@@ -20,6 +20,7 @@
     "@auqw/application": "workspace:*",
     "@auqw/storage-sqlite": "workspace:*",
     "@auqw/ui-native": "workspace:*",
+    "@auqw/ui-shared": "workspace:*",
     "@expo-google-fonts/inter": "^0.4.2",
     "@noble/ciphers": "2.4.0",
     "@noble/curves": "2.4.0",

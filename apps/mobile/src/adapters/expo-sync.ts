@@ -102,7 +102,14 @@ export type ExpoPairHostSurface = {
    * one live offer at a time. Endpoints resolve LAN IPv4 first.
    */
   mintOffer(): Promise<
-    Result<{ code: string; payload: string; expiresAt: number }>
+    Result<{
+      code: string;
+      payload: string;
+      /** The primary `host:port` the payload advertises — the typed-join
+       * endpoint the UI shows beside the code. */
+      endpoint: string;
+      expiresAt: number;
+    }>
   >;
   readonly port: number | null;
   /** LAN IPv4:port list this host advertises — empty pre-start. */
@@ -381,6 +388,7 @@ function buildPairHost(opts: {
       return ok({
         code: minted.value.code,
         payload,
+        endpoint: primary,
         expiresAt: minted.value.expiresAt,
       });
     },

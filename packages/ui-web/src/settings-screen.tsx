@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import { Hairline, Icon, Pressable, Text } from './primitives.tsx';
 import { settingsGroups, t } from '@auqw/ui-shared';
 import type {
@@ -14,6 +15,12 @@ export type SettingsScreenProps = {
   readonly onOpenCorrections?: (() => void) | undefined;
   /** LAN sync panel — omitted entirely when the host has no sync seam. */
   readonly sync?: SyncPanelModel | undefined;
+  /**
+   * Bump to scroll the inline sync section into view and focus it —
+   * the 'sync' settings row is a navigation row whose destination is
+   * this section (there is no separate sync screen on desktop).
+   */
+  readonly syncFocusTick?: number | undefined;
   readonly onPairDevice?: (() => void) | undefined;
   readonly onUnpairDevice?: ((deviceId: string) => void) | undefined;
   readonly onSyncNow?: (() => void) | undefined;
@@ -114,6 +121,7 @@ export function SettingsScreen({
   onToggleRow,
   onOpenCorrections,
   sync,
+  syncFocusTick = 0,
   onPairDevice,
   onUnpairDevice,
   onSyncNow,
@@ -121,6 +129,20 @@ export function SettingsScreen({
   onImportDelta,
 }: SettingsScreenProps) {
   const diagnostics = model.diagnostics;
+  const syncSectionRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (syncFocusTick === 0) {
+      return;
+    }
+    const node = syncSectionRef.current;
+    if (node === null) {
+      return;
+    }
+    // Focus lands on the section itself (tabIndex -1, not the tab
+    // ring) so AT announces 'sync' and Tab continues into its rows.
+    node.scrollIntoView({ block: 'start' });
+    node.focus({ preventScroll: true });
+  }, [syncFocusTick]);
   const persistenceColor =
     diagnostics.persistence === 'ok' ? 'secondary' : 'warn';
   return (
@@ -224,7 +246,12 @@ export function SettingsScreen({
       </div>
       </section>
       {sync !== undefined && (
-        <section className="uw-settings__group">
+        <section
+          ref={syncSectionRef}
+          tabIndex={-1}
+          aria-label={t('settings.heading.sync')}
+          className="uw-settings__group"
+        >
           <Text
             variant="label"
             color="secondary"

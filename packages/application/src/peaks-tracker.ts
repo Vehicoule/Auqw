@@ -1,6 +1,7 @@
-import { CancellationSource } from '@auqw/application';
-import type { PeaksPort } from '@auqw/application';
-import { MAX_DECODE_MS } from './web-peaks.ts';
+import { CancellationSource } from './cancellation.ts';
+import { PEAKS_MAX_DECODE_MS } from './ports/peaks.ts';
+import type { PeaksPort, WaveformPeak } from './ports/peaks.ts';
+import type { ClockPort } from './ports/clock.ts';
 
 /**
  * What the tracker needs to fetch — the live playback session fields.
@@ -15,13 +16,13 @@ export type PeaksTarget = {
   readonly durationMs: number | null;
 };
 
-/** Canonical 256-float rows are tiny; a dozen tracks is plenty of recency. */
+/** Canonical 256-pair rows are tiny; a dozen tracks is plenty of recency. */
 const PEAK_CACHE_LIMIT = 12;
 const PEAK_DEADLINE_MS = 30_000;
 /**
  * A transient abort (bytes not yet buffered, a stalled fill, a dead
  * handle about to be re-prepared) retries on a delay — each pull is a
- * handful of IPC reads, cheap to re-attempt a few times before the
+ * handful of reads, cheap to re-attempt a few times before the
  * seeded pattern settles.
  */
 const PEAK_RETRY_LIMIT = 3;
@@ -29,13 +30,14 @@ const PEAK_RETRY_DELAY_MS = 4_000;
 
 type Inflight = {
   readonly source: CancellationSource;
-  timer: ReturnType<typeof setTimeout> | null;
   /** Latest pull args — a `durationMs` update rides the live sweep. */
   target: PeaksTarget;
 };
 
 export type PeaksTrackerDeps = {
   readonly port: PeaksPort;
+  /** Deadlines and retry sleeps — the injected system clock. */
+  readonly clock: ClockPort;
   /** Fires when a settled result may have changed `get` — re-render. */
   readonly onChange?: (() => void) | undefined;
   readonly cacheLimit?: number;
@@ -44,9 +46,6 @@ export type PeaksTrackerDeps = {
   readonly retryDelayMs?: number;
   /** A durationMs update past this cancels the live sweep outright. */
   readonly maxDurationMs?: number;
-  readonly setTimeoutFn?: typeof setTimeout;
-  readonly clearTimeoutFn?: typeof clearTimeout;
-  readonly now?: () => number;
 };
 
 /**
@@ -61,7 +60,7 @@ export type PeaksTrackerDeps = {
 export function createPeaksTracker(deps: PeaksTrackerDeps): {
   pull(target: PeaksTarget): void;
   cancel(id: string): void;
-  get(id: string): readonly number[] | null | undefined;
+  get(id: string): readonly WaveformPeak[] | null | undefined;
 } {
   const port = deps.port;
   const onChange = deps.onChange;
@@ -69,12 +68,15 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
   const deadlineMs = deps.deadlineMs ?? PEAK_DEADLINE_MS;
   const retryLimit = deps.retryLimit ?? PEAK_RETRY_LIMIT;
   const retryDelayMs = deps.retryDelayMs ?? PEAK_RETRY_DELAY_MS;
-  const maxDurationMs = deps.maxDurationMs ?? MAX_DECODE_MS;
-  const setTimeoutFn = deps.setTimeoutFn ?? setTimeout;
-  const clearTimeoutFn = deps.clearTimeoutFn ?? clearTimeout;
-  const now = deps.now ?? (() => Date.now());
-  const cache = new Map<string, readonly number[] | null>();
+  const maxDurationMs = deps.maxDurationMs ?? PEAKS_MAX_DECODE_MS;
+  const clock = deps.clock;
+  const cache = new Map<string, readonly WaveformPeak[] | null>();
   const inflight = new Map<string, Inflight>();
+  // Request ids must be unique across generations: a re-pull after
+  // cancel can overlap the abandoned extraction still winding down,
+  // and a colliding id lets its teardown unregister the replacement's
+  // native cancel slot.
+  let requestSeq = 0;
 
   function evict(): void {
     while (cache.size > cacheLimit) {
@@ -112,9 +114,6 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
         // request already running over-cap is a duplicate pull, not
         // a reveal — its own terminal failure must still cache.)
         inflight.delete(id);
-        if (live.timer !== null) {
-          clearTimeoutFn(live.timer);
-        }
         live.source.cancel();
         return;
       }
@@ -127,7 +126,6 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
     }
     const entry: Inflight = {
       source: new CancellationSource(),
-      timer: null,
       target,
     };
     inflight.set(id, entry);
@@ -138,8 +136,8 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
         .peaks(
           { handle: entry.target.handle, durationMs: sentMs },
           {
-            requestId: `peaks-${id}-${n}`,
-            deadlineMs: now() + deadlineMs,
+            requestId: `peaks-${id}-${n}-${++requestSeq}`,
+            deadlineMs: clock.nowMs() + deadlineMs,
             signal: entry.source.signal,
           },
         )
@@ -184,11 +182,15 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
             result.error.kind !== 'cancelled' &&
             n < retryLimit
           ) {
-            entry.timer = setTimeoutFn(() => {
-              if (!entry.source.signal.cancelled) {
-                attempt(n + 1);
-              }
-            }, retryDelayMs);
+            // Retry rides the injected clock — a cancel resolves the
+            // sleep early and the guard swallows the dead attempt.
+            void clock
+              .sleep(retryDelayMs, entry.source.signal)
+              .then((slept) => {
+                if (slept.ok && !entry.source.signal.cancelled) {
+                  attempt(n + 1);
+                }
+              });
             return;
           }
           inflight.delete(id);
@@ -206,9 +208,6 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
         return;
       }
       inflight.delete(id);
-      if (entry.timer !== null) {
-        clearTimeoutFn(entry.timer);
-      }
       entry.source.cancel();
     },
     get(id) {

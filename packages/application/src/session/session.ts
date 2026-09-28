@@ -5468,6 +5468,25 @@ export class Session {
     if (r === null || attempt.handle === undefined) {
       return;
     }
+    // A control-path publish (seek/pause/resume) reaches here without
+    // a fresh duration: carry the duration the same attempt last
+    // published so the interim state never reports `null` — the seek
+    // bar disables itself when duration is null, which is what broke
+    // mid-drag scrubs (the seek's own re-key publish killed it). The
+    // carry is attempt-scoped, not recording-scoped: a new attempt —
+    // re-prepare after a source change — reports only the duration
+    // its own player surfaces, so a stale range can't ride forward.
+    const prior = r.playback;
+    const carried =
+      durationMs ??
+      (prior !== undefined &&
+        (prior.type === 'buffering' ||
+          prior.type === 'playing' ||
+          prior.type === 'paused') &&
+        prior.recordingId === attempt.recordingId &&
+        prior.identity.attemptId === attempt.identity.attemptId
+        ? prior.durationMs
+        : undefined);
     r.playback = {
       type: state,
       recordingId: attempt.recordingId,
@@ -5476,7 +5495,7 @@ export class Session {
       handle: attempt.handle,
       positionMs: r.queue.snapshot().positionMs,
       ...(attempt.ref === undefined ? {} : { ref: attempt.ref }),
-      ...(durationMs === undefined ? {} : { durationMs }),
+      ...(carried === undefined ? {} : { durationMs: carried }),
     };
     this.#publish();
   }

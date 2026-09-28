@@ -88,13 +88,18 @@ export function PlatformTabs({
   onSelect,
   renderTab,
   accessory,
+  tabBarHidden = false,
 }: PlatformTabsProps) {
   const theme = useTheme();
   const index = Math.max(
     0,
     items.findIndex((item) => item.key === activeKey),
   );
-  const androidDock = accessory != null && Platform.OS === 'android';
+  // The iOS accessory lives inside the bar's slot, so tabBarHidden takes
+  // it down too; the Android dock is a sibling overlay — hide it
+  // explicitly so the pill doesn't linger over the expanded sheet.
+  const androidDock =
+    accessory != null && Platform.OS === 'android' && !tabBarHidden;
 
   // Android: adjustResize lands the tab bar flush on top of the IME.
   // Platform convention drops it while the keyboard is open; on iOS the
@@ -168,9 +173,12 @@ export function PlatformTabs({
         hapticFeedbackEnabled
         minimizeBehavior="onScrollDown"
         scrollEdgeAppearance="transparent"
-        {...(Platform.OS === 'android'
-          ? { tabBarHidden: keyboardOpen }
-          : {})}
+        // Bar hides for the Android IME and while the stage sheet owns
+        // the screen — the sheet's own scrim covers the world either
+        // way, and a visible bar behind it reads as a second chrome row.
+        tabBarHidden={
+          tabBarHidden || (Platform.OS === 'android' && keyboardOpen)
+        }
         {...(accessory != null && Platform.OS === 'ios'
           ? {
               renderBottomAccessoryView: () => (

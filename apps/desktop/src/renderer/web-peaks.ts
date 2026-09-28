@@ -1,4 +1,4 @@
-import { appError, err, ok } from '@auqw/application';
+import { appError, err, ok, PEAKS_MAX_DECODE_MS } from '@auqw/application';
 import type {
   AppError,
   ErrorKind,
@@ -28,11 +28,11 @@ const MAX_PEAK_BYTES = 24 * 1024 * 1024;
  * `decodeAudioData` expands the whole compressed buffer to per-channel
  * PCM before peak bucketing: 8 min of stereo 48 kHz is ~184 MiB of
  * Float32s. That's the transient spike the renderer pays for a bar
- * row — tracks longer than this keep the seeded pattern.
- * Exported so the tracker can cancel an in-flight sweep whose
- * late-arriving duration crosses the same bound.
+ * row — tracks longer than this keep the seeded pattern. The shared
+ * contract constant (`PEAKS_MAX_DECODE_MS`) is the same bound the
+ * tracker applies when a late duration lands mid-sweep.
  */
-export const MAX_DECODE_MS = 8 * 60 * 1000;
+const MAX_DECODE_MS = PEAKS_MAX_DECODE_MS;
 /**
  * Lowest plausible music bitrate — the bound for streams whose
  * `durationMs` is unknown. At this floor, this many encoded bytes

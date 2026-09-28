@@ -313,6 +313,24 @@ impl StreamRegistry {
         self.session(handle)?.read(position, max_len)
     }
 
+    /// Non-demanding read for decorative consumers (waveform peaks):
+    /// `Some(bytes)` a committed hit, `Some(vec![])` a confirmed EOF,
+    /// `None` an unfetched hole. Queues no fetch-through demand and
+    /// never parks — a caller-side timeout leaves nothing queued
+    /// competing with playback.
+    ///
+    /// # Errors
+    /// [`StreamError::NotFound`] for an unknown handle; the session's
+    /// terminal error if it already ended.
+    pub fn peek(
+        &self,
+        handle: &str,
+        position: u64,
+        max_len: u64,
+    ) -> Result<Option<Vec<u8>>, StreamError> {
+        self.session(handle)?.peek(position, max_len)
+    }
+
     /// DataSource close: detaches the consumer; the session stays live
     /// for re-attach and becomes supersedable again.
     ///

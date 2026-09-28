@@ -281,6 +281,21 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   createHost(config: HostConfig): Promise<void>;
   setAuthToken(token: string | null): void;
   /**
+   * Waveform-peak extraction on the borrowed stream handle — Android
+   * only (iOS registers the host surface alone, so the property is
+   * absent there and the seam wrapper rejects 'unavailable').
+   * Resolves with `count` flat `[up, down]` raw RMS window pairs —
+   * the shared `PeakWindow` shape before JS-side normalization.
+   */
+  waveformPeaks(
+    requestId: string,
+    handle: string,
+    count: number,
+    maxBytes: number,
+    provisionalCap: boolean,
+  ): Promise<number[]>;
+  waveformPeaksCancel(requestId: string): void;
+  /**
    * Live PO-token provider update — resolves read the host's slot
    * at invocation spawn, so a pairing or unpairing landing after
    * createHost applies without a host recreate. null restores the
@@ -495,6 +510,31 @@ export function phaseMarks(handle: string): Promise<StreamPhaseMarks> {
   return seam.phaseMarks === undefined
     ? seamUnavailable('phaseMarks')
     : seam.phaseMarks(handle);
+}
+
+/**
+ * Waveform peaks off the playing stream's own bytes — Android only;
+ * iOS rejects 'unavailable' so the caller keeps the seeded pattern.
+ * Resolves with `count` flat `[up, down]` raw RMS window pairs
+ * (`PeakWindow` magnitudes pre-normalization); rejects with the
+ * application error kinds the adapter maps. The handle is borrowed:
+ * extraction only ever issues positional `streamRead`s.
+ */
+export function waveformPeaks(
+  requestId: string,
+  handle: string,
+  count: number,
+  maxBytes: number,
+  provisionalCap: boolean,
+): Promise<readonly number[]> {
+  return seam.waveformPeaks === undefined
+    ? seamUnavailable('waveformPeaks')
+    : seam.waveformPeaks(requestId, handle, count, maxBytes, provisionalCap);
+}
+
+/** Cancels a running `waveformPeaks` sweep — its promise rejects 'cancelled'. */
+export function waveformPeaksCancel(requestId: string): void {
+  seam.waveformPeaksCancel?.(requestId);
 }
 
 /**

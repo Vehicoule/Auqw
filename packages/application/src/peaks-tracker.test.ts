@@ -1,27 +1,47 @@
-import { assert, assertEqual } from '@auqw/application/testing';
-import { appError, err, ok } from '@auqw/application';
-import type { PeaksPort, PeaksRequest, Result } from '@auqw/application';
+import { assert, assertEqual } from './testing/assert.ts';
+import type { OperationContext } from './cancellation.ts';
+import { appError, err, ok } from './errors.ts';
+import type { Result } from './errors.ts';
 import { createPeaksTracker } from './peaks-tracker.ts';
 import type { PeaksTarget } from './peaks-tracker.ts';
+import { FakeClock } from './testing/fakes.ts';
+import type {
+  PeaksPort,
+  PeaksRequest,
+  WaveformPeak,
+} from './ports/peaks.ts';
 
-const PEAKS: readonly number[] = [0.5, 1, 0.25];
+const PEAKS: readonly WaveformPeak[] = [
+  { up: 0.5, down: 0.4 },
+  { up: 1, down: 0.9 },
+  { up: 0.25, down: 0.2 },
+];
 
 function target(id: string, handle = 'h'): PeaksTarget {
   return { id, handle, durationMs: 120_000 };
 }
 
-/** Flush pending promise chains without a real timer. */
-async function flush(): Promise<void> {
-  await new Promise<void>((resolve) => setImmediate(resolve));
+/** Enough microtask turns for a port call (and a resolved clock
+ *  sleep) to settle before the next assertion. */
+async function settle(rounds = 10): Promise<void> {
+  for (let i = 0; i < rounds; i += 1) {
+    await Promise.resolve();
+  }
 }
 
-type Call = { request: PeaksRequest; resolve: (r: Result<readonly number[]>) => void };
+type Call = {
+  request: PeaksRequest;
+  context: OperationContext;
+  resolve: (r: Result<readonly WaveformPeak[]>) => void;
+};
 
 /**
  * Scripted port: `handler` answers immediately, or `manual` queues
  * calls the test resolves by hand (the superseded-completion case).
  */
-function fakePort(handler?: (request: PeaksRequest) => Result<readonly number[]>): {
+function fakePort(
+  handler?: (request: PeaksRequest) => Result<readonly WaveformPeak[]>,
+): {
   calls: Call[];
   port: PeaksPort;
 } {
@@ -29,41 +49,15 @@ function fakePort(handler?: (request: PeaksRequest) => Result<readonly number[]>
   return {
     calls,
     port: {
-      peaks(request) {
+      peaks(request, context) {
         if (handler !== undefined) {
-          calls.push({ request, resolve: () => {} });
+          calls.push({ request, context, resolve: () => { } });
           return Promise.resolve(handler(request));
         }
-        return new Promise<Result<readonly number[]>>((resolve) => {
-          calls.push({ request, resolve });
+        return new Promise<Result<readonly WaveformPeak[]>>((resolve) => {
+          calls.push({ request, context, resolve });
         });
       },
-    },
-  };
-}
-
-/** Manually-driven timers — retries are deterministic. */
-function fakeTimers(): {
-  setTimeoutFn: typeof setTimeout;
-  clearTimeoutFn: typeof clearTimeout;
-  fire(): void;
-} {
-  const pending: { cb: () => void; cleared: boolean }[] = [];
-  return {
-    setTimeoutFn: ((cb: () => void) => {
-      const timer = { cb, cleared: false };
-      pending.push(timer);
-      return timer;
-    }) as unknown as typeof setTimeout,
-    clearTimeoutFn: ((timer: { cleared: boolean }) => {
-      timer.cleared = true;
-    }) as unknown as typeof clearTimeout,
-    fire() {
-      for (const timer of pending.splice(0)) {
-        if (!timer.cleared) {
-          timer.cb();
-        }
-      }
     },
   };
 }
@@ -75,10 +69,11 @@ export async function run(): Promise<void> {
     let changes = 0;
     const tracker = createPeaksTracker({
       port,
+      clock: new FakeClock(),
       onChange: () => changes++,
     });
     tracker.pull(target('r-1'));
-    await flush();
+    await settle();
     assertEqual(tracker.get('r-1'), PEAKS, 'real peaks cache');
     assertEqual(changes, 1, 'one notification per settle');
     tracker.pull(target('r-1'));
@@ -89,7 +84,7 @@ export async function run(): Promise<void> {
   // the pending extraction.
   {
     const { calls, port } = fakePort();
-    const tracker = createPeaksTracker({ port });
+    const tracker = createPeaksTracker({ port, clock: new FakeClock() });
     tracker.pull(target('r-2'));
     tracker.pull(target('r-2'));
     assertEqual(calls.length, 1, 'one pull per recording');
@@ -100,9 +95,9 @@ export async function run(): Promise<void> {
     const { calls, port } = fakePort(() =>
       err(appError('budget-exceeded', 'too big')),
     );
-    const tracker = createPeaksTracker({ port });
+    const tracker = createPeaksTracker({ port, clock: new FakeClock() });
     tracker.pull(target('r-3'));
-    await flush();
+    await settle();
     assertEqual(tracker.get('r-3'), null, 'terminal failure caches null');
     tracker.pull(target('r-3'));
     assertEqual(calls.length, 1, 'a settled failure never re-pulls');
@@ -111,26 +106,29 @@ export async function run(): Promise<void> {
   // Transient failures retry on a delay and stay uncached — a later
   // pull (e.g. a re-prepared handle) attempts again.
   {
-    const timers = fakeTimers();
+    const clock = new FakeClock();
     const { calls, port } = fakePort(() =>
       err(appError('unavailable', 'not buffered')),
     );
     const tracker = createPeaksTracker({
       port,
-      setTimeoutFn: timers.setTimeoutFn,
-      clearTimeoutFn: timers.clearTimeoutFn,
+      clock,
       retryDelayMs: 10,
       retryLimit: 2,
     });
     tracker.pull(target('r-4'));
-    await flush();
+    await settle();
     assertEqual(calls.length, 1, 'first attempt');
-    timers.fire();
-    await flush();
+    clock.advance(10);
+    await settle();
     assertEqual(calls.length, 2, 'a transient abort retries once more');
-    assertEqual(tracker.get('r-4'), undefined, 'transient failures stay uncached');
+    assertEqual(
+      tracker.get('r-4'),
+      undefined,
+      'transient failures stay uncached',
+    );
     tracker.pull(target('r-4'));
-    await flush();
+    await settle();
     assertEqual(calls.length, 3, 'an uncached target retries on revisit');
   }
 
@@ -138,15 +136,19 @@ export async function run(): Promise<void> {
   // (the decode lands after the handle was swapped).
   {
     const { calls, port } = fakePort();
-    const tracker = createPeaksTracker({ port });
+    const tracker = createPeaksTracker({ port, clock: new FakeClock() });
     tracker.pull(target('r-5', 'h1'));
     tracker.cancel('r-5');
     tracker.pull(target('r-5', 'h2'));
     calls[1]?.resolve(ok(PEAKS)); // the replacement lands first
-    await flush();
-    const stale: readonly number[] = [9, 9, 9];
+    await settle();
+    const stale: readonly WaveformPeak[] = [
+      { up: 9, down: 9 },
+      { up: 9, down: 9 },
+      { up: 9, down: 9 },
+    ];
     calls[0]?.resolve(ok(stale)); // the cancelled pull lands late
-    await flush();
+    await settle();
     assertEqual(
       tracker.get('r-5'),
       PEAKS,
@@ -154,17 +156,42 @@ export async function run(): Promise<void> {
     );
   }
 
+  // A cancelled generation's requestId must never repeat on its
+  // replacement: the abandoned extraction can still be unwinding
+  // natively, and a colliding id lets its teardown unregister the
+  // live one's cancel slot.
+  {
+    const { calls, port } = fakePort();
+    const tracker = createPeaksTracker({ port, clock: new FakeClock() });
+    tracker.pull(target('r-ids', 'h1'));
+    tracker.cancel('r-ids');
+    tracker.pull(target('r-ids', 'h2'));
+    assertEqual(calls.length, 2, 'cancel + re-pull spawns a second call');
+    assert(
+      calls[0]?.context.requestId !== calls[1]?.context.requestId,
+      'request ids stay unique across generations',
+    );
+    assert(
+      calls[1]?.context.requestId.includes('r-ids') === true,
+      'the id still names its recording for diagnostics',
+    );
+  }
+
   // LRU eviction follows recency of pull, not insertion.
   {
     const { port } = fakePort(() => ok(PEAKS));
-    const tracker = createPeaksTracker({ port, cacheLimit: 3 });
+    const tracker = createPeaksTracker({
+      port,
+      clock: new FakeClock(),
+      cacheLimit: 3,
+    });
     tracker.pull(target('a'));
     tracker.pull(target('b'));
     tracker.pull(target('c'));
-    await flush();
+    await settle();
     tracker.pull(target('a')); // refresh a's recency
     tracker.pull(target('d'));
-    await flush();
+    await settle();
     assertEqual(tracker.get('b'), undefined, 'oldest entry evicts');
     assertEqual(tracker.get('a'), PEAKS, 'a revisited entry survives');
     assertEqual(tracker.get('d'), PEAKS, 'the new entry caches');
@@ -174,28 +201,29 @@ export async function run(): Promise<void> {
   // terminal: it settles uncached so the pull a later durationMs
   // triggers gets the full byte budget.
   {
-    const timers = fakeTimers();
     const { calls, port } = fakePort(() =>
       err(appError('not-applicable', 'stream too large')),
     );
+    const clock = new FakeClock();
     const tracker = createPeaksTracker({
       port,
-      setTimeoutFn: timers.setTimeoutFn,
-      clearTimeoutFn: timers.clearTimeoutFn,
+      clock,
       retryDelayMs: 10,
     });
     tracker.pull({ id: 'r-8', handle: 'h', durationMs: null });
-    await flush();
+    await settle();
     assertEqual(
       tracker.get('r-8'),
       undefined,
       'a provisional-cap abort stays uncached',
     );
-    timers.fire();
-    await flush();
-    assertEqual(calls.length, 1, 'no spot-retry on a provisional abort');
+    assertEqual(
+      clock.pendingSleepers,
+      0,
+      'no spot-retry on a provisional abort',
+    );
     tracker.pull({ id: 'r-8', handle: 'h', durationMs: 120_000 });
-    await flush();
+    await settle();
     assertEqual(
       calls.length,
       2,
@@ -208,10 +236,10 @@ export async function run(): Promise<void> {
   // bail re-attempts — in place, at the full cap.
   {
     const { calls, port } = fakePort();
-    const tracker = createPeaksTracker({ port });
+    const tracker = createPeaksTracker({ port, clock: new FakeClock() });
     tracker.pull({ id: 'r-8b', handle: 'h', durationMs: null });
     tracker.pull({ id: 'r-8b', handle: 'h', durationMs: 120_000 });
-    await flush();
+    await settle();
     assertEqual(
       calls.length,
       1,
@@ -225,11 +253,14 @@ export async function run(): Promise<void> {
         ? err(appError('not-applicable', 'stream too large'))
         : ok(PEAKS),
     );
-    const tracker2 = createPeaksTracker({ port: port2 });
+    const tracker2 = createPeaksTracker({
+      port: port2,
+      clock: new FakeClock(),
+    });
     tracker2.pull({ id: 'r-8c', handle: 'h', durationMs: null });
     tracker2.pull({ id: 'r-8c', handle: 'h', durationMs: 120_000 });
-    await flush();
-    await flush();
+    await settle();
+    await settle();
     assertEqual(calls2.length, 2, 'a provisional bail retries in place');
     assertEqual(
       calls2[1]?.request.durationMs,
@@ -244,11 +275,15 @@ export async function run(): Promise<void> {
   // must not cache.
   {
     const { calls, port } = fakePort();
-    const tracker = createPeaksTracker({ port, maxDurationMs: 1000 });
+    const tracker = createPeaksTracker({
+      port,
+      clock: new FakeClock(),
+      maxDurationMs: 1000,
+    });
     tracker.pull({ id: 'r-8d', handle: 'h', durationMs: null });
     tracker.pull({ id: 'r-8d', handle: 'h', durationMs: 2000 });
     calls[0]?.resolve(ok(PEAKS));
-    await flush();
+    await settle();
     assertEqual(
       calls.length,
       1,
@@ -266,11 +301,15 @@ export async function run(): Promise<void> {
   // so the in-flight one dies rather than decoding oversized audio.
   {
     const { calls, port } = fakePort();
-    const tracker = createPeaksTracker({ port, maxDurationMs: 1000 });
+    const tracker = createPeaksTracker({
+      port,
+      clock: new FakeClock(),
+      maxDurationMs: 1000,
+    });
     tracker.pull({ id: 'r-8f', handle: 'h', durationMs: 500 });
     tracker.pull({ id: 'r-8f', handle: 'h', durationMs: 2000 });
     calls[0]?.resolve(ok(PEAKS));
-    await flush();
+    await settle();
     assertEqual(calls.length, 1, 'a duration crossing the cap cancels');
     assertEqual(tracker.get('r-8f'), undefined);
   }
@@ -283,10 +322,14 @@ export async function run(): Promise<void> {
     const { calls, port } = fakePort(() =>
       err(appError('budget-exceeded', 'track too long')),
     );
-    const tracker = createPeaksTracker({ port, maxDurationMs: 1000 });
+    const tracker = createPeaksTracker({
+      port,
+      clock: new FakeClock(),
+      maxDurationMs: 1000,
+    });
     tracker.pull({ id: 'r-8e', handle: 'h', durationMs: 2000 });
     tracker.pull({ id: 'r-8e', handle: 'h', durationMs: 2000 });
-    await flush();
+    await settle();
     assertEqual(calls.length, 1, 'the duplicate pull dedupes');
     assertEqual(
       tracker.get('r-8e'),
@@ -304,9 +347,9 @@ export async function run(): Promise<void> {
     const { calls, port } = fakePort(() =>
       err(appError('budget-exceeded', 'decoded audio too large')),
     );
-    const tracker = createPeaksTracker({ port });
+    const tracker = createPeaksTracker({ port, clock: new FakeClock() });
     tracker.pull({ id: 'r-9', handle: 'h', durationMs: null });
-    await flush();
+    await settle();
     assertEqual(tracker.get('r-9'), null, 'the PCM ceiling stays terminal');
     tracker.pull({ id: 'r-9', handle: 'h', durationMs: 120_000 });
     assertEqual(calls.length, 1, 'a terminal bail never re-decodes');
@@ -319,32 +362,42 @@ export async function run(): Promise<void> {
     const { calls, port } = fakePort(() =>
       err(appError('invalid-response', 'not audio')),
     );
-    const tracker = createPeaksTracker({ port });
+    const tracker = createPeaksTracker({ port, clock: new FakeClock() });
     tracker.pull(target('r-7|a1', 'h1'));
-    await flush();
-    assertEqual(tracker.get('r-7|a1'), null, 'first attempt cached its failure');
+    await settle();
+    assertEqual(
+      tracker.get('r-7|a1'),
+      null,
+      'first attempt cached its failure',
+    );
     tracker.pull(target('r-7|a2', 'h2'));
     assertEqual(calls.length, 2, 'a new attempt pulls its own stream');
   }
 
   // Cancellation mid-retry clears the scheduled attempt.
   {
-    const timers = fakeTimers();
+    const clock = new FakeClock();
     const { calls, port } = fakePort(() =>
       err(appError('unavailable', 'not buffered')),
     );
     const tracker = createPeaksTracker({
       port,
-      setTimeoutFn: timers.setTimeoutFn,
-      clearTimeoutFn: timers.clearTimeoutFn,
+      clock,
       retryDelayMs: 10,
       retryLimit: 3,
     });
     tracker.pull(target('r-6'));
-    await flush();
+    await settle();
+    assertEqual(
+      clock.pendingSleepers,
+      1,
+      'the retry sleep is parked on the clock',
+    );
     tracker.cancel('r-6');
-    timers.fire();
-    await flush();
+    await settle();
+    assertEqual(clock.pendingSleepers, 0, 'cancel unwinds the sleep');
+    clock.advance(10_000);
+    await settle();
     assertEqual(calls.length, 1, 'a cancelled retry never fires');
   }
 }

@@ -11,6 +11,7 @@ export type CollectionScreenProps = {
   readonly onPlayAll?: (() => void) | undefined;
   readonly onPressItem?: ((row: CollectionRowModel) => void) | undefined;
   readonly onToggleLike?: ((row: CollectionRowModel) => void) | undefined;
+  readonly onAddToPlaylist?: ((row: CollectionRowModel) => void) | undefined;
   readonly onContext?: ((row: CollectionRowModel) => void) | undefined;
 };
 
@@ -30,6 +31,7 @@ export function CollectionScreen({
   onPlayAll,
   onPressItem,
   onToggleLike,
+  onAddToPlaylist,
   onContext,
 }: CollectionScreenProps) {
   const list = useTrackList({
@@ -110,6 +112,11 @@ export function CollectionScreen({
                 onToggleLike === undefined
                   ? undefined
                   : () => onToggleLike(item)
+              }
+              onAddToPlaylist={
+                onAddToPlaylist === undefined
+                  ? undefined
+                  : () => onAddToPlaylist(item)
               }
               onContext={
                 onContext === undefined ? undefined : () => onContext(item)

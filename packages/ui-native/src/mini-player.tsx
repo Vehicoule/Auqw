@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   Platform,
   StyleSheet,
@@ -54,6 +54,10 @@ export type MiniPlayerProps = {
       drag's progress conversion use the same physical distance. Falls
       back to the window height until the sheet has measured. */
   readonly travel?: SharedValue<number> | undefined;
+  /** Shared settle-target flag — this drag's release writes the
+      committed anchor here so the sheet's `expanded`-flip effect
+      doesn't restart the spring and drop the flick's velocity. */
+  readonly anchor?: SharedValue<number> | undefined;
   /** False while the sheet owns the screen — keeps the invisible pill
       out of the touch path and the accessibility tree. */
   readonly interactive?: boolean | undefined;
@@ -71,6 +75,7 @@ export function MiniPlayer({
   onCollapse,
   progress: sheetProgress,
   travel: sheetTravel,
+  anchor: sheetAnchor,
   interactive = true,
 }: MiniPlayerProps) {
   const theme = useTheme();
@@ -85,6 +90,20 @@ export function MiniPlayer({
       ? 0
       : Math.min(1, Math.max(0, player.positionMs / player.durationMs));
   const busy = player.status === 'preparing' || player.status === 'buffering';
+  // Latest callbacks via ref — the parent passes fresh inline closures
+  // every position tick, and a deps-listed callback would rebuild the
+  // pan (a fresh Pan() cancels the in-flight swipe — exactly the bug
+  // the stable-gesture comment below is guarding against).
+  const callbacks = useRef({ onNext, onPrevious, onPress, onDismiss, onCollapse });
+  useEffect(() => {
+    callbacks.current = { onNext, onPrevious, onPress, onDismiss, onCollapse };
+  });
+  const emit = useCallback(
+    (key: 'onNext' | 'onPrevious' | 'onPress' | 'onDismiss' | 'onCollapse') => {
+      callbacks.current[key]?.();
+    },
+    [],
+  );
   // Stable gesture object — a fresh Pan() per render would cancel an
   // in-flight swipe when the position tick re-renders the row.
   // ONE pan owns both axes (the pre-morph structure — a Race of two
@@ -124,14 +143,14 @@ export function MiniPlayer({
         if (sheetProgress === undefined) {
           // Static hosts (the gallery) keep the release-threshold
           // contract — no shared progress to track.
-          if (e.translationX < -40 && onNext !== undefined) {
-            scheduleOnRN(onNext);
-          } else if (e.translationX > 40 && onPrevious !== undefined) {
-            scheduleOnRN(onPrevious);
-          } else if (e.translationY > 40 && onDismiss !== undefined) {
-            scheduleOnRN(onDismiss);
-          } else if (e.translationY < -40 && onPress !== undefined) {
-            scheduleOnRN(onPress);
+          if (e.translationX < -40) {
+            scheduleOnRN(emit, 'onNext');
+          } else if (e.translationX > 40) {
+            scheduleOnRN(emit, 'onPrevious');
+          } else if (e.translationY > 40) {
+            scheduleOnRN(emit, 'onDismiss');
+          } else if (e.translationY < -40) {
+            scheduleOnRN(emit, 'onPress');
           }
           return;
         }
@@ -145,21 +164,17 @@ export function MiniPlayer({
               ? 0
               : withSpring(0, { stiffness: 200, damping: 28 });
           }
-          if (e.translationX < -40 && onNext !== undefined) {
-            scheduleOnRN(onNext);
-          } else if (e.translationX > 40 && onPrevious !== undefined) {
-            scheduleOnRN(onPrevious);
+          if (e.translationX < -40) {
+            scheduleOnRN(emit, 'onNext');
+          } else if (e.translationX > 40) {
+            scheduleOnRN(emit, 'onPrevious');
           }
           return;
         }
         // A pull-down that never left the rest anchor dismisses the
         // player outright rather than bouncing an unmoved sheet.
-        if (
-          dragStart.value < 0.01 &&
-          e.translationY > 48 &&
-          onDismiss !== undefined
-        ) {
-          scheduleOnRN(onDismiss);
+        if (dragStart.value < 0.01 && e.translationY > 48) {
+          scheduleOnRN(emit, 'onDismiss');
           return;
         }
         const travel = travelPx();
@@ -171,6 +186,11 @@ export function MiniPlayer({
           ) === 'expanded'
             ? 1
             : 0;
+        // Mark the settle as gesture-owned — the sheet's effect on
+        // `expanded` must not cold-restart this velocity spring.
+        if (sheetAnchor !== undefined) {
+          sheetAnchor.value = target;
+        }
         sheetProgress.value = theme.reducedMotion
           ? target
           : withSpring(target, {
@@ -179,19 +199,16 @@ export function MiniPlayer({
               velocity: -e.velocityY / travel,
             });
         if (target === 1) {
-          if (onPress !== undefined) scheduleOnRN(onPress);
-        } else if (dragStart.value > 0.5 && onCollapse !== undefined) {
-          scheduleOnRN(onCollapse);
+          scheduleOnRN(emit, 'onPress');
+        } else if (dragStart.value > 0.5) {
+          scheduleOnRN(emit, 'onCollapse');
         }
       });
   }, [
-    onNext,
-    onPrevious,
-    onPress,
-    onDismiss,
-    onCollapse,
+    emit,
     sheetProgress,
     sheetTravel,
+    sheetAnchor,
     windowHeight,
     theme.reducedMotion,
     dragStart,

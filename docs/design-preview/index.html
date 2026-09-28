@@ -64,24 +64,19 @@
   .chrome-win{border-radius:8px}
   .chrome-linux{border-radius:8px}
 
-  /* ----- stage: full-height recessed column ----- */
+  /* ----- stage: full-height chromeless column — immersive, artwork-led ----- */
   .stage{width:340px;flex:none;background:var(--bg-stage);border-right:1px solid var(--divider);
-         display:flex;flex-direction:column;padding:0 20px 16px}
-  .stage-top{height:56px;flex:none;display:flex;align-items:center;justify-content:center;
-             position:relative}
-  .tl{position:absolute;left:0;top:50%;transform:translateY(-50%);display:flex;gap:8px}
+         display:flex;flex-direction:column;padding:8px 20px 78px;position:relative}
+  /* macOS traffic lights pin over the stage's top-left — no strip of its own */
+  .chrome-mac .stage{padding-top:56px}
+  .tl{position:absolute;left:20px;top:22px;display:flex;gap:8px;z-index:4}
   .tl i{width:12px;height:12px;border-radius:50%}
   .tl i:nth-child(1){background:#ff5f57}.tl i:nth-child(2){background:#febc2e}.tl i:nth-child(3){background:#28c840}
 
   .tb{display:flex;align-items:center;gap:7px;color:var(--fg-muted);font-size:10.5px;
       padding:6px 10px;background:transparent;border:none;font-family:inherit;border-radius:var(--r-ctl)}
   .tb:hover{background:var(--fg08);color:var(--fg)}
-  .tb .caret{width:7px;height:7px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;
-             transform:rotate(45deg) translate(-1px,-1px);opacity:.7}
-  .stage-top .side{position:absolute;right:0;top:50%;transform:translateY(-50%)}
 
-  .art{width:100%;aspect-ratio:1;position:relative;overflow:hidden;border-radius:var(--r-thumb)}
-  .art .cv{position:absolute;inset:0}
   .cov-eye{background:radial-gradient(ellipse 68% 30% at 50% 46%,#dfe9ee 0%,#7fd8e8 16%,#b31fd8 32%,transparent 58%),#e00d0d}
   .cov-petit{background:linear-gradient(180deg,#f4f2ee 0%,#e8e4de 60%,#d9d2c8 100%)}
   .cov-drac{background:linear-gradient(160deg,#1b2b4a 0%,#0d1420 55%,#060a10 100%)}
@@ -116,16 +111,12 @@
             border-radius:var(--r-ctl)}
   .tbt.play:hover{background:var(--fg)}
   .tbt.play .ic{width:18px;height:18px}
-  .vol{display:flex;align-items:center;gap:10px;margin-top:12px;color:var(--fg-muted)}
-  .vol .vl{flex:1;height:3px;background:var(--fg18);position:relative;border-radius:2px}
-  .vol .vl i{position:absolute;left:0;top:0;bottom:0;width:62%;background:var(--fg-muted);border-radius:2px}
-  .vol .vl u{position:absolute;left:62%;top:50%;transform:translate(-50%,-50%);
-             width:11px;height:11px;background:var(--fg);text-decoration:none;border-radius:50%}
-  .seg{margin-top:auto;display:flex;gap:2px;background:var(--fg08);padding:3px;
-       border-radius:var(--r-ctl)}
+  /* the mode segment floats over the bottom edge — stage column and phone sheet alike */
+  .seg{position:absolute;left:20px;right:20px;bottom:16px;display:flex;gap:2px;
+       background:var(--fg08);padding:3px;border-radius:999px;z-index:5}
   .seg span{display:flex;align-items:center;justify-content:center;gap:7px;flex:1;
-            padding:7px 0;font-size:10.5px;color:var(--fg-muted);border-radius:4px}
-  .seg span.on{background:var(--bg-raise);color:var(--fg-bright);font-weight:700}
+            padding:7px 0;font-size:10.5px;color:var(--fg-muted);border-radius:999px}
+  .seg span.on{background:var(--accent-soft);color:var(--accent);font-weight:700}
   .seg .ic{width:12px;height:12px}
 
   /* lyrics mode — the stage swaps its body, chrome stays */
@@ -144,12 +135,13 @@
   .world{flex:1;display:flex;flex-direction:column;min-width:0}
   .toolbar{height:56px;flex:none;display:flex;align-items:center;gap:8px;
            padding:0 16px 0 20px;position:relative}
+  /* world navigation = the same segmented pill, sized up */
   .navtabs{position:absolute;left:50%;transform:translateX(-50%);
-           display:flex;gap:2px;background:var(--fg08);padding:3px;border-radius:var(--r-ctl)}
-  .navtabs span{display:flex;align-items:center;gap:7px;padding:5px 14px;font-size:11px;
-                color:var(--fg-muted);border-radius:4px}
+           display:flex;gap:2px;background:var(--fg08);padding:3px;border-radius:999px}
+  .navtabs span{display:flex;align-items:center;gap:7px;padding:6px 16px;font-size:12px;
+                color:var(--fg-muted);border-radius:999px}
   .navtabs span:hover{color:var(--fg)}
-  .navtabs span.on{background:var(--bg-raise);color:var(--fg-bright);font-weight:700}
+  .navtabs span.on{background:var(--accent-soft);color:var(--accent);font-weight:700}
   .navtabs .ic{width:13px;height:13px}
   .tright{margin-left:auto;display:flex;align-items:center;gap:8px}
   .caps{display:flex;align-self:stretch;margin:-16px -16px -16px 4px;align-items:stretch}
@@ -330,10 +322,8 @@
   .mrows .r .s .ib .ic{width:14px;height:14px}
 
   /* The immersive player anchors metadata and controls over the artwork. */
-  .sheet .t-meta{margin-top:auto}
   .sheet .wf{margin-top:14px}
   .sheet .transport{gap:6px}
-  .sheet .seg{margin-top:12px}
 
   /* OpenTune-style floating mini-player: art left (progress ring) · title/artist · like + resume */
   .mini{flex:none;margin:0 10px 8px;background:var(--bg-raise);border:1px solid var(--hair);
@@ -382,31 +372,29 @@
 
   /* expanded stage sheet */
   .sheet{position:absolute;inset:0;background:var(--bg-stage);display:flex;flex-direction:column;
-         padding:0 20px 16px;z-index:4}
+         padding:0 20px 78px;z-index:4}
   .grab{display:flex;flex-direction:column;align-items:center;padding-top:32px}
   .grab i{width:36px;height:4px;border-radius:2px;background:var(--fg40)}
-  .sheet .art{margin-top:12px}
   .sheet .transport{margin-top:12px}
-  .sheet.immersive{isolation:isolate;background:#100e0c}
-  .sheet.immersive .sheet-art,.sheet.immersive .sheet-frost,.sheet.immersive .sheet-scrim{
+  /* immersive = the artwork-led player surface shared by the desktop stage
+     column and the phone sheet — backdrop art + progressive frost + scrim */
+  .immersive{isolation:isolate;background:#100e0c}
+  .immersive .sheet-art,.immersive .sheet-frost,.immersive .sheet-scrim{
     position:absolute;inset:0;pointer-events:none}
-  .sheet.immersive .sheet-art{z-index:0}
-  .sheet.immersive .sheet-frost{z-index:1;filter:blur(36px);
+  .immersive .sheet-art{z-index:0}
+  .immersive .sheet-frost{z-index:1;filter:blur(36px);
     mask-image:linear-gradient(transparent 50%,rgba(0,0,0,.55) 72%,#000 90%)}
-  .sheet.immersive .sheet-scrim{z-index:2;
+  .immersive .sheet-scrim{z-index:2;
     background:linear-gradient(180deg,rgba(11,10,9,.30),rgba(11,10,9,.82))}
-  .sheet.immersive > :not(.sheet-art):not(.sheet-frost):not(.sheet-scrim){position:relative;z-index:3}
-  .sheet.immersive .radio-top{display:flex;align-items:center;align-self:center;gap:6px;
+  .immersive > :not(.sheet-art):not(.sheet-frost):not(.sheet-scrim){position:relative;z-index:3}
+  .immersive .radio-top{display:flex;align-items:center;align-self:center;gap:6px;
     margin-top:8px;padding:6px 12px;border-radius:999px;background:var(--accent-soft);
     color:var(--accent);font-size:10px;font-weight:700}
-  .sheet.immersive .radio-top .ic{width:13px;height:13px}
-  .sheet.immersive .t-meta{align-items:flex-end;padding-bottom:4px}
-  .sheet.immersive .t-meta h3{line-height:1.25;display:-webkit-box;
+  .immersive .radio-top .ic{width:13px;height:13px}
+  .immersive .t-meta{margin-top:auto;align-items:flex-end;padding-bottom:4px}
+  .immersive .t-meta h3{line-height:1.25;display:-webkit-box;
     -webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
-  .sheet.immersive .seg{border-radius:999px}
-  .sheet.immersive .seg span{border-radius:999px}
-  .sheet.immersive .seg span.on{background:var(--accent-soft);color:var(--accent)}
-  .sheet.immersive .tbt:disabled{opacity:.42}
+  .immersive .tbt:disabled{opacity:.42}
 
   /* platform media controls */
   /* Android — M3 Expressive: filled accent squircle play, tonal prev/next */
@@ -470,8 +458,10 @@
 <header>
   <h1>auqw <span>/ omarchy shell — unified WCO · organic icons</span></h1>
   <p class="sub">
-    No titlebar band — the Stage column runs to the top edge, output device <b>centered</b> in its
-    strip; the World's first row is its toolbar. Search is a full-width field inside World (it
+    No titlebar band, no stage-top strip — the Stage column is chromeless and runs to the top
+    edge (macOS lights pin over it); the World's first row is its toolbar. The full player is one
+    <b>artwork-led surface on both platforms</b> — backdrop art, progressive bottom frost, and a
+    floating <b>player | lyrics | queue</b> segment. Search is a full-width field inside World (it
     can't collide with chrome). Track rows share <b>one anatomy across platforms</b>: artwork left
     (live eq overlay when playing), title · version, length, state + add-to-playlist right.
     Mobile is platform-native: M3E navbar + controls on Android, liquid glass on iOS.
@@ -481,17 +471,14 @@
 <div class="rowset">
 
   <!-- ================= DARK · macOS · home ================= -->
-  <div class="label">Desktop — tokyo-night · <em>macOS — lights left, output centered</em> · home</div>
+  <div class="label">Desktop — tokyo-night · <em>macOS — lights pin over the stage</em> · home</div>
   <div class="win t-dark chrome-mac">
-    <div class="stage">
-      <div class="stage-top">
-        <div class="tl"><i></i><i></i><i></i></div>
-        <button class="tb"><svg class="ic"><use href="#i-out"/></svg>macbook pro<span class="caret"></span></button>
-        <button class="tb side"><svg class="ic"><use href="#i-side"/></svg></button>
-      </div>
-      <div class="art"><div class="cv cov-eye"></div></div>
+    <div class="stage immersive t-dark">
+      <div class="sheet-art cov-eye"></div><div class="sheet-frost cov-eye"></div><div class="sheet-scrim"></div>
+      <div class="tl"><i></i><i></i><i></i></div>
+      <div class="radio-top"><svg class="ic"><use href="#i-radio"/></svg>start radio</div>
       <div class="t-meta">
-        <div class="tt"><h3>Self Aware</h3><div class="a">Temper City</div><div class="al">Self Aware · 2024</div></div>
+        <div class="tt"><h3>Self Aware (Live at the Observatory)</h3><div class="a">Temper City</div><div class="al">Self Aware · 2024</div></div>
         <div class="iconbt">
           <span class="ib"><svg class="ic"><use href="#i-dl"/></svg></span>
           <span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span>
@@ -499,14 +486,14 @@
       </div>
       <div class="wf" data-p="0.5"></div>
       <div class="wf-t"><span>1:30</span><span>-1:30</span></div>
-      <div class="transport">
+      <div class="transport m3e">
         <button class="tbt lk on"><svg class="ic"><use href="#i-heart"/></svg></button>
+        <button class="tbt"><svg class="ic"><use href="#i-shuffle"/></svg></button>
         <button class="tbt main"><svg class="ic fill"><use href="#i-prev"/></svg></button>
         <button class="tbt play"><svg class="ic fill"><use href="#i-pause"/></svg></button>
         <button class="tbt main"><svg class="ic fill"><use href="#i-next"/></svg></button>
         <button class="tbt"><svg class="ic"><use href="#i-repeat"/></svg></button>
       </div>
-      <div class="vol"><svg class="ic"><use href="#i-vol"/></svg><div class="vl"><i></i><u></u></div></div>
       <div class="seg">
         <span class="on"><svg class="ic"><use href="#i-note"/></svg>player</span>
         <span><svg class="ic"><use href="#i-lyr"/></svg>lyrics</span>
@@ -515,6 +502,7 @@
     </div>
     <div class="world">
       <div class="toolbar">
+        <button class="tb"><svg class="ic"><use href="#i-side"/></svg></button>
         <div class="srch"><svg class="ic"><use href="#i-search"/></svg><input placeholder="search"><kbd>⌘K</kbd></div>
         <div class="navtabs">
           <span class="on"><svg class="ic"><use href="#i-home"/></svg>home</span>
@@ -551,14 +539,11 @@
   <!-- ================= LIGHT · Windows · library ================= -->
   <div class="label">Desktop — light · <em>Windows — caption buttons overlay the world</em> · library</div>
   <div class="win t-light chrome-win">
-    <div class="stage">
-      <div class="stage-top">
-        <button class="tb"><svg class="ic"><use href="#i-out"/></svg>speakers<span class="caret"></span></button>
-        <button class="tb side"><svg class="ic"><use href="#i-side"/></svg></button>
-      </div>
-      <div class="art"><div class="cv cov-eye"></div></div>
+    <div class="stage immersive t-dark">
+      <div class="sheet-art cov-eye"></div><div class="sheet-frost cov-eye"></div><div class="sheet-scrim"></div>
+      <div class="radio-top"><svg class="ic"><use href="#i-radio"/></svg>start radio</div>
       <div class="t-meta">
-        <div class="tt"><h3>Self Aware</h3><div class="a">Temper City</div><div class="al">Self Aware · 2024</div></div>
+        <div class="tt"><h3>Self Aware (Live at the Observatory)</h3><div class="a">Temper City</div><div class="al">Self Aware · 2024</div></div>
         <div class="iconbt">
           <span class="ib"><svg class="ic"><use href="#i-dl"/></svg></span>
           <span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span>
@@ -566,14 +551,14 @@
       </div>
       <div class="wf" data-p="0.5"></div>
       <div class="wf-t"><span>1:30</span><span>-1:30</span></div>
-      <div class="transport">
+      <div class="transport m3e">
         <button class="tbt lk on"><svg class="ic"><use href="#i-heart"/></svg></button>
+        <button class="tbt"><svg class="ic"><use href="#i-shuffle"/></svg></button>
         <button class="tbt main"><svg class="ic fill"><use href="#i-prev"/></svg></button>
         <button class="tbt play"><svg class="ic fill"><use href="#i-pause"/></svg></button>
         <button class="tbt main"><svg class="ic fill"><use href="#i-next"/></svg></button>
         <button class="tbt"><svg class="ic"><use href="#i-repeat"/></svg></button>
       </div>
-      <div class="vol"><svg class="ic"><use href="#i-vol"/></svg><div class="vl"><i></i><u></u></div></div>
       <div class="seg">
         <span class="on"><svg class="ic"><use href="#i-note"/></svg>player</span>
         <span><svg class="ic"><use href="#i-lyr"/></svg>lyrics</span>
@@ -582,6 +567,7 @@
     </div>
     <div class="world">
       <div class="toolbar">
+        <button class="tb"><svg class="ic"><use href="#i-side"/></svg></button>
         <div class="srch"><svg class="ic"><use href="#i-search"/></svg><input placeholder="search"><kbd>⌃K</kbd></div>
         <div class="navtabs">
           <span><svg class="ic"><use href="#i-home"/></svg>home</span>
@@ -640,10 +626,6 @@
   <div class="label">Desktop — oled · <em>Linux — caption buttons overlay the world</em> · explore · stage in lyrics mode</div>
   <div class="win t-oled chrome-linux">
     <div class="stage">
-      <div class="stage-top">
-        <button class="tb"><svg class="ic"><use href="#i-out"/></svg>pipewire<span class="caret"></span></button>
-        <button class="tb side"><svg class="ic"><use href="#i-side"/></svg></button>
-      </div>
       <div class="lmeta">
         <div class="tt"><h3>Self Aware</h3><div class="ls">Temper City · estimated timing</div></div>
         <div class="iconbt">
@@ -677,6 +659,7 @@
     </div>
     <div class="world">
       <div class="toolbar">
+        <button class="tb"><svg class="ic"><use href="#i-side"/></svg></button>
         <div class="srch open"><svg class="ic"><use href="#i-search"/></svg><input value="roads portishead"><kbd>esc</kbd></div>
         <div class="tright">
           <button class="tb"><svg class="ic"><use href="#i-menu"/></svg></button>
@@ -766,6 +749,7 @@
           <div class="wf-t"><span>1:30</span><span>-1:30</span></div>
           <div class="transport m3e">
             <button class="tbt lk on"><svg class="ic"><use href="#i-heart"/></svg></button>
+            <button class="tbt"><svg class="ic"><use href="#i-shuffle"/></svg></button>
             <button class="tbt main"><svg class="ic fill"><use href="#i-prev"/></svg></button>
             <button class="tbt play"><svg class="ic fill"><use href="#i-pause"/></svg></button>
             <button class="tbt main"><svg class="ic fill"><use href="#i-next"/></svg></button>
@@ -832,6 +816,7 @@
           <div class="wf-t"><span>1:30</span><span>-1:30</span></div>
           <div class="transport ios">
             <button class="tbt lk on"><svg class="ic"><use href="#i-heart"/></svg></button>
+            <button class="tbt"><svg class="ic"><use href="#i-shuffle"/></svg></button>
             <button class="tbt main"><svg class="ic fill"><use href="#i-prev"/></svg></button>
             <button class="tbt play"><svg class="ic fill"><use href="#i-pause"/></svg></button>
             <button class="tbt main"><svg class="ic fill"><use href="#i-next"/></svg></button>
@@ -929,24 +914,27 @@
 
 <div class="foot">
   WCO — <code>titleBarStyle: 'hidden'</code> + <code>titleBarOverlay</code> themed per scheme.
-  Stage top strip (56 px, same line as the toolbar) centers the output-device pill; macOS
-  lights pin to its left, the sidebar-collapse button to its right. World toolbar =
-  search icon · centered nav tabs · menu · (win/linux caption buttons). Search is the GTK pattern: the icon expands into a field — when open it takes the
-  toolbar's width and the nav tabs step aside (see the OLED frame), so nothing ever overlaps.
+  The Stage column is chromeless: it runs to the top edge and macOS lights pin over its
+  top-left — no strip of its own. World toolbar = stage toggle · search icon · centered
+  segmented nav pills (same pill language as the mode switch, sized up) · menu · (win/linux
+  caption buttons overlay its right edge). Search is the GTK pattern: the icon expands into a field — when open it takes the
+  toolbar's width and the nav pills step aside (see the OLED frame), so nothing ever overlaps.
   <br><br>
   library — collections grid (liked · downloads · top 50 · history, play affordance on each) →
   your library (filter chips + sort + grid/list toggle + new-playlist card) → followed artists →
   recently added (shared row anatomy).
   Own design in the same language — not the GTK page.
   <br><br>
-  Stage modes — the segmented switch swaps the body: <b>player</b> (art → meta → waveform →
-  transport → volume) / <b>lyrics</b> (title + sync state + scrollable lines, active in accent,
-  estimated timing labeled honestly) / <b>queue</b>. Same chrome on mobile's expanded sheet.
+  Stage modes — the floating segmented pill swaps the body: <b>player</b> (artwork backdrop →
+  radio pill → meta + download/add → waveform → transport like · shuffle · prev · play · next ·
+  repeat → floating segment) / <b>lyrics</b> (title + sync state + scrollable lines, active in
+  accent, estimated timing labeled honestly) / <b>queue</b>. The identical surface is mobile's
+  expanded sheet — grab handle aside — and the phone's navbar hides beneath it.
   <br><br>
   icons — custom-rendered, motion by contract: eq bars on the playing thumb (live here), heart
   fill-in, play⇄pause morph, rotate (sync), bounce (like). Radius ladder: frames 0–8 (per OS) ·
   controls 6 · floating 12 · thumbs 5 · OS pills full. Accent #ff8a3d = active/progress only;
-  play = solid fg-bright on desktop; liked = pink.
+  play = filled accent squircle (m3e) everywhere but iOS glass; liked = pink.
 </div>
 
 <script>

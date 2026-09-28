@@ -739,6 +739,8 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
+
+    internal fun ensureInitialized() = Unit
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_cancel(
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_load_plugin(
@@ -760,6 +762,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_close(
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_open(
+    ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_peek(
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_phase_marks(
     ): Int
@@ -796,6 +800,8 @@ internal object UniffiLib {
         uniffiCallbackInterfaceResolveListener.register(this)
         
     }
+
+    internal fun ensureInitialized() = Unit
     external fun uniffi_auqw_mobile_bindings_fn_clone_pluginhost(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_auqw_mobile_bindings_fn_free_pluginhost(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -823,6 +829,8 @@ internal object UniffiLib {
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_close(`ptr`: Long,`handle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_open(`ptr`: Long,`handle`: RustBuffer.ByValue,`position`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_peek(`ptr`: Long,`handle`: RustBuffer.ByValue,`position`: Long,`maxLen`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_phase_marks(`ptr`: Long,`handle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -988,6 +996,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_open() and 0xFFFF) != 39188) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_peek() and 0xFFFF) != 43086) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_phase_marks() and 0xFFFF) != 17009) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1015,10 +1026,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
  * @suppress
  */
 public fun uniffiEnsureInitialized() {
-    IntegrityCheckingUniffiLib
-    // UniffiLib() initialized as objects are used, but we still need to explicitly
-    // reference it so initialization across crates works as expected.
-    UniffiLib
+    // Call arbitrary methods on IntegrityCheckingUniffiLib and UniffiLib to ensure that
+    // their init blocks run. This ensures initialization across crates works as expected.
+    IntegrityCheckingUniffiLib.ensureInitialized()
+    UniffiLib.ensureInitialized()
 }
 
 // Async support
@@ -1593,6 +1604,21 @@ public interface PluginHostInterface {
     fun `streamOpen`(`handle`: kotlin.String, `position`: kotlin.ULong): kotlin.ULong?
     
     /**
+     * Non-demanding positional read for decorative consumers
+     * (waveform peaks): `Some(bytes)` a committed hit, `Some(empty)`
+     * a confirmed EOF, `None` an unfetched hole. Queues no pump
+     * demand and never parks — a caller abandoning it leaves no
+     * Rust-side demand behind (unlike `stream_read`, whose parked
+     * demand outlives any caller-side timeout). It still does the
+     * store's disk read on a hit, so keep it off the main thread.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the session's kind otherwise.
+     */
+    fun `streamPeek`(`handle`: kotlin.String, `position`: kotlin.ULong, `maxLen`: kotlin.ULong): kotlin.ByteArray?
+    
+    /**
      * The session's lifecycle marks — available even after terminal
      * states.
      *
@@ -2010,6 +2036,36 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
         
         FfiConverterString.lower(`handle`),
         FfiConverterULong.lower(`position`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Non-demanding positional read for decorative consumers
+     * (waveform peaks): `Some(bytes)` a committed hit, `Some(empty)`
+     * a confirmed EOF, `None` an unfetched hole. Queues no pump
+     * demand and never parks — a caller abandoning it leaves no
+     * Rust-side demand behind (unlike `stream_read`, whose parked
+     * demand outlives any caller-side timeout). It still does the
+     * store's disk read on a hit, so keep it off the main thread.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the session's kind otherwise.
+     */
+    @Throws(StreamException::class)override fun `streamPeek`(`handle`: kotlin.String, `position`: kotlin.ULong, `maxLen`: kotlin.ULong): kotlin.ByteArray? {
+            return FfiConverterOptionalByteArray.lift(
+    callWithHandle {
+    uniffiRustCallWithError(StreamException) { _status ->
+    UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_peek(
+        it,
+        
+        FfiConverterString.lower(`handle`),
+        FfiConverterULong.lower(`position`),
+        FfiConverterULong.lower(`maxLen`),_status)
 }
     }
     )
@@ -3692,6 +3748,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteArray?> {
+    override fun read(buf: ByteBuffer): kotlin.ByteArray? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterByteArray.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ByteArray?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterByteArray.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ByteArray?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterByteArray.write(value, buf)
         }
     }
 }

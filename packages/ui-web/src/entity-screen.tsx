@@ -20,6 +20,7 @@ export type EntityScreenProps = {
   readonly onShuffleAll?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
   readonly onPressItem?: ((row: TrackRowModel) => void) | undefined;
+  readonly onAddToPlaylist?: ((row: TrackRowModel) => void) | undefined;
   readonly onContext?: ((row: TrackRowModel) => void) | undefined;
   readonly onLoadMore?: (() => void) | undefined;
   readonly onRetry?: (() => void) | undefined;
@@ -84,6 +85,7 @@ export function EntityScreen({
   onShuffleAll,
   onToggleLike,
   onPressItem,
+  onAddToPlaylist,
   onContext,
   onLoadMore,
   onRetry,
@@ -218,6 +220,11 @@ export function EntityScreen({
               onFocusRow={() => list.onRowFocus(index)}
               onPress={
                 onPressItem === undefined ? undefined : () => onPressItem(item)
+              }
+              onAddToPlaylist={
+                onAddToPlaylist === undefined
+                  ? undefined
+                  : () => onAddToPlaylist(item)
               }
               onContext={
                 onContext === undefined ? undefined : () => onContext(item)
