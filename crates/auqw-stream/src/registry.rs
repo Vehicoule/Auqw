@@ -273,6 +273,33 @@ impl StreamRegistry {
         })
     }
 
+    /// Coalesce-check without a mint: a live, unattached, still-fresh
+    /// session minted by `provider` for `source_ref` — e.g. an advisory
+    /// warm issued moments earlier — is returned under the same policy
+    /// as [`Self::prepare_timed`]'s reuse branch: the adopting caller
+    /// becomes the session's owner and every *other* unattached session
+    /// is superseded, so the at-most-one-unattached invariant holds.
+    /// `Ok(None)` leaves the registry untouched — the caller then runs
+    /// the normal resolve.
+    ///
+    /// # Errors
+    /// [`StreamError::Internal`] on lock poisoning.
+    pub fn adopt_reusable(
+        &self,
+        provider: &str,
+        source_ref: &str,
+    ) -> Result<Option<PrepareInfo>, StreamError> {
+        if self.shutdown.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let _guard = lock(&self.prepare_lock)?;
+        let Some(info) = self.reusable(provider, source_ref)? else {
+            return Ok(None);
+        };
+        let superseded = self.supersede_unattached(Some(&info.handle))?;
+        Ok(Some(PrepareInfo { superseded, ..info }))
+    }
+
     /// Attach a consumer at `position`; releases the head-fill bound
     /// into the read-ahead pump and exempts the session from supersede.
     /// Returns `content_length − position` when the total is known.

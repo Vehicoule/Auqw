@@ -303,6 +303,10 @@ export async function createSessionController(
   // (iOS) port's convention; a failed read drops to offline, never
   // silently online.
   let lastOnline = true;
+  // Metered gate for the session's speculative work (visible-row
+  // mapping + the advisory stream warm) — same seed-then-edge feed as
+  // `lastOnline`; iOS's unwatched port reports false.
+  let lastMetered = false;
   const log = createLog();
   const session = new Session({
     storage,
@@ -330,6 +334,7 @@ export async function createSessionController(
           return localSource?.uriFor(recordingId) ?? null;
         },
         isOnline: () => lastOnline,
+        isMetered: () => lastMetered,
       }
       : {}),
     // Commit-then-log over the in-process engine: every syncable
@@ -589,6 +594,9 @@ export async function createSessionController(
       // monitor's baseline edge can't be missed.
       try {
         const seeded = await connectivity.snapshot();
+        if (seeded.ok) {
+          lastMetered = seeded.value.metered;
+        }
         const online = seeded.ok ? seeded.value.online : false;
         if (online !== lastOnline) {
           // Seeding flipped the optimistic default — if restore
@@ -604,12 +612,16 @@ export async function createSessionController(
       try {
         mediaUnsubs.push(
           connectivity.subscribe((snap) => {
-            if (snap.online === lastOnline) {
+            const meteredChanged = snap.metered !== lastMetered;
+            if (snap.online === lastOnline && !meteredChanged) {
               return;
             }
-            // Update the gate's read BEFORE the session re-derives —
-            // connectivityChanged() reads isOnline() synchronously.
+            // Update the gates' reads BEFORE the session re-derives —
+            // connectivityChanged() consults them synchronously. A
+            // metered flip with `online` steady still swings the
+            // speculative-warm gate.
             lastOnline = snap.online;
+            lastMetered = snap.metered;
             session.connectivityChanged();
             // Same edge drives the sync scheduler: offline cancels
             // pending rounds, recovery reschedules them.

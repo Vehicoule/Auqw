@@ -547,6 +547,7 @@ export class FakePlayer implements PlayerPort {
   #nextResult: Result<unknown> = ok(undefined);
   #prepareHandle = 'handle-1';
   #prepareDeferreds: Deferred<Result<string>>[] = [];
+  #prewarmDeferreds: Deferred<Result<string>>[] = [];
 
   /** Configures the Result returned by the next control call. */
   setNextResult(result: Result<unknown>): void {
@@ -582,9 +583,26 @@ export class FakePlayer implements PlayerPort {
     return this.#prepareDeferreds.length;
   }
 
+  /** Settles the oldest pending prewarm; false when none pending. */
+  settlePrewarm(result: Result<string>): boolean {
+    const deferred = this.#prewarmDeferreds.shift();
+    if (deferred === undefined) {
+      return false;
+    }
+    deferred.resolve(result);
+    return true;
+  }
+
+  get pendingPrewarms(): number {
+    return this.#prewarmDeferreds.length;
+  }
+
   /** Resolves every pending prepare as cancelled. */
   cancelPendingPrepares(): void {
     for (const deferred of this.#prepareDeferreds.splice(0)) {
+      deferred.resolve({ ok: false, error: appError('cancelled', 'cancelled') });
+    }
+    for (const deferred of this.#prewarmDeferreds.splice(0)) {
       deferred.resolve({ ok: false, error: appError('cancelled', 'cancelled') });
     }
   }
@@ -625,6 +643,17 @@ export class FakePlayer implements PlayerPort {
     this.calls.push({ method: 'prepare', input });
     const deferred = new Deferred<Result<string>>();
     this.#prepareDeferreds.push(deferred);
+    return deferred.promise;
+  }
+
+  prewarm(input: {
+    provider: string;
+    sourceRef: string;
+    identity: { attemptId: string; queueRev: number };
+  }): Promise<Result<string>> {
+    this.calls.push({ method: 'prewarm', input });
+    const deferred = new Deferred<Result<string>>();
+    this.#prewarmDeferreds.push(deferred);
     return deferred.promise;
   }
 

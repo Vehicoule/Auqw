@@ -350,6 +350,132 @@ impl PluginHost {
                 None => return Err(HostError::UnknownPlugin { id: plugin_id }),
             }
         };
+        // Adoption fast-path: an unattached, still-fresh session for
+        // this exact (plugin, source_ref) — e.g. an advisory warm a
+        // visible row issued moments before the tap — is re-issued
+        // under this request id, skipping `playback.resolve` entirely.
+        // The registry ran the same supersede scan a coalesced
+        // `prepare_timed` would, so the one-unattached invariant holds;
+        // the bookkeeping below mirrors the invoke path's delivery
+        // commit exactly (tombstone consume, delivery ticket, slot
+        // insert, delivered flip) — ownership and `cancel` semantics
+        // are indistinguishable from a resolved prepare.
+        if let Ok(Some(info)) = stream.adopt_reusable(&plugin_id, &source_ref) {
+            // A zeroed trace is honest here: no invocation ran for
+            // this request — the session's own phase marks still carry
+            // the minting resolve's timing.
+            let summary = AttemptSummary {
+                request_id: request_id.clone(),
+                steps: 0,
+                http_calls: 0,
+                bytes: 0,
+                fuel_used: 0,
+                elapsed_ms: 0,
+                http_trace: Vec::new(),
+                guest_log: Vec::new(),
+            };
+            let prepared_handles = Arc::clone(&self.prepared_handles);
+            let cancelled_requests = Arc::clone(&self.cancelled_requests);
+            let prepared_delivery = Arc::clone(&self.prepared_delivery);
+            // Slot commit under one lock: a cancel that lands first
+            // tombstones instead (consumed below); a cancel that lands
+            // after sees the slot and abandons it — the request id can
+            // never race the adoption window. `track` precedes `insert`
+            // so `delivered: false` always implies the counted window —
+            // identical ordering to the invoke path.
+            enum Adopt {
+                Owned,
+                Cancelled,
+                Dead,
+            }
+            // `track` precedes the slot insert: a `PreparedSlot` with
+            // `delivered: false` must always imply a live in-flight
+            // count, or `cancel`'s `await_idle` could pass under the
+            // commit and kill a session whose `Prepared` is en route.
+            // Non-adopt outcomes never insert a slot, so the ticket is
+            // simply dropped unused.
+            let ticket = prepared_delivery.track(request_id.clone());
+            let adopt: Result<Adopt, HostError> = (|| {
+                let mut m = lock(&self.prepared_handles)?;
+                // Sessions ended by supersede/evict/expiry saw neither
+                // cancel nor release — prune stale mappings first so a
+                // dead session can't block the id's reuse.
+                m.retain(|_, s| s.handle == info.handle || stream.is_live(&s.handle));
+                if m.contains_key(&request_id) {
+                    return Err(HostError::RequestInFlight {
+                        id: request_id.clone(),
+                    });
+                }
+                // Consume this id's tombstone under the same critical
+                // section — a `cancel` that outran the slot insert
+                // owns the verdict; the session survives under the
+                // minting request's own ownership slot.
+                let tombstoned = cancelled_requests
+                    .lock()
+                    .map(|mut t| t.remove(&request_id).is_some())
+                    .unwrap_or(false);
+                if tombstoned {
+                    return Ok(Adopt::Cancelled);
+                }
+                if !stream.is_live(&info.handle) {
+                    return Ok(Adopt::Dead);
+                }
+                m.insert(
+                    request_id.clone(),
+                    PreparedSlot {
+                        handle: info.handle.clone(),
+                        delivered: false,
+                    },
+                );
+                Ok(Adopt::Owned)
+            })();
+            match adopt {
+                Err(e) => return Err(e),
+                Ok(Adopt::Owned) => {
+                    self.runtime.spawn(async move {
+                        deliver(
+                            request_id.clone(),
+                            PrepareOutcome::Prepared {
+                                superseded: info.superseded.clone(),
+                                stream: PreparedStream::from(info),
+                                attempt: summary,
+                            },
+                        )
+                        .await;
+                        if let Ok(mut m) = prepared_handles.lock() {
+                            if let Some(slot) = m.get_mut(&request_id) {
+                                slot.delivered = true;
+                            }
+                        }
+                        drop(ticket);
+                    });
+                    return Ok(());
+                }
+                Ok(kind) => {
+                    let cancelled = matches!(kind, Adopt::Cancelled);
+                    self.runtime.spawn(async move {
+                        deliver(
+                            request_id,
+                            PrepareOutcome::Failed {
+                                kind: if cancelled {
+                                    "cancelled".to_string()
+                                } else {
+                                    "not-found".to_string()
+                                },
+                                message: if cancelled {
+                                    "prepare cancelled".to_string()
+                                } else {
+                                    "stream session ended before delivery".to_string()
+                                },
+                                attempt: summary,
+                            },
+                        )
+                        .await;
+                    });
+                    return Ok(());
+                }
+            }
+        }
         let remint = PluginRemint {
             plugin,
             provider: plugin_id.clone(),

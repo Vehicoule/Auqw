@@ -314,13 +314,15 @@ struct PrepareDelivery {
 impl PrepareDelivery {
     /// Enter the delivery window for `request_id`. The returned
     /// ticket decrements the count on drop, so a panic mid-callback
-    /// can't strand waiters.
-    fn track(&self, request_id: String) -> PrepareDeliveryTicket<'_> {
+    /// can't strand waiters. Owning the `Arc` keeps the ticket
+    /// `'static` — the adoption fast-path registers it synchronously
+    /// on the caller's stack and drops it inside the delivery task.
+    fn track(self: &Arc<Self>, request_id: String) -> PrepareDeliveryTicket {
         if let Ok(mut m) = self.in_flight.lock() {
             *m.entry(request_id.clone()).or_insert(0) += 1;
         }
         PrepareDeliveryTicket {
-            delivery: self,
+            delivery: Arc::clone(self),
             request_id,
         }
     }
@@ -341,12 +343,12 @@ impl PrepareDelivery {
     }
 }
 
-struct PrepareDeliveryTicket<'a> {
-    delivery: &'a PrepareDelivery,
+struct PrepareDeliveryTicket {
+    delivery: Arc<PrepareDelivery>,
     request_id: String,
 }
 
-impl Drop for PrepareDeliveryTicket<'_> {
+impl Drop for PrepareDeliveryTicket {
     fn drop(&mut self) {
         if let Ok(mut m) = self.delivery.in_flight.lock() {
             if let Some(n) = m.get_mut(&self.request_id) {
@@ -1419,5 +1421,330 @@ mod tests {
         );
         let max = "x".repeat(8192);
         assert_eq!(valid_auth_token(Some(max.clone())), Some(max));
+    }
+
+    // --- start_prepare warm-adoption ------------------------------------
+
+    /// A fetch that parks every request — a warm session's pump stays
+    /// inside a live fill forever, so adoption tests never race a
+    /// terminal state the real transport would eventually write.
+    struct HangFetch;
+
+    impl auqw_stream::Fetch for HangFetch {
+        fn get_range<'a>(
+            &'a self,
+            _url: &'a str,
+            _offset: u64,
+            _max_len: u64,
+            _stall: std::time::Duration,
+            _deadline: std::time::Duration,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<auqw_stream::FetchResponse, auqw_stream::StreamError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// A re-mint that never answers — adoption tests mint warm
+    /// sessions directly; the trait still demands the seam exist.
+    struct HangRemint;
+
+    impl auqw_stream::Remint for HangRemint {
+        fn remint(
+            &self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<auqw_stream::PreparedSource, auqw_stream::StreamError>,
+                    > + Send,
+            >,
+        > {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// A temp cache dir cleaned up when the test ends.
+    struct StreamDir(std::path::PathBuf);
+
+    impl StreamDir {
+        fn new(tag: &str) -> Self {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let p = std::env::temp_dir().join(format!(
+                "auqw-host-surface-{tag}-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match std::fs::create_dir_all(&p) {
+                Ok(()) => Self(p),
+                Err(e) => panic!("mkdir {e}"),
+            }
+        }
+    }
+
+    impl Drop for StreamDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn warm_source(provider: &str, source_ref: &str) -> auqw_stream::PreparedSource {
+        auqw_stream::PreparedSource {
+            url: "https://signed.example/s?sig=SECRET".into(),
+            mime: "audio/mp4".into(),
+            itag: Some(140),
+            bitrate_kbps: Some(129),
+            content_length: Some(1024),
+            expires_at_ms: None,
+            source_ref: source_ref.to_string(),
+            provider: provider.to_string(),
+        }
+    }
+
+    /// A host with an echo plugin plus a stream seam whose transport
+    /// parks — warm sessions minted directly into the registry stay
+    /// live for the adoption under test.
+    fn stream_host(tag: &str) -> (PluginHost, Arc<auqw_stream::StreamRegistry>, StreamDir) {
+        let dir = StreamDir::new(tag);
+        let mut host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let reg = Arc::new(
+            auqw_stream::StreamRegistry::with_fetch(
+                auqw_stream::StreamConfig::new(dir.0.clone()),
+                host.runtime.handle().clone(),
+                Arc::new(HangFetch),
+            )
+            .unwrap_or_else(|e| panic!("registry: {e}")),
+        );
+        host.stream = Some(Arc::clone(&reg));
+        (host, reg, dir)
+    }
+
+    fn load_echo(host: &PluginHost) -> String {
+        match host.load_plugin(ECHO_WASM.to_vec(), manifest_json("echo", ECHO_WASM, "[]")) {
+            Ok(id) => id,
+            Err(e) => panic!("load echo: {e}"),
+        }
+    }
+
+    /// Mint a warm session directly in the registry — the seam-side
+    /// half of the adapter's `prewarm` call.
+    fn mint_warm(
+        reg: &Arc<auqw_stream::StreamRegistry>,
+        provider: &str,
+        source_ref: &str,
+    ) -> auqw_stream::PrepareInfo {
+        match reg.prepare(warm_source(provider, source_ref), Arc::new(HangRemint)) {
+            Ok(info) => info,
+            Err(e) => panic!("warm prepare: {e}"),
+        }
+    }
+
+    type OutcomeTx = std::sync::mpsc::Sender<(String, PrepareOutcome)>;
+    type OutcomeRx = std::sync::mpsc::Receiver<(String, PrepareOutcome)>;
+
+    fn deliver_chan() -> (OutcomeTx, OutcomeRx) {
+        std::sync::mpsc::channel()
+    }
+
+    /// Adoption happy path: a live warm session for this exact
+    /// (plugin, ref) is delivered Prepared under the new request id —
+    /// the guest never runs, the attempt trace is honestly zero, and
+    /// the ownership slot + cancel lifecycle are indistinguishable
+    /// from a resolved prepare.
+    #[test]
+    fn prepare_adopts_a_live_warm_session() {
+        let (host, reg, _dir) = stream_host("adopt");
+        let id = load_echo(&host);
+        let warm = mint_warm(&reg, &id, "vid");
+        let (tx, rx) = deliver_chan();
+        match host.start_prepare(id, "vid".into(), "req-adopt".into(), move |rid, outcome| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send((rid, outcome));
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start: {e}"),
+        }
+        let (rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        assert_eq!(rid, "req-adopt");
+        match outcome {
+            PrepareOutcome::Prepared {
+                stream,
+                attempt,
+                superseded,
+            } => {
+                assert_eq!(
+                    stream.handle, warm.handle,
+                    "adoption delivers the warm session's handle"
+                );
+                assert!(
+                    superseded.is_empty(),
+                    "nothing else was unattached: {superseded:?}"
+                );
+                assert_eq!(
+                    (attempt.steps, attempt.http_calls, attempt.elapsed_ms),
+                    (0, 0, 0),
+                    "adoption ran no guest invocation"
+                );
+            }
+            PrepareOutcome::Failed { kind, .. } => {
+                panic!("expected Prepared, got Failed({kind})")
+            }
+        }
+        // The ownership slot is committed under this request id and
+        // flips delivered once the Prepared is on the wire.
+        let mut guard = 0;
+        loop {
+            let delivered = host
+                .prepared_handles
+                .lock()
+                .ok()
+                .and_then(|m| m.get("req-adopt").map(|s| (s.handle.clone(), s.delivered)));
+            match delivered {
+                Some((h, true)) => {
+                    assert_eq!(h, warm.handle);
+                    break;
+                }
+                Some(_) | None if guard < 200 => {
+                    guard += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                _ => panic!("ownership slot for req-adopt never delivered"),
+            }
+        }
+        // Cancelling the delivered-but-unattached session abandons it —
+        // the same lifecycle a resolved prepare would unwind.
+        host.cancel("req-adopt".to_string());
+        assert!(
+            !reg.is_live(&warm.handle),
+            "cancel unwinds the adopted warm session"
+        );
+    }
+
+    /// Tombstone consume: a cancel that outran the adoption still
+    /// lands on this request — the outcome reports cancelled, no slot
+    /// is committed, and the warm session survives under its minting
+    /// request's ownership rather than being abandoned by a request
+    /// that never owned it.
+    #[test]
+    fn prepare_adoption_consumes_a_tombstoned_cancel() {
+        let (host, reg, _dir) = stream_host("tomb");
+        let id = load_echo(&host);
+        let warm = mint_warm(&reg, &id, "vid");
+        host.cancel("req-tomb".to_string());
+        let (tx, rx) = deliver_chan();
+        match host.start_prepare(id, "vid".into(), "req-tomb".into(), move |rid, outcome| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send((rid, outcome));
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start: {e}"),
+        }
+        let (_rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        match outcome {
+            PrepareOutcome::Failed { kind, attempt, .. } => {
+                assert_eq!(kind, "cancelled");
+                assert_eq!(attempt.steps, 0, "a cancelled adoption ran no guest");
+            }
+            PrepareOutcome::Prepared { .. } => {
+                panic!("expected Failed(cancelled), got Prepared")
+            }
+        }
+        assert!(
+            host.prepared_handles
+                .lock()
+                .map(|m| !m.contains_key("req-tomb"))
+                .unwrap_or(false),
+            "a cancelled adoption commits no ownership slot"
+        );
+        assert!(
+            reg.is_live(&warm.handle),
+            "the warm session survives under its minting request's slot"
+        );
+    }
+
+    /// Dead-warm fallback: a released session fails `adopt_reusable`'s
+    /// freshness check, so the request runs the normal resolve —
+    /// observable through a real attempt summary and no delivery of
+    /// the dead handle.
+    #[test]
+    fn prepare_dead_warm_falls_back_to_the_invoke_path() {
+        let (host, reg, _dir) = stream_host("dead");
+        let id = load_echo(&host);
+        let warm = mint_warm(&reg, &id, "vid");
+        match reg.release(&warm.handle) {
+            Ok(()) => {}
+            Err(e) => panic!("release: {e}"),
+        }
+        let (tx, rx) = deliver_chan();
+        match host.start_prepare(id, "vid".into(), "req-dead".into(), move |rid, outcome| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send((rid, outcome));
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start: {e}"),
+        }
+        let (_rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(v) => v,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        match outcome {
+            PrepareOutcome::Failed { attempt, .. } => {
+                assert!(
+                    attempt.steps >= 1,
+                    "the fallback ran the guest's resolve for real"
+                );
+            }
+            PrepareOutcome::Prepared { stream, .. } => {
+                panic!("a dead warm must never deliver — got {}", stream.handle)
+            }
+        }
+    }
+
+    /// Duplicate request ids are rejected on the adoption path too —
+    /// the second admission sees the committed slot and fails
+    /// `RequestInFlight` before it can double-own the warm session.
+    #[test]
+    fn prepare_adoption_rejects_a_duplicate_request_id() {
+        let (host, reg, _dir) = stream_host("dup");
+        let id = load_echo(&host);
+        mint_warm(&reg, &id, "vid");
+        let (tx1, _rx1) = deliver_chan();
+        let (tx2, _rx2) = deliver_chan();
+        let deliver = |tx: OutcomeTx| {
+            move |rid: String, outcome: PrepareOutcome| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send((rid, outcome));
+                }
+            }
+        };
+        match host.start_prepare(id.clone(), "vid".into(), "dup".into(), deliver(tx1)) {
+            Ok(()) => {}
+            Err(e) => panic!("first start: {e}"),
+        }
+        match host.start_prepare(id, "vid".into(), "dup".into(), deliver(tx2)) {
+            Err(HostError::RequestInFlight { id }) => assert_eq!(id, "dup"),
+            other => panic!("expected RequestInFlight, got {other:?}"),
+        }
     }
 }

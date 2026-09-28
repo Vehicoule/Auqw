@@ -419,43 +419,56 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
     });
   }
 
+  function issuePrepare(input: {
+    provider: string;
+    sourceRef: string;
+    identity: PlaybackIdentity;
+  }): Promise<Result<string>> {
+    const requestId = deps.ids.next('prep');
+    supersedeUnattached();
+    const record: PreparedRecord = {
+      handle: deps.ids.next('aud'),
+      requestId,
+      identity: input.identity,
+      providerId: input.provider,
+      sourceRef: input.sourceRef,
+      source: new CancellationSource(),
+      file: new File(directory, `${requestId}.tmp`),
+      sinkHandle: null,
+      downloadDone: false,
+      ready: false,
+      failed: null,
+      attached: null,
+      attaching: false,
+      detachedAt: now(),
+      resumeAtSec: null,
+      onBytes: null,
+    };
+    record.onBytes = () => {
+      if (record.resumeAtSec !== null && record.attached !== null) {
+        const at = record.resumeAtSec;
+        record.resumeAtSec = null;
+        void record.attached.player
+          .seekTo(at)
+          .then(() => record.attached?.player.play())
+          .catch(() => undefined);
+      }
+    };
+    prepared.set(record.handle, record);
+    pending.set(requestId, record);
+    void runPrepare(record);
+    return Promise.resolve(ok(requestId));
+  }
+
   return {
-    prepare(input) {
-      const requestId = deps.ids.next('prep');
-      supersedeUnattached();
-      const record: PreparedRecord = {
-        handle: deps.ids.next('aud'),
-        requestId,
-        identity: input.identity,
-        providerId: input.provider,
-        sourceRef: input.sourceRef,
-        source: new CancellationSource(),
-        file: new File(directory, `${requestId}.tmp`),
-        sinkHandle: null,
-        downloadDone: false,
-        ready: false,
-        failed: null,
-        attached: null,
-        attaching: false,
-        detachedAt: now(),
-        resumeAtSec: null,
-        onBytes: null,
-      };
-      record.onBytes = () => {
-        if (record.resumeAtSec !== null && record.attached !== null) {
-          const at = record.resumeAtSec;
-          record.resumeAtSec = null;
-          void record.attached.player
-            .seekTo(at)
-            .then(() => record.attached?.player.play())
-            .catch(() => undefined);
-        }
-      };
-      prepared.set(record.handle, record);
-      pending.set(requestId, record);
-      void runPrepare(record);
-      return Promise.resolve(ok(requestId));
-    },
+    prepare: issuePrepare,
+    /**
+     * Advisory warm: the seam contract this surface mirrors already
+     * bounds speculative work — one unattached record at a time, so
+     * issuePrepare IS the warm. A later play() on its handle attaches
+     * the resolved file without re-resolving.
+     */
+    prewarm: issuePrepare,
 
     async play(input) {
       const record = prepared.get(input.handle);

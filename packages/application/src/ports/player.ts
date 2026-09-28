@@ -264,6 +264,23 @@ export interface PlayerPort {
     sourceRef: string;
     identity: PlaybackIdentity;
   }): Promise<Result<string>>;
+  /**
+   * Advisory resolve+prepare for a row the user may tap — identical
+   * request/outcome contract to `prepare` (the terminal outcome still
+   * arrives as a `prepare` event carrying `identity`), but carries no
+   * playback intent: implementations must not touch the media element,
+   * bump operation generations, or tear down attaches. The seam's own
+   * policy bounds it — at most one unattached session lives at a time,
+   * so a warm supersedes and is superseded exactly like a `prepare`,
+   * and `cancelPrepare` abandons it while unattached. A later
+   * `prepare`/`prewarm` for the same (provider, sourceRef) adopts the
+   * still-live session instead of re-resolving.
+   */
+  prewarm(input: {
+    provider: string;
+    sourceRef: string;
+    identity: PlaybackIdentity;
+  }): Promise<Result<string>>;
   play(input: {
     handle: string;
     identity: PlaybackIdentity;

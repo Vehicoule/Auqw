@@ -83,9 +83,11 @@ import type { ClockPort } from '../ports/clock.ts';
 import type { IdPort, RandomPort } from '../ports/runtime.ts';
 import type { LogPort } from '../ports/log.ts';
 import type {
+  AttemptTrace,
   PlaybackIdentity,
   PlayerEvent,
   PlayerPort,
+  PreparedStream,
   QueueProjection,
   QueueProjectionItem,
   RepeatMode,
@@ -270,6 +272,15 @@ export type SessionDeps = {
    * (platforms without a connectivity surface keep prior behavior).
    */
   readonly isOnline?: () => boolean;
+  /**
+   * Synchronous "is this connection metered" read (cellular /
+   * data-saver). Speculative work — the visible-row mapping pass and
+   * the advisory stream warm — skips while it reports true: it would
+   * spend bytes the user may be paying for. Playback-intent calls
+   * never consult it. Omitted = never metered (platforms without the
+   * signal keep prior behavior).
+   */
+  readonly isMetered?: () => boolean;
 };
 
 const OP_DEADLINE_MS = 15_000;
@@ -307,6 +318,41 @@ const SYNC_EMIT_PENDING_MAX = 2_048;
 /** Post-projection pending bound — unresolved inserts waiting on
  *  parent rows; drop-newest past it. Never bounds a fresh drain. */
 const SYNC_APPLY_PENDING_MAX = 2_048;
+
+/**
+ * Visible-row warming bounds: a surface hands at most this many refs
+ * or recording ids per `prewarm` call — the ~9-row viewport.
+ */
+const PREWARM_INPUT_LIMIT = 9;
+/**
+ * Queue rows scanned past the cursor for a speculative mapping —
+ * the dealt window a service move would reach next.
+ */
+const WARM_WINDOW = 8;
+/**
+ * Recently-attempted warm rows: an LRU so a derived tick or a fresh
+ * `prewarm` call can't spin the same resolve. 64 entries — the dedupe
+ * bound the warm cache is required to hold.
+ */
+const WARM_SEEN_CAP = 64;
+/** How long a no-hit warm row stays suppressed before it may retry. */
+const WARM_ROW_TTL_MS = 120_000;
+/** A failed stream warm stays denied this long — one slot re-firing
+ *  the same dead resolve every playing-tick is a network leak. */
+const STREAM_DENY_CAP = 16;
+/**
+ * A warm prepared session is only kept — and only adopted — while
+ * its URL outlives the seam's own attach margin (the registry's
+ * `expiry_margin`). A tighter bound would mint sessions the tap
+ * already can't use.
+ */
+const WARM_EXPIRY_MARGIN_MS = 60_000;
+/**
+ * The newest surface-handoff ref counts as visible this long: the
+ * idle stream warm keeps its target while the search results that
+ * minted it are still on screen.
+ */
+const SURFACE_WARM_TTL_MS = 120_000;
 
 const SYNC_APPLY_STABLE: SyncApplyReport = { rehydrateMedia: false };
 
@@ -397,6 +443,28 @@ type ActiveAttempt = {
   listenedMsAccum: number;
   /** Prepare calls spent so far across this intent's attempt chain. */
   preparesUsed: number;
+};
+
+/**
+ * One advisory stream warm: a `player.prewarm` request whose minted
+ * session a later real `prepare` may adopt — the registry keeps at
+ * most one unattached session, so this slot is singular by
+ * construction. `stream` fills when its `prepare` outcome lands;
+ * until then the request is cancellable via `requestId` alone.
+ */
+type StreamWarm = {
+  /**
+   * 'queue' rides the dealt successor while a track plays; 'surface'
+   * is an explicit `prewarm()` row (a search result the user may tap).
+   */
+  readonly origin: 'queue' | 'surface';
+  readonly provider: string;
+  readonly sourceRef: string;
+  readonly attemptId: string;
+  readonly queueRev: number;
+  requestId: string | null;
+  stream: PreparedStream | null;
+  attempt: AttemptTrace | null;
 };
 
 type Ready = {
@@ -821,6 +889,51 @@ export class Session {
   readonly #installedProjections = new Map<string, QueueProjection>();
   #mappingSource: CancellationSource | null = null;
   /**
+   * The one advisory stream warm — see `StreamWarm`. Cleared only
+   * through `#dropStreamWarm` (release/cancel) or the adoption paths
+   * (the attempt/transition claims the session) — never released
+   * while a record still owns it.
+   */
+  #streamWarm: StreamWarm | null = null;
+  /**
+   * Stream rows that just failed a warm — bounded suppression so a
+   * derived tick can't re-fire the same dead resolve every second.
+   */
+  #streamWarmDenied = new Map<string, number>();
+  /**
+   * The newest visible-row ref a surface handed `prewarm()` — the
+   * idle-time stream warm's target. Rows past `SURFACE_WARM_TTL_MS`
+   * count as scrolled-away.
+   */
+  #surfaceWarm: {
+    provider: string;
+    sourceRef: string;
+    atMs: number;
+  } | null = null;
+  /**
+   * Recording ids a surface handed `prewarm()` — the window loop
+   * drains them into `#warmSeen` bookkeeping; bounded at add time.
+   */
+  #warmPending = new Set<string>();
+  /**
+   * Row-warm suppression: recently-attempted recording ids — the
+   * 64-entry LRU the candidates warm is required to dedupe under.
+   */
+  #warmSeen = new Map<string, number>();
+  /** Serializes the visible-window mapping pass — one at a time. */
+  #warmBatchSource: CancellationSource | null = null;
+  /**
+   * The recording the running pass is candidates-resolving, plus the
+   * promise of that row's completion — an attempt resolving the same
+   * row adopts the in-flight warm instead of paying a duplicate
+   * candidates call.
+   */
+  #warmBatchTarget: string | null = null;
+  #warmBatchDone: Promise<void> | null = null;
+  /** Provider the in-flight row warm routes through — adoption and
+   * settings-change cancellation both key on it. */
+  #warmBatchProvider: string | null = null;
+  /**
    * One auto-seed attempt per tail occurrence — set when the lazy
    * radio arms itself on the queue's last item (and when the user
    * disarms while it plays), so repeated #derived ticks on that
@@ -837,6 +950,7 @@ export class Session {
   #radioArmEpoch = 0;
   readonly #localPlaybackFor: (recordingId: string) => string | null;
   readonly #isOnline: () => boolean;
+  readonly #isMetered: () => boolean;
   readonly #sync: SyncEmitPort | undefined;
   /**
    * Emitted writes waiting on the emit port — session-scoped so an
@@ -893,6 +1007,7 @@ export class Session {
     this.#log = deps.log;
     this.#localPlaybackFor = deps.localPlaybackFor ?? (() => null);
     this.#isOnline = deps.isOnline ?? (() => true);
+    this.#isMetered = deps.isMetered ?? (() => false);
     this.#sync = deps.sync;
     this.#corrections = createCorrections({
       storage: deps.storage,
@@ -1302,6 +1417,8 @@ export class Session {
     this.#mappingSource = null;
     this.#own(this.#projectQueue());
     this.#maybeMapSuccessor();
+    this.#maybeWarmWindow();
+    this.#maybeWarmStream();
     this.#maybeGrowRadio();
     this.#maybeArmRadio();
     // A drained queue with an armed tail may be mid-chase or waiting
@@ -2125,6 +2242,61 @@ export class Session {
       return;
     }
     this.#derived();
+  }
+
+  /**
+   * Advisory warm for rows a surface is showing — never playback
+   * intent, never an error channel. Two levels, both bounded and
+   * gated by `settings.prefetch` + the connectivity reads:
+   *
+   * - `recordingIds`: candidates-resolve + automatic-mapping for the
+   *   row's missing ref — up to `PREWARM_INPUT_LIMIT` ids drain into
+   *   the same dealt-window pass; an 'ambiguous' match is a typed
+   *   skip, never a review enqueue.
+   * - `sourceRefs`: the FIRST playable ref for the active playback
+   *   provider becomes the idle-time advisory stream warm — a real
+   *   `player.prewarm` resolve+prepare whose minted session a later
+   *   same-ref `prepare` adopts without re-resolving. Only ever the
+   *   newest one wins: a scrolled-to row is the one the user can tap.
+   *
+   * Everything is cancellable and idempotent — repeated calls for
+   * the same rows dedupe through `#warmSeen`/`#streamWarm`.
+   */
+  prewarm(input: {
+    readonly recordingIds?: readonly string[];
+    readonly sourceRefs?: readonly SourceRef[];
+  }): void {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return;
+    }
+    const r = ready.value;
+    const refs = input.sourceRefs ?? [];
+    for (const s of refs.slice(0, PREWARM_INPUT_LIMIT)) {
+      if (
+        isTrackRef(s) &&
+        s.provider === r.settings.playbackProvider &&
+        s.provider !== LOCAL_PROVIDER
+      ) {
+        const now = this.#safeNow();
+        if (now !== null) {
+          this.#surfaceWarm = {
+            provider: s.provider,
+            sourceRef: s.id,
+            atMs: now,
+          };
+        }
+        break;
+      }
+    }
+    const ids = input.recordingIds ?? [];
+    for (const id of ids.slice(0, PREWARM_INPUT_LIMIT)) {
+      if (isString(id, 256) && this.#warmPending.size < WARM_SEEN_CAP) {
+        this.#warmPending.add(id);
+      }
+    }
+    this.#maybeWarmWindow();
+    this.#maybeWarmStream();
   }
 
   async enqueueRecording(recordingId: string): Promise<Result<string>> {
@@ -3454,7 +3626,7 @@ export class Session {
       ? snap.currentOccurrenceId === null && record.resumeOnDrain
       : snap.currentOccurrenceId !== null &&
       remainingAfterCurrent(snap, this.#dealtOrder(r) ?? undefined) <
-        RADIO_FETCH_AHEAD;
+      RADIO_FETCH_AHEAD;
     if (
       record.status !== 'growing' ||
       record.continuation === null ||
@@ -4189,10 +4361,10 @@ export class Session {
         snap.currentOccurrenceId === null
           ? order.length
           : cursorPos +
-            1 +
-            Math.floor(
-              this.#random.unit() * (order.length - cursorPos),
-            );
+          1 +
+          Math.floor(
+            this.#random.unit() * (order.length - cursorPos),
+          );
       order.splice(slot, 0, occurrence.occurrenceId);
       changed = true;
     }
@@ -4922,6 +5094,61 @@ export class Session {
         return err(routed.error);
       }
     }
+    // A warm session issued for this exact ref may still be live in
+    // the seam's unattached slot: adopting it skips `player.prepare`
+    // — the resolve latency is already spent. A warm for another row
+    // is stale intent — drop it (the seam would supersede it anyway).
+    // A same-key warm still resolving stays: the prepare's registry
+    // coalescing adopts its session when it lands.
+    const warm = this.#streamWarm;
+    if (
+      warm !== null &&
+      (warm.provider !== ref.provider || warm.sourceRef !== ref.id)
+    ) {
+      this.#dropStreamWarm(warm);
+    }
+    if (
+      warm !== null &&
+      warm.stream !== null &&
+      warm.provider === ref.provider &&
+      warm.sourceRef === ref.id &&
+      ref.provider !== LOCAL_PROVIDER
+    ) {
+      const stream = warm.stream;
+      // OWNERSHIP TRANSFER: the warm's request slot (`wreq → handle`)
+      // stays registered as the attempt's `requestId` — it is the
+      // session's only host-side owner, so freeing it here would run
+      // `cancel_if_unattached` on the handle we're about to play.
+      // `preparedHandled` guards every later cancelPrepare for this
+      // request; `release` by handle remains the session's exit.
+      this.#streamWarm = null;
+      attempt.preparedHandled = true;
+      if (warm.requestId !== null) {
+        attempt.requestId = warm.requestId;
+      }
+      const readyW = this.#ready;
+      if (
+        readyW !== null &&
+        readyW.playback.type === 'preparing' &&
+        attemptEq(readyW.playback.identity, attempt.identity)
+      ) {
+        readyW.playback = {
+          ...readyW.playback,
+          ...(attempt.requestId === undefined
+            ? {}
+            : { requestId: attempt.requestId }),
+          ref,
+        };
+        this.#publish();
+      }
+      if (this.#isStale(attempt) || attempt.source.signal.cancelled) {
+        return err(
+          attempt.terminalError ?? appError('superseded', 'play superseded'),
+        );
+      }
+      await this.#adoptPrepared(attempt, stream, warm.attempt, true);
+      return ok(undefined);
+    }
     const prepared = await retryBounded({
       deadlineMs,
       signal: attempt.source.signal,
@@ -5007,6 +5234,43 @@ export class Session {
       return err(routed.error);
     }
     const provider = routed.value;
+    // A window-warm already resolves this row — adopt it instead of
+    // paying a duplicate candidates call: the wait is bounded by the
+    // warm's own deadline and its commit lands the same automatic
+    // mapping + pin this attempt would have produced. A cancelled or
+    // inconclusive warm falls through to the honest resolve below.
+    const warmDone =
+      this.#warmBatchTarget === recording.id &&
+        this.#warmBatchProvider === provider.id
+        ? this.#warmBatchDone
+        : null;
+    if (warmDone !== null) {
+      await new Promise<void>((resolve) => {
+        const unsub = attempt.source.signal.subscribe(() => resolve());
+        void warmDone.then(() => {
+          unsub();
+          resolve();
+        });
+      });
+      if (this.#isStale(attempt) || attempt.source.signal.cancelled) {
+        return err(
+          attempt.terminalError ?? appError('superseded', 'play superseded'),
+        );
+      }
+      const live = this.#ready?.recordings.find(
+        (x) => x.id === recording.id,
+      );
+      const liveOccurrence = this.#ready?.queue
+        .snapshot()
+        .occurrences.find((o) => o.occurrenceId === occurrenceId);
+      const adopted =
+        live === undefined
+          ? null
+          : this.#pickRef(live, liveOccurrence?.selectedRef ?? null);
+      if (adopted !== null) {
+        return ok(adopted);
+      }
+    }
     const query: RecordingQuery = {
       title: recording.title,
       artist: recording.artist,
@@ -5522,6 +5786,15 @@ export class Session {
       return;
     }
     if (event.type === 'prepare') {
+      // Advisory warms carry their own `warm-*` attemptId — their
+      // outcomes never reach the attempt pipeline: a dropped warm's
+      // stale outcome lands in the generic path, which releases a
+      // 'prepared' handle idempotently.
+      const warm = this.#streamWarm;
+      if (warm !== null && warm.attemptId === event.identity.attemptId) {
+        await this.#handleWarmOutcome(event, warm);
+        return;
+      }
       await this.#handlePrepareEvent(event);
       return;
     }
@@ -5740,6 +6013,11 @@ export class Session {
       };
       r.playback = playback;
       this.#publish();
+      if (mapped === 'playing') {
+        // The deal/queue rev is settled by now — the dealt
+        // successor's advisory warm may (re)issue.
+        this.#maybeWarmStream();
+      }
     }
   }
 
@@ -5786,21 +6064,59 @@ export class Session {
       await this.#persist({ attempts });
       return;
     }
-    active.handle = event.outcome.stream.handle;
+    // The prepare may have coalesced onto the warm's session — the
+    // attempt owns the handle now; only the warm's request slot
+    // needs freeing.
+    const warm = this.#streamWarm;
+    if (
+      warm !== null &&
+      warm.stream?.handle === event.outcome.stream.handle
+    ) {
+      this.#streamWarm = null;
+      this.#freeWarmRequest(warm);
+    }
+    await this.#adoptPrepared(
+      active,
+      event.outcome.stream,
+      event.outcome.attempt,
+      // A prepared handle can already be dead (seam coalescing onto
+      // an aged session, TTL expiry between mint and attach) —
+      // re-prepare instead of marking the occurrence unplayable.
+      true,
+    );
+  }
+
+  /**
+   * The shared tail of a 'prepared' outcome: record the handle, hold
+   * autostart under a paused queue, else issue `player.play`.
+   * `reprepareOnDeadHandle` re-runs the whole attempt when the handle
+   * died between mint and attach (dead-resource kinds only) — a warm
+   * or coalesced session can outdate while a fresh mint cannot.
+   */
+  async #adoptPrepared(
+    active: ActiveAttempt,
+    stream: PreparedStream,
+    attempt: AttemptTrace | null,
+    reprepareOnDeadHandle: boolean,
+  ): Promise<void> {
+    const r = this.#ready;
+    if (r === null) {
+      return;
+    }
+    active.handle = stream.handle;
     if (r.queue.snapshot().mode === 'paused') {
       // Paused while the prepare was in flight — user intent wins:
       // hold the handle and report paused, never autostart.
       this.#setPlaybackFromStatus(active, 'paused');
-      await this.#persist({ attempts: [event.outcome.attempt] });
+      if (attempt !== null) {
+        await this.#persist({ attempts: [attempt] });
+      }
       this.#maybeMapSuccessor();
       return;
     }
     const playResult = await this.#bounded(() =>
       this.#player.play({
-        handle:
-          event.outcome.type === 'prepared'
-            ? event.outcome.stream.handle
-            : '',
+        handle: stream.handle,
         identity: active.identity,
         positionMs: r.queue.snapshot().positionMs,
       }),
@@ -5809,14 +6125,27 @@ export class Session {
       return;
     }
     if (!playResult.ok) {
+      if (
+        reprepareOnDeadHandle &&
+        DEAD_STREAM_KINDS.has(playResult.error.kind)
+      ) {
+        // Same recovery as a dead-handle 'failed' status: the queue
+        // still holds the intent — a fresh prepare resolves honestly.
+        await this.#startAttempt(active.occurrenceId);
+        return;
+      }
       await this.#failOrRetryAttempt(active, playResult.error);
       // The trace survives the transport failure, same contract as
       // the prepare-failure branch above.
-      await this.#persist({ attempts: [event.outcome.attempt] });
+      if (attempt !== null) {
+        await this.#persist({ attempts: [attempt] });
+      }
       return;
     }
     this.#setPlaybackFromStatus(active, 'buffering');
-    await this.#persist({ attempts: [event.outcome.attempt] });
+    if (attempt !== null) {
+      await this.#persist({ attempts: [attempt] });
+    }
     this.#maybeMapSuccessor();
   }
 
@@ -6175,6 +6504,14 @@ export class Session {
         preparesUsed: 0,
       };
       this.#active = attempt;
+      // The service's armed move may have adopted the warm's session —
+      // the attach owns it now; free the warm's request slot without
+      // releasing a live handle.
+      const warm = this.#streamWarm;
+      if (warm !== null && warm.stream?.handle === event.handle) {
+        this.#streamWarm = null;
+        this.#freeWarmRequest(warm);
+      }
       r.playback = {
         type: 'buffering',
         recordingId: attempt.recordingId,
@@ -6316,6 +6653,9 @@ export class Session {
     this.#mappingSource = source;
     const occurrenceId = successor.occurrenceId;
     const recordingId = recording.id;
+    // The dealt-window warm dedupes against this in-flight call too —
+    // the row stays suppressed while its mapping resolves.
+    this.#noteWarmSeen(recordingId);
     const work = (async () => {
       const deadlineMs = this.#deadline();
       const query: RecordingQuery = {
@@ -6434,7 +6774,667 @@ export class Session {
     this.#own(work);
   }
 
-  // ---- lifecycle ----------------------------------------------------
+  // ---- visible-row warming -----------------------------------------
+  //
+  // Two honest levels, both bounded, cancellable, and gated by
+  // prefetch+connectivity — never playback intent:
+  //
+  // 1. The candidates pass resolves a REF for rows the cursor could
+  //    reach (the dealt window plus surface-handed recording ids) —
+  //    the same `playback.candidates` → match → automatic-mapping
+  //    commit `#resolveViaCandidates` runs under a real intent. A
+  //    warm only ever writes an 'automatic' mapping the real path
+  //    could have produced; ambiguity is a typed skip, never a review.
+  // 2. The stream warm issues `player.prewarm` for the dealt
+  //    successor's already-resolved ref (and for the newest visible
+  //    surface ref while idle): a real session in the seam's
+  //    one-unattached slot — a tap's `prepare` adopts it at the seam
+  //    without re-resolving, so TTFS drops to attach time.
+
+  /** Speculative gates — playback-intent paths never consult these. */
+  #warmGatesOk(r: Ready): boolean {
+    return (
+      r.settings.prefetch && this.#isOnline() && !this.#isMetered()
+    );
+  }
+
+  /** A row counts as attempted recently — suppresses re-warm. */
+  #warmSeenFresh(recordingId: string): boolean {
+    const at = this.#warmSeen.get(recordingId);
+    if (at === undefined) {
+      return false;
+    }
+    const now = this.#safeNow();
+    if (now === null || now - at < WARM_ROW_TTL_MS) {
+      // LRU touch — a hot row keeps its slot.
+      this.#warmSeen.delete(recordingId);
+      this.#warmSeen.set(recordingId, at);
+      return true;
+    }
+    this.#warmSeen.delete(recordingId);
+    return false;
+  }
+
+  #noteWarmSeen(recordingId: string): void {
+    const now = this.#safeNow();
+    this.#warmSeen.delete(recordingId);
+    this.#warmSeen.set(recordingId, now ?? 0);
+    while (this.#warmSeen.size > WARM_SEEN_CAP) {
+      const oldest = this.#warmSeen.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      this.#warmSeen.delete(oldest);
+    }
+  }
+
+  /** A failed stream warm is denied briefly — bounded list. */
+  #denyStreamWarm(key: string): void {
+    const now = this.#safeNow();
+    this.#streamWarmDenied.delete(key);
+    this.#streamWarmDenied.set(key, now ?? 0);
+    while (this.#streamWarmDenied.size > STREAM_DENY_CAP) {
+      const oldest = this.#streamWarmDenied.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      this.#streamWarmDenied.delete(oldest);
+    }
+  }
+
+  #streamWarmDeniedFresh(key: string): boolean {
+    const at = this.#streamWarmDenied.get(key);
+    if (at === undefined) {
+      return false;
+    }
+    const now = this.#safeNow();
+    if (now === null || now - at < WARM_ROW_TTL_MS) {
+      return true;
+    }
+    this.#streamWarmDenied.delete(key);
+    return false;
+  }
+
+  /**
+   * Frees an adopted warm's request bookkeeping — its session is
+   * attached now, so the host-side cancel is a bookkeeping no-op on
+   * the stream and only releases the request-id slot.
+   */
+  #freeWarmRequest(warm: StreamWarm): void {
+    const requestId = warm.requestId;
+    if (requestId === null) {
+      return;
+    }
+    const identity: PlaybackIdentity = {
+      attemptId: warm.attemptId,
+      queueRev: warm.queueRev,
+    };
+    const work = (async () => {
+      await this.#bounded(() =>
+        this.#player.cancelPrepare({ requestId, identity }),
+      );
+    })();
+    this.#own(work);
+  }
+
+  /**
+   * The serial visible-window pass: rows the cursor could reach
+   * (dealt order, `WARM_WINDOW` past the cursor) plus surface-handed
+   * ids, each getting the candidates→match→automatic-mapping tail a
+   * real resolve would run. One pass at a time; a `#derived` tick
+   * with work pending is a no-op.
+   */
+  #maybeWarmWindow(): void {
+    const r = this.#ready;
+    if (r === null || this.#disposed || !this.#warmGatesOk(r)) {
+      // Gates flipped mid-pass — unwind it; the loop's finally frees
+      // the slot only once its current step actually exits.
+      this.#warmBatchSource?.cancel();
+      return;
+    }
+    if (this.#warmBatchSource !== null) {
+      // A provider switch mid-pass leaves the in-flight row resolving
+      // under the old provider — unwind it; the next `#derived` tick
+      // restarts the pass routed through the new selection.
+      const want = this.#router.providerFor(
+        'playback.candidates',
+        selectionFromSettings(r.settings),
+      );
+      if (
+        want.ok &&
+        this.#warmBatchProvider !== null &&
+        want.value.id !== this.#warmBatchProvider
+      ) {
+        this.#warmBatchSource.cancel();
+      }
+      return;
+    }
+    const source = new CancellationSource();
+    this.#warmBatchSource = source;
+    const work = (async () => {
+      try {
+        await this.#warmWindowLoop(source);
+      } finally {
+        if (this.#warmBatchSource === source) {
+          this.#warmBatchSource = null;
+        }
+      }
+    })();
+    this.#own(work);
+  }
+
+  async #warmWindowLoop(source: CancellationSource): Promise<void> {
+    for (; ;) {
+      const r = this.#ready;
+      if (
+        r === null ||
+        this.#disposed ||
+        source.signal.cancelled ||
+        !this.#warmGatesOk(r)
+      ) {
+        return;
+      }
+      const next = this.#nextWarmTarget(r);
+      if (next === null) {
+        return;
+      }
+      this.#warmBatchTarget = next.recordingId;
+      this.#warmBatchDone = (async () => {
+        try {
+          await this.#warmOne(next, source);
+        } finally {
+          this.#warmBatchTarget = null;
+          this.#warmBatchDone = null;
+          this.#warmBatchProvider = null;
+        }
+      })();
+      await this.#warmBatchDone;
+    }
+  }
+
+  /**
+   * The next row still needing a ref: surface-handed ids first (the
+   * viewport is the freshest intent), then the dealt window past the
+   * cursor. A row with any `#pickRef` hit — occurrence pin, owned
+   * bytes, mapping, unvetoed source ref — is already resolved.
+   */
+  #nextWarmTarget(
+    r: Ready,
+  ): { recordingId: string; occurrenceId: string | null } | null {
+    // While an attempt owns the network (select through prepare),
+    // speculative resolve waits: the attempt may be resolving any of
+    // these rows, and a racing warm duplicates the call and the
+    // mapping write. Playback settling republishes and re-derives —
+    // the warm resumes the moment the attempt ends.
+    if (this.#active !== null) {
+      return null;
+    }
+    for (const id of [...this.#warmPending]) {
+      this.#warmPending.delete(id);
+      const rec = r.recordings.find((x) => x.id === id);
+      if (
+        rec !== undefined &&
+        this.#pickRef(rec, null) === null &&
+        !this.#warmSeenFresh(id)
+      ) {
+        return { recordingId: id, occurrenceId: null };
+      }
+    }
+    // The dealt window is a while-playing warm: a session exists and
+    // the rows behind the cursor are the ones a finger could reach.
+    // 'idle'/'preparing' never speculate past the surface hand-off.
+    const ptype = r.playback.type;
+    if (ptype === 'idle' || ptype === 'preparing') {
+      return null;
+    }
+    const snap = r.queue.snapshot();
+    if (snap.currentOccurrenceId === null) {
+      // No cursor: 'beyond the cursor' is empty — a queue with nothing
+      // selected warms only what surfaces hand in via prewarm().
+      return null;
+    }
+    const dealt = this.#dealtOrder(r);
+    const walk = dealt ?? snap.occurrences.map((o) => o.occurrenceId);
+    const pos = walk.indexOf(snap.currentOccurrenceId);
+    for (let i = pos + 1; i < walk.length && i <= pos + WARM_WINDOW; i++) {
+      const occurrence = snap.occurrences.find(
+        (o) => o.occurrenceId === walk[i],
+      );
+      const rec =
+        occurrence === undefined
+          ? undefined
+          : r.recordings.find((x) => x.id === occurrence.recordingId);
+      if (
+        occurrence !== undefined &&
+        rec !== undefined &&
+        this.#pickRef(rec, occurrence.selectedRef) === null &&
+        !this.#warmSeenFresh(rec.id)
+      ) {
+        return {
+          recordingId: rec.id,
+          occurrenceId: occurrence.occurrenceId,
+        };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Candidates-resolve one window row: identical contract to
+   * `#maybeMapSuccessor` — a matched ref commits as an `automatic`
+   * mapping and pins the occurrence when it is still unmapped;
+   * 'ambiguous'/'unavailable' resolve to honest skips — speculative
+   * work never enqueues a review.
+   */
+  async #warmOne(
+    target: { recordingId: string; occurrenceId: string | null },
+    source: CancellationSource,
+  ): Promise<void> {
+    const r = this.#ready;
+    if (r === null) {
+      return;
+    }
+    this.#noteWarmSeen(target.recordingId);
+    const recording = r.recordings.find((x) => x.id === target.recordingId);
+    if (recording === undefined) {
+      return;
+    }
+    const routed = this.#router.providerFor(
+      'playback.candidates',
+      selectionFromSettings(r.settings),
+    );
+    if (!routed.ok) {
+      return;
+    }
+    const provider = routed.value;
+    if (this.#warmBatchTarget === target.recordingId) {
+      this.#warmBatchProvider = provider.id;
+    }
+    const deadlineMs = this.#deadline();
+    const query: RecordingQuery = {
+      title: recording.title,
+      artist: recording.artist,
+      album: recording.album,
+      durationMs: recording.durationMs,
+      versionLabels: recording.versionLabels,
+      isrc: recording.isrc,
+    };
+    const context = this.#newContext('warm', deadlineMs, source.signal);
+    const result = await this.#withDeadline(
+      () => provider.candidates({ query, limit: CANDIDATE_LIMIT }, context),
+      deadlineMs,
+      source,
+    );
+    if (
+      source.signal.cancelled ||
+      this.#disposed ||
+      this.#warmBatchSource !== source
+    ) {
+      return;
+    }
+    if (!result.ok) {
+      this.#logWarn('row warm failed');
+      return;
+    }
+    const ready2 = this.#ready;
+    if (ready2 === null || this.#disposed || this.#warmBatchSource !== source) {
+      return;
+    }
+    const rec = ready2.recordings.find((x) => x.id === target.recordingId);
+    if (rec === undefined) {
+      return;
+    }
+    let outcome: MatchOutcome;
+    try {
+      outcome = MatchingEngine.match(rec, result.value, rec.mappings);
+    } catch {
+      this.#logWarn('row warm threw on malformed candidates');
+      return;
+    }
+    if (outcome.type !== 'matched') {
+      // 'ambiguous' parks on the row, not in a review — the tap's own
+      // resolve produces the review honestly.
+      return;
+    }
+    const ref = outcome.candidate.sourceRef;
+    const matchedAt = this.#safeNow();
+    if (matchedAt === null) {
+      return;
+    }
+    const automatic: SourceMapping = {
+      ref,
+      status: 'automatic',
+      matchedAtMs: matchedAt,
+      evidence: outcome.evidence,
+    };
+    const occurrenceId = target.occurrenceId;
+    const staged = await this.#commitStaged((ready3) => {
+      const current = ready3.recordings.find(
+        (x) => x.id === target.recordingId,
+      );
+      if (current === undefined) {
+        return err(internalError());
+      }
+      const adopted = adoptAutomaticMapping(current, ref, automatic);
+      const snapNow = ready3.queue.snapshot();
+      const occurrence =
+        occurrenceId === null
+          ? undefined
+          : snapNow.occurrences.find((o) => o.occurrenceId === occurrenceId);
+      // The row may have moved or gained a pin while the candidates
+      // call was in flight — the warm's ref must still win the pick;
+      // a same-provider pin that arrived since is the fresher truth.
+      const picked = this.#pickRef(adopted, occurrence?.selectedRef ?? null);
+      if (!sameRef(picked, ref)) {
+        return err(appError('superseded', 'warm ref lost the pick'));
+      }
+      const shouldPin =
+        occurrence !== undefined &&
+        occurrence.recordingId === adopted.id &&
+        occurrence.selectedRef === null &&
+        ready3.settings.playbackProvider === provider.id;
+      const draft = shouldPin ? new QueueEngine(snapNow) : null;
+      if (draft !== null) {
+        try {
+          draft.setSelectedRef(occurrenceId ?? '', ref);
+        } catch (thrown) {
+          return err(fromUnknown(thrown));
+        }
+      }
+      const recordings = ready3.recordings.map((x) =>
+        x.id === adopted.id ? adopted : x,
+      );
+      return ok<CommitStage<SourceRef>>({
+        batch:
+          draft === null
+            ? { recordings }
+            : { recordings, queue: draft.snapshot() },
+        apply: (rr) => {
+          rr.recordings = recordings;
+          if (draft !== null) {
+            rr.queue = draft;
+          }
+          return ref;
+        },
+      });
+    });
+    if (!staged.ok) {
+      return;
+    }
+    this.#derived();
+    if (occurrenceId !== null) {
+      // A new pin changes what a service move would attach — the
+      // projection must carry it.
+      this.#own(this.#projectQueue());
+    }
+  }
+
+  /** The advisory stream warm's current want — see `StreamWarm`. */
+  #warmWant(
+    r: Ready,
+  ): { provider: string; sourceRef: string; origin: 'queue' | 'surface' } | null {
+    const type = r.playback.type;
+    if (type === 'playing') {
+      // The dealt successor is what the service would attach next —
+      // warm only an already-resolved remote ref; candidate-less rows
+      // are the window pass's job, not a stream mint.
+      const snap = r.queue.snapshot();
+      const dealt = this.#dealtOrder(r);
+      const walk = dealt ?? snap.occurrences.map((o) => o.occurrenceId);
+      const pos =
+        snap.currentOccurrenceId === null
+          ? -1
+          : walk.indexOf(snap.currentOccurrenceId);
+      const successorId = pos >= 0 ? walk[pos + 1] : undefined;
+      const successor = snap.occurrences.find(
+        (o) => o.occurrenceId === successorId,
+      );
+      const recording =
+        successor === undefined
+          ? undefined
+          : r.recordings.find((rec) => rec.id === successor.recordingId);
+      if (successor === undefined || recording === undefined) {
+        return null;
+      }
+      const ref = this.#pickRef(recording, successor.selectedRef);
+      if (
+        ref === null ||
+        ref.provider === LOCAL_PROVIDER ||
+        ref.provider !== r.settings.playbackProvider
+      ) {
+        return null;
+      }
+      return { provider: ref.provider, sourceRef: ref.id, origin: 'queue' };
+    }
+    if (type === 'idle' || type === 'failed') {
+      const s = this.#surfaceWarm;
+      if (s === null) {
+        return null;
+      }
+      const now = this.#safeNow();
+      if (
+        now === null ||
+        now - s.atMs >= SURFACE_WARM_TTL_MS ||
+        s.provider !== r.settings.playbackProvider
+      ) {
+        this.#surfaceWarm = null;
+        return null;
+      }
+      return { provider: s.provider, sourceRef: s.sourceRef, origin: 'surface' };
+    }
+    return null;
+  }
+
+  /**
+   * Reconcile the one warm slot against `#warmWant`: same key keeps,
+   * different key swaps (cancel/release first, then re-issue), none
+   * drops — except under 'preparing'/'buffering'/'paused', where the
+   * warm may still be adopted and stays parked.
+   */
+  #maybeWarmStream(): void {
+    const r = this.#ready;
+    if (r === null || this.#disposed) {
+      return;
+    }
+    const warm = this.#streamWarm;
+    if (!this.#warmGatesOk(r)) {
+      if (warm !== null) {
+        this.#dropStreamWarm(warm);
+      }
+      return;
+    }
+    const want = this.#warmWant(r);
+    const type = r.playback.type;
+    if (want === null) {
+      if (warm === null) {
+        return;
+      }
+      // 'preparing'/'buffering'/'paused' keep the warm — the attempt
+      // may still adopt it or the tick that ends the transition will
+      // re-evaluate. While 'playing' the same rule applies to a warm
+      // that IS the current row: the select that just landed moves
+      // the cursor one tick before the attempt starts, so the want
+      // flips to null early — the warm must survive to be adopted.
+      if (type === 'idle' || type === 'failed') {
+        this.#dropStreamWarm(warm);
+        return;
+      }
+      if (type === 'playing' && !this.#warmIsCurrentRow(r, warm)) {
+        this.#dropStreamWarm(warm);
+      }
+      return;
+    }
+    if (
+      warm !== null &&
+      warm.provider === want.provider &&
+      warm.sourceRef === want.sourceRef
+    ) {
+      return;
+    }
+    if (warm !== null) {
+      // The drop's owned tail re-evaluates — the new warm issues only
+      // after the old request's cancel/release actually landed.
+      this.#dropStreamWarm(warm);
+      return;
+    }
+    this.#issueStreamWarm(want);
+  }
+
+  /** True when the warm's key resolves as the cursor row's own ref —
+   *  the row was tapped/advanced-to and the attempt adopts the warm. */
+  #warmIsCurrentRow(r: Ready, warm: StreamWarm): boolean {
+    const snap = r.queue.snapshot();
+    const current = snap.occurrences.find(
+      (o) => o.occurrenceId === snap.currentOccurrenceId,
+    );
+    const rec =
+      current === undefined
+        ? undefined
+        : r.recordings.find((x) => x.id === current.recordingId);
+    if (current === undefined || rec === undefined) {
+      return false;
+    }
+    const ref = this.#pickRef(rec, current.selectedRef);
+    return (
+      ref !== null &&
+      ref.provider === warm.provider &&
+      ref.id === warm.sourceRef
+    );
+  }
+
+  #issueStreamWarm(want: {
+    provider: string;
+    sourceRef: string;
+    origin: 'queue' | 'surface';
+  }): void {
+    const r = this.#ready;
+    if (
+      r === null ||
+      this.#streamWarm !== null ||
+      !this.#warmGatesOk(r)
+    ) {
+      return;
+    }
+    const key = `${want.provider} ${want.sourceRef}`;
+    if (this.#streamWarmDeniedFresh(key)) {
+      return;
+    }
+    const record: StreamWarm = {
+      origin: want.origin,
+      provider: want.provider,
+      sourceRef: want.sourceRef,
+      attemptId: this.#ids.next('warm'),
+      queueRev: r.queue.snapshot().revision,
+      requestId: null,
+      stream: null,
+      attempt: null,
+    };
+    this.#streamWarm = record;
+    const issueSource = new CancellationSource();
+    const work = (async () => {
+      const issued = await this.#withDeadline(
+        () =>
+          this.#player.prewarm({
+            provider: want.provider,
+            sourceRef: want.sourceRef,
+            identity: {
+              attemptId: record.attemptId,
+              queueRev: record.queueRev,
+            },
+          }),
+        this.#deadline(),
+        issueSource,
+      );
+      if (this.#streamWarm !== record) {
+        return;
+      }
+      if (!issued.ok) {
+        this.#streamWarm = null;
+        this.#denyStreamWarm(key);
+        this.#logWarn('stream warm failed');
+        this.#maybeWarmStream();
+        return;
+      }
+      record.requestId = issued.value;
+    })();
+    this.#own(work);
+  }
+
+  /**
+   * End a warm that was never adopted: cancel the in-flight request
+   * or release the delivered session. The record clears FIRST — an
+   * adoption path claims the session only through `#streamWarm`, so
+   * a null here can never release a handle an attempt now owns.
+   */
+  #dropStreamWarm(warm: StreamWarm): void {
+    if (this.#streamWarm === warm) {
+      this.#streamWarm = null;
+    }
+    const work = (async () => {
+      if (warm.stream !== null) {
+        await this.#releaseHandle(warm.stream.handle, {
+          attemptId: warm.attemptId,
+          queueRev: warm.queueRev,
+        });
+      } else if (warm.requestId !== null) {
+        const requestId = warm.requestId;
+        await this.#bounded(() =>
+          this.#player.cancelPrepare({
+            requestId,
+            identity: {
+              attemptId: warm.attemptId,
+              queueRev: warm.queueRev,
+            },
+          }),
+        );
+      }
+      this.#maybeWarmStream();
+    })();
+    this.#own(work);
+  }
+
+  /**
+   * The warm's own prepare outcome — keyed by its `warm-*` attemptId,
+   * intercepted before the attempt handler sees it. A delivered
+   * session stores for adoption; a failure denies the row briefly.
+   */
+  async #handleWarmOutcome(
+    event: Extract<PlayerEvent, { type: 'prepare' }>,
+    warm: StreamWarm,
+  ): Promise<void> {
+    if (event.outcome.type === 'failed') {
+      this.#streamWarm = null;
+      this.#denyStreamWarm(`${warm.provider} ${warm.sourceRef}`);
+      this.#logWarn('stream warm failed');
+      this.#maybeWarmStream();
+      return;
+    }
+    const stream = event.outcome.stream;
+    warm.stream = stream;
+    warm.attempt = event.outcome.attempt;
+    if (this.#active?.handle === stream.handle) {
+      // An attempt or a service move already attached this session —
+      // ownership moved; the request slot is freed, never released.
+      this.#streamWarm = null;
+      this.#freeWarmRequest(warm);
+      return;
+    }
+    const now = this.#safeNow();
+    if (
+      now === null ||
+      (stream.expiresAtMs !== undefined &&
+        saturatingAdd(now, WARM_EXPIRY_MARGIN_MS) >= stream.expiresAtMs)
+    ) {
+      // Minted inside the expiry margin — useless to a later tap:
+      // release it and suppress the re-warm this row would earn.
+      this.#streamWarm = null;
+      this.#denyStreamWarm(`${warm.provider} ${warm.sourceRef}`);
+      await this.#releaseHandle(stream.handle, {
+        attemptId: warm.attemptId,
+        queueRev: warm.queueRev,
+      });
+    }
+  }
 
   async drain(): Promise<void> {
     for (; ;) {
@@ -6473,6 +7473,13 @@ export class Session {
     this.#disposed = true;
     this.#mappingSource?.cancel();
     this.#mappingSource = null;
+    this.#warmBatchSource?.cancel();
+    this.#warmBatchSource = null;
+    const warm = this.#streamWarm;
+    this.#streamWarm = null;
+    if (warm !== null) {
+      this.#dropStreamWarm(warm);
+    }
     for (const timer of [...this.#timers]) {
       timer.cancel();
     }
