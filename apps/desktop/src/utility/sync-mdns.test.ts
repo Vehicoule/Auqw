@@ -41,7 +41,7 @@ function rerankRetractsOldKey(): void {
     }),
   );
   assertEqual(r.found.length, 1, 'first up emits');
-  assertEqual(r.found[0]!.key, 'Phone|fe80::1', 'bare fe80 picked');
+  assertEqual(r.found[0]!.key, 'Phone|fe80::1|41000', 'bare fe80 picked');
 
   // A second up whose resolved list now includes a private v4 — the
   // re-rank changes the key; the old row must be retracted first.
@@ -54,9 +54,9 @@ function rerankRetractsOldKey(): void {
     }),
   );
   assertEqual(r.found.length, 2, 'second up emits');
-  assertEqual(r.found[1]!.key, 'Phone|192.168.1.8', 'v4 wins');
+  assertEqual(r.found[1]!.key, 'Phone|192.168.1.8|41000', 'v4 wins');
   assertEqual(r.lost.length, 1, 'old key retracted');
-  assertEqual(r.lost[0], 'Phone|fe80::1', 'retracted the stale key');
+  assertEqual(r.lost[0], 'Phone|fe80::1|41000', 'retracted the stale key');
   assert(
     r.lost[0] !== r.found[1]!.key,
     'retract precedes the new found row',
@@ -112,7 +112,7 @@ function downAfterRerankClearsNewRow(): void {
     service({ name: 'Phone', host: 'phone.local', port: 41000 }),
   );
   assertEqual(r.lost.length, 2, 'retract + down');
-  assertEqual(r.lost[1], 'Phone|192.168.1.8', 'down clears new row');
+  assertEqual(r.lost[1], 'Phone|192.168.1.8|41000', 'down clears new row');
 }
 
 function staleGenerationDownKeepsRow(): void {
@@ -182,7 +182,7 @@ function unpairableReannounceRetracts(): void {
   );
   assertEqual(r.found.length, 1, 'no new row');
   assertEqual(r.lost.length, 1, 'prior row retracted');
-  assertEqual(r.lost[0], 'Phone|10.0.0.4', 'retracted key');
+  assertEqual(r.lost[0], 'Phone|10.0.0.4|41000', 'retracted key');
 }
 
 function sameNameServicesCoexist(): void {
@@ -214,7 +214,7 @@ function sameNameServicesCoexist(): void {
     service({ name: 'Phone', host: 'phone-a.local', port: 41000 }),
   );
   assertEqual(r.lost.length, 1, 'only A retracted');
-  assertEqual(r.lost[0], 'Phone|10.0.0.4', 'A key retracted');
+  assertEqual(r.lost[0], 'Phone|10.0.0.4|41000', 'A key retracted');
 
   // An unpairable re-announce of B retracts only B.
   t.up(
@@ -226,7 +226,7 @@ function sameNameServicesCoexist(): void {
     }),
   );
   assertEqual(r.lost.length, 2, 'B retracted');
-  assertEqual(r.lost[1], 'Phone|10.0.0.5', 'B key retracted');
+  assertEqual(r.lost[1], 'Phone|10.0.0.5|41001', 'B key retracted');
 }
 
 function fpSurvivesSrvMove(): void {
@@ -256,7 +256,7 @@ function fpSurvivesSrvMove(): void {
   );
   assertEqual(r.found.length, 2, 'moved service re-emitted');
   assertEqual(r.lost.length, 1, 'old target retracted');
-  assertEqual(r.lost[0], 'Phone|10.0.0.4', 'stale key gone');
+  assertEqual(r.lost[0], 'Phone|10.0.0.4|41000', 'stale key gone');
   // A DELAYED goodbye of the OLD generation (same fp, old host+port)
   // must not kill the fresh row — the down's SRV fields identify the
   // dead generation, so they must match the stored ones.
@@ -279,7 +279,38 @@ function fpSurvivesSrvMove(): void {
     }),
   );
   assertEqual(r.lost.length, 2, 'down by fp+generation retracts');
-  assertEqual(r.lost[1], 'Phone|10.0.0.9', 'current row gone');
+  assertEqual(r.lost[1], 'Phone|10.0.0.9|42000', 'current row gone');
+}
+
+function sameHostDifferentPortsCoexist(): void {
+  const r = recorder();
+  const t = createPeerTracker(r.onFound, r.onLost);
+  // Same name AND same resolved host, distinct listener ports — a
+  // stale generation parked beside the fresh one on the same box.
+  // The port in the key keeps them as separate rows.
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone.local',
+      port: 41000,
+      addresses: ['10.0.0.4'],
+    }),
+  );
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone.local',
+      port: 42000,
+      addresses: ['10.0.0.4'],
+    }),
+  );
+  assertEqual(r.found.length, 2, 'co-hosted ports emit two rows');
+  assert(r.found[0]!.key !== r.found[1]!.key, 'keys differ by port');
+  t.down(
+    service({ name: 'Phone', host: 'phone.local', port: 41000 }),
+  );
+  assertEqual(r.lost.length, 1, 'one generation retracted');
+  assertEqual(r.lost[0], 'Phone|10.0.0.4|41000', 'dead port retracted');
 }
 
 export function run(): void {
@@ -291,5 +322,6 @@ export function run(): void {
   unpairableUpEmitsNothing();
   unpairableReannounceRetracts();
   sameNameServicesCoexist();
+  sameHostDifferentPortsCoexist();
   fpSurvivesSrvMove();
 }

@@ -17,7 +17,14 @@ import type {
   WebContents,
 } from 'electron';
 import { execFile } from 'node:child_process';
-import { readFileSync, watch } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readSync,
+  watch,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -244,10 +251,40 @@ async function main(): Promise<void> {
       home: homedir(),
       env: process.env,
       readFileSync: (path) => {
+        // Bounded and regular-file-only: a sync read in main blocks
+        // the whole process (all IPC, all windows) if the candidate
+        // path resolves to a FIFO/device or a stalled mount, so the
+        // byte count is capped and non-regular files are refused.
+        // O_NONBLOCK keeps the open() itself unblocking on a FIFO;
+        // no O_NOFOLLOW — Omarchy's current/theme symlink chain is
+        // the intended lookup.
+        const CAP = 256 * 1024;
+        let fd: number | null = null;
         try {
-          return readFileSync(path, 'utf8');
+          fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+          if (!fstatSync(fd).isFile()) {
+            return null;
+          }
+          const buf = Buffer.alloc(CAP);
+          let read = 0;
+          for (;;) {
+            const n = readSync(fd, buf, read, CAP - read, null);
+            read += n;
+            if (n === 0 || read >= CAP) {
+              break;
+            }
+          }
+          return buf.toString('utf8', 0, read);
         } catch {
           return null;
+        } finally {
+          if (fd !== null) {
+            try {
+              closeSync(fd);
+            } catch {
+              // close failure on an already-dead fd is unrecoverable noise
+            }
+          }
         }
       },
       execFile: (file, args, timeoutMs) =>
@@ -258,7 +295,15 @@ async function main(): Promise<void> {
           execFile(
             file,
             [...args],
-            { encoding: 'utf8', timeout: timeoutMs },
+            {
+              encoding: 'utf8',
+              timeout: timeoutMs,
+              // The timeout's signal must be lethal by construction:
+              // a portal helper that ignores SIGTERM would leave the
+              // promise (and the monitor's inflight latch) unsettled
+              // forever.
+              killSignal: 'SIGKILL',
+            },
             (error, stdout) => {
               resolve(error === null ? stdout : null);
             },

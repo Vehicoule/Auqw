@@ -9,9 +9,9 @@ import type {
 type DiscoveryEvent = {
   type: string;
   name: string;
-  host?: string;
+  host?: string | null;
   hosts?: string[];
-  port?: number;
+  port?: number | null;
   fp?: string | null;
 };
 
@@ -56,7 +56,7 @@ async function rerankToUnpairableRetracts(): Promise<void> {
     fp: null,
   });
   assertEqual(found.length, 1, 'first found emits');
-  assertEqual(found[0]!.key, 'Phone|10.0.0.4', 'v4 picked');
+  assertEqual(found[0]!.key, 'Phone|10.0.0.4|41000', 'v4 picked');
 
   // The same name re-announces with NO pairable address — the emitted
   // row must be retracted, not left dialable.
@@ -68,7 +68,11 @@ async function rerankToUnpairableRetracts(): Promise<void> {
     fp: null,
   });
   assertEqual(lost.length, 1, 'unpairable re-announce retracts');
-  assertEqual(lost[0], 'Phone|10.0.0.4', 'retracted the stale key');
+  assertEqual(
+    lost[0],
+    'Phone|10.0.0.4|41000',
+    'retracted the stale key',
+  );
   assertEqual(found.length, 1, 'no new row emitted');
 
   // Same for a malformed fp re-announce — the pin can't be honored.
@@ -96,7 +100,7 @@ async function rerankToUnpairableRetracts(): Promise<void> {
     fp: 'nothex',
   });
   assertEqual(lost.length, 2, 'malformed fp retracts live row');
-  assertEqual(lost[1], 'Phone|10.0.0.4', 'retract key matches');
+  assertEqual(lost[1], 'Phone|10.0.0.4|41000', 'retract key matches');
   session.ok && session.value.close();
 }
 
@@ -162,7 +166,7 @@ async function sameNameServicesCoexist(): Promise<void> {
   });
   assertEqual(found.length, 3, 'A re-announce emits');
   assertEqual(lost.length, 1, 'A old row retracted');
-  assertEqual(lost[0], 'Phone|10.0.0.4', 'retracted A key');
+  assertEqual(lost[0], 'Phone|10.0.0.4|41000', 'retracted A key');
 
   // A unpairable re-announce of B retracts only B's row.
   emit({
@@ -173,7 +177,67 @@ async function sameNameServicesCoexist(): Promise<void> {
     fp: null,
   });
   assertEqual(lost.length, 2, 'B retracted');
-  assertEqual(lost[1], 'Phone|10.0.0.5', 'retracted B key');
+  assertEqual(lost[1], 'Phone|10.0.0.5|41001', 'retracted B key');
+  session.ok && session.value.close();
+}
+
+async function lostScopedToGeneration(): Promise<void> {
+  const { native, emit } = fakeNative();
+  const discovery = createExpoSyncDiscovery(native);
+  const found: SyncDiscoveredPeer[] = [];
+  const lost: string[] = [];
+  const session = await discovery.browse({
+    onFound: (p) => found.push(p),
+    onLost: (k) => lost.push(k),
+  });
+  assert(session.ok, 'browse session opens');
+
+  // Two generations under one name: the fresh row survives a stale
+  // goodbye for the dead generation's port.
+  emit({
+    type: 'found',
+    name: 'Phone',
+    hosts: ['10.0.0.4'],
+    port: 41000,
+    fp: null,
+  });
+  emit({
+    type: 'found',
+    name: 'Phone',
+    hosts: ['10.0.0.9'],
+    port: 42000,
+    fp: null,
+  });
+  assertEqual(found.length, 2, 'both generations emitted');
+  emit({ type: 'lost', name: 'Phone', port: 41001, fp: null });
+  assertEqual(lost.length, 0, 'other-generation lost retracts nothing');
+  emit({ type: 'lost', name: 'Phone', port: 41000, fp: null });
+  assertEqual(lost.length, 1, 'own-generation lost retracts');
+  assertEqual(lost[0], 'Phone|10.0.0.4|41000', 'retracted dead row');
+
+  // A lost carrying the record's fp scopes to fp-pinned rows — a
+  // fp-less name-only lost still retracts the rest.
+  const pinned = 'a'.repeat(64);
+  emit({
+    type: 'found',
+    name: 'Phone',
+    hosts: ['10.0.0.7'],
+    port: 43000,
+    fp: pinned,
+  });
+  emit({
+    type: 'lost',
+    name: 'Phone',
+    port: 43001,
+    fp: 'b'.repeat(64),
+  });
+  assertEqual(lost.length, 1, 'foreign fp lost retracts nothing');
+  emit({ type: 'lost', name: 'Phone', fp: pinned });
+  assertEqual(lost.length, 2, 'fp-matched lost retracts');
+  assertEqual(lost[1], 'Phone|10.0.0.7|43000', 'retracted pinned row');
+  emit({ type: 'lost', name: 'Phone' });
+  assertEqual(lost.length, 3, 'identity-less lost retracts remaining');
+  assertEqual(lost[2], 'Phone|10.0.0.9|42000', 'retracted last row');
   session.ok && session.value.close();
 }
 
@@ -181,4 +245,5 @@ export async function run(): Promise<void> {
   await rerankToUnpairableRetracts();
   await rerankPicksDialableOverList();
   await sameNameServicesCoexist();
+  await lostScopedToGeneration();
 }

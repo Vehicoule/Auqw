@@ -489,18 +489,23 @@ function botGuardSandbox(
     }
     if (frameProto !== null && !potPatchedFrameProtos.has(frameProto)) {
       potPatchedFrameProtos.add(frameProto);
+      // jsdom calls _attributeChangeSteps POSITIONALLY —
+      // (localName, oldValue, value, namespace) — so the wrapper must
+      // match that shape; a {name} record read is dead code and the
+      // inner src branch never fires.
       const innerAttrSteps = frameProto['_attributeChangeSteps'] as
-        | ((this: unknown, change: { name?: unknown }) => unknown)
+        | ((this: unknown, localName: string, ...rest: unknown[]) => unknown)
         | undefined;
       frameProto['_postConnectionSteps'] = () => undefined;
       frameProto['_attributeChangeSteps'] = function (
         this: unknown,
-        change: { name?: unknown },
+        localName: string,
+        ...rest: unknown[]
       ): unknown {
-        if (change?.name === 'src') {
+        if (localName === 'src') {
           return undefined;
         }
-        return innerAttrSteps?.call(this, change);
+        return innerAttrSteps?.call(this, localName, ...rest);
       };
     }
   }

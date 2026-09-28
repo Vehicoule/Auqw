@@ -163,14 +163,21 @@ export interface SyncAcceptorPort {
  */
 export interface SyncDiscoveredPeer {
   /**
-   * Stable per-service identity (`name|host`) — the adapter mints it
-   * and both `found` and `lost` carry it, so two adverts sharing a
-   * display name stay distinct rows.
+   * Stable per-service identity (`name|host|port`) — the adapter mints
+   * it and both `found` and `lost` carry it, so two adverts sharing a
+   * display name stay distinct rows and a re-announced listener port
+   * supersedes the old row instead of shadowing it.
    */
   readonly key: string;
   readonly name: string;
   readonly host: string;
   readonly port: number;
+  /**
+   * Every pairable resolved address, best-first (`host` is [0]) —
+   * the dial tries each in order so a dead route under the ranked
+   * pick falls through to a reachable sibling.
+   */
+  readonly addresses: readonly string[];
   readonly fp: string | null;
 }
 

@@ -33,9 +33,10 @@ class AuqwNsd(
     get() =
       context.getSystemService(Context.NSD_SERVICE) as NsdManager
 
-  private var registration: NsdManager.RegistrationListener? = null
   // Read on NSD's binder thread, written by JS callers — @Volatile so
   // a stale listener's failure check sees the current owner.
+  @Volatile
+  private var registration: NsdManager.RegistrationListener? = null
   @Volatile
   private var discovery: NsdManager.DiscoveryListener? = null
   private var multicastLock: WifiManager.MulticastLock? = null
@@ -96,9 +97,11 @@ class AuqwNsd(
 
   /**
    * Browse `_auqw._tcp` — each resolved service emits
-   * `{type:'found', name, host, port, fp}`; teardown emits
-   * `{type:'lost', name}`. Resolutions run on a single executor so a
-   * slow lookup can't wedge the NsdManager callback thread.
+   * `{type:'found', name, host, hosts, port, fp}`; teardown emits
+   * `{type:'lost', name, port, fp}` where port/fp come from the lost
+   * record's last-resolved generation when known. Resolutions run on
+   * a single executor so a slow lookup can't wedge the NsdManager
+   * callback thread.
    */
   fun browse() {
     stopBrowse()
@@ -145,11 +148,23 @@ class AuqwNsd(
 
         override fun onServiceLost(info: NsdServiceInfo) {
           if (gen == browseGeneration) {
-            synchronized(resolveLock) {
-              lostNames.add(info.serviceName)
-              resolveQueue.removeAll { it.first.serviceName == info.serviceName }
-            }
-            emitDiscovery(mapOf("type" to "lost", "name" to info.serviceName))
+            // Attach the lost record's last-resolved generation — the
+            // JS adapter retracts just that generation instead of
+            // wiping every row sharing the (non-unique) service name.
+            val last =
+              synchronized(resolveLock) {
+                lostNames.add(info.serviceName)
+                resolveQueue.removeAll { it.first.serviceName == info.serviceName }
+                lastResolved.remove(info.serviceName)
+              }
+            emitDiscovery(
+              mapOf(
+                "type" to "lost",
+                "name" to info.serviceName,
+                "port" to last?.first,
+                "fp" to last?.second,
+              ),
+            )
           }
         }
 
@@ -193,6 +208,7 @@ class AuqwNsd(
       resolveQueue.clear()
       resolveInFlight = false
       lostNames.clear()
+      lastResolved.clear()
     }
     // No early return: a start that failed after taking the lock but
     // before registering `discovery` still owes the release.
@@ -229,6 +245,10 @@ class AuqwNsd(
   // in-flight resolve must not emit a zombie 'found' afterwards. A
   // fresh onServiceFound for the name clears the mark.
   private val lostNames = mutableSetOf<String>()
+  // Last-resolved (port, fp) per service name — populated on each
+  // emitted 'found', consumed by onServiceLost. Guarded by
+  // `resolveLock` like the queue/lost marks above.
+  private val lastResolved = mutableMapOf<String, Pair<Int, String?>>()
 
   private fun drainResolves(gen: Int) {
     val next =
@@ -284,6 +304,9 @@ class AuqwNsd(
             val host = hosts.firstOrNull()
             val fp = resolved.attributes["dev"]?.let { String(it) }
             if (hosts.isNotEmpty()) {
+              synchronized(resolveLock) {
+                lastResolved[resolved.serviceName] = resolved.port to fp
+              }
               emitDiscovery(
                 mapOf(
                   "type" to "found",

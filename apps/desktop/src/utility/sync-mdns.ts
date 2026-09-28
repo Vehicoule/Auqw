@@ -1,9 +1,9 @@
 import { Bonjour, type Service } from 'bonjour-service';
 import {
   appError,
+  dialableHostsRanked,
   err,
   ok,
-  pickDialableHost,
   type SyncDiscoveredPeer,
   type SyncDiscoveryPort,
   type SyncDiscoverySession,
@@ -71,8 +71,11 @@ export const createBonjourAdvertise = (): SyncAdvertise => {
 function peerOf(service: Service): SyncDiscoveredPeer | null {
   // The resolved address list arrives in resolver order — a bare
   // link-local v6 (fe80:: without a zone) sorts ahead of a routable
-  // private v4 and is undialable, so rank by dialability.
-  const host = pickDialableHost(service.addresses ?? []);
+  // private v4 and is undialable, so rank by dialability. The full
+  // ranked list goes out on `addresses` so the dial falls through to
+  // a reachable sibling when the pick sits behind a dead route.
+  const addresses = dialableHostsRanked(service.addresses ?? []);
+  const host = addresses[0] ?? null;
   if (
     typeof service.name !== 'string' ||
     host === null ||
@@ -96,10 +99,15 @@ function peerOf(service: Service): SyncDiscoveredPeer | null {
     return null;
   }
   return {
-    key: `${service.name}|${host}`,
+    // The port is part of the row identity: two same-named adverts
+    // co-hosted on one address (a stale generation beside the fresh
+    // one, or prod+dev instances) are distinct rows, and a retraction
+    // scoped to one generation can't remove the survivor's row.
+    key: `${service.name}|${host}|${service.port}`,
     name: service.name,
     host,
     port: service.port,
+    addresses,
     fp: rawFp ?? null,
   };
 }
@@ -187,9 +195,11 @@ export const createPeerTracker = (
         // A re-announcement with no pairable address (or a malformed
         // fp) must retract the previously emitted row for that
         // generation — otherwise the last pick stays dialable
-        // forever. A pinned advert retracts its own row outright;
-        // an unpinned one needs generation matching like a down.
-        retract(service, fpOf(service) === null);
+        // forever. Generation matching applies to pinned adverts too:
+        // the fp is cleartext in the TXT, so a stale or spoofed record
+        // matching name+fp must not wipe the live row — only a record
+        // whose SRV fields match the stored generation may retract it.
+        retract(service, true);
         return;
       }
       // Identity: the advert's own fp when pinned, else the SRV host.
@@ -255,6 +265,14 @@ export const createBonjourBrowse = (): SyncDiscoveryPort => {
         const down = tracker.down;
         br.on('up', up);
         br.on('down', down);
+        // bonjour-service emits 'up' only for a NEW fqdn — in-place
+        // record churn arrives as 'srv-update' (SRV host/port retarget)
+        // and 'txt-update' (dev fp change); routing both through `up`
+        // engages the same re-announce/retract path. A pure A/AAAA
+        // address change emits nothing and is covered by the next
+        // re-announce.
+        br.on('srv-update', up);
+        br.on('txt-update', up);
         br.start();
         sessions += 1;
         let closed = false;
@@ -269,6 +287,8 @@ export const createBonjourBrowse = (): SyncDiscoveryPort => {
             closed = true;
             br.off('up', up);
             br.off('down', down);
+            br.off('srv-update', up);
+            br.off('txt-update', up);
             try {
               br.stop();
             } catch {

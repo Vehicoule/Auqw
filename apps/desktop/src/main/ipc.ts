@@ -653,6 +653,13 @@ export function registerChannels(
   // never send its matching stop, so its share would pin the mDNS
   // browse for the utility's lifetime.
   const nearbyStarts = new Map<Sender, number>();
+  // Per-sender serialization of sync:nearbyStart/sync:nearbyStop —
+  // the stop's share check and the start's share recording both must
+  // see the prior op LANDED, not just invoked: a stop evaluated
+  // while its start is in flight would early-return and leave the
+  // share pinned for the renderer's lifetime (and two overlapping
+  // stops could both forward, spending another renderer's count).
+  const nearbyChains = new WeakMap<Sender, Promise<void>>();
   const watched = new WeakSet<Sender>();
   const sendNearbyStop = (): void => {
     void deps.utility
@@ -786,15 +793,44 @@ export function registerChannels(
           watch(event.sender);
         }
         if (
-          name === CHANNELS.syncNearbyStop &&
-          (nearbyStarts.get(event.sender) ?? 0) === 0
+          name === CHANNELS.syncNearbyStart ||
+          name === CHANNELS.syncNearbyStop
         ) {
-          // This sender holds no share — forwarding would spend
-          // another renderer's owner count.
-          return ok(undefined);
+          const sender = event.sender;
+          // The generation is captured at INVOKE time (not when the
+          // chain runs) — a sender dying while queued still trips the
+          // mismatch check after landing and releases the share.
+          const generation =
+            name === CHANNELS.syncNearbyStart
+              ? (generations.get(sender) ?? 0)
+              : null;
+          const chained = (
+            nearbyChains.get(sender) ?? Promise.resolve()
+          ).then(async () => {
+            if (
+              name === CHANNELS.syncNearbyStop &&
+              (nearbyStarts.get(sender) ?? 0) === 0
+            ) {
+              // Evaluated only once prior ops landed — this sender
+              // holds no share; forwarding would spend another
+              // renderer's owner count.
+              return ok(undefined);
+            }
+            const result = await handler.run(args, deps, sender);
+            trackTx(name, sender, args, result, generation);
+            return ok(result);
+          });
+          nearbyChains.set(
+            sender,
+            chained.then(
+              () => undefined,
+              () => undefined,
+            ),
+          );
+          return await chained;
         }
         const generation =
-          name === CHANNELS.storageBegin || name === CHANNELS.syncNearbyStart
+          name === CHANNELS.storageBegin
             ? (generations.get(event.sender) ?? 0)
             : null;
         const result = await handler.run(args, deps, event.sender);

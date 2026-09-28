@@ -2,6 +2,8 @@ import { CancellationSource } from './cancellation.ts';
 import { PEAKS_MAX_DECODE_MS } from './ports/peaks.ts';
 import type { PeaksPort, WaveformPeak } from './ports/peaks.ts';
 import type { ClockPort } from './ports/clock.ts';
+import { appError, err } from './errors.ts';
+import type { Result } from './errors.ts';
 
 /**
  * What the tracker needs to fetch — the live playback session fields.
@@ -71,6 +73,11 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
   const maxDurationMs = deps.maxDurationMs ?? PEAKS_MAX_DECODE_MS;
   const clock = deps.clock;
   const cache = new Map<string, readonly WaveformPeak[] | null>();
+  // Terminal nulls judged under a declared over-cap duration are
+  // duration-dependent (the port's declared-length gate, unlike the
+  // PCM ceiling): a later pull carrying a corrected durationMs under
+  // the cap must re-issue rather than serve the stale refusal.
+  const gatedNullMs = new Map<string, number>();
   const inflight = new Map<string, Inflight>();
   // Request ids must be unique across generations: a re-pull after
   // cancel can overlap the abandoned extraction still winding down,
@@ -85,19 +92,31 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
         break;
       }
       cache.delete(oldest);
+      gatedNullMs.delete(oldest);
     }
   }
 
   function pull(target: PeaksTarget): void {
     const { id } = target;
     if (cache.has(id)) {
-      // Cache hit (including a settled `null`): reinsert so the
-      // revisit bumps recency — the Map's iteration order is the LRU
-      // order eviction walks.
-      const value = cache.get(id);
-      cache.delete(id);
-      cache.set(id, value === undefined ? null : value);
-      return;
+      const judgedMs = gatedNullMs.get(id);
+      const updatedMs = target.durationMs;
+      if (
+        judgedMs !== undefined &&
+        updatedMs !== judgedMs &&
+        (updatedMs === null || updatedMs <= maxDurationMs)
+      ) {
+        gatedNullMs.delete(id);
+        cache.delete(id);
+      } else {
+        // Cache hit (including a settled `null`): reinsert so the
+        // revisit bumps recency — the Map's iteration order is the LRU
+        // order eviction walks.
+        const value = cache.get(id);
+        cache.delete(id);
+        cache.set(id, value === undefined ? null : value);
+        return;
+      }
     }
     const live = inflight.get(id);
     if (live !== undefined) {
@@ -132,6 +151,73 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
 
     const attempt = (n: number): void => {
       const sentMs = entry.target.durationMs;
+      const settle = (result: Result<readonly WaveformPeak[]>): void => {
+        // A cancelled extraction's result belongs to a stale target —
+        // decode may finish after `cancel` ran, and a late success
+        // must never overwrite the replacement attempt's peaks.
+        if (entry.source.signal.cancelled) {
+          return;
+        }
+        // 'not-applicable' marks a provisional bound (the tighter
+        // unknown-duration byte cap): a durationMs that landed
+        // mid-sweep retries it in place at the real cap — no wasted
+        // restart. Restarting on an unchanged durationMs would loop
+        // forever against a port that always refuses, so it keys off
+        // freshness; otherwise the bail settles uncached so a later
+        // pull still gets the full budget.
+        const provisionalCap =
+          !result.ok && result.error.kind === 'not-applicable';
+        if (
+          provisionalCap &&
+          entry.target.durationMs !== null &&
+          entry.target.durationMs !== sentMs
+        ) {
+          attempt(1);
+          return;
+        }
+        if (result.ok) {
+          cache.set(id, result.value);
+          evict();
+        } else if (
+          !provisionalCap &&
+          (result.error.kind === 'budget-exceeded' ||
+            result.error.kind === 'invalid-response')
+        ) {
+          // Terminal failures cache `null` — seeded bars stick and
+          // the same attempt never re-pulls on revisit. A
+          // budget-exceeded sent with a declared duration past the
+          // cap can only have come from the port's duration gate
+          // (it precedes every byte pull), so it is tagged by the
+          // duration it was judged on — a later pull with a
+          // corrected, under-cap durationMs re-earns the sweep.
+          cache.set(id, null);
+          if (
+            result.error.kind === 'budget-exceeded' &&
+            sentMs !== null &&
+            sentMs > maxDurationMs
+          ) {
+            gatedNullMs.set(id, sentMs);
+          }
+          evict();
+        } else if (!provisionalCap && n < retryLimit) {
+          // Every 'cancelled' reaching here is foreign — the
+          // tracker's own cancel never clears the early return
+          // above. A parked read killed by an upstream detach is a
+          // transient abort, not a verdict: it retries like one.
+          // Retry rides the injected clock — a cancel resolves the
+          // sleep early and the guard swallows the dead attempt.
+          void clock
+            .sleep(retryDelayMs, entry.source.signal)
+            .then((slept) => {
+              if (slept.ok && !entry.source.signal.cancelled) {
+                attempt(n + 1);
+              }
+            });
+          return;
+        }
+        inflight.delete(id);
+        onChange?.();
+      };
       void port
         .peaks(
           { handle: entry.target.handle, durationMs: sentMs },
@@ -141,61 +227,13 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
             signal: entry.source.signal,
           },
         )
-        .then((result) => {
-          // A cancelled extraction's result belongs to a stale target —
-          // decode may finish after `cancel` ran, and a late success
-          // must never overwrite the replacement attempt's peaks.
-          if (entry.source.signal.cancelled) {
-            return;
-          }
-          // 'not-applicable' marks a provisional bound (the tighter
-          // unknown-duration byte cap): a durationMs that landed
-          // mid-sweep retries it in place at the real cap — no wasted
-          // restart. Restarting on an unchanged durationMs would loop
-          // forever against a port that always refuses, so it keys off
-          // freshness; otherwise the bail settles uncached so a later
-          // pull still gets the full budget.
-          const provisionalCap =
-            !result.ok && result.error.kind === 'not-applicable';
-          if (
-            provisionalCap &&
-            entry.target.durationMs !== null &&
-            entry.target.durationMs !== sentMs
-          ) {
-            attempt(1);
-            return;
-          }
-          if (result.ok) {
-            cache.set(id, result.value);
-            evict();
-          } else if (
-            !provisionalCap &&
-            (result.error.kind === 'budget-exceeded' ||
-              result.error.kind === 'invalid-response')
-          ) {
-            // Terminal failures cache `null` — seeded bars stick and
-            // the same attempt never re-pulls on revisit.
-            cache.set(id, null);
-            evict();
-          } else if (
-            !provisionalCap &&
-            result.error.kind !== 'cancelled' &&
-            n < retryLimit
-          ) {
-            // Retry rides the injected clock — a cancel resolves the
-            // sleep early and the guard swallows the dead attempt.
-            void clock
-              .sleep(retryDelayMs, entry.source.signal)
-              .then((slept) => {
-                if (slept.ok && !entry.source.signal.cancelled) {
-                  attempt(n + 1);
-                }
-              });
-            return;
-          }
-          inflight.delete(id);
-          onChange?.();
-        });
+        // A synchronous throw in the port (base64 charset, decoder
+        // construction, buffer allocation) rejects the promise —
+        // route it through the same settle path so the inflight entry
+        // is never wedged.
+        .then(settle, () =>
+          settle(err(appError('internal', 'peaks: port rejected'))),
+        );
     };
     attempt(1);
   }

@@ -65,8 +65,10 @@ export type ChromeSchemePayload = v.Guarded<typeof isChromeSchemePayload>;
 
 export const isChromeSchemePayload = v.object({
   scheme: v.literals('dark', 'light', 'oled'),
-  canvas: v.optional(v.string()),
-  symbol: v.optional(v.string()),
+  // Palette-role color strings are hex tokens — bound them like the
+  // palette validator above rather than accepting arbitrary length.
+  canvas: v.optional(v.boundedString(32)),
+  symbol: v.optional(v.boundedString(32)),
 });
 
 const pickFolderArgs = v.object({ title: v.optional(v.string()) });
@@ -581,6 +583,9 @@ const isSyncNearbyPeer = v.object({
   name: v.boundedString(128),
   host: v.boundedString(64),
   port: v.int(),
+  /** Every pairable resolved address, best-first (`host` is [0]) —
+   * dial candidates when the ranked pick sits behind a dead route. */
+  addresses: v.array(v.boundedString(64), { max: 16 }),
   /** Advertised identity fingerprint (TXT `dev`) — null when absent. */
   fp: v.nullable(v.boundedString(128)),
 });
@@ -616,6 +621,12 @@ export const isSyncDialArgs = v.object({
   port: v.int(),
   code: v.pattern(/^[0-9]{6}$/),
   fp: v.optional(v.boundedString(128)),
+  /**
+   * All resolved dial candidates for the target, best-first — when
+   * present the dial iterates this list (dead route under the ranked
+   * pick falls through to a sibling). `host` stays the fallback.
+   */
+  hosts: v.optional(v.array(v.boundedString(64), { max: 16 })),
 });
 
 /** `sync:dialPayload` — pair TO a phone's QR payload verbatim. */

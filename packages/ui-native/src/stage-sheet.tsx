@@ -622,6 +622,8 @@ export function StageSheet({
     () =>
       Gesture.Pan()
         .activeOffsetY(8)
+        // Horizontal drift past ±16px fails the recognizer — the
+        // cancelled finalize must not commit an anchor (see below).
         .failOffsetX([-16, 16])
         .onBegin(() => {
           dragStart.value = progress.value;
@@ -633,8 +635,22 @@ export function StageSheet({
             Math.max(0, dragStart.value - e.translationY / travel),
           );
         })
-        .onFinalize((e) => {
+        .onFinalize((e, success) => {
           const travel = Math.max(1, travelPx.value);
+          if (!success) {
+            // RNGH fires onFinalize on END *and* on FAIL/CANCELLED —
+            // a failed recognizer (failOffsetX drift, OS gesture
+            // steal) must not commit the anchor it never earned:
+            // spring back onto the sheet's current anchor only.
+            const anchor = expanded ? 1 : 0;
+            progress.value = theme.reducedMotion
+              ? anchor
+              : withSpring(anchor, {
+                  ...STAGE_SETTLE_SPRING,
+                  velocity: -e.velocityY / travel,
+                });
+            return;
+          }
           const target =
             resolveStageAnchor(
               dragStart.value,
@@ -652,9 +668,23 @@ export function StageSheet({
                 ...STAGE_SETTLE_SPRING,
                 velocity: -e.velocityY / travel,
               });
-          scheduleOnRN(commitAnchor, target);
+          // A settle that lands on the anchor we're already on is a
+          // no-op for the host — committing it would fire a spurious
+          // expanded flip (the App wrapper maps every commit to
+          // player mode, stomping queue/lyrics).
+          if (target !== (expanded ? 1 : 0)) {
+            scheduleOnRN(commitAnchor, target);
+          }
         }),
-    [travelPx, theme.reducedMotion, progress, dragStart, anchor, commitAnchor],
+    [
+      travelPx,
+      theme.reducedMotion,
+      progress,
+      dragStart,
+      anchor,
+      commitAnchor,
+      expanded,
+    ],
   );
 
   const restCorner = theme.radius.float;
