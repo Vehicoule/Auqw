@@ -2,22 +2,21 @@
  * AppError → user-facing text. The toast pill and the persistent
  * error surfaces (player failed line, search/entity/lyrics panes,
  * sync pair errors, transfer details) all speak this — the raw
- * `kind — message` pair stays on console.warn and the diagnostics
- * rows, never on a user surface: an error surfaced from a native
- * bridge can embed raw exception text (a signed request URL inside
- * a fetch failure, say) that has no business on screen.
+ * `kind` slug stays on console.warn and the diagnostics rows, never
+ * on a user surface: an error surfaced from a native bridge can embed
+ * raw exception text (a signed request URL inside a fetch failure,
+ * say) that has no business on screen.
  *
- * `null` marks disposal outcomes — cancelled, superseded, released
- * are the caller's own teardown (a pause during prepare, a queue
- * jump overtaking a play), not a failure worth reporting.
+ * `null` marks supersession outcomes — cancelled and superseded are
+ * the caller's own teardown (a pause during prepare, a queue jump
+ * overtaking a play), not a failure worth reporting. `released` does
+ * surface: a live prepare can resolve it when the host drops the
+ * request, which strands playback with no other signal.
  */
 import type { AppError, ErrorKind } from '@auqw/application';
 import { isMatchGate } from '@auqw/application';
 import { t, type MessageId } from './i18n.ts';
 
-// Supersession kinds only — 'released' is NOT silent: a live prepare
-// can resolve released when its host drops the request, which strands
-// playback with no other signal.
 const SILENT: ReadonlySet<ErrorKind> = new Set(['cancelled', 'superseded']);
 
 // Exhaustive over ErrorKind — a new taxonomy kind fails typecheck

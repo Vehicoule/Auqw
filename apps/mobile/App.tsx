@@ -974,7 +974,12 @@ function Main({
   const [pairError, setPairError] = useState<AppError | null>(null);
   // Informational pair-surface notices that aren't errors: localized
   // message ids rendered in the same banner slot as pairError.
+  // pairNotice = one-shot share-attempt messages; advertNotice = the
+  // ongoing condition flag from onAdvertiseError — cleared only when
+  // sharing stops or a fresh share retries the advert, never by a
+  // pair attempt (the dead advert stays dead through pairing).
   const [pairNotice, setPairNotice] = useState<MessageId | null>(null);
+  const [advertNotice, setAdvertNotice] = useState<MessageId | null>(null);
   // Symmetric pairing: `share` = this device hosting a QR/code offer;
   // `nearbyPeers` = mDNS-discovered devices we can dial into. Both
   // live only while the sync screen is open — the listener is
@@ -2153,6 +2158,7 @@ function Main({
       endpoint: null,
       expiresAt: null,
     });
+    setAdvertNotice(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [syncOpen]);
 
@@ -2236,10 +2242,9 @@ function Main({
     const unPair = host.onPaired(remintShareOffer);
     // A dead advert leaves the offer code-valid but undiscoverable —
     // tell the user rather than imply nearby visibility.
-    const unAdvert = host.onAdvertiseError(() => {
-      setPairError(null);
-      setPairNotice('sync.advertiseUnavailable');
-    });
+    const unAdvert = host.onAdvertiseError(() =>
+      setAdvertNotice('sync.advertiseUnavailable'),
+    );
     return () => {
       unPair();
       unAdvert();
@@ -2275,15 +2280,17 @@ function Main({
         endpoint: null,
         expiresAt: null,
       });
-      // Sharing stopped — an advertise-unavailable notice is moot
-      // while nothing is advertised.
+      // Sharing stopped — advertise/pair notices are moot while
+      // nothing is advertised.
       setPairNotice(null);
+      setAdvertNotice(null);
       return;
     }
     setShare((prev) => ({ ...prev, busy: true }));
     // A fresh share re-subscribes onAdvertiseError — drop the last
-    // share's notice so it can't linger under the new code.
+    // share's notices so they can't linger under the new code.
     setPairNotice(null);
+    setAdvertNotice(null);
     // Mark wanted BEFORE the async work: the screen-close cleanup reads
     // shareGenRef to decide whether a stop is owed — a start() that
     // lands after dismissal would otherwise leave a live listener. The
@@ -4125,6 +4132,7 @@ function Main({
             pairing={pairing}
             pairError={
               errorText(pairError) ??
+              (advertNotice === null ? null : t(advertNotice)) ??
               (pairNotice === null ? null : t(pairNotice))
             }
             share={

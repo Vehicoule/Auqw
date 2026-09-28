@@ -327,8 +327,9 @@ export const IDLE_TRANSFER: TransferModel = {
 /**
  * Session ops resolve typed errors rather than throwing — a dropped
  * Result is a silent no-op. Keep failures observable: the console
- * keeps the `kind — message` taxonomy text (no secrets), and a
- * transient toast carries the humanized reason. `toastSink` is
+ * logs the taxonomy `kind` (messages can carry signed URLs, so they
+ * stay out of logs too), and a transient toast carries the humanized
+ * reason. `toastSink` is
  * installed once by Main — reportResult is called from callbacks all
  * over the shell, so a sink avoids threading the setter through
  * every dependency list.
