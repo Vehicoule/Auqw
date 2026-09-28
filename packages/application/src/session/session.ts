@@ -20,7 +20,6 @@ import {
   isEntityRef,
   isSettings,
   isSourceRef,
-  isString,
   isTrackMetadata,
   isTrackRef,
   mergeRecordingMetadata,
@@ -58,25 +57,11 @@ import {
   lyricsSheet,
 } from '../library/lyrics.ts';
 import type { LyricsSheet } from '../library/lyrics.ts';
-import {
-  applyImport,
-  exportLibrary,
-  previewImport,
-} from '../library/export-import.ts';
 import type {
   ExportResult,
   ImportPreview,
 } from '../library/export-import.ts';
-import { toggleEntityLike, toggleTrackLike } from '../library/likes.ts';
-import {
-  addPlaylistEntry,
-  createPlaylist,
-  deletePlaylist,
-  removePlaylistEntry,
-  renamePlaylist,
-  reorderPlaylistEntry,
-} from '../library/playlists.ts';
-import type { EntryMove, PlaylistState } from '../library/playlists.ts';
+import type { EntryMove } from '../library/playlists.ts';
 import { MatchingEngine } from '../matching/matching-engine.ts';
 import type { MatchOutcome } from '../matching/matching-engine.ts';
 import type { ClockPort } from '../ports/clock.ts';
@@ -111,12 +96,10 @@ import { QueueEngine } from '../queue/queue-engine.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import {
   emissionWrites,
-  importEmissionWrites,
   projectAppliedEntries,
   projectMaterialized,
   recordingDeleteWrites,
   recordingUpsertWrites,
-  reviewSyncWrites,
   unsyncedWrites,
 } from '../sync/sync-projection.ts';
 import type { SyncEmitInput } from '../sync/sync-projection.ts';
@@ -136,6 +119,11 @@ import {
   RADIO_FETCH_AHEAD,
 } from '../queue/radio-tail.ts';
 import type { RadioTail, RadioTailRecord } from '../queue/radio-tail.ts';
+import { Serializer } from './serializer.ts';
+import { LibraryService } from './library-service.ts';
+import { internalError, timeoutError } from './util.ts';
+import { syncEmitInput } from './ready.ts';
+import type { Ready } from './ready.ts';
 
 export type SessionPlayback =
   | { readonly type: 'idle' }
@@ -345,14 +333,6 @@ function attemptEq(a: PlaybackIdentity, b: PlaybackIdentity): boolean {
   return a.attemptId === b.attemptId;
 }
 
-function internalError(): AppError {
-  return appError('internal', 'an internal error occurred');
-}
-
-function timeoutError(): AppError {
-  return appError('timeout', 'operation deadline exceeded');
-}
-
 /** Mapping precedence identical to MatchingEngine's conflict rule. */
 function mappingRank(status: SourceMapping['status']): number {
   return status === 'user-confirmed' ? 2 : status === 'rejected' ? 1 : 0;
@@ -398,88 +378,6 @@ type ActiveAttempt = {
   /** Prepare calls spent so far across this intent's attempt chain. */
   preparesUsed: number;
 };
-
-type Ready = {
-  recordings: Recording[];
-  likes: Like[];
-  entities: Entity[];
-  entitySourceRefs: EntitySourceRef[];
-  playlists: Playlist[];
-  playlistEntries: PlaylistEntry[];
-  playHistory: PlayEvent[];
-  playCounts: PlayCount[];
-  /**
-   * Disposable lyrics cache (data.md): held for `getLyrics` reads but
-   * deliberately not published — caches are not session state, and
-   * `getLyrics` is the per-recording accessor, same class as the
-   * storage-only artwork cache.
-   */
-  lyricsCache: LyricsCacheEntry[];
-  queue: QueueEngine;
-  /**
-   * Queue-write generation: bumped inside a storage segment when a
-   * queue commit fails and rolls the engine back. Writes enqueued
-   * with the old epoch captured the engine after that mutation — the
-   * rollback erased them — so they report the boundary failure
-   * instead of committing a state their own mutation never landed in.
-   */
-  queueEpoch: number;
-  /**
-   * Revision of the last durably committed queue snapshot. A queue
-   * command commits its own post-mutation snapshot, never the live
-   * engine — without this, a segment-fresh draft (mapping adoption)
-   * could land first and an earlier-captured stale snapshot would
-   * regress the store. A queued write whose revision is already
-   * covered is durable through the covering commit, so it skips.
-   */
-  queueCommittedRev: number;
-  settings: Settings;
-  playback: SessionPlayback;
-  repeat: RepeatMode;
-  /**
-   * The dealt play order under shuffle — occurrence ids the cursor
-   * walks; `null` when off. `#dealtOrder` reconciles it against the
-   * live queue on every read: removals drop out, enqueues insert at
-   * uniform random positions behind the cursor's dealt position.
-   * Runtime-only, never persisted.
-   */
-  shuffleOrder: string[] | null;
-  /**
-   * Shuffle-intent generation: `setShuffle` bumps it, `#dealtOrder`
-   * reconciles do not. `#persistQueue` captures it beside the deal so a
-   * rollback restores the pre-edit deal only when the user's shuffle
-   * choice hasn't moved since the mutation captured it.
-   */
-  shuffleEpoch: number;
-  /**
-   * Replay cycles per queue occurrence: a repeat-driven replay or wrap
-   * bumps the target's cycle, and a recorded play stamps
-   * `${occurrenceId}#${cycle}` so each loop of one occurrence counts
-   * while same-loop status echoes still dedupe. Runtime-only.
-   */
-  listenCycles: Record<string, number>;
-  radio: RadioTailRecord | null;
-  persistenceError: AppError | undefined;
-  /**
-   * Remote merge outcomes whose records still can't materialize
-   * (a field or a parent row hasn't arrived) — refolded on every
-   * drain, dropped when the record lands or its fold is superseded
-   * by a durable state change (import resets it with the library).
-   */
-  syncPending: MergeOutcome[];
-  /**
-   * Materialized rebuild records that could not materialize yet (a
-   * dependent whose parent has not arrived — paged rebuilds can order
-   * dependents first). Retained and unioned into the next
-   * `applyMaterializedEntries` call — memory stays page-bounded
-   * without dropping cross-page dependents (Review #46).
-   */
-  materializedPending: MaterializedRecord[];
-};
-
-function playlistSections(r: Ready): PlaylistState {
-  return { playlists: r.playlists, entries: r.playlistEntries };
-}
 
 /**
  * A repeat-driven replay or wrap begins a new listen for the target
@@ -544,21 +442,6 @@ function listenCycleBaseline(
     }
   }
   return counts;
-}
-
-/** The committed sections emission diffs a batch against. */
-function syncEmitInput(r: Ready): SyncEmitInput {
-  return {
-    recordings: r.recordings,
-    likes: r.likes,
-    entities: r.entities,
-    entitySourceRefs: r.entitySourceRefs,
-    playlists: r.playlists,
-    playlistEntries: r.playlistEntries,
-    playHistory: r.playHistory,
-    playCounts: r.playCounts,
-    settings: r.settings,
-  };
 }
 
 function appliedOutcomeKey(outcome: MergeOutcome): string {
@@ -793,20 +676,19 @@ export class Session {
   #opSources = new Set<CancellationSource>();
   #ownedWork = new Set<Promise<unknown>>();
   #deadlineWork = new Set<Promise<unknown>>();
-  #eventTail: Promise<void> = Promise.resolve();
-  #likeTail: Promise<void> = Promise.resolve();
-  #playlistTail: Promise<void> = Promise.resolve();
-  #lyricsTail: Promise<void> = Promise.resolve();
+  readonly #eventSerial = new Serializer();
+  readonly #lyricsSerial = new Serializer();
   /**
-   * The one storage tail: every commit — session writes, review ops,
+   * The one storage lane: every commit — session writes, review ops,
    * the import swap — serializes through it, so a read-modify-write
    * corrections op can never interleave with a session section write
    * (corrections load→commit races session recordings writers).
    */
-  #storageTail: Promise<void> = Promise.resolve();
+  readonly #storageSerial = new Serializer();
   readonly #corrections: Corrections;
-  #radioTail: Promise<void> = Promise.resolve();
-  #entityTail: Promise<void> = Promise.resolve();
+  readonly #library: LibraryService;
+  readonly #radioSerial = new Serializer();
+  readonly #entitySerial = new Serializer();
   #listeners = new Set<(state: SessionState) => void>();
   #playerUnsub: () => void;
   #disposed = false;
@@ -830,8 +712,8 @@ export class Session {
   #radioAutoSeedOccurrence: string | null = null;
   /**
    * Bumped whenever an armed tail is cleared. An auto-seed queued
-   * behind #radioTail aborts on a stale epoch — a user's disarm or
-   * a replacement seed must never be undone by an arm scheduled
+   * behind the radio lane aborts on a stale epoch — a user's disarm
+   * or a replacement seed must never be undone by an arm scheduled
    * before it.
    */
   #radioArmEpoch = 0;
@@ -846,7 +728,7 @@ export class Session {
    * port degrades to the newest writes, never unbounded memory.
    */
   #syncEmitPending: LocalWrite[] = [];
-  #syncTail: Promise<void> = Promise.resolve();
+  readonly #syncSerial = new Serializer();
   /**
    * Recording ids owed a matchReview tombstone emission. The review
    * ids live only in the persisted section — a load that fails after
@@ -899,6 +781,51 @@ export class Session {
       ids: deps.ids,
       clock: deps.clock,
       log: deps.log,
+    });
+    this.#library = new LibraryService({
+      storage: deps.storage,
+      ids: deps.ids,
+      clock: deps.clock,
+      corrections: this.#corrections,
+      host: {
+        ready: () => this.#ready,
+        requireReady: () => this.#requireReady(),
+        publish: () => this.#publish(),
+        derived: () => this.#derived(),
+        enqueueStorage: (fn) => this.#enqueueStorage(fn),
+        persist: (batch) => this.#persist(batch),
+        emitSync: (writes) => this.#emitSync(writes),
+        own: (work) => this.#own(work),
+        trackSource: (source) => {
+          this.#opSources.add(source);
+          return () => {
+            this.#opSources.delete(source);
+          };
+        },
+        safeNow: () => this.#safeNow(),
+        deadline: () => this.#deadline(),
+        newContext: (prefix, deadlineMs, signal) =>
+          this.#newContext(prefix, deadlineMs, signal),
+        withDeadline: (operation, absoluteDeadlineMs, operationSource) =>
+          this.#withDeadline(
+            operation,
+            absoluteDeadlineMs,
+            operationSource,
+          ),
+        resumeGatedPlayback: (recordingId) =>
+          this.#resumeGatedPlayback(recordingId),
+        prepareImport: () => this.#prepareImport(),
+        swapReady: () => {
+          this.#ready = null;
+          this.#state = { type: 'unhydrated' };
+        },
+        restore: () => {
+          // A fresh load, never a shared in-flight restore: the memo
+          // may still point at a pre-import load.
+          this.#restorePromise = null;
+          return this.restore();
+        },
+      },
     });
     this.#playerUnsub = deps.player.subscribe((event) => {
       this.#onPlayerEvent(event);
@@ -1062,15 +989,13 @@ export class Session {
   }
 
   /**
-   * Serializes one storage segment on `#storageTail`. Review ops run
+   * Serializes one storage segment on the storage lane. Review ops run
    * whole read-modify-write cycles inside a segment, so they are
    * atomic against every session commit — and a commit queued behind
    * them evaluates its batch against the freshest mirror.
    */
   #enqueueStorage<T>(fn: () => Promise<Result<T>>): Promise<Result<T>> {
-    const work = this.#storageTail.then(fn);
-    this.#storageTail = work.then(() => undefined, () => undefined);
-    return work;
+    return this.#storageSerial.run(fn);
   }
 
   /** Bounded, nonfatal persistence. Failures publish persistenceError. */
@@ -1343,9 +1268,7 @@ export class Session {
   }
 
   #drainSyncEmit(): Promise<void> {
-    const work = this.#syncTail.then(() => this.#drainEmitPending());
-    this.#syncTail = work.then(() => undefined, () => undefined);
-    return work;
+    return this.#syncSerial.run(() => this.#drainEmitPending());
   }
 
   async #drainEmitPending(): Promise<void> {
@@ -2341,75 +2264,14 @@ export class Session {
   }
 
   toggleLike(recordingId: string): Promise<Result<void>> {
-    // Compute each replacement from the previous committed like set.
-    const work = this.#likeTail.then(() => this.#toggleLike(recordingId));
-    this.#likeTail = work.then(() => undefined, () => undefined);
-    this.#own(work);
-    return work;
-  }
-
-  async #toggleLike(recordingId: string): Promise<Result<void>> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return ready;
-    }
-    const r = ready.value;
-    if (!r.recordings.some((rec) => rec.id === recordingId)) {
-      return err(appError('not-found', 'unknown recording'));
-    }
-    const now = this.#safeNow();
-    if (now === null) {
-      return err(internalError());
-    }
-    const next = toggleTrackLike(r.likes, recordingId, now);
-    const persisted = await this.#persist({ likes: next });
-    if (!persisted.ok) {
-      // Commit-first semantics: the in-memory like set is unchanged.
-      return err(persisted.error);
-    }
-    r.likes = [...next];
-    this.#publish();
-    return ok(undefined);
+    return this.#library.toggleLike(recordingId);
   }
 
   toggleEntityLike(
     kind: EntityKind,
     entityId: string,
   ): Promise<Result<void>> {
-    const work = this.#likeTail.then(() =>
-      this.#toggleEntityLike(kind, entityId),
-    );
-    this.#likeTail = work.then(() => undefined, () => undefined);
-    this.#own(work);
-    return work;
-  }
-
-  async #toggleEntityLike(
-    kind: EntityKind,
-    entityId: string,
-  ): Promise<Result<void>> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return ready;
-    }
-    const r = ready.value;
-    if (
-      !r.entities.some((e) => e.entityId === entityId && e.kind === kind)
-    ) {
-      return err(appError('not-found', 'unknown entity'));
-    }
-    const now = this.#safeNow();
-    if (now === null) {
-      return err(internalError());
-    }
-    const next = toggleEntityLike(r.likes, kind, entityId, now);
-    const persisted = await this.#persist({ likes: next });
-    if (!persisted.ok) {
-      return err(persisted.error);
-    }
-    r.likes = [...next];
-    this.#publish();
-    return ok(undefined);
+    return this.#library.toggleEntityLike(kind, entityId);
   }
 
   /**
@@ -2422,8 +2284,7 @@ export class Session {
    * so a `complete:false` page still materializes it.
    */
   getEntityPage(ref: EntityRef): Promise<Result<EntityPage>> {
-    const work = this.#entityTail.then(() => this.#getEntityPage(ref));
-    this.#entityTail = work.then(() => undefined, () => undefined);
+    const work = this.#entitySerial.run(() => this.#getEntityPage(ref));
     this.#own(work);
     return work;
   }
@@ -2511,108 +2372,16 @@ export class Session {
     return page;
   }
 
-  /** Commits both playlist sections atomically, then mirrors them. */
-  async #commitPlaylists(
-    r: Ready,
-    next: PlaylistState,
-  ): Promise<Result<void>> {
-    const persisted = await this.#persist({
-      playlists: next.playlists,
-      playlistEntries: next.entries,
-    });
-    if (!persisted.ok) {
-      return err(persisted.error);
-    }
-    r.playlists = [...next.playlists];
-    r.playlistEntries = [...next.entries];
-    this.#publish();
-    return ok(undefined);
-  }
-
-  #enqueuePlaylistOp<T>(
-    fn: () => Promise<Result<T>>,
-  ): Promise<Result<T>> {
-    const work = this.#playlistTail.then(fn);
-    this.#playlistTail = work.then(() => undefined, () => undefined);
-    this.#own(work);
-    return work;
-  }
-
   createPlaylist(name: string): Promise<Result<string>> {
-    return this.#enqueuePlaylistOp(() => this.#createPlaylist(name));
-  }
-
-  async #createPlaylist(name: string): Promise<Result<string>> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return ready;
-    }
-    const r = ready.value;
-    if (!isString(name, 512) || name.trim().length === 0) {
-      return err(appError('invalid-response', 'invalid playlist name'));
-    }
-    const now = this.#safeNow();
-    if (now === null) {
-      return err(internalError());
-    }
-    const playlistId = this.#ids.next('playlist');
-    const next = createPlaylist(
-      playlistSections(r),
-      playlistId,
-      name,
-      now,
-    );
-    const committed = await this.#commitPlaylists(r, next);
-    if (!committed.ok) {
-      return err(committed.error);
-    }
-    return ok(playlistId);
+    return this.#library.createPlaylist(name);
   }
 
   renamePlaylist(playlistId: string, name: string): Promise<Result<void>> {
-    return this.#enqueuePlaylistOp(() =>
-      this.#renamePlaylist(playlistId, name),
-    );
-  }
-
-  async #renamePlaylist(
-    playlistId: string,
-    name: string,
-  ): Promise<Result<void>> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return ready;
-    }
-    const r = ready.value;
-    if (!r.playlists.some((p) => p.playlistId === playlistId)) {
-      return err(appError('not-found', 'unknown playlist'));
-    }
-    if (!isString(name, 512) || name.trim().length === 0) {
-      return err(appError('invalid-response', 'invalid playlist name'));
-    }
-    const now = this.#safeNow();
-    if (now === null) {
-      return err(internalError());
-    }
-    const next = renamePlaylist(playlistSections(r), playlistId, name, now);
-    return this.#commitPlaylists(r, next);
+    return this.#library.renamePlaylist(playlistId, name);
   }
 
   deletePlaylist(playlistId: string): Promise<Result<void>> {
-    return this.#enqueuePlaylistOp(() => this.#deletePlaylist(playlistId));
-  }
-
-  async #deletePlaylist(playlistId: string): Promise<Result<void>> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return ready;
-    }
-    const r = ready.value;
-    if (!r.playlists.some((p) => p.playlistId === playlistId)) {
-      return err(appError('not-found', 'unknown playlist'));
-    }
-    const next = deletePlaylist(playlistSections(r), playlistId);
-    return this.#commitPlaylists(r, next);
+    return this.#library.deletePlaylist(playlistId);
   }
 
   addPlaylistEntry(
@@ -2620,114 +2389,22 @@ export class Session {
     recordingId: string,
     selectedRef: SourceRef | null = null,
   ): Promise<Result<string>> {
-    return this.#enqueuePlaylistOp(() =>
-      this.#addPlaylistEntry(playlistId, recordingId, selectedRef),
-    );
-  }
-
-  async #addPlaylistEntry(
-    playlistId: string,
-    recordingId: string,
-    selectedRef: SourceRef | null,
-  ): Promise<Result<string>> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return ready;
-    }
-    const r = ready.value;
-    if (!r.playlists.some((p) => p.playlistId === playlistId)) {
-      return err(appError('not-found', 'unknown playlist'));
-    }
-    if (!r.recordings.some((rec) => rec.id === recordingId)) {
-      return err(appError('not-found', 'unknown recording'));
-    }
-    if (selectedRef !== null && !isTrackRef(selectedRef)) {
-      return err(appError('invalid-response', 'invalid selected ref'));
-    }
-    const now = this.#safeNow();
-    if (now === null) {
-      return err(internalError());
-    }
-    const entryId = this.#ids.next('entry');
-    const next = addPlaylistEntry(playlistSections(r), {
-      entryId,
+    return this.#library.addPlaylistEntry(
       playlistId,
       recordingId,
       selectedRef,
-      addedMs: now,
-    });
-    const committed = await this.#commitPlaylists(r, next);
-    if (!committed.ok) {
-      return err(committed.error);
-    }
-    return ok(entryId);
+    );
   }
 
   removePlaylistEntry(entryId: string): Promise<Result<void>> {
-    return this.#enqueuePlaylistOp(() => this.#removePlaylistEntry(entryId));
-  }
-
-  async #removePlaylistEntry(entryId: string): Promise<Result<void>> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return ready;
-    }
-    const r = ready.value;
-    if (!r.playlistEntries.some((e) => e.entryId === entryId)) {
-      return err(appError('not-found', 'unknown entry'));
-    }
-    const now = this.#safeNow();
-    if (now === null) {
-      return err(internalError());
-    }
-    const next = removePlaylistEntry(playlistSections(r), entryId, now);
-    return this.#commitPlaylists(r, next);
+    return this.#library.removePlaylistEntry(entryId);
   }
 
   reorderPlaylistEntry(
     entryId: string,
     move: EntryMove | null,
   ): Promise<Result<void>> {
-    return this.#enqueuePlaylistOp(() =>
-      this.#reorderPlaylistEntry(entryId, move),
-    );
-  }
-
-  async #reorderPlaylistEntry(
-    entryId: string,
-    move: EntryMove | null,
-  ): Promise<Result<void>> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return ready;
-    }
-    const r = ready.value;
-    const entry = r.playlistEntries.find((e) => e.entryId === entryId);
-    if (entry === undefined) {
-      return err(appError('not-found', 'unknown entry'));
-    }
-    if (move !== null) {
-      const targetId = 'before' in move ? move.before : move.after;
-      const target = r.playlistEntries.find((e) => e.entryId === targetId);
-      if (
-        target === undefined ||
-        target.playlistId !== entry.playlistId ||
-        targetId === entryId
-      ) {
-        return err(appError('not-found', 'unknown move target'));
-      }
-    }
-    const now = this.#safeNow();
-    if (now === null) {
-      return err(internalError());
-    }
-    const next = reorderPlaylistEntry(
-      playlistSections(r),
-      entryId,
-      move,
-      now,
-    );
-    return this.#commitPlaylists(r, next);
+    return this.#library.reorderPlaylistEntry(entryId, move);
   }
 
   /**
@@ -2801,10 +2478,9 @@ export class Session {
     recordingId: string,
     context?: OperationContext,
   ): Promise<Result<LyricsSheet>> {
-    const work = this.#lyricsTail.then(() =>
+    const work = this.#lyricsSerial.run(() =>
       this.#getLyrics(recordingId, context),
     );
-    this.#lyricsTail = work.then(() => undefined, () => undefined);
     this.#own(work);
     return work;
   }
@@ -2820,11 +2496,7 @@ export class Session {
     filter?: ReviewFilter,
     context?: OperationContext,
   ): Promise<Result<readonly MatchReview[]>> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return Promise.resolve(err(ready.error));
-    }
-    return this.#corrections.listReviews(filter, context?.signal);
+    return this.#library.listMatchReviews(filter, context);
   }
 
   confirmReview(
@@ -2832,39 +2504,33 @@ export class Session {
     candidateIndex: number,
     context?: OperationContext,
   ): Promise<Result<MatchReview>> {
-    return this.#reviewOp(
-      (signal) => this.#corrections.confirm(reviewId, candidateIndex, signal),
-      context,
-    ).then(async (result) => {
-      // A gated play attempt parked this review and left playback
-      // failed — the confirm IS the retry, so resume the blocked
-      // occurrence when it is the one that gated. The verdict is in
-      // the reloaded recording, so the re-attempt resolves straight
-      // to it. A retry failure lands as the new playback error; the
-      // confirm itself stays a success.
-      const playback = this.#ready?.playback;
-      if (
-        result.ok &&
-        playback !== undefined &&
-        playback.type === 'failed' &&
-        playback.occurrenceId !== null &&
-        playback.recordingId === result.value.recordingId &&
-        isMatchGate(playback.error)
-      ) {
-        await this.playOccurrence(playback.occurrenceId);
-      }
-      return result;
-    });
+    return this.#library.confirmReview(reviewId, candidateIndex, context);
+  }
+
+  /**
+   * The verdict lands in the reloaded recording, so a gated play
+   * attempt parked on the review resumes straight to it: the
+   * confirm IS the retry. A retry failure lands as the new playback
+   * error; the confirm itself stays a success.
+   */
+  async #resumeGatedPlayback(recordingId: string): Promise<void> {
+    const playback = this.#ready?.playback;
+    if (
+      playback !== undefined &&
+      playback.type === 'failed' &&
+      playback.occurrenceId !== null &&
+      playback.recordingId === recordingId &&
+      isMatchGate(playback.error)
+    ) {
+      await this.playOccurrence(playback.occurrenceId);
+    }
   }
 
   rejectReview(
     reviewId: string,
     context?: OperationContext,
   ): Promise<Result<MatchReview>> {
-    return this.#reviewOp(
-      (signal) => this.#corrections.reject(reviewId, signal),
-      context,
-    );
+    return this.#library.rejectReview(reviewId, context);
   }
 
   /**
@@ -2876,124 +2542,7 @@ export class Session {
     reviewId: string,
     context?: OperationContext,
   ): Promise<Result<MatchReview>> {
-    return this.#reviewOp(
-      (signal) => this.#corrections.undo(reviewId, signal),
-      context,
-    );
-  }
-
-  /**
-   * Serialized review mutation: the module commits recordings +
-   * matchReviews atomically, then the session reads the affected
-   * recording back so `#pickRef` (via `effectiveMapping`) and the
-   * projected queue follow the verdict. The read-back merges into
-   * in-memory recordings rather than replacing them — a concurrent
-   * mutation on another tail can be newer than the reload. A
-   * read-back failure flags persistenceError like `#persist` does —
-   * the verdict still landed.
-   */
-  #reviewOp(
-    op: (signal?: CancellationSignal) => Promise<Result<MatchReview>>,
-    context?: OperationContext,
-  ): Promise<Result<MatchReview>> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return Promise.resolve(err(ready.error));
-    }
-    const r = ready.value;
-    // The whole review op — corrections' load->mutate->commit, the
-    // reload, and the mirror merge — is a single segment on the
-    // storage tail: it serializes against every session commit, so a
-    // verdict can never be clobbered by an interleaved recordings
-    // write (and vice versa).
-    const work = this.#enqueueStorage(async () => {
-      // Queued behind an import's ready-swap, a staged review would
-      // otherwise apply an old-generation verdict to the imported
-      // database — same guard as #persist/#commitStaged.
-      if (this.#ready !== r) {
-        return err(
-          appError('superseded', 'session state was replaced'),
-        );
-      }
-      const result = await op(context?.signal);
-      if (!result.ok) {
-        return result;
-      }
-      // The reload is bounded like every storage call — a hanging
-      // load fails the segment instead of wedging the tail — and the
-      // bound and the operation context share a single deadline.
-      const reloadSource = new CancellationSource();
-      this.#opSources.add(reloadSource);
-      let reloaded: Result<PersistedState>;
-      try {
-        const deadlineMs = this.#deadline();
-        reloaded = await this.#withDeadline(
-          () =>
-            this.#storage.load(
-              this.#newContext(
-                'reload',
-                deadlineMs,
-                context?.signal ?? reloadSource.signal,
-              ),
-            ),
-          deadlineMs,
-          reloadSource,
-        );
-      } finally {
-        this.#opSources.delete(reloadSource);
-      }
-      const affectedId = result.value.recordingId;
-      const prevRec = r.recordings.find((rec) => rec.id === affectedId);
-      if (reloaded.ok && isPersistedState(reloaded.value)) {
-        // Merge, never replace: a concurrent recording mutation on
-        // another tail may sit between its in-memory mirror and its
-        // persist, so the reload can be older than memory for any
-        // recording but the reviewed one. The reviewed recording
-        // takes the committed version — the reload post-dates the
-        // op's own commit, so it carries the verdict. Every other
-        // in-memory entry wins; committed rows memory doesn't know
-        // (committed by a racing op just before this load) join at
-        // the tail.
-        const committed = reloaded.value.recordings;
-        const byId = new Map(committed.map((rec) => [rec.id, rec]));
-        const seen = new Set<string>();
-        const merged: Recording[] = [];
-        for (const rec of r.recordings) {
-          seen.add(rec.id);
-          merged.push(
-            rec.id === affectedId ? (byId.get(rec.id) ?? rec) : rec,
-          );
-        }
-        for (const rec of committed) {
-          if (!seen.has(rec.id)) {
-            merged.push(rec);
-          }
-        }
-        r.recordings = merged;
-        // Emit the committed recording (it carries the verdict's
-        // mapping change) plus the review row — corrections commits
-        // inside `op`, outside the #persist diff.
-        const committedRec = byId.get(affectedId);
-        if (committedRec !== undefined) {
-          this.#emitSync(recordingUpsertWrites(committedRec, prevRec));
-        }
-      } else {
-        r.persistenceError = reloaded.ok
-          ? appError('invalid-response', 'reload after review failed validation')
-          : reloaded.error;
-        // No recording emit here: the op already committed but the
-        // committed row is unknown — stamping `prevRec` would publish
-        // a known-stale mapping with a fresh stamp that wins remotely.
-        // The boot-time field diff in `emitUnsynced` recovers the
-        // committed row on the next reconcile.
-      }
-      this.#emitSync(reviewSyncWrites(result.value));
-      this.#publish();
-      this.#derived();
-      return result;
-    });
-    this.#own(work);
-    return work;
+    return this.#library.undoReview(reviewId, context);
   }
 
   async #getLyrics(
@@ -3169,19 +2718,7 @@ export class Session {
 
   /** Serialize the owned library to export-document JSON text. */
   async exportLibrary(): Promise<Result<ExportResult>> {
-    const source = new CancellationSource();
-    this.#opSources.add(source);
-    try {
-      const deadlineMs = this.#deadline();
-      const context = this.#newContext('export', deadlineMs, source.signal);
-      return await this.#withDeadline(
-        () => exportLibrary(this.#storage, this.#clock, context),
-        deadlineMs,
-        source,
-      );
-    } finally {
-      this.#opSources.delete(source);
-    }
+    return this.#library.exportLibrary();
   }
 
   /**
@@ -3191,84 +2728,35 @@ export class Session {
    * from the replaced rows. Returns the confirm-screen summary.
    */
   async importLibrary(text: string): Promise<Result<ImportPreview>> {
-    const preview = previewImport(text);
-    if (!preview.ok) {
-      return preview;
+    return this.#library.importLibrary(text);
+  }
+
+  /**
+   * Import prelude, run before the storage-lane swap: release active
+   * playback first (its recording rows are about to be replaced — a
+   * clean release, the recording did not fail), cancel successor
+   * mapping still resolving against the old rows, and disarm the
+   * radio tail — an armed tail cannot survive the queue replace.
+   */
+  async #prepareImport(): Promise<void> {
+    const active = this.#active;
+    if (active !== null) {
+      active.source.cancel();
+      active.timer?.cancel();
+      if (active.handle !== undefined) {
+        await this.#releaseHandle(active.handle, active.identity);
+      }
+      this.#active = null;
+      const r = this.#ready;
+      if (r !== null) {
+        r.playback = { type: 'idle' };
+      }
     }
-    const source = new CancellationSource();
-    this.#opSources.add(source);
-    try {
-      // Release active playback first: its recording rows are about
-      // to be replaced. A clean release — the recording did not fail.
-      const active = this.#active;
-      if (active !== null) {
-        active.source.cancel();
-        active.timer?.cancel();
-        if (active.handle !== undefined) {
-          await this.#releaseHandle(active.handle, active.identity);
-        }
-        this.#active = null;
-        const r = this.#ready;
-        if (r !== null) {
-          r.playback = { type: 'idle' };
-        }
-      }
-      // Successor mapping may be resolving against the old rows.
-      this.#mappingSource?.cancel();
-      this.#mappingSource = null;
-      // An armed radio tail cannot survive the queue replace:
-      // cancel any in-flight continuation and drop the record.
-      const replaced = this.#ready;
-      if (replaced !== null) {
-        this.#clearRadio(replaced);
-      }
-      const deadlineMs = this.#deadline();
-      const context = this.#newContext('import', deadlineMs, source.signal);
-      // The whole imported owned set goes out as one emission — the
-      // writes mint inside the segment against the library being
-      // replaced, then flush after the swap+restore lands.
-      let importWrites: LocalWrite[] = [];
-      // The swap runs as a segment on the storage tail: every writer
-      // queued ahead commits first and is rolled forward, and a
-      // writer that staged against the old Ready and commits behind
-      // the swap is superseded by the generation check in #persist —
-      // never stale-applied over the imported sections.
-      const applied = await this.#enqueueStorage(async () => {
-        const result = await this.#withDeadline(
-          () => applyImport(this.#storage, preview.value.doc, context),
-          deadlineMs,
-          source,
-        );
-        // The generation flips inside the segment: the next queued
-        // writer observes #ready === null and supersedes instead of
-        // committing old-generation sections over the imported rows.
-        if (result.ok) {
-          const prevReady = this.#ready;
-          if (prevReady !== null) {
-            importWrites = importEmissionWrites(
-              syncEmitInput(prevReady),
-              preview.value.doc,
-            );
-          }
-          this.#ready = null;
-          this.#state = { type: 'unhydrated' };
-        }
-        return result;
-      });
-      if (!applied.ok) {
-        return applied;
-      }
-      // Rehydrate from the replaced document: restore() performs the
-      // load path whenever #ready is null.
-      this.#restorePromise = null;
-      const restored = await this.restore();
-      if (!restored.ok) {
-        return restored;
-      }
-      this.#emitSync(importWrites);
-      return ok(preview.value);
-    } finally {
-      this.#opSources.delete(source);
+    this.#mappingSource?.cancel();
+    this.#mappingSource = null;
+    const replaced = this.#ready;
+    if (replaced !== null) {
+      this.#clearRadio(replaced);
     }
   }
 
@@ -3283,8 +2771,7 @@ export class Session {
    * replaces the armed one.
    */
   startRadio(ref: SourceRef): Promise<Result<void>> {
-    const work = this.#radioTail.then(() => this.#startRadio(ref));
-    this.#radioTail = work.then(() => undefined, () => undefined);
+    const work = this.#radioSerial.run(() => this.#startRadio(ref));
     this.#own(work);
     return work;
   }
@@ -3315,8 +2802,8 @@ export class Session {
    */
   #clearRadio(r: Ready): void {
     // The epoch bumps even with no record: an auto-arm queued on
-    // #radioTail behind another op must still die when a stop or
-    // disarm lands before it starts.
+    // the radio lane behind another op must still die when a stop
+    // or disarm lands before it starts.
     this.#radioArmEpoch += 1;
     const record = r.radio;
     if (record === null) {
@@ -3429,8 +2916,7 @@ export class Session {
     }
     record.fetching = true;
     this.#publish();
-    const work = this.#radioTail.then(() => this.#growRadio(record));
-    this.#radioTail = work.then(() => undefined, () => undefined);
+    const work = this.#radioSerial.run(() => this.#growRadio(record));
     this.#own(work);
   }
 
@@ -3646,7 +3132,7 @@ export class Session {
     this.#radioAutoSeedOccurrence = snap.currentOccurrenceId;
     const armedFor = snap.currentOccurrenceId;
     const epoch = this.#radioArmEpoch;
-    const work = this.#radioTail.then(async () => {
+    const work = this.#radioSerial.run(async () => {
       const cur = this.#ready;
       if (
         cur === null ||
@@ -3719,10 +3205,6 @@ export class Session {
       }
       return seeded;
     });
-    this.#radioTail = work.then(
-      () => undefined,
-      () => undefined,
-    );
     this.#own(work);
   }
 
@@ -3964,11 +3446,7 @@ export class Session {
     record.dupPages += 1;
     record.fetching = true;
     this.#publish();
-    const work = this.#radioTail.then(() => this.#growRadio(record, true));
-    this.#radioTail = work.then(
-      () => undefined,
-      () => undefined,
-    );
+    const work = this.#radioSerial.run(() => this.#growRadio(record, true));
     this.#own(work);
   }
 
@@ -5485,8 +4963,8 @@ export class Session {
 
   #onPlayerEvent(event: PlayerEvent): void {
     // Serialized chain: no fire-and-forget, drainable, errors mapped.
-    this.#eventTail = this.#eventTail
-      .then(() => this.#handleEvent(event))
+    this.#eventSerial
+      .run(() => this.#handleEvent(event))
       .catch(() => {
         this.#logWarn('player event handling failed');
       });
@@ -6419,7 +5897,7 @@ export class Session {
 
   async drain(): Promise<void> {
     for (; ;) {
-      await this.#eventTail;
+      await this.#eventSerial.idle();
       const pending = [
         ...this.#ownedWork,
         ...this.#releaseWork.values(),
@@ -6434,7 +5912,7 @@ export class Session {
   /** Full drain including armed deadline work; used by dispose. */
   async #drainAll(): Promise<void> {
     for (; ;) {
-      await this.#eventTail;
+      await this.#eventSerial.idle();
       const pending = [
         ...this.#ownedWork,
         ...this.#releaseWork.values(),
