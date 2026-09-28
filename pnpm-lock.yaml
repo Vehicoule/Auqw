@@ -185,6 +185,9 @@ importers:
       '@auqw/ui-native':
         specifier: workspace:*
         version: link:../../packages/ui-native
+      '@auqw/ui-shared':
+        specifier: workspace:*
+        version: link:../../packages/ui-shared
       '@expo-google-fonts/inter':
         specifier: ^0.4.2
         version: 0.4.2

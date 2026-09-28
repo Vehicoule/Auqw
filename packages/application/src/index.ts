@@ -10,6 +10,7 @@ export * from './ports/sync-engine.ts';
 export * from './ports/sync-transport.ts';
 export * from './ports/tag-reader.ts';
 export * from './ports/peaks.ts';
+export * from './peaks-tracker.ts';
 export * from './ports/connectivity.ts';
 export * from './downloads/transfer-policy.ts';
 export * from './local/local-source.ts';

@@ -191,6 +191,7 @@ class AuqwExpoModule : Module() {
   private var host: PluginHost? = null
   private val streamRegistry = AuqwStreamRegistry()
   private val streamDataSourceFactory = AuqwStreamDataSource.Factory(streamRegistry)
+  private val waveformPeaks = AuqwWaveformPeaks(streamRegistry)
   // The seam's terminal kinds (released/expired/superseded/…) can
   // never succeed on retry — let them fail to onPlayerError at once
   // instead of burning the default policy's ~3s of retries; the
@@ -459,6 +460,7 @@ class AuqwExpoModule : Module() {
       } catch (e: Exception) {
         Log.w(TAG, "unbind: ${e.message}")
       }
+      waveformPeaks.cancelAll()
       // lf-* handles are bookkeeping only — drop the registry so a
       // recreated module can't resurrect a dead caller's file attach.
       localHandles.clear()
@@ -1015,6 +1017,31 @@ class AuqwExpoModule : Module() {
         marks.headReadyMs?.let { put("headReadyMs", it.toDouble()) }
         marks.attachMs?.let { put("attachMs", it.toDouble()) }
       }
+    }
+
+    /**
+     * Waveform peaks for the Stage seek (docs/decisions.md): positional
+     * `streamRead` pulls off the borrowed handle into
+     * MediaExtractor+MediaCodec, bucketed to `count` raw [up, down]
+     * RMS windows the JS side normalizes. The handle is never opened,
+     * closed, or released here — the player owns it. CodedException
+     * codes are the application taxonomy (unavailable/released/
+     * budget-exceeded/not-applicable/invalid-response/cancelled).
+     */
+    AsyncFunction("waveformPeaks") Coroutine { requestId: String, handle: String, count: Double, maxBytes: Double, provisionalCap: Boolean ->
+      waveformPeaks.extract(
+        requestId,
+        handle,
+        count.toInt(),
+        maxBytes.toLong(),
+        provisionalCap
+      )
+    }
+
+    /** Cancels a running `waveformPeaks` sweep — the in-flight promise
+     *  rejects with the 'cancelled' kind. */
+    Function("waveformPeaksCancel") { requestId: String ->
+      waveformPeaks.cancel(requestId)
     }
 
     // Gate-0 file leg: same warm player, FileDataSource-backed

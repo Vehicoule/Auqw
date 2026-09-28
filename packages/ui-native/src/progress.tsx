@@ -25,9 +25,10 @@ import {
   formatRemaining,
   resamplePeaks,
   t,
-  waveformAmplitudes,
   waveformBarLayout,
+  waveformPeaks,
 } from '@auqw/ui-shared';
+import type { WaveformPeak } from '@auqw/ui-shared';
 import { progressPathState } from './motion';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
@@ -131,7 +132,8 @@ function barExtentW(
 
 function barsPathD(
   xs: readonly number[],
-  amps: readonly number[],
+  ups: readonly number[],
+  downs: readonly number[],
   idx: readonly number[],
   count: number,
   mid: number,
@@ -146,14 +148,11 @@ function barsPathD(
     if (x > maxX) {
       continue;
     }
-    const extent = barExtentW(
-      amps[i] ?? 0,
-      maxExtent,
-      2.4,
-      staggerW(bloom, idx[i] ?? i, count),
-    );
-    d += `M${x.toFixed(2)} ${(mid - extent).toFixed(2)} L${x.toFixed(2)} ${(
-      mid + extent
+    const stagger = staggerW(bloom, idx[i] ?? i, count);
+    const upExtent = barExtentW(ups[i] ?? 0, maxExtent, 2.4, stagger);
+    const downExtent = barExtentW(downs[i] ?? 0, maxExtent, 2.4, stagger);
+    d += `M${x.toFixed(2)} ${(mid - upExtent).toFixed(2)} L${x.toFixed(2)} ${(
+      mid + downExtent
     ).toFixed(2)}`;
   }
   return d;
@@ -243,6 +242,7 @@ export function ArtworkRing({
 function useSeekGesture(
   durationMs: number | null,
   onSeek: ((ms: number) => void) | undefined,
+  onPreview: ((ms: number | null) => void) | undefined,
 ): {
   readonly gesture: ReturnType<typeof Gesture.Pan>;
   readonly onLayout: (e: LayoutChangeEvent) => void;
@@ -254,16 +254,30 @@ function useSeekGesture(
       setWidth(w);
     }
   }, []);
-  const seek = useCallback(
+  const preview = useCallback(
+    (x: number) => {
+      if (durationMs === null || durationMs <= 0) {
+        return;
+      }
+      const ratio = Math.min(1, Math.max(0, x / width));
+      onPreview?.(Math.round(ratio * durationMs));
+    },
+    [durationMs, onPreview, width],
+  );
+  const commit = useCallback(
     (x: number) => {
       if (durationMs === null || durationMs <= 0 || onSeek === undefined) {
+        onPreview?.(null);
         return;
       }
       const ratio = Math.min(1, Math.max(0, x / width));
       onSeek(Math.round(ratio * durationMs));
     },
-    [durationMs, onSeek, width],
+    [durationMs, onPreview, onSeek, width],
   );
+  const cancel = useCallback(() => {
+    onPreview?.(null);
+  }, [onPreview]);
   const enabled =
     durationMs !== null && durationMs > 0 && onSeek !== undefined;
   // Stable gesture object — a fresh Pan() per render would cancel a
@@ -274,12 +288,18 @@ function useSeekGesture(
         .minDistance(0)
         .enabled(enabled)
         .onBegin((e) => {
-          scheduleOnRN(seek, e.x);
+          scheduleOnRN(preview, e.x);
         })
         .onUpdate((e) => {
-          scheduleOnRN(seek, e.x);
+          scheduleOnRN(preview, e.x);
+        })
+        // A cancelled pan clears the preview; only a finished gesture
+        // moves playback — the same commit-on-release rule the
+        // waveform seek and the web range input share.
+        .onFinalize((e, success) => {
+          scheduleOnRN(success ? commit : cancel, e.x);
         }),
-    [enabled, seek],
+    [cancel, commit, enabled, preview],
   );
   return { gesture, onLayout };
 }
@@ -333,9 +353,56 @@ export function LinearScrubber({
   style,
 }: LinearScrubberProps) {
   const theme = useTheme();
-  const { gesture, onLayout } = useSeekGesture(durationMs, onSeek);
-  const { onAccessibilityAction } = useSeekA11y(positionMs, durationMs, onSeek);
-  const p = progressOf(positionMs, durationMs);
+  const [previewMs, setPreviewMs] = useState<number | null>(null);
+  const [heldMs, setHeldMs] = useState<number | null>(null);
+  const heldBaseline = useRef(0);
+  const positionRef = useRef(positionMs);
+  positionRef.current = positionMs;
+  const heldTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Optimistic fill: the committed target stays shown until the
+  // publish round-trip lands (or the settle timer lapses) — the same
+  // hold the waveform seek applies.
+  const commit = useCallback(
+    (ms: number) => {
+      setPreviewMs(null);
+      heldBaseline.current = positionRef.current;
+      setHeldMs(ms);
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+      }
+      heldTimer.current = setTimeout(() => {
+        heldTimer.current = null;
+        setHeldMs(null);
+      }, 800);
+      onSeek?.(ms);
+    },
+    [onSeek],
+  );
+  useEffect(() => {
+    if (heldMs !== null && positionMs !== heldBaseline.current) {
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+        heldTimer.current = null;
+      }
+      setHeldMs(null);
+    }
+  }, [positionMs, heldMs]);
+  useEffect(
+    () => () => {
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+      }
+    },
+    [],
+  );
+  const { gesture, onLayout } = useSeekGesture(
+    durationMs,
+    commit,
+    setPreviewMs,
+  );
+  const shownMs = previewMs ?? heldMs ?? positionMs;
+  const { onAccessibilityAction } = useSeekA11y(shownMs, durationMs, onSeek);
+  const p = progressOf(shownMs, durationMs);
   return (
     <GestureDetector gesture={gesture}>
       <View
@@ -396,30 +463,35 @@ const WAVE_BAR_GAP = 2.5;
 
 type BarGroup = {
   readonly xs: readonly number[];
-  readonly amps: readonly number[];
+  readonly ups: readonly number[];
+  readonly downs: readonly number[];
   readonly idx: readonly number[];
 };
 
 // Three amplitude terciles → three stroke opacities, so the quieter
-// bars read quieter without one animated component per bar.
+// bars read quieter without one animated component per bar. A bar's
+// loudness is its longer arm.
 function partitionBars(
   xs: readonly number[],
-  amps: readonly number[],
+  peaks: readonly WaveformPeak[],
 ): readonly [BarGroup, BarGroup, BarGroup] {
-  const sorted = [...amps].sort((a, b) => a - b);
+  const sorted = peaks
+    .map((p) => Math.max(p.up, p.down))
+    .sort((a, b) => a - b);
   const t1 = sorted[Math.floor(sorted.length / 3)] ?? Infinity;
   const t2 = sorted[Math.floor((sorted.length * 2) / 3)] ?? Infinity;
   const groups: [BarGroup, BarGroup, BarGroup] = [
-    { xs: [], amps: [], idx: [] },
-    { xs: [], amps: [], idx: [] },
-    { xs: [], amps: [], idx: [] },
+    { xs: [], ups: [], downs: [], idx: [] },
+    { xs: [], ups: [], downs: [], idx: [] },
+    { xs: [], ups: [], downs: [], idx: [] },
   ];
   for (let i = 0; i < xs.length; i += 1) {
-    const amp = amps[i] ?? 0;
+    const amp = Math.max(peaks[i]?.up ?? 0, peaks[i]?.down ?? 0);
     const g = amp <= t1 ? 0 : amp <= t2 ? 1 : 2;
     const group = groups[g];
     (group.xs as number[]).push(xs[i] ?? 0);
-    (group.amps as number[]).push(amp);
+    (group.ups as number[]).push(peaks[i]?.up ?? 0);
+    (group.downs as number[]).push(peaks[i]?.down ?? 0);
     (group.idx as number[]).push(i);
   }
   return groups;
@@ -433,10 +505,10 @@ export type WaveformSeekProps = {
   /**
    * Real measured peaks at the canonical resolution (`peaks.ts`),
    * resampled to the bar count. Absent/null keeps the seeded
-   * `waveformAmplitudes` pattern — extraction is lazy, so the seeded
+   * `waveformPeaks` pattern — extraction is lazy, so the seeded
    * bars are both the pending state and the failure fallback.
    */
-  readonly peaks?: readonly number[] | null | undefined;
+  readonly peaks?: readonly WaveformPeak[] | null | undefined;
   readonly loading?: boolean | undefined;
   readonly labels?: boolean | undefined;
   readonly visible?: boolean | undefined;
@@ -471,21 +543,22 @@ export function WaveformSeek({
     () => waveformBarLayout(width, WAVE_BAR_WIDTH, WAVE_BAR_GAP),
     [width],
   );
-  const amps = useMemo(
+  const bars = useMemo(
     () =>
       peaks !== undefined && peaks !== null && peaks.length > 0
         ? resamplePeaks(peaks, layout.count)
-        : waveformAmplitudes(seed, layout.count),
+        : waveformPeaks(seed, layout.count),
     [peaks, seed, layout.count],
   );
-  const groups = useMemo(() => partitionBars(layout.xs, amps), [layout, amps]);
+  const groups = useMemo(() => partitionBars(layout.xs, bars), [layout, bars]);
   const allBars = useMemo<BarGroup>(
     () => ({
       xs: layout.xs,
-      amps,
+      ups: bars.map((b) => b.up),
+      downs: bars.map((b) => b.down),
       idx: layout.xs.map((_, i) => i),
     }),
-    [layout, amps],
+    [layout, bars],
   );
 
   const fill = useSharedValue(progress);
@@ -631,7 +704,8 @@ export function WaveformSeek({
   const dLow = useDerivedValue(() =>
     barsPathD(
       groups[0].xs,
-      groups[0].amps,
+      groups[0].ups,
+      groups[0].downs,
       groups[0].idx,
       layout.count,
       WAVE_MID,
@@ -642,7 +716,8 @@ export function WaveformSeek({
   const dMid = useDerivedValue(() =>
     barsPathD(
       groups[1].xs,
-      groups[1].amps,
+      groups[1].ups,
+      groups[1].downs,
       groups[1].idx,
       layout.count,
       WAVE_MID,
@@ -653,7 +728,8 @@ export function WaveformSeek({
   const dHigh = useDerivedValue(() =>
     barsPathD(
       groups[2].xs,
-      groups[2].amps,
+      groups[2].ups,
+      groups[2].downs,
       groups[2].idx,
       layout.count,
       WAVE_MID,
@@ -667,7 +743,8 @@ export function WaveformSeek({
   const dAll = useDerivedValue(() =>
     barsPathD(
       allBars.xs,
-      allBars.amps,
+      allBars.ups,
+      allBars.downs,
       allBars.idx,
       layout.count,
       WAVE_MID,

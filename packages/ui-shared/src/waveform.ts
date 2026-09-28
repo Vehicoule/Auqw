@@ -1,8 +1,10 @@
 // Deterministic decorative waveform + ring geometry shared by the
 // native and web progress controls. The seeded pattern is a
-// placeholder for real peaks: renderers prefer measured amplitudes
+// placeholder for real peaks: renderers prefer measured pairs
 // (`peaks.ts`) when a `PeaksPort` supplies them and fall back to this
 // hashed pattern while extraction is pending or after failure.
+
+import type { WaveformPeak } from '@auqw/application';
 
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
@@ -33,10 +35,10 @@ function seededRange(rand: () => number, min: number, max: number): number {
   return min + rand() * (max - min);
 }
 
-export function waveformAmplitudes(
+export function waveformPeaks(
   seed: string,
   count: number,
-): readonly number[] {
+): readonly WaveformPeak[] {
   if (count <= 0 || !Number.isFinite(count)) {
     return [];
   }
@@ -47,16 +49,31 @@ export function waveformAmplitudes(
   const f1 = seededRange(rand, 1.5, 2.5);
   const f2 = seededRange(rand, 4, 6);
   const f3 = seededRange(rand, 9, 13);
+  // The lower arm rides a second seeded wave — related-but-different,
+  // like the channel/sign split real peaks carry.
+  const randB = seedStream(seed, 2);
+  const q1 = randB();
+  const q2 = randB();
+  const g1 = seededRange(randB, 1.5, 2.5);
+  const g2 = seededRange(randB, 5, 8);
   const jitter = seedStream(seed, 1);
-  const out: number[] = [];
+  const jitterB = seedStream(seed, 3);
+  const out: WaveformPeak[] = [];
   for (let i = 0; i < count; i += 1) {
     const u = count === 1 ? 0.5 : i / (count - 1);
-    const wave =
+    const waveA =
       0.55 * Math.sin(2 * Math.PI * (f1 * u + p1)) +
       0.3 * Math.sin(2 * Math.PI * (f2 * u + p2)) +
       0.15 * Math.sin(2 * Math.PI * (f3 * u + p3));
-    const value = 0.5 + 0.5 * wave + (jitter() * 2 - 1) * 0.12;
-    out.push(Math.min(1, Math.max(0.12, value)));
+    const waveB =
+      0.6 * Math.sin(2 * Math.PI * (g1 * u + q1)) +
+      0.4 * Math.sin(2 * Math.PI * (g2 * u + q2));
+    const up = 0.5 + 0.5 * waveA + (jitter() * 2 - 1) * 0.12;
+    const down = 0.45 + 0.42 * waveB + (jitterB() * 2 - 1) * 0.12;
+    out.push({
+      up: Math.min(1, Math.max(0.12, up)),
+      down: Math.min(1, Math.max(0.08, down)),
+    });
   }
   return out;
 }

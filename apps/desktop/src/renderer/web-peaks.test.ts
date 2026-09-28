@@ -116,7 +116,7 @@ export async function run(): Promise<void> {
       'peaks arrive at the canonical resolution',
     );
     assert(
-      (result.value[200] ?? 0) === 1,
+      (result.value[200]?.up ?? 0) === 1,
       'the decoded impulse owns its bucket',
     );
     const firstRead = stream.calls[0];
@@ -202,7 +202,7 @@ export async function run(): Promise<void> {
       'reads stop at the empty chunk',
     );
     assert(
-      (result.value[0] ?? 0) === 1,
+      (result.value[0]?.up ?? 0) === 1,
       'a constant PCM decodes to a flat full row',
     );
   }

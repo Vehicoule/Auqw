@@ -1,110 +1,241 @@
+import type { WaveformPeak } from '@auqw/application';
+
 /**
  * Waveform peak extraction and resampling for the Stage's
  * waveform-style seek.
  *
  * The seek renders decoration only — a plain progress bar in
  * waveform clothing — so these helpers model a display profile, not
- * an analysis result: `peaksFromChannels` reduces decoded PCM to a
- * canonical-resolution envelope and `resamplePeaks` maps that envelope
- * onto whatever bar count the layout produces. A zeroed profile is
- * the honest rendering of silence or empty input; callers falling
- * back to the seeded pattern (`waveformAmplitudes`) do so on null
+ * an analysis result. Extractors reduce decoded PCM to raw
+ * per-window magnitudes (`PeakWindow`), `normalizePeakWindows`
+ * applies the shared 5th–95th percentile normalization plus the
+ * gamma lift, and `resamplePeaks` maps that profile onto whatever
+ * bar count the layout produces. A zeroed profile is the honest
+ * rendering of silence or empty input; callers falling back to the
+ * seeded pattern (`waveformPeaks` in waveform.ts) do so on null
  * input, not on zeros.
  */
+export type { WaveformPeak } from '@auqw/application';
 
-/** Canonical peak resolution — one float per envelope bucket. */
+/** Canonical peak resolution — one pair per envelope bucket. */
 export const PEAKS_RESOLUTION = 256;
+
+/**
+ * Raw (unnormalized) per-window magnitudes — the currency extractors
+ * emit. `up`/`down` are root-mean-square energies of the window's
+ * two asymmetry sources: stereo (or wider) splits channel parity —
+ * even channels feed `up`, odd feed `down` — while mono splits the
+ * half-waves: positive samples feed `up`, negative feed `down`.
+ * Values are PCM-domain (≥0); `normalizePeakWindows` maps them onto
+ * the display range.
+ */
+export type PeakWindow = {
+  readonly up: number;
+  readonly down: number;
+};
 
 const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);
 
 /**
- * Reduces per-channel PCM samples (decoded audio, normalized float
- * data) to `count` absolute-amplitude buckets, then normalizes by the
- * loudest bucket and applies a gentle square-root lift so quiet
- * passages stay readable against the loud ones.
- *
- * @param channels one Float32Array per decoded channel
- * @param count    bucket count of the output profile
+ * Compressor display floor — normalized values below this still draw
+ * a stub bar so the waveform reads continuous through quiet passages.
  */
-export function peaksFromChannels(
-  channels: readonly Float32Array[],
-  count: number,
-): readonly number[] {
-  if (!Number.isFinite(count) || count <= 0) {
+const PEAK_FLOOR = 0.05;
+/** Loudness shaping — darkens mid amplitudes so transients contrast. */
+const PEAK_GAMMA = 1.2;
+
+function percentile(sorted: readonly number[], p: number): number {
+  if (sorted.length === 0) {
+    return 0;
+  }
+  const i = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.floor(((sorted.length - 1) * p) / 100)),
+  );
+  return sorted[i]!;
+}
+
+/**
+ * Maps raw window magnitudes onto normalized display pairs. One
+ * shared scale serves both sides — normalizing `up` and `down`
+ * independently would erase the asymmetry the pair exists to carry.
+ * The scale is the 5th–95th percentile band of all magnitudes: bars
+ * past p95 saturate, bars under p5 sit on the floor, and the spread
+ * between keeps dynamics readable instead of the old loudest-bucket
+ * normalize that rendered everything loud. When the band collapses
+ * onto the bulk — a sparse profile like a single transient over a
+ * flat bed — the top anchor relaxes toward half the true max so the
+ * bed still reads quiet and the transient still owns its bar.
+ * All-zero input yields all-zero output.
+ */
+export function normalizePeakWindows(
+  windows: readonly PeakWindow[],
+): readonly WaveformPeak[] {
+  if (windows.length === 0) {
     return [];
   }
-  const out = new Array<number>(count).fill(0);
-  const frames = channels.reduce(
-    (min, ch) => Math.min(min, ch.length),
-    Number.POSITIVE_INFINITY,
-  );
-  if (!Number.isFinite(frames) || frames === 0) {
-    return out;
+  const mags = new Array<number>(windows.length * 2);
+  for (let i = 0; i < windows.length; i += 1) {
+    mags[i * 2] = windows[i]!.up;
+    mags[i * 2 + 1] = windows[i]!.down;
   }
-  const step = frames / count;
-  let loudest = 0;
-  for (let i = 0; i < count; i++) {
-    const from = Math.floor(i * step);
-    const to = Math.min(frames, Math.max(Math.floor((i + 1) * step), from + 1));
-    let peak = 0;
-    for (const ch of channels) {
-      for (let s = from; s < to; s++) {
-        const amp = Math.abs(ch[s]!);
-        if (amp > peak) peak = amp;
-      }
+  mags.sort((a, b) => a - b);
+  const peak = mags[mags.length - 1]!;
+  if (peak <= 0) {
+    // A wholly silent profile is honest zeros, not floor stubs.
+    const zeros = new Array<WaveformPeak>(windows.length);
+    for (let i = 0; i < windows.length; i += 1) {
+      zeros[i] = { up: 0, down: 0 };
     }
-    out[i] = peak;
-    if (peak > loudest) loudest = peak;
+    return zeros;
   }
-  if (loudest <= 0) {
-    return out;
-  }
-  // Normalized by the loudest bucket, sqrt-lifted: a bucket at 25% of
-  // peak amplitude still renders a half-height bar.
-  for (let i = 0; i < count; i++) {
-    out[i] = clamp01(Math.sqrt(out[i]! / loudest));
+  const lo = percentile(mags, 5);
+  const hi = Math.max(percentile(mags, 95), lo, peak * 0.5);
+  const span = hi - lo;
+  const shape = (v: number): number => {
+    const t = span > 1e-9 ? (v - lo) / span : v > 0 ? 1 : 0;
+    return Math.pow(Math.min(1, Math.max(PEAK_FLOOR, t)), PEAK_GAMMA);
+  };
+  const out = new Array<WaveformPeak>(windows.length);
+  for (let i = 0; i < windows.length; i += 1) {
+    out[i] = {
+      up: shape(windows[i]!.up),
+      down: shape(windows[i]!.down),
+    };
   }
   return out;
 }
 
 /**
+ * Reduces per-channel PCM samples (decoded audio, normalized float
+ * data) to `count` raw window buckets. With two or more channels the
+ * pair splits channel parity (evens → `up`, odds → `down`); a single
+ * channel splits by sign (positive samples → `up`, negative →
+ * `down`). Either way both arms come from real signal energy, so
+ * the rendered bars are asymmetric and honest.
+ *
+ * @param channels one Float32Array per decoded channel
+ * @param count    bucket count of the output profile
+ */
+export function peakWindowsFromChannels(
+  channels: readonly Float32Array[],
+  count: number,
+): readonly PeakWindow[] {
+  if (!Number.isFinite(count) || count <= 0) {
+    return [];
+  }
+  const out = new Array<PeakWindow>(count);
+  const frames = channels.reduce(
+    (min, ch) => Math.min(min, ch.length),
+    Number.POSITIVE_INFINITY,
+  );
+  if (!Number.isFinite(frames) || frames === 0 || channels.length === 0) {
+    for (let i = 0; i < count; i += 1) {
+      out[i] = { up: 0, down: 0 };
+    }
+    return out;
+  }
+  const step = frames / count;
+  const stereo = channels.length >= 2;
+  for (let i = 0; i < count; i += 1) {
+    const from = Math.floor(i * step);
+    const to = Math.min(frames, Math.max(Math.floor((i + 1) * step), from + 1));
+    let upSq = 0;
+    let downSq = 0;
+    let upN = 0;
+    let downN = 0;
+    if (stereo) {
+      for (let c = 0; c < channels.length; c += 1) {
+        const ch = channels[c]!;
+        const even = c % 2 === 0;
+        for (let s = from; s < to; s++) {
+          const v = ch[s]!;
+          if (even) {
+            upSq += v * v;
+            upN += 1;
+          } else {
+            downSq += v * v;
+            downN += 1;
+          }
+        }
+      }
+    } else {
+      const ch = channels[0]!;
+      for (let s = from; s < to; s++) {
+        const v = ch[s]!;
+        if (v >= 0) {
+          upSq += v * v;
+          upN += 1;
+        } else {
+          downSq += v * v;
+          downN += 1;
+        }
+      }
+    }
+    out[i] = {
+      up: upN > 0 ? Math.sqrt(upSq / upN) : 0,
+      down: downN > 0 ? Math.sqrt(downSq / downN) : 0,
+    };
+  }
+  return out;
+}
+
+/**
+ * Decoded PCM → normalized display pairs — the composition desktop's
+ * extractor needs; mobile's adapter instead receives raw windows off
+ * the native extractor and calls `normalizePeakWindows` itself.
+ */
+export function peaksFromChannels(
+  channels: readonly Float32Array[],
+  count: number,
+): readonly WaveformPeak[] {
+  return normalizePeakWindows(peakWindowsFromChannels(channels, count));
+}
+
+/**
  * Maps a canonical-resolution peak profile onto an arbitrary bar
- * count. Downsampled buckets take the max of their source range (so
- * real transients survive aggregation); upsampled positions linearly
- * interpolate. Input shorter than one bucket or empty yields zeros —
- * the caller decides whether zeros or the seeded pattern is the right
- * fallback.
+ * count. Downsampled buckets take the per-side max of their source
+ * range (so real transients survive aggregation); upsampled
+ * positions linearly interpolate each side. Input shorter than one
+ * bucket or empty yields zeroed pairs — the caller decides whether
+ * zeros or the seeded pattern is the right fallback.
  */
 export function resamplePeaks(
-  peaks: readonly number[],
+  peaks: readonly WaveformPeak[],
   count: number,
-): readonly number[] {
+): readonly WaveformPeak[] {
   if (!Number.isFinite(count) || count <= 0) {
     return [];
   }
   const source = peaks.length;
   if (source === 0) {
-    return new Array<number>(count).fill(0);
+    return new Array<WaveformPeak>(count).fill({ up: 0, down: 0 });
   }
-  const out = new Array<number>(count);
+  const out = new Array<WaveformPeak>(count);
   if (source >= count) {
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < count; i += 1) {
       const from = Math.floor((i * source) / count);
       const to = Math.max(from + 1, Math.floor(((i + 1) * source) / count));
-      let peak = 0;
+      let up = 0;
+      let down = 0;
       for (let s = from; s < to && s < source; s++) {
-        if (peaks[s]! > peak) peak = peaks[s]!;
+        const p = peaks[s]!;
+        if (p.up > up) up = p.up;
+        if (p.down > down) down = p.down;
       }
-      out[i] = peak;
+      out[i] = { up, down };
     }
     return out;
   }
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < count; i += 1) {
     const pos = count > 1 ? (i * (source - 1)) / (count - 1) : 0;
     const lo = Math.floor(pos);
     const hi = Math.min(source - 1, lo + 1);
     const frac = pos - lo;
-    out[i] = peaks[lo]! + (peaks[hi]! - peaks[lo]!) * frac;
+    out[i] = {
+      up: peaks[lo]!.up + (peaks[hi]!.up - peaks[lo]!.up) * frac,
+      down: peaks[lo]!.down + (peaks[hi]!.down - peaks[lo]!.down) * frac,
+    };
   }
   return out;
 }

@@ -244,6 +244,7 @@ function statusEvent(
   state: 'playing' | 'paused' | 'buffering' | 'ended' | 'failed',
   positionMs: number,
   error = appError('transient', 'player failed'),
+  durationMs?: number,
 ): PlayerEvent {
   const base = {
     type: 'status' as const,
@@ -251,6 +252,7 @@ function statusEvent(
     identity,
     state,
     positionMs,
+    ...(durationMs === undefined ? {} : { durationMs }),
   };
   return state === 'failed' ? { ...base, error } : base;
 }
@@ -810,6 +812,59 @@ async function pauseResumeSeek(): Promise<void> {
   assertEqual(seekCall.positionMs, 9_000);
   assertEqual(seekCall.identity.attemptId, id0.attemptId);
   assertEqual(seekCall.identity.queueRev, rev0 + 3);
+}
+
+// Regression: a seek re-keys the attempt identity and re-publishes
+// playback before the transport call — that interim state must keep
+// the duration the player already reported. When it didn't, the
+// published `durationMs` dropped to `null` and the waveform seek
+// disabled itself mid-drag (enabled requires a positive duration).
+async function seekKeepsPublishedDuration(): Promise<void> {
+  const r = rig(
+    persisted({
+      // The recording row carries no duration — the stream's status
+      // events are the only source.
+      recordings: [
+        {
+          ...recording('r1', [ref('youtube-music', 'y1')]),
+          durationMs: null,
+        },
+      ],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  const snap0 = readyOf(r);
+  const id0 = 'identity' in snap0.playback ? snap0.playback.identity : undefined;
+  assert(id0 !== undefined);
+  // The player reports media duration only via status events.
+  r.player.emit(
+    statusEvent(id0, 'h-o1', 'playing', 4_000, undefined, 180_000),
+  );
+  await pump();
+  const pb0 = readyOf(r).playback;
+  assert(
+    'durationMs' in pb0 && pb0.durationMs === 180_000,
+    'a status event publishes durationMs',
+  );
+
+  const seeked = await r.session.seekTo(90_000);
+  assert(seeked.ok, 'seek failed');
+  const pb1 = readyOf(r).playback;
+  assert(
+    'durationMs' in pb1 && pb1.durationMs === 180_000,
+    'a seek keeps the published durationMs',
+  );
+  assertEqual(readyOf(r).queue.positionMs, 90_000);
 }
 
 // A paused stream can outlive its registry session — detached
@@ -5719,6 +5774,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['naturalEnded', naturalEnded],
   ['endedFallback', endedFallback],
   ['pauseResumeSeek', pauseResumeSeek],
+  ['seekKeepsPublishedDuration', seekKeepsPublishedDuration],
   ['resumeDeadHandleRePrepares', resumeDeadHandleRePrepares],
   ['deadHandleFailedStatusRePrepares', deadHandleFailedStatusRePrepares],
   ['queueCommitRollback', queueCommitRollback],

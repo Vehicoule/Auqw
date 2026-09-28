@@ -22,6 +22,7 @@ import type {
   QueueModel,
   RadioModel,
   StageMode,
+  WaveformPeak,
 } from '@auqw/ui-shared';
 
 export type { LyricsModel, StageMode } from '@auqw/ui-shared';
@@ -251,7 +252,7 @@ export type NowPlayingScreenProps = {
   readonly onSeek?: ((ms: number) => void) | undefined;
   /** Real measured peaks for the playing recording; null/undefined
    * keeps the seeded pattern (pending state and failure fallback). */
-  readonly peaks?: readonly number[] | null | undefined;
+  readonly peaks?: readonly WaveformPeak[] | null | undefined;
   readonly onRetryLyrics?: (() => void) | undefined;
   readonly onStartRadio?: (() => void) | undefined;
   readonly onStopRadio?: (() => void) | undefined;

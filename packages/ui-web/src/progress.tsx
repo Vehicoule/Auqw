@@ -3,14 +3,23 @@ import {
   formatRemaining,
   resamplePeaks,
   t,
-  waveformAmplitudes,
   waveformBarExtent,
   waveformBarLayout,
+  waveformPeaks,
 } from '@auqw/ui-shared';
+import type { WaveformPeak } from '@auqw/ui-shared';
 import { Artwork, Text } from './primitives.tsx';
 import { progressPathState } from './motion.ts';
 import { seekStepMs } from './keyboard.ts';
-import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type { KeyboardEvent } from 'react';
 
 // Same squared ring the native 'arc' variant draws — the desktop
@@ -125,6 +134,134 @@ function progressOf(positionMs: number, durationMs: number | null): number {
   return Math.min(1, Math.max(0, positionMs / durationMs));
 }
 
+/**
+ * Commit-on-release scrub state for the range-input seek controls:
+ * a pointer drag previews `scrubMs` and fires `onSeek` once at
+ * pointer-up, matching the native pan gesture. Committing per
+ * `input` event serialized a queue persist plus a transport seek on
+ * every pixel — the transport re-anchored mid-drag and the thumb
+ * kept snapping back to the last published position, so the bar
+ * couldn't be dragged. `heldMs` keeps the committed position shown
+ * until the publish round-trip lands (or the settle timer lapses),
+ * the same optimistic fill the native control applies.
+ */
+function useScrubCommit(
+  positionMs: number,
+  durationMs: number | null,
+  onSeek: ((ms: number) => void) | undefined,
+): {
+  readonly enabled: boolean;
+  readonly shownMs: number;
+  readonly onScrubStart: () => void;
+  readonly onScrubValue: (ms: number) => void;
+  readonly onScrubEnd: (commitMs: number | null) => void;
+} {
+  const enabled =
+    durationMs !== null && durationMs > 0 && onSeek !== undefined;
+  const [scrubMs, setScrubMs] = useState<number | null>(null);
+  const [heldMs, setHeldMs] = useState<number | null>(null);
+  const dragging = useRef(false);
+  const scrubRef = useRef<number | null>(null);
+  const positionRef = useRef(positionMs);
+  positionRef.current = positionMs;
+  const heldBaseline = useRef(0);
+  const heldTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const commit = useCallback(
+    (ms: number) => {
+      dragging.current = false;
+      scrubRef.current = null;
+      setScrubMs(null);
+      heldBaseline.current = positionRef.current;
+      setHeldMs(ms);
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+      }
+      heldTimer.current = setTimeout(() => {
+        heldTimer.current = null;
+        setHeldMs(null);
+      }, 800);
+      onSeek?.(ms);
+    },
+    [onSeek],
+  );
+
+  // The publish lands as a `positionMs` change: once it does, the
+  // real value is authoritative again and the hold releases. A
+  // paused/noop seek that never republishes releases on the timer.
+  useEffect(() => {
+    if (heldMs !== null && positionMs !== heldBaseline.current) {
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+        heldTimer.current = null;
+      }
+      setHeldMs(null);
+    }
+  }, [positionMs, heldMs]);
+  useEffect(
+    () => () => {
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+      }
+    },
+    [],
+  );
+  // A disable landing mid-drag abandons the gesture (pointerup will
+  // never arrive on a disabled input) — restore the real fill.
+  useEffect(() => {
+    if (!enabled && dragging.current) {
+      dragging.current = false;
+      scrubRef.current = null;
+      setScrubMs(null);
+    }
+  }, [enabled]);
+
+  const onScrubStart = useCallback(() => {
+    if (enabled) {
+      dragging.current = true;
+      scrubRef.current = null;
+    }
+  }, [enabled]);
+  const onScrubValue = useCallback(
+    (ms: number) => {
+      if (dragging.current) {
+        scrubRef.current = ms;
+        setScrubMs(ms);
+      } else if (enabled) {
+        // No pointer drag in flight — keyboard Home/End and AT
+        // commits seek immediately, as before.
+        commit(ms);
+      }
+    },
+    [commit, enabled],
+  );
+  const onScrubEnd = useCallback(
+    (commitMs: number | null) => {
+      if (!dragging.current) {
+        return;
+      }
+      const ms = scrubRef.current ?? commitMs;
+      if (ms === null) {
+        // A cancelled/empty gesture restores the real fill — only a
+        // committed position may move playback.
+        dragging.current = false;
+        scrubRef.current = null;
+        setScrubMs(null);
+        return;
+      }
+      commit(ms);
+    },
+    [commit],
+  );
+  return {
+    enabled,
+    shownMs: scrubMs ?? heldMs ?? positionMs,
+    onScrubStart,
+    onScrubValue,
+    onScrubEnd,
+  };
+}
+
 export type LinearScrubberProps = {
   readonly positionMs: number;
   readonly durationMs: number | null;
@@ -141,11 +278,12 @@ export function LinearScrubber({
   onSeek,
   className,
 }: LinearScrubberProps) {
-  const enabled = durationMs !== null && durationMs > 0 && onSeek !== undefined;
-  const p = progressOf(positionMs, durationMs);
+  const scrub = useScrubCommit(positionMs, durationMs, onSeek);
+  const { enabled, shownMs } = scrub;
+  const p = progressOf(shownMs, durationMs);
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     const stepped =
-      onSeek === undefined ? null : seekStepMs(event.key, positionMs, durationMs);
+      onSeek === undefined ? null : seekStepMs(event.key, shownMs, durationMs);
     if (stepped !== null) {
       event.preventDefault();
       onSeek?.(stepped);
@@ -157,17 +295,28 @@ export function LinearScrubber({
       className={`uw-scrubber${enabled ? '' : ' uw-off'}${className ? ` ${className}` : ''}`}
       aria-label={t('progress.a11y.seek')}
       aria-valuetext={t('progress.a11y.value', {
-        position: formatClock(positionMs),
+        position: formatClock(shownMs),
         duration: formatClock(durationMs),
       })}
       min={0}
       max={Math.max(1, durationMs ?? 0)}
       step="any"
-      value={Math.round(positionMs)}
+      value={Math.round(shownMs)}
       disabled={!enabled}
       onKeyDown={onKeyDown}
+      onPointerDown={enabled ? scrub.onScrubStart : undefined}
+      onPointerUp={
+        enabled
+          ? (event) =>
+            scrub.onScrubEnd(Number(event.currentTarget.value))
+          : undefined
+      }
+      onPointerCancel={enabled ? () => scrub.onScrubEnd(null) : undefined}
+      onLostPointerCapture={enabled ? () => scrub.onScrubEnd(null) : undefined}
       onChange={
-        enabled ? (event) => onSeek?.(Number(event.currentTarget.value)) : undefined
+        enabled
+          ? (event) => scrub.onScrubValue(Number(event.currentTarget.value))
+          : undefined
       }
       style={{ '--uw-fill': `${p * 100}%` } as React.CSSProperties}
     />
@@ -181,44 +330,55 @@ const WAVE_MIN_EXTENT = 2.4;
 const WAVE_BAR_WIDTH = 3;
 const WAVE_BAR_GAP = 2.5;
 
-// One `M x y1 L x y2` segment per bar — the same model the native
-// control draws, so both ports share the helper math verbatim.
+// One `M x y1 L x y2` segment per bar, asymmetric around the midline
+// — the same model the native control draws, so both ports share the
+// helper math verbatim.
 function barsPathD(
   xs: readonly number[],
-  amps: readonly number[],
+  peaks: readonly WaveformPeak[],
 ): string {
   let d = '';
   for (let i = 0; i < xs.length; i += 1) {
-    const extent = waveformBarExtent(
-      amps[i] ?? 0,
+    const peak = peaks[i];
+    const upExtent = waveformBarExtent(
+      peak?.up ?? 0,
       WAVE_MAX_EXTENT,
       WAVE_MIN_EXTENT,
       1,
     );
-    d += `M${(xs[i] ?? 0).toFixed(2)} ${(WAVE_MID - extent).toFixed(2)} L${(
+    const downExtent = waveformBarExtent(
+      peak?.down ?? 0,
+      WAVE_MAX_EXTENT,
+      WAVE_MIN_EXTENT,
+      1,
+    );
+    d += `M${(xs[i] ?? 0).toFixed(2)} ${(WAVE_MID - upExtent).toFixed(2)} L${(
       xs[i] ?? 0
-    ).toFixed(2)} ${(WAVE_MID + extent).toFixed(2)}`;
+    ).toFixed(2)} ${(WAVE_MID + downExtent).toFixed(2)}`;
   }
   return d;
 }
 
-// Three amplitude terciles → three stroke opacities (mirrors native).
+// Three amplitude terciles → three stroke opacities (mirrors native);
+// a bar's loudness is its longer arm.
 function partitionBars(
   xs: readonly number[],
-  amps: readonly number[],
+  peaks: readonly WaveformPeak[],
 ): readonly [string, string, string] {
-  const sorted = [...amps].sort((a, b) => a - b);
+  const sorted = peaks
+    .map((p) => Math.max(p.up, p.down))
+    .sort((a, b) => a - b);
   const t1 = sorted[Math.floor(sorted.length / 3)] ?? Infinity;
   const t2 = sorted[Math.floor((sorted.length * 2) / 3)] ?? Infinity;
   const groups: [number[], number[], number[]] = [[], [], []];
   for (let i = 0; i < xs.length; i += 1) {
-    const amp = amps[i] ?? 0;
+    const amp = Math.max(peaks[i]?.up ?? 0, peaks[i]?.down ?? 0);
     groups[amp <= t1 ? 0 : amp <= t2 ? 1 : 2].push(i);
   }
   return groups.map((g) =>
     barsPathD(
       g.map((i) => xs[i] ?? 0),
-      g.map((i) => amps[i] ?? 0),
+      g.map((i) => peaks[i] ?? { up: 0, down: 0 }),
     ),
   ) as [string, string, string];
 }
@@ -231,10 +391,10 @@ export type WaveformSeekProps = {
   /**
    * Real measured peaks at the canonical resolution (`peaks.ts`),
    * resampled to the bar count. Absent/null keeps the seeded
-   * `waveformAmplitudes` pattern — extraction is lazy, so the seeded
+   * `waveformPeaks` pattern — extraction is lazy, so the seeded
    * bars are both the pending state and the failure fallback.
    */
-  readonly peaks?: readonly number[] | null | undefined;
+  readonly peaks?: readonly WaveformPeak[] | null | undefined;
   readonly loading?: boolean | undefined;
   readonly labels?: boolean | undefined;
   readonly className?: string | undefined;
@@ -256,6 +416,7 @@ export function WaveformSeek({
   const rootRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(320);
   const [hover, setHover] = useState<number | null>(null);
+  const scrub = useScrubCommit(positionMs, durationMs, onSeek);
   useLayoutEffect(() => {
     const el = rootRef.current;
     if (el === null || typeof ResizeObserver === 'undefined') {
@@ -270,28 +431,29 @@ export function WaveformSeek({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  const enabled = durationMs !== null && durationMs > 0 && onSeek !== undefined;
+  const enabled = scrub.enabled;
+  const shownMs = scrub.shownMs;
   const isLoading = loading || durationMs === null;
-  const p = progressOf(positionMs, durationMs);
+  const p = progressOf(shownMs, durationMs);
   const layout = useMemo(
     () => waveformBarLayout(width, WAVE_BAR_WIDTH, WAVE_BAR_GAP),
     [width],
   );
-  const amps = useMemo(
+  const bars = useMemo(
     () =>
       peaks !== undefined && peaks !== null && peaks.length > 0
         ? resamplePeaks(peaks, layout.count)
-        : waveformAmplitudes(seed, layout.count),
+        : waveformPeaks(seed, layout.count),
     [peaks, seed, layout.count],
   );
   const [dLow, dMid, dHigh] = useMemo(
-    () => partitionBars(layout.xs, amps),
-    [layout, amps],
+    () => partitionBars(layout.xs, bars),
+    [layout, bars],
   );
-  const dAll = useMemo(() => barsPathD(layout.xs, amps), [layout, amps]);
+  const dAll = useMemo(() => barsPathD(layout.xs, bars), [layout, bars]);
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     const stepped =
-      onSeek === undefined ? null : seekStepMs(event.key, positionMs, durationMs);
+      onSeek === undefined ? null : seekStepMs(event.key, shownMs, durationMs);
     if (stepped !== null) {
       event.preventDefault();
       onSeek?.(stepped);
@@ -422,17 +584,29 @@ export function WaveformSeek({
         className={`uw-scrubber uw-wave__input${enabled ? '' : ' uw-off'}`}
         aria-label={t('progress.a11y.seek')}
         aria-valuetext={t('progress.a11y.value', {
-          position: formatClock(positionMs),
+          position: formatClock(shownMs),
           duration: formatClock(durationMs),
         })}
         min={0}
         max={Math.max(1, durationMs ?? 0)}
         step="any"
-        value={Math.round(positionMs)}
+        value={Math.round(shownMs)}
         disabled={!enabled}
         onKeyDown={onKeyDown}
+        onPointerDown={enabled ? scrub.onScrubStart : undefined}
+        onPointerUp={
+          enabled
+            ? (event) => scrub.onScrubEnd(Number(event.currentTarget.value))
+            : undefined
+        }
+        onPointerCancel={enabled ? () => scrub.onScrubEnd(null) : undefined}
+        onLostPointerCapture={
+          enabled ? () => scrub.onScrubEnd(null) : undefined
+        }
         onChange={
-          enabled ? (event) => onSeek?.(Number(event.currentTarget.value)) : undefined
+          enabled
+            ? (event) => scrub.onScrubValue(Number(event.currentTarget.value))
+            : undefined
         }
         onPointerMove={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();
@@ -448,10 +622,10 @@ export function WaveformSeek({
       {labels && (
         <div className="uw-wave__labels">
           <Text variant="metadata" color="secondary" numeric>
-            {formatClock(positionMs)}
+            {formatClock(shownMs)}
           </Text>
           <Text variant="metadata" color="secondary" numeric>
-            {formatRemaining(positionMs, durationMs)}
+            {formatRemaining(shownMs, durationMs)}
           </Text>
         </div>
       )}

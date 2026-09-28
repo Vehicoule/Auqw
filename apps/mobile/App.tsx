@@ -135,6 +135,9 @@ import { createSessionController } from './src/session/controller.ts';
 import type { SessionController } from './src/session/controller.ts';
 import { activateHomeCard } from './src/session/home-card.ts';
 import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
+import { createExpoPeaksPort } from './src/adapters/expo-peaks.ts';
+import { useWaveformPeaks } from './src/adapters/use-waveform-peaks.ts';
+import type { PeaksTarget } from './src/adapters/use-waveform-peaks.ts';
 import { discoveredPotProviderUrl } from './src/adapters/pot-provider-discovery.ts';
 import { potProviderUrlFromPeers } from './src/adapters/pot-provider.ts';
 import { createClock, createIds } from './src/adapters/runtime.ts';
@@ -1399,6 +1402,16 @@ function Main({
       }),
     [state, localeTick],
   );
+  // Real waveform peaks for the Stage seek — lazy, cached per
+  // recordingId|attemptId (a re-prepared stream never inherits the
+  // attempt it replaced). The port borrows the live stream handle;
+  // Android decodes natively, iOS surfaces 'unavailable' and the
+  // seeded pattern stays either way while pending or on failure.
+  const peaksPort = useMemo(
+    () =>
+      Platform.OS === 'android' ? createExpoPeaksPort(AuqwExpo) : null,
+    [],
+  );
   const queueModel = useMemo(() => {
     // Same honesty rule as the library rows: offline + unowned marks
     // 'unavailable' so a dead press isn't a surprise.
@@ -2460,6 +2473,17 @@ function Main({
   );
 
   const playback = state.playback;
+  const peaksTarget: PeaksTarget | null =
+    playback.type === 'buffering' ||
+    playback.type === 'playing' ||
+    playback.type === 'paused'
+      ? {
+          id: `${playback.recordingId}|${playback.identity.attemptId}`,
+          handle: playback.handle,
+          durationMs: playback.durationMs ?? null,
+        }
+      : null;
+  const peaks = useWaveformPeaks(peaksPort, peaksTarget);
   const playing = playback.type === 'playing';
   const currentRecordingId =
     playback.type === 'idle' ? null : playback.recordingId;
@@ -4271,6 +4295,7 @@ function Main({
                   : undefined
               }
               onSeek={seekToPosition}
+              peaks={peaks}
               onRetryLyrics={onRetryLyrics}
               onStartRadio={radioCapable ? onStartRadio : undefined}
               onStopRadio={onStopRadio}
