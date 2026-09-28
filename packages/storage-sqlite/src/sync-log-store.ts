@@ -178,7 +178,11 @@ export class SqliteSyncLogStore implements SyncLogStore {
       (write.watermarks !== undefined &&
         !isSyncCursor(write.watermarks)) ||
       (write.dropDivergenceBefore !== undefined &&
-        !isSafeInt(write.dropDivergenceBefore))
+        !isSafeInt(write.dropDivergenceBefore)) ||
+      (write.dropEntries !== undefined &&
+        !write.dropEntries.every(
+          (drop) => typeof drop.deviceId === 'string' && isSafeInt(drop.seq),
+        ))
     ) {
       return err(
         appError('invalid-response', 'sync append batch failed validation'),
@@ -207,6 +211,17 @@ export class SqliteSyncLogStore implements SyncLogStore {
               `INSERT OR IGNORE INTO sync_log (device_id, seq, entry_json)
                VALUES (?, ?, ?)`,
               [entry.deviceId, entry.seq, JSON.stringify(entry)],
+              context.signal,
+            );
+          }
+        }
+        if (write.dropEntries !== undefined) {
+          // Log compaction: drop merge-dead rows every observed peer
+          // already holds, keyed by the table's UNIQUE(device_id, seq).
+          for (const drop of write.dropEntries) {
+            await conn.execute(
+              'DELETE FROM sync_log WHERE device_id = ? AND seq = ?',
+              [drop.deviceId, drop.seq],
               context.signal,
             );
           }

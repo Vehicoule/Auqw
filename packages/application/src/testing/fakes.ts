@@ -1423,13 +1423,29 @@ export class FakeSyncLogStore implements SyncLogStore {
       (write.watermarks !== undefined &&
         !isSyncCursor(write.watermarks)) ||
       (write.dropDivergenceBefore !== undefined &&
-        !isSafeNonNegative(write.dropDivergenceBefore))
+        !isSafeNonNegative(write.dropDivergenceBefore)) ||
+      (write.dropEntries !== undefined &&
+        !write.dropEntries.every(
+          (drop) =>
+            typeof drop.deviceId === 'string' &&
+            isSafeNonNegative(drop.seq),
+        ))
     ) {
       return err(
         appError('invalid-response', 'append batch failed validation'),
       );
     }
     this.writes.push({ write: this.#clone(write), context });
+    if (write.dropEntries !== undefined) {
+      const dropped = new Set(
+        write.dropEntries.map(
+          (drop) => `${drop.deviceId}${drop.seq}`,
+        ),
+      );
+      this.#entries = this.#entries.filter(
+        (entry) => !dropped.has(`${entry.deviceId}${entry.seq}`),
+      );
+    }
     if (write.entries !== undefined) {
       this.#entries.push(...this.#clone(write.entries));
     }

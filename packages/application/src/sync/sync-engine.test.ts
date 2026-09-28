@@ -2318,6 +2318,62 @@ async function sumSaturation(): Promise<void> {
   assertEqual(fields?.['count'], Number.MAX_SAFE_INTEGER);
 }
 
+async function logCompaction(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 1_000);
+  // seq1 loses the field's lww merge — merge-dead once seq2 lands.
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'Old',
+  });
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'New',
+  });
+  assertEqual(a.store.entries.length, 2);
+  const docA = await a.engine.exportDelta();
+  assert(docA.ok);
+  await mustApply(b.engine, docA.value);
+  // b's export advertises its contiguous claim {a: 2}; a applying it
+  // learns every observed peer holds a's seqs 1-2.
+  const docB = await b.engine.exportDelta();
+  assert(docB.ok);
+  assertEqual(docB.value.cursor['a'], 2);
+  await mustApply(a.engine, docB.value);
+  // The dead loser drops; the merge-live winner stays so a fresh
+  // peer still materializes the same state.
+  const kept = a.store.entries;
+  assertEqual(kept.length, 1);
+  assertEqual(kept[0]?.seq, 2);
+  assertEqual(a.engine.cursor()['a'], 2);
+  // A fresh peer crosses the dropped seq via a skipped hole and
+  // still materializes the winner.
+  const c = await makeEngine('c', 1_000);
+  const docA2 = await a.engine.exportDelta();
+  assert(docA2.ok);
+  assertDeepEqual(
+    docA2.value.entries.map((entry) => entry.seq),
+    [2],
+  );
+  assertDeepEqual(docA2.value.skipped['a'], [1]);
+  await mustApply(c.engine, docA2.value);
+  assertEqual(materialized(c.engine, 'recording', 'r1')?.['title'], 'New');
+  // Hydrating over the compacted log still restores the local seq
+  // counter — the next write must mint seq 3, not reuse 1.
+  const a2 = await makeEngine('a', 1_000, a.store);
+  const wrote = await mustWrite(a2.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'artist',
+    value: 'Someone',
+  });
+  assertEqual(wrote.seq, 3);
+}
+
 export async function run(): Promise<void> {
   await basicWrites();
   await localWriteValidation();
@@ -2364,5 +2420,6 @@ export async function run(): Promise<void> {
   await recordIdsAreInjective();
   await exportedEntriesFrozen();
   await sumSaturation();
+  await logCompaction();
   await propertyHarness();
 }
