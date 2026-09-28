@@ -320,7 +320,7 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'sync.unpair': 'desvincular',
   'sync.unpairA11y': 'desvincular {name}',
   'sync.form.help':
-    'escribe el código de 6 dígitos que muestra el escritorio con su dirección:puerto — p. ej. 192.168.1.20 y 48715',
+    'escribe el código de 6 dígitos que muestra el otro dispositivo con su dirección:puerto — p. ej. 192.168.1.20 y 48715',
   'sync.form.codeA11y': 'código de emparejamiento',
   'sync.form.host': 'dirección del dispositivo',
   'sync.form.port': 'puerto',

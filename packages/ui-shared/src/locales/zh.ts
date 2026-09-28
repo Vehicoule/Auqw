@@ -301,7 +301,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'sync.unpair': '解除配对',
   'sync.unpairA11y': '解除配对 {name}',
   'sync.form.help':
-    '输入桌面上显示的 6 位代码及其地址:端口 — 例如 192.168.1.20 和 48715',
+    '输入另一台设备上显示的 6 位代码及其地址:端口 — 例如 192.168.1.20 和 48715',
   'sync.form.codeA11y': '配对码',
   'sync.form.host': '设备地址',
   'sync.form.port': '端口',

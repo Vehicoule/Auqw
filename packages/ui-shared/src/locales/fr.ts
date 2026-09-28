@@ -315,7 +315,7 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'sync.unpair': 'dissocier',
   'sync.unpairA11y': 'dissocier {name}',
   'sync.form.help':
-    'saisis le code à 6 chiffres affiché sur le bureau avec son adresse:port — ex. 192.168.1.20 et 48715',
+    "saisis le code à 6 chiffres affiché sur l'autre appareil avec son adresse:port — ex. 192.168.1.20 et 48715",
   'sync.form.codeA11y': "code d'appairage",
   'sync.form.host': "adresse de l'appareil",
   'sync.form.port': 'port',

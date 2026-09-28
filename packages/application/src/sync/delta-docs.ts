@@ -1,5 +1,6 @@
 import { appError, err, ok } from '../errors.ts';
 import type { Result } from '../errors.ts';
+import type { CancellationSignal } from '../cancellation.ts';
 import { isSyncDelta } from './sync-engine.ts';
 import type { SyncCursor, SyncDelta } from './sync-engine.ts';
 import { MAX_SYNC_DOC_BYTES, utf8ByteLength } from './sync-wire.ts';
@@ -33,11 +34,54 @@ export const MAX_SYNC_DELTA_DOC_BYTES = MAX_SYNC_DOC_BYTES;
  */
 export const MAX_SYNC_DELTA_TEXT_CHARS = 16 * 1_048_576;
 
+/** Entry bound a fitted export starts from — the engine's wire cap. */
+const MAX_EXPORT_PAGE = 10_000;
+
 function docBytes(doc: SyncDelta): number | null {
   try {
     return utf8ByteLength(JSON.stringify(doc));
   } catch {
     return null;
+  }
+}
+
+/**
+ * Byte-bounded `exportDelta` for the clipboard path: the engine
+ * pages by entry count but a doc caps serialized bytes, so refit by
+ * halving the entry limit until the page ships — erroring only when
+ * a single entry can't fit. The same refit the sync client's
+ * `exportFittedPage` and the desktop IPC adapter already run;
+ * `more` stays honest because the engine sets it against the
+ * applied limit.
+ */
+export async function exportFittedDeltaDoc(
+  exportDelta: (
+    since: SyncCursor | undefined,
+    limit: number,
+    signal: CancellationSignal,
+  ) => Promise<Result<SyncDelta>>,
+  cursor: SyncCursor,
+  signal: CancellationSignal,
+): Promise<Result<SyncDelta>> {
+  let limit = MAX_EXPORT_PAGE;
+  for (;;) {
+    const delta = await exportDelta(cursor, limit, signal);
+    if (!delta.ok) {
+      return delta;
+    }
+    const bytes = docBytes(delta.value);
+    if (bytes !== null && bytes <= MAX_SYNC_DELTA_DOC_BYTES) {
+      return delta;
+    }
+    if (limit === 1) {
+      return err(
+        appError(
+          'invalid-response',
+          'single sync entry exceeds the wire bound',
+        ),
+      );
+    }
+    limit = Math.max(1, Math.floor(limit / 2));
   }
 }
 
@@ -65,7 +109,12 @@ export async function collectSyncDeltaDocs(
     }
     docs.push(doc);
     totalBytes += bytes;
-    if (totalBytes > MAX_SYNC_DELTA_TEXT_CHARS) {
+    // Budget the payload as it serializes, not just the docs: a lone
+    // doc ships bare while an array adds brackets + a comma per join
+    // — accepting on doc bytes alone could mint a payload
+    // `parseSyncDeltaDocs` refuses on arrival.
+    const framing = docs.length > 1 ? docs.length + 1 : 0;
+    if (totalBytes + framing > MAX_SYNC_DELTA_TEXT_CHARS) {
       // The batch outgrew what the parse side accepts — an honest
       // stop beats shipping a payload no peer can import.
       return err(

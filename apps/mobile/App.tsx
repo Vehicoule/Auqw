@@ -37,6 +37,7 @@ import {
   collectSyncDeltaDocs,
   effectiveMapping,
   err,
+  exportFittedDeltaDoc,
   formatEndpoint,
   isMatchGate,
   isRefRejected,
@@ -2484,7 +2485,9 @@ function Main({
   // Clipboard exchange — RN's core Clipboard covers get/setString on
   // Android (deprecated upstream but present in 0.86, zero added deps;
   // see docs/decisions.md). The engine's exportDelta/applyDelta run the
-  // same paging + validation as the desktop IPC path.
+  // same paging + validation as the desktop IPC path —
+  // exportFittedDeltaDoc adds the byte refit the desktop adapter does,
+  // halving the entry limit until each page fits the wire doc cap.
   const onCopyPayload = useCallback(() => {
     if (share.payload !== null) {
       Clipboard.setString(share.payload);
@@ -2495,8 +2498,9 @@ function Main({
     if (engine === undefined) {
       return;
     }
+    const signal = new CancellationSource().signal;
     void collectSyncDeltaDocs((cursor) =>
-      engine.exportDelta(cursor, undefined, new CancellationSource().signal),
+      exportFittedDeltaDoc(engine.exportDelta, cursor, signal),
     )
       .then((collected) => {
         if (!collected.ok) {
