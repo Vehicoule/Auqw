@@ -3240,7 +3240,6 @@ function Main({
             }}
             stageOpen={stageOpen}
             onStageOpenChange={setStageOpen}
-            onStopPlayback={player !== null ? () => void session.stop() : undefined}
             stage={
               player !== null ? (
                 <NowPlayingScreen
@@ -3272,6 +3271,16 @@ function Main({
                       ? () => onDownloadAction(currentRecordingId)
                       : undefined
                   }
+                  onAddToPlaylist={
+                    currentRecordingId !== null
+                      ? () =>
+                        setPickerFor({
+                          kind: 'recording',
+                          recordingId: currentRecordingId,
+                        })
+                      : undefined
+                  }
+                  onStopPlayback={() => void session.stop()}
                   onSeek={seekToPosition}
                   peaks={peaks}
                   onRetryLyrics={onRetryLyrics}

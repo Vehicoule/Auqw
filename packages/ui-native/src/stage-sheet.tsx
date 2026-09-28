@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Image,
   Platform,
@@ -10,6 +10,7 @@ import {
 import type { StyleProp, ViewStyle } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
+  useAnimatedProps,
   useAnimatedReaction,
   useAnimatedStyle,
   useSharedValue,
@@ -267,9 +268,10 @@ const MODES: readonly {
   label: MessageId;
   icon: IconName;
 }[] = [
-  { key: 'queue', label: 'stage.mode.queue', icon: 'queue' },
+  // Same order as the desktop segment — player leads on both platforms.
   { key: 'player', label: 'stage.mode.player', icon: 'note' },
   { key: 'lyrics', label: 'stage.mode.lyrics', icon: 'lyrics' },
+  { key: 'queue', label: 'stage.mode.queue', icon: 'queue' },
 ];
 
 export function ModeSegment({
@@ -288,7 +290,6 @@ export function ModeSegment({
         backgroundColor: theme.colors.fg08,
         padding: 3,
         borderRadius: theme.radius.pill,
-        marginTop: theme.spacing.md,
       }}
     >
       {MODES.map((m) => {
@@ -453,6 +454,10 @@ export type StageSheetProps = {
   readonly queueScrollEnabled?: boolean | undefined;
   readonly dragPreview?: 'rest' | 'mid-drag' | 'dismissed' | undefined;
   readonly topInset?: number | undefined;
+  /** Bottom safe-area inset (home indicator / gesture bar) — the
+      floating mode segment clears it. Hosts without edge insets
+      (the gallery) omit it. */
+  readonly bottomInset?: number | undefined;
   /** Shared 0..1 morph progress — the mini-player's rise drag writes it
       directly, so the sheet tracks the finger instead of replaying the
       `expanded` change after the fact. Standalone hosts (the gallery)
@@ -463,6 +468,11 @@ export type StageSheetProps = {
       pixels to progress against the same distance the sheet translates
       over. Standalone hosts omit it and the sheet measures itself. */
   readonly travel?: SharedValue<number> | undefined;
+  /** Shared settle-target flag (-1 = idle, else 0/1): whichever
+      gesture's release committed this anchor already launched its own
+      velocity-carrying spring, so the `expanded`-flip effect must not
+      restart the settle cold. Standalone hosts omit it. */
+  readonly anchor?: SharedValue<number> | undefined;
   readonly onPlayPause?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onPrevious?: (() => void) | undefined;
@@ -511,8 +521,10 @@ export function StageSheet({
   queueScrollEnabled = true,
   dragPreview,
   topInset = 0,
+  bottomInset = 0,
   progress: progressProp,
   travel: travelProp,
+  anchor: anchorProp,
   onPlayPause,
   onNext,
   onPrevious,
@@ -548,16 +560,34 @@ export function StageSheet({
   // The measured sheet height is the morph's travel distance; the pill
   // divides finger pixels by this same value so the rise is 1:1.
   const travelPx = travelProp ?? internalTravel;
+  const internalAnchor = useSharedValue(-1);
+  const anchor = anchorProp ?? internalAnchor;
   const dragStart = useSharedValue(0);
   const [internalMode, setInternalMode] = useState<StageMode>('player');
   const activeMode = mode ?? internalMode;
 
+  // The parent re-renders on every position tick and passes fresh
+  // inline closures — a deps-listed callback would rebuild the pan
+  // (canceling the in-flight drag), so the gesture commits through a
+  // ref instead.
+  const onExpandChangeRef = useRef(onExpandChange);
+  useEffect(() => {
+    onExpandChangeRef.current = onExpandChange;
+  }, [onExpandChange]);
+
   useEffect(() => {
     const target = expanded ? 1 : 0;
+    // A gesture's release already launched a velocity-carrying spring
+    // toward this anchor — restarting it here would drop the flick.
+    const gestureOwned = anchor.value === target;
+    anchor.value = -1;
+    if (gestureOwned) {
+      return;
+    }
     progress.value = theme.reducedMotion
       ? target
       : withSpring(target, STAGE_SETTLE_SPRING);
-  }, [expanded, theme.reducedMotion, progress]);
+  }, [expanded, theme.reducedMotion, progress, anchor]);
 
   // Gallery-only preview states — production never passes dragPreview,
   // and this must not run for ordinary `expanded` flips or it would
@@ -573,16 +603,19 @@ export function StageSheet({
     }
   }, [dragPreview, expanded, progress]);
 
-  const collapse = useCallback(() => {
-    onExpandChange?.(false);
-  }, [onExpandChange]);
+  const commitAnchor = useCallback((target: number) => {
+    onExpandChangeRef.current?.(target === 1);
+  }, []);
 
-  const commitAnchor = useCallback(
-    (target: number) => {
-      onExpandChange?.(target === 1);
-    },
-    [onExpandChange],
-  );
+  // Tap on the uncovered region dismisses — including mid-morph, where
+  // `expanded` is still false and the state flip alone wouldn't move
+  // the spring.
+  const dismissBackdrop = useCallback(() => {
+    progress.value = theme.reducedMotion
+      ? 0
+      : withSpring(0, STAGE_SETTLE_SPRING);
+    onExpandChangeRef.current?.(false);
+  }, [progress, theme.reducedMotion]);
 
   // The gesture object is stable across renders — a fresh Pan() per
   // render would cancel an in-flight sheet drag on the next tick.
@@ -611,6 +644,9 @@ export function StageSheet({
             ) === 'expanded'
               ? 1
               : 0;
+          // Mark the settle as gesture-owned so the `expanded` flip the
+          // commit schedules doesn't cold-restart this spring.
+          anchor.value = target;
           progress.value = theme.reducedMotion
             ? target
             : withSpring(target, {
@@ -619,7 +655,7 @@ export function StageSheet({
               });
           scheduleOnRN(commitAnchor, target);
         }),
-    [travelPx, theme.reducedMotion, progress, dragStart, commitAnchor],
+    [travelPx, theme.reducedMotion, progress, dragStart, anchor, commitAnchor],
   );
 
   const restCorner = theme.radius.float;
@@ -655,6 +691,14 @@ export function StageSheet({
     opacity: stageScrimAlpha(progress.value),
   }));
 
+  // The floating segment clears the home-indicator zone; its footprint
+  // (lift + touch block + 3px padding each side + a md gap) is the
+  // reserve pinned content keeps clear of — scrollable modes put the
+  // same reserve inside their content so rows/lines glide beneath it.
+  const segmentLift = bottomInset + theme.spacing.sm;
+  const segmentReserve =
+    segmentLift + theme.sizes.touch + 6 + theme.spacing.md;
+
   const immersive = activeMode === 'player' && player.artworkUrl !== null;
   // StageSheet's own inline colors must follow the sheet's surface —
   // children re-resolve via the nested dark provider, but a color read
@@ -666,22 +710,47 @@ export function StageSheet({
   // starts rising (a mid-flight drag must never reveal bare surface)
   // and unmounts only once the morph is fully back at the pill — the
   // settle-back path still gets its backdrop.
-  const [backdropOn, setBackdropOn] = useState(expanded);
+  const [risenOn, setRisenOn] = useState(expanded);
   // `expanded` mirrored onto the UI thread — the reaction below must
   // read a shared value; a captured ref only snapshots at worklet
-  // creation and would pin a sheet mounted-expanded forever.
+  // creation and would pin a sheet mounted-expanded forever. Synced
+  // in a layout effect so the write lands inside the same commit as
+  // the expanded flip: a passive effect would leave a window where
+  // the gate still reads stale and taps leak underneath.
   const expandedShared = useSharedValue(expanded);
-  useEffect(() => {
+  useLayoutEffect(() => {
     expandedShared.value = expanded;
   }, [expanded, expandedShared]);
   useAnimatedReaction(
     () => progress.value > 0.001,
     (risen, prev) => {
       if (risen === prev) return;
-      scheduleOnRN(setBackdropOn, risen || expandedShared.value);
+      scheduleOnRN(setRisenOn, risen || expandedShared.value);
     },
     [progress],
   );
+  // The dismiss surface's touch + a11y gate rides the morph on the
+  // UI thread: on native the surface stays mounted and starts
+  // intercepting the same frame the sheet lifts off the pill (or the
+  // expanded anchor lands) — a state-mounted surface would leave a
+  // JS-hop window where a tap slips through to content underneath.
+  // RNW writes those non-style animated props as inert DOM
+  // attributes: the wrapper's pe:none class is baked at mount and
+  // never swaps, and `pointer-events` inherits — RNW Pressable
+  // emits no pe class of its own, so the web gate pairs the
+  // Pressable's mount (`dismissOn`, which also covers the
+  // synchronous expanded flip) with an explicit pointerEvents='auto'
+  // that overrides the inherited dead class. On native 'auto' is
+  // the default and the wrapper's 'none' still gates the subtree.
+  const dismissSurfaceProps = useAnimatedProps(() => {
+    const on = progress.value > 0.001 || expandedShared.value;
+    return {
+      pointerEvents: on ? 'auto' : 'none',
+      accessibilityElementsHidden: !on,
+      importantForAccessibility: on ? 'auto' : 'no-hide-descendants',
+    } as const;
+  });
+  const dismissOn = risenOn || expanded;
 
   const body = (
     <>
@@ -971,7 +1040,12 @@ export function StageSheet({
           ) : lyrics.lines.length === 0 ? (
             <EmptyState title={t('lyrics.empty')} icon="lyrics" />
           ) : (
-            <ScrollView style={{ flex: 1, marginTop: theme.spacing.sm }}>
+            <ScrollView
+              style={{ flex: 1, marginTop: theme.spacing.sm }}
+              // Lines glide beneath the floating segment; the pad lets
+              // the last line scroll fully clear of it.
+              contentContainerStyle={{ paddingBottom: segmentReserve }}
+            >
               {lyrics.lines.map((line, i) => (
                 <Text
                   key={i}
@@ -1035,6 +1109,7 @@ export function StageSheet({
                 queue={queue}
                 reordering={queueReordering}
                 scrollEnabled={queueScrollEnabled}
+                contentPaddingBottom={segmentReserve}
                 onPressItem={onPressQueueItem}
                 onRemoveItem={onRemoveQueueItem}
                 onMoveItem={onMoveQueueItem}
@@ -1044,15 +1119,28 @@ export function StageSheet({
           )}
         </View>
       )}
-      <ModeSegment
-        mode={activeMode}
-        onSelect={(m) => {
-          setInternalMode(m);
-          if (onModeChange !== undefined) {
-            onModeChange(m);
-          }
+      {/* The mode segment floats over the sheet's bottom safe zone —
+          it takes no layout space, so lyrics/queue rows and the
+          transport never reflow around it or hide beneath it. */}
+      <View
+        pointerEvents="box-none"
+        style={{
+          position: 'absolute',
+          left: theme.spacing.xl,
+          right: theme.spacing.xl,
+          bottom: segmentLift,
         }}
-      />
+      >
+        <ModeSegment
+          mode={activeMode}
+          onSelect={(m) => {
+            setInternalMode(m);
+            if (onModeChange !== undefined) {
+              onModeChange(m);
+            }
+          }}
+        />
+      </View>
     </>
   );
 
@@ -1069,14 +1157,28 @@ export function StageSheet({
           scrimStyle,
         ]}
       />
-      {expanded && (
-        <Pressable
-          compact
-          onPress={collapse}
-          accessibilityLabel={t('sheets.closeA11y')}
-          style={StyleSheet.absoluteFill}
-        />
-      )}
+      {/* Dismiss surface — taps on the uncovered region (or through
+          the parked sheet's pointerEvents=none mid-morph) collapse
+          the morph instead of leaking to content underneath. The
+          wrapper mounts always: on native its gate rides the UI
+          thread — a JS-gated ancestor in the hit path would reopen
+          the hop — while on web it is inert and the Pressable's own
+          mount plus its explicit pointerEvents='auto' (overriding
+          the wrapper's inherited dead class) is the gate. */}
+      <Animated.View
+        animatedProps={dismissSurfaceProps}
+        style={StyleSheet.absoluteFill}
+      >
+        {(dismissOn || Platform.OS !== 'web') && (
+          <Pressable
+            compact
+            onPress={dismissBackdrop}
+            accessibilityLabel={t('sheets.closeA11y')}
+            pointerEvents="auto"
+            style={StyleSheet.absoluteFill}
+          />
+        )}
+      </Animated.View>
       <Animated.View
         onLayout={(e) => {
           setHeight(e.nativeEvent.layout.height);
@@ -1104,7 +1206,7 @@ export function StageSheet({
             artwork and controls fade in through the pill's fade window
             and are fully present at the input gate. */}
         <Animated.View style={[StyleSheet.absoluteFill, contentStyle]}>
-          {immersive && backdropOn && (
+          {immersive && risenOn && (
             <PlayerBackdrop artworkUrl={player.artworkUrl} />
           )}
           {immersive ? (
@@ -1117,7 +1219,12 @@ export function StageSheet({
                 style={{
                   flex: 1,
                   paddingHorizontal: theme.spacing.xl,
-                  paddingBottom: theme.spacing.lg,
+                  // The player's pinned tail (waveform + transport) can't
+                  // scroll beneath the segment, so it reserves the
+                  // segment's footprint here; lyrics/queue put it inside
+                  // their scroll content instead.
+                  paddingBottom:
+                    activeMode === 'player' ? segmentReserve : 0,
                 }}
               >
                 {body}
@@ -1128,7 +1235,8 @@ export function StageSheet({
               style={{
                 flex: 1,
                 paddingHorizontal: theme.spacing.xl,
-                paddingBottom: theme.spacing.lg,
+                paddingBottom:
+                  activeMode === 'player' ? segmentReserve : 0,
               }}
             >
               {body}

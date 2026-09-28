@@ -159,6 +159,7 @@ export type PressableProps = {
   readonly accessibilityRole?: AccessibilityRole | undefined;
   readonly accessibilityState?: AccessibilityState | undefined;
   readonly disabled?: boolean | undefined;
+  readonly pointerEvents?: 'auto' | 'none' | 'box-none' | 'box-only' | undefined;
   readonly compact?: boolean | undefined;
   readonly hitSlop?: Insets | undefined;
   readonly style?:
@@ -176,6 +177,7 @@ export function Pressable({
   accessibilityRole = 'button',
   accessibilityState,
   disabled = false,
+  pointerEvents,
   compact = false,
   hitSlop,
   style,
@@ -197,6 +199,7 @@ export function Pressable({
       accessibilityLabel={accessibilityLabel}
       accessibilityHint={accessibilityHint}
       accessibilityState={{ ...accessibilityState, disabled: off }}
+      pointerEvents={pointerEvents}
       hitSlop={hitSlop ?? (compact ? slop : undefined)}
       style={({ pressed }) => [
         !compact && {
