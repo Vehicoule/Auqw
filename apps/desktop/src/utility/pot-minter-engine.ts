@@ -50,13 +50,13 @@ export type MinterRequest =
     }
   | { readonly id: number; readonly op: 'dispose'; readonly sessionId: number };
 
-export type MinterBuilt = {
+type MinterBuilt = {
   readonly sessionId: number;
   readonly expiresAtMs: number;
   readonly freshUntilMs?: number;
 };
 
-export type MinterErrorPayload = {
+type MinterErrorPayload = {
   readonly status?: number;
   readonly kind?: string;
   readonly message: string;
@@ -83,7 +83,7 @@ export function wireError(thrown: unknown): MinterErrorPayload {
   return { message: 'pot: minter failed' };
 }
 
-export function unwiredError(payload: MinterErrorPayload): Error {
+function unwiredError(payload: MinterErrorPayload): Error {
   if (
     typeof payload.status === 'number' &&
     typeof payload.kind === 'string'
@@ -134,7 +134,7 @@ function childEnv(): Record<string, string> {
  * session inside it) rather than queue behind it. */
 const CHILD_OP_TIMEOUT_MS = 120_000;
 
-export type ProcessMinterDeps = {
+type ProcessMinterDeps = {
   readonly log?: (line: string) => void;
   /** Child entry path — defaults to the bundled sibling artifact. */
   readonly childModule?: string;

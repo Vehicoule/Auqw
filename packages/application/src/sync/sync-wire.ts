@@ -24,7 +24,7 @@ import { isSyncCursor, type SyncCursor } from './sync-engine.ts';
  *                  sync-request (S→C kick), bye, error       (sealed)
  */
 
-export const WIRE_VERSION = 1;
+const WIRE_VERSION = 1;
 
 /** Cap while unauthenticated — mirrors the server's handshake cap. */
 export const HANDSHAKE_CAP = 16 * 1_024;
@@ -36,7 +36,7 @@ export const SEAL_OVERHEAD = 28;
 export const SESSION_CAP = MAX_SYNC_DOC_BYTES + SEAL_OVERHEAD + 4_096;
 
 /** `since` never crosses 256 on the wire (isSyncReq). */
-export const MAX_SINCE_CHARS = 256;
+const MAX_SINCE_CHARS = 256;
 
 export const DEVICE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{7,63}$/;
 export const DEVICE_NAME_MAX = 128;
@@ -71,7 +71,7 @@ export type ClientHello = {
   readonly endpoints?: readonly string[];
 };
 
-export type ServerChallenge = {
+type ServerChallenge = {
   readonly v: number;
   readonly kind: 'challenge';
   /** Server ephemeral X25519 SPKI, base64. */
@@ -119,9 +119,9 @@ export type WelcomeMsg = {
 };
 
 export type RejectMsg = { readonly t: 'reject'; readonly reason: string };
-export type PongMsg = { readonly t: 'pong' };
-export type SyncRequestMsg = { readonly t: 'sync-request' };
-export type ByeMsg = { readonly t: 'bye' };
+type PongMsg = { readonly t: 'pong' };
+type SyncRequestMsg = { readonly t: 'sync-request' };
+type ByeMsg = { readonly t: 'bye' };
 export type ErrorMsg = { readonly t: 'error'; readonly code: string };
 
 /** Only the caller's own record — the wire never dumps the registry. */
@@ -230,7 +230,7 @@ export function isServerChallenge(
   );
 }
 
-export function isSyncDeviceRecord(
+function isSyncDeviceRecord(
   value: unknown,
 ): value is SyncDeviceRecord {
   return (
@@ -330,7 +330,7 @@ export function isSyncRequestMsg(
   );
 }
 
-export function isByeMsg(value: unknown): value is ByeMsg {
+function isByeMsg(value: unknown): value is ByeMsg {
   return isRecord(value) && hasExactKeys(value, ['t']) && value['t'] === 'bye';
 }
 
@@ -380,7 +380,7 @@ export function isPairingPayload(
  * Encode mirrors local-source.ts: real UTF-8, lone surrogates encode
  * as their own code point — hashing needs determinism, not validity.
  */
-export function utf8Encode(input: string): Uint8Array {
+function utf8Encode(input: string): Uint8Array {
   const out: number[] = [];
   for (let i = 0; i < input.length; i += 1) {
     const cp = input.codePointAt(i) ?? 0;
@@ -423,7 +423,7 @@ export function utf8ByteLength(input: string): number {
 }
 
 /** Replacement-char decode — malformed bytes never throw. */
-export function utf8Decode(bytes: Uint8Array): string {
+function utf8Decode(bytes: Uint8Array): string {
   const cps: number[] = [];
   let i = 0;
   while (i < bytes.length) {
@@ -645,7 +645,7 @@ export function wireRejectReason(reason: string): AppError {
 
 /* ------------------------------ the pump --------------------------- */
 
-export type WireCloseReason = 'peer' | 'error' | 'oversize' | 'local';
+type WireCloseReason = 'peer' | 'error' | 'oversize' | 'local';
 
 export type SyncWirePump = {
   /** false when the payload exceeds the phase cap or the pump is dead. */

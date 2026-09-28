@@ -25,7 +25,6 @@ import type {
   WaveformPeak,
 } from '@auqw/ui-shared';
 
-export type { LyricsModel, StageMode } from '@auqw/ui-shared';
 
 export type TransportProps = {
   readonly variant?: 'm3e' | 'ios' | undefined;

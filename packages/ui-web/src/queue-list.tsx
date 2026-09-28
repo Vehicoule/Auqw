@@ -14,7 +14,7 @@ export type PendingMove = { readonly id: string; readonly dir: -1 | 1 };
 // Unacknowledged pending ops expire after this window: the caller
 // contract carries no reject signal, so a bounded TTL is the honest
 // way to bound how long a truly-failed move can ghost the order.
-export const PENDING_TTL_MS = 30_000;
+const PENDING_TTL_MS = 30_000;
 
 export function idsEqual(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((id, i) => id === b[i]);

@@ -132,7 +132,7 @@ export function isPickFilesArgs(value: unknown): value is PickFilesArgs {
  * Secure-store keys map to one file each under userData — the pattern
  * refuses separators so a key can never walk the directory.
  */
-export function isSecureKey(value: unknown): value is string {
+function isSecureKey(value: unknown): value is string {
   return (
     typeof value === 'string' &&
     /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value) &&
@@ -231,7 +231,7 @@ export type PluginManifestPayload = {
   readonly version: string | null;
 };
 
-export function isPluginManifestPayload(
+function isPluginManifestPayload(
   value: unknown,
 ): value is PluginManifestPayload {
   return (
@@ -307,7 +307,7 @@ export function isPreparedStreamPayload(
   );
 }
 
-export type HttpTracePayload = {
+type HttpTracePayload = {
   readonly method: string;
   readonly url: string;
   readonly status?: number;
@@ -346,7 +346,7 @@ function isHttpTracePayload(value: unknown): value is HttpTracePayload {
   );
 }
 
-export type GuestLogPayload = {
+type GuestLogPayload = {
   readonly level: string;
   readonly message: string;
 };
@@ -558,7 +558,7 @@ export function isStreamOpenArgs(
 }
 
 /** `stream:open` result — `null` remaining = unknown total. */
-export type StreamOpenResult = { readonly remaining: number | null };
+type StreamOpenResult = { readonly remaining: number | null };
 
 export function isStreamOpenResult(
   value: unknown,
@@ -594,7 +594,7 @@ export function isStreamReadArgs(
 }
 
 /** `stream:read` result — raw bytes ride base64; empty = EOF. */
-export type StreamReadResult = { readonly data: string };
+type StreamReadResult = { readonly data: string };
 
 export function isStreamReadResult(
   value: unknown,
@@ -607,7 +607,7 @@ export function isStreamReadResult(
   );
 }
 
-export type StreamServeUrlResult = { readonly url: string };
+type StreamServeUrlResult = { readonly url: string };
 
 export function isStreamServeUrlResult(
   value: unknown,
@@ -750,7 +750,7 @@ export type StreamPortLike = {
   readonly close: () => void;
 };
 
-export type UndefinedArgs = undefined;
+type UndefinedArgs = undefined;
 
 /**
  * The storage channels forward to the utility process: `begin` pins a
@@ -819,7 +819,7 @@ export type StorageExecuteArgs = {
   readonly sql: string;
   readonly params: readonly SqlValue[];
 };
-export type StorageQueryArgs = StorageExecuteArgs;
+type StorageQueryArgs = StorageExecuteArgs;
 
 export function isStorageExecuteArgs(
   value: unknown,
@@ -911,7 +911,7 @@ export type AuqwStorage = {
 /** Cap on an opaque delta document — sync payloads must not balloon IPC. */
 export const MAX_SYNC_DOC_BYTES = 1_048_576;
 
-export type SyncListenerState =
+type SyncListenerState =
   | 'starting'
   | 'listening'
   | 'unavailable'
@@ -1400,10 +1400,10 @@ export function isSyncTriggerResult(
  * which runs per write before stamping — the boundary only owes the
  * bounded-shape check below.
  */
-export const MAX_SYNC_LOCAL_WRITES = 256;
-export const MAX_SYNC_FIELD_BYTES = 65_536;
+const MAX_SYNC_LOCAL_WRITES = 256;
+const MAX_SYNC_FIELD_BYTES = 65_536;
 
-export type SyncLocalWriteDoc =
+type SyncLocalWriteDoc =
   | {
       readonly kind: string;
       readonly recordId: string;
@@ -1416,7 +1416,7 @@ export type SyncLocalWriteDoc =
       readonly tombstone: true;
     };
 
-export function isSyncLocalWriteDoc(
+function isSyncLocalWriteDoc(
   value: unknown,
 ): value is SyncLocalWriteDoc {
   if (
@@ -1564,7 +1564,7 @@ export function isSyncMaterializedResult(
  * The renderer's `api.sync.*` — one method per `sync:*` channel; the
  * utility's sync service answers them all and works plugin-free.
  */
-export type AuqwSync = {
+type AuqwSync = {
   readonly status: () => Promise<SyncStatusResult>;
   readonly pairing: () => Promise<SyncPairingResult>;
   readonly devices: () => Promise<SyncDevicesResult>;
@@ -1640,11 +1640,11 @@ export type AuqwSync = {
  * `name.part` over `name`. Destination names stay bare — the managed
  * dir under userData is the only writable surface.
  */
-export const MAX_TRANSFER_NAME = 512;
+const MAX_TRANSFER_NAME = 512;
 // 4MiB decoded → ceil(4194304/3)*4 = 5,592,408 base64 chars.
-export const MAX_TRANSFER_WRITE_BASE64 = 5_592_408;
-export const MAX_SWEEP_KEEP = 65_536;
-export const MAX_LIST_ENTRIES = 65_536;
+const MAX_TRANSFER_WRITE_BASE64 = 5_592_408;
+const MAX_SWEEP_KEEP = 65_536;
+const MAX_LIST_ENTRIES = 65_536;
 
 export type TransferBeginArgs = {
   readonly destPath: string;
@@ -1662,10 +1662,10 @@ export function isTransferBeginArgs(
   );
 }
 
-export type TransferBeginResult = { readonly sinkId: string };
+type TransferBeginResult = { readonly sinkId: string };
 export type TransferSinkArgs = { readonly sinkId: string };
 
-export function isSinkId(value: unknown): value is string {
+function isSinkId(value: unknown): value is string {
   return (
     typeof value === 'string' &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
@@ -1711,7 +1711,7 @@ export function isTransferWriteArgs(
   );
 }
 
-export type TransferCommitResult = { readonly offset: number };
+type TransferCommitResult = { readonly offset: number };
 
 export function isTransferCommitResult(
   value: unknown,
@@ -1741,7 +1741,7 @@ export function isTransferFinalizeArgs(
   );
 }
 
-export type TransferFinalizeResult = { readonly digest: string };
+type TransferFinalizeResult = { readonly digest: string };
 
 export function isTransferFinalizeResult(
   value: unknown,
@@ -1782,7 +1782,7 @@ export function isTransferNameArgs(
   );
 }
 
-export type TransferStatResult = {
+type TransferStatResult = {
   readonly exists: boolean;
   readonly bytes: number | null;
 };
@@ -1814,7 +1814,7 @@ export function isTransferSweepArgs(
   );
 }
 
-export type TransferSweepResult = { readonly swept: number };
+type TransferSweepResult = { readonly swept: number };
 
 export function isTransferSweepResult(
   value: unknown,
@@ -1833,7 +1833,7 @@ export type TransferSinkInfo = {
   readonly openedMs: number;
 };
 
-export function isTransferSinkInfo(
+function isTransferSinkInfo(
   value: unknown,
 ): value is TransferSinkInfo {
   return (
@@ -1846,9 +1846,9 @@ export function isTransferSinkInfo(
   );
 }
 
-export type TransferFileInfo = { readonly name: string; readonly bytes: number };
+type TransferFileInfo = { readonly name: string; readonly bytes: number };
 
-export function isTransferFileInfo(
+function isTransferFileInfo(
   value: unknown,
 ): value is TransferFileInfo {
   return (
@@ -1859,7 +1859,7 @@ export function isTransferFileInfo(
   );
 }
 
-export type TransferListResult = {
+type TransferListResult = {
   readonly sinks: readonly TransferSinkInfo[];
   readonly files: readonly TransferFileInfo[];
 };
@@ -1879,11 +1879,11 @@ export function isTransferListResult(
   );
 }
 
-export type TransferStatusResult = TransferSinkInfo;
+type TransferStatusResult = TransferSinkInfo;
 
 export const isTransferStatusResult = isTransferSinkInfo;
 
-export type TransferStatsResult = {
+type TransferStatsResult = {
   readonly bytes: number;
   readonly files: number;
   readonly partials: number;
@@ -1911,7 +1911,7 @@ export function isTransferStatsResult(
  * unbounded work across the boundary.
  */
 export const MAX_TAGREAD_BATCH = 64;
-export const MAX_DOC_ID = 4096;
+const MAX_DOC_ID = 4096;
 export const MAX_ENUM_ENTRIES = 50_000;
 export const MAX_TAG_FIELD = 4096;
 
@@ -1927,7 +1927,7 @@ export function isTagreadEnumerateArgs(
   );
 }
 
-export type LocalEntryPayload = {
+type LocalEntryPayload = {
   readonly docId: string;
   readonly name: string;
   readonly size: number;
@@ -1935,7 +1935,7 @@ export type LocalEntryPayload = {
   readonly modifiedMs: number | null;
 };
 
-export function isLocalEntryPayload(
+function isLocalEntryPayload(
   value: unknown,
 ): value is LocalEntryPayload {
   return (
@@ -1950,7 +1950,7 @@ export function isLocalEntryPayload(
   );
 }
 
-export type TagreadEnumerateResult = {
+type TagreadEnumerateResult = {
   readonly entries: readonly LocalEntryPayload[];
 };
 
@@ -1984,12 +1984,12 @@ export function isTagreadBatchArgs(
   );
 }
 
-export type FileFingerprintPayload = {
+type FileFingerprintPayload = {
   readonly docId: string;
   readonly fingerprint: string;
 };
 
-export function isFileFingerprintPayload(
+function isFileFingerprintPayload(
   value: unknown,
 ): value is FileFingerprintPayload {
   return (
@@ -2000,7 +2000,7 @@ export function isFileFingerprintPayload(
   );
 }
 
-export type TagreadFingerprintResult = {
+type TagreadFingerprintResult = {
   readonly fingerprints: readonly (FileFingerprintPayload | null)[];
 };
 
@@ -2018,7 +2018,7 @@ export function isTagreadFingerprintResult(
   );
 }
 
-export type LocalTagsPayload = {
+type LocalTagsPayload = {
   readonly docId: string;
   readonly title: string | null;
   readonly artist: string | null;
@@ -2027,7 +2027,7 @@ export type LocalTagsPayload = {
   readonly genre: string | null;
 };
 
-export function isLocalTagsPayload(
+function isLocalTagsPayload(
   value: unknown,
 ): value is LocalTagsPayload {
   const tagField = (v: unknown) => v === null || isBoundedString(v, MAX_TAG_FIELD);
@@ -2051,7 +2051,7 @@ export function isLocalTagsPayload(
   );
 }
 
-export type TagreadReadResult = {
+type TagreadReadResult = {
   readonly tags: readonly (LocalTagsPayload | null)[];
 };
 
@@ -2073,9 +2073,9 @@ export function isTagreadReadResult(
  * engine's `addFolder` commits; probe/playback back the renderer's
  * `localPlaybackFor` hook; sweep is the startup integrity reporter.
  */
-export const MAX_LOCAL_PATHS = 1024;
-export const MAX_LOCAL_PATH = 4096;
-export const MAX_PLAYBACK_ENTRIES = 100_000;
+const MAX_LOCAL_PATHS = 1024;
+const MAX_LOCAL_PATH = 4096;
+const MAX_PLAYBACK_ENTRIES = 100_000;
 
 export type LocalAddArgs = { readonly paths: readonly string[] };
 
@@ -2096,7 +2096,7 @@ export type LocalPickPayload = {
   readonly kind: 'dir' | 'file';
 };
 
-export function isLocalPickPayload(
+function isLocalPickPayload(
   value: unknown,
 ): value is LocalPickPayload {
   return (
@@ -2108,7 +2108,7 @@ export function isLocalPickPayload(
   );
 }
 
-export type LocalAddResult = {
+type LocalAddResult = {
   readonly picks: readonly LocalPickPayload[];
 };
 
@@ -2136,7 +2136,7 @@ export function isLocalProbeArgs(
   );
 }
 
-export type LocalProbeResult = { readonly uri: string | null };
+type LocalProbeResult = { readonly uri: string | null };
 
 export function isLocalProbeResult(
   value: unknown,
@@ -2150,7 +2150,7 @@ export function isLocalProbeResult(
   );
 }
 
-export type LocalSourcePayload = {
+type LocalSourcePayload = {
   readonly sourceId: string;
   readonly treeUri: string;
   readonly label: string;
@@ -2159,7 +2159,7 @@ export type LocalSourcePayload = {
   readonly fileCount: number;
 };
 
-export function isLocalSourcePayload(
+function isLocalSourcePayload(
   value: unknown,
 ): value is LocalSourcePayload {
   return (
@@ -2182,7 +2182,7 @@ export function isLocalSourcePayload(
   );
 }
 
-export type LocalListResult = {
+type LocalListResult = {
   readonly sources: readonly LocalSourcePayload[];
 };
 
@@ -2198,12 +2198,12 @@ export function isLocalListResult(
   );
 }
 
-export type LocalPlaybackEntry = {
+type LocalPlaybackEntry = {
   readonly recordingId: string;
   readonly uri: string;
 };
 
-export function isLocalPlaybackEntry(
+function isLocalPlaybackEntry(
   value: unknown,
 ): value is LocalPlaybackEntry {
   return (
@@ -2215,7 +2215,7 @@ export function isLocalPlaybackEntry(
   );
 }
 
-export type LocalPlaybackResult = {
+type LocalPlaybackResult = {
   readonly entries: readonly LocalPlaybackEntry[];
 };
 
@@ -2231,7 +2231,7 @@ export function isLocalPlaybackResult(
   );
 }
 
-export type LocalSweepResult = {
+type LocalSweepResult = {
   readonly missing: number;
   readonly sources: readonly { readonly sourceId: string; readonly missing: number }[];
 };

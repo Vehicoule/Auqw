@@ -76,7 +76,7 @@ import type { SecureStore } from './secure-store.ts';
 import type { ThemeMonitor } from './theme-monitor.ts';
 
 /** Structural slices of the Electron IPC surface — keeps this module electron-free. */
-export interface RendererLifecycle {
+interface RendererLifecycle {
   on?(
     event: 'destroyed' | 'render-process-gone' | 'did-navigate',
     listener: () => void,

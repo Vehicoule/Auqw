@@ -7,7 +7,7 @@ export const CURRENT_SCHEMA_VERSION = 8;
  * these names in sqlite_master means a foreign file being adopted
  * silently, and initialize rejects it instead of merging into it.
  */
-export const KNOWN_TABLES: readonly string[] = Object.freeze([
+const KNOWN_TABLES: readonly string[] = Object.freeze([
   'schema_version',
   'recordings',
   'source_refs',
@@ -370,7 +370,7 @@ const RENAMED_OBJECT_NAME =
  * indexes share one ('object'); triggers live in their own and may
  * reuse an object name without colliding.
  */
-export type SchemaObjectKind = 'object' | 'trigger';
+type SchemaObjectKind = 'object' | 'trigger';
 
 /**
  * Every schema-object name the migrations create or rename to —

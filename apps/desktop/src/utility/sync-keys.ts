@@ -20,7 +20,7 @@ import {
  * key material — its `api.sync.*` surface carries device metadata only.
  */
 
-export const SYNC_KEYS_CHANNEL = 'sync:keys';
+const SYNC_KEYS_CHANNEL = 'sync:keys';
 
 /** Cap on the registry — pairing spam can't grow the store unbounded. */
 export const MAX_SYNC_DEVICES = 64;
@@ -78,7 +78,7 @@ export type SyncKeysOp =
   | { readonly op: 'device-touch'; readonly record: SyncDeviceRecord }
   | { readonly op: 'device-delete'; readonly id: string };
 
-export type SyncKeysResult =
+type SyncKeysResult =
   | { readonly identity: SyncIdentity | null }
   | { readonly devices: readonly SyncDeviceRecord[]; readonly skipped: number }
   | null;

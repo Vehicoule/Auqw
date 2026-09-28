@@ -6,7 +6,7 @@ import { CodedError } from 'expo-modules-core';
 // Host surface — verbatim contract from the retired plugin-host-expo module.
 // ---------------------------------------------------------------------------
 
-export type HostConfig = {
+type HostConfig = {
   fuelPerEntry: number;
   fuelTotal: number;
   /** Base URL of a bgutil-compatible PO-token service; omit for anonymous resolves. */
@@ -25,7 +25,7 @@ export type HostConfig = {
   authToken?: string | undefined;
 };
 
-export type HttpTraceSummary = {
+type HttpTraceSummary = {
   method: string;
   /** Query/fragment-free URL. */
   url: string;
@@ -34,12 +34,12 @@ export type HttpTraceSummary = {
   elapsedMs: number;
 };
 
-export type GuestLogSummary = {
+type GuestLogSummary = {
   level: string;
   message: string;
 };
 
-export type AttemptSummary = {
+type AttemptSummary = {
   requestId: string;
   steps: number;
   httpCalls: number;
@@ -50,7 +50,7 @@ export type AttemptSummary = {
   guestLog: GuestLogSummary[];
 };
 
-export type ResolvedResource = {
+type ResolvedResource = {
   url: string;
   mime: string;
   bitrateKbps?: number;
@@ -60,27 +60,27 @@ export type ResolvedResource = {
   itag?: number;
 };
 
-export type ResolveOutcome =
+type ResolveOutcome =
   | { type: 'resolved'; resource: ResolvedResource; attempt: AttemptSummary }
   | { type: 'failed'; kind: string; message: string; attempt: AttemptSummary };
 
 /** Outcome of a generic capability request: the raw result JSON plus attempt. */
-export type RequestOutcome =
+type RequestOutcome =
   | { type: 'succeeded'; resultJson: string; attempt: AttemptSummary }
   | { type: 'failed'; kind: string; message: string; attempt: AttemptSummary };
 
-export type SpinReport = {
+type SpinReport = {
   elapsedMs: number;
   fuelUsed: number;
   kind: string;
 };
 
-export type OutcomeEvent = {
+type OutcomeEvent = {
   requestId: string;
   outcome: ResolveOutcome;
 };
 
-export type RequestOutcomeEvent = {
+type RequestOutcomeEvent = {
   requestId: string;
   outcome: RequestOutcome;
 };
@@ -93,7 +93,7 @@ export type RequestOutcomeEvent = {
 /** ABI error taxonomy plus the seam's terminal-transition kinds —
  * mirrors `packages/application/src/errors.ts` (wire kinds surface
  * verbatim from the host, so the union must cover the whole set). */
-export type ErrorKind =
+type ErrorKind =
   | 'no-result'
   | 'not-applicable'
   | 'unsupported'
@@ -120,7 +120,7 @@ export type ErrorKind =
   | 'internal';
 
 /** A stream whose head bytes are staged for attach. Opaque: prepared → attached → released. */
-export type PreparedStream = {
+type PreparedStream = {
   handle: string;
   mime: string;
   itag?: number;
@@ -129,7 +129,7 @@ export type PreparedStream = {
   bitrateKbps?: number;
 };
 
-export type PrepareOutcome =
+type PrepareOutcome =
   | { type: 'prepared'; stream: PreparedStream; attempt: AttemptSummary }
   | { type: 'failed'; kind: ErrorKind; message: string; attempt: AttemptSummary };
 
@@ -140,7 +140,7 @@ export type PrepareOutcomeEvent = {
   outcome: PrepareOutcome;
 };
 
-export type PlaybackState =
+type PlaybackState =
   | 'idle'
   | 'buffering'
   | 'ready'
@@ -149,7 +149,7 @@ export type PlaybackState =
   | 'ended'
   | 'failed';
 
-export type PlaybackStatusEvent = {
+type PlaybackStatusEvent = {
   handle: string;
   attemptId: string;
   queueRev: number;
@@ -159,7 +159,7 @@ export type PlaybackStatusEvent = {
   error?: { kind: ErrorKind; message: string };
 };
 
-export type PhaseMark = {
+type PhaseMark = {
   name: string;
   /** Epoch ms (Date.now domain) at the mark, for JS joins. */
   atMs: number;
@@ -167,7 +167,7 @@ export type PhaseMark = {
   sinceStartMs: number;
 };
 
-export type PhaseMarkEvent = PhaseMark & {
+type PhaseMarkEvent = PhaseMark & {
   handle: string;
   attemptId: string;
   queueRev: number;
@@ -179,7 +179,7 @@ export type PhaseMarkEvent = PhaseMark & {
  * durations (`resolveMs` of the minting resolve, `remintMs` of the
  * last re-mint). Diagnostics; available after terminal states.
  */
-export type StreamPhaseMarks = {
+type StreamPhaseMarks = {
   prepareStartedMs: number;
   resolveMs?: number;
   remintMs?: number;
@@ -189,7 +189,7 @@ export type StreamPhaseMarks = {
 };
 
 /** One immutable projected queue item — never carries a signed URL. */
-export type QueueProjectionItem = {
+type QueueProjectionItem = {
   occurrenceId: string;
   provider: string | null;
   sourceRef: string | null;
@@ -203,7 +203,7 @@ export type QueueProjectionItem = {
  * service moves only a cursor within it and reports
  * `queue-transition` events for reconciliation.
  */
-export type QueueProjection = {
+type QueueProjection = {
   projectionId: string;
   queueRev: number;
   currentOccurrenceId: string | null;
@@ -223,10 +223,10 @@ export type QueueProjection = {
   items: QueueProjectionItem[];
 };
 
-export type QueueTransitionReason = 'ended' | 'remote-next' | 'remote-previous';
+type QueueTransitionReason = 'ended' | 'remote-next' | 'remote-previous';
 
 /** Service-reported cursor move inside the installed projection. */
-export type QueueTransitionEvent = {
+type QueueTransitionEvent = {
   projectionId: string;
   projectedQueueRev: number;
   fromOccurrenceId: string | null;
@@ -239,7 +239,7 @@ export type QueueTransitionEvent = {
 
 // ---- TagReaderPort surface (slice 3 local files) ----
 
-export type TagReaderEntry = {
+type TagReaderEntry = {
   docId: string;
   name: string;
   size: number;
@@ -251,12 +251,12 @@ export type TagReaderEntry = {
   modifiedMs?: number | null;
 };
 
-export type TagReaderFingerprint = {
+type TagReaderFingerprint = {
   docId: string;
   fingerprint: string;
 };
 
-export type TagReaderTags = {
+type TagReaderTags = {
   docId: string;
   title: string | null;
   artist: string | null;
@@ -632,7 +632,7 @@ export function addQueueTransitionListener(
 }
 
 /** {online, metered} — snapshot read and the change-edge payload. */
-export type ConnectivityChangedEvent = {
+type ConnectivityChangedEvent = {
   online: boolean;
   metered: boolean;
 };
@@ -708,13 +708,13 @@ export function hasTagReader(): boolean {
 // ---- Sync-socket wrappers (LAN sync client, docs/specs/sync.md) ----
 
 /** Frame bytes cross the bridge as base64 — never raw binary JSON. */
-export type SyncSocketDataEvent = {
+type SyncSocketDataEvent = {
   socketId: string;
   data: string;
 };
 
 /** reason: 'peer' = remote FIN, 'error' = socket fault, 'local' = destroyed. */
-export type SyncSocketClosedEvent = {
+type SyncSocketClosedEvent = {
   socketId: string;
   reason: string;
 };

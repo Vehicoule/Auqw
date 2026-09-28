@@ -176,9 +176,9 @@ export function createCodec(opts: {
 /* Wire message shapes — validated, never trusted                       */
 /* ------------------------------------------------------------------ */
 
-export const WIRE_VERSION = 1;
+const WIRE_VERSION = 1;
 
-export type ClientHello = {
+type ClientHello = {
   readonly v: number;
   readonly kind: 'hello';
   readonly deviceId: string;
@@ -199,7 +199,7 @@ export type ClientHello = {
  * trusted into a DH call (or a fingerprint/registry slot) on shape
  * alone.
  */
-export function isX25519PubKeyB64(value: unknown): value is string {
+function isX25519PubKeyB64(value: unknown): value is string {
   if (
     typeof value !== 'string' ||
     value.length === 0 ||
@@ -258,7 +258,7 @@ export function isClientHello(value: unknown): value is ClientHello {
 /* The seam                                                            */
 /* ------------------------------------------------------------------ */
 
-export type AcceptedHandshake = {
+type AcceptedHandshake = {
   /** Plaintext frame payload to send next — the challenge. */
   readonly challenge: Buffer;
   /** Sealed channel for everything after. */
@@ -353,7 +353,7 @@ export function createNoiseV1Cipher(identity: SyncIdentity): SyncCipher {
 /* marked plainly. NOT wired into the app's runtime path.               */
 /* ------------------------------------------------------------------ */
 
-export type TestPeer = {
+type TestPeer = {
   readonly identity: SyncIdentity;
   readonly deviceId: string;
   readonly name: string;

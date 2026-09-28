@@ -85,7 +85,7 @@ const BINDINGS_CANDIDATES: readonly string[] = [
   `${BINDINGS_BASENAME}.dll`,
 ];
 
-export type HostEnv = {
+type HostEnv = {
   /** Explicit .node artifact path — overrides the candidate scan. */
   AUQW_NODE_BINDINGS?: string | undefined;
   /** Directory of `<id>.wasm` + `<id>.manifest.json` plugin pairs. */
@@ -162,7 +162,7 @@ export function bindingsCandidates(
  * manifest JSON (the adapter re-validates capability names against
  * the ABI set; unknown names never survive `startRequest` anyway).
  */
-export type LoadedPlugin = {
+type LoadedPlugin = {
   readonly pluginId: string;
   readonly providerId: string;
   readonly capabilities: readonly string[];

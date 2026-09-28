@@ -10,9 +10,9 @@
  * reports it so the caller can take the `server.rs` fallback.
  */
 
-export type ContainerKind = 'webm' | 'mp4' | 'unsupported';
+type ContainerKind = 'webm' | 'mp4' | 'unsupported';
 
-export type SniffResult =
+type SniffResult =
   | { readonly kind: 'need-more' }
   | { readonly kind: 'ok'; readonly container: 'webm' | 'mp4' }
   | { readonly kind: 'unsupported' };
@@ -129,7 +129,7 @@ function asciiType(buf: Uint8Array, off: number): string {
  */
 export type WebmCue = { readonly mediaMs: number; readonly byte: number };
 
-export type WebmWalk = {
+type WebmWalk = {
   /** Cluster start offsets — media-segment boundaries, ascending. */
   readonly boundaries: number[];
   /** Absolute offset of the Segment's payload — cue positions hang off it. */
@@ -375,7 +375,7 @@ function readBox(buf: Uint8Array, off: number): Mp4Box | null {
  * the following `moof`. A `mdat` reached with `moov` seen but no `moof`
  * is a non-fragmented file — the caller falls back to the range server.
  */
-export type Mp4Walk =
+type Mp4Walk =
   | { readonly kind: 'fragmented'; readonly boundaries: number[] }
   | { readonly kind: 'non-fragmented' }
   | { readonly kind: 'need-more' };
@@ -421,7 +421,7 @@ function mp4Walk(buf: Uint8Array): Mp4Walk {
 
 // ---- the ingest carve -----------------------------------------------------
 
-export type CarveResult =
+type CarveResult =
   | {
       readonly kind: 'ok';
       readonly container: 'webm' | 'mp4';
