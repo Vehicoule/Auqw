@@ -17,6 +17,7 @@ import {
   fromUnknown,
   isChangeEntry,
   isDivergenceEntry,
+  isPeerMarks,
   isSyncCursor,
   ok,
 } from '@auqw/application';
@@ -25,6 +26,7 @@ import type {
   DivergenceEntry,
   OperationContext,
   Result,
+  SyncCursor,
   SyncLogSnapshot,
   SyncLogStore,
   SyncLogWrite,
@@ -111,7 +113,8 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
       key !== 'dropDivergenceBefore' &&
       key !== 'dropEntries' &&
       key !== 'divergenceReplayOffset' &&
-      key !== 'divergenceDroppedEmissions'
+      key !== 'divergenceDroppedEmissions' &&
+      key !== 'peerMarks'
     ) {
       return false;
     }
@@ -185,6 +188,12 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
   ) {
     return false;
   }
+  if (
+    value['peerMarks'] !== undefined &&
+    !isPeerMarks(value['peerMarks'])
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -210,6 +219,9 @@ function parseFile(raw: string): Parsed {
   let entries: ChangeEntry[] = [];
   const divergence: DivergenceEntry[] = [];
   const watermarks: Record<string, number> = {};
+  // A Map — not a plain record — so a sender literally named
+  // `__proto__` folds as data, not a prototype write.
+  const peerMarks = new Map<string, SyncCursor>();
   let floor = 0;
   let replayOffset = 0;
   const droppedEmissions = new Set<number>();
@@ -283,6 +295,11 @@ function parseFile(raw: string): Parsed {
     for (const [device, mark] of Object.entries(write.watermarks ?? {})) {
       watermarks[device] = Math.max(watermarks[device] ?? 0, mark);
     }
+    for (const [sender, marks] of Object.entries(write.peerMarks ?? {})) {
+      // Per-sender row replace — the write carries the whole folded
+      // row, so a regressed claim clears what was stored wholesale.
+      peerMarks.set(sender, marks);
+    }
   }
   let deviceId: string;
   try {
@@ -307,6 +324,9 @@ function parseFile(raw: string): Parsed {
             (a, b) => a - b,
           ),
         }
+        : {}),
+      ...(peerMarks.size > 0
+        ? { peerMarks: Object.fromEntries(peerMarks) }
         : {}),
     },
   };
@@ -376,6 +396,14 @@ function serializeSnapshot(
           : {}),
     }),
   );
+  // Peer-mark rows serialize one sender per line: the load fold is
+  // per-sender replace, so split lines carry identical state while
+  // each stays far under MAX_LINE_BYTES — the aggregated table is the
+  // one field sized senders x sources, which a single line could push
+  // past the reader's bound and get truncated as corruption on reopen.
+  for (const [sender, marks] of Object.entries(snapshot.peerMarks ?? {})) {
+    lines.push(JSON.stringify({ peerMarks: { [sender]: marks } }));
+  }
   return `${lines.join('\n')}\n`;
 }
 
@@ -402,6 +430,19 @@ async function checkpoint(
     return err(appError('invalid-response', 'sync log failed to refold'));
   }
   const body = serializeSnapshot(deviceId, parsed.snapshot);
+  for (const line of body.split('\n')) {
+    if (Buffer.byteLength(line, 'utf8') > MAX_LINE_BYTES) {
+      // An over-bound line would parse as corruption on reopen and
+      // repair would truncate it — refuse the rewrite instead and
+      // leave the uncompacted (still valid) file in place.
+      return err(
+        appError(
+          'invalid-response',
+          'sync log snapshot exceeds the durable line bound',
+        ),
+      );
+    }
+  }
   const tmp = `${path}${REWRITE_SUFFIX}`;
   try {
     const handle = await open(tmp, 'w');

@@ -1031,9 +1031,14 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         t: 'sync',
         since: cursorToSince(deps.engine.cursor()),
       };
-      if (own.value.entries.length > 0 || own.value.more) {
-        msg['delta'] = own.value;
-      }
+      // The delta is the sender-claim carrier: the receiver folds it
+      // into its durable peer-mark table — a peer that never exports
+      // entries still re-confirms its remembered row every round
+      // instead of pinning compaction forever. An all-empty delta
+      // (a rebuilt peer with nothing) is a valid complete claim too:
+      // it retires the stale row rather than leaving it pinned.
+      // Identical claims apply as in-memory no-ops.
+      msg['delta'] = own.value;
       // Two caps both bind: the receiver validates the nested delta
       // doc against MAX_SYNC_DOC_BYTES, and the sealed frame must fit
       // the session payload bound. A delta in the gap between them

@@ -476,6 +476,17 @@ export type SyncLogSnapshot = {
    * `divergenceFloor` replays above it and resurrects a pruned row.
    */
   readonly divergenceDroppedEmissions?: readonly number[];
+  /**
+   * The durable peer-mark table: `peerMarks[sender][src]` is the last
+   * contiguous watermark each delta sender provably held for `src` at
+   * its most recent claim. Restored rows are stale by construction —
+   * the wire carries no peer-instance token, so a deviceId surviving
+   * a peer's rebuild can't be told apart from the same instance — so
+   * hydration seeds them as remembered-but-unconfirmed: a silent
+   * remembered peer pins compaction at 0 rather than being credited
+   * a mark it may no longer hold.
+   */
+  readonly peerMarks?: Readonly<Record<string, SyncCursor>>;
 };
 
 export type SyncLogWrite = {
@@ -512,6 +523,16 @@ export type SyncLogWrite = {
    * set-union); a stale subset merges into the accumulated set.
    */
   readonly divergenceDroppedEmissions?: readonly number[];
+  /**
+   * Per-sender replacement rows for the durable peer-mark table: a
+   * write carries the sender's whole folded row so a live claim that
+   * regresses a persisted row clears it wholesale — a rebuilt peer
+   * must never merge fresh claims into what its lost instance held.
+   * On `applyDelta` the row rides the entries append itself, so a
+   * peer's presence lands atomically with the delta that carried its
+   * claim — an apply can only ack once the mark is durable.
+   */
+  readonly peerMarks?: Readonly<Record<string, SyncCursor>>;
 };
 
 /**
@@ -894,6 +915,25 @@ export function isSyncCursor(value: unknown): value is SyncCursor {
     isRecord(value) &&
     Object.keys(value).length <= MAX_CURSOR_DEVICES &&
     Object.values(value).every(isSafeNonNegative)
+  );
+}
+
+/**
+ * The durable peer-mark table's shape: senders keyed by device id,
+ * each row the sender's last advertised cursor. Rows keep the wire's
+ * source bound; the sender count is deliberately unbounded — the
+ * table is the floor that protects every remembered peer, so evicting
+ * a sender would let compaction drop entries it never received. A
+ * hard cap needs protocol-level peer retirement, which the wire does
+ * not carry.
+ */
+export function isPeerMarks(
+  value: unknown,
+): value is Readonly<Record<string, SyncCursor>> {
+  return (
+    isRecord(value) &&
+    Object.keys(value).every((sender) => isString(sender, MAX_DEVICE_ID)) &&
+    Object.values(value).every(isSyncCursor)
   );
 }
 
@@ -1315,11 +1355,36 @@ export async function createSyncEngine(
   /**
    * The last contiguous watermarks each delta sender advertised —
    * `peerMarks[sender][src]` is the largest seq that peer provably
-   * holds for `src`. Marks only grow, so each apply max-folds.
+   * holds for `src`. Each apply replaces the row with the claimed
+   * cursor — a live regression retires what a lost instance claimed.
    * Compaction drops an entry only when the per-source MINIMUM across
    * senders passes it: every peer we have heard from already holds it.
    */
   const peerMarks = new Map<string, Map<string, number>>();
+  /**
+   * Senders the durable peer-mark table remembered that have not
+   * re-advertised a cursor this session. A restored mark is stale:
+   * the wire carries no peer-instance token, so a deviceId surviving
+   * a peer's rebuild may belong to a fresh instance that lost the
+   * data its old claims covered. While a remembered peer stays
+   * silent it contributes nothing to compaction — its floor
+   * contribution is 0 for every device, which only ever delays
+   * cleanup. A peer's first live cursor claim clears the staleness:
+   * a monotone claim re-confirms the stored row, a regression proves
+   * a rebuild — either way only the live claims govern from then on.
+   */
+  const stalePeers = new Set<string>();
+  /**
+   * Senders whose folded row has not been confirmed durable: a
+   * `peerMarks` append is best-effort, so a sender stays flagged
+   * until a store append carrying its row succeeds — the flag is
+   * what retries the row on later writes, including claims that
+   * change nothing. Without it a failed write would drop the peer
+   * from the durable table entirely: after restart it remembered
+   * nothing, pinned nothing, and compaction could discard entries
+   * it still needed to catch up.
+   */
+  const dirtyPeerMarkSenders = new Set<string>();
   const seen = new Set<string>();
   /**
    * Per-device emission observation: `seenSeqs[d]` holds only
@@ -1935,10 +2000,18 @@ export async function createSyncEngine(
     skipped: Record<string, readonly number[]> | undefined,
     signal: CancellationSignal,
     deadlineMs: number,
+    peerMark?: { sender: string; marks: SyncCursor },
   ): Promise<Result<void>> {
     const write: SyncLogWrite = {
       entries,
       watermarks: prospectiveMarks(entries, skipped),
+      // The delta sender's folded claim rides the entries append — a
+      // peer's presence is durable iff the apply that carried it
+      // acked, so a restart can never forget a peer whose entries the
+      // log accepted while its mark sat uncommitted.
+      ...(peerMark === undefined
+        ? {}
+        : { peerMarks: { [peerMark.sender]: peerMark.marks } }),
     };
     const appended = await call(() =>
       store.append(write, context('sync-app', deadlineMs, signal)),
@@ -1951,6 +2024,9 @@ export async function createSyncEngine(
     commitSeqs(entries, skipped);
     for (const entry of entries) {
       indexEntry(entry);
+    }
+    if (peerMark !== undefined) {
+      dirtyPeerMarkSenders.delete(peerMark.sender);
     }
     return ok(undefined);
   }
@@ -1968,10 +2044,18 @@ export async function createSyncEngine(
 
   /**
    * Persist newly-detected divergence rows and prune the history once
-   * it exceeds its bound. A compaction `plan` rides the same durable
-   * write so the log deletes land atomically with the merge's own
-   * writes — the in-memory lanes drop only after the append commits,
-   * so a transient failure leaves the log intact for the next plan.
+   * it exceeds its bound. A compaction `plan` and pending peer-mark
+   * rows ride the same durable write so the log deletes and the
+   * watermark claims land atomically with the merge's own writes —
+   * the in-memory lanes drop only after the append commits, so a
+   * transient failure leaves the log intact for the next plan.
+   *
+   * Every pending peer-mark row re-issues on EVERY write — an
+   * append is best-effort, so a sender stays flagged
+   * (`dirtyPeerMarkSenders`) until a write carrying its row
+   * confirms. Retries need no fresh claim: an unchanged cursor still
+   * emits the dirty rows here, and one sender's apply retries rows
+   * another sender left pending.
    */
   async function appendDivergence(
     rows: readonly DivergenceEntry[],
@@ -1980,7 +2064,16 @@ export async function createSyncEngine(
     deadlineMs: number,
   ): Promise<void> {
     const drops = plan?.dropped ?? [];
-    if (rows.length === 0 && drops.length === 0) {
+    // A Map — not a plain record — so a device literally named
+    // `__proto__` lands as data instead of mutating a prototype.
+    const pendingRows = new Map<string, SyncCursor>();
+    for (const sender of dirtyPeerMarkSenders) {
+      const row = peerMarks.get(sender);
+      if (row !== undefined) {
+        pendingRows.set(sender, Object.fromEntries(row));
+      }
+    }
+    if (rows.length === 0 && drops.length === 0 && pendingRows.size === 0) {
       return;
     }
     let dropBefore: number | undefined;
@@ -2012,6 +2105,9 @@ export async function createSyncEngine(
             : {}),
         }
         : {}),
+      ...(pendingRows.size > 0
+        ? { peerMarks: Object.fromEntries(pendingRows) }
+        : {}),
     };
     const appended = await call(() =>
       store.append(write, context('sync-div', deadlineMs, signal)),
@@ -2019,6 +2115,12 @@ export async function createSyncEngine(
     if (!appended.ok) {
       warn(`sync divergence history append failed: ${appended.error.kind}`);
       return;
+    }
+    // The write confirmed — retire the pending rows it carried.
+    // Ops serialize, so nothing could re-fold between the snapshot
+    // above and this clearing.
+    for (const sender of pendingRows.keys()) {
+      dirtyPeerMarkSenders.delete(sender);
     }
     if (plan !== undefined) {
       commitCompaction(plan);
@@ -2028,17 +2130,38 @@ export async function createSyncEngine(
   /**
    * Fold the sender's advertised contiguous watermarks into the peer
    * table — `peerMarks[sender][src]` becomes the largest seq the
-   * sender provably holds for `src`. Marks only grow, so a max-fold
-   * keeps the newest claim.
+   * sender provably holds for `src`. A cursor is a COMPLETE claim,
+   * not a delta: the folded row replaces wholesale, matching the
+   * write's per-sender replace — a live regression (a peer rebuilt
+   * under the same id) must retire the marks its lost instance
+   * claimed, not max-fold over them. The live claim also lifts the
+   * sender's hydrate-restored staleness: whatever the durable table
+   * remembered, the claims observed this session now govern.
+   *
+   * Bounds: a row is exactly one wire-validated cursor, so the
+   * MAX_CURSOR_DEVICES source bound comes free from `isSyncDelta`.
+   * The sender count stays unbounded on purpose: a sender's row is
+   * what stops compaction dropping entries that peer never received,
+   * so evicting one is a data-loss direction, and a safe cap would
+   * need protocol-level peer retirement the wire does not carry.
    */
   function notePeerCursor(sender: string, cursor: SyncCursor): void {
-    let marks = peerMarks.get(sender);
-    if (marks === undefined) {
-      marks = new Map<string, number>();
-      peerMarks.set(sender, marks);
+    const claims = new Map<string, number>(Object.entries(cursor));
+    const prev = peerMarks.get(sender);
+    let changed = prev === undefined || prev.size !== claims.size;
+    if (!changed && prev !== undefined) {
+      for (const [src, mark] of claims) {
+        if (prev.get(src) !== mark) {
+          changed = true;
+          break;
+        }
+      }
     }
-    for (const [src, mark] of Object.entries(cursor)) {
-      marks.set(src, Math.max(mark, marks.get(src) ?? 0));
+    if (changed) {
+      peerMarks.set(sender, claims);
+    }
+    if (stalePeers.delete(sender) || changed) {
+      dirtyPeerMarkSenders.add(sender);
     }
   }
 
@@ -2058,7 +2181,11 @@ export async function createSyncEngine(
     const dropped: ChangeEntry[] = [];
     const lanes: [string, ChangeEntry[]][] = [];
     const ordinals: number[] = [];
-    if (peerMarks.size === 0) {
+    if (peerMarks.size === 0 || stalePeers.size > 0) {
+      // A remembered-but-silent peer contributes 0 to every floor —
+      // its durable marks are stale until its next live claim — so
+      // while any remembered peer hasn't re-advertised this session
+      // the minimum over all senders can never exceed 0 anyway.
       return { dropped, lanes, ordinals };
     }
     for (const [dev, list] of logByDevice) {
@@ -2616,9 +2743,40 @@ export async function createSyncEngine(
         }
       }
 
-      const appended = await appendLog(fresh, doc.skipped, sig, deadlineMs);
-      if (!appended.ok) {
-        return err(appended.error);
+      // The sender's cursor is its own contiguous watermark claim —
+      // folded before the entries append so the row rides that same
+      // durable write: a peer's presence lands atomically with the
+      // delta carrying its claim, and an apply that can't persist the
+      // mark errors out rather than acking without it. Once every
+      // observed peer advertises a seq as held, a dead log row below
+      // the floor can never be needed again and is dropped from both
+      // the in-memory lanes and durable sync_log.
+      notePeerCursor(doc.senderDeviceId, doc.cursor);
+      const foldedRow = peerMarks.get(doc.senderDeviceId);
+      // A cursor-only claim that changed nothing (no fresh entries,
+      // no skipped holes, a row already durable) is a pure re-confirm
+      // — skip the append so an idle round costs the store no write.
+      const needsLog =
+        fresh.length > 0 ||
+        (doc.skipped !== undefined &&
+          Object.keys(doc.skipped).length > 0) ||
+        dirtyPeerMarkSenders.has(doc.senderDeviceId);
+      if (needsLog) {
+        const appended = await appendLog(
+          fresh,
+          doc.skipped,
+          sig,
+          deadlineMs,
+          foldedRow === undefined
+            ? undefined
+            : {
+                sender: doc.senderDeviceId,
+                marks: Object.fromEntries(foldedRow),
+              },
+        );
+        if (!appended.ok) {
+          return err(appended.error);
+        }
       }
       // Once fresh entries are durable the merge runs to completion —
       // bailing here would leave the log ahead of the in-memory merge.
@@ -2633,11 +2791,6 @@ export async function createSyncEngine(
       } catch (thrown) {
         return err(fromUnknown(thrown));
       }
-      // The sender's cursor is its own contiguous watermark claim —
-      // once every observed peer advertises a seq as held, a dead log
-      // row below the floor can never be needed again and is dropped
-      // from both the in-memory lanes and durable sync_log.
-      notePeerCursor(doc.senderDeviceId, doc.cursor);
       const compaction = planCompaction();
       await appendDivergence(divs, compaction, sig, deadlineMs);
       // Attach the post-merge materialized truth per applied record —
@@ -2794,7 +2947,8 @@ export async function createSyncEngine(
       !isOptSafeNonNegative(snapshot.divergenceReplayOffset)) ||
     (snapshot.divergenceDroppedEmissions !== undefined &&
       (!Array.isArray(snapshot.divergenceDroppedEmissions) ||
-        !snapshot.divergenceDroppedEmissions.every(isEmissionSeq)))
+        !snapshot.divergenceDroppedEmissions.every(isEmissionSeq))) ||
+    (snapshot.peerMarks !== undefined && !isPeerMarks(snapshot.peerMarks))
   ) {
     return err(appError('invalid-response', 'sync log snapshot invalid'));
   }
@@ -2847,6 +3001,14 @@ export async function createSyncEngine(
   // more.
   for (const [dev, mark] of Object.entries(snapshot.watermarks)) {
     contiguous.set(dev, Math.max(mark, contiguous.get(dev) ?? 0));
+  }
+  // Durable peer rows hydrate as stale: a remembered-but-silent peer
+  // pins every compaction floor at 0 until its first live claim —
+  // the stored marks themselves never count, because a rebuilt peer
+  // could carry the same deviceId while holding nothing its old
+  // claims covered.
+  for (const sender of Object.keys(snapshot.peerMarks ?? {})) {
+    stalePeers.add(sender);
   }
   hlc = new HybridClock(highest);
   // Best-effort repair write: divergence rows rebuilt from the log

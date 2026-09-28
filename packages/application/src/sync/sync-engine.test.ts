@@ -2560,6 +2560,169 @@ async function sumSaturation(): Promise<void> {
   assertEqual(fields?.['count'], Number.MAX_SAFE_INTEGER);
 }
 
+async function peerMarkWriteRetriesUntilDurable(): Promise<void> {
+  const store = new FakeSyncLogStore();
+  const realAppend = store.append.bind(store);
+  let armed = false;
+  store.append = (write, context) => {
+    if (armed && write.peerMarks !== undefined) {
+      armed = false;
+      return Promise.resolve({
+        ok: false as const,
+        error: appError('transient', 'simulated store failure'),
+      });
+    }
+    return realAppend(write, context);
+  };
+  const a = await makeEngine('a', 1_000, store);
+  armed = true;
+  // The sender's mark rides the entries append itself, so a failed
+  // write refuses the whole apply rather than acking with the peer's
+  // presence still only in memory — after a restart the table would
+  // remember nothing about 'b' and compaction could drop entries it
+  // still needed to catch up.
+  const refused = await a.engine.applyDelta({
+    ...delta([], 'b'),
+    cursor: { a: 1 },
+  });
+  assert(!refused.ok, 'apply fails when the mark cannot commit');
+  assert(a.store.storedPeerMarks['b'] === undefined);
+  await mustApply(a.engine, { ...delta([], 'b'), cursor: { a: 1 } });
+  assertDeepEqual(a.store.storedPeerMarks['b'], { a: 1 });
+  assert(
+    a.store.writes.some(
+      (w) =>
+        w.write.entries !== undefined &&
+        w.write.peerMarks?.['b'] !== undefined,
+    ),
+    'the mark rode the entries append',
+  );
+  // A mark update that fails to persist stays flagged and re-issues
+  // on any later write — even another sender's divergence append.
+  armed = true;
+  const refused2 = await a.engine.applyDelta({
+    ...delta([], 'b'),
+    cursor: { a: 2 },
+  });
+  assert(!refused2.ok);
+  assertDeepEqual(a.store.storedPeerMarks['b'], { a: 1 });
+  await mustApply(a.engine, { ...delta([], 'c'), cursor: { a: 1 } });
+  assertDeepEqual(a.store.storedPeerMarks['b'], { a: 2 });
+  assertDeepEqual(a.store.storedPeerMarks['c'], { a: 1 });
+}
+
+async function peerMarkTableAcceptsUnboundedSenders(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  // Distinct senders accumulate over a device's lifetime — the table
+  // must NOT bound them: a sender's row is what stops compaction
+  // dropping entries that peer still needs, so every heard sender
+  // stays and a restart hydrates whatever was stored.
+  for (let i = 0; i < 515; i++) {
+    await mustApply(a.engine, {
+      ...delta([], `dev-${i}`),
+      cursor: { a: i + 1 },
+    });
+  }
+  const stored = a.store.storedPeerMarks;
+  assertEqual(Object.keys(stored).length, 515);
+  assertDeepEqual(stored['dev-0'], { a: 1 });
+  assertDeepEqual(stored['dev-514'], { a: 515 });
+  // The persisted table is exactly the shape the earlier sender cap
+  // rejected: a restart must hydrate all 515 rows, not wedge startup.
+  await makeEngine('a', 2_000, a.store);
+}
+
+async function oversizedCursorRejectedAtWire(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  // A peer-mark row is exactly one validated cursor, so the per-row
+  // source bound lives at the wire: a claim beyond it never folds.
+  const claim: Record<string, number> = {};
+  for (let i = 0; i < 600; i++) {
+    claim[`src-${i}`] = i + 1;
+  }
+  const applied = await a.engine.applyDelta({
+    ...delta([], 'b'),
+    cursor: claim,
+  });
+  assert(!applied.ok, 'a cursor beyond the wire bound is rejected');
+  assertDeepEqual(a.store.storedPeerMarks['b'], undefined);
+}
+
+async function livePeerRegressionReplacesRow(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 1_000);
+  // r1: seq1 dies to seq2; r2: seq3 dies to seq4.
+  for (const recordId of ['r1', 'r2']) {
+    await mustWrite(a.engine, {
+      kind: 'recording',
+      recordId,
+      field: 'title',
+      value: 'Old',
+    });
+    await mustWrite(a.engine, {
+      kind: 'recording',
+      recordId,
+      field: 'title',
+      value: 'New',
+    });
+  }
+  const docA = await a.engine.exportDelta();
+  assert(docA.ok);
+  await mustApply(b.engine, docA.value);
+  const docB = await b.engine.exportDelta();
+  assert(docB.ok);
+  // b's claim {a:4} lands: the dead losers at seqs 1 and 3 compact.
+  await mustApply(a.engine, docB.value);
+  assertDeepEqual(
+    a.store.entries.map((entry) => entry.seq),
+    [2, 4],
+  );
+  // seq4 dies to seq5 — merge-dead but still above every floor.
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r2',
+    field: 'title',
+    value: 'Final',
+  });
+  // The peer rebuilt mid-session and now claims only {a:2}. A live
+  // cursor is a complete claim — the row replaces wholesale; a
+  // max-fold would keep crediting {a:4} and let the next claim drop
+  // seq4, which the rebuilt peer never received.
+  await mustApply(a.engine, { ...delta([], 'b'), cursor: { a: 2 } });
+  assertDeepEqual(a.store.storedPeerMarks['b'], { a: 2 });
+  await mustApply(a.engine, { ...delta([], 'c'), cursor: { a: 6 } });
+  assertDeepEqual(
+    a.store.entries.map((entry) => entry.seq),
+    [2, 4, 5],
+  );
+}
+
+async function peerMarkClaimOnlyDeltaNoops(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  // A cursor claim with no entries still folds and persists — the
+  // wire path a read-only peer's re-confirm rides each round.
+  const claim = { ...delta([], 'b'), cursor: { a: 1 } };
+  await mustApply(a.engine, claim);
+  assertDeepEqual(a.store.storedPeerMarks['b'], { a: 1 });
+  const writesAfter = a.store.writes.length;
+  // An identical claim changes nothing — the apply folds but commits
+  // no write, so idle rounds cost the store nothing.
+  await mustApply(a.engine, claim);
+  assertEqual(a.store.writes.length, writesAfter);
+}
+
+async function peerMarkSenderNamedProto(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  // A device id colliding with the object-prototype key must persist
+  // as data — a plain-record accumulator would mutate its prototype
+  // and silently drop the peer from the durable table.
+  await mustApply(a.engine, {
+    ...delta([], '__proto__'),
+    cursor: { a: 1 },
+  });
+  assertDeepEqual(a.store.storedPeerMarks['__proto__'], { a: 1 });
+}
+
 async function logCompaction(): Promise<void> {
   const a = await makeEngine('a', 1_000);
   const b = await makeEngine('b', 1_000);
@@ -2616,6 +2779,131 @@ async function logCompaction(): Promise<void> {
   assertEqual(wrote.seq, 3);
 }
 
+async function peerMarksSurviveRestart(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 1_000);
+  // Two dead-then-live pairs: seq1/seq3 lose their merges and drop
+  // once b advertises coverage; seq2/seq4 stay as the live winners.
+  for (const recordId of ['r1', 'r2']) {
+    await mustWrite(a.engine, {
+      kind: 'recording',
+      recordId,
+      field: 'title',
+      value: 'Old',
+    });
+    await mustWrite(a.engine, {
+      kind: 'recording',
+      recordId,
+      field: 'title',
+      value: 'New',
+    });
+  }
+  const docA = await a.engine.exportDelta();
+  assert(docA.ok);
+  await mustApply(b.engine, docA.value);
+  const docB = await b.engine.exportDelta();
+  assert(docB.ok);
+  await mustApply(a.engine, docB.value);
+  // b's claim {a:4} folded AND persisted — the dead losers dropped.
+  assertDeepEqual(
+    a.store.entries.map((entry) => entry.seq),
+    [2, 4],
+  );
+  assertEqual(a.store.storedPeerMarks['b']?.['a'], 4);
+
+  // Restart over the same store: the persisted row seeds b as a
+  // remembered-but-unconfirmed peer. Two fresh writes kill the
+  // surviving winners — seq2/seq4 become merge-dead at seqs the
+  // STALE mark already covers, so crediting it would drop them.
+  const a2 = await makeEngine('a', 1_000, a.store);
+  await mustWrite(a2.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'Final',
+  });
+  await mustWrite(a2.engine, {
+    kind: 'recording',
+    recordId: 'r2',
+    field: 'title',
+    value: 'Last',
+  });
+  // A third peer's live claim covers them, but b hasn't re-advertised
+  // since the restart — the remembered row pins the floor at 0 rather
+  // than crediting a mark b may no longer hold.
+  const claimC = { ...delta([], 'c'), cursor: { a: 6 } };
+  await mustApply(a2.engine, claimC);
+  assertDeepEqual(
+    a2.store.entries.map((entry) => entry.seq),
+    [2, 4, 5, 6],
+  );
+  // b re-advertises at/above its stored mark — the live claim
+  // re-confirms the row, the pin lifts, and the dead winners drop on
+  // the min(b, c) floor without re-learning anything.
+  const claimB = { ...delta([], 'b'), cursor: { a: 6 } };
+  await mustApply(a2.engine, claimB);
+  assertDeepEqual(
+    a2.store.entries.map((entry) => entry.seq),
+    [5, 6],
+  );
+  assertDeepEqual(a2.store.storedPeerMarks['b'], { a: 6 });
+}
+
+async function rebuiltPeerDropsStaleMarks(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 1_000);
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'Old',
+  });
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'New',
+  });
+  const docA = await a.engine.exportDelta();
+  assert(docA.ok);
+  await mustApply(b.engine, docA.value);
+  const docB = await b.engine.exportDelta();
+  assert(docB.ok);
+  await mustApply(a.engine, docB.value);
+  assertEqual(a.store.storedPeerMarks['b']?.['a'], 2);
+
+  // a restarts; b loses its data and rebuilds under the SAME device
+  // id — the wire can't tell the rebuild apart from the same
+  // instance, so its stored marks must stay stale until a live claim.
+  const a2 = await makeEngine('a', 1_000, a.store);
+  // seq3 kills seq2: the once-live winner becomes merge-dead at a seq
+  // the stale {a:2} row already covers — crediting it would drop it.
+  await mustWrite(a2.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'Final',
+  });
+  // While rebuilt-b stays silent a second peer's claim covering seq2
+  // still can't drop it: b's remembered row pins the floor at 0.
+  const claimC = { ...delta([], 'c'), cursor: { a: 3 } };
+  await mustApply(a2.engine, claimC);
+  assertDeepEqual(
+    a2.store.entries.map((entry) => entry.seq),
+    [2, 3],
+  );
+  // The rebuilt b re-handshakes with an empty cursor — the live claim
+  // replaces the stale row wholesale, so b keeps pinning at 0 (its
+  // honest state), and the store forgets the lost instance's marks.
+  const claimB = { ...delta([], 'b'), cursor: {} };
+  await mustApply(a2.engine, claimB);
+  assertDeepEqual(
+    a2.store.entries.map((entry) => entry.seq),
+    [2, 3],
+  );
+  assertDeepEqual(a2.store.storedPeerMarks['b'], {});
+}
+
 export async function run(): Promise<void> {
   await basicWrites();
   await localWriteValidation();
@@ -2668,5 +2956,13 @@ export async function run(): Promise<void> {
   await interleavedCompactionKeepsOrdinals();
   await failedCompactionKeepsLanes();
   await equalFrontierValuesSkipDivergence();
+  await peerMarksSurviveRestart();
+  await rebuiltPeerDropsStaleMarks();
+  await peerMarkWriteRetriesUntilDurable();
+  await peerMarkTableAcceptsUnboundedSenders();
+  await oversizedCursorRejectedAtWire();
+  await livePeerRegressionReplacesRow();
+  await peerMarkClaimOnlyDeltaNoops();
+  await peerMarkSenderNamedProto();
   await propertyHarness();
 }

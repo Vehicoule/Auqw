@@ -12,10 +12,12 @@ import {
   err,
   isChangeEntry,
   isDivergenceEntry,
+  isPeerMarks,
   isSyncCursor,
   ok,
 } from '@auqw/application';
 import { CANCELLED } from './cancelled.ts';
+import type { SyncCursor } from '@auqw/application';
 import type {
   SqliteConnection,
   SqliteDriver,
@@ -190,6 +192,46 @@ export class SqliteSyncLogStore implements SyncLogStore {
           }
           divergenceDroppedEmissions.push(emission);
         }
+        const peerMarkRows = await conn.query<SqlRow>(
+          'SELECT sender, marks_json FROM sync_peer_marks',
+          undefined,
+          context.signal,
+        );
+        // A Map — not a plain record — so a stored sender literally
+        // named `__proto__` folds as data, not a prototype write.
+        const peerMarks = new Map<string, SyncCursor>();
+        for (const row of peerMarkRows) {
+          const sender = row['sender'];
+          let marks: unknown;
+          try {
+            marks = JSON.parse(String(row['marks_json']));
+          } catch {
+            return err(
+              appError(
+                'invalid-response',
+                'stored peer marks failed validation',
+              ),
+            );
+          }
+          if (typeof sender !== 'string' || !isSyncCursor(marks)) {
+            return err(
+              appError(
+                'invalid-response',
+                'stored peer marks failed validation',
+              ),
+            );
+          }
+          peerMarks.set(sender, marks);
+        }
+        const peerMarksTable = Object.fromEntries(peerMarks);
+        if (!isPeerMarks(peerMarksTable)) {
+          return err(
+            appError(
+              'invalid-response',
+              'stored peer marks failed validation',
+            ),
+          );
+        }
         return ok({
           entries,
           divergence,
@@ -197,6 +239,7 @@ export class SqliteSyncLogStore implements SyncLogStore {
           divergenceFloor,
           divergenceReplayOffset,
           divergenceDroppedEmissions,
+          peerMarks: peerMarksTable,
         });
       }, context.signal);
     } catch (thrown) {
@@ -226,7 +269,8 @@ export class SqliteSyncLogStore implements SyncLogStore {
       (write.divergenceDroppedEmissions !== undefined &&
         !write.divergenceDroppedEmissions.every(
           (emission) => isSafeInt(emission) && emission >= 1,
-        ))
+        )) ||
+      (write.peerMarks !== undefined && !isPeerMarks(write.peerMarks))
     ) {
       return err(
         appError('invalid-response', 'sync append batch failed validation'),
@@ -309,6 +353,21 @@ export class SqliteSyncLogStore implements SyncLogStore {
               `INSERT INTO sync_watermarks (device_id, mark) VALUES (?, ?)
                ON CONFLICT (device_id) DO UPDATE SET mark = MAX(mark, excluded.mark)`,
               [device, mark],
+              context.signal,
+            );
+          }
+        }
+        if (write.peerMarks !== undefined) {
+          // Per-sender row REPLACE — never max-fold: a live claim that
+          // regresses the stored row clears it wholesale, since the
+          // old row may have belonged to a lost peer instance.
+          for (const [sender, marks] of Object.entries(write.peerMarks)) {
+            await conn.execute(
+              `INSERT INTO sync_peer_marks (sender, marks_json)
+               VALUES (?, ?)
+               ON CONFLICT (sender)
+               DO UPDATE SET marks_json = excluded.marks_json`,
+              [sender, JSON.stringify(marks)],
               context.signal,
             );
           }

@@ -318,6 +318,38 @@ async function droppedEmissionsUnionFold(): Promise<void> {
   driver.close();
 }
 
+// 11. Peer-mark rows round-trip and REPLACE per sender — a regressed
+// live claim clears the stored row wholesale, never max-folds.
+async function peerMarksReplace(): Promise<void> {
+  const { driver, storage, syncLog } = rig();
+  assert((await storage.initialize(ctx().context)).ok);
+  assert(
+    (
+      await syncLog.append(
+        { peerMarks: { 'phone-1': { 'desk-1': 5, 'phone-1': 2 } } },
+        ctx().context,
+      )
+    ).ok,
+    'append resolves',
+  );
+  assert(
+    (
+      await syncLog.append(
+        { peerMarks: { 'phone-1': {}, 'desk-1': { 'phone-1': 9 } } },
+        ctx().context,
+      )
+    ).ok,
+    'replace append resolves',
+  );
+  const loaded = await syncLog.load(ctx().context);
+  assert(loaded.ok);
+  assertDeepEqual(loaded.value.peerMarks, {
+    'phone-1': {},
+    'desk-1': { 'phone-1': 9 },
+  });
+  driver.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['emptyLoad', emptyLoad],
   ['appendLoadRoundtrip', appendLoadRoundtrip],
@@ -329,6 +361,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['cancellationTyped', cancellationTyped],
   ['sharedDriverStores', sharedDriverStores],
   ['droppedEmissionsUnionFold', droppedEmissionsUnionFold],
+  ['peerMarksReplace', peerMarksReplace],
 ];
 
 for (const [name, fn] of TESTS) {
