@@ -1389,7 +1389,6 @@ export class Session {
       return fn();
     });
   }
-  }
 
   /**
    * The projection input a sync apply needs beyond the Ready mirror —
