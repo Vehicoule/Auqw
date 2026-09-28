@@ -251,11 +251,27 @@ export type NowPlayingScreenProps = {
 // over the top for text contrast. The `t-dark` class on the stage
 // re-scopes every token for this subtree, matching the sheet's nested
 // dark ThemeProvider.
-function StageBackdrop({ url }: { readonly url: string }) {
+function StageBackdrop({
+  url,
+  onError,
+}: {
+  readonly url: string;
+  readonly onError: () => void;
+}) {
   return (
     <div className="uw-stage__backdrop" aria-hidden="true">
-      <img className="uw-stage__backdrop-art" src={url} alt="" />
-      <img className="uw-stage__backdrop-frost" src={url} alt="" />
+      <img
+        className="uw-stage__backdrop-art"
+        src={url}
+        alt=""
+        onError={onError}
+      />
+      <img
+        className="uw-stage__backdrop-frost"
+        src={url}
+        alt=""
+        onError={onError}
+      />
       <div className="uw-stage__backdrop-scrim" />
     </div>
   );
@@ -297,13 +313,25 @@ export function NowPlayingScreen({
   const activeMode = mode ?? internalMode;
   // Player mode is artwork-led — full-bleed art under the bottom
   // cluster; missing art (and lyrics/queue) keeps the flat stage.
+  // A failed request drops to that same flat treatment: the failed
+  // url is recorded so a track change re-arms the immersive stage,
+  // and the missing-art glyph stands in instead of two broken imgs.
+  const [failedArtworkUrl, setFailedArtworkUrl] = useState<string | null>(
+    null,
+  );
   const artworkUrl = activeMode === 'player' ? player.artworkUrl : null;
+  const liveArtwork = artworkUrl !== failedArtworkUrl ? artworkUrl : null;
   return (
     <div
-      className={`uw-stage${artworkUrl !== null ? ' uw-stage--immersive t-dark' : ''}`}
+      className={`uw-stage${liveArtwork !== null ? ' uw-stage--immersive t-dark' : ''}`}
       data-mode={activeMode}
     >
-      {artworkUrl !== null && <StageBackdrop url={artworkUrl} />}
+      {liveArtwork !== null && (
+        <StageBackdrop
+          url={liveArtwork}
+          onError={() => setFailedArtworkUrl(liveArtwork)}
+        />
+      )}
       <div className="uw-stage__body">
       {activeMode === 'player' && (
         <>
@@ -362,7 +390,7 @@ export function NowPlayingScreen({
             {/* Bottom-anchored meta in the frost zone — the column's
                   dead space lives above it; a long title scrolls. */}
             <div className="uw-stage__scroll">
-              {player.artworkUrl === null && (
+              {liveArtwork === null && (
           <div className="uw-stage__art">
                   <Artwork url={null} fill />
           </div>
