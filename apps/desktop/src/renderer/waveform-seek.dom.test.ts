@@ -377,7 +377,11 @@ export async function run(): Promise<void> {
       win.document.body.appendChild(container);
       const root = createRoot(container);
       const seeks: number[] = [];
-      const render = (trackKey: string, positionMs: number, durationMs: number) =>
+      const render = (
+        trackKey: string,
+        positionMs: number,
+        durationMs: number | null,
+      ) =>
         createElement(WaveformSeek, {
           positionMs,
           durationMs,
@@ -411,6 +415,23 @@ export async function run(): Promise<void> {
         'a dead pointer’s stray input commits nothing',
       );
       assertEqual(input.value, '0', 'the dead pointer previews nothing');
+      // A disable/re-enable while the dead pointer is still held
+      // must not resurrect it — its input stays ignored until the
+      // real release lands.
+      await act(async () => {
+        root.render(render('occ-b', 0, null));
+      });
+      await act(async () => {
+        root.render(render('occ-b', 0, 90_000));
+      });
+      await act(async () => {
+        slide(input, 45_000);
+      });
+      assertEqual(
+        seeks.length,
+        0,
+        'a dead pointer stays dead across re-enable',
+      );
       await act(async () => {
         pointer(input, 'pointerup');
       });
@@ -424,6 +445,16 @@ export async function run(): Promise<void> {
         '0',
         'the abandoned gesture restores the new track’s position',
       );
+      // Released — keyboard input is free again.
+      await act(async () => {
+        slide(input, 55_000);
+      });
+      assertEqual(
+        seeks.length,
+        1,
+        'input commits once the dead pointer released',
+      );
+      assertEqual(seeks[0], 55_000, 'the keyboard commit lands');
       await act(async () => {
         root.unmount();
       });

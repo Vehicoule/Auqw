@@ -153,19 +153,23 @@ function useScrubCommit(
 ): {
   readonly enabled: boolean;
   readonly shownMs: number;
-  readonly onScrubStart: () => void;
+  readonly onScrubStart: (pointerId: number) => void;
   readonly onScrubValue: (ms: number) => void;
-  readonly onScrubEnd: (commitMs: number | null) => void;
+  readonly onScrubEnd: (commitMs: number | null, pointerId: number) => void;
 } {
   const enabled =
     durationMs !== null && durationMs > 0 && onSeek !== undefined;
   const [scrubMs, setScrubMs] = useState<number | null>(null);
   const [heldMs, setHeldMs] = useState<number | null>(null);
-  // Pointer lifecycle — 'drag' a live scrub; 'abandoned' a still-
-  // pressed pointer whose gesture died (track flip, disable): its
-  // stray `input` events stay ignored until the release lands, so
-  // they can't commit as a fake keyboard seek.
-  const pointerPhase = useRef<'none' | 'drag' | 'abandoned'>('none');
+  // Pointer identity tracking: `activePointer` is the pointer id
+  // driving the drag; `deadPointers` are ids whose gesture died
+  // mid-press (track flip, disable) — their `input` events stay
+  // ignored until their real release, observed at the document
+  // where pointerup always bubbles, so they can never commit as a
+  // fake keyboard seek.
+  const pointerPhase = useRef<'none' | 'drag'>('none');
+  const activePointer = useRef<number | null>(null);
+  const deadPointers = useRef<Set<number>>(new Set());
   const scrubRef = useRef<number | null>(null);
   const positionRef = useRef(positionMs);
   positionRef.current = positionMs;
@@ -179,6 +183,7 @@ function useScrubCommit(
   const commit = useCallback(
     (ms: number) => {
       pointerPhase.current = 'none';
+      activePointer.current = null;
       scrubRef.current = null;
       setScrubMs(null);
       heldBaseline.current = positionRef.current;
@@ -222,19 +227,43 @@ function useScrubCommit(
     },
     [],
   );
-  // A disable landing mid-drag abandons the gesture (pointerup will
-  // never arrive on a disabled input) — restore the real fill. The
-  // dead phase can't outlive the disable itself: once the control
-  // re-enables, the pointer's old drag session is gone and keyboard
-  // input must commit again.
+  // Every pointer release bubbles to the document — even one
+  // landing off the control or while it's disabled. Draining dead
+  // ids there means a held dead pointer keeps ignoring its input
+  // (a re-enabled control included) while a released one frees
+  // keyboard input again. A release off the element mid-drag is a
+  // cancel.
+  useEffect(() => {
+    const release = (event: PointerEvent) => {
+      deadPointers.current.delete(event.pointerId);
+      if (event.pointerId === activePointer.current) {
+        activePointer.current = null;
+        pointerPhase.current = 'none';
+        scrubRef.current = null;
+        gestureKey.current = undefined;
+        setScrubMs(null);
+      }
+    };
+    document.addEventListener('pointerup', release);
+    document.addEventListener('pointercancel', release);
+    return () => {
+      document.removeEventListener('pointerup', release);
+      document.removeEventListener('pointercancel', release);
+    };
+  }, []);
+  // A disable landing mid-drag kills the gesture (pointerup can
+  // never arrive on a disabled input) — drain the pointer as dead
+  // and restore the real fill.
   useEffect(() => {
     if (!enabled && pointerPhase.current === 'drag') {
-      pointerPhase.current = 'abandoned';
+      if (activePointer.current !== null) {
+        deadPointers.current.add(activePointer.current);
+        activePointer.current = null;
+      }
+      pointerPhase.current = 'none';
       scrubRef.current = null;
       gestureKey.current = undefined;
       setScrubMs(null);
-    } else if (enabled && pointerPhase.current === 'abandoned') {
-      pointerPhase.current = 'none';
     }
   }, [enabled]);
   // The hold belongs to the track it was committed on — a track
@@ -249,57 +278,67 @@ function useScrubCommit(
       setHeldMs(null);
     }
   }, [trackKey, heldMs]);
-  // A track change mid-drag abandons the gesture entirely: the
+  // A track change mid-drag kills the gesture entirely: the
   // preview belongs to a track no longer playing, a release must
-  // never seek it, and the still-pressed pointer's later inputs
-  // stay ignored until its release — `onScrubEnd` double-checks
-  // the key since a release can land before this effect.
+  // never seek it, and the still-pressed pointer drains as dead —
+  // `onScrubEnd` double-checks the key since a release can land
+  // before this effect.
   useEffect(() => {
     if (
       pointerPhase.current === 'drag' &&
       gestureKey.current !== undefined &&
       gestureKey.current !== trackKey
     ) {
-      pointerPhase.current = 'abandoned';
+      if (activePointer.current !== null) {
+        deadPointers.current.add(activePointer.current);
+        activePointer.current = null;
+      }
+      pointerPhase.current = 'none';
       scrubRef.current = null;
       gestureKey.current = undefined;
       setScrubMs(null);
     }
   }, [trackKey]);
 
-  const onScrubStart = useCallback(() => {
-    if (enabled) {
-      pointerPhase.current = 'drag';
-      scrubRef.current = null;
-      gestureKey.current = trackKeyRef.current;
-    }
-  }, [enabled]);
+  const onScrubStart = useCallback(
+    (pointerId: number) => {
+      if (enabled) {
+        pointerPhase.current = 'drag';
+        activePointer.current = pointerId;
+        scrubRef.current = null;
+        gestureKey.current = trackKeyRef.current;
+      }
+    },
+    [enabled],
+  );
   const onScrubValue = useCallback(
     (ms: number) => {
       if (pointerPhase.current === 'drag') {
         scrubRef.current = ms;
         setScrubMs(ms);
-      } else if (pointerPhase.current === 'none' && enabled) {
-        // No pointer gesture in flight — keyboard Home/End and AT
-        // commits seek immediately, as before. An abandoned
-        // pointer's inputs are ignored until its release lands.
+      } else if (deadPointers.current.size === 0 && enabled) {
+        // No pointer gesture live or dead in flight — keyboard
+        // Home/End and AT commits seek immediately, as before. A
+        // held dead pointer's inputs are ignored until release.
         commit(ms);
       }
     },
     [commit, enabled],
   );
   const onScrubEnd = useCallback(
-    (commitMs: number | null) => {
-      if (pointerPhase.current === 'none') {
-        return;
+    (commitMs: number | null, pointerId: number) => {
+      if (deadPointers.current.delete(pointerId)) {
+        return; // a dead pointer's release — drained, seeks nothing
       }
-      // Abandoned gestures — a cancelled pointer, a dead gesture's
-      // release, or a track change since pointer-down — restore
-      // the real fill. The key check matters: releasing on a new
-      // track must not seek it to a position the preview only ever
-      // showed on the old one.
+      if (pointerId !== activePointer.current) {
+        return; // a pointer this control never tracked
+      }
+      activePointer.current = null;
+      // Abandoned gestures — a cancelled pointer or a track change
+      // since pointer-down — restore the real fill. The key check
+      // matters: releasing on a new track must not seek it to a
+      // position the preview only ever showed on the old one.
       if (
-        pointerPhase.current === 'abandoned' ||
         commitMs === null ||
         (gestureKey.current !== undefined &&
           gestureKey.current !== trackKeyRef.current)
@@ -378,15 +417,24 @@ export function LinearScrubber({
       value={Math.round(shownMs)}
       disabled={!enabled}
       onKeyDown={onKeyDown}
-      onPointerDown={enabled ? scrub.onScrubStart : undefined}
+      onPointerDown={
+        enabled ? (event) => scrub.onScrubStart(event.pointerId) : undefined
+      }
       onPointerUp={
         enabled
           ? (event) =>
-            scrub.onScrubEnd(Number(event.currentTarget.value))
+            scrub.onScrubEnd(
+              Number(event.currentTarget.value),
+              event.pointerId,
+            )
           : undefined
       }
-      onPointerCancel={enabled ? () => scrub.onScrubEnd(null) : undefined}
-      onLostPointerCapture={enabled ? () => scrub.onScrubEnd(null) : undefined}
+      onPointerCancel={
+        enabled ? (event) => scrub.onScrubEnd(null, event.pointerId) : undefined
+      }
+      onLostPointerCapture={
+        enabled ? (event) => scrub.onScrubEnd(null, event.pointerId) : undefined
+      }
       onChange={
         enabled
           ? (event) => scrub.onScrubValue(Number(event.currentTarget.value))
@@ -672,15 +720,27 @@ export function WaveformSeek({
         value={Math.round(shownMs)}
         disabled={!enabled}
         onKeyDown={onKeyDown}
-        onPointerDown={enabled ? scrub.onScrubStart : undefined}
+        onPointerDown={
+          enabled ? (event) => scrub.onScrubStart(event.pointerId) : undefined
+        }
         onPointerUp={
           enabled
-            ? (event) => scrub.onScrubEnd(Number(event.currentTarget.value))
+            ? (event) =>
+              scrub.onScrubEnd(
+                Number(event.currentTarget.value),
+                event.pointerId,
+              )
             : undefined
         }
-        onPointerCancel={enabled ? () => scrub.onScrubEnd(null) : undefined}
+        onPointerCancel={
+          enabled
+            ? (event) => scrub.onScrubEnd(null, event.pointerId)
+            : undefined
+        }
         onLostPointerCapture={
-          enabled ? () => scrub.onScrubEnd(null) : undefined
+          enabled
+            ? (event) => scrub.onScrubEnd(null, event.pointerId)
+            : undefined
         }
         onChange={
           enabled
