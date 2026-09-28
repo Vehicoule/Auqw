@@ -1,6 +1,6 @@
 import { CancellationSource } from '@auqw/application';
 import { assert, assertEqual } from '@auqw/application/testing';
-import { createClock, createIds, createLog } from './runtime.ts';
+import { createClock, createIds, createLog } from '@auqw/application';
 
 // 1. The wall clock reports Date.now and sleeps resolve ok.
 async function clockBasics(): Promise<void> {

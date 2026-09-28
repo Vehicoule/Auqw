@@ -16,7 +16,7 @@ import {
   type SyncSocketPort,
 } from '@auqw/application';
 import { isShellError } from '../shared/errors.ts';
-import { createClock, createIds, createLog } from '../renderer/runtime.ts';
+import { createClock, createIds, createLog } from '@auqw/application';
 import {
   createNoiseV1ClientCrypto,
   type SyncIdentity,

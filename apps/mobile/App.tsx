@@ -162,11 +162,11 @@ import type { SessionController } from './src/session/controller.ts';
 import { activateHomeCard } from './src/session/home-card.ts';
 import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
 import { createExpoPeaksPort } from './src/adapters/expo-peaks.ts';
-import { useWaveformPeaks } from './src/adapters/use-waveform-peaks.ts';
-import type { PeaksTarget } from './src/adapters/use-waveform-peaks.ts';
+import { useWaveformPeaks } from '@auqw/ui-shared';
+import type { PeaksTarget } from '@auqw/ui-shared';
 import { discoveredPotProviderUrl } from './src/adapters/pot-provider-discovery.ts';
 import { potProviderUrlFromPeers } from './src/adapters/pot-provider.ts';
-import { createClock, createIds } from './src/adapters/runtime.ts';
+import { createClock, createIds } from '@auqw/application';
 import { devRoute } from './src/dev-routes.ts';
 import { appFilePath, runSeamLink } from './seam-dev.ts';
 

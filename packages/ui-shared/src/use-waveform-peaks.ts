@@ -1,21 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
-import { createPeaksTracker } from '@auqw/application';
+import { createClock, createPeaksTracker } from '@auqw/application';
 import type { PeaksPort, WaveformPeak } from '@auqw/application';
 import type { PeaksTarget } from '@auqw/application';
-import { createClock } from './runtime.ts';
 
 export type { PeaksTarget } from '@auqw/application';
 
 /**
- * Real waveform peaks for the currently playing recording — the
- * mobile twin of the desktop hook. Extraction is lazy per
- * `recordingId|attemptId` (a re-prepared stream never inherits the
- * attempt it replaced), a `null` entry marks a settled failure so the
- * seeded pattern sticks without re-pulling, and a small LRU bounds
- * memory. Returns `null` while pending or on failure — the renderer
- * falls back to the seeded pattern. The lifecycle itself lives in
- * `@auqw/application`'s `peaks-tracker.ts`; this hook only bridges
- * it to React.
+ * Real waveform peaks for the currently playing recording — lazily
+ * extracted on track change, cached per attempt (`recordingId|attemptId`
+ * — a re-prepared stream never inherits the attempt it replaced), a
+ * `null` entry marks a settled failure so the seeded pattern sticks
+ * without re-pulling on every render, and a small LRU bounds memory.
+ * A cancelled extraction never caches — revisiting the track retries.
+ * Returns `null` while pending or on failure — the renderer falls
+ * back to the seeded pattern. The lifecycle itself lives in
+ * `@auqw/application`'s `peaks-tracker.ts`; this hook only bridges it
+ * to React.
  */
 export function useWaveformPeaks(
   port: PeaksPort | null,
@@ -27,10 +27,10 @@ export function useWaveformPeaks(
       port === null
         ? null
         : createPeaksTracker({
-          port,
-          clock: createClock(),
-          onChange: () => setTick((tick) => tick + 1),
-        }),
+            port,
+            clock: createClock(),
+            onChange: () => setTick((tick) => tick + 1),
+          }),
     [port],
   );
 

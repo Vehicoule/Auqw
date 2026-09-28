@@ -135,10 +135,10 @@ import type { ThemeSource } from '@auqw/design-tokens/adaptive';
 import { isShellError } from '../shared/errors.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
-import { createClock, createIds } from './runtime.ts';
+import { createClock, createIds } from '@auqw/application';
 import { createWebPeaksPort } from './web-peaks.ts';
-import { useWaveformPeaks } from './use-waveform-peaks.ts';
-import type { PeaksTarget } from './use-waveform-peaks.ts';
+import { useWaveformPeaks } from '@auqw/ui-shared';
+import type { PeaksTarget } from '@auqw/ui-shared';
 
 // Boot and gate strings render before the ready settings arrive —
 // seed the UI language from the system tag so those first screens

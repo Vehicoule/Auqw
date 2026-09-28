@@ -31,7 +31,7 @@ import {
   createClock,
   createIds,
   createLog,
-} from '../renderer/runtime.ts';
+} from '@auqw/application';
 import { createTagService } from './tags.ts';
 import { createTransferService } from './transfer.ts';
 import { hasRequestId, isUtilityRequest } from './validators.ts';

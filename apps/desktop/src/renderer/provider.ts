@@ -15,7 +15,7 @@ import {
 } from '@auqw/application';
 import type { ErrorKind } from '@auqw/application';
 import type { AuqwApi, RequestOutcomePayload } from '../shared/contract.ts';
-import { createIds } from './runtime.ts';
+import { createIds } from '@auqw/application';
 
 export { manifestCapabilities } from '@auqw/application';
 

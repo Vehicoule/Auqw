@@ -10,7 +10,7 @@ import {
   FakeSyncLogStore,
 } from '@auqw/application/testing';
 import { MAX_SYNC_DOC_BYTES } from '../shared/contract.ts';
-import { createClock, createIds, createLog } from '../renderer/runtime.ts';
+import { createClock, createIds, createLog } from '@auqw/application';
 import {
   createUtilitySyncEngine,
   type UtilitySyncEngine,
