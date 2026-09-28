@@ -25,6 +25,7 @@ import {
   serializeSyncDeltaDocs,
 } from '@auqw/application';
 import type {
+  AppError,
   AttemptTrace,
   EntityRef,
   ImportPreview,
@@ -1620,20 +1621,30 @@ function Main({
   // must resolve — retrying the press only fails the same way, so a
   // play that hits the gate opens the review surface instead of
   // dying quietly on a dead queue item.
-  const reportPlay = useCallback(
-    (action: MessageId, result: Result<unknown>) => {
+  //
+  // reportPlayError is the single error funnel: the play promise and
+  // the published `playback.failed` state carry the SAME error object,
+  // so identity-dedupe via lastPlayErrorRef reports each failure once
+  // regardless of which channel delivers it first.
+  const lastPlayErrorRef = useRef<AppError | null>(null);
+  const reportPlayError = useCallback(
+    (action: MessageId, error: AppError) => {
       // A newer play replacing this attempt resolves 'superseded' (or
-      // 'cancelled') — that's the queue working, not a failure worth a
-      // toast.
+      // 'cancelled'); engine disposal resolves 'released' — that's the
+      // queue working, not a failure worth a toast.
       if (
-        !result.ok &&
-        (result.error.kind === 'superseded' ||
-          result.error.kind === 'cancelled')
+        error.kind === 'superseded' ||
+        error.kind === 'cancelled' ||
+        error.kind === 'released'
       ) {
         return;
       }
-      reportResult(action, result);
-      if (!result.ok && isMatchGate(result.error)) {
+      if (lastPlayErrorRef.current === error) {
+        return;
+      }
+      lastPlayErrorRef.current = error;
+      reportResult(action, { ok: false, error });
+      if (isMatchGate(error)) {
         // Land the user on the fresh pending row: a stale 'resolved'
         // filter or an already-open screen would hide it, so the
         // route always selects pending and reloads.
@@ -1646,6 +1657,25 @@ function Main({
     },
     [pushOverlay, overlay, loadReviews],
   );
+  const reportPlay = useCallback(
+    (action: MessageId, result: Result<unknown>) => {
+      if (result.ok) {
+        reportResult(action, result);
+        return;
+      }
+      reportPlayError(action, result.error);
+    },
+    [reportPlayError],
+  );
+  // A prepare/stream failure that lands after the play promise already
+  // resolved reaches the UI only through `playback.failed` — the
+  // watcher reports it through the same deduped funnel as the promise
+  // path so the failure can't pass silently.
+  useEffect(() => {
+    if (state.playback.type === 'failed') {
+      reportPlayError('common.play', state.playback.error);
+    }
+  }, [state.playback, reportPlayError]);
 
   const playRecording = useCallback(
     async (recordingId: string) => {
