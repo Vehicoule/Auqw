@@ -203,6 +203,23 @@ function render(node: ReactNode): string {
   const markup = render(h(TrackRow, { row: liked!, onToggleLike: () => {} }));
   check('liked row aria-label mentions liked', markup.includes('unlike'));
 }
+{
+  const row = fixtureRowStates[0]!;
+  const markup = render(
+    h(TrackRow, {
+      row,
+      onPress: () => { },
+      onAddToPlaylist: () => { },
+      onContext: () => { },
+    }),
+  );
+  assertIncludes(
+    'row add-to-playlist affordance renders',
+    markup,
+    'aria-label="add to playlist"',
+  );
+  assertIncludes('row menu button still renders', markup, 'row actions');
+}
 
 // ---- markup: queue ----------------------------------------------------
 
@@ -351,6 +368,26 @@ function render(node: ReactNode): string {
   check('pairing QR renders as svg', markup.includes('<svg'));
   assertIncludes('pairing expiry renders', markup, 'expires in 4m');
   assertIncludes('pairing copy affordance', markup, 'copy payload');
+}
+{
+  const markup = render(
+    h(PairingSheet, {
+      pairing: null,
+      onPairCode: () => { },
+      onDismiss: () => { },
+    }),
+  );
+  assertIncludes(
+    'typed join renders the host field',
+    markup,
+    'device address',
+  );
+  assertIncludes(
+    'typed join renders the code field',
+    markup,
+    '123456',
+  );
+  assertIncludes('typed join renders the pair button', markup, '>pair<');
 }
 
 // ---- markup: now playing / lyrics -----------------------------------------

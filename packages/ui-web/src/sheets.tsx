@@ -418,10 +418,10 @@ export function AddToPlaylistSheet({
             onCreate === undefined
               ? undefined
               : (name) => {
-                  onCreate(name);
-                  setDraft('');
-                  setCreating(false);
-                }
+                onCreate(name);
+                setDraft('');
+                setCreating(false);
+              }
           }
           onCancel={() => {
             setDraft('');
@@ -514,9 +514,108 @@ function NearbyRow({
 }
 
 /**
+ * The manual join form — the desktop's typed path where mobile has a
+ * camera: code + host + port, mirroring the mobile PairForm exactly.
+ * `port` stays a draft string so an empty box means "no port yet",
+ * never a hidden default.
+ */
+function ManualPairForm({
+  disabled,
+  onPairCode,
+}: {
+  readonly disabled: boolean;
+  readonly onPairCode?:
+    | ((input: {
+        code: string;
+        host: string;
+        port: number | null;
+      }) => void)
+    | undefined;
+}) {
+  const [code, setCode] = useState('');
+  const [host, setHost] = useState('');
+  const [port, setPort] = useState('');
+  const codeReady = /^[0-9]{6}$/.test(code);
+  const hostReady = host.trim().length > 0;
+  const parsedPort = port.trim() === '' ? null : Number.parseInt(port, 10);
+  const portReady =
+    parsedPort !== null &&
+    Number.isSafeInteger(parsedPort) &&
+    parsedPort > 0 &&
+    parsedPort <= 65535;
+  const ready = codeReady && hostReady && portReady && !disabled;
+  return (
+    <div className="uw-manual-pair">
+      <Text variant="metadata" color="secondary">
+        {t('sync.form.help')}
+      </Text>
+      <div className="uw-nearby__dial">
+        <input
+          className="uw-namefield__input"
+          aria-label={t('sync.form.codeA11y')}
+          placeholder="123456"
+          autoComplete="off"
+          inputMode="numeric"
+          maxLength={6}
+          value={code}
+          onChange={(event) =>
+            setCode(event.currentTarget.value.replace(/[^0-9]/g, '').slice(0, 6))
+          }
+        />
+      </div>
+      <div className="uw-nearby__dial">
+        <input
+          className="uw-namefield__input"
+          aria-label={t('sync.form.host')}
+          placeholder={t('sync.form.host')}
+          autoComplete="off"
+          spellCheck={false}
+          value={host}
+          onChange={(event) => setHost(event.currentTarget.value)}
+        />
+        <input
+          className="uw-namefield__input uw-manual-pair__port"
+          aria-label={t('sync.form.portA11y')}
+          placeholder={t('sync.form.port')}
+          autoComplete="off"
+          inputMode="numeric"
+          maxLength={5}
+          value={port}
+          onChange={(event) =>
+            setPort(event.currentTarget.value.replace(/[^0-9]/g, '').slice(0, 5))
+          }
+        />
+      </div>
+      <div className="uw-nearby__dial">
+        <Pressable
+          onPress={
+            !ready || onPairCode === undefined
+              ? undefined
+              : () =>
+                onPairCode({
+                  code,
+                  host: host.trim(),
+                  port: parsedPort,
+                })
+          }
+          disabled={!ready || onPairCode === undefined}
+          ariaLabel={disabled ? t('sync.form.pairing') : t('sync.form.pair')}
+          className="uw-pill uw-pill--accent"
+        >
+          <Text variant="metadata" color="bright">
+            {disabled ? t('sync.form.pairing') : t('sync.form.pair')}
+          </Text>
+        </Pressable>
+      </div>
+    </div>
+  );
+}
+
+/**
  * The pairing offer: the QR another device scans, plus the code.
  * Below it the accept half — nearby pair hosts discovered over mDNS
- * (tap → type the code that device is showing) and a raw-payload
+ * (tap → type the code that device is showing), a typed code+address
+ * form for off-network or discovery-free joins, and a raw-payload
  * paste fallback. `expiresLabel` counts down to the offer's expiry.
  * `pairing` is null while the offer mints or after it failed — the
  * accept half must work either way, so it renders unconditionally.
@@ -527,6 +626,7 @@ export function PairingSheet({
   onDismiss,
   nearbyPeers,
   onPairNearby,
+  onPairCode,
   onPastePayload,
   dialing = false,
   dialError = null,
@@ -536,6 +636,17 @@ export function PairingSheet({
   readonly onDismiss?: (() => void) | undefined;
   readonly nearbyPeers?: readonly NearbyPeerModel[] | undefined;
   readonly onPairNearby?: ((key: string, code: string) => void) | undefined;
+  /**
+   * Typed join: code + host + port — the desktop's join-by-address
+   * path (it has no camera; the QR scanner is a mobile surface).
+   */
+  readonly onPairCode?:
+    | ((input: {
+        code: string;
+        host: string;
+        port: number | null;
+      }) => void)
+    | undefined;
   readonly onPastePayload?: ((payload: string) => void) | undefined;
   readonly dialing?: boolean | undefined;
   readonly dialError?: string | null | undefined;
@@ -604,6 +715,9 @@ export function PairingSheet({
               />
             ))}
           </div>
+        )}
+        {onPairCode !== undefined && (
+          <ManualPairForm disabled={dialing} onPairCode={onPairCode} />
         )}
         {onPastePayload !== undefined && (
           <div className="uw-nearby__dial">

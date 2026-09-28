@@ -26,6 +26,7 @@ export type SearchScreenProps = {
   readonly onRetry?: (() => void) | undefined;
   readonly onResultPress?: ((row: TrackRowModel) => void) | undefined;
   readonly onToggleLike?: ((row: TrackRowModel) => void) | undefined;
+  readonly onAddToPlaylist?: ((row: TrackRowModel) => void) | undefined;
   readonly onContext?: ((row: TrackRowModel) => void) | undefined;
   /** Submitted queries, newest first — rendered on the idle phase. */
   readonly recents?: readonly string[] | undefined;
@@ -51,6 +52,7 @@ export function SearchScreen({
   onRetry,
   onResultPress,
   onToggleLike,
+  onAddToPlaylist,
   onContext,
   recents = [],
   onRecentPress,
@@ -276,6 +278,11 @@ export function SearchScreen({
                   onToggleLike === undefined
                     ? undefined
                     : () => onToggleLike(row)
+                }
+                onAddToPlaylist={
+                  onAddToPlaylist === undefined
+                    ? undefined
+                    : () => onAddToPlaylist(row)
                 }
                 onContext={
                   onContext === undefined ? undefined : () => onContext(row)
