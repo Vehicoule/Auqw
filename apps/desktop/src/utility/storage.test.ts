@@ -169,6 +169,36 @@ export async function run(): Promise<void> {
     );
     await call(CHANNELS.storageRollback, { txId: deadBatch });
 
+    // a cancel landing mid-chunk interrupts the batch — the handler
+    // yields between 64-statement sub-batches and re-checks the flag
+    const midTx = await begin();
+    const midFlight = call(CHANNELS.storageExecMany, {
+      txId: midTx,
+      statements: Array.from({ length: 130 }, (_, i) => ({
+        sql: 'INSERT INTO items (name) VALUES (?)',
+        params: [`mid-${i}`],
+      })),
+    });
+    await call(CHANNELS.storageCancel, { txId: midTx });
+    const midResult = await midFlight;
+    assert(
+      !midResult.ok && midResult.error.kind === 'cancelled',
+      'mid-batch cancel interrupts the chunk',
+    );
+    await call(CHANNELS.storageRollback, { txId: midTx });
+    const midCheck = await begin();
+    const midRows = await query(
+      midCheck,
+      `SELECT COUNT(*) AS n FROM items WHERE name LIKE 'mid-%'`,
+    );
+    assert(midRows.ok);
+    assertDeepEqual(
+      midRows.result,
+      { rows: [{ n: 0 }] },
+      'interrupted batch rolled back clean',
+    );
+    await call(CHANNELS.storageCommit, { txId: midCheck });
+
     // rollback discards
     const tx3 = await begin();
     await execute(tx3, 'INSERT INTO items (name) VALUES (?)', ['dropped']);

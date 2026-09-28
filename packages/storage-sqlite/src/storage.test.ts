@@ -2186,6 +2186,34 @@ async function largeRemovalCommits(): Promise<void> {
   driver.close();
 }
 
+async function duplicateLyricsRejected(): Promise<void> {
+  const { driver, storage } = rig();
+  assert(
+    (
+      await storage.commit(
+        { recordings: [recording('r1', [ref('itunes', 'i1')])] },
+        ctx().context,
+      )
+    ).ok,
+    'seed commit',
+  );
+  // recording_id is the lyrics PK — a repeat in one batch used to die
+  // on the constraint; the delta model must reject it up front.
+  const entry = (kind: 'plain' | 'synced'): LyricsCacheEntry => ({
+    recordingId: 'r1',
+    provider: 'lyrics-lrclib',
+    kind,
+    payload: { plainLyrics: 'w', syncedLyrics: null, instrumental: false },
+    fetchedMs: 1,
+  });
+  const result = await storage.commit(
+    { lyricsCache: [entry('plain'), entry('synced')] },
+    ctx().context,
+  );
+  assert(!result.ok, 'repeated lyrics recording rejects');
+  driver.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentOperations', concurrentOperations],
   ['initializeAndCoalesce', initializeAndCoalesce],
@@ -2228,6 +2256,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['committedOrderPersists', committedOrderPersists],
   ['artworkCacheEviction', artworkCacheEviction],
   ['largeRemovalCommits', largeRemovalCommits],
+  ['duplicateLyricsRejected', duplicateLyricsRejected],
 ];
 
 for (const [name, fn] of TESTS) {

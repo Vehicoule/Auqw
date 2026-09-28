@@ -328,9 +328,11 @@ export function createStorageService(
    * A commit's write plan in one call: every statement is gated
    * before any of them runs, then each runs in order inside the
    * pinned tx — a mid-batch failure still leaves the renderer's
-   * rollback to undo the partial write.
+   * rollback to undo the partial write. The loop yields between
+   * sub-batches so a queued storage:cancel lands mid-batch instead
+   * of waiting out the whole chunk.
    */
-  function execMany(args: StorageExecManyArgs): unknown {
+  async function execMany(args: StorageExecManyArgs): Promise<unknown> {
     const tx = requireTx(args.txId);
     if (tx.cancelled) {
       throw shellError('cancelled', 'transaction cancelled');
@@ -338,12 +340,18 @@ export function createStorageService(
     for (const statement of args.statements) {
       checkStatement(statement.sql);
     }
+    const opened = database();
     try {
-      const opened = database();
-      for (const statement of args.statements) {
+      for (const [index, statement] of args.statements.entries()) {
         const prepared = opened.prepare(statement.sql);
         prepared.setReadBigInts(true);
         prepared.run(...statement.params);
+        if ((index + 1) % 64 === 0) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          if (tx.cancelled) {
+            throw shellError('cancelled', 'transaction cancelled');
+          }
+        }
       }
       return undefined;
     } catch (thrown) {

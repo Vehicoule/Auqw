@@ -1147,7 +1147,11 @@ export async function planCommit(
   const lyricsCache = batch.lyricsCache;
   if (
     lyricsCache !== undefined &&
-    (!Array.isArray(lyricsCache) || !lyricsCache.every(isLyricsCacheEntry))
+    (!Array.isArray(lyricsCache) ||
+      !lyricsCache.every(isLyricsCacheEntry) ||
+      // recording_id is the PK — the old rewrite's second INSERT
+      // rejected a repeated recording; keep that contract.
+      !allUnique(lyricsCache, (entry) => entry.recordingId))
   ) {
     return err(invalidBatch());
   }
