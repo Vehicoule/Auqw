@@ -2488,6 +2488,11 @@ function Main({
   // same paging + validation as the desktop IPC path —
   // exportFittedDeltaDoc adds the byte refit the desktop adapter does,
   // halving the entry limit until each page fits the wire doc cap.
+  // The export walk is owned: a second tap supersedes the in-flight
+  // one and unmount cancels it — its only output is a late clipboard
+  // write nobody is waiting on.
+  const exportDeltaSource = useRef<CancellationSource | null>(null);
+  useEffect(() => () => exportDeltaSource.current?.cancel(), []);
   const onCopyPayload = useCallback(() => {
     if (share.payload !== null) {
       Clipboard.setString(share.payload);
@@ -2498,13 +2503,22 @@ function Main({
     if (engine === undefined) {
       return;
     }
-    const signal = new CancellationSource().signal;
+    exportDeltaSource.current?.cancel();
+    const source = new CancellationSource();
+    exportDeltaSource.current = source;
     void collectSyncDeltaDocs((cursor) =>
-      exportFittedDeltaDoc(engine.exportDelta, cursor, signal),
+      exportFittedDeltaDoc(engine.exportDelta, cursor, source.signal),
     )
       .then((collected) => {
+        if (exportDeltaSource.current === source) {
+          exportDeltaSource.current = null;
+        }
         if (!collected.ok) {
-          reportResult('sync.panel.copyDelta', collected);
+          // A superseded/unmounted walk ends 'cancelled' — that is a
+          // disposal, not a failure worth a toast.
+          if (collected.error.kind !== 'cancelled') {
+            reportResult('sync.panel.copyDelta', collected);
+          }
           return;
         }
         Clipboard.setString(serializeSyncDeltaDocs(collected.value));
