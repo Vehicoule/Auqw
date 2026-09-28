@@ -641,10 +641,12 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       // lived only on the session, so no emission ever carries one
       // half of a landing without the other.
       if (session.roundReport !== undefined) {
-        // An unpair mid-round already deleted this peer's counters —
-        // a landing that drains after it must not repopulate state
-        // for a pairing that no longer exists.
-        if (peers.has(session.peerFp)) {
+        // Only the session still OWNING the pairing's slot may land
+        // its round: a superseding re-pair repopulates `peers` before
+        // the killed session drains, so peer-existence would let a
+        // stale round's counters (and a swallowed rate-limit floor)
+        // surface under the fresh pairing. Same guard as killSession.
+        if (sessions.get(session.peerFp) === session) {
           lastRounds.set(session.peerFp, session.roundReport);
           if (!session.closed) {
             views.set(

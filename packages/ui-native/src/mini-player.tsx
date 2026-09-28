@@ -139,7 +139,23 @@ export function MiniPlayer({
           Math.max(0, dragStart.value - e.translationY / travelPx()),
         );
       })
-      .onFinalize((e) => {
+      .onFinalize((e, success) => {
+        // RNGH fires onFinalize on END *and* on FAIL/CANCELLED — an OS
+        // steal or a failOffset abort carries the finger's last
+        // translation, so without the guard a dead gesture still
+        // dismisses/skips/commits. Restore whatever it wrote and stop.
+        if (!success) {
+          if (
+            sheetProgress !== undefined &&
+            wroteProgress.value &&
+            sheetProgress.value > 0
+          ) {
+            sheetProgress.value = theme.reducedMotion
+              ? 0
+              : withSpring(0, { stiffness: 200, damping: 28 });
+          }
+          return;
+        }
         if (sheetProgress === undefined) {
           // Static hosts (the gallery) keep the release-threshold
           // contract — no shared progress to track.

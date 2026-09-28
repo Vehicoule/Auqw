@@ -444,8 +444,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         view.lastError !== undefined &&
         (view.lastError.retryable ||
           view.lastError.kind === 'unavailable') &&
-        !track.running &&
-        track.timer === null
+        !track.running
       ) {
         // A session the client dropped (dead socket, keepalive miss)
         // or a dial that found nobody listening reconnects on the
@@ -456,8 +455,11 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         const hint = view.lastError.retryAfterMs;
         // The floor is absolute and set only by a FRESH verdict — an
         // unchanged offline lastError republished by some other
-        // peer's status emission must not slide it later. Republish
-        // re-arms wait out the floor's remainder, not a new hint.
+        // peer's status emission must not slide it later. The renewal
+        // is deliberately NOT gated on `timer === null`: an armed wake
+        // defers to the newer floor at fire time (runRound), while a
+        // swallowed update would let the stale wake dial inside the
+        // peer's newest asked wait.
         const prevOffline =
           prevPeer !== undefined && prevPeer.state === 'offline'
             ? prevPeer.lastError
@@ -473,15 +475,17 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         ) {
           track.notBeforeMs = now + hint;
         }
-        const floorWait =
-          track.notBeforeMs !== undefined &&
-            now !== null &&
-            track.notBeforeMs > now
-            ? track.notBeforeMs - now
-            : 0;
-        const wait = Math.max(track.backoffMs, floorWait);
-        track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
-        schedule(view.peer.fp, wait, 'stand');
+        if (track.timer === null) {
+          const floorWait =
+            track.notBeforeMs !== undefined &&
+              now !== null &&
+              track.notBeforeMs > now
+              ? track.notBeforeMs - now
+              : 0;
+          const wait = Math.max(track.backoffMs, floorWait);
+          track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
+          schedule(view.peer.fp, wait, 'stand');
+        }
       } else if (
         view.state === 'offline' &&
         view.lastError === undefined &&

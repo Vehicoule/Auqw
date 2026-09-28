@@ -2366,8 +2366,15 @@ export class PlaybackEngine {
     // under the new deal — the player already attached its target —
     // so resolve the event's own projection when it is still known,
     // else fall back to the installed one, else the canonical order.
-    const executed =
-      this.#installedProjections.get(event.projectionId) ?? projection;
+    const recorded = this.#installedProjections.get(event.projectionId);
+    const executed = recorded ?? projection;
+    // The lookup is bounded (8 installs): a projection evicted before
+    // its move events land CANNOT be re-judged — a wrap that was legal
+    // under the executed order reads illegal under a re-shuffled one,
+    // and rejecting diverges the cursor from what the service is
+    // playing. An unknown id therefore skips only the walk-space
+    // legality below; the identity/revision checks still apply.
+    const edgeUnverifiable = recorded === undefined;
     const execItems = executed?.items ?? [];
     const execOrder =
       executed === null || executed.order.length !== execItems.length
@@ -2410,7 +2417,7 @@ export class PlaybackEngine {
     let repeatEdge = false;
     if (event.reason === 'ended' || event.reason === 'remote-next') {
       const successor = orderPos >= 0 ? atWalk(orderPos + 1) : null;
-      legal = event.toOccurrenceId === successor;
+      legal = edgeUnverifiable || event.toOccurrenceId === successor;
       // repeat=one replays the cursor item on `ended` — a same-item
       // edge is legal only there (remote-next still advances). The
       // executed projection's rule governs — it is what the service
@@ -2439,6 +2446,7 @@ export class PlaybackEngine {
     } else if (event.reason === 'remote-previous') {
       const predecessor = orderPos > 0 ? atWalk(orderPos - 1) : null;
       legal =
+        edgeUnverifiable ||
         (event.toOccurrenceId !== null &&
           event.toOccurrenceId === event.fromOccurrenceId) ||
         (predecessor !== null &&
@@ -2469,7 +2477,13 @@ export class PlaybackEngine {
       this.#host.logWarn('queue transition rejected');
       return;
     }
-    if (!currentProjection) {
+    if (edgeUnverifiable) {
+      // The executed projection aged out of the lookup — the edge was
+      // accepted on identity alone, so say so for postmortems.
+      this.#host.logWarn(
+        'queue transition on evicted projection — legality unverified',
+      );
+    } else if (!currentProjection) {
       // The event's edge was already proven legal against the
       // INSTALLED projection above, so a stale-but-past revision is
       // safe to reconcile.

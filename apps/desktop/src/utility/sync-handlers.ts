@@ -323,6 +323,7 @@ export function createSyncHandlers(input: {
           port: args.port,
           code: args.code,
           ...(args.fp !== undefined ? { fp: args.fp } : {}),
+          ...(args.hosts !== undefined ? { hosts: args.hosts } : {}),
           signal,
         }),
       );

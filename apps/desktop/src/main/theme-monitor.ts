@@ -58,7 +58,13 @@ export interface ThemeMonitor {
   stop(): void;
 }
 
-const ASSIGN_RE = /([A-Za-z_0-9]+)\s*=\s*"([^"\n]+)"/;
+// Double-quoted basic strings and single-quoted literal strings are
+// both legal TOML values; either may carry the palette keys.
+const ASSIGN_RE = /([A-Za-z_0-9]+)\s*=\s*(?:"([^"\n]+)"|'([^'\n]+)')/;
+
+// Opens a `key = """`/`'''` multiline string; a closer on the same
+// line keeps it single-line (those still match ASSIGN_RE).
+const MULTILINE_OPEN_RE = /=\s*("""|''')/;
 
 /** Cuts a TOML `#` comment: a `#` inside a quoted span is data (colors
     are quoted hex), one outside ends the line. */
@@ -85,10 +91,32 @@ function stripTomlComment(line: string): string {
     override the live value. */
 export function parseOmarchyColors(text: string): Palette | null {
   const keys = new Map<string, string>();
+  // A `key = """`/`'''` value that doesn't close on its own line
+  // swallows the following lines as string data — none of them may
+  // contribute keys, or a stray `x = "v"` inside the block would
+  // parse as a real assignment.
+  let multiline: string | null = null;
   for (const line of text.split('\n')) {
-    const match = ASSIGN_RE.exec(stripTomlComment(line));
+    if (multiline !== null) {
+      // Inside a multiline string nothing is a comment — check the
+      // raw line for the closing delimiter.
+      if (line.includes(multiline)) {
+        multiline = null;
+      }
+      continue;
+    }
+    const stripped = stripTomlComment(line);
+    const open = MULTILINE_OPEN_RE.exec(stripped);
+    if (open !== null) {
+      const rest = stripped.slice(open.index + open[0].length);
+      if (!rest.includes(open[1]!)) {
+        multiline = open[1]!;
+        continue;
+      }
+    }
+    const match = ASSIGN_RE.exec(stripped);
     if (match !== null) {
-      keys.set(match[1]!, match[2]!);
+      keys.set(match[1]!, match[2] ?? match[3]!);
     }
   }
   const bg = keys.get('background');
@@ -172,7 +200,14 @@ export function parseKdeGlobals(text: string): Palette | null {
 
 /** `r,g,b` (or a bare `default`/`followsColorScheme`) → `#rrggbb`. */
 function kdeRgb(value: string): string | undefined {
-  const parts = value.split(',').map((part) => Number(part.trim()));
+  // Empty segments are not zeroes — Number('') parses as 0 and would
+  // silently accept `255,,0`, so blank parts map to NaN and fail the
+  // integer/range check below.
+  const parts = value
+    .split(',')
+    .map((part) =>
+      part.trim() === '' ? Number.NaN : Number(part.trim()),
+    );
   if (
     parts.length < 3 ||
     parts.slice(0, 3).some((n) => !Number.isInteger(n) || n < 0 || n > 255)

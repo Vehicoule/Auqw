@@ -976,6 +976,7 @@ function Main({
       name: string;
       host: string;
       port: number;
+      addresses: readonly string[];
       fp: string | null;
     }[]
   >([]);
@@ -1211,6 +1212,18 @@ function Main({
       Platform.OS === 'android' ? createExpoPeaksPort(AuqwExpo) : null,
     [],
   );
+  // Both morph consumers unmount with the player — a settle cut off
+  // mid-flight would leave stageProgress parked at a mid value and
+  // the next mount would render the pill at ~0 alpha. Re-seed on
+  // teardown so a fresh player starts collapsed, not mid-morph.
+  useEffect(() => {
+    if (player === null) {
+      stageProgress.value = 0;
+      stageTravel.value = 0;
+      setExpanded(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player === null]);
   const queueModel = useMemo(() => {
     // Same honesty rule as the library rows: offline + unowned marks
     // 'unavailable' so a dead press isn't a surprise.
@@ -1699,10 +1712,12 @@ function Main({
   );
 
   // Mirrors the cursor's targeting in walk space — the dealt order
-  // under shuffle, canonical otherwise: next → walk position+1;
-  // previous → restart current when positionMs>3s or at the walk's
-  // head, else position−1. The gate sees the same target the engine
-  // would land on.
+  // under shuffle, canonical otherwise: next → walk position+1,
+  // wrapping to walk[0] under repeat=all at the tail; previous →
+  // restart current when positionMs>3s, wrap to the walk's tail at
+  // its head under repeat=all (len>1), restart at the head, else
+  // position−1. The gate sees the same target the engine would land
+  // on — a wrap to an unowned item must not slip through offline.
   const advance = useCallback(
     (method: 'next' | 'previous') => {
       if (online === false) {
@@ -1716,12 +1731,19 @@ function Main({
           currentOccurrenceId === null
             ? -1
             : walk.indexOf(currentOccurrenceId);
+        const wrapAll = state.repeat === 'all';
         const targetId =
           method === 'next'
-            ? walk[pos + 1]
-            : positionMs > 3000 || pos <= 0
+            ? pos === walk.length - 1 && wrapAll
+              ? walk[0]
+              : walk[pos + 1]
+            : positionMs > 3000
               ? walk[pos]
-              : walk[pos - 1];
+              : pos === 0 && wrapAll && walk.length > 1
+                ? walk[walk.length - 1]
+                : pos <= 0
+                  ? walk[pos]
+                  : walk[pos - 1];
         const target = occurrences.find(
           (o) => o.occurrenceId === targetId,
         );
@@ -1737,7 +1759,15 @@ function Main({
           ),
       );
     },
-    [online, state.queue, state.shuffleOrder, isOwned, session, reportPlay],
+    [
+      online,
+      state.queue,
+      state.shuffleOrder,
+      state.repeat,
+      isOwned,
+      session,
+      reportPlay,
+    ],
   );
 
   // Offline honesty for metadata paths (cached search/entity rows):
@@ -1998,6 +2028,7 @@ function Main({
               name: peer.name,
               host: peer.host,
               port: peer.port,
+              addresses: peer.addresses,
               fp: peer.fp,
             },
           ]);
@@ -2255,9 +2286,15 @@ function Main({
       if (peer === undefined) {
         return;
       }
+      // Every resolved candidate goes to the dial — the ranked pick
+      // can sit behind a dead route while a sibling address answers.
+      const endpoints =
+        peer.addresses.length > 0 ? peer.addresses : [peer.host];
       runPair({
         code,
-        endpoints: [formatEndpoint(peer.host, peer.port)],
+        endpoints: endpoints.map((host) =>
+          formatEndpoint(host, peer.port),
+        ),
         ...(peer.fp !== null ? { fp: peer.fp } : {}),
       });
     },

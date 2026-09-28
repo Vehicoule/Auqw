@@ -813,9 +813,9 @@ function Main({
         if (event.type === 'lost') {
           return prev.filter((peer) => peer.key !== event.key);
         }
-        // Service identity (name|host) is the row key — a re-advertised
-        // peer on a new port replaces its row, a same-named neighbor
-        // keeps its own.
+        // Service identity (name|host|port) is the row key — a
+        // re-advertised peer on a new port replaces its row, a
+        // same-named neighbor keeps its own.
         const next = prev.filter((peer) => peer.key !== event.peer.key);
         return [...next, event.peer];
       });
@@ -920,6 +920,7 @@ function Main({
           host: peer.host,
           port: peer.port,
           code,
+          hosts: peer.addresses,
           ...(peer.fp !== null ? { fp: peer.fp } : {}),
         })
         .then(finishDial)

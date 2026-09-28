@@ -6,7 +6,12 @@ import type {
   SyncDiscoveryPort,
   SyncDiscoverySession,
 } from '@auqw/application';
-import { appError, err, ok, pickDialableHost } from '@auqw/application';
+import {
+  appError,
+  dialableHostsRanked,
+  err,
+  ok,
+} from '@auqw/application';
 import {
   nativeError,
   type AuqwExpoSubscription,
@@ -73,21 +78,23 @@ export function createExpoSyncDiscovery(
       // coexist per service. The generation identity is the advert's
       // `dev` fp when present — it survives hostname/port/address
       // changes — falling back to the listener port for unpinned
-      // adverts. A native 'lost' carries only the service name, and a
-      // native 'stopped' (async NSD failure) must retract each emitted
-      // peer so the UI holds no ghosts.
+      // adverts. A native 'lost' carries the record's last-resolved
+      // fp/port when known, and a native 'stopped' (async NSD failure)
+      // must retract each emitted peer so the UI holds no ghosts.
       const emitted = new Map<
         string,
         Map<string, { port: number | undefined; fp: string | null }>
       >();
       const validFp = (v: unknown): string | null =>
         typeof v === 'string' && /^[0-9a-f]{64}$/.test(v) ? v : null;
-      // Retract rows of one generation: by fp when the record pins
-      // one, else by port — and every row under the name when neither
-      // is usable. A `found` that fails the gates below must still
-      // retract rows a previous `found` emitted — otherwise the last
-      // usable endpoint stays dialable after the advert turned
-      // unpairable.
+      // Retract rows of one generation: an fp mismatch disqualifies
+      // outright, then a known port scopes the match to that
+      // generation — a stale goodbye for a dead generation must not
+      // wipe the fresh row sharing its fp, and a record carrying
+      // neither retracts every row under the name. A `found` that
+      // fails the gates below must still retract rows a previous
+      // `found` emitted — otherwise the last usable endpoint stays
+      // dialable after the advert turned unpairable.
       const retract = (
         name: string,
         fp: string | null,
@@ -99,9 +106,8 @@ export function createExpoSyncDiscovery(
         }
         for (const [key, e] of entries) {
           const hit =
-            fp !== null
-              ? e.fp === fp
-              : port === undefined || e.port === undefined || e.port === port;
+            (fp === null || e.fp === fp) &&
+            (port === undefined || e.port === undefined || e.port === port);
           if (hit) {
             entries.delete(key);
             browsing?.onLost(key);
@@ -113,13 +119,17 @@ export function createExpoSyncDiscovery(
       };
       browseSub = native.addSyncDiscoveryListener((event) => {
         if (event.type === 'found') {
-          // `hosts` carries every resolved address — pick the dialable
-          // one (a public v4 or bare fe80:: literal must not shadow a
-          // pairable address behind it). Older module revisions emit
-          // only `host`, which stays the single-candidate fallback.
-          const host = pickDialableHost(
-            event.hosts ?? (event.host !== undefined ? [event.host] : []),
+          // `hosts` carries every resolved address — the pairable
+          // subset ranks best-first and feeds `addresses` so the dial
+          // falls through a dead route (a public v4 or bare fe80::
+          // literal must not shadow a pairable address behind it).
+          // Older module revisions emit only `host`, which stays the
+          // single-candidate fallback.
+          const candidates = dialableHostsRanked(
+            event.hosts ??
+              (typeof event.host === 'string' ? [event.host] : []),
           );
+          const host = candidates[0] ?? null;
           const port =
             Number.isSafeInteger(event.port) &&
             (event.port ?? 0) >= 1 &&
@@ -151,7 +161,10 @@ export function createExpoSyncDiscovery(
             );
             return;
           }
-          const key = `${event.name}|${host}`;
+          // The port belongs in the key — a re-announced service on
+          // a new listener port is a different row than the stale one
+          // sitting under the same name|host.
+          const key = `${event.name}|${host}|${port}`;
           let entries = emitted.get(event.name);
           if (entries === undefined) {
             entries = new Map();
@@ -175,14 +188,23 @@ export function createExpoSyncDiscovery(
             name: event.name,
             host,
             port,
+            addresses: candidates,
             fp,
           });
           entries.set(key, { port, fp });
         } else if (event.type === 'lost') {
-          // NSD reports only the service name on loss — every row
-          // under it goes (a surviving same-named neighbor re-announces
-          // on its next PTR refresh).
-          retract(event.name, null);
+          // The native side attaches the lost record's last-resolved
+          // generation (fp when the advert pinned one, else its port)
+          // so a goodbye retracts just that generation — a name-only
+          // record still retracts every row under the name (a surviving
+          // same-named neighbor re-announces on its next PTR refresh).
+          retract(
+            event.name,
+            validFp(event.fp),
+            Number.isSafeInteger(event.port)
+              ? (event.port as number)
+              : undefined,
+          );
         } else if (event.type === 'stopped') {
           for (const entries of emitted.values()) {
             for (const key of entries.keys()) {
@@ -251,6 +273,11 @@ export function createExpoSyncDiscovery(
       const gen = ++advertGen;
       const sub = native.addSyncDiscoveryListener((event) => {
         if (event.type === 'advertise-failed' && gen === advertGen) {
+          // Terminal for this registration — release the dead
+          // subscription ourselves rather than wait on a close() the
+          // consumer may skip after onError.
+          advertGen += 1;
+          sub.remove();
           onError?.();
         }
       });
@@ -260,8 +287,18 @@ export function createExpoSyncDiscovery(
             () => {
               // A rejected announce means the offer pairs by code but
               // is NOT discoverable nearby — surface it, don't leave a
-              // live-looking dead advert.
-              onError?.();
+              // live-looking dead advert. Terminal for this
+              // registration either way, so release the subscription;
+              // only report while we still own the seam — a superseded
+              // advertise's rejection must not null the newer handle.
+              const ours = gen === advertGen;
+              if (ours) {
+                advertGen += 1;
+              }
+              sub.remove();
+              if (ours) {
+                onError?.();
+              }
             },
           ),
         () => undefined,

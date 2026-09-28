@@ -177,8 +177,20 @@ export function isPairableLanHost(host: string): boolean {
 export function pickDialableHost(
   addresses: readonly string[],
 ): string | null {
-  let best: string | null = null;
-  let bestRank = Number.POSITIVE_INFINITY;
+  return dialableHostsRanked(addresses)[0] ?? null;
+}
+
+/**
+ * Every pairable address of a resolved advert, best-first under the
+ * ranking above (stable sort — equal ranks keep resolver order),
+ * deduped and bracket-stripped so each entry is dialable as-is. A
+ * dial tries them in order: the first-ranked literal can sit behind
+ * a dead route while a lower-ranked one still answers.
+ */
+export function dialableHostsRanked(
+  addresses: readonly string[],
+): readonly string[] {
+  const ranked: { bare: string; rank: number }[] = [];
   for (const address of addresses) {
     if (typeof address !== 'string' || !isPairableLanHost(address)) {
       continue;
@@ -219,10 +231,19 @@ export function pickDialableHost(
             (first & 0xffc0) === 0xfe80
           ? 2 // bare fe80:: — undialable
           : 1;
-    if (rank < bestRank) {
-      bestRank = rank;
-      best = address;
+    // Emit the bracket-stripped literal the gate validated — a
+    // `[fd00::8]` form passes isPairableLanHost but neither
+    // net.connect nor InetSocketAddress parses brackets.
+    ranked.push({ bare, rank });
+  }
+  ranked.sort((a, b) => a.rank - b.rank);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const { bare } of ranked) {
+    if (!seen.has(bare)) {
+      seen.add(bare);
+      out.push(bare);
     }
   }
-  return best;
+  return out;
 }

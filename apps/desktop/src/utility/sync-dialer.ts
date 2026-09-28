@@ -320,6 +320,9 @@ export type SyncDialer = {
     port: number;
     code: string;
     fp?: string;
+    /** All resolved dial candidates (best-first) — `host` is the
+     * fallback when absent; the dial iterates the list. */
+    hosts?: readonly string[];
     signal?: CancellationSignal;
   }): Promise<Result<SyncPeer>>;
   /** Pair TO a phone's scanned QR payload verbatim. */
@@ -395,12 +398,16 @@ export function createSyncDialer(deps: {
   }
 
   return {
-    pairTo({ host, port, code, fp, signal }) {
+    pairTo({ host, port, code, fp, hosts, signal }) {
+      const candidates =
+        hosts !== undefined && hosts.length > 0 ? hosts : [host];
       return withClient((client) =>
         client.pair(
           {
             code,
-            endpoints: [formatEndpoint(host, port)],
+            endpoints: [...new Set(candidates)].map((h) =>
+              formatEndpoint(h, port),
+            ),
             ...(fp !== undefined ? { fp } : {}),
           },
           signal,

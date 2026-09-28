@@ -226,7 +226,9 @@ export type AuqwSyncNative = Pick<
   /** mDNS advertise `_auqw._tcp` — TXT `dev` carries the identity fp. */
   syncAdvertise?(name: string, port: number, fp: string): Promise<void>;
   syncAdvertiseStop?(): Promise<void>;
-  /** mDNS browse `_auqw._tcp` — `{type,name,host?,port?,fp?}` events. */
+  /** mDNS browse `_auqw._tcp` — `{type,name,host?,hosts?,port?,fp?}`
+   * events; 'lost' carries the record's last-resolved port/fp when
+   * known (null otherwise). */
   syncBrowse?(): Promise<void>;
   syncBrowseStop?(): Promise<void>;
   addSyncSocketAcceptedListener?(
@@ -239,12 +241,12 @@ export type AuqwSyncNative = Pick<
     listener: (event: {
       type: string;
       name: string;
-      host?: string;
+      host?: string | null;
       /** Every resolved advert address — the JS side picks the
        * dialable one (LAN gate + ranking live in `@auqw/application`,
        * not in Kotlin). Absent on older native builds. */
       hosts?: string[];
-      port?: number;
+      port?: number | null;
       fp?: string | null;
     }) => void,
   ): AuqwExpoSubscription;
