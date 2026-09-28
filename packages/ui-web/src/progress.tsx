@@ -183,6 +183,9 @@ function useScrubCommit(
 
   const commit = useCallback(
     (ms: number) => {
+      // `step="any"` hands fractional values to the DOM; session
+      // positions are integer ms — round at the commit boundary.
+      const rounded = Math.round(ms);
       pointerPhase.current = 'none';
       activePointer.current = null;
       scrubRef.current = null;
@@ -195,7 +198,7 @@ function useScrubCommit(
           ? gestureKey.current
           : trackKeyRef.current;
       gestureKey.current = undefined;
-      setHeldMs(ms);
+      setHeldMs(rounded);
       if (heldTimer.current !== null) {
         clearTimeout(heldTimer.current);
       }
@@ -203,7 +206,7 @@ function useScrubCommit(
         heldTimer.current = null;
         setHeldMs(null);
       }, 800);
-      onSeek?.(ms);
+      onSeek?.(rounded);
     },
     [onSeek],
   );

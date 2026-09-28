@@ -1510,12 +1510,20 @@ export class Session {
 
   /** Bounded, nonfatal, sanitized internal logging. */
   #logWarn(message: string): void {
+    this.#logWrite('warn', message);
+  }
+
+  #logDebug(message: string): void {
+    this.#logWrite('debug', message);
+  }
+
+  #logWrite(level: 'debug' | 'warn', message: string): void {
     const atMs = this.#safeNow();
     if (atMs === null) {
       return;
     }
     const work = this.#bounded(() =>
-      this.#log.write({ level: 'warn', message, atMs }),
+      this.#log.write({ level, message, atMs }),
     ).then(() => undefined);
     this.#own(work);
   }
@@ -4142,7 +4150,16 @@ export class Session {
       this.#radioAutoSeedOccurrence = live.currentOccurrenceId;
       const seeded = await this.#startRadio(ref);
       if (!seeded.ok) {
-        this.#logWarn(`auto radio seed failed: ${seeded.error.kind}`);
+        // The seed is speculative — exhausting its guest budget or
+        // the call deadline is weather, not a warn.
+        if (
+          seeded.error.kind === 'budget-exceeded' ||
+          seeded.error.kind === 'timeout'
+        ) {
+          this.#logDebug(`auto radio seed skipped: ${seeded.error.kind}`);
+        } else {
+          this.#logWarn(`auto radio seed failed: ${seeded.error.kind}`);
+        }
       }
       return seeded;
     });
@@ -4986,10 +5003,10 @@ export class Session {
         appError('invalid-response', 'position must be safe nonnegative'),
       );
     }
-    if (active === null) {
+    const before = r.queue.snapshot();
+    if (before.currentOccurrenceId === null) {
       return err(appError('unavailable', 'no active playback to seek'));
     }
-    const before = r.queue.snapshot();
     try {
       r.queue.seekTo(positionMs);
     } catch (thrown) {
@@ -5000,9 +5017,9 @@ export class Session {
       return persisted;
     }
     this.#derived();
-    if (active.handle === undefined) {
-      // Seek intent rides on the queue snapshot; the pending
-      // 'prepared' outcome plays from it.
+    if (active === null || active.handle === undefined) {
+      // Seek intent rides on the queue snapshot; the next 'prepared'
+      // outcome — in flight or from a later retry — plays from it.
       this.#publish();
       return ok(undefined);
     }
