@@ -1639,16 +1639,12 @@ function Main({
     action: MessageId;
   } | null>(null);
   const attemptSeqRef = useRef(0);
+  // The funnel reports whatever the engine published as the attempt's
+  // terminal verdict — superseded attempts never reach playback.failed
+  // (#failAttempt only fires for the live attempt), and a deadline-
+  // cancelled verdict IS the failed state the user needs surfaced.
   const reportPlayError = useCallback(
     (action: MessageId, error: AppError) => {
-      // A newer play replacing this attempt resolves 'superseded' (or
-      // 'cancelled') — that's the queue working, not a failure worth a
-      // toast. 'released' is NOT silent here: a live prepare can also
-      // resolve released when its host drops the request, and that
-      // strands playback with no other signal.
-      if (error.kind === 'superseded' || error.kind === 'cancelled') {
-        return;
-      }
       if (lastPlayErrorRef.current === error) {
         return;
       }
@@ -1671,6 +1667,17 @@ function Main({
     (action: MessageId, result: Result<unknown>) => {
       if (result.ok) {
         reportResult(action, result);
+        return;
+      }
+      // The promise's 'superseded'/'cancelled' is queue bookkeeping —
+      // superseded attempts never publish a failed state, and a
+      // cancelled terminal verdict arrives through the watcher.
+      // 'released' is NOT silent: a live prepare can resolve it when
+      // the host drops the request, stranding playback silently.
+      if (
+        result.error.kind === 'superseded' ||
+        result.error.kind === 'cancelled'
+      ) {
         return;
       }
       reportPlayError(action, result.error);
