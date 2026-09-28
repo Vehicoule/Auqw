@@ -38,6 +38,7 @@ import {
   err,
   exportFittedDeltaDoc,
   formatEndpoint,
+  fromUnknown,
   isMatchGate,
   isRefRejected,
   parseSyncDeltaDocs,
@@ -135,6 +136,7 @@ import {
   THEME_ORDER,
   attemptLabel,
   entityRefKey,
+  errorText,
   formatBytes,
   greeting,
   navItems,
@@ -504,7 +506,7 @@ function SessionGate({
       {state.type === 'restore-failed' ? (
         <ErrorState
           title={t('boot.restoreFailed')}
-          hint={state.error.message}
+          hint={errorText(state.error)}
           onRetry={() => void controller.session.restore()}
         />
       ) : (
@@ -2034,14 +2036,14 @@ function Main({
         .pair(request, new CancellationSource().signal)
         .then((result) => {
           setPairing(false);
-          setPairError(result.ok ? null : result.error.message);
+          setPairError(result.ok ? null : errorText(result.error));
         })
         // A thrown pair (adapter crash) must still clear the latch —
         // otherwise `pairing` stays true and every later attempt is
         // dropped on the guard above.
-        .catch(() => {
+        .catch((thrown: unknown) => {
           setPairing(false);
-          setPairError('pairing failed');
+          setPairError(errorText(fromUnknown(thrown)));
         });
     },
     // syncSurface is stable per controller.
@@ -2184,7 +2186,7 @@ function Main({
           return;
         }
         if (!offer.ok) {
-          setPairError(offer.error.message);
+          setPairError(errorText(offer.error));
           mintFailed();
           return;
         }
@@ -2295,7 +2297,7 @@ function Main({
           endpoint: null,
           expiresAt: null,
         });
-        setPairError(started.error.message);
+        setPairError(errorText(started.error));
         return;
       }
       const offer = await host.mintOffer();
@@ -2313,7 +2315,7 @@ function Main({
           endpoint: null,
           expiresAt: null,
         });
-        setPairError(offer.error.message);
+        setPairError(errorText(offer.error));
         return;
       }
       setShare({
@@ -2748,7 +2750,7 @@ function Main({
         setTransfer((prev) => ({
           ...prev,
           exportPhase: 'error',
-          exportDetail: result.error.message,
+          exportDetail: errorText(result.error),
         }));
         return;
       }
@@ -2767,14 +2769,11 @@ function Main({
           exportPhase: 'done',
           exportDetail: file.uri,
         }));
-      } catch (thrown) {
+      } catch {
         setTransfer((prev) => ({
           ...prev,
           exportPhase: 'error',
-          exportDetail:
-            thrown instanceof Error
-              ? thrown.message
-              : t('transfer.exportWriteFailed'),
+          exportDetail: t('transfer.exportWriteFailed'),
         }));
       }
     });
@@ -2807,7 +2806,7 @@ function Main({
           setTransfer((prev) => ({
             ...prev,
             importPhase: 'error',
-            importDetail: preview.error.message,
+            importDetail: t('error.importInvalid'),
             preview: null,
           }));
           return;
@@ -2820,15 +2819,12 @@ function Main({
           importPhase: 'preview',
           preview: toImportPreviewModel(preview.value, sourceLabel),
         }));
-      } catch (thrown) {
+      } catch {
         importPreviewRaw.current = null;
         setTransfer((prev) => ({
           ...prev,
           importPhase: 'error',
-          importDetail:
-            thrown instanceof Error
-              ? thrown.message
-              : t('transfer.readFailed'),
+          importDetail: t('transfer.readFailed'),
           preview: null,
         }));
       }
@@ -2852,7 +2848,7 @@ function Main({
           setTransfer((prev) => ({
             ...prev,
             importPhase: 'error',
-            importDetail: result.error.message,
+            importDetail: errorText(result.error),
           }));
           return;
         }
@@ -3744,7 +3740,7 @@ function Main({
                   setTransfer((prev) => ({
                     ...prev,
                     importPhase: 'error',
-                    importDetail: preview.error.message,
+                    importDetail: t('error.importInvalid'),
                     preview: null,
                   }));
                   return;
@@ -3757,15 +3753,12 @@ function Main({
                   importPhase: 'preview',
                   preview: toImportPreviewModel(preview.value, sourceLabel),
                 }));
-              } catch (thrown) {
+              } catch {
                 importPreviewRaw.current = null;
                 setTransfer((prev) => ({
                   ...prev,
                   importPhase: 'error',
-                  importDetail:
-                    thrown instanceof Error
-                      ? thrown.message
-                      : 'could not read the import file',
+                  importDetail: t('transfer.readFailed'),
                   preview: null,
                 }));
               }

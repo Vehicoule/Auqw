@@ -11,7 +11,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types src/ui-shared.test.ts"
+    "test": "node --experimental-strip-types src/ui-shared.test.ts && node --experimental-strip-types src/error-text.test.ts"
   },
   "dependencies": {
     "@auqw/application": "workspace:*",

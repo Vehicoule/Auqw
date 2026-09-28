@@ -462,8 +462,31 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'nav.primaryA11y': '主导航',
 
   // ---- toasts ------------------------------------------------------------
-  'toast.failed': '{action} 失败 — {kind}',
+  'toast.failed': '{action} 失败 — {detail}',
   'toast.storefrontCode': '商店必须是两位字母国家代码',
+
+  // ---- error reasons -----------------------------------------------------
+  'error.noResult': '没有结果 — 重试',
+  'error.unsupported': '此处不支持',
+  'error.auth': '需要先在提供方登录',
+  'error.authExpired': '提供方登录已过期 — 重新连接',
+  'error.rateLimited': '提供方正在限制请求',
+  'error.expiredLink': '链接已过期 — 重试',
+  'error.permission': '访问被拒绝 — 检查权限',
+  'error.unexpected': '收到了意外的回复 — 重试',
+  'error.timeout': '仍在加载 — 重试',
+  'error.busy': '提供方忙 — 稍后再试',
+  'error.plugin': '提供方插件行为异常',
+  'error.rejected': '下载未通过校验 — 重试',
+  'error.capped': '打开的流过多 — 稍等片刻',
+  'error.evicted': '已为腾出空间而移除 — 重试',
+  'error.expired': '已过期 — 重试',
+  'error.notFound': '已不存在 — 刷新后重试',
+  'error.unavailable': '不可用 — 重试',
+  'error.storageFull': '存储已满 — 释放一些空间',
+  'error.generic': '出错了 — 重试',
+  'error.matchGate': '无法匹配此曲目 — 查看审核',
+  'error.importInvalid': '该文件不是有效的曲库导出',
 
   // ---- reported operation names ------------------------------------------
   'action.playResult': '播放结果',

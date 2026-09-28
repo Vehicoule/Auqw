@@ -33,6 +33,7 @@ import {
   topPlayed,
 } from '@auqw/application';
 import { fromTag, t, type MessageId } from './i18n.ts';
+import { errorText } from './error-text.ts';
 
 export type PlatformVariant = 'android' | 'ios';
 
@@ -312,7 +313,7 @@ export type LyricsModel = {
   readonly activeIndex: number | null;
   /** The honest sync-state label (`synced` / `unsynced` + provenance). */
   readonly syncLabel: string | null;
-  /** Detail for non-content states — the typed error's message. */
+  /** Detail for non-content states — the humanized error reason. */
   readonly message: string | null;
 };
 
@@ -342,7 +343,7 @@ export function toLyricsModel(input: {
     return {
       ...empty,
       state: error === null ? 'unavailable' : 'error',
-      message: error?.message ?? null,
+      message: errorText(error),
     };
   }
   const provenance = `${sheet.provider}${sheet.cached ? t('lyrics.cachedSuffix') : ''}`;
@@ -420,7 +421,7 @@ export function toRadioModel(radio: RadioTail | null): RadioModel {
     label: t('radio.label', { status: t(`radio.status.${radio.status}`) }),
     detail:
       radio.status === 'failed'
-        ? (radio.error?.message ?? t('radio.continuationFailed'))
+        ? (errorText(radio.error) ?? t('radio.continuationFailed'))
         : radio.providerId,
   };
 }
@@ -488,7 +489,7 @@ export function toCorrectionsModel(input: {
   if (input.reviews === null) {
     return {
       state: input.error === null ? 'loading' : 'error',
-      message: input.error?.message ?? null,
+      message: errorText(input.error),
       filter: input.filter,
       pendingCount: 0,
       resolvedCount: 0,
@@ -572,7 +573,7 @@ export type SyncPeerModel = {
   readonly lastSyncLabel: string | null;
   /** First dialed endpoint — the honest 'where' for the row. */
   readonly endpointLabel: string | null;
-  /** The typed error message from the last failed op, if any. */
+  /** The humanized reason from the last failed op, if any. */
   readonly lastError: string | null;
   readonly fpShort: string;
 };
@@ -613,7 +614,7 @@ export function toSyncModel(input: {
           ? null
           : t('sync.lastSync', { date: fmt(view.peer.lastSyncAt) ?? '—' }),
       endpointLabel: view.peer.endpoints[0] ?? null,
-      lastError: view.lastError?.message ?? null,
+      lastError: errorText(view.lastError),
       fpShort: view.peer.fp.slice(0, 12),
     }),
   );
@@ -930,7 +931,7 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
         // position is where playback resumes on retry.
         positionMs: queue.positionMs,
         durationMs: recording?.durationMs ?? null,
-        errorMessage: playback.error.message,
+        errorMessage: errorText(playback.error),
       };
   }
 }
@@ -1429,7 +1430,7 @@ export function toEntityModel(input: {
       items: [],
       hasMore: false,
       loadingMore: false,
-      message: error?.message ?? null,
+      message: errorText(error),
     };
   }
   const entityId = entityIdForRef(
@@ -1458,7 +1459,7 @@ export function toEntityModel(input: {
     hasMore: page.continuation !== null,
     loadingMore: input.loadingMore ?? false,
     // A refresh error while content stays surfaces as a flagged note.
-    message: error?.message ?? null,
+    message: errorText(error),
   };
 }
 

@@ -491,8 +491,31 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'nav.primaryA11y': 'principal',
 
   // ---- toasts ------------------------------------------------------------
-  'toast.failed': '{action} falló — {kind}',
+  'toast.failed': '{action} falló — {detail}',
   'toast.storefrontCode': 'la tienda debe ser un código de país de dos letras',
+
+  // ---- error reasons -----------------------------------------------------
+  'error.noResult': 'no volvió nada — inténtalo de nuevo',
+  'error.unsupported': 'no disponible aquí',
+  'error.auth': 'el proveedor necesita inicio de sesión primero',
+  'error.authExpired': 'la sesión del proveedor expiró — reconéctala',
+  'error.rateLimited': 'el proveedor está limitando peticiones ahora',
+  'error.expiredLink': 'el enlace expiró — inténtalo de nuevo',
+  'error.permission': 'acceso denegado — revisa los permisos',
+  'error.unexpected': 'respuesta inesperada — inténtalo de nuevo',
+  'error.timeout': 'sigue cargando — inténtalo de nuevo',
+  'error.busy': 'el proveedor está ocupado — inténtalo en un rato',
+  'error.plugin': 'un plugin del proveedor se comportó mal',
+  'error.rejected': 'la descarga no pasó las comprobaciones — inténtalo de nuevo',
+  'error.capped': 'demasiados streams abiertos — espera un momento',
+  'error.evicted': 'se quitó para hacer espacio — inténtalo de nuevo',
+  'error.expired': 'expiró — inténtalo de nuevo',
+  'error.notFound': 'ya no está — actualiza e inténtalo de nuevo',
+  'error.unavailable': 'no disponible — inténtalo de nuevo',
+  'error.storageFull': 'almacenamiento lleno — libera espacio',
+  'error.generic': 'algo salió mal — inténtalo de nuevo',
+  'error.matchGate': 'no pudimos emparejar esta pista — mira la revisión',
+  'error.importInvalid': 'ese archivo no es una exportación de biblioteca válida',
 
   // ---- reported operation names ------------------------------------------
   'action.playResult': 'reproducir resultado',

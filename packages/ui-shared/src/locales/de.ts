@@ -484,8 +484,31 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'nav.primaryA11y': 'hauptnavigation',
 
   // ---- toasts ------------------------------------------------------------
-  'toast.failed': '{action} fehlgeschlagen — {kind}',
+  'toast.failed': '{action} fehlgeschlagen — {detail}',
   'toast.storefrontCode': 'storefront muss ein zweistelliger ländercode sein',
+
+  // ---- error reasons -----------------------------------------------------
+  'error.noResult': 'nichts gefunden — erneut versuchen',
+  'error.unsupported': 'hier nicht unterstützt',
+  'error.auth': 'der anbieter braucht zuerst eine anmeldung',
+  'error.authExpired': 'anbieter-anmeldung abgelaufen — neu verbinden',
+  'error.rateLimited': 'der anbieter limitiert gerade anfragen',
+  'error.expiredLink': 'der link ist abgelaufen — erneut versuchen',
+  'error.permission': 'zugriff verweigert — berechtigungen prüfen',
+  'error.unexpected': 'unerwartete antwort — erneut versuchen',
+  'error.timeout': 'lädt noch — erneut versuchen',
+  'error.busy': 'der anbieter ist beschäftigt — später erneut versuchen',
+  'error.plugin': 'ein anbieter-plugin hat sich falsch verhalten',
+  'error.rejected': 'der download hat die prüfung nicht bestanden — erneut versuchen',
+  'error.capped': 'zu viele streams offen — kurz warten',
+  'error.evicted': 'entfernt, um platz zu schaffen — erneut versuchen',
+  'error.expired': 'abgelaufen — erneut versuchen',
+  'error.notFound': 'weg — aktualisieren und erneut versuchen',
+  'error.unavailable': 'nicht verfügbar — erneut versuchen',
+  'error.storageFull': 'speicher ist voll — platz freigeben',
+  'error.generic': 'etwas ist schiefgelaufen — erneut versuchen',
+  'error.matchGate': 'titel konnte nicht zugeordnet werden — review prüfen',
+  'error.importInvalid': 'diese datei ist kein gültiger bibliotheks-export',
 
   // ---- reported operation names ------------------------------------------
   'action.playResult': 'ergebnis abspielen',

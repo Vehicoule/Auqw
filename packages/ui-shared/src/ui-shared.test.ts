@@ -1060,8 +1060,10 @@ const tap = (s: string) => {
   );
   assertEqual(failedRadio?.failed, true);
   assert(
-    failedRadio?.statusText.includes('continuation timed out') ?? false,
-    'failed tail carries its typed message',
+    failedRadio?.statusText.includes(
+      'the provider is rate-limiting right now',
+    ) ?? false,
+    'failed tail carries the humanized reason, not the raw message',
   );
 
   const meta = stageMetaView(fixturePlayerFailed);
