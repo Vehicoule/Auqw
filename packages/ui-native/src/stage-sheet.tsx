@@ -41,7 +41,6 @@ import {
   Spinner,
   Text,
 } from './primitives.tsx';
-import type { IconName } from './primitives.tsx';
 import { useResolvedArtworkUri } from './artwork.tsx';
 import {
   resolveStageAnchor,
@@ -54,7 +53,6 @@ import { QueueList } from './queue-list';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import type {
   LyricsModel,
-  MessageId,
   PlatformVariant,
   PlayerModel,
   QueueModel,
@@ -63,6 +61,17 @@ import type {
   WaveformPeak,
 } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
+import {
+  downloadButtonView,
+  lyricsHeaderView,
+  lyricsPaneView,
+  queueReorderButton,
+  radioRowView,
+  stageMetaView,
+  stageModeTabs,
+  useStageMode,
+  useTransportView,
+} from '@auqw/ui-shared/controllers';
 
 
 // Settle dynamics — the CMP deck's spring (StiffnessLow + no bounce): the
@@ -159,8 +168,21 @@ export function TransportControls({
 }: TransportProps) {
   const theme = useTheme();
   const v = transportVariant(theme, variant);
-  const busy = status === 'preparing' || status === 'buffering';
-  const playing = intentPlaying;
+  const view = useTransportView({
+    status,
+    intentPlaying,
+    liked,
+    canPrevious,
+    canNext,
+    shuffle,
+    repeat,
+    onPlayPause,
+    onPrevious,
+    onNext,
+    onToggleLike,
+    onToggleShuffle,
+    onCycleRepeat,
+  });
   const playColor = variant === 'm3e' ? theme.colors.canvas : theme.colors.textBright;
   return (
     <View
@@ -172,43 +194,43 @@ export function TransportControls({
       }}
     >
       <IconButton
-        icon={liked ? 'heart-filled' : 'heart'}
+        icon={view.like.icon}
         size={32}
         iconSize={14}
-        color={liked ? theme.colors.liked : theme.colors.textSecondary}
-        accessibilityLabel={liked ? t('common.unlike') : t('common.like')}
-        active={liked}
-        onPress={onToggleLike}
+        color={view.like.liked ? theme.colors.liked : theme.colors.textSecondary}
+        accessibilityLabel={view.like.a11yLabel}
+        active={view.like.active}
+        onPress={view.like.onPress}
         style={v.side}
       />
       <IconButton
-        icon="shuffle"
+        icon={view.shuffle.icon}
         size={32}
         iconSize={14}
-        color={shuffle ? theme.colors.accent : theme.colors.textSecondary}
-        accessibilityLabel={t('common.shuffle')}
-        disabled={onToggleShuffle === undefined}
-        active={shuffle}
-        onPress={onToggleShuffle}
+        color={
+          view.shuffle.active ? theme.colors.accent : theme.colors.textSecondary
+        }
+        accessibilityLabel={view.shuffle.a11yLabel}
+        disabled={view.shuffle.disabled}
+        active={view.shuffle.active}
+        onPress={view.shuffle.onPress}
         style={v.side}
       />
       <IconButton
-        icon="previous"
+        icon={view.previous.icon}
         size={36}
         iconSize={15}
         color={theme.colors.textPrimary}
-        accessibilityLabel={t('common.previous')}
-        disabled={!canPrevious}
-        onPress={onPrevious}
+        accessibilityLabel={view.previous.a11yLabel}
+        disabled={view.previous.disabled}
+        onPress={view.previous.onPress}
         style={v.main}
       />
       <Pressable
         compact
-        onPress={onPlayPause}
-        accessibilityLabel={
-          playing ? t('common.pause') : t('common.play')
-        }
-        accessibilityState={{ selected: playing }}
+        onPress={view.play.onPress}
+        accessibilityLabel={view.play.a11yLabel}
+        accessibilityState={{ selected: view.play.pressed }}
         style={[
           {
             alignItems: 'center',
@@ -219,59 +241,46 @@ export function TransportControls({
           v.play,
         ]}
       >
-        {busy ? (
+        {view.busy ? (
           <Spinner size={18} color={playColor} />
         ) : (
           <PlayPauseIcon
-            playing={playing}
+            playing={view.playing}
             size={18}
             color={playColor}
           />
         )}
       </Pressable>
       <IconButton
-        icon="next"
+        icon={view.next.icon}
         size={36}
         iconSize={15}
         color={theme.colors.textPrimary}
-        accessibilityLabel={t('common.next')}
-        disabled={!canNext}
-        onPress={onNext}
+        accessibilityLabel={view.next.a11yLabel}
+        disabled={view.next.disabled}
+        onPress={view.next.onPress}
         style={v.main}
       />
       <IconButton
-        icon={repeat === 'one' ? 'repeat-one' : 'repeat'}
+        icon={view.repeat.icon}
         size={32}
         iconSize={14}
         color={
-          repeat === 'off' ? theme.colors.textSecondary : theme.colors.accent
+          view.repeat.active ? theme.colors.accent : theme.colors.textSecondary
         }
-        accessibilityLabel={
-          repeat === 'one'
-            ? t('common.repeatOne')
-            : repeat === 'all'
-              ? t('common.repeatAll')
-              : t('common.repeat')
-        }
-        disabled={onCycleRepeat === undefined}
-        active={repeat !== 'off'}
-        onPress={onCycleRepeat}
+        accessibilityLabel={view.repeat.a11yLabel}
+        disabled={view.repeat.disabled}
+        active={view.repeat.active}
+        onPress={view.repeat.onPress}
         style={v.side}
       />
     </View>
   );
 }
 
-const MODES: readonly {
-  key: StageMode;
-  label: MessageId;
-  icon: IconName;
-}[] = [
-  // Same order as the desktop segment — player leads on both platforms.
-  { key: 'player', label: 'stage.mode.player', icon: 'note' },
-  { key: 'lyrics', label: 'stage.mode.lyrics', icon: 'lyrics' },
-  { key: 'queue', label: 'stage.mode.queue', icon: 'queue' },
-];
+/** Sheet tab order: player · lyrics · queue — same order as the
+ *  desktop segment (player leads on both platforms). */
+const STAGE_MODE_ORDER: readonly StageMode[] = ['player', 'lyrics', 'queue'];
 
 export function ModeSegment({
   mode,
@@ -281,6 +290,7 @@ export function ModeSegment({
   readonly onSelect?: ((mode: StageMode) => void) | undefined;
 }) {
   const theme = useTheme();
+  const tabs = stageModeTabs(STAGE_MODE_ORDER, mode, onSelect);
   return (
     <View
       style={{
@@ -291,8 +301,7 @@ export function ModeSegment({
         borderRadius: theme.radius.pill,
       }}
     >
-      {MODES.map((m) => {
-        const active = m.key === mode;
+      {tabs.map((tab) => {
         // M3E segmented-button: the selected segment reads as a tonal
         // (secondary-container) pill; iOS keeps the raised slab.
         // The pill silhouette matches the rounded transport controls —
@@ -303,12 +312,12 @@ export function ModeSegment({
         const activeColor = m3e ? theme.colors.accent : theme.colors.textBright;
         return (
           <Pressable
-            key={m.key}
+            key={tab.key}
             compact
-            onPress={onSelect === undefined ? undefined : () => onSelect(m.key)}
+            onPress={tab.onPress}
             accessibilityRole="tab"
-            accessibilityLabel={t(m.label)}
-            accessibilityState={{ selected: active }}
+            accessibilityLabel={tab.label}
+            accessibilityState={{ selected: tab.active }}
             style={{
               flex: 1,
               flexDirection: 'row',
@@ -317,22 +326,22 @@ export function ModeSegment({
               gap: 7,
               minHeight: theme.sizes.touch,
               borderRadius: theme.radius.pill,
-              backgroundColor: active ? activeBg : 'transparent',
+              backgroundColor: tab.active ? activeBg : 'transparent',
             }}
           >
             <Icon
-              name={m.icon}
+              name={tab.icon}
               size={12}
-              color={active ? activeColor : theme.colors.textSecondary}
+              color={tab.active ? activeColor : theme.colors.textSecondary}
             />
             <Text
               variant="metadata"
-              color={active ? (m3e ? 'accent' : 'bright') : 'secondary'}
+              color={tab.active ? (m3e ? 'accent' : 'bright') : 'secondary'}
               style={[
-                active && { fontFamily: theme.fontFamilies.bold },
+                tab.active && { fontFamily: theme.fontFamilies.bold },
               ]}
             >
-              {t(m.label)}
+              {tab.label}
             </Text>
           </Pressable>
         );
@@ -562,8 +571,17 @@ export function StageSheet({
   const internalAnchor = useSharedValue(-1);
   const anchor = anchorProp ?? internalAnchor;
   const dragStart = useSharedValue(0);
-  const [internalMode, setInternalMode] = useState<StageMode>('player');
-  const activeMode = mode ?? internalMode;
+  const { activeMode, select: selectMode } = useStageMode(mode, onModeChange);
+  const meta = stageMetaView(player);
+  const lyricsHeader = lyricsHeaderView(player, lyrics);
+  const lyricsPane = lyricsPaneView(lyrics, onRetryLyrics);
+  const radioRow = radioRowView(radio, onStartRadio, onStopRadio);
+  const queueReorder = queueReorderButton(
+    queueReordering,
+    onToggleQueueReorder,
+  );
+  const downloadButton =
+    download === null ? null : downloadButtonView(download, onDownload);
 
   // The parent re-renders on every position tick and passes fresh
   // inline closures — a deps-listed callback would rebuild the pan
@@ -772,72 +790,66 @@ export function StageSheet({
       </GestureDetector>
       {/* Radio lives top-center on the player surface, under the grab
           handle — a seed affordance or the armed tail's status. */}
-      {activeMode === 'player' &&
-        radio !== undefined &&
-        (radio.armed || onStartRadio !== undefined) && (
+      {activeMode === 'player' && radioRow !== null && (
+        <View
+          style={{
+            flexDirection: 'row',
+            justifyContent: 'center',
+            marginTop: theme.spacing.sm,
+          }}
+        >
+          {/* Same accent pill as the mode selector's active item —
+              accentSoft fill, accent content, pill radius. */}
           <View
             style={{
               flexDirection: 'row',
-              justifyContent: 'center',
-              marginTop: theme.spacing.sm,
+              alignItems: 'center',
+              gap: theme.spacing.sm,
+              borderRadius: theme.radius.pill,
+              backgroundColor: colors.accentSoft,
+              paddingHorizontal: theme.spacing.md,
+              paddingVertical: theme.spacing.xs,
             }}
           >
-            {/* Same accent pill as the mode selector's active item —
-                accentSoft fill, accent content, pill radius. */}
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: theme.spacing.sm,
-                borderRadius: theme.radius.pill,
-                backgroundColor: colors.accentSoft,
-                paddingHorizontal: theme.spacing.md,
-                paddingVertical: theme.spacing.xs,
-              }}
-            >
-              <Icon
-                name="radio"
-                size={13}
-                color={
-                  radio.status === 'failed' ? colors.warn : colors.accent
-                }
-              />
-              {radio.armed ? (
-                <>
-                  <Text
-                    variant="metadata"
-                    color={radio.status === 'failed' ? 'warn' : 'accent'}
-                  >
-                    {radio.label}
-                    {radio.fetching ? t('stage.radio.fetchingSuffix') : ''}
-                    {radio.detail === null ? '' : ` · ${radio.detail}`}
-                  </Text>
-                  <Pressable
-                    compact
-                    onPress={onStopRadio}
-                    accessibilityLabel={t('stage.radio.stopA11y')}
-                    style={{ paddingHorizontal: theme.spacing.xs }}
-                  >
-                    <Text variant="metadata" color="primary">
-                      {t('stage.radio.stop')}
-                    </Text>
-                  </Pressable>
-                </>
-              ) : (
+            <Icon
+              name="radio"
+              size={13}
+              color={radioRow.failed ? colors.warn : colors.accent}
+            />
+            {radioRow.armed ? (
+              <>
+                <Text
+                  variant="metadata"
+                  color={radioRow.failed ? 'warn' : 'accent'}
+                >
+                  {radioRow.statusText}
+                </Text>
                 <Pressable
                   compact
-                  onPress={onStartRadio}
-                  accessibilityLabel={t('stage.radio.start')}
+                  onPress={radioRow.stop.onPress}
+                  accessibilityLabel={radioRow.stop.a11yLabel}
                   style={{ paddingHorizontal: theme.spacing.xs }}
                 >
-                  <Text variant="metadata" color="accent">
-                    {t('stage.radio.start')}
+                  <Text variant="metadata" color="primary">
+                    {radioRow.stop.label}
                   </Text>
                 </Pressable>
-              )}
-            </View>
+              </>
+            ) : (
+              <Pressable
+                compact
+                onPress={radioRow.start.onPress}
+                accessibilityLabel={radioRow.start.a11yLabel}
+                style={{ paddingHorizontal: theme.spacing.xs }}
+              >
+                <Text variant="metadata" color="accent">
+                  {radioRow.start.label}
+                </Text>
+              </Pressable>
+            )}
           </View>
-        )}
+        </View>
+      )}
       {activeMode === 'player' && (
         <>
           {/* Title/artist bottom-anchored in the light-frost zone; the
@@ -875,7 +887,7 @@ export function StageSheet({
             >
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text variant="display" color="bright" numberOfLines={2}>
-                  {player.title}
+                  {meta.title}
                 </Text>
                 <Text
                   variant="body"
@@ -883,26 +895,26 @@ export function StageSheet({
                   numberOfLines={1}
                   style={{ marginTop: 4 }}
                 >
-                  {player.artist ?? '—'}
+                  {meta.artistLabel}
                 </Text>
-                {player.albumLabel !== null && (
+                {meta.albumLabel !== null && (
                   <Text
                     variant="metadata"
                     color="secondary"
                     numberOfLines={1}
                     style={{ marginTop: 3 }}
                   >
-                    {player.albumLabel}
+                    {meta.albumLabel}
                   </Text>
                 )}
-                {player.errorMessage !== null && (
+                {meta.errorMessage !== null && (
                   <Text
                     variant="metadata"
                     color="warn"
                     numberOfLines={2}
                     style={{ marginTop: 3 }}
                   >
-                    {player.errorMessage}
+                    {meta.errorMessage}
                   </Text>
                 )}
               </View>
@@ -917,35 +929,21 @@ export function StageSheet({
                     gap: theme.spacing.xs,
                   }}
                 >
-                  {download !== null && (
+                  {downloadButton !== null && (
                     <IconButton
-                      icon={
-                        download === 'stored'
-                          ? 'check'
-                          : download === 'failed'
-                            ? 'warn'
-                            : 'download'
-                      }
+                      icon={downloadButton.icon}
                       size={36}
                       iconSize={15}
                       color={
-                        download === 'failed'
+                        downloadButton.failed
                           ? colors.warn
-                          : download === 'stored'
+                          : downloadButton.stored
                             ? colors.accent
                             : colors.textSecondary
                       }
-                      accessibilityLabel={
-                        download === 'stored'
-                          ? t('stage.download.storedA11y')
-                          : download === 'failed'
-                            ? t('stage.download.failedA11y')
-                            : download === 'queued' || download === 'downloading'
-                              ? t('stage.download.busyA11y')
-                              : t('stage.download.idleA11y')
-                      }
-                      active={download === 'stored'}
-                      onPress={onDownload}
+                      accessibilityLabel={downloadButton.a11yLabel}
+                      active={downloadButton.stored}
+                      onPress={downloadButton.onPress}
                     />
                   )}
                   {onAddToPlaylist !== undefined && (
@@ -966,10 +964,10 @@ export function StageSheet({
             positionMs={player.positionMs}
             durationMs={player.durationMs}
             onSeek={onSeek}
-            trackKey={player.occurrenceId}
-            seed={`${player.title}|${player.artist ?? ''}`}
+            trackKey={meta.trackKey}
+            seed={meta.waveformSeed}
             peaks={peaks}
-            loading={player.status === 'preparing' || player.durationMs === null}
+            loading={meta.waveformLoading}
             visible={expanded}
           />
           <View style={{ marginTop: theme.spacing.md }}>
@@ -996,7 +994,7 @@ export function StageSheet({
         <>
           <View style={{ marginTop: theme.spacing.md }}>
             <Text variant="title" color="bright" numberOfLines={1}>
-              {player.title}
+              {lyricsHeader.title}
             </Text>
             <Text
               variant="metadata"
@@ -1004,8 +1002,7 @@ export function StageSheet({
               numberOfLines={1}
               style={{ marginTop: 3 }}
             >
-              {player.artist ?? '—'}
-              {lyrics?.syncLabel != null ? ` · ${lyrics.syncLabel}` : ''}
+              {lyricsHeader.subtitle}
             </Text>
           </View>
           {/*
@@ -1014,30 +1011,20 @@ export function StageSheet({
            * instrumental/unavailable/error are explicit states, and
            * loading is bounded by the session's own op deadline.
            */}
-          {lyrics === undefined ? (
-            <EmptyState title={t('lyrics.empty')} icon="lyrics" />
-          ) : lyrics.state === 'loading' ? (
-            <LoadingState title={t('lyrics.loading')} />
-          ) : lyrics.state === 'error' ? (
+          {lyricsPane.kind === 'empty' ? (
+            <EmptyState
+              title={lyricsPane.title}
+              hint={lyricsPane.hint}
+              icon={lyricsPane.icon}
+            />
+          ) : lyricsPane.kind === 'loading' ? (
+            <LoadingState title={lyricsPane.title} />
+          ) : lyricsPane.kind === 'error' ? (
             <ErrorState
-              title={t('lyrics.errorTitle')}
-              hint={lyrics.message}
-              onRetry={onRetryLyrics}
+              title={lyricsPane.title}
+              hint={lyricsPane.hint}
+              onRetry={lyricsPane.onRetry}
             />
-          ) : lyrics.state === 'instrumental' ? (
-            <EmptyState
-              title={t('lyrics.instrumental')}
-              hint={lyrics.message}
-              icon="lyrics"
-            />
-          ) : lyrics.state === 'unavailable' ? (
-            <EmptyState
-              title={t('lyrics.empty')}
-              hint={lyrics.message}
-              icon="lyrics"
-            />
-          ) : lyrics.lines.length === 0 ? (
-            <EmptyState title={t('lyrics.empty')} icon="lyrics" />
           ) : (
             <ScrollView
               style={{ flex: 1, marginTop: theme.spacing.sm }}
@@ -1045,29 +1032,23 @@ export function StageSheet({
               // the last line scroll fully clear of it.
               contentContainerStyle={{ paddingBottom: segmentReserve }}
             >
-              {lyrics.lines.map((line, i) => (
+              {lyricsPane.lines.map((line, i) => (
                 <Text
                   key={i}
                   variant="body"
-                  color={
-                    i === lyrics.activeIndex
-                      ? 'accent'
-                      : lyrics.state === 'plain'
-                        ? 'primary'
-                        : 'secondary'
-                  }
+                  color={line.color}
                   style={[
                     {
                       paddingVertical: 9,
                       paddingHorizontal: theme.spacing.sm,
                       borderRadius: theme.radius.control,
                     },
-                    i === lyrics.activeIndex && {
+                    line.active && {
                       fontFamily: theme.fontFamilies.bold,
                     },
                   ]}
                 >
-                  {line}
+                  {line.text}
                 </Text>
               ))}
             </ScrollView>
@@ -1080,7 +1061,7 @@ export function StageSheet({
             <EmptyState title={t('queue.empty')} icon="queue" />
           ) : (
             <>
-              {onToggleQueueReorder !== undefined && (
+              {queueReorder !== null && (
                 <View
                   style={{
                     flexDirection: 'row',
@@ -1090,17 +1071,15 @@ export function StageSheet({
                   }}
                 >
                   <IconButton
-                    icon="drag-handle"
+                    icon={queueReorder.icon}
                     size={32}
                     iconSize={14}
                     color={
-                      queueReordering ? colors.accent : colors.textSecondary
+                      queueReorder.active ? colors.accent : colors.textSecondary
                     }
-                    accessibilityLabel={
-                      queueReordering ? t('queue.reorderDone') : t('queue.reorder')
-                    }
-                    active={queueReordering}
-                    onPress={onToggleQueueReorder}
+                    accessibilityLabel={queueReorder.a11yLabel}
+                    active={queueReorder.active}
+                    onPress={queueReorder.onPress}
                   />
                 </View>
               )}
@@ -1130,15 +1109,7 @@ export function StageSheet({
           bottom: segmentLift,
         }}
       >
-        <ModeSegment
-          mode={activeMode}
-          onSelect={(m) => {
-            setInternalMode(m);
-            if (onModeChange !== undefined) {
-              onModeChange(m);
-            }
-          }}
-        />
+        <ModeSegment mode={activeMode} onSelect={selectMode} />
       </View>
     </>
   );

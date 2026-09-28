@@ -8,10 +8,13 @@ import {
   LoadingState,
   UnavailableState,
 } from './states.tsx';
-import type { SearchStateModel, TrackRowModel } from '@auqw/ui-shared';
-import { t } from '@auqw/ui-shared';
+import type { SearchStateModel } from '@auqw/ui-shared';
+import {
+  useSearchScreenController,
+  type SearchScreenHandlers,
+} from '@auqw/ui-shared/controllers';
 
-export type SearchScreenProps = {
+export type SearchScreenProps = SearchScreenHandlers & {
   readonly state: SearchStateModel;
   /**
    * The live editing text for the input — `state.query` is the
@@ -22,23 +25,14 @@ export type SearchScreenProps = {
   readonly query?: string | undefined;
   readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
-  readonly onQueryChange?: ((query: string) => void) | undefined;
-  readonly onSubmit?: (() => void) | undefined;
-  readonly onCancel?: (() => void) | undefined;
-  readonly onRetry?: (() => void) | undefined;
-  readonly onResultPress?: ((row: TrackRowModel) => void) | undefined;
-  readonly onToggleLike?: ((row: TrackRowModel) => void) | undefined;
-  readonly onContext?: ((row: TrackRowModel) => void) | undefined;
   /** Submitted queries, newest first — rendered on the idle phase. */
   readonly recents?: readonly string[] | undefined;
-  readonly onRecentPress?: ((query: string) => void) | undefined;
   /**
    * Keystroke completions for the live text — rendered whenever the
    * box's text differs from the committed `state.query`, so results
    * from an older search never impersonate matches for the draft.
    */
   readonly suggestions?: readonly string[] | undefined;
-  readonly onSuggestionPress?: ((query: string) => void) | undefined;
 };
 
 export function SearchScreen({
@@ -59,11 +53,21 @@ export function SearchScreen({
   onSuggestionPress,
 }: SearchScreenProps) {
   const theme = useTheme();
-  const loading = state.phase === 'loading';
-  const editing = query ?? state.query;
-  // Draft mode: the box carries text that was never committed as the
-  // shown query — completions own the pane until submit.
-  const draft = editing.trim() !== '' && editing.trim() !== state.query;
+  const view = useSearchScreenController({
+    state,
+    query,
+    onQueryChange,
+    onSubmit,
+    onCancel,
+    onRetry,
+    onResultPress,
+    onToggleLike,
+    onContext,
+    recents,
+    onRecentPress,
+    suggestions,
+    onSuggestionPress,
+  });
   return (
     <View
       style={{
@@ -88,15 +92,15 @@ export function SearchScreen({
       >
         <Icon name="search" size={14} color={theme.colors.textSecondary} />
         <TextInput
-          value={query ?? state.query}
-          onChangeText={onQueryChange}
-          onSubmitEditing={onSubmit}
-          placeholder={t('search.fieldLabel')}
+          value={view.field.value}
+          onChangeText={view.field.onChange}
+          onSubmitEditing={view.field.onSubmit}
+          placeholder={view.field.label}
           placeholderTextColor={theme.colors.textSecondary}
           autoCapitalize="none"
           autoCorrect={false}
           returnKeyType="search"
-          accessibilityLabel={t('search.fieldLabel')}
+          accessibilityLabel={view.field.label}
           style={[
             theme.typography.body,
             {
@@ -106,35 +110,35 @@ export function SearchScreen({
             },
           ]}
         />
-        {loading && (
+        {view.field.loading && (
           <>
             <Spinner size={14} />
-            {onCancel !== undefined && (
+            {view.field.cancel !== null && (
               <Pressable
                 compact
-                onPress={onCancel}
-                accessibilityLabel={t('search.a11y.cancel')}
+                onPress={view.field.cancel.onPress}
+                accessibilityLabel={view.field.cancel.a11yLabel}
                 style={{ paddingHorizontal: theme.spacing.xs }}
               >
                 <Text variant="metadata" color="accent">
-                  {t('common.cancel')}
+                  {view.field.cancel.label}
                 </Text>
               </Pressable>
             )}
           </>
         )}
-        {!loading && editing !== '' && onQueryChange !== undefined && (
+        {view.field.clear !== null && (
           <Pressable
             compact
-            onPress={() => onQueryChange('')}
-            accessibilityLabel={t('search.a11y.clear')}
+            onPress={view.field.clear.onPress}
+            accessibilityLabel={view.field.clear.a11yLabel}
             style={{ padding: theme.spacing.xs }}
           >
             <Icon name="close" size={12} color={theme.colors.textSecondary} />
           </Pressable>
         )}
       </View>
-      {draft && (
+      {view.suggestions !== null && (
         <ScrollView
           style={{ flex: 1 }}
           scrollEnabled={scrollEnabled}
@@ -150,14 +154,12 @@ export function SearchScreen({
               marginBottom: theme.spacing.xs,
             }}
           >
-            {t('search.suggestions')}
+            {view.suggestions.heading}
           </Text>
           <Pressable
             compact
-            onPress={onSubmit}
-            accessibilityLabel={t('search.a11y.suggestion', {
-              query: editing.trim(),
-            })}
+            onPress={view.suggestions.commit.onPress}
+            accessibilityLabel={view.suggestions.commit.a11yLabel}
             style={({ pressed }) => [
               {
                 flexDirection: 'row',
@@ -172,21 +174,15 @@ export function SearchScreen({
           >
             <Icon name="search" size={14} color={theme.colors.textSecondary} />
             <Text variant="body" color="primary" numberOfLines={1}>
-              {t('search.commitQuery', { query: editing.trim() })}
+              {view.suggestions.commit.label}
             </Text>
           </Pressable>
-          {suggestions.map((suggestion) => (
+          {view.suggestions.items.map((suggestion) => (
             <Pressable
-              key={suggestion}
+              key={suggestion.label}
               compact
-              onPress={
-                onSuggestionPress === undefined
-                  ? undefined
-                  : () => onSuggestionPress(suggestion)
-              }
-              accessibilityLabel={t('search.a11y.suggestion', {
-                query: suggestion,
-              })}
+              onPress={suggestion.onPress}
+              accessibilityLabel={suggestion.a11yLabel}
               style={({ pressed }) => [
                 {
                   flexDirection: 'row',
@@ -205,13 +201,13 @@ export function SearchScreen({
                 color={theme.colors.textSecondary}
               />
               <Text variant="body" color="primary" numberOfLines={1}>
-                {suggestion}
+                {suggestion.label}
               </Text>
             </Pressable>
           ))}
         </ScrollView>
       )}
-      {!draft && state.phase === 'ready' && (
+      {view.resultsHead !== null && (
         <View
           style={{
             alignItems: 'flex-start',
@@ -220,23 +216,19 @@ export function SearchScreen({
           }}
         >
           <Text variant="heading" color="bright">
-            {t('search.results')}
+            {view.resultsHead.title}
           </Text>
           <Text
             variant="metadata"
             color="secondary"
             style={{ marginTop: theme.spacing.xxs }}
           >
-            {t('search.resultsMeta', {
-              provider: state.providerId ?? t('search.providerFallback'),
-              count: state.results.length,
-            })}
+            {view.resultsHead.metaLabel}
           </Text>
         </View>
       )}
-      {!draft &&
-        state.phase === 'idle' &&
-        (recents.length > 0 ? (
+      {view.idle !== null &&
+        (view.idle.kind === 'recents' ? (
           <View>
             <Text
               variant="label"
@@ -247,18 +239,14 @@ export function SearchScreen({
                 marginBottom: theme.spacing.xs,
               }}
             >
-              {t('search.recent')}
+              {view.idle.heading}
             </Text>
-            {recents.map((recent) => (
+            {view.idle.items.map((recent) => (
               <Pressable
-                key={recent}
+                key={recent.label}
                 compact
-                onPress={
-                  onRecentPress === undefined
-                    ? undefined
-                    : () => onRecentPress(recent)
-                }
-                accessibilityLabel={t('search.a11y.again', { query: recent })}
+                onPress={recent.onPress}
+                accessibilityLabel={recent.a11yLabel}
                 style={({ pressed }) => [
                   {
                     flexDirection: 'row',
@@ -277,69 +265,54 @@ export function SearchScreen({
                   color={theme.colors.textSecondary}
                 />
                 <Text variant="body" color="primary" numberOfLines={1}>
-                  {recent}
+                  {recent.label}
                 </Text>
               </Pressable>
             ))}
           </View>
         ) : (
           <EmptyState
-            title={t('search.emptyTitle')}
-            hint={t('search.emptyHint')}
-            icon="search"
+            title={view.idle.title}
+            hint={view.idle.hint}
+            icon={view.idle.icon}
           />
         ))}
-      {!draft && state.phase === 'loading' && state.results.length === 0 && (
-        <LoadingState title={t('search.loading')} hint={state.query} />
+      {view.status?.kind === 'loading' && (
+        <LoadingState title={view.status.title} hint={view.status.hint} />
       )}
-      {!draft && state.phase === 'empty' && (
+      {view.status?.kind === 'empty' && (
         <EmptyState
-          title={t('search.noResults', { query: state.query })}
-          hint={t('search.noResultsHint')}
-          icon="search"
+          title={view.status.title}
+          hint={view.status.hint}
+          icon={view.status.icon}
         />
       )}
-      {!draft && state.phase === 'error' && (
+      {view.status?.kind === 'error' && (
         <ErrorState
-          title={t('search.failed')}
-          hint={state.message}
-          onRetry={state.retryable ? onRetry : undefined}
+          title={view.status.title}
+          hint={view.status.hint}
+          onRetry={view.status.onRetry}
         />
       )}
-      {!draft && state.phase === 'unavailable' && (
-        <UnavailableState
-          title={t('search.unavailableTitle')}
-          hint={state.message}
+      {view.status?.kind === 'unavailable' && (
+        <UnavailableState title={view.status.title} hint={view.status.hint} />
+      )}
+      {view.results !== null && (
+        <FlatList
+          data={view.results.rows}
+          keyExtractor={(row) => row.row.key}
+          scrollEnabled={scrollEnabled}
+          contentContainerStyle={{ paddingHorizontal: 6 }}
+          renderItem={({ item }) => (
+            <TrackRow
+              row={item.row}
+              onPress={item.onPress}
+              onToggleLike={item.onToggleLike}
+              onContext={item.onContext}
+            />
+          )}
         />
       )}
-      {!draft &&
-        (state.phase === 'ready' || state.phase === 'loading') &&
-        state.results.length > 0 && (
-          <FlatList
-            data={state.results}
-            keyExtractor={(row) => row.key}
-            scrollEnabled={scrollEnabled}
-            contentContainerStyle={{ paddingHorizontal: 6 }}
-            renderItem={({ item }) => (
-              <TrackRow
-                row={item}
-                onPress={
-                  onResultPress === undefined
-                    ? undefined
-                    : () => onResultPress(item)
-                }
-                onToggleLike={
-                  onToggleLike === undefined
-                    ? undefined
-                    : () => onToggleLike(item)
-                }
-                onContext={
-                  onContext === undefined ? undefined : () => onContext(item)
-                }
-              />
-            )}
-          />
-        )}
     </View>
   );
 }

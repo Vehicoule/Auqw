@@ -1,16 +1,16 @@
 import { Icon, Pressable, Text } from './primitives.tsx';
 import { ErrorState } from './states.tsx';
-import { t } from '@auqw/ui-shared';
-import type { ImportPreviewModel, TransferModel } from '@auqw/ui-shared';
+import type { TransferModel } from '@auqw/ui-shared';
+import {
+  useTransferScreenController,
+  type TransferImportView,
+  type TransferRowView,
+  type TransferScreenHandlers,
+} from '@auqw/ui-shared/controllers';
 
-export type TransferScreenProps = {
+export type TransferScreenProps = TransferScreenHandlers & {
   readonly model: TransferModel;
   readonly scrollEnabled?: boolean | undefined;
-  readonly onBack?: (() => void) | undefined;
-  readonly onExport?: (() => void) | undefined;
-  readonly onPickImportFile?: (() => void) | undefined;
-  readonly onApplyImport?: (() => void) | undefined;
-  readonly onResetImport?: (() => void) | undefined;
 };
 
 /**
@@ -30,20 +30,28 @@ export function TransferScreen({
   onApplyImport,
   onResetImport,
 }: TransferScreenProps) {
-  const exportBusy = model.exportPhase === 'working';
-  const importBusy =
-    model.importPhase === 'reading' || model.importPhase === 'applying';
+  const view = useTransferScreenController({
+    model,
+    onExport,
+    onPickImportFile,
+    onApplyImport,
+    onResetImport,
+  });
   return (
     <div
       className="uw-screen uw-transfer"
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
       <div className="uw-collection__head">
-        <Pressable onPress={onBack} ariaLabel={t('common.back')} className="uw-back">
+        <Pressable
+          onPress={onBack}
+          ariaLabel={view.backA11yLabel}
+          className="uw-back"
+        >
           <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
         </Pressable>
         <Text variant="display" color="bright" className="uw-collection__title">
-          {t('transfer.title')}
+          {view.title}
         </Text>
       </div>
       <div className="uw-transfer__sections">
@@ -54,19 +62,9 @@ export function TransferScreen({
             uppercase
             className="uw-section-label"
           >
-            {t('transfer.exportSection')}
+            {view.exportSectionLabel}
           </Text>
-          <TransferRow
-            label={exportBusy ? t('transfer.exporting') : t('transfer.export')}
-            detail={
-              model.exportPhase === 'done' || model.exportPhase === 'error'
-                ? model.exportDetail
-                : null
-            }
-            detailTone={model.exportPhase === 'error' ? 'warn' : 'secondary'}
-            disabled={exportBusy || onExport === undefined}
-            onPress={onExport}
-          />
+          <TransferRow view={view.exportRow} />
         </section>
         <section>
           <Text
@@ -75,54 +73,32 @@ export function TransferScreen({
             uppercase
             className="uw-section-label"
           >
-            {t('transfer.importSection')}
+            {view.importSectionLabel}
           </Text>
-          <TransferRow
-            label={importBusy ? t('transfer.working') : t('transfer.import')}
-            detail={model.importPhase === 'error' ? model.importDetail : null}
-            detailTone="warn"
-            disabled={importBusy || onPickImportFile === undefined}
-            onPress={onPickImportFile}
-          />
-          <ImportBody
-            model={model}
-            onApplyImport={onApplyImport}
-            onResetImport={onResetImport}
-          />
+          <TransferRow view={view.importRow} />
+          <ImportBody body={view.importBody} />
         </section>
       </div>
     </div>
   );
 }
 
-function TransferRow({
-  label,
-  detail,
-  detailTone,
-  disabled,
-  onPress,
-}: {
-  readonly label: string;
-  readonly detail: string | null;
-  readonly detailTone: 'secondary' | 'warn';
-  readonly disabled: boolean;
-  readonly onPress?: (() => void) | undefined;
-}) {
+function TransferRow({ view }: { readonly view: TransferRowView }) {
   return (
     <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      ariaLabel={label}
-      className={`uw-transfer-row${disabled ? ' uw-off' : ''}`}
+      onPress={view.onPress}
+      disabled={view.disabled}
+      ariaLabel={view.label}
+      className={`uw-transfer-row${view.disabled ? ' uw-off' : ''}`}
     >
       <Icon name="download" size={14} color="var(--text-secondary)" />
       <span className="uw-transfer-row__text">
         <Text variant="body" color="primary" numberOfLines={1}>
-          {label}
+          {view.label}
         </Text>
-        {detail === null ? null : (
-          <Text variant="metadata" color={detailTone} numberOfLines={2}>
-            {detail}
+        {view.detail === null ? null : (
+          <Text variant="metadata" color={view.detailTone} numberOfLines={2}>
+            {view.detail}
           </Text>
         )}
       </span>
@@ -132,32 +108,28 @@ function TransferRow({
 }
 
 function ImportBody({
-  model,
-  onApplyImport,
-  onResetImport,
+  body,
 }: {
-  readonly model: TransferModel;
-  readonly onApplyImport?: (() => void) | undefined;
-  readonly onResetImport?: (() => void) | undefined;
+  readonly body: TransferImportView | null;
 }) {
-  const preview: ImportPreviewModel | null = model.preview;
-  if (preview === null) {
+  if (body === null) {
     return null;
   }
+  const { footer } = body;
   return (
-    <div className="uw-import-preview" data-phase={model.importPhase}>
+    <div className="uw-import-preview" data-phase={body.phase}>
       <Text variant="body" color="bright">
-        {t('transfer.previewTitle')}
+        {body.title}
       </Text>
-      <Text variant="metadata" color="secondary" className="uw-import-preview__meta">
-        {t('transfer.format', { version: preview.formatVersion })}
-        {preview.exportedLabel === null
-          ? ''
-          : t('transfer.exportedSuffix', { date: preview.exportedLabel })}
-        {t('transfer.sourceSuffix', { source: preview.sourceLabel })}
+      <Text
+        variant="metadata"
+        color="secondary"
+        className="uw-import-preview__meta"
+      >
+        {body.metaLabel}
       </Text>
       <div className="uw-import-preview__rows">
-        {preview.rows.map((row) => (
+        {body.rows.map((row) => (
           <div key={row.key} className="uw-import-preview__row">
             <Text variant="metadata" color="secondary" className="uw-diag-row__k">
               {row.label}
@@ -168,54 +140,54 @@ function ImportBody({
           </div>
         ))}
       </div>
-      {model.importPhase === 'done' ? (
+      {footer.kind === 'done' ? (
         <div className="uw-import-preview__done">
           <Icon name="check" size={14} color="var(--accent)" />
           <Text variant="metadata" color="accent" className="uw-diag-row__k">
-            {model.importDetail ?? t('transfer.applied')}
+            {footer.detail}
           </Text>
           <Pressable
-            onPress={onResetImport}
-            ariaLabel={t('transfer.resetA11y')}
+            onPress={footer.onReset}
+            ariaLabel={footer.resetA11yLabel}
             className="uw-review__action"
           >
             <Text variant="metadata" color="primary">
-              {t('common.done')}
+              {footer.resetLabel}
             </Text>
           </Pressable>
         </div>
-      ) : model.importPhase === 'error' ? (
+      ) : footer.kind === 'error' ? (
         <div className="uw-import-preview__error">
-          <ErrorState title={t('transfer.failed')} hint={model.importDetail} />
+          <ErrorState title={footer.title} hint={footer.hint} />
           <Pressable
-            onPress={onResetImport}
-            ariaLabel={t('transfer.resetA11y')}
+            onPress={footer.onReset}
+            ariaLabel={footer.resetA11yLabel}
             className="uw-review__action"
           >
             <Text variant="metadata" color="primary">
-              {t('transfer.startOver')}
+              {footer.resetLabel}
             </Text>
           </Pressable>
         </div>
       ) : (
         <div className="uw-import-preview__actions">
           <Pressable
-            onPress={onApplyImport}
-            disabled={model.importPhase === 'applying'}
-            ariaLabel={t('transfer.apply')}
+            onPress={footer.onApply}
+            disabled={footer.applying}
+            ariaLabel={footer.applyA11yLabel}
             className="uw-cta"
           >
             <Text variant="metadata" color="canvas">
-              {model.importPhase === 'applying' ? t('transfer.applying') : t('transfer.apply')}
+              {footer.applyLabel}
             </Text>
           </Pressable>
           <Pressable
-            onPress={onResetImport}
-            ariaLabel={t('transfer.cancelA11y')}
+            onPress={footer.onCancel}
+            ariaLabel={footer.cancelA11yLabel}
             className="uw-headbtn"
           >
             <Text variant="metadata" color="secondary">
-              {t('common.cancel')}
+              {footer.cancelLabel}
             </Text>
           </Pressable>
         </div>

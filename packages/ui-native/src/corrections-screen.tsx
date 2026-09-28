@@ -2,32 +2,17 @@ import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Icon, PillButton, Pressable, Text } from './primitives.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
-import type {
-  CorrectionsFilter,
-  CorrectionsModel,
-  MessageId,
-  ReviewRowModel,
-} from '@auqw/ui-shared';
-import { t } from '@auqw/ui-shared';
+import type { CorrectionsModel } from '@auqw/ui-shared';
+import {
+  useCorrectionsScreenController,
+  type CorrectionsRowView,
+  type CorrectionsScreenHandlers,
+} from '@auqw/ui-shared/controllers';
 
-const FILTERS: readonly { value: CorrectionsFilter; label: MessageId }[] = [
-  { value: 'pending', label: 'corrections.filter.pending' },
-  { value: 'resolved', label: 'corrections.filter.resolved' },
-  { value: 'all', label: 'corrections.filter.all' },
-];
-
-export type CorrectionsScreenProps = {
+export type CorrectionsScreenProps = CorrectionsScreenHandlers & {
   readonly model: CorrectionsModel;
   readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
-  readonly onBack?: (() => void) | undefined;
-  readonly onFilter?: ((filter: CorrectionsFilter) => void) | undefined;
-  readonly onConfirm?:
-  | ((reviewId: string, candidateIndex: number) => void)
-  | undefined;
-  readonly onReject?: ((reviewId: string) => void) | undefined;
-  readonly onUndo?: ((reviewId: string) => void) | undefined;
-  readonly onRetry?: (() => void) | undefined;
 };
 
 /**
@@ -49,6 +34,14 @@ export function CorrectionsScreen({
   onRetry,
 }: CorrectionsScreenProps) {
   const theme = useTheme();
+  const view = useCorrectionsScreenController({
+    model,
+    onFilter,
+    onConfirm,
+    onReject,
+    onUndo,
+    onRetry,
+  });
   return (
     <View
       style={{
@@ -69,7 +62,7 @@ export function CorrectionsScreen({
         <Pressable
           compact
           onPress={onBack}
-          accessibilityLabel={t('common.back')}
+          accessibilityLabel={view.backA11yLabel}
           style={{ padding: theme.spacing.xs }}
         >
           <Icon
@@ -79,13 +72,10 @@ export function CorrectionsScreen({
           />
         </Pressable>
         <Text variant="display" color="bright" style={{ flex: 1 }}>
-          {t('corrections.title')}
+          {view.title}
         </Text>
         <Text variant="metadata" color="secondary">
-          {t('corrections.counts', {
-            pending: model.pendingCount,
-            resolved: model.resolvedCount,
-          })}
+          {view.countsLabel}
         </Text>
       </View>
       <View
@@ -96,66 +86,51 @@ export function CorrectionsScreen({
           marginBottom: theme.spacing.xs,
         }}
       >
-        {FILTERS.map((filter) => (
+        {view.filters.map((filter) => (
           <Pressable
             key={filter.value}
             compact
-            onPress={
-              onFilter === undefined ? undefined : () => onFilter(filter.value)
-            }
-            accessibilityLabel={t('corrections.filterA11y', {
-              label: t(filter.label),
-            })}
-            accessibilityState={{ selected: model.filter === filter.value }}
+            onPress={filter.onPress}
+            accessibilityLabel={filter.a11yLabel}
+            accessibilityState={{ selected: filter.selected }}
             style={{
               paddingHorizontal: theme.spacing.sm,
               paddingVertical: theme.spacing.xs,
               borderRadius: theme.radius.pill,
-              borderWidth:
-                model.filter === filter.value ? theme.strokes.hairline : 0,
+              borderWidth: filter.selected ? theme.strokes.hairline : 0,
               borderColor: theme.colors.hairline,
             }}
           >
             <Text
               variant="metadata"
-              color={model.filter === filter.value ? 'bright' : 'secondary'}
+              color={filter.selected ? 'bright' : 'secondary'}
             >
-              {t(filter.label)}
+              {filter.label}
             </Text>
           </Pressable>
         ))}
       </View>
-      {model.state === 'loading' ? (
-        <LoadingState title={t('corrections.loading')} />
-      ) : model.state === 'error' ? (
+      {view.body.kind === 'loading' ? (
+        <LoadingState title={view.body.title} />
+      ) : view.body.kind === 'error' ? (
         <ErrorState
-          title={t('corrections.errorTitle')}
-          hint={model.message}
-          onRetry={onRetry}
+          title={view.body.title}
+          hint={view.body.hint}
+          onRetry={view.body.onRetry}
         />
-      ) : model.rows.length === 0 ? (
+      ) : view.body.kind === 'empty' ? (
         <EmptyState
-          title={t('corrections.empty')}
-          hint={
-            model.filter === 'pending'
-              ? t('corrections.emptyHint.pending')
-              : t('corrections.emptyHint.other')
-          }
-          icon="check"
+          title={view.body.title}
+          hint={view.body.hint}
+          icon={view.body.icon}
         />
       ) : (
         <ScrollView
           scrollEnabled={scrollEnabled}
           contentContainerStyle={{ paddingBottom: theme.spacing.xxl }}
         >
-          {model.rows.map((row) => (
-            <ReviewRow
-              key={row.reviewId}
-              row={row}
-              onConfirm={onConfirm}
-              onReject={onReject}
-              onUndo={onUndo}
-            />
+          {view.body.rows.map((row) => (
+            <ReviewRow key={row.row.reviewId} view={row} />
           ))}
         </ScrollView>
       )}
@@ -163,21 +138,9 @@ export function CorrectionsScreen({
   );
 }
 
-function ReviewRow({
-  row,
-  onConfirm,
-  onReject,
-  onUndo,
-}: {
-  readonly row: ReviewRowModel;
-  readonly onConfirm?:
-  | ((reviewId: string, candidateIndex: number) => void)
-  | undefined;
-  readonly onReject?: ((reviewId: string) => void) | undefined;
-  readonly onUndo?: ((reviewId: string) => void) | undefined;
-}) {
+function ReviewRow({ view }: { readonly view: CorrectionsRowView }) {
   const theme = useTheme();
-  const pending = row.status === 'pending';
+  const { row, pending } = view;
   return (
     <View
       style={{
@@ -202,7 +165,7 @@ function ReviewRow({
         >
           {row.title}
         </Text>
-        <Text variant="metadata" color={pending ? 'warn' : 'secondary'}>
+        <Text variant="metadata" color={view.statusColor}>
           {row.statusLabel}
         </Text>
       </View>
@@ -216,19 +179,13 @@ function ReviewRow({
           {row.artist}
         </Text>
       )}
-      {row.candidates.map((candidate) => (
+      {view.candidates.map((candidate) => (
         <Pressable
           key={candidate.index}
           compact
-          onPress={
-            pending && onConfirm !== undefined
-              ? () => onConfirm(row.reviewId, candidate.index)
-              : undefined
-          }
-          disabled={!pending || onConfirm === undefined}
-          accessibilityLabel={t('corrections.a11y.confirm', {
-            title: candidate.title,
-          })}
+          onPress={candidate.onPress}
+          disabled={!candidate.enabled}
+          accessibilityLabel={candidate.a11yLabel}
           style={({ pressed }) => [
             {
               flexDirection: 'row',
@@ -271,26 +228,20 @@ function ReviewRow({
           marginTop: theme.spacing.xs,
         }}
       >
-        {pending ? (
+        {view.action.kind === 'reject' ? (
           <PillButton
-            label={t('corrections.rejectAll')}
+            label={view.action.label}
             tone="warn"
             minHeight={26}
-            onPress={
-              onReject === undefined ? undefined : () => onReject(row.reviewId)
-            }
-            accessibilityLabel={t('corrections.a11y.reject', {
-              title: row.title,
-            })}
+            onPress={view.action.onPress}
+            accessibilityLabel={view.action.a11yLabel}
           />
         ) : (
           <PillButton
-            label={t('corrections.undo')}
+            label={view.action.label}
             minHeight={26}
-            onPress={
-              onUndo === undefined ? undefined : () => onUndo(row.reviewId)
-            }
-            accessibilityLabel={t('corrections.a11y.undo', { title: row.title })}
+            onPress={view.action.onPress}
+            accessibilityLabel={view.action.a11yLabel}
           />
         )}
       </View>

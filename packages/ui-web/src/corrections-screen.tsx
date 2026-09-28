@@ -1,32 +1,15 @@
 import { Icon, Pressable, Text } from './primitives.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
-import type {
-  CorrectionsFilter,
-  CorrectionsModel,
-  ReviewRowModel,
-} from '@auqw/ui-shared';
-import { t } from '@auqw/ui-shared';
-import type { MessageId } from '@auqw/ui-shared';
+import type { CorrectionsModel } from '@auqw/ui-shared';
+import {
+  useCorrectionsScreenController,
+  type CorrectionsRowView,
+  type CorrectionsScreenHandlers,
+} from '@auqw/ui-shared/controllers';
 
-// Filter labels are message ids resolved at render — never cache
-// translated strings at module scope or they go stale on a locale switch.
-const FILTERS: readonly { value: CorrectionsFilter; label: MessageId }[] = [
-  { value: 'pending', label: 'corrections.filter.pending' },
-  { value: 'resolved', label: 'corrections.filter.resolved' },
-  { value: 'all', label: 'corrections.filter.all' },
-];
-
-export type CorrectionsScreenProps = {
+export type CorrectionsScreenProps = CorrectionsScreenHandlers & {
   readonly model: CorrectionsModel;
   readonly scrollEnabled?: boolean | undefined;
-  readonly onBack?: (() => void) | undefined;
-  readonly onFilter?: ((filter: CorrectionsFilter) => void) | undefined;
-  readonly onConfirm?:
-    | ((reviewId: string, candidateIndex: number) => void)
-    | undefined;
-  readonly onReject?: ((reviewId: string) => void) | undefined;
-  readonly onUndo?: ((reviewId: string) => void) | undefined;
-  readonly onRetry?: (() => void) | undefined;
 };
 
 /**
@@ -46,73 +29,74 @@ export function CorrectionsScreen({
   onUndo,
   onRetry,
 }: CorrectionsScreenProps) {
+  const view = useCorrectionsScreenController({
+    model,
+    onFilter,
+    onConfirm,
+    onReject,
+    onUndo,
+    onRetry,
+  });
   return (
     <div
       className="uw-screen uw-corrections"
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
       <div className="uw-collection__head">
-        <Pressable onPress={onBack} ariaLabel={t('common.back')} className="uw-back">
+        <Pressable
+          onPress={onBack}
+          ariaLabel={view.backA11yLabel}
+          className="uw-back"
+        >
           <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
         </Pressable>
         <Text variant="display" color="bright" className="uw-collection__title">
-          {t('corrections.title')}
+          {view.title}
         </Text>
         <Text variant="metadata" color="secondary">
-          {t('corrections.counts', {
-            pending: model.pendingCount,
-            resolved: model.resolvedCount,
-          })}
+          {view.countsLabel}
         </Text>
       </div>
-      <div className="uw-corrections__filters" role="toolbar" aria-label={t('corrections.statusFilterA11y')}>
-        {FILTERS.map((filter) => (
+      <div
+        className="uw-corrections__filters"
+        role="toolbar"
+        aria-label={view.filtersA11yLabel}
+      >
+        {view.filters.map((filter) => (
           <Pressable
             key={filter.value}
-            onPress={
-              onFilter === undefined ? undefined : () => onFilter(filter.value)
-            }
-            ariaLabel={t('corrections.filterA11y', { label: t(filter.label) })}
-            ariaSelected={model.filter === filter.value}
-            className={`uw-chip${model.filter === filter.value ? ' uw-chip--active' : ''}`}
+            onPress={filter.onPress}
+            ariaLabel={filter.a11yLabel}
+            ariaSelected={filter.selected}
+            className={`uw-chip${filter.selected ? ' uw-chip--active' : ''}`}
           >
             <Text
               variant="metadata"
-              color={model.filter === filter.value ? 'bright' : 'secondary'}
+              color={filter.selected ? 'bright' : 'secondary'}
             >
-              {t(filter.label)}
+              {filter.label}
             </Text>
           </Pressable>
         ))}
       </div>
-      {model.state === 'loading' ? (
-        <LoadingState title={t('corrections.loading')} />
-      ) : model.state === 'error' ? (
+      {view.body.kind === 'loading' ? (
+        <LoadingState title={view.body.title} />
+      ) : view.body.kind === 'error' ? (
         <ErrorState
-          title={t('corrections.errorTitle')}
-          hint={model.message}
-          onRetry={onRetry}
+          title={view.body.title}
+          hint={view.body.hint}
+          onRetry={view.body.onRetry}
         />
-      ) : model.rows.length === 0 ? (
+      ) : view.body.kind === 'empty' ? (
         <EmptyState
-          title={t('corrections.empty')}
-          hint={
-            model.filter === 'pending'
-              ? t('corrections.emptyHint.pending')
-              : t('corrections.emptyHint.other')
-          }
-          icon="check"
+          title={view.body.title}
+          hint={view.body.hint}
+          icon={view.body.icon}
         />
       ) : (
-        <div role="list" aria-label={t('settings.diag.matchReviews')}>
-          {model.rows.map((row) => (
-            <ReviewRow
-              key={row.reviewId}
-              row={row}
-              onConfirm={onConfirm}
-              onReject={onReject}
-              onUndo={onUndo}
-            />
+        <div role="list" aria-label={view.body.listA11yLabel}>
+          {view.body.rows.map((row) => (
+            <ReviewRow key={row.row.reviewId} view={row} />
           ))}
         </div>
       )}
@@ -120,20 +104,8 @@ export function CorrectionsScreen({
   );
 }
 
-function ReviewRow({
-  row,
-  onConfirm,
-  onReject,
-  onUndo,
-}: {
-  readonly row: ReviewRowModel;
-  readonly onConfirm?:
-    | ((reviewId: string, candidateIndex: number) => void)
-    | undefined;
-  readonly onReject?: ((reviewId: string) => void) | undefined;
-  readonly onUndo?: ((reviewId: string) => void) | undefined;
-}) {
-  const pending = row.status === 'pending';
+function ReviewRow({ view }: { readonly view: CorrectionsRowView }) {
+  const { row, pending } = view;
   return (
     <div className="uw-review" role="listitem" data-status={row.status}>
       <div className="uw-review__head">
@@ -145,7 +117,7 @@ function ReviewRow({
         >
           {row.title}
         </Text>
-        <Text variant="metadata" color={pending ? 'warn' : 'secondary'}>
+        <Text variant="metadata" color={view.statusColor}>
           {row.statusLabel}
         </Text>
       </div>
@@ -154,16 +126,12 @@ function ReviewRow({
           {row.artist}
         </Text>
       )}
-      {row.candidates.map((candidate) => (
+      {view.candidates.map((candidate) => (
         <Pressable
           key={candidate.index}
-          onPress={
-            pending && onConfirm !== undefined
-              ? () => onConfirm(row.reviewId, candidate.index)
-              : undefined
-          }
-          disabled={!pending || onConfirm === undefined}
-          ariaLabel={t('corrections.a11y.confirm', { title: candidate.title })}
+          onPress={candidate.onPress}
+          disabled={!candidate.enabled}
+          ariaLabel={candidate.a11yLabel}
           className={`uw-review__candidate${pending ? '' : ' uw-off'}`}
         >
           {pending && (
@@ -188,31 +156,18 @@ function ReviewRow({
         </Pressable>
       ))}
       <div className="uw-review__actions">
-        {pending ? (
-          <Pressable
-            onPress={
-              onReject === undefined ? undefined : () => onReject(row.reviewId)
-            }
-            ariaLabel={t('corrections.a11y.reject', { title: row.title })}
-            className="uw-review__action"
+        <Pressable
+          onPress={view.action.onPress}
+          ariaLabel={view.action.a11yLabel}
+          className="uw-review__action"
+        >
+          <Text
+            variant="metadata"
+            color={view.action.kind === 'reject' ? 'warn' : 'primary'}
           >
-            <Text variant="metadata" color="warn">
-              {t('corrections.rejectAll')}
-            </Text>
-          </Pressable>
-        ) : (
-          <Pressable
-            onPress={
-              onUndo === undefined ? undefined : () => onUndo(row.reviewId)
-            }
-            ariaLabel={t('corrections.a11y.undo', { title: row.title })}
-            className="uw-review__action"
-          >
-            <Text variant="metadata" color="primary">
-              {t('corrections.undo')}
-            </Text>
-          </Pressable>
-        )}
+            {view.action.label}
+          </Text>
+        </Pressable>
       </div>
     </div>
   );

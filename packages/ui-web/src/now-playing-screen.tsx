@@ -8,7 +8,6 @@ import {
   Spinner,
   Text,
 } from './primitives.tsx';
-import type { IconName } from './primitives.tsx';
 import { WaveformSeek } from './progress.tsx';
 import { useOverlayDismiss } from './stack.tsx';
 import { QueueList } from './queue-list.tsx';
@@ -17,13 +16,24 @@ import { t } from '@auqw/ui-shared';
 import type {
   DownloadChip,
   LyricsModel,
-  MessageId,
   PlayerModel,
   QueueModel,
   RadioModel,
   StageMode,
   WaveformPeak,
 } from '@auqw/ui-shared';
+import {
+  downloadButtonView,
+  lyricsHeaderView,
+  lyricsPaneView,
+  queueReorderButton,
+  radioRowView,
+  stageMetaView,
+  stageModeTabs,
+  useStageMode,
+  useTransportView,
+  type StageScreenHandlers,
+} from '@auqw/ui-shared/controllers';
 
 
 export type TransportProps = {
@@ -71,92 +81,95 @@ export function TransportControls({
   repeat = 'off',
   onCycleRepeat,
 }: TransportProps) {
-  const busy = status === 'preparing' || status === 'buffering';
-  const playing = intentPlaying;
-  const playColor = variant === 'm3e' ? 'var(--canvas)' : 'var(--text-bright)';
+  const view = useTransportView({
+    status,
+    intentPlaying,
+    liked,
+    canPrevious,
+    canNext,
+    shuffle,
+    repeat,
+    onPlayPause,
+    onPrevious,
+    onNext,
+    onToggleLike,
+    onToggleShuffle,
+    onCycleRepeat,
+  });
+  const playColor =
+    variant === 'm3e' ? 'var(--canvas)' : 'var(--text-bright)';
   return (
-    <div className={`uw-transport uw-transport--${variant}`} role="group" aria-label={t('player.a11y.transport')}>
+    <div className={`uw-transport uw-transport--${variant}`} role="group" aria-label={view.a11yLabel}>
       <IconButton
-        icon={liked ? 'heart-filled' : 'heart'}
+        icon={view.like.icon}
         size={32}
         iconSize={14}
-        color={liked ? 'var(--liked)' : 'var(--text-secondary)'}
-        ariaLabel={liked ? t('common.unlike') : t('common.like')}
-        active={liked}
-        onPress={onToggleLike}
+        color={view.like.liked ? 'var(--liked)' : 'var(--text-secondary)'}
+        ariaLabel={view.like.a11yLabel}
+        active={view.like.active}
+        onPress={view.like.onPress}
         className="uw-transport__side"
       />
       <IconButton
-        icon="shuffle"
+        icon={view.shuffle.icon}
         size={32}
         iconSize={14}
-        color={shuffle ? 'var(--accent)' : 'var(--text-secondary)'}
-        ariaLabel={t('common.shuffle')}
-        disabled={onToggleShuffle === undefined}
-        active={shuffle}
-        onPress={onToggleShuffle}
+        color={view.shuffle.active ? 'var(--accent)' : 'var(--text-secondary)'}
+        ariaLabel={view.shuffle.a11yLabel}
+        disabled={view.shuffle.disabled}
+        active={view.shuffle.active}
+        onPress={view.shuffle.onPress}
         className="uw-transport__side"
       />
       <IconButton
-        icon="previous"
+        icon={view.previous.icon}
         size={36}
         iconSize={15}
         color="var(--text-primary)"
-        ariaLabel={t('common.previous')}
-        disabled={!canPrevious}
-        onPress={onPrevious}
+        ariaLabel={view.previous.a11yLabel}
+        disabled={view.previous.disabled}
+        onPress={view.previous.onPress}
         className="uw-transport__main"
       />
       <Pressable
-        onPress={onPlayPause}
-        ariaLabel={playing ? t('common.pause') : t('common.play')}
-        ariaPressed={playing}
+        onPress={view.play.onPress}
+        ariaLabel={view.play.a11yLabel}
+        ariaPressed={view.play.pressed}
         className="uw-transport__play"
       >
-        {busy ? (
+        {view.busy ? (
           <Spinner size={18} color={playColor} />
         ) : (
-          <PlayPauseIcon playing={playing} size={18} color={playColor} />
+          <PlayPauseIcon playing={view.playing} size={18} color={playColor} />
         )}
       </Pressable>
       <IconButton
-        icon="next"
+        icon={view.next.icon}
         size={36}
         iconSize={15}
         color="var(--text-primary)"
-        ariaLabel={t('common.next')}
-        disabled={!canNext}
-        onPress={onNext}
+        ariaLabel={view.next.a11yLabel}
+        disabled={view.next.disabled}
+        onPress={view.next.onPress}
         className="uw-transport__main"
       />
       <IconButton
-        icon={repeat === 'one' ? 'repeat-one' : 'repeat'}
+        icon={view.repeat.icon}
         size={32}
         iconSize={14}
-        color={repeat === 'off' ? 'var(--text-secondary)' : 'var(--accent)'}
-        ariaLabel={
-          repeat === 'one'
-            ? t('common.repeatOne')
-            : repeat === 'all'
-              ? t('common.repeatAll')
-              : t('common.repeat')
-        }
-        disabled={onCycleRepeat === undefined}
-        active={repeat !== 'off'}
-        onPress={onCycleRepeat}
+        color={view.repeat.active ? 'var(--accent)' : 'var(--text-secondary)'}
+        ariaLabel={view.repeat.a11yLabel}
+        disabled={view.repeat.disabled}
+        active={view.repeat.active}
+        onPress={view.repeat.onPress}
         className="uw-transport__side"
       />
     </div>
   );
 }
 
-// Labels resolve at render (never cached in the module constant) so a
-// locale switch re-translates every tab.
-const MODES: readonly { key: StageMode; label: MessageId; icon: IconName }[] = [
-  { key: 'player', label: 'stage.mode.player', icon: 'note' },
-  { key: 'lyrics', label: 'stage.mode.lyrics', icon: 'lyrics' },
-  { key: 'queue', label: 'stage.mode.queue', icon: 'queue' },
-];
+/** Desktop tab order: player · lyrics · queue. */
+const STAGE_MODE_ORDER: readonly StageMode[] = ['player', 'lyrics', 'queue'];
 
 export function ModeSegment({
   mode,
@@ -165,40 +178,38 @@ export function ModeSegment({
   readonly mode: StageMode;
   readonly onSelect?: ((mode: StageMode) => void) | undefined;
 }) {
+  const tabs = stageModeTabs(STAGE_MODE_ORDER, mode, onSelect);
   return (
     <div className="uw-segment" role="tablist" aria-label={t('stage.modeTabsA11y')}>
-      {MODES.map((m) => {
-        const active = m.key === mode;
-        return (
-          <Pressable
-            key={m.key}
-            onPress={onSelect === undefined ? undefined : () => onSelect(m.key)}
-            ariaLabel={t(m.label)}
-            ariaSelected={active}
-            className={`uw-segment__item${active ? ' uw-segment__item--on' : ''}`}
+      {tabs.map((tab) => (
+        <Pressable
+          key={tab.key}
+          onPress={tab.onPress}
+          ariaLabel={tab.label}
+          ariaSelected={tab.active}
+          className={`uw-segment__item${tab.active ? ' uw-segment__item--on' : ''}`}
+        >
+          {/* Tonal pill — same construction as the native segment's
+              m3e fill: accentSoft chip, accent icon + label. */}
+          <Icon
+            name={tab.icon}
+            size={12}
+            color={tab.active ? 'var(--accent)' : 'var(--text-secondary)'}
+          />
+          <Text
+            variant="metadata"
+            color={tab.active ? 'accent' : 'secondary'}
+            className={tab.active ? 'uw-text--bold' : undefined}
           >
-            {/* Tonal pill — same construction as the native segment's
-                m3e fill: accentSoft chip, accent icon + label. */}
-            <Icon
-              name={m.icon}
-              size={12}
-              color={active ? 'var(--accent)' : 'var(--text-secondary)'}
-            />
-            <Text
-              variant="metadata"
-              color={active ? 'accent' : 'secondary'}
-              className={active ? 'uw-text--bold' : undefined}
-            >
-              {t(m.label)}
-            </Text>
-          </Pressable>
-        );
-      })}
+            {tab.label}
+          </Text>
+        </Pressable>
+      ))}
     </div>
   );
 }
 
-export type NowPlayingScreenProps = {
+export type NowPlayingScreenProps = StageScreenHandlers & {
   readonly player: PlayerModel;
   readonly mode?: StageMode | undefined;
   readonly queue?: QueueModel | undefined;
@@ -206,41 +217,12 @@ export type NowPlayingScreenProps = {
   readonly radio?: RadioModel | undefined;
   readonly queueReordering?: boolean | undefined;
   readonly queueScrollEnabled?: boolean | undefined;
-  readonly onPlayPause?: (() => void) | undefined;
-  readonly onNext?: (() => void) | undefined;
-  readonly onPrevious?: (() => void) | undefined;
-  readonly onToggleLike?: (() => void) | undefined;
   readonly shuffle?: boolean | undefined;
-  readonly onToggleShuffle?: (() => void) | undefined;
   readonly repeat?: 'off' | 'all' | 'one' | undefined;
-  readonly onCycleRepeat?: (() => void) | undefined;
   readonly download?: DownloadChip | null | undefined;
-  readonly onDownload?: (() => void) | undefined;
-  /** Add-to-playlist affordance on the meta row (same as native). */
-  readonly onAddToPlaylist?: (() => void) | undefined;
-  /**
-   * Stops playback and clears the stage's track (the queue keeps its
-   * items — the native mini-player's swipe-down dismiss). Overlays the
-   * stage's top-right in every mode; omitted hides the control.
-   */
-  readonly onStopPlayback?: (() => void) | undefined;
-  readonly onSeek?: ((ms: number) => void) | undefined;
   /** Real measured peaks for the playing recording; null/undefined
    * keeps the seeded pattern (pending state and failure fallback). */
   readonly peaks?: readonly WaveformPeak[] | null | undefined;
-  readonly onRetryLyrics?: (() => void) | undefined;
-  readonly onStartRadio?: (() => void) | undefined;
-  readonly onStopRadio?: (() => void) | undefined;
-  readonly onModeChange?: ((mode: StageMode) => void) | undefined;
-  readonly onPressQueueItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onRemoveQueueItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onToggleQueueReorder?: (() => void) | undefined;
-  readonly onMoveQueueItem?:
-    | ((occurrenceId: string, direction: -1 | 1) => void)
-    | undefined;
-  readonly onMoveQueueItemTo?:
-    | ((occurrenceId: string, toIndex: number) => void)
-    | undefined;
 };
 
 // Immersive player backdrop (the native StageSheet's treatment ported
@@ -308,8 +290,14 @@ export function NowPlayingScreen({
   onMoveQueueItem,
   onMoveQueueItemTo,
 }: NowPlayingScreenProps) {
-  const [internalMode, setInternalMode] = useState<StageMode>('player');
-  const activeMode = mode ?? internalMode;
+  const { activeMode, select } = useStageMode(mode, onModeChange);
+  const meta = stageMetaView(player);
+  const lyricsHeader = lyricsHeaderView(player, lyrics);
+  const lyricsPane = lyricsPaneView(lyrics, onRetryLyrics);
+  const radioRow = radioRowView(radio, onStartRadio, onStopRadio);
+  const reorder = queueReorderButton(queueReordering, onToggleQueueReorder);
+  const downloadBtn =
+    download === null ? null : downloadButtonView(download, onDownload);
   // Player mode is artwork-led — full-bleed art under the bottom
   // cluster; missing art (and lyrics/queue) keeps the flat stage.
   // A failed request drops to that same flat treatment — the
@@ -354,46 +342,40 @@ export function NowPlayingScreen({
                * carries the typed message, and stop always clears. Same
                * top-center accent pill the sheet pins under its handle.
                */}
-            {radio !== undefined && (radio.armed || onStartRadio !== undefined) && (
+            {radioRow !== null && (
               <div className="uw-stage__radio">
                 <div className="uw-stage__radio-pill">
                   <Icon
                     name="radio"
                     size={13}
-                    color={
-                      radio.status === 'failed'
-                        ? 'var(--warn)'
-                        : 'var(--accent)'
-                    }
+                    color={radioRow.failed ? 'var(--warn)' : 'var(--accent)'}
                   />
-                  {radio.armed ? (
+                  {radioRow.armed ? (
                     <>
                       <Text
                         variant="metadata"
-                        color={radio.status === 'failed' ? 'warn' : 'accent'}
+                        color={radioRow.failed ? 'warn' : 'accent'}
                       >
-                        {radio.label}
-                        {radio.fetching ? t('stage.radio.fetchingSuffix') : ''}
-                        {radio.detail === null ? '' : ` · ${radio.detail}`}
+                        {radioRow.statusText}
                       </Text>
                       <Pressable
-                        onPress={onStopRadio}
-                        ariaLabel={t('stage.radio.stopA11y')}
+                        onPress={radioRow.stop.onPress}
+                        ariaLabel={radioRow.stop.a11yLabel}
                         className="uw-stage__radio-action"
                       >
                         <Text variant="metadata" color="primary">
-                          {t('stage.radio.stop')}
+                          {radioRow.stop.label}
                         </Text>
                       </Pressable>
                     </>
                   ) : (
                     <Pressable
-                      onPress={onStartRadio}
-                      ariaLabel={t('stage.radio.start')}
+                      onPress={radioRow.start.onPress}
+                      ariaLabel={radioRow.start.a11yLabel}
                       className="uw-stage__radio-action"
                     >
                       <Text variant="metadata" color="accent">
-                        {t('stage.radio.start')}
+                        {radioRow.start.label}
                       </Text>
                     </Pressable>
                   )}
@@ -411,60 +393,46 @@ export function NowPlayingScreen({
               <div className="uw-stage__meta-row">
           <div className="uw-stage__meta">
                   <Text variant="display" color="bright" numberOfLines={2}>
-              {player.title}
+              {meta.title}
             </Text>
             <Text variant="body" color="primary" numberOfLines={1}>
-              {player.artist ?? '—'}
+              {meta.artistLabel}
             </Text>
-            {player.albumLabel !== null && (
+            {meta.albumLabel !== null && (
               <Text
                 variant="metadata"
                 color="secondary"
                 numberOfLines={1}
               >
-                {player.albumLabel}
+                {meta.albumLabel}
               </Text>
             )}
-            {player.errorMessage !== null && (
+            {meta.errorMessage !== null && (
               <Text variant="metadata" color="warn" numberOfLines={2}>
-                {player.errorMessage}
+                {meta.errorMessage}
               </Text>
             )}
           </div>
                 {/* Ownership actions hug the right edge of the meta
                       line — download state icon first, then the
                       playlist-picker affordance (native parity). */}
-                {(download !== null || onAddToPlaylist !== undefined) && (
+                {(downloadBtn !== null || onAddToPlaylist !== undefined) && (
                   <div className="uw-stage__actions">
-                    {download !== null && (
+                    {downloadBtn !== null && (
                       <IconButton
-                        icon={
-                          download === 'stored'
-                            ? 'check'
-                            : download === 'failed'
-                              ? 'warn'
-                              : 'download'
-                        }
+                        icon={downloadBtn.icon}
                         size={36}
                         iconSize={15}
                         color={
-                          download === 'failed'
+                          downloadBtn.failed
                             ? 'var(--warn)'
-                            : download === 'stored'
+                            : downloadBtn.stored
                               ? 'var(--accent)'
                               : 'var(--text-secondary)'
                         }
-                        ariaLabel={
-                          download === 'stored'
-                            ? t('stage.download.storedA11y')
-                            : download === 'failed'
-                              ? t('stage.download.failedA11y')
-                              : download === 'queued' || download === 'downloading'
-                                ? t('stage.download.busyA11y')
-                                : t('stage.download.idleA11y')
-                        }
-                        active={download === 'stored'}
-                        onPress={onDownload}
+                        ariaLabel={downloadBtn.a11yLabel}
+                        active={downloadBtn.stored}
+                        onPress={downloadBtn.onPress}
                       />
                     )}
                     {onAddToPlaylist !== undefined && (
@@ -485,10 +453,10 @@ export function NowPlayingScreen({
             positionMs={player.positionMs}
             durationMs={player.durationMs}
             onSeek={onSeek}
-            trackKey={player.occurrenceId}
-            seed={`${player.title}|${player.artist ?? ''}`}
+            trackKey={meta.trackKey}
+            seed={meta.waveformSeed}
             peaks={peaks}
-            loading={player.status === 'preparing' || player.durationMs === null}
+            loading={meta.waveformLoading}
           />
           <TransportControls
             variant="m3e"
@@ -512,11 +480,10 @@ export function NowPlayingScreen({
         <>
           <div className="uw-stage__meta uw-stage__meta--lyrics">
             <Text variant="body" color="bright" numberOfLines={1}>
-              {player.title}
+              {lyricsHeader.title}
             </Text>
             <Text variant="metadata" color="secondary" numberOfLines={1}>
-              {player.artist ?? '—'}
-              {lyrics?.syncLabel != null ? ` · ${lyrics.syncLabel}` : ''}
+              {lyricsHeader.subtitle}
             </Text>
           </div>
           {/*
@@ -525,46 +492,30 @@ export function NowPlayingScreen({
            * instrumental/unavailable/error are explicit states, and
            * loading is bounded by the session's own op deadline.
            */}
-          {lyrics === undefined ? (
-            <EmptyState title={t('lyrics.empty')} icon="lyrics" />
-          ) : lyrics.state === 'loading' ? (
-            <LoadingState title={t('lyrics.loading')} />
-          ) : lyrics.state === 'error' ? (
+          {lyricsPane.kind === 'empty' ? (
+            <EmptyState
+              title={lyricsPane.title}
+              hint={lyricsPane.hint}
+              icon={lyricsPane.icon}
+            />
+          ) : lyricsPane.kind === 'loading' ? (
+            <LoadingState title={lyricsPane.title} />
+          ) : lyricsPane.kind === 'error' ? (
             <ErrorState
-              title={t('lyrics.errorTitle')}
-              hint={lyrics.message}
-              onRetry={onRetryLyrics}
+              title={lyricsPane.title}
+              hint={lyricsPane.hint}
+              onRetry={lyricsPane.onRetry}
             />
-          ) : lyrics.state === 'instrumental' ? (
-            <EmptyState
-              title={t('lyrics.instrumental')}
-              hint={lyrics.message}
-              icon="lyrics"
-            />
-          ) : lyrics.state === 'unavailable' ? (
-            <EmptyState
-              title={t('lyrics.empty')}
-              hint={lyrics.message}
-              icon="lyrics"
-            />
-          ) : lyrics.lines.length === 0 ? (
-            <EmptyState title={t('lyrics.empty')} icon="lyrics" />
           ) : (
-            <div className="uw-lyrics" data-state={lyrics.state}>
-              {lyrics.lines.map((line, i) => (
+            <div className="uw-lyrics" data-state={lyricsPane.state}>
+              {lyricsPane.lines.map((line, i) => (
                 <Text
                   key={i}
                   variant="body"
-                  color={
-                    i === lyrics.activeIndex
-                      ? 'accent'
-                      : lyrics.state === 'plain'
-                        ? 'primary'
-                        : 'secondary'
-                  }
-                  className={`uw-lyrics__line${i === lyrics.activeIndex ? ' uw-lyrics__line--active' : ''}`}
+                  color={line.color}
+                  className={`uw-lyrics__line${line.active ? ' uw-lyrics__line--active' : ''}`}
                 >
-                  {line}
+                  {line.text}
                 </Text>
               ))}
             </div>
@@ -577,22 +528,20 @@ export function NowPlayingScreen({
             <EmptyState title={t('queue.empty')} icon="queue" />
           ) : (
             <>
-              {onToggleQueueReorder !== undefined && (
+              {reorder !== null && (
                 <div className="uw-stage__queue-tools">
                   <IconButton
-                    icon="drag-handle"
+                    icon={reorder.icon}
                     size={32}
                     iconSize={14}
                     color={
-                      queueReordering
+                      reorder.active
                         ? 'var(--accent)'
                         : 'var(--text-secondary)'
                     }
-                    ariaLabel={
-                      queueReordering ? t('queue.reorderDone') : t('queue.reorder')
-                    }
-                    active={queueReordering}
-                    onPress={onToggleQueueReorder}
+                    ariaLabel={reorder.a11yLabel}
+                    active={reorder.active}
+                    onPress={reorder.onPress}
                   />
                 </div>
               )}
@@ -628,15 +577,7 @@ export function NowPlayingScreen({
           it takes no layout space, so lyrics/queue rows and the
           transport never reflow around it or hide beneath it. */}
       <div className="uw-stage__segment">
-      <ModeSegment
-        mode={activeMode}
-        onSelect={(m) => {
-          setInternalMode(m);
-          if (onModeChange !== undefined) {
-            onModeChange(m);
-          }
-        }}
-      />
+      <ModeSegment mode={activeMode} onSelect={select} />
     </div>
     </div>
   );
