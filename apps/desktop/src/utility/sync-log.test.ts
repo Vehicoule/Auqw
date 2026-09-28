@@ -345,6 +345,37 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— Peer-mark rows replace per sender and survive reopen ——
+  {
+    const dir = await freshDir();
+    const path = join(dir, 'sync-log.jsonl');
+    const opened = await openSyncLogStore(path);
+    assert(opened.ok);
+    if (!opened.ok) {
+      return;
+    }
+    for (const write of [
+      { peerMarks: { 'dsk-b': { 'dsk-a': 2 }, 'dsk-c': { 'dsk-a': 4 } } },
+      { peerMarks: { 'dsk-b': {} } },
+    ] as const) {
+      const appended = await opened.value.store.append(write, ctx());
+      assert(appended.ok);
+    }
+    const reopened = await openSyncLogStore(path);
+    assert(reopened.ok);
+    if (!reopened.ok) {
+      return;
+    }
+    const loaded = await reopened.value.store.load(ctx());
+    assert(loaded.ok);
+    if (loaded.ok) {
+      assertDeepEqual(loaded.value.peerMarks, {
+        'dsk-b': {},
+        'dsk-c': { 'dsk-a': 4 },
+      });
+    }
+  }
+
   // —— Concurrent appends serialize in issue order ——
   {
     const dir = await freshDir();

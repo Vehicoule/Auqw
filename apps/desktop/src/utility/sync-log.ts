@@ -17,6 +17,7 @@ import {
   fromUnknown,
   isChangeEntry,
   isDivergenceEntry,
+  isPeerMarks,
   isSyncCursor,
   ok,
 } from '@auqw/application';
@@ -25,6 +26,7 @@ import type {
   DivergenceEntry,
   OperationContext,
   Result,
+  SyncCursor,
   SyncLogSnapshot,
   SyncLogStore,
   SyncLogWrite,
@@ -111,7 +113,8 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
       key !== 'dropDivergenceBefore' &&
       key !== 'dropEntries' &&
       key !== 'divergenceReplayOffset' &&
-      key !== 'divergenceDroppedEmissions'
+      key !== 'divergenceDroppedEmissions' &&
+      key !== 'peerMarks'
     ) {
       return false;
     }
@@ -185,6 +188,12 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
   ) {
     return false;
   }
+  if (
+    value['peerMarks'] !== undefined &&
+    !isPeerMarks(value['peerMarks'])
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -210,6 +219,7 @@ function parseFile(raw: string): Parsed {
   let entries: ChangeEntry[] = [];
   const divergence: DivergenceEntry[] = [];
   const watermarks: Record<string, number> = {};
+  const peerMarks: Record<string, SyncCursor> = {};
   let floor = 0;
   let replayOffset = 0;
   const droppedEmissions = new Set<number>();
@@ -283,6 +293,11 @@ function parseFile(raw: string): Parsed {
     for (const [device, mark] of Object.entries(write.watermarks ?? {})) {
       watermarks[device] = Math.max(watermarks[device] ?? 0, mark);
     }
+    for (const [sender, marks] of Object.entries(write.peerMarks ?? {})) {
+      // Per-sender row replace — the write carries the whole folded
+      // row, so a regressed claim clears what was stored wholesale.
+      peerMarks[sender] = marks;
+    }
   }
   let deviceId: string;
   try {
@@ -308,6 +323,7 @@ function parseFile(raw: string): Parsed {
           ),
         }
         : {}),
+      ...(Object.keys(peerMarks).length > 0 ? { peerMarks } : {}),
     },
   };
 }
@@ -373,6 +389,10 @@ function serializeSnapshot(
       ...(snapshot.divergenceReplayOffset !== undefined &&
         snapshot.divergenceReplayOffset > 0
           ? { divergenceReplayOffset: snapshot.divergenceReplayOffset }
+          : {}),
+      ...(snapshot.peerMarks !== undefined &&
+        Object.keys(snapshot.peerMarks).length > 0
+          ? { peerMarks: snapshot.peerMarks }
           : {}),
     }),
   );
