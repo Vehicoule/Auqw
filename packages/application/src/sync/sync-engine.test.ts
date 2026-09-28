@@ -2208,10 +2208,11 @@ async function prunedDivergenceNotResurrected(): Promise<void> {
 async function compactionKeepsRepairPositions(): Promise<void> {
   // Compaction dropped two loser-emitting entries whose rows were
   // already pruned. Replay positions must still line up with the
-  // stored floor: with the offset the surviving losers land at their
-  // original emit ordinals — the 'v1' row is missing above the floor
-  // and must be rebuilt; without it both would replay below the
-  // floor and the row would be lost permanently.
+  // stored floor: with the retired ordinals persisted, the surviving
+  // losers land at their original emit ordinals — the 'v1' row is
+  // missing above the floor and must be rebuilt; without it both
+  // would replay below the floor and the row would be lost
+  // permanently.
   const peerEntries = [
     rawEntry('recording', 'r1', 'title', 'old', { l: 10, c: 0 }, 'x'),
     rawEntry('recording', 'r1', 'title', 'new', { l: 20, c: 0 }, 'x'),
@@ -2247,11 +2248,129 @@ async function compactionKeepsRepairPositions(): Promise<void> {
     ],
     watermarks: {},
     divergenceFloor: 3,
-    divergenceReplayOffset: 2,
+    divergenceDroppedEmissions: [1, 2],
   });
   await makeEngine('a', 1_000, compacted);
   assertEqual(compacted.divergenceRows.length, 2);
   assertEqual(compacted.divergenceRows[1]?.loser.value, 'v1');
+}
+
+
+async function interleavedCompactionKeepsOrdinals(): Promise<void> {
+  // Ordinal set, not a count: 'old' emitted first in the original
+  // session and the floor pruned its row; a LATER loser's entry was
+  // compacted holding ordinal 2. Replay must land 'old' back on
+  // ordinal 1 — still below the floor — not shifted up past the
+  // floor by the retired position.
+  const interleaved = new FakeSyncLogStore({
+    entries: [
+      rawEntry('recording', 'r1', 'title', 'old', { l: 10, c: 0 }, 'x'),
+      rawEntry('recording', 'r1', 'title', 'new', { l: 20, c: 0 }, 'x'),
+      rawEntry('recording', 'r2', 'title', 'v2', { l: 40, c: 0 }, 'x'),
+    ],
+    divergence: [],
+    watermarks: {},
+    divergenceFloor: 2,
+    divergenceDroppedEmissions: [2],
+  });
+  await makeEngine('a', 1_000, interleaved);
+  assertEqual(interleaved.divergenceRows.length, 0);
+  // The mirror: a survivor whose original ordinal sat ABOVE the
+  // retired one still repairs at its own position — 'v1' held 3,
+  // its row was lost, so exactly it is rebuilt.
+  const survivors = new FakeSyncLogStore({
+    entries: [
+      rawEntry('recording', 'r1', 'title', 'old', { l: 10, c: 0 }, 'x'),
+      rawEntry('recording', 'r1', 'title', 'new', { l: 20, c: 0 }, 'x'),
+      rawEntry('recording', 'r2', 'title', 'v1', { l: 30, c: 0 }, 'x'),
+      rawEntry('recording', 'r2', 'title', 'v2', { l: 40, c: 0 }, 'x'),
+    ],
+    divergence: [],
+    watermarks: {},
+    divergenceFloor: 2,
+    divergenceDroppedEmissions: [2],
+  });
+  await makeEngine('a', 1_000, survivors);
+  assertEqual(survivors.divergenceRows.length, 1);
+  assertEqual(survivors.divergenceRows[0]?.loser.value, 'v1');
+}
+
+
+async function failedCompactionKeepsLanes(): Promise<void> {
+  // A transient 'sync-div' append failure must leave the in-memory
+  // lanes whole — the durable delete never landed, so nothing may be
+  // dropped; a later apply replans and commits the same drop.
+  const a = await makeEngine('a', 1_000);
+  const b = await makeEngine('b', 1_000);
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'Old',
+  });
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'New',
+  });
+  const docA = await a.engine.exportDelta();
+  assert(docA.ok);
+  await mustApply(b.engine, docA.value);
+  const docB = await b.engine.exportDelta();
+  assert(docB.ok && docB.value.cursor['a'] === 2);
+  // Hold the entry append, then fail the compaction write that
+  // follows it — applyDelta still resolves (divergence writes are
+  // best-effort) but no lane may shrink.
+  a.store.holdNextAppend();
+  const pending = a.engine.applyDelta(
+    JSON.parse(JSON.stringify(docB.value)) as unknown,
+  );
+  for (let i = 0; i < 200 && a.store.pendingAppends === 0; i += 1) {
+    await Promise.resolve();
+  }
+  assertEqual(a.store.pendingAppends, 1);
+  assert(a.store.settleAppend(ok(undefined)));
+  a.store.failNextAppend(appError('unavailable', 'disk'));
+  const applied = await pending;
+  assert(applied.ok, 'a failed divergence write stays best-effort');
+  const docA2 = await a.engine.exportDelta();
+  assert(docA2.ok);
+  assertDeepEqual(
+    docA2.value.entries.map((entry) => entry.seq),
+    [1, 2],
+  );
+  // The retried apply replans the same drop and commits it — the
+  // retired emission ordinal lands durably with it.
+  const retried = await a.engine.applyDelta(
+    JSON.parse(JSON.stringify(docB.value)) as unknown,
+  );
+  assert(retried.ok);
+  const docA3 = await a.engine.exportDelta();
+  assert(docA3.ok);
+  assertDeepEqual(docA3.value.entries.map((entry) => entry.seq), [2]);
+  assertDeepEqual(a.store.storedDivergenceDroppedEmissions, [1]);
+}
+
+
+async function equalFrontierValuesSkipDivergence(): Promise<void> {
+  // Equal-valued frontier churn isn't a divergence: a newer entry
+  // displacing (or being dominated by) a same-value candidate moves
+  // no materialized value — the rival path already suppresses those
+  // rows, so the frontier insert must match or every equal-value
+  // rewrite logs a phantom loss.
+  const b = await makeEngine('b');
+  await mustApply(
+    b.engine,
+    delta([
+      rawEntry('playCount', 'r1', 'lastMs', 100, { l: 10, c: 0 }, 'x'),
+      rawEntry('playCount', 'r1', 'lastMs', 100, { l: 20, c: 0 }, 'x'),
+      rawEntry('playCount', 'r1', 'lastMs', 100, { l: 5, c: 0 }, 'x'),
+    ]),
+  );
+  assertEqual(b.engine.divergenceHistory().length, 0);
+  const fields = materialized(b.engine, 'playCount', 'r1');
+  assertEqual(fields?.['lastMs'], 100);
 }
 
 
@@ -2472,5 +2591,8 @@ export async function run(): Promise<void> {
   await exportedEntriesFrozen();
   await sumSaturation();
   await logCompaction();
+  await interleavedCompactionKeepsOrdinals();
+  await failedCompactionKeepsLanes();
+  await equalFrontierValuesSkipDivergence();
   await propertyHarness();
 }

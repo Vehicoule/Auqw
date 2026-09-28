@@ -187,6 +187,7 @@ export async function run(): Promise<void> {
       {
         dropEntries: [{ deviceId: 'dsk-peer', seq: 2 }],
         divergenceReplayOffset: 1,
+        divergenceDroppedEmissions: [2],
       },
     ];
     for (const write of writes) {
@@ -213,6 +214,7 @@ export async function run(): Promise<void> {
         [1, 3],
       );
       assertEqual(loaded.value.divergenceReplayOffset, 1);
+      assertDeepEqual(loaded.value.divergenceDroppedEmissions, [2]);
     }
   }
 

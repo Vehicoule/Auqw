@@ -461,14 +461,21 @@ export type SyncLogSnapshot = {
    */
   readonly divergenceFloor?: number;
   /**
-   * Cumulative count of distinct divergence emissions produced by
-   * entries compaction has dropped. Hydration seeds the replay
-   * position with it so surviving entries' emission ordinals still
-   * line up with `divergenceFloor` — without it a compacted loser
-   * would shift every later position down and a row that was never
-   * pruned could be mistaken for one that was.
+   * Legacy count form of `divergenceDroppedEmissions`: logs written
+   * before emission ordinals were tracked carry only how many
+   * emissions compaction dropped, so hydration assumes they held
+   * positions 1..N and seeds the replay cursor past them.
    */
   readonly divergenceReplayOffset?: number;
+  /**
+   * Every emission ordinal log compaction has retired, ascending.
+   * Hydration replays the surviving log to repair rows a failed
+   * append lost; each replayed emission must land back on the
+   * ordinal it originally held — skipping the retired ones — or a
+   * surviving loser whose original position sat below
+   * `divergenceFloor` replays above it and resurrects a pruned row.
+   */
+  readonly divergenceDroppedEmissions?: readonly number[];
 };
 
 export type SyncLogWrite = {
@@ -492,12 +499,19 @@ export type SyncLogWrite = {
     readonly seq: number;
   }[];
   /**
-   * Rides with `dropEntries`: the running total of distinct
-   * divergence emissions the dropped entries produced. Stores fold
-   * it with MAX so hydration can re-offset replay positions — a
-   * replayed value is idempotent, a stale smaller one a no-op.
+   * Superseded by `divergenceDroppedEmissions` — kept so stores
+   * still parse writes an older build appended. The engine no
+   * longer emits it.
    */
   readonly divergenceReplayOffset?: number;
+  /**
+   * Rides with `dropEntries`: the emission ordinals the dropped
+   * entries held, union-folded by the store so hydration can map
+   * each replayed emission back onto the ordinal it originally
+   * occupied. A replayed write is idempotent (INSERT OR IGNORE /
+   * set-union); a stale subset merges into the accumulated set.
+   */
+  readonly divergenceDroppedEmissions?: readonly number[];
 };
 
 /**
@@ -1313,20 +1327,33 @@ export async function createSyncEngine(
   const divergenceSeen = new Set<string>();
   let divergenceSeq = 0;
   /**
-   * Hydrate-replay bookkeeping: `replaySeen` + `repairPos` re-derive
-   * the original emit order so positions line up 1:1 with row seqs;
-   * `divergenceFloor` is the store's cumulative prune frontier —
-   * losers with emit positions below it were intentionally capped
-   * away and must not be rebuilt (that would resurrect pruned history
-   * with fresh seqs and churn the retained window on every restart).
-   * `divergenceReplayOffset` is the cumulative count of emissions by
-   * entries compaction dropped — hydrate seeds `repairPos` with it
-   * so surviving entries' positions still line up with the floor.
+   * Hydrate-replay bookkeeping: `replaySeen` + the emission-ordinal
+   * state below re-derive the original emit order so each replayed
+   * emission lands on the ordinal it originally held; `divergenceFloor`
+   * is the store's cumulative prune frontier — losers whose ordinal
+   * sits below it were intentionally capped away and must not be
+   * rebuilt (that would resurrect pruned history with fresh seqs and
+   * churn the retained window on every restart).
    */
   const replaySeen = new Set<string>();
-  let repairPos = 0;
+  /**
+   * The original emission ordinal each loser entry produced — set
+   * when the row is emitted (live) or replayed (repair), so
+   * compaction can retire exactly the ordinals the entries it drops
+   * held rather than approximating with a count.
+   */
+  const emittedAt = new Map<ChangeEntry, number>();
+  /**
+   * Emission ordinals compaction retired, sorted — hydrated from
+   * the store's accumulated set. `nextEmissionOrdinal` is the next
+   * unclaimed ordinal; `droppedOrdinalCursor` walks the sorted set
+   * so ordinals the dropped entries held are skipped, landing every
+   * replayed emission back on its original position.
+   */
+  const droppedEmissions: number[] = [];
+  let droppedOrdinalCursor = 0;
+  let nextEmissionOrdinal = 1;
   let divergenceFloor = 0;
-  let divergenceReplayOffset = 0;
   let hlc = new HybridClock();
 
   /**
@@ -1436,6 +1463,31 @@ export async function createSyncEngine(
     };
   }
 
+  /** Advance the ordinal cursor past ordinals compaction retired. */
+  function skipRetiredOrdinals(): void {
+    while (true) {
+      const retired = droppedEmissions[droppedOrdinalCursor];
+      if (retired === undefined || retired > nextEmissionOrdinal) {
+        return;
+      }
+      nextEmissionOrdinal = retired + 1;
+      droppedOrdinalCursor += 1;
+    }
+  }
+
+  /**
+   * The ordinal this replayed emission originally held: the next
+   * position compaction never retired, so survivors land back on
+   * their own ordinals — never shifted past or below the floor by
+   * an interleaved drop.
+   */
+  function claimEmissionOrdinal(): number {
+    const ordinal = nextEmissionOrdinal;
+    nextEmissionOrdinal += 1;
+    skipRetiredOrdinals();
+    return ordinal;
+  }
+
   /**
    * `emit`:
    * - true — a live merge: every new loser materializes a row.
@@ -1463,21 +1515,22 @@ export async function createSyncEngine(
     }
     if (emit === 'repair') {
       // Replay emits the same distinct-loser sequence the original
-      // merges produced, so each new position equals the row seq the
-      // event would have received. Stored rows still exist (dedupe);
-      // positions below the floor were intentionally pruned —
+      // merges produced, so each claimed ordinal equals the one the
+      // event first received. Stored rows still exist (dedupe);
+      // ordinals below the floor were intentionally pruned —
       // mark them seen so they are never rebuilt; anything missing
       // above the floor is a lost append worth repairing.
       if (replaySeen.has(key)) {
         return;
       }
       replaySeen.add(key);
-      repairPos += 1;
+      const ordinal = claimEmissionOrdinal();
+      emittedAt.set(loser, ordinal);
       if (divergenceSeen.has(key)) {
         return;
       }
       divergenceSeen.add(key);
-      if (repairPos < divergenceFloor) {
+      if (ordinal < divergenceFloor) {
         return;
       }
     } else {
@@ -1485,6 +1538,7 @@ export async function createSyncEngine(
         return;
       }
       divergenceSeen.add(key);
+      emittedAt.set(loser, divergenceSeq + 1);
     }
     divergenceSeq += 1;
     const at = now() ?? loser.hlc.l;
@@ -1652,8 +1706,12 @@ export async function createSyncEngine(
         continue;
       }
       // Dominated: dead weight — the dominator's fate bounds this
-      // entry's under any tombstone order.
-      recordDivergence(divs, entry, cand, emit);
+      // entry's under any tombstone order. An equal value isn't a
+      // loss worth a row — the frontier only gained a newer stamp
+      // for what it already showed (same rule as the rival path).
+      if (!jsonEquals(cand.value, mine)) {
+        recordDivergence(divs, entry, cand, emit);
+      }
       return;
     }
     live.push(entry);
@@ -1671,7 +1729,11 @@ export async function createSyncEngine(
       ) {
         continue;
       }
-      recordDivergence(divs, cand, entry, emit);
+      // Pruned but equal-valued: the candidate leaves the frontier
+      // without a row — no value the merge reports actually moved.
+      if (!jsonEquals(cand.value, mine)) {
+        recordDivergence(divs, cand, entry, emit);
+      }
       mergeLive.delete(cand);
       live.splice(i, 1);
     }
@@ -1885,17 +1947,30 @@ export async function createSyncEngine(
   }
 
   /**
+   * What `planCompaction` computed but has not committed: the
+   * merge-dead entries to drop, the shrunken lanes to install, and
+   * the emission ordinals the dropped entries held.
+   */
+  type CompactionPlan = {
+    readonly dropped: readonly ChangeEntry[];
+    readonly lanes: readonly (readonly [string, ChangeEntry[]])[];
+    readonly ordinals: readonly number[];
+  };
+
+  /**
    * Persist newly-detected divergence rows and prune the history once
-   * it exceeds its bound. Compaction `drops` ride the same durable
+   * it exceeds its bound. A compaction `plan` rides the same durable
    * write so the log deletes land atomically with the merge's own
-   * writes.
+   * writes — the in-memory lanes drop only after the append commits,
+   * so a transient failure leaves the log intact for the next plan.
    */
   async function appendDivergence(
     rows: readonly DivergenceEntry[],
-    drops: readonly { deviceId: string; seq: number }[],
+    plan: CompactionPlan | undefined,
     signal: CancellationSignal,
     deadlineMs: number,
   ): Promise<void> {
+    const drops = plan?.dropped ?? [];
     if (rows.length === 0 && drops.length === 0) {
       return;
     }
@@ -1917,10 +1992,15 @@ export async function createSyncEngine(
         : { dropDivergenceBefore: dropBefore }),
       ...(drops.length > 0
         ? {
-          dropEntries: drops,
-          // Sending the cumulative offset makes a replayed write
-          // idempotent — stores fold it with MAX.
-          divergenceReplayOffset,
+          dropEntries: drops.map((entry) => ({
+            deviceId: entry.deviceId,
+            seq: entry.seq,
+          })),
+          // The ordinals the dropped entries held — union-folded
+          // durably so hydrate replay can skip retired positions.
+          ...(plan !== undefined && plan.ordinals.length > 0
+            ? { divergenceDroppedEmissions: plan.ordinals }
+            : {}),
         }
         : {}),
     };
@@ -1930,6 +2010,9 @@ export async function createSyncEngine(
     if (!appended.ok) {
       warn(`sync divergence history append failed: ${appended.error.kind}`);
       return;
+    }
+    if (plan !== undefined) {
+      commitCompaction(plan);
     }
   }
 
@@ -1962,15 +2045,13 @@ export async function createSyncEngine(
    * `localSeq` from the max stored row, and losing it would reuse a
    * seq the log's UNIQUE(device_id, seq) would then swallow.
    */
-  function compactLog(): { deviceId: string; seq: number }[] {
+  function planCompaction(): CompactionPlan {
+    const dropped: ChangeEntry[] = [];
+    const lanes: [string, ChangeEntry[]][] = [];
+    const ordinals: number[] = [];
     if (peerMarks.size === 0) {
-      return [];
+      return { dropped, lanes, ordinals };
     }
-    const drops: { deviceId: string; seq: number }[] = [];
-    // Distinct divergence emissions the dropped entries produced —
-    // persisted so hydrate replay can re-offset repair positions to
-    // the original emit ordinals the divergence floor refers to.
-    let emitted = 0;
     for (const [dev, list] of logByDevice) {
       let floor = Infinity;
       for (const marks of peerMarks.values()) {
@@ -1996,32 +2077,42 @@ export async function createSyncEngine(
         ) {
           keptPrefix.push(entry);
         } else {
-          drops.push({ deviceId: dev, seq: entry.seq });
-          // The seq is below our own contiguous mark too, so a
-          // redelivery re-applies harmlessly (it merges dead again
-          // and is re-dropped) — keeping the key would pin dedupe
-          // memory for every compacted entry forever.
-          seen.delete(entryKey(entry));
-          if (
-            divergenceSeen.has(
-              divergenceKey(
-                entry.kind,
-                entry.recordId,
-                entry.field,
-                toSide(entry),
-              ),
-            )
-          ) {
-            emitted += 1;
+          dropped.push(entry);
+          // The emission ordinal this entry held retires with it —
+          // recorded durably so replay keeps survivors on their
+          // original ordinals instead of sliding them past the
+          // dropped ones.
+          const ordinal = emittedAt.get(entry);
+          if (ordinal !== undefined && !ordinals.includes(ordinal)) {
+            ordinals.push(ordinal);
           }
         }
       }
       if (keptPrefix.length !== boundary) {
-        logByDevice.set(dev, [...keptPrefix, ...list.slice(boundary)]);
+        lanes.push([dev, [...keptPrefix, ...list.slice(boundary)]]);
       }
     }
-    divergenceReplayOffset += emitted;
-    return drops;
+    return { dropped, lanes, ordinals };
+  }
+
+  /**
+   * Apply a compaction plan the store has durably committed: shrink
+   * the lanes and release dedupe/ordinal bookkeeping for the dropped
+   * entries. Runs only after `store.append` succeeds — a transient
+   * failure must leave the log whole so a later plan can retry.
+   */
+  function commitCompaction(plan: CompactionPlan): void {
+    for (const [dev, lane] of plan.lanes) {
+      logByDevice.set(dev, lane);
+    }
+    for (const entry of plan.dropped) {
+      // The seq is below our own contiguous mark too, so a
+      // redelivery re-applies harmlessly (it merges dead again
+      // and is re-dropped) — keeping the key would pin dedupe
+      // memory for every compacted entry forever.
+      seen.delete(entryKey(entry));
+      emittedAt.delete(entry);
+    }
   }
 
   function validLocalWrite(
@@ -2193,7 +2284,7 @@ export async function createSyncEngine(
         divs.push(...merged.divergences);
         results.push({ entry, outcome: merged.outcome });
       }
-      await appendDivergence(divs, [], sig, deadlineMs);
+      await appendDivergence(divs, undefined, sig, deadlineMs);
       return ok(results);
     });
     return cancellable(work, sig);
@@ -2538,8 +2629,8 @@ export async function createSyncEngine(
       // row below the floor can never be needed again and is dropped
       // from both the in-memory lanes and durable sync_log.
       notePeerCursor(doc.senderDeviceId, doc.cursor);
-      const drops = compactLog();
-      await appendDivergence(divs, drops, sig, deadlineMs);
+      const compaction = planCompaction();
+      await appendDivergence(divs, compaction, sig, deadlineMs);
       // Attach the post-merge materialized truth per applied record —
       // projecting from entries alone can't see fields that merged in
       // earlier deltas (a delayed tombstone that lost to newer fields
@@ -2691,16 +2782,25 @@ export async function createSyncEngine(
     (snapshot.divergenceFloor !== undefined &&
       !isOptSafeNonNegative(snapshot.divergenceFloor)) ||
     (snapshot.divergenceReplayOffset !== undefined &&
-      !isOptSafeNonNegative(snapshot.divergenceReplayOffset))
+      !isOptSafeNonNegative(snapshot.divergenceReplayOffset)) ||
+    (snapshot.divergenceDroppedEmissions !== undefined &&
+      (!Array.isArray(snapshot.divergenceDroppedEmissions) ||
+        !snapshot.divergenceDroppedEmissions.every(isEmissionSeq)))
   ) {
     return err(appError('invalid-response', 'sync log snapshot invalid'));
   }
   divergenceFloor = snapshot.divergenceFloor ?? 0;
-  // Compaction dropped entries that already consumed replay
-  // positions — seeding the offset keeps surviving entries' emit
-  // ordinals aligned with the stored divergence floor.
-  divergenceReplayOffset = snapshot.divergenceReplayOffset ?? 0;
-  repairPos = divergenceReplayOffset;
+  droppedEmissions.push(
+    ...new Set(snapshot.divergenceDroppedEmissions ?? []),
+  );
+  droppedEmissions.sort((a, b) => a - b);
+  // Compaction dropped entries that already consumed emission
+  // ordinals — replay resumes at each survivor's own position so
+  // ordinals still line up with the stored divergence floor. The
+  // legacy offset carries only a count (logs written before
+  // ordinals were tracked): treat its positions as the first N.
+  nextEmissionOrdinal = (snapshot.divergenceReplayOffset ?? 0) + 1;
+  skipRetiredOrdinals();
   // Stored divergence rows seed the dedupe set BEFORE replay, so
   // 'repair' emit materializes exactly the rows the store is missing.
   for (const row of snapshot.divergence) {

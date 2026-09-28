@@ -290,6 +290,34 @@ async function sharedDriverStores(): Promise<void> {
   driver.close();
 }
 
+// 10. Retired emission ordinals union-fold across appends and load
+// in ordinal order — a replayed write is idempotent, a subset write
+// merges into the accumulated set.
+async function droppedEmissionsUnionFold(): Promise<void> {
+  const { driver, storage, syncLog } = rig();
+  assert((await storage.initialize(ctx().context)).ok);
+  assert(
+    (
+      await syncLog.append(
+        { divergenceDroppedEmissions: [3, 1] },
+        ctx().context,
+      )
+    ).ok,
+  );
+  assert(
+    (
+      await syncLog.append(
+        { divergenceDroppedEmissions: [2, 3] },
+        ctx().context,
+      )
+    ).ok,
+  );
+  const loaded = await syncLog.load(ctx().context);
+  assert(loaded.ok);
+  assertDeepEqual(loaded.value.divergenceDroppedEmissions, [1, 2, 3]);
+  driver.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['emptyLoad', emptyLoad],
   ['appendLoadRoundtrip', appendLoadRoundtrip],
@@ -300,6 +328,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['corruptRowRejected', corruptRowRejected],
   ['cancellationTyped', cancellationTyped],
   ['sharedDriverStores', sharedDriverStores],
+  ['droppedEmissionsUnionFold', droppedEmissionsUnionFold],
 ];
 
 for (const [name, fn] of TESTS) {

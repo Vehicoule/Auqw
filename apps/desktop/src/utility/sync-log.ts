@@ -110,7 +110,8 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
       key !== 'watermarks' &&
       key !== 'dropDivergenceBefore' &&
       key !== 'dropEntries' &&
-      key !== 'divergenceReplayOffset'
+      key !== 'divergenceReplayOffset' &&
+      key !== 'divergenceDroppedEmissions'
     ) {
       return false;
     }
@@ -170,6 +171,20 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
   ) {
     return false;
   }
+  if (
+    value['divergenceDroppedEmissions'] !== undefined &&
+    !(
+      Array.isArray(value['divergenceDroppedEmissions']) &&
+      value['divergenceDroppedEmissions'].every(
+        (emission) =>
+          typeof emission === 'number' &&
+          Number.isSafeInteger(emission) &&
+          emission >= 1,
+      )
+    )
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -197,6 +212,7 @@ function parseFile(raw: string): Parsed {
   const watermarks: Record<string, number> = {};
   let floor = 0;
   let replayOffset = 0;
+  const droppedEmissions = new Set<number>();
   let offset = 0;
   const lines = raw.split('\n');
   for (let i = 0; i < lines.length; i++) {
@@ -255,6 +271,9 @@ function parseFile(raw: string): Parsed {
     if (write.divergenceReplayOffset !== undefined) {
       replayOffset = Math.max(replayOffset, write.divergenceReplayOffset);
     }
+    for (const emission of write.divergenceDroppedEmissions ?? []) {
+      droppedEmissions.add(emission);
+    }
     if (write.dropDivergenceBefore !== undefined) {
       floor = Math.max(floor, write.dropDivergenceBefore);
     }
@@ -282,6 +301,13 @@ function parseFile(raw: string): Parsed {
       watermarks,
       ...(floor > 0 ? { divergenceFloor: floor } : {}),
       ...(replayOffset > 0 ? { divergenceReplayOffset: replayOffset } : {}),
+      ...(droppedEmissions.size > 0
+        ? {
+          divergenceDroppedEmissions: [...droppedEmissions].sort(
+            (a, b) => a - b,
+          ),
+        }
+        : {}),
     },
   };
 }
@@ -302,15 +328,19 @@ async function writeHeader(path: string, deviceId: string): Promise<void> {
  * then entries/divergence in chunks sized well under MAX_LINE_BYTES,
  * then a metadata line carrying watermarks and both cumulative
  * scalars (`dropDivergenceBefore`, `divergenceReplayOffset`). Fold
- * order makes this safe: entries concatenate, marks max-fold, and the
- * floor applies globally regardless of which line carries it.
+ * order makes this safe: entries concatenate, marks max-fold, the
+ * dropped-emission set union-folds, and the floor applies globally
+ * regardless of which line carries it.
  */
 function serializeSnapshot(
   deviceId: string,
   snapshot: SyncLogSnapshot,
 ): string {
   const lines: string[] = [JSON.stringify({ v: HEADER_VERSION, deviceId })];
-  const chunk = <T>(items: readonly T[], key: 'entries' | 'divergence') => {
+  const chunk = <T>(
+    items: readonly T[],
+    key: 'entries' | 'divergence' | 'divergenceDroppedEmissions',
+  ) => {
     let pending: T[] = [];
     let bytes = 0;
     const flush = () => {
@@ -332,6 +362,7 @@ function serializeSnapshot(
   };
   chunk(snapshot.entries, 'entries');
   chunk(snapshot.divergence, 'divergence');
+  chunk(snapshot.divergenceDroppedEmissions ?? [], 'divergenceDroppedEmissions');
   lines.push(
     JSON.stringify({
       watermarks: snapshot.watermarks,

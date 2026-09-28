@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 9;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -33,6 +33,7 @@ export const KNOWN_TABLES: readonly string[] = Object.freeze([
   'sync_divergence',
   'sync_watermarks',
   'sync_meta',
+  'sync_divergence_dropped',
 ]);
 
 const MIGRATION_1: readonly string[] = [
@@ -348,6 +349,18 @@ const MIGRATION_8: readonly string[] = [
   `ALTER TABLE settings_new RENAME TO settings`,
 ];
 
+/**
+ * v8 -> v9: the emission ordinals log compaction retired (docs/specs/
+ * sync.md). Scalar replay offsets only worked when every dropped
+ * emission preceded every survivor; this set lets hydrate replay map
+ * each surviving emission back onto the ordinal it originally held.
+ */
+const MIGRATION_9: readonly string[] = [
+  `CREATE TABLE sync_divergence_dropped (
+  emission INTEGER PRIMARY KEY CHECK (emission >= 1)
+)`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
@@ -358,6 +371,7 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_6]),
   Object.freeze([...MIGRATION_7]),
   Object.freeze([...MIGRATION_8]),
+  Object.freeze([...MIGRATION_9]),
 ]);
 
 const CREATED_OBJECT_NAME =
