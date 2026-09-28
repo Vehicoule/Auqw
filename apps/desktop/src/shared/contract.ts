@@ -835,6 +835,40 @@ export function isStorageExecuteArgs(
 
 export const isStorageQueryArgs = isStorageExecuteArgs;
 
+export type StorageStatement = {
+  readonly sql: string;
+  readonly params: readonly SqlValue[];
+};
+
+export function isStorageStatement(
+  value: unknown,
+): value is StorageStatement {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sql', 'params']) &&
+    isBoundedString(value['sql'], 65_536) &&
+    isSqlParams(value['params'])
+  );
+}
+
+export type StorageExecManyArgs = {
+  readonly txId: string;
+  readonly statements: readonly StorageStatement[];
+};
+
+export function isStorageExecManyArgs(
+  value: unknown,
+): value is StorageExecManyArgs {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['txId', 'statements']) &&
+    isBoundedString(value['txId'], 64) &&
+    Array.isArray(value['statements']) &&
+    value['statements'].length <= 4_096 &&
+    value['statements'].every(isStorageStatement)
+  );
+}
+
 export type StorageExecuteResult = {
   readonly changes: number;
   readonly lastInsertRowId: number | null;
@@ -895,6 +929,10 @@ export type AuqwStorage = {
     sql: string,
     params?: readonly SqlValue[],
   ) => Promise<StorageExecuteResult>;
+  readonly execMany: (
+    txId: string,
+    statements: readonly StorageStatement[],
+  ) => Promise<void>;
   readonly query: (
     txId: string,
     sql: string,

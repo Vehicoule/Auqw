@@ -18,6 +18,7 @@ type Call = {
   readonly txId?: string;
   readonly sql?: string;
   readonly params?: readonly SqlValue[];
+  readonly batchSize?: number;
 };
 
 function fakeStorage(overrides: Partial<AuqwStorage> = {}): {
@@ -47,6 +48,18 @@ function fakeStorage(overrides: Partial<AuqwStorage> = {}): {
     execute: (txId, sql, params = []): Promise<StorageExecuteResult> => {
       calls.push({ channel: 'execute', txId, sql, params });
       return Promise.resolve({ changes: 1, lastInsertRowId: 7 });
+    },
+    execMany: (txId, statements) => {
+      calls.push({ channel: 'execMany', txId, batchSize: statements.length });
+      for (const statement of statements) {
+        calls.push({
+          channel: 'execMany:stmt',
+          txId,
+          sql: statement.sql,
+          params: statement.params,
+        });
+      }
+      return Promise.resolve();
     },
     query: (txId, sql, params = []) => {
       calls.push({ channel: 'query', txId, sql, params });
@@ -280,6 +293,97 @@ export async function run(): Promise<void> {
       'wire cancellation',
     );
     assertDeepEqual(channels(calls), ['begin', 'execute', 'rollback']);
+  }
+
+  // executeAll sends one wire call per ≤2048-statement chunk — a
+  // whole commit plan crosses the bridge once, ordered and tx-pinned
+  {
+    const { calls, storage } = fakeStorage();
+    const driver = createSqliteDriver(storage);
+    await driver.transaction(async (conn) => {
+      await conn.executeAll([
+        { sql: 'INSERT INTO t VALUES (?)', params: [1] },
+        { sql: 'INSERT INTO t VALUES (?)', params: [2] },
+        { sql: 'DELETE FROM t WHERE id = ?', params: [1] },
+      ]);
+      return 'x';
+    });
+    assertDeepEqual(channels(calls), [
+      'begin',
+      'execMany',
+      'execMany:stmt',
+      'execMany:stmt',
+      'execMany:stmt',
+      'commit',
+    ]);
+    const batches = calls.filter((c) => c.channel === 'execMany');
+    assertDeepEqual(
+      batches.map((c) => c.batchSize),
+      [3],
+    );
+    assert(
+      batches.every((c) => c.txId === 'tx-1'),
+      'batch pinned to the open tx',
+    );
+    const stmts = calls.filter((c) => c.channel === 'execMany:stmt');
+    assertDeepEqual(
+      stmts.map((c) => c.sql),
+      [
+        'INSERT INTO t VALUES (?)',
+        'INSERT INTO t VALUES (?)',
+        'DELETE FROM t WHERE id = ?',
+      ],
+    );
+    assertDeepEqual(stmts[2]?.params, [1]);
+  }
+
+  // plans beyond the per-call cap split into sequential chunks with
+  // statement order preserved across the boundary
+  {
+    const { calls, storage } = fakeStorage();
+    const driver = createSqliteDriver(storage);
+    await driver.transaction(async (conn) => {
+      await conn.executeAll(
+        Array.from({ length: 2049 }, (_, i) => ({
+          sql: 'INSERT INTO t VALUES (?)',
+          params: [i],
+        })),
+      );
+      return 'x';
+    });
+    const batches = calls.filter((c) => c.channel === 'execMany');
+    assertDeepEqual(
+      batches.map((c) => c.batchSize),
+      [2048, 1],
+    );
+    const stmts = calls.filter((c) => c.channel === 'execMany:stmt');
+    assertEqual(stmts.length, 2049);
+    assertDeepEqual(
+      stmts[2048]?.params,
+      [2048],
+      'first statement of the second chunk follows the 2048th',
+    );
+  }
+
+  // a per-call signal cancels the batch without poisoning the tx —
+  // nothing reaches the wire
+  {
+    const { calls, storage } = fakeStorage();
+    const driver = createSqliteDriver(storage);
+    const source = new CancellationSource();
+    await throwsWith(
+      driver.transaction(async (conn) => {
+        source.cancel();
+        await conn.executeAll(
+          [{ sql: 'SELECT 1', params: [] }],
+          source.signal,
+        );
+        return 'never';
+      }),
+      CANCELLED,
+      'executeAll statement-level cancel',
+    );
+    assertDeepEqual(channels(calls), ['begin', 'rollback']);
   }
 
   // backup/dropBackup delegate straight through

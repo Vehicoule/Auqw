@@ -283,9 +283,10 @@ async function commitRollback(): Promise<void> {
     ).ok,
   );
   const before = await loadOk(storage);
-  // Commit txn executes: 9 deletes (dependent tables first), then
-  // inserts — execute 11 lands mid-insert on r3's source_refs row.
-  failing.failBeforeExecute(11);
+  // Delta commit executes: delete stale source_refs, delete old
+  // recordings, insert new recordings, insert new source_refs —
+  // execute 4 fails after the recording insert landed.
+  failing.failBeforeExecute(4);
   const failed = await storage.commit(
     {
       recordings: [
@@ -325,10 +326,11 @@ async function cancellationRollback(): Promise<void> {
     cancelledCtx,
   );
   assert(!early.ok && early.error.kind === 'cancelled', 'typed cancelled');
-  // Mid-commit: 16 read queries run first, then the rewrite's 9
-  // deletes — statement 20 is a dependent-table delete.
+  // Mid-commit: 3 recording-section reads + 9 dependent probes run
+  // first (statements 1-12); statement 15 is the recording insert,
+  // after both deletes landed.
   const { context: midCtx, source: mid } = ctx();
-  failing.hookAtStatement(20, () => mid.cancel());
+  failing.hookAtStatement(15, () => mid.cancel());
   const late = await storage.commit(
     {
       recordings: [
@@ -1837,7 +1839,7 @@ async function downloadLocalRoundtrip(): Promise<void> {
   assertDeepEqual(after.downloads, [downloads[1]!], 'downloads cascade');
   assertDeepEqual(after.localFiles, files, 'local files cascade');
   // An interrupted write mid-insert rolls back the whole commit:
-  // execute 1 is the downloads DELETE, execute 2 the download INSERT.
+  // execute 1 deletes the replaced download row, execute 2 inserts.
   const base = await loadOk(storage);
   failing.failBeforeExecute(2);
   const failed = await storage.commit(
@@ -2029,6 +2031,56 @@ async function migrationV7toV8(): Promise<void> {
   driver.close();
 }
 
+// 28. Delta commits rewrite only changed rows: an ordinal swap on
+// queue_occurrences' UNIQUE ordinal must land via delete+reinsert,
+// and committing an unchanged section plans no row writes at all
+// (the lone execute is the unconditional attempt-cap prune).
+async function deltaWriteScope(): Promise<void> {
+  const { driver, failing, storage } = rig();
+  const recordings = [
+    recording('r1', [ref('itunes', 'i1')]),
+    recording('r2', [ref('itunes', 'i2')]),
+  ];
+  const queue: QueueSnapshot = {
+    revision: 1,
+    occurrences: [
+      occurrence('o1', 'r1'),
+      occurrence('o2', 'r1'),
+      occurrence('o3', 'r2'),
+    ],
+    currentOccurrenceId: null,
+    positionMs: 0,
+    mode: 'stopped',
+  };
+  assert(
+    (await storage.commit({ recordings, queue }, ctx().context)).ok,
+    'seed commit',
+  );
+  // Swapping o1 <-> o3 exchanges ordinals 0 and 2 — an in-place
+  // UPDATE would hit the UNIQUE constraint mid-statement.
+  const reordered: QueueSnapshot = {
+    ...queue,
+    revision: 2,
+    occurrences: [
+      occurrence('o3', 'r2'),
+      occurrence('o2', 'r1'),
+      occurrence('o1', 'r1'),
+    ],
+  };
+  assert(
+    (await storage.commit({ queue: reordered }, ctx().context)).ok,
+    'ordinal swap commits',
+  );
+  const after = await loadOk(storage);
+  assertDeepEqual(after.queue, reordered, 'reordered queue reads back');
+  // Execute 1 is the attempt-cap prune; a second execute would mean
+  // the identical section still produced writes.
+  failing.failBeforeExecute(2);
+  const unchanged = await storage.commit({ recordings }, ctx().context);
+  assert(unchanged.ok, 'unchanged section writes nothing');
+  driver.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentOperations', concurrentOperations],
   ['initializeAndCoalesce', initializeAndCoalesce],
@@ -2067,6 +2119,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['languageRoundtrip', languageRoundtrip],
   ['migrationV5toV6', migrationV5toV6],
   ['migrationV7toV8', migrationV7toV8],
+  ['deltaWriteScope', deltaWriteScope],
 ];
 
 for (const [name, fn] of TESTS) {

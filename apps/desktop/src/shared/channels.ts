@@ -21,6 +21,7 @@ export const CHANNELS = {
   storageRollback: 'storage:rollback',
   storageCancel: 'storage:cancel',
   storageExecute: 'storage:execute',
+  storageExecMany: 'storage:execMany',
   storageQuery: 'storage:query',
   storageBackup: 'storage:backup',
   storageDropBackup: 'storage:dropBackup',

@@ -349,6 +349,19 @@ export async function run(): Promise<void> {
       routed: 'storage:execute',
       args: execArgs,
     });
+    const manyArgs = {
+      txId: 'tx-1',
+      statements: [
+        { sql: 'DELETE FROM t WHERE id = ?', params: ['a'] },
+        { sql: 'INSERT INTO t VALUES (?)', params: ['b'] },
+      ],
+    };
+    const many = await invoke(CHANNELS.storageExecMany, manyArgs);
+    assert(many.ok);
+    assertDeepEqual(many.result, {
+      routed: 'storage:execMany',
+      args: manyArgs,
+    });
     const backup = await invoke(CHANNELS.storageBackup, { tag: 'v1' });
     assert(backup.ok);
     assertDeepEqual(backup.result, {
@@ -363,6 +376,11 @@ export async function run(): Promise<void> {
       params: [true],
     });
     assert(!badExec.ok && badExec.error.kind === 'invalid-request');
+    const badMany = await invoke(CHANNELS.storageExecMany, {
+      txId: 'tx-1',
+      statements: [{ sql: 'SELECT 1', params: [{}] }],
+    });
+    assert(!badMany.ok && badMany.error.kind === 'invalid-request');
     const badCommit = await invoke(CHANNELS.storageCommit, { txId: '' });
     assert(!badCommit.ok && badCommit.error.kind === 'invalid-request');
     const badBackup = await invoke(CHANNELS.storageBackup, { tag: '../x' });

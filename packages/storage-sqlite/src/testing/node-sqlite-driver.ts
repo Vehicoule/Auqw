@@ -126,6 +126,13 @@ export class NodeSqliteDriver implements SqliteDriver {
           lastInsertRowId: toRowId(info.lastInsertRowid),
         });
       },
+      executeAll: (statements, statementSignal) => {
+        for (const statement of statements) {
+          checkSignal(statementSignal ?? signal);
+          this.#db.prepare(statement.sql).run(...statement.params);
+        }
+        return Promise.resolve();
+      },
       query: <T extends SqlRow>(
         sql: string,
         params: SqlParams = [],
@@ -232,6 +239,24 @@ export class FailingDriver implements SqliteDriver {
           }
           this.#runHook();
           return conn.execute(sql, params, statementSignal);
+        },
+        // Batches still count/fail/hook per statement — the injection
+        // surface is the statement sequence, not the call shape.
+        executeAll: async (statements, statementSignal) => {
+          for (const statement of statements) {
+            this.#executeCount += 1;
+            this.#statementCount += 1;
+            if (this.#failExecuteAt === this.#executeCount) {
+              this.#failExecuteAt = null;
+              throw new Error('injected execute failure');
+            }
+            this.#runHook();
+            await conn.execute(
+              statement.sql,
+              statement.params,
+              statementSignal,
+            );
+          }
         },
         query: (sql, params, statementSignal) => {
           this.#queryCount += 1;

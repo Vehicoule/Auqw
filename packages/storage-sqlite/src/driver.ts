@@ -4,12 +4,28 @@ export type SqlValue = string | number | null;
 export type SqlParams = readonly SqlValue[];
 export type SqlRow = Readonly<Record<string, SqlValue>>;
 
+/** One statement plus its bound parameters — the unit a driver batches. */
+export type SqlStatement = {
+  readonly sql: string;
+  readonly params: SqlParams;
+};
+
 export interface SqliteConnection {
   execute(
     sql: string,
     params?: SqlParams,
     signal?: CancellationSignal,
   ): Promise<{ changes: number; lastInsertRowId: number | null }>;
+  /**
+   * Runs a statement batch in order; results are discarded. Drivers
+   * crossing a process boundary ship the whole batch in one call —
+   * per-statement round trips are the cost this exists to remove.
+   * The signal is still observed between statements.
+   */
+  executeAll(
+    statements: readonly SqlStatement[],
+    signal?: CancellationSignal,
+  ): Promise<void>;
   query<T extends SqlRow>(
     sql: string,
     params?: SqlParams,

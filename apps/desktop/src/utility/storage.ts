@@ -5,12 +5,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { CHANNELS } from '../shared/channels.ts';
 import type {
   StorageBackupArgs,
+  StorageExecManyArgs,
   StorageExecuteArgs,
   StorageTxArgs,
 } from '../shared/contract.ts';
 import {
   isStorageBackupArgs,
   isStorageBeginArgs,
+  isStorageExecManyArgs,
   isStorageExecuteArgs,
   isStorageQueryArgs,
   isStorageTxArgs,
@@ -322,6 +324,33 @@ export function createStorageService(
     }
   }
 
+  /**
+   * A commit's write plan in one call: every statement is gated
+   * before any of them runs, then each runs in order inside the
+   * pinned tx — a mid-batch failure still leaves the renderer's
+   * rollback to undo the partial write.
+   */
+  function execMany(args: StorageExecManyArgs): unknown {
+    const tx = requireTx(args.txId);
+    if (tx.cancelled) {
+      throw shellError('cancelled', 'transaction cancelled');
+    }
+    for (const statement of args.statements) {
+      checkStatement(statement.sql);
+    }
+    try {
+      const opened = database();
+      for (const statement of args.statements) {
+        const prepared = opened.prepare(statement.sql);
+        prepared.setReadBigInts(true);
+        prepared.run(...statement.params);
+      }
+      return undefined;
+    } catch (thrown) {
+      rethrowStorage('storage execMany failed', thrown);
+    }
+  }
+
   function query(args: StorageExecuteArgs): unknown {
     const tx = requireTx(args.txId);
     if (tx.cancelled) {
@@ -413,6 +442,11 @@ export function createStorageService(
         CHANNELS.storageExecute,
         isStorageExecuteArgs,
         execute,
+      ),
+      [CHANNELS.storageExecMany]: guarded(
+        CHANNELS.storageExecMany,
+        isStorageExecManyArgs,
+        execMany,
       ),
       [CHANNELS.storageQuery]: guarded(
         CHANNELS.storageQuery,

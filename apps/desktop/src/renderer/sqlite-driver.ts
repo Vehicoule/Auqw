@@ -14,7 +14,8 @@ import type { AuqwStorage } from '../shared/contract.ts';
  * `SqliteDriver` over the `storage:*` IPC surface. The database lives
  * in the utility process, so the transaction callback's statements
  * become txId-pinned requests there — one `storage:execute`/`query`
- * per statement, `commit`/`rollback` closing the span.
+ * per statement, write batches as `storage:execMany`, and
+ * `commit`/`rollback` closing the span.
  *
  * Cancellation is local observation plus a `storage:cancel` flag: the
  * signal is polled before every statement (it cannot cross IPC) and
@@ -68,6 +69,15 @@ export function createSqliteDriver(storage: AuqwStorage): SqliteDriver {
           return storage
             .query(txId, sql, params)
             .then((result) => result.rows as readonly R[]);
+        },
+        // The whole write plan ships as one `storage:execMany` per
+        // chunk — per-statement round trips are the cost this removes.
+        executeAll: async (statements, statementSignal) => {
+          check(statementSignal ?? signal);
+          for (let i = 0; i < statements.length; i += 2048) {
+            check(statementSignal ?? signal);
+            await storage.execMany(txId, statements.slice(i, i + 2048));
+          }
         },
       };
       // Polls only run at statement boundaries — the subscription flags

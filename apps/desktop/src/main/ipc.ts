@@ -37,6 +37,7 @@ import {
   isStorageBeginArgs,
   isStorageBeginResult,
   isStorageExecuteArgs,
+  isStorageExecManyArgs,
   isStorageQueryArgs,
   isStorageTxArgs,
   isStreamCancelArgs,
@@ -381,6 +382,12 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     CHANNELS.storageExecute,
     channel(isStorageExecuteArgs, (args, deps) =>
       deps.utility.request(CHANNELS.storageExecute, args),
+    ),
+  ],
+  [
+    CHANNELS.storageExecMany,
+    channel(isStorageExecManyArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.storageExecMany, args),
     ),
   ],
   [
