@@ -702,11 +702,37 @@ function Main({
     storageUsage === null
       ? null
       : formatBytes(storageUsage.bytes, storageUsage.free);
+  // Transfer events can outpace the statfs probe — each read stamps a
+  // sequence, and only a success newer than the last applied success
+  // lands. A failed probe advances nothing, so it can't knock out an
+  // older success still in flight.
+  const usageSeq = useRef(0);
+  const usageApplied = useRef(0);
+  const usageLastProbe = useRef(0);
+  const usageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshUsage = useCallback(() => {
+    // The subscribe path fires per progress chunk — a statfs probe on
+    // each one is hundreds of scans per download. Throttle to ~1 Hz
+    // with a trailing call so the settled value still lands.
+    const now = Date.now();
+    const gap = now - usageLastProbe.current;
+    if (gap < 1_000) {
+      if (usageTimer.current === null) {
+        usageTimer.current = setTimeout(() => {
+          usageTimer.current = null;
+          refreshUsage();
+        }, 1_000 - gap);
+      }
+      return;
+    }
+    usageLastProbe.current = now;
+    usageSeq.current += 1;
+    const seq = usageSeq.current;
     void controller.downloads
       .usage(new CancellationSource().signal)
       .then((u) => {
-        if (u.ok) {
+        if (u.ok && seq > usageApplied.current) {
+          usageApplied.current = seq;
           setStorageUsage({ bytes: u.value.bytes, free: u.value.free });
         }
       });
@@ -720,6 +746,10 @@ function Main({
     });
     return () => {
       unsubscribe();
+      if (usageTimer.current !== null) {
+        clearTimeout(usageTimer.current);
+        usageTimer.current = null;
+      }
       if (downloadsTimer.current !== null) {
         clearTimeout(downloadsTimer.current);
         downloadsTimer.current = null;
@@ -1072,6 +1102,24 @@ function Main({
     );
   }, []);
 
+  // `state` republishes a fresh `settings` object on every tick, and
+  // `searchState` swaps identity on every revision — both would
+  // re-fire this effect (and cancel the debounce) without an actual
+  // change underneath. Depend on the derived values instead: the
+  // provider selection is stable across publishes, and the committed
+  // query is the only searchState field the gate reads.
+  const suggestSelection = useMemo(
+    () => selectionFromSettings(state.settings),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      state.settings.catalogProvider,
+      state.settings.playbackProvider,
+      state.settings.lyricsProvider,
+      state.settings.radioProvider,
+    ],
+  );
+  const committedQuery =
+    searchState.type === 'idle' ? '' : searchState.query;
   // Keystrokes debounce into `catalog.suggest` completions routed over
   // declaring providers — the typing surface is suggestions, not live
   // result pages, so the debounce runs tighter than a catalog search
@@ -1088,11 +1136,9 @@ function Main({
       search?.cancel();
       return undefined;
     }
-    const committed =
-      searchState.type === 'idle' ? '' : searchState.query;
     // Committed text is no draft, and inputs past the payload cap
     // (256) can't be served — neither earns a fetch.
-    if (trimmed === committed || [...trimmed].length > 256) {
+    if (trimmed === committedQuery || [...trimmed].length > 256) {
       setSuggestions([]);
       return undefined;
     }
@@ -1106,7 +1152,7 @@ function Main({
         signal: source.signal,
       };
       void providerRouter
-        .suggest(selectionFromSettings(state.settings), { input: trimmed }, context)
+        .suggest(suggestSelection, { input: trimmed }, context)
         .then((result) => {
           if (suggestSeq.current === seq && !source.signal.cancelled) {
             setSuggestions(result.ok ? result.value : []);
@@ -1114,7 +1160,7 @@ function Main({
         });
     }, 150);
     return () => clearTimeout(timer);
-  }, [query, searchState, search, providerRouter, state.settings]);
+  }, [query, committedQuery, search, providerRouter, suggestSelection]);
 
   // Keep the row→metadata map in sync so a tap can recover the
   // TrackMetadata the session needs for addAndPlay.
@@ -1862,8 +1908,12 @@ function Main({
           .addFolder(new CancellationSource().signal)
           .then((added) => {
             reportResult('settings.addLocalFolder', added);
-            if (added.ok) {
-              session.syncLocalRecordings(local.recordings());
+            // Re-read the live source — a mid-flight rehydrate swaps
+            // the instance, and committing the captured one's stale
+            // snapshot would clobber rows it never saw.
+            const source = controller.local();
+            if (added.ok && source !== null) {
+              session.syncLocalRecordings(source.recordings());
               refreshLocal();
             }
           });
@@ -1888,8 +1938,9 @@ function Main({
           .removeSource(sourceId, new CancellationSource().signal)
           .then((removed) => {
             reportResult('action.removeLocalFolder', removed);
-            if (removed.ok) {
-              session.syncLocalRecordings(local.recordings());
+            const source = controller.local();
+            if (removed.ok && source !== null) {
+              session.syncLocalRecordings(source.recordings());
               refreshLocal();
             }
           });
@@ -1904,8 +1955,9 @@ function Main({
           .rescan(undefined, new CancellationSource().signal)
           .then((scanned) => {
             reportResult('settings.rescanLocal', scanned);
-            if (scanned.ok) {
-              session.syncLocalRecordings(local.recordings());
+            const source = controller.local();
+            if (scanned.ok && source !== null) {
+              session.syncLocalRecordings(source.recordings());
               refreshLocal();
             }
           });
@@ -2581,15 +2633,23 @@ function Main({
     state.radio,
     localeTick,
   ]);
-  const radioCapable = useMemo(
-    () =>
-      controller.providers.some((p) =>
-        p.capabilities.includes('radio.seed'),
+  // Radio seeds route by the seed reference's own provider — a track
+  // is only seedable when THAT provider declares radio.seed, not just
+  // any loaded one.
+  const radioSeedable = useCallback(
+    (ref: SourceRef | null): boolean =>
+      ref !== null &&
+      controller.providers.some(
+        (p) => p.id === ref.provider && p.capabilities.includes('radio.seed'),
       ),
     [controller],
   );
 
-  const onStartRadio = useCallback(() => {
+  // The stage radio control seeds from the playing occurrence's
+  // selected ref, falling back to the recording's first source ref —
+  // the same derivation the seed op uses, kept shared so the gate
+  // mirrors the action exactly.
+  const radioSeedRef = useMemo((): SourceRef | null => {
     const current = state.queue.occurrences.find(
       (o) => o.occurrenceId === state.queue.currentOccurrenceId,
     );
@@ -2597,14 +2657,29 @@ function Main({
       currentRecordingId === null
         ? undefined
         : state.recordings.find((r) => r.id === currentRecordingId);
-    const ref: SourceRef | null =
-      current?.selectedRef ?? recording?.sourceRefs[0] ?? null;
-    if (ref !== null) {
+    return current?.selectedRef ?? recording?.sourceRefs[0] ?? null;
+  }, [state.queue, state.recordings, currentRecordingId]);
+
+  // The row-action seed: a metadata row seeds its own ref; a library
+  // row seeds its first source ref. Gate matches the op's target.
+  const actionRadioRef = useMemo((): SourceRef | null => {
+    if (actionsFor === null) {
+      return null;
+    }
+    return actionsFor.kind === 'metadata'
+      ? actionsFor.meta.sourceRef
+      : (state.recordings.find((r) => r.id === actionsFor.recordingId)
+          ?.sourceRefs[0] ?? null);
+  }, [actionsFor, state.recordings]);
+
+  const onStartRadio = useCallback(() => {
+    const ref = radioSeedRef;
+    if (ref !== null && radioSeedable(ref)) {
       void session
         .startRadio(ref)
         .then((r) => reportResult('stage.radio.start', r));
     }
-  }, [session, state, currentRecordingId]);
+  }, [session, radioSeedRef, radioSeedable]);
 
   const onStopRadio = useCallback(() => {
     reportResult('action.stopRadio', session.stopRadio());
@@ -3184,14 +3259,15 @@ function Main({
           break;
         case 'radio': {
           // Track-seeded at this release: a metadata row seeds its own
-          // ref; a library row seeds its first source ref. No ref
-          // means no seed — the row action simply doesn't fire.
+          // ref; a library row seeds its first source ref. The action
+          // only renders when the seed's provider declares radio.seed,
+          // but guard the op too — state may shift between the two.
           const ref =
             target.kind === 'metadata'
               ? target.meta.sourceRef
               : (state.recordings.find((r) => r.id === target.recordingId)
                 ?.sourceRefs[0] ?? null);
-          if (ref !== null) {
+          if (ref !== null && radioSeedable(ref)) {
             void session
               .startRadio(ref)
               .then((r) => reportResult('stage.radio.start', r));
@@ -3212,7 +3288,7 @@ function Main({
           break;
       }
     },
-    [actionsFor, session, openEntity, state.recordings, downloadRefFor, onDownloadAction],
+    [actionsFor, session, openEntity, state.recordings, downloadRefFor, onDownloadAction, radioSeedable],
   );
 
   const onOpenCard = useCallback(
@@ -4223,7 +4299,9 @@ function Main({
               onSeek={seekToPosition}
               peaks={peaks}
               onRetryLyrics={onRetryLyrics}
-              onStartRadio={radioCapable ? onStartRadio : undefined}
+              onStartRadio={
+                radioSeedable(radioSeedRef) ? onStartRadio : undefined
+              }
               onStopRadio={onStopRadio}
               onPressQueueItem={playQueueOccurrence}
               onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
@@ -4353,10 +4431,10 @@ function Main({
                       },
                     ]
                   : []),
-                // Only offer the seed affordance when a bundled
-                // provider declares radio.seed — an unsupported start
-                // is a dead end.
-                ...(radioCapable
+                // Only offer the seed affordance when the seed's own
+                // provider declares radio.seed — routing is ref-scoped,
+                // so another provider's support is a dead end.
+                ...(radioSeedable(actionRadioRef)
                   ? [
                     {
                       key: 'radio',
