@@ -473,6 +473,12 @@ type StreamWarm = {
    * to attach).
    */
   adoptedAttempt: ActiveAttempt | null;
+  /**
+   * The `#surfaceBacklog` entry this warm was issued for — consumed
+   * when the mint lands so the backlog tracks only refs still owed a
+   * session. `null` for queue-successor and direct-hand warms.
+   */
+  backlogKey: string | null;
 };
 
 type Ready = {
@@ -926,6 +932,26 @@ export class Session {
    * its mint+prepare is already spent).
    */
   #warmPendingQueries: { key: string; query: RecordingQuery }[] = [];
+
+  /**
+   * Track-row keys the surface's latest `prewarm({tracks})` hand
+   * showed — resolved refs and queued queries from an earlier page
+   * are discarded against it, so a stale match never mints over what
+   * is actually visible.
+   */
+  #surfaceKeys = new Set<string>();
+  /**
+   * Resolved track-row refs awaiting the one stream-warm slot, in
+   * arrival order — `#surfaceWant` offers the newest live entry, and
+   * an entry is consumed only when its warm actually mints, so a
+   * resolved row's seen mark always means "offered to the player".
+   */
+  #surfaceBacklog: {
+    key: string;
+    provider: string;
+    sourceRef: string;
+    atMs: number;
+  }[] = [];
 
   /**
    * Recording ids a surface handed `prewarm()` — the window loop
@@ -2314,6 +2340,34 @@ export class Session {
       }
     }
     const tracks = input.tracks ?? [];
+    if (input.tracks !== undefined) {
+      // The visible page just changed: queued and resolved intents
+      // from the old one are dropped — a stale match must never mint
+      // over the rows now under the user's finger.
+      this.#surfaceKeys = new Set(
+        tracks
+          .slice(0, PREWARM_INPUT_LIMIT)
+          .filter(
+            (meta) =>
+              isTrackMetadata(meta) &&
+              meta.sourceRef.provider !== r.settings.playbackProvider &&
+              meta.sourceRef.provider !== LOCAL_PROVIDER,
+          )
+          .map((meta) => `q:${meta.sourceRef.provider}:${meta.sourceRef.id}`),
+      );
+      this.#warmPendingQueries = this.#warmPendingQueries.filter((t) =>
+        this.#surfaceKeys.has(t.key),
+      );
+      this.#surfaceBacklog = this.#surfaceBacklog.filter((e) => {
+        if (this.#surfaceKeys.has(e.key)) {
+          return true;
+        }
+        // Never offered, so the row's seen mark is undone — a page
+        // that shows it again resolves it fresh.
+        this.#warmSeen.delete(e.key);
+        return false;
+      });
+    }
     for (const meta of tracks.slice(0, PREWARM_INPUT_LIMIT)) {
       // Rows already carrying a playback-provider ref are covered by
       // the sourceRefs hand; everything else needs a candidates
@@ -7293,12 +7347,12 @@ export class Session {
 
   /**
    * Candidates-resolve one surface-handed track row: catalog-only
-   * metadata never becomes a recording, so a match feeds the stream
-   * warm's `(provider, ref)` key directly — no mapping or pin
-   * commits (there is nothing to land them on). Only an unclaimed
-   * slot takes the match: a live warm stays the single speculative
-   * session and later matches park on their seen marks instead of
-   * churning mints.
+   * metadata never becomes a recording, so a match parks its resolved
+   * `(provider, ref)` in `#surfaceBacklog` — no mapping or pin
+   * commits (there is nothing to land them on). The backlog drains
+   * through `#surfaceWant`, so the one speculative slot offers every
+   * visible row in turn; a match for a page that left view is
+   * discarded against `#surfaceKeys`.
    */
   async #warmOneQuery(
     target: { query: RecordingQuery; key: string },
@@ -7383,26 +7437,123 @@ export class Session {
       return;
     }
     const now = this.#safeNow();
-    if (now === null || this.#streamWarm !== null) {
+    if (now === null) {
       return;
     }
-    this.#surfaceWarm = {
-      provider: ref.provider,
-      sourceRef: ref.id,
-      atMs: now,
-    };
+    if (!this.#surfaceKeys.has(target.key)) {
+      // The page that showed this row changed while it resolved —
+      // discard the match: it must never mint over the page now
+      // visible, and unseeing lets a re-shown page resolve it fresh.
+      this.#warmSeen.delete(target.key);
+      return;
+    }
+    // Resolved, not yet minted: park the ref in arrival order so the
+    // backlog can offer each visible row to the stream warm in turn —
+    // the seen mark stays honest because the tap's resolve is already
+    // spent and the minted session arrives before the gesture would.
+    if (
+      this.#surfaceBacklog.length < WARM_SEEN_CAP &&
+      !this.#surfaceBacklog.some((e) => e.key === target.key)
+    ) {
+      this.#surfaceBacklog.push({
+        key: target.key,
+        provider: ref.provider,
+        sourceRef: ref.id,
+        atMs: now,
+      });
+    }
     this.#maybeWarmStream();
+  }
+
+  /**
+   * The freshest live surface intent: an explicit `sourceRefs` hand or
+   * a resolved track row, fresh within `SURFACE_WARM_TTL_MS` and on
+   * the playback provider. Backlog entries whose page left view — or
+   * that aged out — are evicted (and unseen: they were never offered)
+   * as they surface; a denied ref waits out its suppression instead
+   * of being offered again.
+   */
+  #surfaceWant(
+    r: Ready,
+  ): { provider: string; sourceRef: string; backlogKey: string | null } | null {
+    const now = this.#safeNow();
+    if (now === null) {
+      return null;
+    }
+    const hand = this.#surfaceWarm;
+    const live =
+      hand !== null &&
+      now - hand.atMs < SURFACE_WARM_TTL_MS &&
+      hand.provider === r.settings.playbackProvider
+        ? hand
+        : null;
+    if (hand !== null && live === null) {
+      this.#surfaceWarm = null;
+    }
+    let back: {
+      key: string;
+      provider: string;
+      sourceRef: string;
+      atMs: number;
+    } | null = null;
+    for (let i = this.#surfaceBacklog.length - 1; i >= 0; i -= 1) {
+      const e = this.#surfaceBacklog[i];
+      if (e === undefined) {
+        continue;
+      }
+      if (
+        !this.#surfaceKeys.has(e.key) ||
+        now - e.atMs >= SURFACE_WARM_TTL_MS ||
+        e.provider !== r.settings.playbackProvider
+      ) {
+        this.#surfaceBacklog.splice(i, 1);
+        this.#warmSeen.delete(e.key);
+        continue;
+      }
+      if (this.#streamWarmDeniedFresh(`${e.provider} ${e.sourceRef}`)) {
+        continue;
+      }
+      back = e;
+      break;
+    }
+    if (back !== null && (live === null || back.atMs >= live.atMs)) {
+      return {
+        provider: back.provider,
+        sourceRef: back.sourceRef,
+        backlogKey: back.key,
+      };
+    }
+    if (live !== null) {
+      return {
+        provider: live.provider,
+        sourceRef: live.sourceRef,
+        backlogKey: null,
+      };
+    }
+    return null;
   }
 
   /** The advisory stream warm's current want — see `StreamWarm`. */
   #warmWant(
     r: Ready,
-  ): { provider: string; sourceRef: string; origin: 'queue' | 'surface' } | null {
+  ): {
+    provider: string;
+    sourceRef: string;
+    origin: 'queue' | 'surface';
+    backlogKey: string | null;
+  } | null {
     const type = r.playback.type;
+    const surface = this.#surfaceWant(r);
     if (type === 'playing') {
-      // The dealt successor is what the service would attach next —
-      // warm only an already-resolved remote ref; candidate-less rows
-      // are the window pass's job, not a stream mint.
+      // A fresh surface row outranks the dealt successor — the user
+      // is looking at it right now, so its tap is the likelier next
+      // play. Without one the successor is what the service would
+      // attach next — warm only an already-resolved remote ref;
+      // candidate-less rows are the window pass's job, not a stream
+      // mint.
+      if (surface !== null) {
+        return { ...surface, origin: 'surface' };
+      }
       const snap = r.queue.snapshot();
       const dealt = this.#dealtOrder(r);
       const walk = dealt ?? snap.occurrences.map((o) => o.occurrenceId);
@@ -7429,25 +7580,22 @@ export class Session {
       ) {
         return null;
       }
-      return { provider: ref.provider, sourceRef: ref.id, origin: 'queue' };
+      return {
+        provider: ref.provider,
+        sourceRef: ref.id,
+        origin: 'queue',
+        backlogKey: null,
+      };
     }
     if (type === 'idle' || type === 'failed') {
-      const s = this.#surfaceWarm;
-      if (s === null) {
-        return null;
-      }
-      const now = this.#safeNow();
-      if (
-        now === null ||
-        now - s.atMs >= SURFACE_WARM_TTL_MS ||
-        s.provider !== r.settings.playbackProvider
-      ) {
-        this.#surfaceWarm = null;
-        return null;
-      }
-      return { provider: s.provider, sourceRef: s.sourceRef, origin: 'surface' };
+      return surface === null ? null : { ...surface, origin: 'surface' };
     }
-    return null;
+    // 'preparing' parks the warm for the in-flight attempt; under
+    // 'buffering'/'paused' a surfaced row is still the freshest
+    // intent, so it arbitrates the same way as while playing.
+    return surface === null || type === 'preparing'
+      ? null
+      : { ...surface, origin: 'surface' };
   }
 
   /**
@@ -7540,6 +7688,7 @@ export class Session {
     provider: string;
     sourceRef: string;
     origin: 'queue' | 'surface';
+    backlogKey: string | null;
   }): void {
     const r = this.#ready;
     if (
@@ -7563,6 +7712,7 @@ export class Session {
       stream: null,
       attempt: null,
       adoptedAttempt: null,
+      backlogKey: want.backlogKey,
     };
     this.#streamWarm = record;
     const issueSource = new CancellationSource();
@@ -7672,6 +7822,12 @@ export class Session {
     const stream = event.outcome.stream;
     warm.stream = stream;
     warm.attempt = event.outcome.attempt;
+    if (warm.backlogKey !== null) {
+      // Minted = offered: the resolved row's backlog entry is spent.
+      this.#surfaceBacklog = this.#surfaceBacklog.filter(
+        (e) => e.key !== warm.backlogKey,
+      );
+    }
     if (this.#active?.handle === stream.handle) {
       // An attempt or a service move already attached this session —
       // ownership moved; the request slot is freed, never released.

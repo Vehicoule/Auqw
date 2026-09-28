@@ -787,10 +787,17 @@ impl PluginHost {
                 Some(slot.handle)
             }
         });
-        drop(m);
+        // The last-owner verdict and the conditional registry kill run
+        // under the same `m`: dropped between them, an adoption could
+        // commit its ownership slot for this handle — the registry
+        // still reads it unattached — and this kill would then end the
+        // session the new request just received. `prepared_handles`
+        // outermost matches the admission path's lock order, so the
+        // serialization introduces no cycle.
         if let (Some(stream), Some(handle)) = (&self.stream, handle) {
             let _ = stream.cancel_if_unattached(&handle);
         }
+        drop(m);
         // Tombstone when no delivered handle was found AND a race
         // still exists: a never-admitted id (cancel-before-start),
         // or a live prepare whose `Prepared` is mid-registration.
@@ -1914,5 +1921,84 @@ mod tests {
             reg.is_live(&warm.handle),
             "the adopt candidate stays live too"
         );
+    }
+
+    /// Concurrent cancel-versus-adopt: whichever side commits first
+    /// decides — the cancel kills the warm before the adoption's
+    /// registry scan (the request falls back to a fresh resolve), or
+    /// sees the new owner and skips the kill. The adoption must never
+    /// deliver a session the racing cancel then ends: the last-owner
+    /// check and `cancel_if_unattached` run under the same
+    /// `prepared_handles` guard, so the new owner serializes either
+    /// way.
+    #[test]
+    fn cancel_racing_adoption_never_kills_the_new_owner() {
+        for round in 0..64 {
+            let (host, reg, _dir) = stream_host("race");
+            let host = Arc::new(host);
+            let id = load_echo(&host);
+            let warm = mint_warm(&reg, &id, "vid");
+            // The warm rides an owner slot the way a delivered
+            // prepared request's would.
+            match host.prepared_handles.lock() {
+                Ok(mut m) => {
+                    m.insert(
+                        "req-warm".to_string(),
+                        PreparedSlot {
+                            handle: warm.handle.clone(),
+                            delivered: true,
+                        },
+                    );
+                }
+                Err(e) => panic!("handles: {e}"),
+            }
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let (tx, rx) = deliver_chan();
+            let cancel = {
+                let host = Arc::clone(&host);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    host.cancel("req-warm".to_string());
+                })
+            };
+            let adopt = {
+                let host = Arc::clone(&host);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let _ = host.start_prepare(
+                        id,
+                        "vid".into(),
+                        "req-adopt".into(),
+                        move |rid, outcome| {
+                            let tx = tx.clone();
+                            async move {
+                                let _ = tx.send((rid, outcome));
+                            }
+                        },
+                    );
+                })
+            };
+            match cancel.join() {
+                Ok(()) => {}
+                Err(_) => panic!("cancel thread panicked"),
+            }
+            match adopt.join() {
+                Ok(()) => {}
+                Err(_) => panic!("adopt thread panicked"),
+            }
+            if let Ok((_rid, PrepareOutcome::Prepared { stream, .. })) =
+                rx.recv_timeout(std::time::Duration::from_secs(30))
+            {
+                if stream.handle == warm.handle {
+                    assert!(
+                        reg.is_live(&warm.handle),
+                        "round {round}: the adopted session was killed \
+                         by the cancel it raced"
+                    );
+                }
+            }
+        }
     }
 }

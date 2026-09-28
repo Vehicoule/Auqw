@@ -5951,6 +5951,14 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
     'catalogRowsResolveIntoStreamWarm',
     catalogRowsResolveIntoStreamWarm,
   ],
+  [
+    'searchRowOutranksSuccessorDuringPlayback',
+    searchRowOutranksSuccessorDuringPlayback,
+  ],
+  [
+    'staleSearchPageMatchDiscarded',
+    staleSearchPageMatchDiscarded,
+  ],
 ] as const;
 
 // The materialized rebuild: the durable log's surviving records
@@ -7495,6 +7503,105 @@ async function catalogRowsResolveIntoStreamWarm(): Promise<void> {
     r.ytm.pendingCount('candidates'),
     0,
     'repeat hand deduped on the seen mark',
+  );
+}
+
+/** A resolved search row the user is looking at outranks the dealt
+ *  successor for the one stream-warm slot while a track plays — its
+ *  tap pays only the resolve, not the mint. */
+async function searchRowOutranksSuccessorDuringPlayback(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+      ],
+      queue: stoppedQueue([occurrence('oA', 'rA'), occurrence('oB', 'rB')]),
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  const playback = readyOf(r).playback;
+  const idA = 'identity' in playback ? playback.identity : undefined;
+  assert(idA !== undefined);
+  r.player.emit(statusEvent(idA, 'h-oA', 'playing', 100));
+  await pump();
+  const warmed = warmInput(r);
+  assertEqual(warmed.sourceRef, 'yB', 'dealt successor warms while playing');
+  assert(r.player.settlePrewarm(ok('req-warmB')), 'successor warm settling');
+  r.player.emit(warmPrepared(warmed.identity, 'h-warmB'));
+  await pump();
+  r.session.prewarm({
+    tracks: [meta('itunes', 'i-search', 'Song Search', 'Artist', 300_000)],
+  });
+  await pump();
+  assert(
+    r.ytm.settleCandidates(
+      ok([meta('youtube-music', 'y-search', 'Song Search', 'Artist', 300_000)]),
+    ),
+    'search-row candidates pending',
+  );
+  await pump();
+  const prewarms = calls(r, 'prewarm');
+  assertEqual(prewarms.length, 2, 'surface row claims the warm slot');
+  assertEqual(
+    (prewarms[1]?.input as { sourceRef: string }).sourceRef,
+    'y-search',
+    'visible row warmed ahead of the successor',
+  );
+  assertEqual(
+    calls(r, 'release').length,
+    1,
+    'displaced successor warm released',
+  );
+}
+
+/** A match for a page that already left view is discarded — it must
+ *  never mint over the page now visible, and re-showing the row
+ *  resolves it fresh. */
+async function staleSearchPageMatchDiscarded(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('rA', [ref('youtube-music', 'yA')])],
+      queue: stoppedQueue([occurrence('oA', 'rA')]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({
+    tracks: [meta('itunes', 'i-A', 'Song A', 'Artist', 300_000)],
+  });
+  await pump();
+  assertEqual(r.ytm.pendingCount('candidates'), 1, 'page-A row resolving');
+  // The surface moves to page B before A's candidates land.
+  r.session.prewarm({
+    tracks: [meta('itunes', 'i-B', 'Song B', 'Artist', 300_000)],
+  });
+  await pump();
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'y-A', 'Song A', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 0, 'stale match never mints');
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    'the visible page\'s row resolves next',
+  );
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'y-B', 'Song B', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'visible match mints');
+  assertEqual(warmInput(r).sourceRef, 'y-B', 'page-B ref warmed');
+  // The discarded row was unseen — showing it again resolves fresh.
+  r.session.prewarm({
+    tracks: [meta('itunes', 'i-A', 'Song A', 'Artist', 300_000)],
+  });
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    're-shown row resolves fresh',
   );
 }
 
