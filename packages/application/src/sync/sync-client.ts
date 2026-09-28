@@ -1032,7 +1032,16 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         t: 'sync',
         since: cursorToSince(deps.engine.cursor()),
       };
-      if (own.value.entries.length > 0 || own.value.more) {
+      // A non-empty cursor is itself a claim worth sending: the
+      // receiver folds it into its durable peer-mark table — a
+      // read-only peer that never exports entries still re-confirms
+      // its remembered row every round instead of pinning compaction
+      // forever. Identical claims apply as in-memory no-ops.
+      if (
+        own.value.entries.length > 0 ||
+        own.value.more ||
+        Object.keys(own.value.cursor).length > 0
+      ) {
         msg['delta'] = own.value;
       }
       // Two caps both bind: the receiver validates the nested delta
