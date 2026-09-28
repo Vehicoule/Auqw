@@ -7,7 +7,7 @@
  * Labels resolve inside the hooks — translated strings are never
  * cached at module scope or they go stale on a locale switch.
  */
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import type { ThemeName } from '@auqw/design-tokens';
 import type { RepeatMode } from '@auqw/application';
 import { t } from './i18n.ts';
@@ -136,26 +136,23 @@ export function useQueueScreenController({
   readonly reordering?: boolean | undefined;
   readonly onToggleReorder?: (() => void) | undefined;
 }): QueueScreenView {
-  return useMemo(
-    () => ({
-      title: t('queue.title'),
-      countLabel: t('queue.count', { count: queue.items.length }),
-      reorder: queueReorderButton(reordering, onToggleReorder),
-      current:
-        player === null
-          ? null
-          : {
-              title: player.title,
-              status: player.status,
-              playing: player.status === 'playing',
-              artworkUrl: player.artworkUrl,
-              metaLabel: `${player.artist ?? '—'} · ${formatClock(
-                player.positionMs,
-              )} / ${formatClock(player.durationMs)}`,
-            },
-    }),
-    [queue, player, reordering, onToggleReorder],
-  );
+  return {
+    title: t('queue.title'),
+    countLabel: t('queue.count', { count: queue.items.length }),
+    reorder: queueReorderButton(reordering, onToggleReorder),
+    current:
+      player === null
+        ? null
+        : {
+            title: player.title,
+            status: player.status,
+            playing: player.status === 'playing',
+            artworkUrl: player.artworkUrl,
+            metaLabel: `${player.artist ?? '—'} · ${formatClock(
+              player.positionMs,
+            )} / ${formatClock(player.durationMs)}`,
+          },
+  };
 }
 
 // ---- corrections ------------------------------------------------------
@@ -255,95 +252,93 @@ export function useCorrectionsScreenController({
 }: {
   readonly model: CorrectionsModel;
 } & Omit<CorrectionsScreenHandlers, 'onBack'>): CorrectionsScreenView {
-  return useMemo(() => {
-    const body: CorrectionsBodyView =
-      model.state === 'loading'
-        ? { kind: 'loading', title: t('corrections.loading') }
-        : model.state === 'error'
+  const body: CorrectionsBodyView =
+    model.state === 'loading'
+      ? { kind: 'loading', title: t('corrections.loading') }
+      : model.state === 'error'
+        ? {
+            kind: 'error',
+            title: t('corrections.errorTitle'),
+            hint: model.message,
+            onRetry,
+          }
+        : model.rows.length === 0
           ? {
-              kind: 'error',
-              title: t('corrections.errorTitle'),
-              hint: model.message,
-              onRetry,
+              kind: 'empty',
+              title: t('corrections.empty'),
+              hint:
+                model.filter === 'pending'
+                  ? t('corrections.emptyHint.pending')
+                  : t('corrections.emptyHint.other'),
+              icon: 'check',
             }
-          : model.rows.length === 0
-            ? {
-                kind: 'empty',
-                title: t('corrections.empty'),
-                hint:
-                  model.filter === 'pending'
-                    ? t('corrections.emptyHint.pending')
-                    : t('corrections.emptyHint.other'),
-                icon: 'check',
-              }
-            : {
-                kind: 'rows',
-                listA11yLabel: t('settings.diag.matchReviews'),
-                rows: model.rows.map((row) => {
-                  const pending = row.status === 'pending';
-                  return {
-                    row,
-                    pending,
-                    statusColor: pending ? 'warn' : 'secondary',
-                    candidates: row.candidates.map((candidate) => ({
-                      index: candidate.index,
+          : {
+              kind: 'rows',
+              listA11yLabel: t('settings.diag.matchReviews'),
+              rows: model.rows.map((row) => {
+                const pending = row.status === 'pending';
+                return {
+                  row,
+                  pending,
+                  statusColor: pending ? 'warn' : 'secondary',
+                  candidates: row.candidates.map((candidate) => ({
+                    index: candidate.index,
+                    title: candidate.title,
+                    subtitle: candidate.subtitle,
+                    enabled: pending && onConfirm !== undefined,
+                    a11yLabel: t('corrections.a11y.confirm', {
                       title: candidate.title,
-                      subtitle: candidate.subtitle,
-                      enabled: pending && onConfirm !== undefined,
-                      a11yLabel: t('corrections.a11y.confirm', {
-                        title: candidate.title,
-                      }),
-                      onPress:
-                        pending && onConfirm !== undefined
-                          ? () => onConfirm(row.reviewId, candidate.index)
-                          : undefined,
-                    })),
-                    action:
-                      pending
-                        ? {
-                            kind: 'reject',
-                            label: t('corrections.rejectAll'),
-                            a11yLabel: t('corrections.a11y.reject', {
-                              title: row.title,
-                            }),
-                            onPress:
-                              onReject === undefined
-                                ? undefined
-                                : () => onReject(row.reviewId),
-                          }
-                        : {
-                            kind: 'undo',
-                            label: t('corrections.undo'),
-                            a11yLabel: t('corrections.a11y.undo', {
-                              title: row.title,
-                            }),
-                            onPress:
-                              onUndo === undefined
-                                ? undefined
-                                : () => onUndo(row.reviewId),
-                          },
-                  };
-                }),
-              };
-    return {
-      title: t('corrections.title'),
-      backA11yLabel: t('common.back'),
-      countsLabel: t('corrections.counts', {
-        pending: model.pendingCount,
-        resolved: model.resolvedCount,
-      }),
-      filtersA11yLabel: t('corrections.statusFilterA11y'),
-      filters: CORRECTIONS_FILTERS.map((filter) => ({
-        value: filter.value,
-        label: t(filter.label),
-        selected: model.filter === filter.value,
-        a11yLabel: t('corrections.filterA11y', { label: t(filter.label) }),
-        onPress:
-          onFilter === undefined ? undefined : () => onFilter(filter.value),
-      })),
-      body,
-    };
-  }, [model, onFilter, onConfirm, onReject, onUndo, onRetry]);
+                    }),
+                    onPress:
+                      pending && onConfirm !== undefined
+                        ? () => onConfirm(row.reviewId, candidate.index)
+                        : undefined,
+                  })),
+                  action:
+                    pending
+                      ? {
+                          kind: 'reject',
+                          label: t('corrections.rejectAll'),
+                          a11yLabel: t('corrections.a11y.reject', {
+                            title: row.title,
+                          }),
+                          onPress:
+                            onReject === undefined
+                              ? undefined
+                              : () => onReject(row.reviewId),
+                        }
+                      : {
+                          kind: 'undo',
+                          label: t('corrections.undo'),
+                          a11yLabel: t('corrections.a11y.undo', {
+                            title: row.title,
+                          }),
+                          onPress:
+                            onUndo === undefined
+                              ? undefined
+                              : () => onUndo(row.reviewId),
+                        },
+                };
+              }),
+            };
+  return {
+    title: t('corrections.title'),
+    backA11yLabel: t('common.back'),
+    countsLabel: t('corrections.counts', {
+      pending: model.pendingCount,
+      resolved: model.resolvedCount,
+    }),
+    filtersA11yLabel: t('corrections.statusFilterA11y'),
+    filters: CORRECTIONS_FILTERS.map((filter) => ({
+      value: filter.value,
+      label: t(filter.label),
+      selected: model.filter === filter.value,
+      a11yLabel: t('corrections.filterA11y', { label: t(filter.label) }),
+      onPress:
+        onFilter === undefined ? undefined : () => onFilter(filter.value),
+    })),
+    body,
+  };
 }
 
 // ---- transfer ---------------------------------------------------------
@@ -418,85 +413,83 @@ export function useTransferScreenController({
 }: {
   readonly model: TransferModel;
 } & Omit<TransferScreenHandlers, 'onBack'>): TransferScreenView {
-  return useMemo(() => {
-    const exportBusy = model.exportPhase === 'working';
-    const importBusy =
-      model.importPhase === 'reading' || model.importPhase === 'applying';
-    const preview = model.preview;
-    const footer: TransferImportFooterView | null =
-      preview === null
-        ? null
-        : model.importPhase === 'done'
+  const exportBusy = model.exportPhase === 'working';
+  const importBusy =
+    model.importPhase === 'reading' || model.importPhase === 'applying';
+  const preview = model.preview;
+  const footer: TransferImportFooterView | null =
+    preview === null
+      ? null
+      : model.importPhase === 'done'
+        ? {
+            kind: 'done',
+            detail: model.importDetail ?? t('transfer.applied'),
+            resetLabel: t('common.done'),
+            resetA11yLabel: t('transfer.resetA11y'),
+            onReset: onResetImport,
+          }
+        : model.importPhase === 'error'
           ? {
-              kind: 'done',
-              detail: model.importDetail ?? t('transfer.applied'),
-              resetLabel: t('common.done'),
+              kind: 'error',
+              title: t('transfer.failed'),
+              hint: model.importDetail,
+              resetLabel: t('transfer.startOver'),
               resetA11yLabel: t('transfer.resetA11y'),
               onReset: onResetImport,
             }
-          : model.importPhase === 'error'
-            ? {
-                kind: 'error',
-                title: t('transfer.failed'),
-                hint: model.importDetail,
-                resetLabel: t('transfer.startOver'),
-                resetA11yLabel: t('transfer.resetA11y'),
-                onReset: onResetImport,
-              }
-            : {
-                kind: 'confirm',
-                applying: model.importPhase === 'applying',
-                applyLabel:
-                  model.importPhase === 'applying'
-                    ? t('transfer.applying')
-                    : t('transfer.apply'),
-                applyA11yLabel: t('transfer.apply'),
-                onApply: onApplyImport,
-                cancelLabel: t('common.cancel'),
-                cancelA11yLabel: t('transfer.cancelA11y'),
-                onCancel: onResetImport,
-              };
-    return {
-      title: t('transfer.title'),
-      backA11yLabel: t('common.back'),
-      exportSectionLabel: t('transfer.exportSection'),
-      importSectionLabel: t('transfer.importSection'),
-      exportRow: {
-        label: exportBusy ? t('transfer.exporting') : t('transfer.export'),
-        detail:
-          model.exportPhase === 'done' || model.exportPhase === 'error'
-            ? model.exportDetail
-            : null,
-        detailTone: model.exportPhase === 'error' ? 'warn' : 'secondary',
-        disabled: exportBusy || onExport === undefined,
-        onPress: onExport,
-      },
-      importRow: {
-        label: importBusy ? t('transfer.working') : t('transfer.import'),
-        detail: model.importPhase === 'error' ? model.importDetail : null,
-        detailTone: 'warn',
-        disabled: importBusy || onPickImportFile === undefined,
-        onPress: onPickImportFile,
-      },
-      importBody:
-        preview === null || footer === null
-          ? null
           : {
-              phase: model.importPhase,
-              title: t('transfer.previewTitle'),
-              metaLabel:
-                t('transfer.format', { version: preview.formatVersion }) +
-                (preview.exportedLabel === null
-                  ? ''
-                  : t('transfer.exportedSuffix', {
-                      date: preview.exportedLabel,
-                    })) +
-                t('transfer.sourceSuffix', { source: preview.sourceLabel }),
-              rows: preview.rows,
-              footer,
-            },
-    };
-  }, [model, onExport, onPickImportFile, onApplyImport, onResetImport]);
+              kind: 'confirm',
+              applying: model.importPhase === 'applying',
+              applyLabel:
+                model.importPhase === 'applying'
+                  ? t('transfer.applying')
+                  : t('transfer.apply'),
+              applyA11yLabel: t('transfer.apply'),
+              onApply: onApplyImport,
+              cancelLabel: t('common.cancel'),
+              cancelA11yLabel: t('transfer.cancelA11y'),
+              onCancel: onResetImport,
+            };
+  return {
+    title: t('transfer.title'),
+    backA11yLabel: t('common.back'),
+    exportSectionLabel: t('transfer.exportSection'),
+    importSectionLabel: t('transfer.importSection'),
+    exportRow: {
+      label: exportBusy ? t('transfer.exporting') : t('transfer.export'),
+      detail:
+        model.exportPhase === 'done' || model.exportPhase === 'error'
+          ? model.exportDetail
+          : null,
+      detailTone: model.exportPhase === 'error' ? 'warn' : 'secondary',
+      disabled: exportBusy || onExport === undefined,
+      onPress: onExport,
+    },
+    importRow: {
+      label: importBusy ? t('transfer.working') : t('transfer.import'),
+      detail: model.importPhase === 'error' ? model.importDetail : null,
+      detailTone: 'warn',
+      disabled: importBusy || onPickImportFile === undefined,
+      onPress: onPickImportFile,
+    },
+    importBody:
+      preview === null || footer === null
+        ? null
+        : {
+            phase: model.importPhase,
+            title: t('transfer.previewTitle'),
+            metaLabel:
+              t('transfer.format', { version: preview.formatVersion }) +
+              (preview.exportedLabel === null
+                ? ''
+                : t('transfer.exportedSuffix', {
+                    date: preview.exportedLabel,
+                  })) +
+              t('transfer.sourceSuffix', { source: preview.sourceLabel }),
+            rows: preview.rows,
+            footer,
+          },
+  };
 }
 
 // ---- library ----------------------------------------------------------
@@ -638,168 +631,151 @@ export function useLibraryScreenController({
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState('');
 
-  return useMemo(() => {
-    const kindsPresent = LIBRARY_KIND_FILTERS.filter((f) =>
-      model.cards.some((card) => card.kind === f.key),
-    );
-    const filtered =
-      filter === 'all'
-        ? model.cards
-        : model.cards.filter((card) => card.kind === filter);
-    const cards =
-      sort === 'recent'
-        ? [...filtered].sort((a, b) => b.sortMs - a.sortMs)
-        : [...filtered].sort((a, b) => a.title.localeCompare(b.title));
-    return {
-      title: t('nav.library'),
-      collections: model.collections.map((tile) => ({
-        tile,
-        icon: LIBRARY_COLLECTION_ICONS[tile.key],
-        enabled: tile.enabled,
-        a11yLabel: t('library.tileA11y', {
-          label: tile.label,
-          count: tile.count,
-        }),
-        countLabel: tile.note ?? t('common.trackCount', { count: tile.count }),
-        playA11yLabel: t('library.tilePlayA11y', { label: tile.label }),
-        onOpen:
-          onOpenCollection === undefined
-            ? undefined
-            : () => onOpenCollection(tile.key),
-        onPlay:
-          onPlayCollection === undefined || tile.count === 0
-            ? undefined
-            : () => onPlayCollection(tile.key),
+  const kindsPresent = LIBRARY_KIND_FILTERS.filter((f) =>
+    model.cards.some((card) => card.kind === f.key),
+  );
+  const filtered =
+    filter === 'all'
+      ? model.cards
+      : model.cards.filter((card) => card.kind === filter);
+  const cards =
+    sort === 'recent'
+      ? [...filtered].sort((a, b) => b.sortMs - a.sortMs)
+      : [...filtered].sort((a, b) => a.title.localeCompare(b.title));
+  return {
+    title: t('nav.library'),
+    collections: model.collections.map((tile) => ({
+      tile,
+      icon: LIBRARY_COLLECTION_ICONS[tile.key],
+      enabled: tile.enabled,
+      a11yLabel: t('library.tileA11y', {
+        label: tile.label,
+        count: tile.count,
+      }),
+      countLabel: tile.note ?? t('common.trackCount', { count: tile.count }),
+      playA11yLabel: t('library.tilePlayA11y', { label: tile.label }),
+      onOpen:
+        onOpenCollection === undefined
+          ? undefined
+          : () => onOpenCollection(tile.key),
+      onPlay:
+        onPlayCollection === undefined || tile.count === 0
+          ? undefined
+          : () => onPlayCollection(tile.key),
+    })),
+    headingLabel: t('library.heading'),
+    sortChip: {
+      label: t(`library.sort.${sort}`),
+      onPress: () => setSort(sort === 'recent' ? 'title' : 'recent'),
+    },
+    layoutChip: {
+      label: t(`library.view.${layout}`),
+      onPress: () => setLayout(layout === 'grid' ? 'list' : 'grid'),
+    },
+    layout,
+    filterA11yLabel: t('library.kindFilterA11y'),
+    filterOptions: [
+      {
+        key: 'all' as const,
+        label: t('library.filter.all'),
+        active: filter === 'all',
+        onPress: () => setFilter('all'),
+      },
+      ...kindsPresent.map((f) => ({
+        key: f.key as LibraryKindFilter,
+        label: t(f.label),
+        active: filter === f.key,
+        onPress: () => setFilter(f.key),
       })),
-      headingLabel: t('library.heading'),
-      sortChip: {
-        label: t(`library.sort.${sort}`),
-        onPress: () => setSort(sort === 'recent' ? 'title' : 'recent'),
-      },
-      layoutChip: {
-        label: t(`library.view.${layout}`),
-        onPress: () => setLayout(layout === 'grid' ? 'list' : 'grid'),
-      },
-      layout,
-      filterA11yLabel: t('library.kindFilterA11y'),
-      filterOptions: [
-        {
-          key: 'all' as const,
-          label: t('library.filter.all'),
-          active: filter === 'all',
-          onPress: () => setFilter('all'),
+    ],
+    creating,
+    nameField: creating
+      ? {
+          value: draft,
+          placeholder: t('common.newPlaylistName'),
+          onChange: setDraft,
+          onSubmit:
+            onCreatePlaylist === undefined
+              ? undefined
+              : (name) => {
+                  onCreatePlaylist(name);
+                  setDraft('');
+                  setCreating(false);
+                },
+          onCancel: () => {
+            setDraft('');
+            setCreating(false);
+          },
+        }
+      : null,
+    showEmpty: cards.length === 0 && !creating,
+    empty: {
+      title: t('library.emptyTitle'),
+      hint: t('library.emptyHint'),
+      icon: 'list-plus',
+    },
+    newCard: creating
+      ? null
+      : {
+          label: t('common.newPlaylist'),
+          a11yLabel: t('common.newPlaylist'),
+          onPress:
+            onCreatePlaylist === undefined
+              ? undefined
+              : () => setCreating(true),
         },
-        ...kindsPresent.map((f) => ({
-          key: f.key as LibraryKindFilter,
-          label: t(f.label),
-          active: filter === f.key,
-          onPress: () => setFilter(f.key),
-        })),
-      ],
-      creating,
-      nameField: creating
-        ? {
-            value: draft,
-            placeholder: t('common.newPlaylistName'),
-            onChange: setDraft,
-            onSubmit:
-              onCreatePlaylist === undefined
-                ? undefined
-                : (name) => {
-                    onCreatePlaylist(name);
-                    setDraft('');
-                    setCreating(false);
-                  },
-            onCancel: () => {
-              setDraft('');
-              setCreating(false);
-            },
-          }
-        : null,
-      showEmpty: cards.length === 0 && !creating,
-      empty: {
-        title: t('library.emptyTitle'),
-        hint: t('library.emptyHint'),
-        icon: 'list-plus',
-      },
-      newCard: creating
+    cards: cards.map((card) => ({
+      card,
+      a11yLabel: t('common.cardA11y', {
+        title: card.title,
+        subtitle: card.subtitle,
+      }),
+      onPress:
+        onOpenCard === undefined ? undefined : () => onOpenCard(card),
+    })),
+    artists:
+      model.artists.length === 0
         ? null
         : {
-            label: t('common.newPlaylist'),
-            a11yLabel: t('common.newPlaylist'),
-            onPress:
-              onCreatePlaylist === undefined
-                ? undefined
-                : () => setCreating(true),
+            heading: t('library.artistsHeading'),
+            items: model.artists.map((artist) => ({
+              artist,
+              a11yLabel: artist.name,
+              onPress:
+                artist.entityRef !== null && onOpenArtist !== undefined
+                  ? () => onOpenArtist(artist)
+                  : undefined,
+            })),
           },
-      cards: cards.map((card) => ({
-        card,
-        a11yLabel: t('common.cardA11y', {
-          title: card.title,
-          subtitle: card.subtitle,
-        }),
-        onPress:
-          onOpenCard === undefined ? undefined : () => onOpenCard(card),
-      })),
-      artists:
-        model.artists.length === 0
-          ? null
-          : {
-              heading: t('library.artistsHeading'),
-              items: model.artists.map((artist) => ({
-                artist,
-                a11yLabel: artist.name,
-                onPress:
-                  artist.entityRef !== null && onOpenArtist !== undefined
-                    ? () => onOpenArtist(artist)
-                    : undefined,
-              })),
-            },
-      recent:
-        model.recentlyAdded.length === 0
-          ? null
-          : {
-              heading: t('library.recentlyLiked'),
-              a11yLabel: t('library.recentlyLiked'),
-              rows: model.recentlyAdded.map((item) => ({
-                row: item,
-                onPress:
-                  onPressItem === undefined
-                    ? undefined
-                    : () => onPressItem(item.key),
-                onToggleLike:
-                  onToggleLike === undefined
-                    ? undefined
-                    : () => onToggleLike(item.key),
-                onAddToPlaylist:
-                  onAddToPlaylist === undefined
-                    ? undefined
-                    : () => onAddToPlaylist(item.key),
-                onContext:
-                  onContext === undefined
-                    ? undefined
-                    : () => onContext(item.key),
-              })),
-            },
-    };
-  }, [
-    model,
-    filter,
-    sort,
-    layout,
-    creating,
-    draft,
-    onPressItem,
-    onToggleLike,
-    onAddToPlaylist,
-    onContext,
-    onOpenCollection,
-    onPlayCollection,
-    onOpenCard,
-    onOpenArtist,
-    onCreatePlaylist,
-  ]);
+    recent:
+      model.recentlyAdded.length === 0
+        ? null
+        : {
+            heading: t('library.recentlyLiked'),
+            a11yLabel: t('library.recentlyLiked'),
+            rows: model.recentlyAdded.map((item) => ({
+              row: item,
+              onPress:
+                onPressItem === undefined
+                  ? undefined
+                  : () => onPressItem(item.key),
+              onToggleLike:
+                onToggleLike === undefined
+                  ? undefined
+                  : () => onToggleLike(item.key),
+              onAddToPlaylist:
+                onAddToPlaylist === undefined
+                  ? undefined
+                  : () => onAddToPlaylist(item.key),
+              onContext:
+                onContext === undefined
+                  ? undefined
+                  : () => onContext(item.key),
+            })),
+          },
+  };
 }
+
 
 // ---- entity -----------------------------------------------------------
 
@@ -890,101 +866,90 @@ export function useEntityScreenController({
 }: {
   readonly model: EntityScreenModel;
 } & Omit<EntityScreenHandlers, 'onBack'>): EntityScreenView {
-  return useMemo(() => {
-    if (model.phase === 'loading') {
-      return {
-        kind: 'loading',
-        title: t('state.loading'),
-        backA11yLabel: t('common.back'),
-      };
-    }
-    if (model.phase === 'error') {
-      return {
-        kind: 'error',
-        title: t('entity.errorTitle'),
-        backA11yLabel: t('common.back'),
-        hint: model.message,
-        onRetry,
-      };
-    }
-    const empty = model.items.length === 0;
+  if (model.phase === 'loading') {
     return {
-      kind: 'ready',
-      model,
+      kind: 'loading',
+      title: t('state.loading'),
       backA11yLabel: t('common.back'),
-      kindLabel:
-        model.kind === null
-          ? t('entity.kind.fallback')
-          : t(`entity.kind.${model.kind}`),
-      play: {
-        label: t('common.play'),
-        icon: 'play',
-        accent: true,
-        disabled: empty,
-        onPress: onPlayAll,
-      },
-      shuffle: {
-        label: t('entity.shuffle'),
-        icon: 'shuffle',
-        accent: false,
-        disabled: empty,
-        onPress: onShuffleAll,
-      },
-      like: {
-        icon: model.liked ? 'heart-filled' : 'heart',
-        liked: model.liked,
-        a11yLabel: model.liked ? t('common.unlike') : t('common.like'),
-        onPress: model.canLike ? onToggleLike : undefined,
-      },
-      notice:
-        !model.complete || model.message !== null
-          ? { text: model.message ?? t('entity.partial') }
-          : null,
-      body: empty
-        ? {
-            kind: 'empty',
-            title: t('entity.empty'),
-            hint: t('entity.emptyHint'),
-            icon: 'note',
-          }
-        : {
-            kind: 'rows',
-            listA11yLabel: model.title ?? undefined,
-            rows: model.items.map((item) => ({
-              row: item,
-              onPress:
-                onPressItem === undefined ? undefined : () => onPressItem(item),
-              onAddToPlaylist:
-                onAddToPlaylist === undefined
-                  ? undefined
-                  : () => onAddToPlaylist(item),
-              onContext:
-                onContext === undefined ? undefined : () => onContext(item),
-            })),
-            loadMore: model.hasMore
-              ? {
-                  busy: model.loadingMore,
-                  label: model.loadingMore
-                    ? t('state.loading')
-                    : t('entity.loadMore'),
-                  a11yLabel: t('entity.loadMore'),
-                  onPress: model.loadingMore ? undefined : onLoadMore,
-                }
-              : null,
-          },
     };
-  }, [
+  }
+  if (model.phase === 'error') {
+    return {
+      kind: 'error',
+      title: t('entity.errorTitle'),
+      backA11yLabel: t('common.back'),
+      hint: model.message,
+      onRetry,
+    };
+  }
+  const empty = model.items.length === 0;
+  return {
+    kind: 'ready',
     model,
-    onPlayAll,
-    onShuffleAll,
-    onToggleLike,
-    onPressItem,
-    onAddToPlaylist,
-    onContext,
-    onLoadMore,
-    onRetry,
-  ]);
+    backA11yLabel: t('common.back'),
+    kindLabel:
+      model.kind === null
+        ? t('entity.kind.fallback')
+        : t(`entity.kind.${model.kind}`),
+    play: {
+      label: t('common.play'),
+      icon: 'play',
+      accent: true,
+      disabled: empty,
+      onPress: onPlayAll,
+    },
+    shuffle: {
+      label: t('entity.shuffle'),
+      icon: 'shuffle',
+      accent: false,
+      disabled: empty,
+      onPress: onShuffleAll,
+    },
+    like: {
+      icon: model.liked ? 'heart-filled' : 'heart',
+      liked: model.liked,
+      a11yLabel: model.liked ? t('common.unlike') : t('common.like'),
+      onPress: model.canLike ? onToggleLike : undefined,
+    },
+    notice:
+      !model.complete || model.message !== null
+        ? { text: model.message ?? t('entity.partial') }
+        : null,
+    body: empty
+      ? {
+          kind: 'empty',
+          title: t('entity.empty'),
+          hint: t('entity.emptyHint'),
+          icon: 'note',
+        }
+      : {
+          kind: 'rows',
+          listA11yLabel: model.title ?? undefined,
+          rows: model.items.map((item) => ({
+            row: item,
+            onPress:
+              onPressItem === undefined ? undefined : () => onPressItem(item),
+            onAddToPlaylist:
+              onAddToPlaylist === undefined
+                ? undefined
+                : () => onAddToPlaylist(item),
+            onContext:
+              onContext === undefined ? undefined : () => onContext(item),
+          })),
+          loadMore: model.hasMore
+            ? {
+                busy: model.loadingMore,
+                label: model.loadingMore
+                  ? t('state.loading')
+                  : t('entity.loadMore'),
+                a11yLabel: t('entity.loadMore'),
+                onPress: model.loadingMore ? undefined : onLoadMore,
+              }
+            : null,
+        },
+  };
 }
+
 
 // ---- search -----------------------------------------------------------
 
@@ -1122,164 +1087,147 @@ export function useSearchScreenController({
   readonly recents?: readonly string[] | undefined;
   readonly suggestions?: readonly string[] | undefined;
 } & SearchScreenHandlers): SearchScreenView {
-  return useMemo(() => {
-    const loading = state.phase === 'loading';
-    const editing = query ?? state.query;
-    // Draft mode: the box carries text that was never committed as the
-    // shown query — completions own the pane until submit.
-    const draft = editing.trim() !== '' && editing.trim() !== state.query;
-    const trimmed = editing.trim();
-    return {
-      draft,
-      field: {
-        icon: 'search',
-        label: t('search.fieldLabel'),
-        value: editing,
-        readOnly: onQueryChange === undefined,
-        loading,
-        onChange: onQueryChange,
-        onSubmit,
-        cancel:
-          loading && onCancel !== undefined
-            ? {
-                label: t('common.cancel'),
-                a11yLabel: t('search.a11y.cancel'),
-                onPress: onCancel,
-              }
-            : null,
-        clear:
-          !loading && editing !== '' && onQueryChange !== undefined
-            ? {
-                icon: 'close',
-                a11yLabel: t('search.a11y.clear'),
-                onPress: () => onQueryChange(''),
-              }
-            : null,
-      },
-      suggestions: draft
+  const loading = state.phase === 'loading';
+  const editing = query ?? state.query;
+  // Draft mode: the box carries text that was never committed as the
+  // shown query — completions own the pane until submit.
+  const draft = editing.trim() !== '' && editing.trim() !== state.query;
+  const trimmed = editing.trim();
+  return {
+    draft,
+    field: {
+      icon: 'search',
+      label: t('search.fieldLabel'),
+      value: editing,
+      readOnly: onQueryChange === undefined,
+      loading,
+      onChange: onQueryChange,
+      onSubmit,
+      cancel:
+        loading && onCancel !== undefined
+          ? {
+              label: t('common.cancel'),
+              a11yLabel: t('search.a11y.cancel'),
+              onPress: onCancel,
+            }
+          : null,
+      clear:
+        !loading && editing !== '' && onQueryChange !== undefined
+          ? {
+              icon: 'close',
+              a11yLabel: t('search.a11y.clear'),
+              onPress: () => onQueryChange(''),
+            }
+          : null,
+    },
+    suggestions: draft
+      ? {
+          heading: t('search.suggestions'),
+          a11yLabel: t('search.suggestions'),
+          commit: {
+            icon: 'search',
+            label: t('search.commitQuery', { query: trimmed }),
+            a11yLabel: t('search.a11y.suggestion', { query: trimmed }),
+            onPress: onSubmit,
+          },
+          items: suggestions.map((suggestion) => ({
+            label: suggestion,
+            icon: 'search' as const,
+            a11yLabel: t('search.a11y.suggestion', { query: suggestion }),
+            onPress:
+              onSuggestionPress === undefined
+                ? undefined
+                : () => onSuggestionPress(suggestion),
+          })),
+        }
+      : null,
+    resultsHead:
+      !draft && state.phase === 'ready'
         ? {
-            heading: t('search.suggestions'),
-            a11yLabel: t('search.suggestions'),
-            commit: {
+            title: t('search.results'),
+            metaLabel: t('search.resultsMeta', {
+              provider: state.providerId ?? t('search.providerFallback'),
+              count: state.results.length,
+            }),
+          }
+        : null,
+    idle:
+      !draft && state.phase === 'idle'
+        ? recents.length > 0
+          ? {
+              kind: 'recents',
+              heading: t('search.recent'),
+              items: recents.map((recent) => ({
+                label: recent,
+                icon: 'clock' as const,
+                a11yLabel: t('search.a11y.again', { query: recent }),
+                onPress:
+                  onRecentPress === undefined
+                    ? undefined
+                    : () => onRecentPress(recent),
+              })),
+            }
+          : {
+              kind: 'empty',
+              title: t('search.emptyTitle'),
+              hint: t('search.emptyHint'),
               icon: 'search',
-              label: t('search.commitQuery', { query: trimmed }),
-              a11yLabel: t('search.a11y.suggestion', { query: trimmed }),
-              onPress: onSubmit,
-            },
-            items: suggestions.map((suggestion) => ({
-              label: suggestion,
+            }
+        : null,
+    status:
+      draft || state.phase !== 'loading' || state.results.length > 0
+        ? !draft && state.phase === 'empty'
+          ? {
+              kind: 'empty' as const,
+              title: t('search.noResults', { query: state.query }),
+              hint: t('search.noResultsHint'),
               icon: 'search' as const,
-              a11yLabel: t('search.a11y.suggestion', { query: suggestion }),
+            }
+          : !draft && state.phase === 'error'
+            ? {
+                kind: 'error' as const,
+                title: t('search.failed'),
+                hint: state.message,
+                onRetry: state.retryable ? onRetry : undefined,
+              }
+            : !draft && state.phase === 'unavailable'
+              ? {
+                  kind: 'unavailable' as const,
+                  title: t('search.unavailableTitle'),
+                  hint: state.message,
+                }
+              : null
+        : {
+            kind: 'loading' as const,
+            title: t('search.loading'),
+            hint: state.query,
+          },
+    results:
+      !draft &&
+      (state.phase === 'ready' || state.phase === 'loading') &&
+      state.results.length > 0
+        ? {
+            a11yLabel: t('search.resultsA11y'),
+            rows: state.results.map((row) => ({
+              row,
               onPress:
-                onSuggestionPress === undefined
+                onResultPress === undefined
                   ? undefined
-                  : () => onSuggestionPress(suggestion),
+                  : () => onResultPress(row),
+              onToggleLike:
+                onToggleLike === undefined
+                  ? undefined
+                  : () => onToggleLike(row),
+              onAddToPlaylist:
+                onAddToPlaylist === undefined
+                  ? undefined
+                  : () => onAddToPlaylist(row),
+              onContext:
+                onContext === undefined ? undefined : () => onContext(row),
             })),
           }
         : null,
-      resultsHead:
-        !draft && state.phase === 'ready'
-          ? {
-              title: t('search.results'),
-              metaLabel: t('search.resultsMeta', {
-                provider: state.providerId ?? t('search.providerFallback'),
-                count: state.results.length,
-              }),
-            }
-          : null,
-      idle:
-        !draft && state.phase === 'idle'
-          ? recents.length > 0
-            ? {
-                kind: 'recents',
-                heading: t('search.recent'),
-                items: recents.map((recent) => ({
-                  label: recent,
-                  icon: 'clock' as const,
-                  a11yLabel: t('search.a11y.again', { query: recent }),
-                  onPress:
-                    onRecentPress === undefined
-                      ? undefined
-                      : () => onRecentPress(recent),
-                })),
-              }
-            : {
-                kind: 'empty',
-                title: t('search.emptyTitle'),
-                hint: t('search.emptyHint'),
-                icon: 'search',
-              }
-          : null,
-      status:
-        draft || state.phase !== 'loading' || state.results.length > 0
-          ? !draft && state.phase === 'empty'
-            ? {
-                kind: 'empty' as const,
-                title: t('search.noResults', { query: state.query }),
-                hint: t('search.noResultsHint'),
-                icon: 'search' as const,
-              }
-            : !draft && state.phase === 'error'
-              ? {
-                  kind: 'error' as const,
-                  title: t('search.failed'),
-                  hint: state.message,
-                  onRetry: state.retryable ? onRetry : undefined,
-                }
-              : !draft && state.phase === 'unavailable'
-                ? {
-                    kind: 'unavailable' as const,
-                    title: t('search.unavailableTitle'),
-                    hint: state.message,
-                  }
-                : null
-          : {
-              kind: 'loading' as const,
-              title: t('search.loading'),
-              hint: state.query,
-            },
-      results:
-        !draft &&
-        (state.phase === 'ready' || state.phase === 'loading') &&
-        state.results.length > 0
-          ? {
-              a11yLabel: t('search.resultsA11y'),
-              rows: state.results.map((row) => ({
-                row,
-                onPress:
-                  onResultPress === undefined
-                    ? undefined
-                    : () => onResultPress(row),
-                onToggleLike:
-                  onToggleLike === undefined
-                    ? undefined
-                    : () => onToggleLike(row),
-                onAddToPlaylist:
-                  onAddToPlaylist === undefined
-                    ? undefined
-                    : () => onAddToPlaylist(row),
-                onContext:
-                  onContext === undefined ? undefined : () => onContext(row),
-              })),
-            }
-          : null,
-    };
-  }, [
-    state,
-    query,
-    recents,
-    suggestions,
-    onQueryChange,
-    onSubmit,
-    onCancel,
-    onRetry,
-    onResultPress,
-    onToggleLike,
-    onAddToPlaylist,
-    onContext,
-    onRecentPress,
-    onSuggestionPress,
-  ]);
+  };
 }
 
 // ---- stage (now-playing screen ↔ stage sheet) -------------------------
@@ -1501,75 +1449,56 @@ export function useTransportView({
   onCycleRepeat,
   onDownload,
 }: TransportInput): TransportView {
-  return useMemo(
-    () => ({
-      a11yLabel: t('player.a11y.transport'),
-      busy: status === 'preparing' || status === 'buffering',
-      playing: intentPlaying,
-      like: {
-        icon: liked ? 'heart-filled' : 'heart',
-        liked,
-        a11yLabel: liked ? t('common.unlike') : t('common.like'),
-        active: liked,
-        onPress: onToggleLike,
-      },
-      shuffle: {
-        icon: 'shuffle',
-        a11yLabel: t('common.shuffle'),
-        disabled: onToggleShuffle === undefined,
-        active: shuffle,
-        onPress: onToggleShuffle,
-      },
-      previous: {
-        icon: 'previous',
-        a11yLabel: t('common.previous'),
-        disabled: !canPrevious,
-        onPress: onPrevious,
-      },
-      play: {
-        a11yLabel: intentPlaying ? t('common.pause') : t('common.play'),
-        pressed: intentPlaying,
-        onPress: onPlayPause,
-      },
-      next: {
-        icon: 'next',
-        a11yLabel: t('common.next'),
-        disabled: !canNext,
-        onPress: onNext,
-      },
-      repeat: {
-        icon: repeat === 'one' ? 'repeat-one' : 'repeat',
-        a11yLabel:
-          repeat === 'one'
-            ? t('common.repeatOne')
-            : repeat === 'all'
-              ? t('common.repeatAll')
-              : t('common.repeat'),
-        active: repeat !== 'off',
-        disabled: onCycleRepeat === undefined,
-        onPress: onCycleRepeat,
-      },
-      download:
-        download === null ? null : downloadButtonView(download, onDownload),
-    }),
-    [
-      status,
-      intentPlaying,
+  return {
+    a11yLabel: t('player.a11y.transport'),
+    busy: status === 'preparing' || status === 'buffering',
+    playing: intentPlaying,
+    like: {
+      icon: liked ? 'heart-filled' : 'heart',
       liked,
-      canPrevious,
-      canNext,
-      shuffle,
-      repeat,
-      download,
-      onPlayPause,
-      onPrevious,
-      onNext,
-      onToggleLike,
-      onToggleShuffle,
-      onCycleRepeat,
-      onDownload,
-    ],
-  );
+      a11yLabel: liked ? t('common.unlike') : t('common.like'),
+      active: liked,
+      onPress: onToggleLike,
+    },
+    shuffle: {
+      icon: 'shuffle',
+      a11yLabel: t('common.shuffle'),
+      disabled: onToggleShuffle === undefined,
+      active: shuffle,
+      onPress: onToggleShuffle,
+    },
+    previous: {
+      icon: 'previous',
+      a11yLabel: t('common.previous'),
+      disabled: !canPrevious,
+      onPress: onPrevious,
+    },
+    play: {
+      a11yLabel: intentPlaying ? t('common.pause') : t('common.play'),
+      pressed: intentPlaying,
+      onPress: onPlayPause,
+    },
+    next: {
+      icon: 'next',
+      a11yLabel: t('common.next'),
+      disabled: !canNext,
+      onPress: onNext,
+    },
+    repeat: {
+      icon: repeat === 'one' ? 'repeat-one' : 'repeat',
+      a11yLabel:
+        repeat === 'one'
+          ? t('common.repeatOne')
+          : repeat === 'all'
+            ? t('common.repeatAll')
+            : t('common.repeat'),
+      active: repeat !== 'off',
+      disabled: onCycleRepeat === undefined,
+      onPress: onCycleRepeat,
+    },
+    download:
+      download === null ? null : downloadButtonView(download, onDownload),
+  };
 }
 
 /**
