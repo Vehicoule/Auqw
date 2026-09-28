@@ -4963,11 +4963,13 @@ export class Session {
 
   #onPlayerEvent(event: PlayerEvent): void {
     // Serialized chain: no fire-and-forget, drainable, errors mapped.
-    this.#eventSerial
-      .run(() => this.#handleEvent(event))
-      .catch(() => {
+    // The catch is part of the lane's work so drain() also awaits the
+    // error callback — not just the handler that rejected.
+    this.#eventSerial.run(() =>
+      this.#handleEvent(event).catch(() => {
         this.#logWarn('player event handling failed');
-      });
+      }),
+    );
   }
 
   async #handleEvent(event: PlayerEvent): Promise<void> {
