@@ -2560,6 +2560,84 @@ async function sumSaturation(): Promise<void> {
   assertEqual(fields?.['count'], Number.MAX_SAFE_INTEGER);
 }
 
+async function peerMarkWriteRetriesUntilDurable(): Promise<void> {
+  const store = new FakeSyncLogStore();
+  const realAppend = store.append.bind(store);
+  let armed = false;
+  store.append = (write, context) => {
+    if (armed && write.peerMarks !== undefined) {
+      armed = false;
+      return Promise.resolve({
+        ok: false as const,
+        error: appError('transient', 'simulated store failure'),
+      });
+    }
+    return realAppend(write, context);
+  };
+  const a = await makeEngine('a', 1_000, store);
+  await mustApply(a.engine, { ...delta([], 'b'), cursor: { a: 1 } });
+  assertDeepEqual(a.store.storedPeerMarks['b'], { a: 1 });
+  armed = true;
+  // The peer-mark write fails — the folded row must stay pending
+  // rather than being silently forgotten, or a restart would
+  // remember nothing about 'b' and compaction could drop entries
+  // the peer still needed to catch up.
+  await mustApply(a.engine, { ...delta([], 'b'), cursor: { a: 2 } });
+  assertDeepEqual(a.store.storedPeerMarks['b'], { a: 1 });
+  // An unchanged cursor still retries the pending row — the flag
+  // only clears when a write carrying it confirms.
+  await mustApply(a.engine, { ...delta([], 'b'), cursor: { a: 2 } });
+  assertDeepEqual(a.store.storedPeerMarks['b'], { a: 2 });
+}
+
+async function peerMarkTableEvictsLeastRecent(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  // Distinct senders accumulate over a device's lifetime — the table
+  // must bound them: past the cap the least-recently-claimed rows
+  // evict, keeping the durable table inside isPeerMarks' sender
+  // bound so a restart can always hydrate.
+  for (let i = 0; i < 515; i++) {
+    await mustApply(a.engine, {
+      ...delta([], `dev-${i}`),
+      cursor: { a: i + 1 },
+    });
+  }
+  const stored = a.store.storedPeerMarks;
+  assert(
+    Object.keys(stored).length <= 512,
+    `stored table must stay bounded, got ${Object.keys(stored).length}`,
+  );
+  assert(stored['dev-0'] === undefined, 'oldest claim evicted');
+  assert(stored['dev-2'] === undefined, 'third claim evicted');
+  assertDeepEqual(stored['dev-3'], { a: 4 });
+  assertDeepEqual(stored['dev-514'], { a: 515 });
+  // The persisted table stayed inside the bound a load validates —
+  // a restart hydrates instead of wedging sync startup.
+  await makeEngine('a', 2_000, a.store);
+}
+
+async function peerMarkRowClamps(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  // A folded row is bounded to the wire's source count — successive
+  // disjoint claims keep the largest marks, so a dropped source only
+  // delays that lane's compaction rather than crediting a wrong seq.
+  const first: Record<string, number> = {};
+  for (let i = 0; i < 512; i++) {
+    first[`src-${i}`] = i + 1;
+  }
+  await mustApply(a.engine, { ...delta([], 'b'), cursor: first });
+  const second: Record<string, number> = {};
+  for (let i = 512; i < 600; i++) {
+    second[`src-${i}`] = i + 1_000;
+  }
+  await mustApply(a.engine, { ...delta([], 'b'), cursor: second });
+  const row = a.store.storedPeerMarks['b'] ?? {};
+  assert(Object.keys(row).length <= 512, 'row stays inside the source bound');
+  assert(row['src-599'] === 1599, 'largest marks kept');
+  assert(row['src-88'] === 89, 'above-minimum marks kept');
+  assert(row['src-0'] === undefined, 'smallest mark displaced');
+}
+
 async function logCompaction(): Promise<void> {
   const a = await makeEngine('a', 1_000);
   const b = await makeEngine('b', 1_000);
@@ -2795,5 +2873,8 @@ export async function run(): Promise<void> {
   await equalFrontierValuesSkipDivergence();
   await peerMarksSurviveRestart();
   await rebuiltPeerDropsStaleMarks();
+  await peerMarkWriteRetriesUntilDurable();
+  await peerMarkTableEvictsLeastRecent();
+  await peerMarkRowClamps();
   await propertyHarness();
 }

@@ -1487,7 +1487,11 @@ export class FakeSyncLogStore implements SyncLogStore {
         !write.divergenceDroppedEmissions.every(
           (ordinal) => isSafeNonNegative(ordinal) && ordinal >= 1,
         )) ||
-      (write.peerMarks !== undefined && !isPeerMarks(write.peerMarks))
+      (write.peerMarks !== undefined && !isPeerMarks(write.peerMarks)) ||
+      (write.dropPeerMarkSenders !== undefined &&
+        !write.dropPeerMarkSenders.every(
+          (sender) => typeof sender === 'string',
+        ))
     ) {
       return err(
         appError('invalid-response', 'append batch failed validation'),
@@ -1527,6 +1531,11 @@ export class FakeSyncLogStore implements SyncLogStore {
         if (current === undefined || mark > current) {
           this.#watermarks[device] = mark;
         }
+      }
+    }
+    if (write.dropPeerMarkSenders !== undefined) {
+      for (const sender of write.dropPeerMarkSenders) {
+        delete this.#peerMarks[sender];
       }
     }
     if (write.peerMarks !== undefined) {

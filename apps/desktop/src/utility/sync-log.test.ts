@@ -357,6 +357,7 @@ export async function run(): Promise<void> {
     for (const write of [
       { peerMarks: { 'dsk-b': { 'dsk-a': 2 }, 'dsk-c': { 'dsk-a': 4 } } },
       { peerMarks: { 'dsk-b': {} } },
+      { dropPeerMarkSenders: ['dsk-c'] },
     ] as const) {
       const appended = await opened.value.store.append(write, ctx());
       assert(appended.ok);
@@ -369,10 +370,51 @@ export async function run(): Promise<void> {
     const loaded = await reopened.value.store.load(ctx());
     assert(loaded.ok);
     if (loaded.ok) {
-      assertDeepEqual(loaded.value.peerMarks, {
-        'dsk-b': {},
-        'dsk-c': { 'dsk-a': 4 },
-      });
+      assertDeepEqual(loaded.value.peerMarks, { 'dsk-b': {} });
+    }
+  }
+
+  // —— Checkpoint splits peer-mark rows into bounded lines ——
+  {
+    // The aggregated table is sized senders × sources — emitted as
+    // one meta line it would outgrow MAX_LINE_BYTES and reopen as
+    // corruption. One sender per line stays bounded at any width.
+    const dir = await freshDir();
+    const path = join(dir, 'sync-log.jsonl');
+    const opened = await openSyncLogStore(path);
+    assert(opened.ok);
+    if (!opened.ok) {
+      return;
+    }
+    const row: Record<string, number> = {};
+    for (let i = 0; i < 512; i++) {
+      row[`src-${'s'.repeat(110)}-${i}`] = i;
+    }
+    // ~400 senders x ~65 KiB rows — the aggregated line would pass
+    // 20 MiB, the same shape the review flagged.
+    for (let s = 0; s < 400; s++) {
+      const appended = await opened.value.store.append(
+        { peerMarks: { [`peer-${'p'.repeat(100)}-${s}`]: row } },
+        ctx(),
+      );
+      assert(appended.ok);
+    }
+    const dropped = await opened.value.store.append(
+      { dropEntries: [{ deviceId: 'dsk-gone', seq: 1 }] },
+      ctx(),
+    );
+    assert(dropped.ok);
+    const reopened = await openSyncLogStore(path);
+    assert(reopened.ok);
+    if (!reopened.ok) {
+      return;
+    }
+    const loaded = await reopened.value.store.load(ctx());
+    assert(loaded.ok);
+    if (loaded.ok) {
+      const marks = loaded.value.peerMarks ?? {};
+      assertEqual(Object.keys(marks).length, 400);
+      assertDeepEqual(marks[`peer-${'p'.repeat(100)}-7`], row);
     }
   }
 
