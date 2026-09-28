@@ -701,9 +701,9 @@ export function StageSheet({
   // starts rising (a mid-flight drag must never reveal bare surface)
   // and unmounts only once the morph is fully back at the pill — the
   // settle-back path still gets its backdrop. A frame of JS latency
-  // costs nothing here; the dismiss surface's touch gate can't wait
-  // on this hop, so it rides the UI thread instead (below).
-  const [artworkOn, setArtworkOn] = useState(expanded);
+  // costs nothing for the art; the dismiss surface's touch gate can't
+  // wait on this hop, so it rides the UI thread instead (below).
+  const [risenOn, setRisenOn] = useState(expanded);
   // `expanded` mirrored onto the UI thread — the reaction below must
   // read a shared value; a captured ref only snapshots at worklet
   // creation and would pin a sheet mounted-expanded forever.
@@ -715,7 +715,7 @@ export function StageSheet({
     () => progress.value > 0.001,
     (risen, prev) => {
       if (risen === prev) return;
-      scheduleOnRN(setArtworkOn, risen || expandedShared.value);
+      scheduleOnRN(setRisenOn, risen || expandedShared.value);
     },
     [progress],
   );
@@ -732,6 +732,12 @@ export function StageSheet({
       importantForAccessibility: on ? 'auto' : 'no-hide-descendants',
     } as const;
   });
+  // The same gate in JS truth for the surface's base props: RNW maps
+  // pointerEvents to a style class, not a prop the worklet can write
+  // — non-style animated props land as inert DOM attributes on web —
+  // so the React gate is what web ever sees; on native the UI-thread
+  // gate overrides the base the moment the morph moves.
+  const dismissTouchable = risenOn || expanded;
 
   const body = (
     <>
@@ -1136,13 +1142,19 @@ export function StageSheet({
           scrimStyle,
         ]}
       />
-      {/* Dismiss surface — always mounted, gated on the UI thread:
-          it intercepts the same frame the sheet lifts off the pill,
-          so taps on the uncovered region (or through the parked
-          sheet's pointerEvents=none mid-morph) collapse the morph
-          instead of leaking to content underneath. */}
+      {/* Dismiss surface — always mounted: taps on the uncovered
+          region (or through the parked sheet's pointerEvents=none
+          mid-morph) collapse the morph instead of leaking to content
+          underneath. The UI-thread gate intercepts the same frame
+          the sheet lifts; the base props mirror the same truth for
+          web, where non-style animated props are inert attributes. */}
       <Animated.View
         animatedProps={dismissSurfaceProps}
+        pointerEvents={dismissTouchable ? 'auto' : 'none'}
+        accessibilityElementsHidden={!dismissTouchable}
+        importantForAccessibility={
+          dismissTouchable ? 'auto' : 'no-hide-descendants'
+        }
         style={StyleSheet.absoluteFill}
       >
         <Pressable
@@ -1179,7 +1191,7 @@ export function StageSheet({
             artwork and controls fade in through the pill's fade window
             and are fully present at the input gate. */}
         <Animated.View style={[StyleSheet.absoluteFill, contentStyle]}>
-          {immersive && artworkOn && (
+          {immersive && risenOn && (
             <PlayerBackdrop artworkUrl={player.artworkUrl} />
           )}
           {immersive ? (
