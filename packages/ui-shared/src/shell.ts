@@ -540,19 +540,16 @@ export function overlayReducer<O>(
 export function useOverlayStack<O>(): OverlayStack<O> {
   const [stack, setStack] = useState<readonly OverlayEntry<O>[]>([]);
   const counter = useRef(0);
-  const nextKey = () => `ov-${(counter.current += 1)}`;
   const push = useCallback((next: O) => {
+    const key = `ov-${(counter.current += 1)}`;
     setStack((stack) =>
-      overlayReducer(stack, { type: 'push', key: nextKey(), overlay: next }),
+      overlayReducer(stack, { type: 'push', key, overlay: next }),
     );
   }, []);
   const reset = useCallback((next: O) => {
+    const key = `ov-${(counter.current += 1)}`;
     setStack((stack) =>
-      overlayReducer(stack, {
-        type: 'reset',
-        key: nextKey(),
-        overlay: next,
-      }),
+      overlayReducer(stack, { type: 'reset', key, overlay: next }),
     );
   }, []);
   /** Pop the top route — every screen's own back affordance. */
