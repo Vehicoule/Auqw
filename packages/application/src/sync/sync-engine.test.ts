@@ -1787,6 +1787,22 @@ async function materializedFieldValidation(): Promise<void> {
     }),
     'over-long field name is rejected',
   );
+  assert(
+    !isMaterializedRecord({
+      kind: 'recording',
+      recordId: 'r1',
+      fields: { title: 'ok', constructor: 'x' },
+    }),
+    'a prototype-named field misses the whitelist, not crashes',
+  );
+  assert(
+    !isMaterializedRecord(
+      JSON.parse(
+        '{"kind":"recording","recordId":"r1","fields":{"title":"ok","__proto__":"x"}}',
+      ),
+    ),
+    'a wire __proto__ field misses the whitelist, not crashes',
+  );
 }
 
 async function expiredHistoryPagination(): Promise<void> {

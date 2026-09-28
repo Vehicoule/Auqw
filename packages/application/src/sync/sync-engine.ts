@@ -803,7 +803,11 @@ export function syncFieldRule(
   kind: SyncRecordKind,
   field: string,
 ): FieldRule | undefined {
-  return SYNC_FIELD_RULES[kind][field];
+  const rules = SYNC_FIELD_RULES[kind];
+  // Own-name match only — a wire field literally named 'constructor'
+  // (or any Object.prototype member) must miss, not resolve the
+  // inherited entry and crash on a non-rule object.
+  return Object.hasOwn(rules, field) ? rules[field] : undefined;
 }
 
 export function isChangeEntry(value: unknown): value is ChangeEntry {
