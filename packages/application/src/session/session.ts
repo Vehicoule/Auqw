@@ -22,8 +22,8 @@ import {
   isEntityRef,
   isSafeNonNegative,
   isSettings,
-  isSourceRef,
   isString,
+
   isTrackMetadata,
   isTrackRef,
   mergeRecordingMetadata,
@@ -86,8 +86,6 @@ import type {
   EntityPage,
   LyricsQuery,
   ProviderPort,
-  RadioPage,
-  RadioSeed,
   RecordingQuery,
 } from '../ports/provider.ts';
 import {
@@ -103,32 +101,21 @@ import { QueueEngine } from '../queue/queue-engine.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import {
   emissionWrites,
-  projectAppliedEntries,
-  projectMaterialized,
   recordingDeleteWrites,
   recordingUpsertWrites,
-  unsyncedWrites,
 } from '../sync/sync-projection.ts';
-import type { SyncEmitInput } from '../sync/sync-projection.ts';
-import { utf8ByteLength } from '../sync/sync-wire.ts';
 import type {
   LocalWrite,
   MaterializedRecord,
   MergeOutcome,
 } from '../sync/sync-engine.ts';
-import {
-  isRadioPage,
-  planRadioPage,
-  publishRadio,
-  remainingAfterCurrent,
-  samePublishedRadio,
-  shouldGrowRadio,
-  RADIO_DRAIN_CHASE_PAGES,
-  RADIO_FETCH_AHEAD,
-} from '../queue/radio-tail.ts';
-import type { RadioTail, RadioTailRecord } from '../queue/radio-tail.ts';
+import { publishRadio, samePublishedRadio } from '../queue/radio-tail.ts';
+import type { RadioTail } from '../queue/radio-tail.ts';
+
 import { Serializer } from './serializer.ts';
 import { LibraryService } from './library-service.ts';
+import { RadioCoordinator } from './radio-coordinator.ts';
+import { SyncIngress } from './sync-ingress.ts';
 import { internalError, timeoutError } from './util.ts';
 import { syncEmitInput } from './ready.ts';
 import type { Ready } from './ready.ts';
@@ -296,23 +283,6 @@ const PREPARE_CALL_BUDGET = 2;
 // Status ticks fire ~1 s; a position delta above this between ticks
 // is a seek/jump, not played time.
 const MAX_TICK_DELTA_MS = 2_500;
-/** Desktop's sync:localChanges channel caps one batch at 256 writes. */
-const SYNC_EMIT_CHUNK = 256;
-/**
- * Emit chunks also bound by encoded size: the channel's result is a
- * small ack, but the REQUEST itself must stay well under the wire
- * doc cap — a count-only bound let ~16 MiB of writes ride one call
- * (Review #46 round-9). One write can never exceed the field cap,
- * so every write fits a fresh chunk alone; the head-drop branch is
- * only a belt for a value that slips past its own field bound.
- */
-const SYNC_EMIT_BYTES = 768 * 1024;
-/** Retained emit backlog bound — drop-oldest past it. */
-const SYNC_EMIT_PENDING_MAX = 2_048;
-/** Post-projection pending bound — unresolved inserts waiting on
- *  parent rows; drop-newest past it. Never bounds a fresh drain. */
-const SYNC_APPLY_PENDING_MAX = 2_048;
-
 /**
  * Visible-row warming bounds: a surface hands at most this many refs
  * or recording ids per `prewarm` call — the ~9-row viewport.
@@ -347,8 +317,6 @@ const WARM_EXPIRY_MARGIN_MS = 60_000;
  * minted it are still on screen.
  */
 const SURFACE_WARM_TTL_MS = 120_000;
-
-const SYNC_APPLY_STABLE: SyncApplyReport = { rehydrateMedia: false };
 
 /**
  * A stored stream handle that no longer resolves registry-side —
@@ -569,105 +537,6 @@ function listenCycleBaseline(
   return counts;
 }
 
-function appliedOutcomeKey(outcome: MergeOutcome): string {
-  if (outcome.type !== 'applied') {
-    return '';
-  }
-  const entry = outcome.entry;
-  return `${entry.deviceId}${entry.hlc.l}${entry.hlc.c}`;
-}
-
-/**
- * Only 'applied' outcomes feed the fold; dedupe by entry key so a
- * redelivered outcome can't double-apply, and bound the hold so a
- * permanently unmaterializable record can't grow memory.
- */
-function boundSyncPending(
-  outcomes: readonly MergeOutcome[],
-): MergeOutcome[] {
-  const seen = new Set<string>();
-  const out: MergeOutcome[] = [];
-  for (const outcome of outcomes) {
-    if (outcome.type !== 'applied') {
-      continue;
-    }
-    const key = appliedOutcomeKey(outcome);
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    out.push(outcome);
-    if (out.length >= SYNC_APPLY_PENDING_MAX) {
-      break;
-    }
-  }
-  return out;
-}
-
-/**
- * Failure-path retention: the union still feeds the next drain, but
- * bounded and deduped like the success path — a growing failure loop
- * can't grow memory unboundedly (Review #46). Evicted outcomes are
- * recoverable via `applyMaterializedEntries` — the engine's durable
- * log still holds them; the typed warn marks the loss window.
- */
-function retainSyncPending(
-  union: readonly MergeOutcome[],
-  warn: (message: string) => void,
-): MergeOutcome[] {
-  const retained = boundSyncPending(union);
-  const eligible = union.reduce(
-    (n, o) => n + (o.type === 'applied' ? 1 : 0),
-    0,
-  );
-  if (retained.length < eligible) {
-    warn('sync pending bound evicted applied outcomes');
-  }
-  return retained;
-}
-
-/**
- * Bound + dedupe materialized pending: same (kind, recordId) re-served
- * is a newer snapshot — last wins; evictions drop the OLDEST pending
- * record and warn, matching the outcome-side bound.
- */
-function boundMaterializedPending(
-  records: readonly MaterializedRecord[],
-): MaterializedRecord[] {
-  const seen = new Set<string>();
-  const out: MaterializedRecord[] = [];
-  for (let i = records.length - 1; i >= 0; i -= 1) {
-    const rec = records[i];
-    if (rec === undefined) {
-      continue;
-    }
-    const key = `${rec.kind}\u001f${rec.recordId}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    out.unshift(rec);
-    if (out.length >= SYNC_APPLY_PENDING_MAX) {
-      break;
-    }
-  }
-  return out;
-}
-
-function retainMaterializedPending(
-  union: readonly MaterializedRecord[],
-  warn: (message: string) => void,
-): MaterializedRecord[] {
-  const retained = boundMaterializedPending(union);
-  const eligible = new Set(
-    union.map((rec) => `${rec.kind}\u001f${rec.recordId}`),
-  ).size;
-  if (retained.length < eligible) {
-    warn('sync materialized pending bound evicted records');
-  }
-  return retained;
-}
-
 /**
  * What a staged write produces: the section batch to commit plus the
  * in-memory apply. An omitted `batch` means nothing durable changed
@@ -817,7 +686,8 @@ export class Session {
   readonly #storageSerial = new Serializer();
   readonly #corrections: Corrections;
   readonly #library: LibraryService;
-  readonly #radioSerial = new Serializer();
+  readonly #syncIngress: SyncIngress;
+  readonly #radio: RadioCoordinator;
   readonly #entitySerial = new Serializer();
   #listeners = new Set<(state: SessionState) => void>();
   /**
@@ -915,43 +785,10 @@ export class Session {
   /** Provider the in-flight row warm routes through — adoption and
    * settings-change cancellation both key on it. */
   #warmBatchProvider: string | null = null;
-  /**
-   * One auto-seed attempt per tail occurrence — set when the lazy
-   * radio arms itself on the queue's last item (and when the user
-   * disarms while it plays), so repeated #derived ticks on that
-   * item never reseed in a loop. The suppression clears implicitly:
-   * the next current occurrence carries a different id.
-   */
-  #radioAutoSeedOccurrence: string | null = null;
-  /**
-   * Bumped whenever an armed tail is cleared. An auto-seed queued
-   * behind the radio lane aborts on a stale epoch — a user's disarm
-   * or a replacement seed must never be undone by an arm scheduled
-   * before it.
-   */
-  #radioArmEpoch = 0;
   readonly #localPlaybackFor: (recordingId: string) => string | null;
   readonly #isOnline: () => boolean;
   readonly #isMetered: () => boolean;
   readonly #sync: SyncEmitPort | undefined;
-  /**
-   * Emitted writes waiting on the emit port — session-scoped so an
-   * import's Ready swap can't strand them. Drained FIFO, chunked to
-   * the desktop channel's write cap; a failed drain keeps the chunk
-   * for the next emission. Drop-oldest bound: a permanently dead
-   * port degrades to the newest writes, never unbounded memory.
-   */
-  #syncEmitPending: LocalWrite[] = [];
-  readonly #syncSerial = new Serializer();
-  /**
-   * Recording ids owed a matchReview tombstone emission. The review
-   * ids live only in the persisted section — a load that fails after
-   * the delete committed would otherwise drop the tombstones forever
-   * and a peer re-upserting its orphan review would wedge sync on the
-   * referential check. Retained until an emission's load succeeds;
-   * `emitUnsynced` re-kicks the drain for survivors of a ready swap.
-   */
-  #reviewTombstoneIds = new Set<string>();
   #restorePromise: Promise<Result<void>> | null = null;
 
   constructor(deps: SessionDeps) {
@@ -1009,7 +846,7 @@ export class Session {
         derived: () => this.#derived(),
         enqueueStorage: (fn) => this.#enqueueStorage(fn),
         persist: (batch) => this.#persist(batch),
-        emitSync: (writes) => this.#emitSync(writes),
+        emitSync: (writes) => this.#syncIngress.emit(writes),
         own: (work) => this.#own(work),
         trackSource: (source) => {
           this.#opSources.add(source);
@@ -1040,6 +877,74 @@ export class Session {
           this.#restorePromise = null;
           return this.restore();
         },
+      },
+    });
+    this.#syncIngress = new SyncIngress({
+      storage: deps.storage,
+      sync: deps.sync,
+      host: {
+        ready: () => this.#ready,
+        requireReady: () => this.#requireReady(),
+        publish: () => this.#publish(),
+        derived: () => this.#derived(),
+        own: (work) => this.#own(work),
+        logWarn: (message) => this.#logWarn(message),
+        hasProvider: (id) => this.#providers.has(id),
+        enqueueStorage: (fn, options) => this.#enqueueStorage(fn, options),
+        trackSource: (source) => {
+          this.#opSources.add(source);
+          return () => {
+            this.#opSources.delete(source);
+          };
+        },
+        deadline: () => this.#deadline(),
+        newContext: (prefix, deadlineMs, signal) =>
+          this.#newContext(prefix, deadlineMs, signal),
+        withDeadline: (operation, absoluteDeadlineMs, operationSource) =>
+          this.#withDeadline(
+            operation,
+            absoluteDeadlineMs,
+            operationSource,
+          ),
+      },
+    });
+    this.#radio = new RadioCoordinator({
+      storage: deps.storage,
+      ids: deps.ids,
+      router: this.#router,
+      host: {
+        ready: () => this.#ready,
+        requireReady: () => this.#requireReady(),
+        publish: () => this.#publish(),
+        derived: () => this.#derived(),
+        own: (work) => this.#own(work),
+        disposed: () => this.#disposed,
+        dealtOrder: (r) => this.#dealtOrder(r),
+        isOnline: () => this.#isOnline(),
+        localPlaybackFor: (recordingId) =>
+          this.#localPlaybackFor(recordingId),
+        activeAttempt: () => this.#active,
+        playOccurrence: (occurrenceId) =>
+          this.playOccurrence(occurrenceId),
+        logWarn: (message) => this.#logWarn(message),
+        enqueueStorage: (fn) => this.#enqueueStorage(fn),
+        emitSync: (writes) => this.#syncIngress.emit(writes),
+        trackSource: (source) => {
+          this.#opSources.add(source);
+          return () => {
+            this.#opSources.delete(source);
+          };
+        },
+        safeNow: () => this.#safeNow(),
+        deadline: () => this.#deadline(),
+        newContext: (prefix, deadlineMs, signal) =>
+          this.#newContext(prefix, deadlineMs, signal),
+        withDeadline: (operation, absoluteDeadlineMs, operationSource) =>
+          this.#withDeadline(
+            operation,
+            absoluteDeadlineMs,
+            operationSource,
+          ),
       },
     });
     this.#playerUnsub = deps.player.subscribe((event) => {
@@ -1390,44 +1295,6 @@ export class Session {
     });
   }
 
-  /**
-   * The projection input a sync apply needs beyond the Ready mirror —
-   * loaded once per drain, then reused by the drain's remaining apply
-   * segments. The cache lives on `r` so a Ready swap drops it whole.
-   */
-  async #syncApplySections(
-    r: Ready,
-    source: CancellationSource,
-    deadlineMs: number,
-  ): Promise<Result<SyncApplySections>> {
-    if (r.syncApplyCache !== null) {
-      return ok(r.syncApplyCache);
-    }
-    const loaded = await this.#withDeadline(
-      () =>
-        this.#storage.load(
-          this.#newContext('load', deadlineMs, source.signal),
-        ),
-      deadlineMs,
-      source,
-    );
-    if (!loaded.ok) {
-      return err(loaded.error);
-    }
-    if (!isPersistedState(loaded.value)) {
-      return err(
-        appError('invalid-response', 'persisted state failed validation'),
-      );
-    }
-    r.syncApplyCache = {
-      matchReviews: loaded.value.matchReviews,
-      lyricsCache: loaded.value.lyricsCache,
-      downloads: loaded.value.downloads,
-      localFiles: loaded.value.localFiles,
-    };
-    return ok(r.syncApplyCache);
-  }
-
   /** Bounded, nonfatal persistence. Failures publish persistenceError. */
   async #persist(
     batch: StorageBatch | (() => StorageBatch),
@@ -1465,7 +1332,7 @@ export class Session {
         if (committed.ok) {
           // Post-commit and best-effort: emission never rolls the
           // domain write back — it only feeds the change log.
-          this.#emitSync(emissionWrites(syncEmitInput(generation), evaluated));
+          this.#syncIngress.emit(emissionWrites(syncEmitInput(generation), evaluated));
         }
         return committed;
       });
@@ -1532,7 +1399,7 @@ export class Session {
           r.persistenceError = undefined;
           // Same post-commit seam as #persist — `r` still holds the
           // pre-apply sections the batch diffs against.
-          this.#emitSync(emissionWrites(syncEmitInput(r), batch));
+          this.#syncIngress.emit(emissionWrites(syncEmitInput(r), batch));
         }
         const outcome = apply(r);
         this.#publish();
@@ -1667,8 +1534,8 @@ export class Session {
     this.#maybeMapSuccessor();
     this.#maybeWarmWindow();
     this.#maybeWarmStream();
-    this.#maybeGrowRadio();
-    this.#maybeArmRadio();
+    this.#radio.maybeGrowRadio();
+    this.#radio.maybeArmRadio();
     // A drained queue with an armed tail may be mid-chase or waiting
     // on a reconnect — re-evaluate so offline-stranded chases resume.
     const cur = this.#ready;
@@ -1678,132 +1545,11 @@ export class Session {
       rec !== null &&
       cur.queue.snapshot().currentOccurrenceId === null
     ) {
-      this.#resumeDrainedQueue(cur, rec, undefined);
+      this.#radio.resumeDrainedQueue(cur, rec, undefined);
     }
   }
 
-  // ---- sync emission ------------------------------------------------
-  //
-  // Emission is post-commit and best-effort: the domain write is
-  // already durable, so a failed emit leaves the change log behind
-  // — never a rollback. Writes queue onto `#syncEmitPending` and a
-  // single tail drains them to the emit port in channel-sized chunks.
-
-  /**
-   * Queue the mapped writes and kick the drain. Called inside the
-   * storage segment right after a successful syncable commit — the
-   * drain itself is async port work, so it never holds the tail.
-   * A fresh commit's writes are NEVER truncated — the bound below
-   * applies only to a backlog that keeps failing to send.
-   */
-  #emitSync(writes: readonly LocalWrite[]): void {
-    // Queue even during dispose — dispose runs one final graceful
-    // drain after owned work settles, and a commit landing inside it
-    // still deserves its emission (Review #46).
-    if (this.#sync === undefined || writes.length === 0) {
-      return;
-    }
-    this.#syncEmitPending.push(...writes);
-    this.#own(this.#drainSyncEmit());
-  }
-
-  #drainSyncEmit(): Promise<void> {
-    return this.#syncSerial.run(() => this.#drainEmitPending());
-  }
-
-  async #drainEmitPending(): Promise<void> {
-    const sync = this.#sync;
-    if (sync === undefined) {
-      return;
-    }
-    while (this.#syncEmitPending.length > 0) {
-      const chunk = this.#syncEmitChunk();
-      if (chunk.length === 0) {
-        continue;
-      }
-      const source = new CancellationSource();
-      this.#opSources.add(source);
-      let sent: Result<unknown>;
-      try {
-        const deadlineMs = this.#deadline();
-        sent = await this.#withDeadline(
-          () => sync.localChanges(chunk, source.signal),
-          deadlineMs,
-          source,
-        );
-      } finally {
-        this.#opSources.delete(source);
-      }
-      if (!sent.ok) {
-        // Retained: put the chunk back at the head so the next
-        // emission retries it. The backlog bound applies HERE only —
-        // under a sustained send failure, drop-oldest caps memory
-        // while the fresh-writes path above never truncates a
-        // healthy commit.
-        this.#syncEmitPending.unshift(...chunk);
-        if (this.#syncEmitPending.length > SYNC_EMIT_PENDING_MAX) {
-          this.#syncEmitPending.splice(
-            0,
-            this.#syncEmitPending.length - SYNC_EMIT_PENDING_MAX,
-          );
-          this.#logWarn(
-            'sync emission backlog overflowed; oldest writes dropped',
-          );
-        }
-        // Surface through the persist-owned channel —
-        // the domain writes already landed, so this reports the
-        // truth: the change log is behind, not the library.
-        const r = this.#ready;
-        if (r !== null) {
-          r.persistenceError = sent.error;
-          this.#publish();
-        }
-        this.#logWarn('sync emission failed; writes retained for retry');
-        return;
-      }
-      // The chunk already left the queue when it was sliced — a
-      // failure above is the only path that re-queues nothing, and
-      // that path returns before here.
-    }
-  }
-
-  /**
-   * Slice the head chunk by count AND encoded bytes — a batch that
-   * passes per-write field bounds can still overflow the wire doc
-   * cap when summed, and an oversized send reports as a transport
-   * failure while the engine append already landed, so the same
-   * writes would retry into an ever-growing log (Review #46
-   * round-9). A head write bigger than the whole budget can never
-   * fit — drop it with a typed warn rather than wedge the queue.
-   */
-  #syncEmitChunk(): LocalWrite[] {
-    const chunk: LocalWrite[] = [];
-    let bytes = 2; // '[]'
-    while (this.#syncEmitPending.length > 0) {
-      const write = this.#syncEmitPending[0];
-      if (write === undefined) {
-        break;
-      }
-      const size = utf8ByteLength(JSON.stringify(write)) + 1;
-      if (chunk.length === 0 && bytes + size > SYNC_EMIT_BYTES) {
-        this.#syncEmitPending.shift();
-        this.#logWarn(
-          'sync emission dropped an oversized write; cannot fit the channel bound',
-        );
-        continue;
-      }
-      if (
-        chunk.length >= SYNC_EMIT_CHUNK ||
-        bytes + size > SYNC_EMIT_BYTES
-      ) {
-        break;
-      }
-      this.#syncEmitPending.shift();
-      chunk.push(write);
-      bytes += size;
-    }
-    return chunk;
-  }
+  // ---- sync ---------------------------------------------------------
 
   /**
    * The inbound half: fold remote merge outcomes onto the domain.
@@ -1813,144 +1559,11 @@ export class Session {
    * — refolding is idempotent. Never emits: remote writes are not
    * local writes.
    */
-  async applySyncedEntries(
+  applySyncedEntries(
     outcomes: readonly MergeOutcome[],
     signal?: CancellationSignal,
   ): Promise<Result<SyncApplyReport>> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return ready;
-    }
-    const generation = ready.value;
-    const source = new CancellationSource();
-    const unlink = signal?.subscribe(() => {
-      source.cancel();
-    });
-    this.#opSources.add(source);
-    try {
-      return await this.#enqueueStorage(async () => {
-        const r = this.#ready;
-        if (r === null || r !== generation) {
-          return err(
-            appError('superseded', 'session state was replaced'),
-          );
-        }
-        const deadlineMs = this.#deadline();
-        // One load seeds the whole drain — later pages reuse the
-        // cached sections. `reused` marks an input older than this
-        // segment: its download/local-file rows may have moved under
-        // their off-tail owners, checked again below.
-        const reused = r.syncApplyCache !== null;
-        const loaded = await this.#syncApplySections(
-          r,
-          source,
-          deadlineMs,
-        );
-        // The transport already consumed these outcomes — every one
-        // feeds projection; the bound applies only to post-projection
-        // pending, never to a fresh drain (Review #46).
-        const union = [...r.syncPending, ...outcomes];
-        const warn = (m: string): void => this.#logWarn(m);
-        if (!loaded.ok) {
-          // Retain the union for the next drain exactly like a commit
-          // failure — consumed outcomes can't be re-fetched.
-          r.syncPending = retainSyncPending(union, warn);
-          r.persistenceError = loaded.error;
-          this.#publish();
-          return err(loaded.error);
-        }
-        // Refold earlier pending outcomes with the new ones — a
-        // parent row landing this drain unblocks a held insert.
-        const superseded = outcomes.filter(
-          (o) => o.type !== 'applied',
-        ).length;
-        if (superseded > 0) {
-          // Losing entries keep the domain row — divergence history
-          // owns them; the log notes the drop without record ids.
-          this.#logWarn(
-            `sync projection dropped ${superseded} non-applied outcomes`,
-          );
-        }
-        const project = (input: SyncApplySections) =>
-          projectAppliedEntries(union, {
-            recordings: r.recordings,
-            likes: r.likes,
-            entities: r.entities,
-            entitySourceRefs: r.entitySourceRefs,
-            playlists: r.playlists,
-            playlistEntries: r.playlistEntries,
-            playHistory: r.playHistory,
-            playCounts: r.playCounts,
-            matchReviews: input.matchReviews,
-            lyricsCache: input.lyricsCache,
-            downloads: input.downloads,
-            localFiles: input.localFiles,
-            queue: r.queue.snapshot(),
-            settings: r.settings,
-          });
-        let projection = project(loaded.value);
-        // Spread lifts the readonly section map — the settings
-        // reconcile below may rewrite the projected row.
-        let batch = { ...projection.batch };
-        if (
-          reused &&
-          (batch.recordings !== undefined ||
-            batch.recordingsMerge !== undefined ||
-            batch.downloads !== undefined ||
-            batch.localFiles !== undefined)
-        ) {
-          // DownloadManager and LocalFileSource commit on their own
-          // lanes — rows cached from an earlier page may be stale, so
-          // a batch that rewrites either section re-loads and
-          // re-projects against fresh truth before committing it. A
-          // recordings write must reload too even when no media
-          // section projected: a fresh off-tail row referencing a
-          // deleted recording is invisible to the cached projection,
-          // but the commit's in-transaction merge still validates it.
-          r.syncApplyCache = null;
-          const fresh = await this.#syncApplySections(
-            r,
-            source,
-            deadlineMs,
-          );
-          if (!fresh.ok) {
-            r.syncPending = retainSyncPending(union, warn);
-            r.persistenceError = fresh.error;
-            this.#publish();
-            return err(fresh.error);
-          }
-          projection = project(fresh.value);
-          batch = { ...projection.batch };
-        }
-        for (const skip of projection.skipped) {
-          this.#logWarn(`sync projection skipped ${skip.kind} record`);
-        }
-        if (Object.keys(batch).length === 0) {
-          r.syncPending = boundSyncPending(projection.pending);
-          // A clean projection clears the surface it shares with
-          // persist failures — the failure that set it is resolved.
-          r.persistenceError = undefined;
-          this.#publish();
-          return ok(SYNC_APPLY_STABLE);
-        }
-        const applied = await this.#commitSyncProjection(
-          r,
-          batch,
-          source,
-          deadlineMs,
-        );
-        if (!applied.ok) {
-          // Nothing landed — refold the whole union next drain.
-          r.syncPending = retainSyncPending(union, warn);
-          return applied;
-        }
-        r.syncPending = boundSyncPending(projection.pending);
-        return applied;
-      }, { syncApply: true });
-    } finally {
-      unlink?.();
-      this.#opSources.delete(source);
-    }
+    return this.#syncIngress.applySyncedEntries(outcomes, signal);
   }
 
   /**
@@ -1961,136 +1574,16 @@ export class Session {
    * Records absent from `records` keep their rows (they were never
    * synced); rows whose records materialize empty are deleted.
    */
-  async applyMaterializedEntries(
+  applyMaterializedEntries(
     records: readonly MaterializedRecord[],
     signal?: CancellationSignal,
   ): Promise<Result<SyncApplyReport>> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return ready;
-    }
-    const generation = ready.value;
-    const source = new CancellationSource();
-    const unlink = signal?.subscribe(() => {
-      source.cancel();
-    });
-    this.#opSources.add(source);
-    try {
-      return await this.#enqueueStorage(async () => {
-        const r = this.#ready;
-        if (r === null || r !== generation) {
-          return err(
-            appError('superseded', 'session state was replaced'),
-          );
-        }
-        const deadlineMs = this.#deadline();
-        // Same drain reuse as applySyncedEntries — one seeded load
-        // serves the whole rebuild; `reused` re-checks the off-tail
-        // sections before a cached batch rewrites them.
-        const reused = r.syncApplyCache !== null;
-        const loaded = await this.#syncApplySections(
-          r,
-          source,
-          deadlineMs,
-        );
-        const warn = (m: string): void => this.#logWarn(m);
-        // Union retained pending with the fresh page — a dependent
-        // that pended on an earlier page folds again here and lands
-        // once its parent arrives (same key, fresher record wins).
-        const union = [...r.materializedPending, ...records];
-        if (!loaded.ok) {
-          // Served-but-unprojected records are as consumed as drained
-          // outcomes — retain the union for the next call exactly like
-          // a commit failure (Review #46).
-          r.materializedPending = retainMaterializedPending(union, warn);
-          r.persistenceError = loaded.error;
-          this.#publish();
-          return err(loaded.error);
-        }
-        const project = (input: SyncApplySections) =>
-          projectMaterialized(union, {
-            recordings: r.recordings,
-            likes: r.likes,
-            entities: r.entities,
-            entitySourceRefs: r.entitySourceRefs,
-            playlists: r.playlists,
-            playlistEntries: r.playlistEntries,
-            playHistory: r.playHistory,
-            playCounts: r.playCounts,
-            matchReviews: input.matchReviews,
-            lyricsCache: input.lyricsCache,
-            downloads: input.downloads,
-            localFiles: input.localFiles,
-            queue: r.queue.snapshot(),
-            settings: r.settings,
-          });
-        let projection = project(loaded.value);
-        let batch = { ...projection.batch };
-        if (
-          reused &&
-          (batch.recordings !== undefined ||
-            batch.recordingsMerge !== undefined ||
-            batch.downloads !== undefined ||
-            batch.localFiles !== undefined)
-        ) {
-          // Off-tail owners (downloads, local files) may have moved
-          // the cached rows — reload and re-project before a rewrite,
-          // and before a recording write: the commit re-validates
-          // fresh dependent rows a cached projection never saw.
-          r.syncApplyCache = null;
-          const fresh = await this.#syncApplySections(
-            r,
-            source,
-            deadlineMs,
-          );
-          if (!fresh.ok) {
-            r.materializedPending = retainMaterializedPending(
-              union,
-              warn,
-            );
-            r.persistenceError = fresh.error;
-            this.#publish();
-            return err(fresh.error);
-          }
-          projection = project(fresh.value);
-          batch = { ...projection.batch };
-        }
-        for (const skip of projection.skipped) {
-          this.#logWarn(`sync projection skipped ${skip.kind} record`);
-        }
-        if (Object.keys(batch).length === 0) {
-          r.materializedPending = boundMaterializedPending(
-            projection.pendingRecords,
-          );
-          r.persistenceError = undefined;
-          this.#publish();
-          return ok(SYNC_APPLY_STABLE);
-        }
-        const applied = await this.#commitSyncProjection(
-          r,
-          batch,
-          source,
-          deadlineMs,
-        );
-        if (!applied.ok) {
-          // Nothing landed — the union refolds on the next call.
-          r.materializedPending = retainMaterializedPending(union, warn);
-          return applied;
-        }
-        r.materializedPending = boundMaterializedPending(
-          projection.pendingRecords,
-        );
-        return applied;
-      }, { syncApply: true });
-    } finally {
-      unlink?.();
-      this.#opSources.delete(source);
-    }
+    return this.#syncIngress.applyMaterializedEntries(records, signal);
   }
 
   /**
    * Boot-time recovery for emissions that never reached the log —
-   * `#syncEmitPending` is memory-only, so a shutdown or dead emit
+   * the emit backlog is memory-only, so a shutdown or dead emit
    * port can strand committed writes (Review #46). `synced` maps the
    * engine's materialized `syncedRecordKey` to each live record's
    * fields — the same source `applyMaterializedEntries` consumes —
@@ -2098,243 +1591,10 @@ export class Session {
    * records AND stale field values). Upserts only: a record the
    * remote never saw can only be created, never re-deleted.
    */
-  async emitUnsynced(
+  emitUnsynced(
     synced: ReadonlyMap<string, Record<string, unknown>>,
   ): Promise<void> {
-    const r = this.#ready;
-    if (r === null || this.#sync === undefined) {
-      return;
-    }
-    const source = new CancellationSource();
-    this.#opSources.add(source);
-    try {
-      const deadlineMs = this.#deadline();
-      const loaded = await this.#withDeadline(
-        () =>
-          this.#storage.load(
-            this.#newContext('load', deadlineMs, source.signal),
-          ),
-        deadlineMs,
-        source,
-      );
-      if (this.#ready !== r) {
-        return;
-      }
-      const matchReviews =
-        loaded.ok && isPersistedState(loaded.value)
-          ? loaded.value.matchReviews
-          : [];
-      this.#emitSync(
-        unsyncedWrites(
-          { ...syncEmitInput(r), matchReviews },
-          synced,
-        ),
-      );
-      // Survivors of a ready generation swap still owe tombstones —
-      // this reconcile pass is the durable retry hook.
-      if (this.#reviewTombstoneIds.size > 0) {
-        this.#own(this.#emitMatchReviewTombstones([]));
-      }
-    } finally {
-      this.#opSources.delete(source);
-    }
-  }
-
-  /**
-   * matchReview rows sit outside the Ready mirror — tombstoning a
-   * local delete's reviews needs the persisted section, so they emit
-   * off their own load like emitUnsynced. Every other dependent in
-   * recordingDeleteWrites already went out with the sync emission.
-   */
-  async #emitMatchReviewTombstones(
-    deleted: readonly Recording[],
-  ): Promise<void> {
-    for (const rec of deleted) {
-      this.#reviewTombstoneIds.add(rec.id);
-    }
-    const r = this.#ready;
-    if (
-      r === null ||
-      this.#sync === undefined ||
-      this.#reviewTombstoneIds.size === 0
-    ) {
-      return;
-    }
-    const source = new CancellationSource();
-    this.#opSources.add(source);
-    try {
-      const deadlineMs = this.#deadline();
-      // The liveness read must sit on the storage lane: a re-add whose
-      // commit is still queued behind this load would otherwise slip
-      // past the `live` check and get its live reviews tombstoned.
-      await this.#enqueueStorage(async () => {
-        const loaded = await this.#withDeadline(
-          () =>
-            this.#storage.load(
-              this.#newContext('load', deadlineMs, source.signal),
-            ),
-          deadlineMs,
-          source,
-        );
-        // A ready swap between the delete and this load would read a
-        // generation's persisted view the delete wasn't staged under —
-        // keep the ids queued for the next reconcile instead.
-        if (this.#ready !== r) {
-          return ok(undefined);
-        }
-        if (!loaded.ok || !isPersistedState(loaded.value)) {
-          this.#logWarn(
-            'match-review tombstone load failed; ids retained for retry',
-          );
-          return ok(undefined);
-        }
-        const state = loaded.value;
-        // A recording re-added between delete and load is live again —
-        // its review rows belong to the live row and no longer owe a
-        // tombstone.
-        const live = new Set(state.recordings.map((rec) => rec.id));
-        const owed = new Set<string>();
-        for (const id of this.#reviewTombstoneIds) {
-          if (!live.has(id)) {
-            owed.add(id);
-          }
-        }
-        this.#reviewTombstoneIds.clear();
-        this.#emitSync(
-          state.matchReviews
-            .filter((review) => owed.has(review.recordingId))
-            .map((review) => ({
-              kind: 'matchReview' as const,
-              recordId: review.reviewId,
-              tombstone: true as const,
-            })),
-        );
-        return ok(undefined);
-      });
-    } finally {
-      this.#opSources.delete(source);
-    }
-  }
-
-  /**
-   * Shared commit tail for the two sync-apply paths: provider
-   * reconcile on remote settings, the storage commit, the section
-   * mirror, and the publish. The caller owns pending-bookkeeping —
-   * on failure it decides what to retain.
-   */
-  async #commitSyncProjection(
-    r: Ready,
-    batch: {
-      -readonly [K in keyof StorageBatch]?: StorageBatch[K];
-    },
-    source: CancellationSource,
-    deadlineMs: number,
-  ): Promise<Result<SyncApplyReport>> {
-    // Reconcile remote settings against THIS session's providers
-    // — projection validates the shape only; the required-slot
-    // fallback / optional-slot nulling mirrors updateSettings.
-    if (batch.settings !== undefined) {
-      const s = batch.settings;
-      batch.settings = {
-        ...s,
-        catalogProvider: this.#providers.has(s.catalogProvider)
-          ? s.catalogProvider
-          : r.settings.catalogProvider,
-        playbackProvider: this.#providers.has(s.playbackProvider)
-          ? s.playbackProvider
-          : r.settings.playbackProvider,
-        lyricsProvider:
-          s.lyricsProvider != null &&
-            !this.#providers.has(s.lyricsProvider)
-            ? null
-            : (s.lyricsProvider ?? null),
-        radioProvider:
-          s.radioProvider != null &&
-            !this.#providers.has(s.radioProvider)
-            ? null
-            : (s.radioProvider ?? null),
-      };
-    }
-    const committed = await this.#withDeadline(
-      () =>
-        this.#storage.commit(
-          batch,
-          this.#newContext('persist', deadlineMs, source.signal),
-        ),
-      deadlineMs,
-      source,
-    );
-    if (!committed.ok) {
-      r.persistenceError = committed.error;
-      this.#publish();
-      return err(committed.error);
-    }
-    if (batch.recordingsMerge !== undefined) {
-      r.recordings = [...batch.recordingsMerge(r.recordings)];
-    }
-    if (batch.likes !== undefined) {
-      r.likes = [...batch.likes];
-    }
-    if (batch.entities !== undefined) {
-      r.entities = [...batch.entities];
-    }
-    if (batch.entitySourceRefs !== undefined) {
-      r.entitySourceRefs = [...batch.entitySourceRefs];
-    }
-    if (batch.playlists !== undefined) {
-      r.playlists = [...batch.playlists];
-    }
-    if (batch.playlistEntries !== undefined) {
-      r.playlistEntries = [...batch.playlistEntries];
-    }
-    if (batch.playHistory !== undefined) {
-      r.playHistory = [...batch.playHistory];
-    }
-    if (batch.playCounts !== undefined) {
-      r.playCounts = [...batch.playCounts];
-    }
-    if (batch.lyricsCache !== undefined) {
-      r.lyricsCache = [...batch.lyricsCache];
-    }
-    if (batch.settings !== undefined) {
-      r.settings = { ...batch.settings };
-    }
-    if (batch.queue !== undefined) {
-      r.queue = new QueueEngine(batch.queue);
-      r.queueCommittedRev = Math.max(
-        r.queueCommittedRev,
-        batch.queue.revision,
-      );
-      // A queued #persistQueue holding the old engine must
-      // supersede — its revision math no longer describes
-      // this queue.
-      r.queueEpoch += 1;
-    }
-    // The drain's cached projection input rolls forward with what
-    // just committed — the next page folds over durable truth
-    // without a fresh load.
-    const applyCache = r.syncApplyCache;
-    if (applyCache !== null) {
-      if (batch.matchReviews !== undefined) {
-        applyCache.matchReviews = batch.matchReviews;
-      }
-      if (batch.lyricsCache !== undefined) {
-        applyCache.lyricsCache = batch.lyricsCache;
-      }
-      if (batch.downloads !== undefined) {
-        applyCache.downloads = batch.downloads;
-      }
-      if (batch.localFiles !== undefined) {
-        applyCache.localFiles = batch.localFiles;
-      }
-    }
-    r.persistenceError = undefined;
-    this.#derived();
-    this.#publish();
-    return ok({
-      rehydrateMedia:
-        batch.downloads !== undefined || batch.localFiles !== undefined,
-    });
+    return this.#syncIngress.emitUnsynced(synced);
   }
 
   // ---- restore ----------------------------------------------------
@@ -2539,9 +1799,9 @@ export class Session {
           deleted.push(rec);
         }
       }
-      this.#emitSync(writes);
+      this.#syncIngress.emit(writes);
       if (deleted.length > 0) {
-        this.#own(this.#emitMatchReviewTombstones(deleted));
+        this.#own(this.#syncIngress.emitMatchReviewTombstones(deleted));
       }
     }
     this.#publish();
@@ -3387,7 +2647,7 @@ export class Session {
     this.#mappingSource = null;
     const replaced = this.#ready;
     if (replaced !== null) {
-      this.#clearRadio(replaced);
+      this.#radio.clearRadio(replaced);
     }
   }
 
@@ -3402,9 +2662,7 @@ export class Session {
    * replaces the armed one.
    */
   startRadio(ref: SourceRef): Promise<Result<void>> {
-    const work = this.#radioSerial.run(() => this.#startRadio(ref));
-    this.#own(work);
-    return work;
+    return this.#radio.startRadio(ref);
   }
 
   /**
@@ -3412,682 +2670,7 @@ export class Session {
    * queue simply stops growing.
    */
   stopRadio(): Result<void> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return ready;
-    }
-    const r = ready.value;
-    this.#clearRadio(r);
-    // The disarm also counts as the auto-seed verdict for the item
-    // it landed on — the tail must not silently reseed under it.
-    this.#radioAutoSeedOccurrence =
-      r.queue.snapshot().currentOccurrenceId;
-    this.#publish();
-    return ok(undefined);
-  }
-
-  /**
-   * Drops the tail record and cancels any in-flight continuation;
-   * stale fetch results are rejected by record identity, never
-   * applied.
-   */
-  #clearRadio(r: Ready): void {
-    // The epoch bumps even with no record: an auto-arm queued on
-    // the radio lane behind another op must still die when a stop
-    // or disarm lands before it starts.
-    this.#radioArmEpoch += 1;
-    const record = r.radio;
-    if (record === null) {
-      return;
-    }
-    record.source?.cancel();
-    r.radio = null;
-  }
-
-  async #startRadio(ref: SourceRef): Promise<Result<void>> {
-    const ready = this.#requireReady();
-    if (!ready.ok) {
-      return ready;
-    }
-    const r = ready.value;
-    if (!isSourceRef(ref)) {
-      return err(appError('invalid-response', 'invalid radio seed'));
-    }
-    if (ref.kind !== 'track') {
-      // Track-seeded at first release (providers.md).
-      return err(
-        appError('not-applicable', 'radio seeds are track refs'),
-      );
-    }
-    const routed = this.#router.providerForRef(ref, 'radio.seed');
-    if (!routed.ok) {
-      return err(routed.error);
-    }
-    this.#clearRadio(r);
-    const record: RadioTailRecord = {
-      seedRef: ref,
-      providerId: routed.value.id,
-      continuation: null,
-      status: 'growing',
-      error: undefined,
-      fetching: true,
-      source: null,
-      // A tail may only resurrect playback it was armed during — a
-      // seed issued on an idle queue appends for later instead.
-      resumeOnDrain: r.queue.snapshot().mode === 'playing',
-      dupPages: 0,
-    };
-    r.radio = record;
-    this.#publish();
-    const seeded = await this.#radioCall(
-      routed.value,
-      { sourceRef: ref },
-      record,
-    );
-    record.fetching = false;
-    if (r.radio !== record || this.#disposed) {
-      // Superseded or cleared while the seed was in flight — same
-      // honesty rule as superseded playback attempts.
-      return err(appError('superseded', 'radio seed superseded'));
-    }
-    if (!seeded.ok) {
-      // A failed seed never armed a radio: the state stays absent
-      // and the typed error is the caller's.
-      r.radio = null;
-      this.#publish();
-      return err(seeded.error);
-    }
-    const staged = await this.#commitRadioPage(record, seeded.value);
-    if (!staged.ok) {
-      // The commit's awaits gave a reseed room to swap `r.radio` to a
-      // newer record — only our own failed seed clears it.
-      if (r.radio === record) {
-        r.radio = null;
-        this.#publish();
-      }
-      return err(staged.error);
-    }
-    record.continuation = seeded.value.continuation;
-    if (record.continuation === null) {
-      record.status = 'ended';
-    }
-    this.#publish();
-    // Resume before deriving: a drained queue that just gained items
-    // must see the playhead move first, else the chase hook would
-    // fire another fetch it no longer needs.
-    this.#resumeDrainedQueue(r, record, staged.value.firstAppended);
-    if (staged.value.changed) {
-      this.#derived();
-    }
-    return ok(undefined);
-  }
-
-  /**
-   * Lazy fetch-ahead: called from #derived (every queue transition)
-   * and the native transition reconcile — never from a timer. The
-   * predicate lives in queue/radio-tail.ts; the fetch serializes on
-   * the radio tail so at most one continuation is in flight.
-   */
-  #maybeGrowRadio(): void {
-    const r = this.#ready;
-    if (r === null || this.#disposed) {
-      return;
-    }
-    const record = r.radio;
-    const snap = r.queue.snapshot();
-    if (
-      record === null ||
-      !shouldGrowRadio(record, snap, this.#dealtOrder(r) ?? undefined)
-    ) {
-      return;
-    }
-    // Radio growth spends the network — skip when offline.
-    if (!this.#isOnline()) {
-      return;
-    }
-    record.fetching = true;
-    this.#publish();
-    const work = this.#radioSerial.run(() => this.#growRadio(record));
-    this.#own(work);
-  }
-
-  async #growRadio(
-    record: RadioTailRecord,
-    whileDrained = false,
-  ): Promise<void> {
-    const r = this.#ready;
-    if (r === null || r.radio !== record) {
-      return;
-    }
-    // Re-check the trigger's predicate: queued behind other radio
-    // ops the window may already be filled — a stale trigger is a
-    // no-op, not a wasted fetch. The trigger published `fetching`;
-    // clearing it needs a publish so the flag never reads as a
-    // stuck spinner.
-    const snap = r.queue.snapshot();
-    // The drained chase runs only while the queue still waits — a
-    // user landing on other content ends it.
-    const windowOpen = whileDrained
-      ? snap.currentOccurrenceId === null && record.resumeOnDrain
-      : snap.currentOccurrenceId !== null &&
-      remainingAfterCurrent(snap, this.#dealtOrder(r) ?? undefined) <
-      RADIO_FETCH_AHEAD;
-    if (
-      record.status !== 'growing' ||
-      record.continuation === null ||
-      !windowOpen
-    ) {
-      record.fetching = false;
-      this.#publish();
-      // A fetch-ahead queued before a drain aborts here: the window
-      // closed because the queue is now empty, not because the tail
-      // finished. Hand back to the drained-queue chase or the armed
-      // continuation strands with nothing in flight.
-      if (snap.currentOccurrenceId === null) {
-        this.#resumeDrainedQueue(r, record, undefined);
-      }
-      return;
-    }
-    // The continuation token's issuer is the only honest target —
-    // route by the seed's provenance, not the settings slot.
-    const routed = this.#router.providerForRef(record.seedRef, 'radio.seed');
-    if (!routed.ok) {
-      record.fetching = false;
-      record.status = 'failed';
-      record.error = routed.error;
-      this.#publish();
-      return;
-    }
-    const result = await this.#radioCall(
-      routed.value,
-      { continuation: record.continuation },
-      record,
-    );
-    record.fetching = false;
-    if (r.radio !== record || this.#disposed) {
-      return;
-    }
-    if (!result.ok) {
-      if (result.error.kind === 'cancelled') {
-        return;
-      }
-      // Honest stop: the tail fails terminal — no retry loop, the
-      // queue simply plays out what it has.
-      record.status = 'failed';
-      record.error = result.error;
-      this.#publish();
-      return;
-    }
-    const staged = await this.#commitRadioPage(record, result.value);
-    if (!staged.ok) {
-      record.status = 'failed';
-      record.error = staged.error;
-      this.#publish();
-      return;
-    }
-    record.continuation = result.value.continuation;
-    if (record.continuation === null) {
-      record.status = 'ended';
-    }
-    this.#publish();
-    // Resume before deriving — see #startRadio.
-    this.#resumeDrainedQueue(r, record, staged.value.firstAppended);
-    if (staged.value.changed) {
-      // derived() re-evaluates the window: a page that still leaves
-      // the tail short chains the next continuation immediately.
-      this.#derived();
-    }
-  }
-
-  /**
-   * One bounded provider call for the tail. The cancellation source
-   * lives on the record so clears can cancel it, and is tracked in
-   * #opSources so dispose cancels it too.
-   */
-  async #radioCall(
-    provider: ProviderPort,
-    input: RadioSeed,
-    record: RadioTailRecord,
-  ): Promise<Result<RadioPage>> {
-    const source = new CancellationSource();
-    record.source = source;
-    this.#opSources.add(source);
-    try {
-      const deadlineMs = this.#deadline();
-      const context = this.#newContext('radio', deadlineMs, source.signal);
-      return await this.#withDeadline(
-        () => provider.radioSeed(input, context),
-        deadlineMs,
-        source,
-      );
-    } finally {
-      this.#opSources.delete(source);
-      if (record.source === source) {
-        record.source = null;
-      }
-    }
-  }
-
-  /**
-   * Stages a fetched page against library + queue: validates the wire
-   * shape (one corrupt item fails the whole page), dedupes and
-   * mints/merges via `planRadioPage`, then enqueues the survivors on
-   * a draft engine. Pure — the recordings write and the queue move
-   * commit together, all items or none, before the mirror updates.
-   */
-  #stageRadioPage(
-    r: Ready,
-    page: RadioPage,
-  ): Result<
-    CommitStage<{ changed: boolean; firstAppended: string | undefined }>
-  > {
-    if (!isRadioPage(page)) {
-      return err(
-        appError('invalid-response', 'radio page failed validation'),
-      );
-    }
-    const now = this.#safeNow();
-    if (now === null) {
-      return err(internalError());
-    }
-    const plan = planRadioPage(
-      r.recordings,
-      r.queue.snapshot().occurrences,
-      page.candidates,
-      this.#ids,
-      r.settings.playbackProvider,
-      now,
-    );
-    const recordingsChanged = plan.recordings !== r.recordings;
-    const draft = new QueueEngine(r.queue.snapshot());
-    try {
-      for (const occurrence of plan.occurrences) {
-        draft.enqueue(occurrence);
-      }
-    } catch (thrown) {
-      return err(fromUnknown(thrown));
-    }
-    const firstAppended = plan.occurrences[0]?.occurrenceId;
-    if (!recordingsChanged && plan.occurrences.length === 0) {
-      return ok({
-        apply: () => ({ changed: false, firstAppended: undefined }),
-      });
-    }
-    const recordings = plan.recordings;
-    const queue = draft.snapshot();
-    return ok({
-      batch: { recordings, queue },
-      apply: (rr) => {
-        rr.recordings = [...recordings];
-        rr.queue = draft;
-        return { changed: true, firstAppended };
-      },
-    });
-  }
-
-  /**
-   * Auto-arm: reaching the queue's LAST occurrence seeds the lazy
-   * tail from the playing track, so a finite queue rolls into a
-   * radio mix instead of ending (playing a single track arms it
-   * immediately). Any existing tail — growing, ended, or failed —
-   * blocks it: a terminal tail stays terminal until an explicit seed
-   * replaces it, and auto-arm must never resurrect a failed mix.
-   * One attempt per occurrence; a disarm or a superseding seed
-   * invalidates a queued attempt via the arm epoch. Failures stay
-   * logged — an auto-seed is speculative, never user-visible.
-   */
-  #maybeArmRadio(): void {
-    const r = this.#ready;
-    if (r === null || this.#disposed) {
-      return;
-    }
-    const snap = r.queue.snapshot();
-    if (
-      snap.mode !== 'playing' ||
-      snap.currentOccurrenceId === null ||
-      // The tail the cursor will actually run off — dealt space
-      // under shuffle, canonical otherwise.
-      remainingAfterCurrent(snap, this.#dealtOrder(r) ?? undefined) !== 0 ||
-      this.#radioAutoSeedOccurrence === snap.currentOccurrenceId ||
-      r.radio !== null
-    ) {
-      return;
-    }
-    if (!this.#isOnline()) {
-      // Offline is weather — connectivityChanged() re-derives.
-      return;
-    }
-    // One attempt per tail position — the marker holds even when the
-    // queued work finds nothing seedable: that verdict is sticky, not
-    // weather.
-    this.#radioAutoSeedOccurrence = snap.currentOccurrenceId;
-    const armedFor = snap.currentOccurrenceId;
-    const epoch = this.#radioArmEpoch;
-    const work = this.#radioSerial.run(async () => {
-      const cur = this.#ready;
-      if (
-        cur === null ||
-        this.#disposed ||
-        this.#radioArmEpoch !== epoch ||
-        cur.radio !== null
-      ) {
-        // Cleared or reseeded while queued — the later decision wins.
-        return ok(undefined);
-      }
-      // Re-evaluate at run time: the tail may have moved while this
-      // arm was queued (a stop is caught by the epoch; a cursor move
-      // reseeds from the item actually on the tail).
-      const live = cur.queue.snapshot();
-      if (
-        live.mode !== 'playing' ||
-        live.currentOccurrenceId === null ||
-        remainingAfterCurrent(live, this.#dealtOrder(cur) ?? undefined) !== 0
-      ) {
-        // The cursor left the tail before this arm ran — the
-        // occurrence was never judged, so a later return to it may
-        // still arm.
-        if (this.#radioAutoSeedOccurrence === armedFor) {
-          this.#radioAutoSeedOccurrence = null;
-        }
-        return ok(undefined);
-      }
-      const liveOccurrence = live.occurrences.find(
-        (o) => o.occurrenceId === live.currentOccurrenceId,
-      );
-      const liveRecording = cur.recordings.find(
-        (rec) => rec.id === liveOccurrence?.recordingId,
-      );
-      if (liveOccurrence === undefined || liveRecording === undefined) {
-        return ok(undefined);
-      }
-      // An attempt for the tail item that hasn't resolved its ref
-      // yet is weather: stored-order fallback would seed a different
-      // version than the one playing. #startAttempt re-fires the
-      // arm when `attempt.ref` lands.
-      const liveAttempt = this.#active;
-      if (
-        liveAttempt !== null &&
-        liveAttempt.occurrenceId === live.currentOccurrenceId &&
-        liveAttempt.ref === undefined
-      ) {
-        if (this.#radioAutoSeedOccurrence === armedFor) {
-          this.#radioAutoSeedOccurrence = null;
-        }
-        return ok(undefined);
-      }
-      const ref = this.#radioSeedRef(liveOccurrence, liveRecording);
-      if (ref === null) {
-        // Judged: nothing seedable — the verdict sticks.
-        this.#radioAutoSeedOccurrence = live.currentOccurrenceId;
-        return ok(undefined);
-      }
-      if (!this.#isOnline()) {
-        // Connectivity dropped between trigger and run — release the
-        // marker so the reconnect #derived re-arms this occurrence.
-        if (this.#radioAutoSeedOccurrence === armedFor) {
-          this.#radioAutoSeedOccurrence = null;
-        }
-        return ok(undefined);
-      }
-      this.#radioAutoSeedOccurrence = live.currentOccurrenceId;
-      const seeded = await this.#startRadio(ref);
-      if (!seeded.ok) {
-        // The seed is speculative — exhausting its guest budget or
-        // the call deadline is weather, not a warn.
-        if (
-          seeded.error.kind === 'budget-exceeded' ||
-          seeded.error.kind === 'timeout'
-        ) {
-          this.#logDebug(`auto radio seed skipped: ${seeded.error.kind}`);
-        } else {
-          this.#logWarn(`auto radio seed failed: ${seeded.error.kind}`);
-        }
-      }
-      return seeded;
-    });
-    this.#own(work);
-  }
-
-  /**
-   * Pick the seed ref for a queue occurrence: the live attempt's
-   * resolved ref decides — `#pickRef` may have chosen an effective
-   * mapping over the stored order, and the seed must follow the
-   * version actually playing. A non-local playing ref whose provider
-   * can't seed radio is a verdict, not a fallback: substituting a
-   * different provider's ref would mix from another version. Local
-   * playback has no provider identity, so its ref falls through to
-   * the recording's catalog identity — the pinned ref, then stored
-   * order. Each candidate must route to a `radio.seed` provider.
-   */
-  #radioSeedRef(
-    occurrence: QueueOccurrence,
-    recording: Recording,
-  ): SourceRef | null {
-    const active = this.#active;
-    if (
-      active !== null &&
-      active.occurrenceId === occurrence.occurrenceId &&
-      active.ref !== undefined
-    ) {
-      const playing = active.ref;
-      // Local playback has no provider identity: the recording's
-      // catalog refs remain the honest seed source.
-      if (playing.provider !== LOCAL_PROVIDER) {
-        // The resolved ref is the version playing — when its provider
-        // can't seed radio there is no faithful substitute, and a
-        // different provider's ref would mix from another version.
-        if (playing.kind !== 'track') {
-          return null;
-        }
-        return this.#router.providerForRef(playing, 'radio.seed').ok
-          ? playing
-          : null;
-      }
-    }
-    const candidates: (SourceRef | null)[] = [
-      occurrence.selectedRef,
-      ...recording.sourceRefs,
-    ];
-    for (const candidate of candidates) {
-      if (candidate === null || candidate.kind !== 'track') {
-        continue;
-      }
-      if (this.#router.providerForRef(candidate, 'radio.seed').ok) {
-        return candidate;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * A disarm landing while a page's commit waits on storage must
-   * never let the page reach the queue — or the durable doc. The
-   * record check runs inside the segment before staging (a disarm
-   * queued ahead drops the commit entirely) and again after the
-   * commit await: a rejected page skips the sync emission and the
-   * in-memory apply, then the SAME segment — which still owns the
-   * storage tail, so nothing can have committed in between — issues
-   * a compensating commit that rewrites the live, page-free queue
-   * and recordings at a fresh queue revision. Writing the freshest
-   * mirror keeps mutations queued during the await durable (their
-   * own segments later no-op on the revision check), and bumping
-   * `queueCommittedRev` onto that new lineage keeps the next queue
-   * write from being skipped.
-   */
-  async #commitRadioPage(
-    record: RadioTailRecord,
-    page: RadioPage,
-  ): Promise<
-    Result<{ changed: boolean; firstAppended: string | undefined }>
-  > {
-    const generation = this.#ready;
-    const source = new CancellationSource();
-    this.#opSources.add(source);
-    try {
-      return await this.#enqueueStorage(async () => {
-        const r = this.#ready;
-        if (generation === null || r !== generation) {
-          return err(
-            appError('superseded', 'session state was replaced'),
-          );
-        }
-        if (r.radio !== record) {
-          return ok({ changed: false, firstAppended: undefined });
-        }
-        const staged = this.#stageRadioPage(r, page);
-        if (!staged.ok) {
-          return err(staged.error);
-        }
-        const inner = staged.value;
-        if (inner.batch === undefined) {
-          const outcome = inner.apply(r);
-          this.#publish();
-          return ok(outcome);
-        }
-        const batch = inner.batch;
-        const deadlineMs = this.#deadline();
-        const context = this.#newContext('persist', deadlineMs, source.signal);
-        const committed = await this.#withDeadline(
-          () => this.#storage.commit(batch, context),
-          deadlineMs,
-          source,
-        );
-        if (!committed.ok) {
-          r.persistenceError = committed.error;
-          this.#publish();
-          return err(committed.error);
-        }
-        if (batch.queue !== undefined) {
-          r.queueCommittedRev = Math.max(
-            r.queueCommittedRev,
-            batch.queue.revision,
-          );
-        }
-        r.persistenceError = undefined;
-        if (r.radio === record) {
-          this.#emitSync(emissionWrites(syncEmitInput(r), batch));
-          const outcome = inner.apply(r);
-          this.#publish();
-          return ok(outcome);
-        }
-        // The page committed but the disarm already ran — the mirror
-        // never applied it, so live sections are the inverse image.
-        // The revert revision must clear BOTH counters: mutations
-        // queued during the commit already raised the live engine
-        // past `queueCommittedRev`, so minting off the committed
-        // counter alone could hand the fresh engine a revision at or
-        // below the content it carries — a later write then re-uses a
-        // durable revision and the persist guard skips it.
-        const liveQueue = r.queue.snapshot();
-        const revertedQueue: QueueSnapshot = {
-          ...liveQueue,
-          revision:
-            Math.max(r.queueCommittedRev, liveQueue.revision) + 1,
-        };
-        const revertBatch: StorageBatch = {
-          queue: revertedQueue,
-          recordings: [...r.recordings],
-        };
-        const revertDeadlineMs = this.#deadline();
-        const revertContext = this.#newContext(
-          'persist',
-          revertDeadlineMs,
-          source.signal,
-        );
-        const reverted = await this.#withDeadline(
-          () => this.#storage.commit(revertBatch, revertContext),
-          revertDeadlineMs,
-          source,
-        );
-        if (!reverted.ok) {
-          r.persistenceError = reverted.error;
-          this.#publish();
-          return err(reverted.error);
-        }
-        r.queueCommittedRev = revertedQueue.revision;
-        // Peers never saw the page — emit only the revert delta.
-        this.#emitSync(emissionWrites(syncEmitInput(r), revertBatch));
-        // The mirror keeps its live content and adopts the fresh
-        // revision so queued commands stay on the durable lineage.
-        r.queue = new QueueEngine(revertedQueue);
-        // The engine was swapped wholesale — projections and the
-        // tail hooks still reference the pre-swap instance.
-        this.#derived();
-        this.#publish();
-        return ok({ changed: false, firstAppended: undefined });
-      });
-    } finally {
-      this.#opSources.delete(source);
-    }
-  }
-
-  /**
-   * A page landing on a drained queue: the tail was armed while
-   * playing (`resumeOnDrain`) and playback ran out of occurrences
-   * before the fetch landed — resume at the first appended item.
-   * The record-identity check keeps a disarm sticky: `stop()` and
-   * `stopRadio()` drop the record, so a stopped queue never
-   * resurrects when an in-flight page lands.
-   */
-  #resumeDrainedQueue(
-    r: Ready,
-    record: RadioTailRecord,
-    firstAppended: string | undefined,
-  ): void {
-    if (
-      this.#disposed ||
-      r.radio !== record ||
-      r.queue.snapshot().currentOccurrenceId !== null
-    ) {
-      return;
-    }
-    if (firstAppended !== undefined) {
-      record.dupPages = 0;
-      if (!record.resumeOnDrain) {
-        return;
-      }
-      // A resumed occurrence whose bytes aren't owned fires a
-      // candidates/resolve chain that can only fail offline — stay
-      // armed instead of burning the attempt; the next landed page
-      // retries once connectivity is back. Owned bytes (downloads,
-      // local files) still resume: that's the offline-honest path.
-      const appended = r.queue
-        .snapshot()
-        .occurrences.find((o) => o.occurrenceId === firstAppended);
-      if (
-        !this.#isOnline() &&
-        this.#localPlaybackFor(appended?.recordingId ?? '') === null
-      ) {
-        return;
-      }
-      this.#own(
-        this.playOccurrence(firstAppended).then((res) => {
-          if (!res.ok) {
-            this.#logWarn(`radio resume failed: ${res.error.kind}`);
-          }
-        }),
-      );
-      return;
-    }
-    // The page landed on a drained queue and appended nothing — the
-    // continuation may still hold fresh items, so chase it within a
-    // bound. Without this a duplicate-only page strands a playing
-    // queue's tail forever.
-    if (
-      !record.resumeOnDrain ||
-      record.status !== 'growing' ||
-      record.continuation === null ||
-      record.fetching ||
-      record.dupPages >= RADIO_DRAIN_CHASE_PAGES ||
-      !this.#isOnline()
-    ) {
-      return;
-    }
-    record.dupPages += 1;
-    record.fetching = true;
-    this.#publish();
-    const work = this.#radioSerial.run(() => this.#growRadio(record, true));
-    this.#own(work);
+    return this.#radio.stopRadio();
   }
 
   // ---- transport ----------------------------------------------------
@@ -4151,7 +2734,7 @@ export class Session {
     // a page landing during it must find `r.radio` empty, or its
     // drain-resume would start a fresh attempt mid-teardown.
     const radioRecord = r.radio;
-    this.#clearRadio(r);
+    this.#radio.clearRadio(r);
     // Commit the stopped queue before the irreversible transport
     // teardown: a failed commit rolls the engine back to playing and
     // leaves the live attempt untouched — the caller's error is
@@ -4257,13 +2840,10 @@ export class Session {
     this.#mappingSource?.cancel();
     this.#mappingSource = null;
     this.#maybeMapSuccessor();
-    this.#maybeGrowRadio();
-    this.#maybeArmRadio();
-    // The warm targets follow the new deal too — the old successor's
-    // stream warm is dropped and the dealt window re-walks behind the
-    // reshuffled cursor.
     this.#maybeWarmWindow();
     this.#maybeWarmStream();
+    this.#radio.maybeGrowRadio();
+    this.#radio.maybeArmRadio();
     return ok(undefined);
   }
 
@@ -5026,7 +3606,7 @@ export class Session {
     }
     // The playing ref is now known — an auto-arm queued while this
     // attempt was still resolving can seed the real version.
-    this.#maybeArmRadio();
+    this.#radio.maybeArmRadio();
     if (this.#isStale(attempt) || attempt.source.signal.cancelled) {
       return err(
         attempt.terminalError ?? appError('superseded', 'play superseded'),
@@ -6550,7 +5130,7 @@ export class Session {
       // A native drain bypasses #derived: chase the armed tail's
       // continuation here too, or a drained queue strands forever.
       if (toId === null && wasPlaying && rec !== null && r.radio === rec) {
-        this.#resumeDrainedQueue(r, rec, undefined);
+        this.#radio.resumeDrainedQueue(r, rec, undefined);
       }
     }
     // Native may already be several moves ahead. Re-projecting this
@@ -6561,8 +5141,8 @@ export class Session {
     // The cursor moved inside the projection — the radio tail's
     // fetch-ahead window may have opened, and landing on the last
     // item arms it.
-    this.#maybeGrowRadio();
-    this.#maybeArmRadio();
+    this.#radio.maybeGrowRadio();
+    this.#radio.maybeArmRadio();
   }
 
   // ---- successor mapping ----------------------------------------------
@@ -7780,6 +6360,6 @@ export class Session {
     // committed writes their stamp instead of dying with the queue
     // (Review #46). A failure just keeps the queue; boot-diff is the
     // net for whatever the port could not take.
-    await this.#drainSyncEmit().catch(() => undefined);
+    await this.#syncIngress.drainEmissions().catch(() => undefined);
   }
 }
