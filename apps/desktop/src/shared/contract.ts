@@ -1,215 +1,135 @@
-import {
-  hasOnlyKeys,
-  isBoolean,
-  isBoundedString,
-  isFiniteNumber,
-  isRecord,
-  isSafeNonNegativeInt,
-  isStringOrUndefined,
-} from './check.ts';
+import { hasOnlyKeys, isBoundedString, isRecord } from './check.ts';
+import * as v from './schema.ts';
 import type { SqlRow, SqlValue } from '@auqw/storage-sqlite';
-import type { ThemeSource } from '@auqw/design-tokens/adaptive';
+import type {
+  AdaptivePalette,
+  ThemeSource,
+} from '@auqw/design-tokens/adaptive';
 
 /**
  * Payload types for every channel in `CHANNELS`. Validators here are the
  * single source of truth: main validates inbound args with them and the
- * preload re-validates every returned payload with them.
+ * preload re-validates every returned payload with them. Each `isX` is
+ * composed from the `v.*` combinators in `./schema.ts` and each payload
+ * type is `v.Guarded<typeof isX>` — the declared type IS the validator's
+ * narrowing, so the two can never drift.
  */
 
-export type AppMeta = {
-  readonly version: string;
-  readonly platform: string;
-  readonly userDataPath: string;
-};
+export type AppMeta = v.Guarded<typeof isAppMeta>;
 
-export function isAppMeta(value: unknown): value is AppMeta {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['version', 'platform', 'userDataPath']) &&
-    isBoundedString(value['version'], 128) &&
-    isBoundedString(value['platform'], 32) &&
-    isBoundedString(value['userDataPath'], 4096)
+export const isAppMeta = v.object({
+  version: v.boundedString(128),
+  platform: v.boundedString(32),
+  userDataPath: v.boundedString(4096),
+});
+
+export type NetSnapshot = NetEvent;
+export type NetEvent = v.Guarded<typeof isNetEvent>;
+
+export const isNetEvent = v.object({
+  online: v.boolean(),
+});
+
+const PALETTE_KEYS = ['bg', 'fg', 'accent', 'warn', 'sel'] as const;
+
+const isAdaptivePalette: v.Guard<AdaptivePalette> = (
+  value,
+): value is AdaptivePalette =>
+  isRecord(value) &&
+  hasOnlyKeys(value, PALETTE_KEYS) &&
+  PALETTE_KEYS.every((key) =>
+    isBoundedString(value[key] ?? 'x', 32),
   );
-}
 
-export type NetSnapshot = { readonly online: boolean };
-export type NetEvent = { readonly online: boolean };
-
-export function isNetEvent(value: unknown): value is NetEvent {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['online']) &&
-    isBoolean(value['online'])
-  );
-}
+const isThemeSource: v.Guard<ThemeSource | null> = v.nullable(
+  v.object({
+    scheme: v.literals('dark', 'light'),
+    palette: v.optional(isAdaptivePalette),
+  }),
+);
 
 /**
  * The OS-emitted `{scheme, palette?}` a ThemeSourcePort produces, or
  * `null` when main has no source to offer (the renderer then resolves
  * 'adaptive' like 'system'). Pushed on `theme:events`.
  */
-export type ThemeSourceEvent = { readonly source: ThemeSource | null };
+export type ThemeSourceEvent = v.Guarded<typeof isThemeSourceEvent>;
 
-const PALETTE_KEYS = ['bg', 'fg', 'accent', 'warn', 'sel'] as const;
-
-export function isThemeSourceEvent(value: unknown): value is ThemeSourceEvent {
-  if (!isRecord(value) || !hasOnlyKeys(value, ['source'])) {
-    return false;
-  }
-  const source = value['source'];
-  if (source === null) {
-    return true;
-  }
-  if (!isRecord(source) || !hasOnlyKeys(source, ['scheme', 'palette'])) {
-    return false;
-  }
-  if (source['scheme'] !== 'dark' && source['scheme'] !== 'light') {
-    return false;
-  }
-  const palette = source['palette'];
-  if (palette === undefined) {
-    return true;
-  }
-  return (
-    isRecord(palette) &&
-    hasOnlyKeys(palette, PALETTE_KEYS) &&
-    PALETTE_KEYS.every((key) =>
-      isBoundedString(palette[key] ?? 'x', 32),
-    )
-  );
-}
+export const isThemeSourceEvent = v.object({
+  source: isThemeSource,
+});
 
 /** `chrome:scheme` payload — resolved built-in scheme plus the canvas/
     symbol colors to tint the titlebar overlay (differ under adaptive). */
-export type ChromeSchemePayload = {
-  readonly scheme: 'dark' | 'light' | 'oled';
-  readonly canvas?: string;
-  readonly symbol?: string;
-};
+export type ChromeSchemePayload = v.Guarded<typeof isChromeSchemePayload>;
 
-export function isChromeSchemePayload(
+export const isChromeSchemePayload = v.object({
+  scheme: v.literals('dark', 'light', 'oled'),
+  canvas: v.optional(v.string()),
+  symbol: v.optional(v.string()),
+});
+
+const pickFolderArgs = v.object({ title: v.optional(v.string()) });
+const pickFilesArgs = v.object({
+  title: v.optional(v.string()),
+  multiple: v.optional(v.boolean()),
+});
+
+export type PickFolderArgs = v.Guarded<typeof pickFolderArgs>;
+export type PickFilesArgs = v.Guarded<typeof pickFilesArgs>;
+
+export const isPickFolderArgs = (
   value: unknown,
-): value is ChromeSchemePayload {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['scheme', 'canvas', 'symbol']) &&
-    (value['scheme'] === 'dark' ||
-      value['scheme'] === 'light' ||
-      value['scheme'] === 'oled') &&
-    isStringOrUndefined(value['canvas']) &&
-    isStringOrUndefined(value['symbol'])
-  );
-}
+): value is PickFolderArgs =>
+  value === undefined || pickFolderArgs(value);
 
-export type PickFolderArgs = { readonly title?: string };
-export type PickFilesArgs = {
-  readonly title?: string;
-  readonly multiple?: boolean;
-};
-
-export function isPickFolderArgs(
+export const isPickFilesArgs = (
   value: unknown,
-): value is PickFolderArgs {
-  return (
-    value === undefined ||
-    (isRecord(value) &&
-      hasOnlyKeys(value, ['title']) &&
-      isStringOrUndefined(value['title']))
-  );
-}
-
-export function isPickFilesArgs(value: unknown): value is PickFilesArgs {
-  return (
-    value === undefined ||
-    (isRecord(value) &&
-      hasOnlyKeys(value, ['title', 'multiple']) &&
-      isStringOrUndefined(value['title']) &&
-      (value['multiple'] === undefined || isBoolean(value['multiple'])))
-  );
-}
+): value is PickFilesArgs =>
+  value === undefined || pickFilesArgs(value);
 
 /**
  * Secure-store keys map to one file each under userData — the pattern
  * refuses separators so a key can never walk the directory.
  */
-function isSecureKey(value: unknown): value is string {
-  return (
-    typeof value === 'string' &&
-    /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value) &&
-    // `auqw.sync.*` is the pairing-custody namespace — it lives in the
-    // sync-secure store behind `sync:keys`, never on these
-    // renderer-facing channels.
-    !value.toLowerCase().startsWith('auqw.sync.')
-  );
-}
+export const isSecureKey = v.refine(
+  v.pattern(/^[a-z0-9][a-z0-9._-]{0,127}$/i),
+  // `auqw.sync.*` is the pairing-custody namespace — it lives in the
+  // sync-secure store behind `sync:keys`, never on these
+  // renderer-facing channels.
+  (key) => !key.toLowerCase().startsWith('auqw.sync.'),
+);
 
-export type SecureGetArgs = { readonly key: string };
-export type SecureSetArgs = { readonly key: string; readonly value: string };
-export type SecureDeleteArgs = { readonly key: string };
+export type SecureGetArgs = v.Guarded<typeof isSecureGetArgs>;
+export type SecureSetArgs = v.Guarded<typeof isSecureSetArgs>;
+export type SecureDeleteArgs = v.Guarded<typeof isSecureDeleteArgs>;
 
-export function isSecureGetArgs(value: unknown): value is SecureGetArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['key']) &&
-    isSecureKey(value['key'])
-  );
-}
+export const isSecureGetArgs = v.object({ key: isSecureKey });
 
-export function isSecureSetArgs(value: unknown): value is SecureSetArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['key', 'value']) &&
-    isSecureKey(value['key']) &&
-    typeof value['value'] === 'string' &&
-    value['value'].length <= 65_536
-  );
-}
+export const isSecureSetArgs = v.object({
+  key: isSecureKey,
+  value: v.string(65_536),
+});
 
 export const isSecureDeleteArgs = isSecureGetArgs;
 
-export function isStringOrNull(
-  value: unknown,
-): value is string | null {
-  return value === null || typeof value === 'string';
-}
+export const isStringOrNull = v.nullable(v.string());
 
-export function isStringArray(value: unknown): value is string[] {
-  return (
-    Array.isArray(value) &&
-    value.every((item) => typeof item === 'string')
-  );
-}
+export const isStringArray = v.array(v.string());
 
-export function isUndefinedResult(value: unknown): value is undefined {
-  return value === undefined;
-}
+export const isUndefinedResult = v.literal(undefined);
 
-export type UtilityPingArgs = { readonly message: string };
-export type UtilityPingResult = {
-  readonly reply: 'pong';
-  readonly echo: string;
-};
+export type UtilityPingArgs = v.Guarded<typeof isUtilityPingArgs>;
+export type UtilityPingResult = v.Guarded<typeof isUtilityPingResult>;
 
-export function isUtilityPingArgs(
-  value: unknown,
-): value is UtilityPingArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['message']) &&
-    isBoundedString(value['message'], 4096)
-  );
-}
+export const isUtilityPingArgs = v.object({
+  message: v.boundedString(4096),
+});
 
-export function isUtilityPingResult(
-  value: unknown,
-): value is UtilityPingResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['reply', 'echo']) &&
-    value['reply'] === 'pong' &&
-    isBoundedString(value['echo'], 4096)
-  );
-}
+export const isUtilityPingResult = v.object({
+  reply: v.literal('pong'),
+  echo: v.boundedString(4096),
+});
 
 /* ------------------------------------------------------------------ */
 /* Plugin-host status + stream seam payloads                            */
@@ -223,97 +143,46 @@ export function isUtilityPingResult(
  * capability names verbatim — the renderer-side provider adapter
  * re-validates them against the ABI capability set.
  */
-export type PluginManifestPayload = {
-  readonly pluginId: string;
-  readonly providerId: string;
-  readonly capabilities: readonly string[];
+export type PluginManifestPayload = v.Guarded<
+  typeof isPluginManifestPayload
+>;
+
+export const isPluginManifestPayload = v.object({
+  pluginId: v.boundedString(128),
+  providerId: v.boundedString(128),
+  capabilities: v.array(v.boundedString(64)),
   /** Manifest `version`; null when the manifest omits it. */
-  readonly version: string | null;
-};
+  version: v.nullable(v.boundedString(64)),
+});
 
-function isPluginManifestPayload(
-  value: unknown,
-): value is PluginManifestPayload {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['pluginId', 'providerId', 'capabilities', 'version']) &&
-    isBoundedString(value['pluginId'], 128) &&
-    isBoundedString(value['providerId'], 128) &&
-    Array.isArray(value['capabilities']) &&
-    value['capabilities'].every((c) => isBoundedString(c, 64)) &&
-    (value['version'] === null || isBoundedString(value['version'], 64))
-  );
-}
+export type HostPluginsResult = v.Guarded<typeof isHostPluginsResult>;
 
-export type HostPluginsResult = {
-  readonly bindings: 'loaded' | 'unavailable';
-  readonly bindingsError?: string;
-  readonly plugins: readonly string[];
-  readonly manifests: readonly PluginManifestPayload[];
-};
-
-export function isHostPluginsResult(
-  value: unknown,
-): value is HostPluginsResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['bindings', 'bindingsError', 'plugins', 'manifests']) &&
-    (value['bindings'] === 'loaded' || value['bindings'] === 'unavailable') &&
-    isStringOrUndefined(value['bindingsError']) &&
-    Array.isArray(value['plugins']) &&
-    value['plugins'].every((p) => isBoundedString(p, 128)) &&
-    Array.isArray(value['manifests']) &&
-    value['manifests'].every(isPluginManifestPayload)
-  );
-}
+export const isHostPluginsResult = v.object({
+  bindings: v.literals('loaded', 'unavailable'),
+  bindingsError: v.optional(v.string()),
+  plugins: v.array(v.boundedString(128)),
+  manifests: v.array(isPluginManifestPayload),
+});
 
 /**
  * A prepared stream handle as the host reports it — mirrors
  * `PreparedStream` in `packages/application` but stays shell-local so
  * the contract never imports app packages.
  */
-export type PreparedStreamPayload = {
-  readonly handle: string;
-  readonly mime: string;
-  readonly itag?: number;
-  readonly contentLength?: number;
-  readonly expiresAtMs?: number;
-  readonly bitrateKbps?: number;
-};
+export type PreparedStreamPayload = v.Guarded<
+  typeof isPreparedStreamPayload
+>;
 
-export function isPreparedStreamPayload(
-  value: unknown,
-): value is PreparedStreamPayload {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, [
-      'handle',
-      'mime',
-      'itag',
-      'contentLength',
-      'expiresAtMs',
-      'bitrateKbps',
-    ]) &&
-    isBoundedString(value['handle'], 512) &&
-    isBoundedString(value['mime'], 128) &&
-    (value['itag'] === undefined ||
-      isSafeNonNegativeInt(value['itag'])) &&
-    (value['contentLength'] === undefined ||
-      isSafeNonNegativeInt(value['contentLength'])) &&
-    (value['expiresAtMs'] === undefined ||
-      isSafeNonNegativeInt(value['expiresAtMs'])) &&
-    (value['bitrateKbps'] === undefined ||
-      isSafeNonNegativeInt(value['bitrateKbps']))
-  );
-}
+export const isPreparedStreamPayload = v.object({
+  handle: v.boundedString(512),
+  mime: v.boundedString(128),
+  itag: v.optional(v.int()),
+  contentLength: v.optional(v.int()),
+  expiresAtMs: v.optional(v.int()),
+  bitrateKbps: v.optional(v.int()),
+});
 
-type HttpTracePayload = {
-  readonly method: string;
-  readonly url: string;
-  readonly status?: number;
-  readonly bytes: number;
-  readonly elapsedMs: number;
-};
+export type HttpTracePayload = v.Guarded<typeof isHttpTracePayload>;
 
 /**
  * Mirrors the port's trace-URL rule: a redacted `http(s)` URL, or the
@@ -321,354 +190,174 @@ type HttpTracePayload = {
  * LAN address never crosses at all). Signed-url material — queries
  * and fragments — never crosses.
  */
-function isTraceUrlPayload(value: unknown): boolean {
-  if (value === '<pot-provider>') {
-    return true;
-  }
-  return (
-    isBoundedString(value, 2048) &&
+const isTraceUrlPayload: v.Guard<string> = (
+  value,
+): value is string =>
+  value === '<pot-provider>' ||
+  (isBoundedString(value, 2048) &&
     (value.startsWith('http://') || value.startsWith('https://')) &&
     !value.includes('?') &&
-    !value.includes('#')
-  );
-}
+    !value.includes('#'));
 
-function isHttpTracePayload(value: unknown): value is HttpTracePayload {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['method', 'url', 'status', 'bytes', 'elapsedMs']) &&
-    isBoundedString(value['method'], 32) &&
-    isTraceUrlPayload(value['url']) &&
-    (value['status'] === undefined ||
-      isSafeNonNegativeInt(value['status'])) &&
-    isSafeNonNegativeInt(value['bytes']) &&
-    isSafeNonNegativeInt(value['elapsedMs'])
-  );
-}
+const isHttpTracePayload = v.object({
+  method: v.boundedString(32),
+  url: isTraceUrlPayload,
+  status: v.optional(v.int()),
+  bytes: v.int(),
+  elapsedMs: v.int(),
+});
 
-type GuestLogPayload = {
-  readonly level: string;
-  readonly message: string;
-};
+export type GuestLogPayload = v.Guarded<typeof isGuestLogPayload>;
 
-function isGuestLogPayload(value: unknown): value is GuestLogPayload {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['level', 'message']) &&
-    isBoundedString(value['level'], 16) &&
-    typeof value['message'] === 'string' &&
-    value['message'].length <= 4096
-  );
-}
+const isGuestLogPayload = v.object({
+  level: v.boundedString(16),
+  message: v.string(4096),
+});
 
 /** Attempt diagnostics — redacted by the host before crossing. */
-export type AttemptSummaryPayload = {
-  readonly requestId: string;
-  readonly steps: number;
-  readonly httpCalls: number;
-  readonly bytes: number;
-  readonly fuelUsed: number;
-  readonly elapsedMs: number;
-  readonly httpTrace: readonly HttpTracePayload[];
-  readonly guestLog: readonly GuestLogPayload[];
-};
+export type AttemptSummaryPayload = v.Guarded<
+  typeof isAttemptSummaryPayload
+>;
 
-function isAttemptSummaryPayload(
-  value: unknown,
-): value is AttemptSummaryPayload {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, [
-      'requestId',
-      'steps',
-      'httpCalls',
-      'bytes',
-      'fuelUsed',
-      'elapsedMs',
-      'httpTrace',
-      'guestLog',
-    ]) &&
-    isBoundedString(value['requestId'], 128) &&
-    isSafeNonNegativeInt(value['steps']) &&
-    isSafeNonNegativeInt(value['httpCalls']) &&
-    isSafeNonNegativeInt(value['bytes']) &&
-    isSafeNonNegativeInt(value['fuelUsed']) &&
-    isSafeNonNegativeInt(value['elapsedMs']) &&
-    // Caps mirror `isAttemptTrace` in packages/application — the
-    // boundary must never accept a trace the port would reject on
-    // persistence, nor drop one the port considers valid.
-    Array.isArray(value['httpTrace']) &&
-    value['httpTrace'].length <= 32 &&
-    value['httpTrace'].every(isHttpTracePayload) &&
-    Array.isArray(value['guestLog']) &&
-    value['guestLog'].length <= 128 &&
-    value['guestLog'].every(isGuestLogPayload)
-  );
-}
+const isAttemptSummaryPayload = v.object({
+  requestId: v.boundedString(128),
+  steps: v.int(),
+  httpCalls: v.int(),
+  bytes: v.int(),
+  fuelUsed: v.int(),
+  elapsedMs: v.int(),
+  // Caps mirror `isAttemptTrace` in packages/application — the
+  // boundary must never accept a trace the port would reject on
+  // persistence, nor drop one the port considers valid.
+  httpTrace: v.array(isHttpTracePayload, { max: 32 }),
+  guestLog: v.array(isGuestLogPayload, { max: 128 }),
+});
 
-/**
- * `startPrepare`'s resolved outcome. `prepared` carries the minted
- * stream; `failed`/`superseded` carry the host's typed kind + message.
- */
 /**
  * `startRequest`'s terminal outcome — `succeeded` carries the raw
  * `done.result` JSON for the renderer adapter to decode, `failed`
  * the host's typed kind + message.
  */
-export type RequestOutcomePayload = {
-  readonly type: 'succeeded' | 'failed';
-  readonly resultJson?: string;
-  readonly kind?: string;
-  readonly message?: string;
-  readonly attempt: AttemptSummaryPayload;
-};
+export type RequestOutcomePayload = v.Guarded<
+  typeof isRequestOutcomePayload
+>;
 
-export function isRequestOutcomePayload(
-  value: unknown,
-): value is RequestOutcomePayload {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, [
-      'type',
-      'resultJson',
-      'kind',
-      'message',
-      'attempt',
-    ]) &&
-    (value['type'] === 'succeeded' || value['type'] === 'failed') &&
-    (value['resultJson'] === undefined ||
-      (typeof value['resultJson'] === 'string' &&
-        value['resultJson'].length <= 1_048_576)) &&
-    isStringOrUndefined(value['kind']) &&
-    isStringOrUndefined(value['message']) &&
-    isAttemptSummaryPayload(value['attempt'])
-  );
-}
+export const isRequestOutcomePayload = v.object({
+  type: v.literals('succeeded', 'failed'),
+  resultJson: v.optional(v.string(1_048_576)),
+  kind: v.optional(v.string()),
+  message: v.optional(v.string()),
+  attempt: isAttemptSummaryPayload,
+});
 
-export type PrepareOutcomePayload = {
-  readonly type: 'prepared' | 'failed' | 'superseded';
-  readonly stream?: PreparedStreamPayload;
+/**
+ * `startPrepare`'s resolved outcome. `prepared` carries the minted
+ * stream; `failed`/`superseded` carry the host's typed kind + message.
+ */
+export type PrepareOutcomePayload = v.Guarded<
+  typeof isPrepareOutcomePayload
+>;
+
+export const isPrepareOutcomePayload = v.object({
+  type: v.literals('prepared', 'failed', 'superseded'),
+  stream: v.optional(isPreparedStreamPayload),
   // Session handles this prepare superseded or pruned (napi
   // `PrepareOutcome.superseded: Vec<String>`) — handle routing drops
-  // them so a dead session can never serve a later attach.
-  readonly superseded?: readonly string[];
-  readonly kind?: string;
-  readonly message?: string;
-  readonly attempt?: AttemptSummaryPayload;
-};
+  // them so a dead session can never serve a later attach. No length
+  // cap: the registry prunes unbounded terminal sets, and rejecting
+  // post-registration would strand the minted handle.
+  superseded: v.optional(v.array(v.boundedString(256))),
+  kind: v.optional(v.string()),
+  message: v.optional(v.string()),
+  attempt: v.optional(isAttemptSummaryPayload),
+});
 
-export function isPrepareOutcomePayload(
-  value: unknown,
-): value is PrepareOutcomePayload {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, [
-      'type',
-      'stream',
-      'superseded',
-      'kind',
-      'message',
-      'attempt',
-    ]) &&
-    (value['type'] === 'prepared' ||
-      value['type'] === 'failed' ||
-      value['type'] === 'superseded') &&
-    (value['stream'] === undefined ||
-      isPreparedStreamPayload(value['stream'])) &&
-    // No length cap: the registry prunes unbounded terminal sets, and
-    // rejecting post-registration would strand the minted handle.
-    (value['superseded'] === undefined ||
-      (Array.isArray(value['superseded']) &&
-        value['superseded'].every((h) => isBoundedString(h, 256)))) &&
-    isStringOrUndefined(value['kind']) &&
-    isStringOrUndefined(value['message']) &&
-    (value['attempt'] === undefined ||
-      isAttemptSummaryPayload(value['attempt']))
-  );
-}
+export type StreamPrepareArgs = v.Guarded<typeof isStreamPrepareArgs>;
 
-export type StreamPrepareArgs = {
-  readonly pluginId: string;
-  readonly sourceRef: string;
-  readonly requestId: string;
-};
+export const isStreamPrepareArgs = v.object({
+  pluginId: v.boundedString(128),
+  sourceRef: v.boundedString(4096),
+  requestId: v.boundedString(128),
+});
 
-export function isStreamPrepareArgs(
-  value: unknown,
-): value is StreamPrepareArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['pluginId', 'sourceRef', 'requestId']) &&
-    isBoundedString(value['pluginId'], 128) &&
-    isBoundedString(value['sourceRef'], 4096) &&
-    isBoundedString(value['requestId'], 128)
-  );
-}
+export type StreamDevPrepareArgs = v.Guarded<
+  typeof isStreamDevPrepareArgs
+>;
 
-export type StreamDevPrepareArgs = {
-  readonly url: string;
-  readonly mime: string;
-  readonly contentLength?: number;
-  readonly remintable?: boolean;
-};
+export const isStreamDevPrepareArgs = v.object({
+  url: v.refine(
+    v.string(4096),
+    (url) => url.startsWith('https://') || url.startsWith('http://'),
+  ),
+  mime: v.boundedString(128),
+  contentLength: v.optional(v.int()),
+  remintable: v.optional(v.boolean()),
+});
 
-export function isStreamDevPrepareArgs(
-  value: unknown,
-): value is StreamDevPrepareArgs {
-  const url = isRecord(value) ? value['url'] : undefined;
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['url', 'mime', 'contentLength', 'remintable']) &&
-    typeof url === 'string' &&
-    url.length <= 4096 &&
-    (url.startsWith('https://') || url.startsWith('http://')) &&
-    isBoundedString(value['mime'], 128) &&
-    (value['contentLength'] === undefined ||
-      isSafeNonNegativeInt(value['contentLength'])) &&
-    (value['remintable'] === undefined || isBoolean(value['remintable']))
-  );
-}
+export type StreamHandleArgs = v.Guarded<typeof isStreamHandleArgs>;
 
-export type StreamHandleArgs = { readonly handle: string };
+export const isStreamHandleArgs = v.object({
+  handle: v.boundedString(512),
+});
 
-export function isStreamHandleArgs(
-  value: unknown,
-): value is StreamHandleArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['handle']) &&
-    isBoundedString(value['handle'], 512)
-  );
-}
+export type StreamOpenArgs = v.Guarded<typeof isStreamOpenArgs>;
 
-export type StreamOpenArgs = {
-  readonly handle: string;
-  readonly position: number;
-};
-
-export function isStreamOpenArgs(
-  value: unknown,
-): value is StreamOpenArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['handle', 'position']) &&
-    isBoundedString(value['handle'], 512) &&
-    isSafeNonNegativeInt(value['position'])
-  );
-}
+export const isStreamOpenArgs = v.object({
+  handle: v.boundedString(512),
+  position: v.int(),
+});
 
 /** `stream:open` result — `null` remaining = unknown total. */
-type StreamOpenResult = { readonly remaining: number | null };
+export type StreamOpenResult = v.Guarded<typeof isStreamOpenResult>;
 
-export function isStreamOpenResult(
-  value: unknown,
-): value is StreamOpenResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['remaining']) &&
-    (value['remaining'] === null ||
-      isSafeNonNegativeInt(value['remaining']))
-  );
-}
+export const isStreamOpenResult = v.object({
+  remaining: v.nullable(v.int()),
+});
 
-export type StreamReadArgs = {
-  readonly handle: string;
-  readonly position: number;
-  readonly maxLen: number;
-};
+export type StreamReadArgs = v.Guarded<typeof isStreamReadArgs>;
 
 const MAX_READ_LEN = 1024 * 1024;
 
-export function isStreamReadArgs(
-  value: unknown,
-): value is StreamReadArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['handle', 'position', 'maxLen']) &&
-    isBoundedString(value['handle'], 512) &&
-    isSafeNonNegativeInt(value['position']) &&
-    isSafeNonNegativeInt(value['maxLen']) &&
-    (value['maxLen'] as number) > 0 &&
-    (value['maxLen'] as number) <= MAX_READ_LEN
-  );
-}
+export const isStreamReadArgs = v.object({
+  handle: v.boundedString(512),
+  position: v.int(),
+  maxLen: v.refine(v.int(), (n) => n > 0 && n <= MAX_READ_LEN),
+});
 
 /** `stream:read` result — raw bytes ride base64; empty = EOF. */
-type StreamReadResult = { readonly data: string };
+export type StreamReadResult = v.Guarded<typeof isStreamReadResult>;
 
-export function isStreamReadResult(
-  value: unknown,
-): value is StreamReadResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['data']) &&
-    typeof value['data'] === 'string' &&
-    value['data'].length <= MAX_READ_LEN * 2
-  );
-}
+export const isStreamReadResult = v.object({
+  data: v.string(MAX_READ_LEN * 2),
+});
 
-type StreamServeUrlResult = { readonly url: string };
+export type StreamServeUrlResult = v.Guarded<
+  typeof isStreamServeUrlResult
+>;
 
-export function isStreamServeUrlResult(
-  value: unknown,
-): value is StreamServeUrlResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['url']) &&
-    isBoundedString(value['url'], 2048) &&
-    value['url'].startsWith('http://127.0.0.1:')
-  );
-}
+export const isStreamServeUrlResult = v.object({
+  url: v.refine(v.boundedString(2048), (url) =>
+    url.startsWith('http://127.0.0.1:'),
+  ),
+});
 
 /** `stream:marks` — lifecycle phase marks, all optional ms values. */
-export type StreamMarksResult = {
-  readonly prepareStartedMs?: number;
-  readonly resolveMs?: number;
-  readonly mintMs?: number;
-  readonly firstByteMs?: number;
-  readonly headReadyMs?: number;
-  readonly attachMs?: number;
-};
+export type StreamMarksResult = v.Guarded<typeof isStreamMarksResult>;
 
-export function isStreamMarksResult(
-  value: unknown,
-): value is StreamMarksResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, [
-      'prepareStartedMs',
-      'resolveMs',
-      'mintMs',
-      'firstByteMs',
-      'headReadyMs',
-      'attachMs',
-    ]) &&
-    (value['prepareStartedMs'] === undefined ||
-      isSafeNonNegativeInt(value['prepareStartedMs'])) &&
-    (value['resolveMs'] === undefined ||
-      isSafeNonNegativeInt(value['resolveMs'])) &&
-    (value['mintMs'] === undefined ||
-      isSafeNonNegativeInt(value['mintMs'])) &&
-    (value['firstByteMs'] === undefined ||
-      isSafeNonNegativeInt(value['firstByteMs'])) &&
-    (value['headReadyMs'] === undefined ||
-      isSafeNonNegativeInt(value['headReadyMs'])) &&
-    (value['attachMs'] === undefined ||
-      isSafeNonNegativeInt(value['attachMs']))
-  );
-}
+export const isStreamMarksResult = v.object({
+  prepareStartedMs: v.optional(v.int()),
+  resolveMs: v.optional(v.int()),
+  mintMs: v.optional(v.int()),
+  firstByteMs: v.optional(v.int()),
+  headReadyMs: v.optional(v.int()),
+  attachMs: v.optional(v.int()),
+});
 
-export type StreamCancelArgs = { readonly requestId: string };
+export type StreamCancelArgs = v.Guarded<typeof isStreamCancelArgs>;
 
-export function isStreamCancelArgs(
-  value: unknown,
-): value is StreamCancelArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['requestId']) &&
-    isBoundedString(value['requestId'], 128)
-  );
-}
+export const isStreamCancelArgs = v.object({
+  requestId: v.boundedString(128),
+});
 
 /**
  * `host:request` — any declared capability with a JSON object payload,
@@ -676,44 +365,21 @@ export function isStreamCancelArgs(
  * requestId so its cancel path can reach the host before the promise
  * resolves.
  */
-export type HostRequestArgs = {
-  readonly pluginId: string;
-  readonly capability: string;
-  readonly payloadJson: string;
-  readonly requestId: string;
-};
+export type HostRequestArgs = v.Guarded<typeof isHostRequestArgs>;
 
-export function isHostRequestArgs(
-  value: unknown,
-): value is HostRequestArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, [
-      'pluginId',
-      'capability',
-      'payloadJson',
-      'requestId',
-    ]) &&
-    isBoundedString(value['pluginId'], 128) &&
-    isBoundedString(value['capability'], 64) &&
-    typeof value['payloadJson'] === 'string' &&
-    value['payloadJson'].length <= 65_536 &&
-    isBoundedString(value['requestId'], 128)
-  );
-}
+export const isHostRequestArgs = v.object({
+  pluginId: v.boundedString(128),
+  capability: v.boundedString(64),
+  payloadJson: v.string(65_536),
+  requestId: v.boundedString(128),
+});
 
 /** `host:cancel` — same requestId-scoped abort as `stream:cancel`. */
-export type HostCancelArgs = { readonly requestId: string };
+export type HostCancelArgs = v.Guarded<typeof isHostCancelArgs>;
 
-export function isHostCancelArgs(
-  value: unknown,
-): value is HostCancelArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['requestId']) &&
-    isBoundedString(value['requestId'], 128)
-  );
-}
+export const isHostCancelArgs = v.object({
+  requestId: v.boundedString(128),
+});
 
 /**
  * `stream:port` — asks main to broker a MessageChannel to the utility
@@ -721,21 +387,12 @@ export function isHostCancelArgs(
  * `stream-bytes` event keyed by `requestId`; the invoke resolves once
  * main has posted both ends (or rejects typed).
  */
-export type StreamPortArgs = {
-  readonly handle: string;
-  readonly requestId: string;
-};
+export type StreamPortArgs = v.Guarded<typeof isStreamPortArgs>;
 
-export function isStreamPortArgs(
-  value: unknown,
-): value is StreamPortArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['handle', 'requestId']) &&
-    isBoundedString(value['handle'], 512) &&
-    isBoundedString(value['requestId'], 128)
-  );
-}
+export const isStreamPortArgs = v.object({
+  handle: v.boundedString(512),
+  requestId: v.boundedString(128),
+});
 
 /**
  * The pump-port facade the preload hands the renderer — the real
@@ -757,159 +414,81 @@ export type StreamPortLike = {
  * boundary. Params and row values are `SqlValue` (string/number/null)
  * only — bigint, blob, and boolean have no wire representation.
  */
-export type StorageBeginResult = { readonly txId: string };
+export type StorageBeginResult = v.Guarded<typeof isStorageBeginResult>;
 
-export function isStorageBeginResult(
-  value: unknown,
-): value is StorageBeginResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['txId']) &&
-    isBoundedString(value['txId'], 64)
-  );
-}
+export const isStorageBeginResult = v.object({
+  txId: v.boundedString(64),
+});
 
-export function isStorageBeginArgs(
-  value: unknown,
-): value is undefined {
-  return value === undefined;
-}
+export const isStorageBeginArgs = v.literal(undefined);
 
-export type StorageTxArgs = { readonly txId: string };
+export type StorageTxArgs = v.Guarded<typeof isStorageTxArgs>;
 
-export function isStorageTxArgs(
-  value: unknown,
-): value is StorageTxArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['txId']) &&
-    isBoundedString(value['txId'], 64)
-  );
-}
+export const isStorageTxArgs = v.object({
+  txId: v.boundedString(64),
+});
 
-function isSqlValue(value: unknown): value is SqlValue {
-  return (
-    value === null ||
-    (typeof value === 'string' && value.length <= 1_048_576) ||
-    isFiniteNumber(value)
-  );
-}
+const isSqlValue: v.Guard<SqlValue> = v.union(
+  v.literal(null),
+  v.string(1_048_576),
+  v.finite(),
+);
 
-function isSqlParams(value: unknown): value is readonly SqlValue[] {
-  return (
-    Array.isArray(value) &&
-    value.length <= 256 &&
-    value.every(isSqlValue)
-  );
-}
+const isSqlParams = v.array(isSqlValue, { max: 256 });
 
-function isSqlRowValue(value: unknown): value is SqlRow {
-  return (
-    isRecord(value) &&
-    Object.keys(value).length <= 256 &&
-    Object.keys(value).every((key) => isBoundedString(key, 128)) &&
-    Object.values(value).every(isSqlValue)
-  );
-}
+const isSqlRowValue: v.Guard<SqlRow> = (
+  value,
+): value is SqlRow =>
+  isRecord(value) &&
+  Object.keys(value).length <= 256 &&
+  Object.keys(value).every((key) => isBoundedString(key, 128)) &&
+  Object.values(value).every(isSqlValue);
 
-export type StorageExecuteArgs = {
-  readonly txId: string;
-  readonly sql: string;
-  readonly params: readonly SqlValue[];
-};
+export type StorageExecuteArgs = v.Guarded<typeof isStorageExecuteArgs>;
+export type StorageQueryArgs = v.Guarded<typeof isStorageQueryArgs>;
 
-export function isStorageExecuteArgs(
-  value: unknown,
-): value is StorageExecuteArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['txId', 'sql', 'params']) &&
-    isBoundedString(value['txId'], 64) &&
-    isBoundedString(value['sql'], 65_536) &&
-    isSqlParams(value['params'])
-  );
-}
+export const isStorageExecuteArgs = v.object({
+  txId: v.boundedString(64),
+  sql: v.boundedString(65_536),
+  params: isSqlParams,
+});
 
 export const isStorageQueryArgs = isStorageExecuteArgs;
 
-export type StorageStatement = {
-  readonly sql: string;
-  readonly params: readonly SqlValue[];
-};
+export type StorageStatement = v.Guarded<typeof isStorageStatement>;
 
-export function isStorageStatement(
-  value: unknown,
-): value is StorageStatement {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['sql', 'params']) &&
-    isBoundedString(value['sql'], 65_536) &&
-    isSqlParams(value['params'])
-  );
-}
+export const isStorageStatement = v.object({
+  sql: v.boundedString(65_536),
+  params: isSqlParams,
+});
 
-export type StorageExecManyArgs = {
-  readonly txId: string;
-  readonly statements: readonly StorageStatement[];
-};
+export type StorageExecManyArgs = v.Guarded<typeof isStorageExecManyArgs>;
 
-export function isStorageExecManyArgs(
-  value: unknown,
-): value is StorageExecManyArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['txId', 'statements']) &&
-    isBoundedString(value['txId'], 64) &&
-    Array.isArray(value['statements']) &&
-    value['statements'].length <= 4_096 &&
-    value['statements'].every(isStorageStatement)
-  );
-}
+export const isStorageExecManyArgs = v.object({
+  txId: v.boundedString(64),
+  statements: v.array(isStorageStatement, { max: 4_096 }),
+});
 
-export type StorageExecuteResult = {
-  readonly changes: number;
-  readonly lastInsertRowId: number | null;
-};
+export type StorageExecuteResult = v.Guarded<
+  typeof isStorageExecuteResult
+>;
 
-export function isStorageExecuteResult(
-  value: unknown,
-): value is StorageExecuteResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['changes', 'lastInsertRowId']) &&
-    isSafeNonNegativeInt(value['changes']) &&
-    (value['lastInsertRowId'] === null ||
-      (isFiniteNumber(value['lastInsertRowId']) &&
-        Number.isSafeInteger(value['lastInsertRowId'])))
-  );
-}
+export const isStorageExecuteResult = v.object({
+  changes: v.int(),
+  lastInsertRowId: v.nullable(v.integer()),
+});
 
-export type StorageQueryResult = { readonly rows: readonly SqlRow[] };
+export type StorageQueryResult = v.Guarded<typeof isStorageQueryResult>;
 
-export function isStorageQueryResult(
-  value: unknown,
-): value is StorageQueryResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['rows']) &&
-    Array.isArray(value['rows']) &&
-    value['rows'].length <= 1_000_000 &&
-    value['rows'].every(isSqlRowValue)
-  );
-}
+export const isStorageQueryResult = v.object({
+  rows: v.array(isSqlRowValue, { max: 1_000_000 }),
+});
 
-export type StorageBackupArgs = { readonly tag: string };
+export type StorageBackupArgs = v.Guarded<typeof isStorageBackupArgs>;
 
-export function isStorageBackupArgs(
-  value: unknown,
-): value is StorageBackupArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['tag']) &&
-    typeof value['tag'] === 'string' &&
-    /^[a-z0-9-]{1,64}$/i.test(value['tag'])
-  );
-}
+export const isStorageBackupArgs = v.object({
+  tag: v.pattern(/^[a-z0-9-]{1,64}$/i),
+});
 
 /**
  * The storage bridge the renderer's `SqliteDriver` drives — one method
@@ -946,93 +525,46 @@ export type AuqwStorage = {
 /** Cap on an opaque delta document — sync payloads must not balloon IPC. */
 export const MAX_SYNC_DOC_BYTES = 1_048_576;
 
-type SyncListenerState =
-  | 'starting'
-  | 'listening'
-  | 'unavailable'
+const syncListenerState = v.literals(
+  'starting',
+  'listening',
+  'unavailable',
   // Never started: a never-paired install defers listener+custody until
   // an explicit sync action (pairing), so observational status reads
   // stay free of the safeStorage/keychain read.
-  | 'dormant'
-  | 'disabled';
+  'dormant',
+  'disabled',
+);
 
-export type SyncStatusResult = {
-  readonly listener: SyncListenerState;
+export type SyncListenerState = v.Guarded<typeof syncListenerState>;
+
+export type SyncStatusResult = v.Guarded<typeof isSyncStatusResult>;
+
+export const isSyncStatusResult = v.object({
+  listener: syncListenerState,
   /** `ip:port` to feed a pairing payload, or null when nothing is up. */
-  readonly endpoint: string | null;
-  readonly boundPort: number | null;
-  readonly advertise: 'off' | 'announcing' | 'unavailable';
-  readonly pairedDevices: number;
-  readonly sessions: number;
-  readonly lastSyncAt: number | null;
-  readonly engine: 'ready' | 'absent';
-  readonly name: string;
-  readonly fingerprint: string | null;
-};
+  endpoint: v.nullable(v.boundedString(128)),
+  boundPort: v.nullable(v.int()),
+  advertise: v.literals('off', 'announcing', 'unavailable'),
+  pairedDevices: v.int(),
+  sessions: v.int(),
+  lastSyncAt: v.nullable(v.finite()),
+  engine: v.literals('ready', 'absent'),
+  name: v.boundedString(128),
+  fingerprint: v.nullable(v.boundedString(128)),
+});
 
-export function isSyncStatusResult(
-  value: unknown,
-): value is SyncStatusResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, [
-      'listener',
-      'endpoint',
-      'boundPort',
-      'advertise',
-      'pairedDevices',
-      'sessions',
-      'lastSyncAt',
-      'engine',
-      'name',
-      'fingerprint',
-    ]) &&
-    (value['listener'] === 'starting' ||
-      value['listener'] === 'listening' ||
-      value['listener'] === 'unavailable' ||
-      value['listener'] === 'dormant' ||
-      value['listener'] === 'disabled') &&
-    (value['endpoint'] === null ||
-      isBoundedString(value['endpoint'], 128)) &&
-    (value['boundPort'] === null ||
-      isSafeNonNegativeInt(value['boundPort'])) &&
-    (value['advertise'] === 'off' ||
-      value['advertise'] === 'announcing' ||
-      value['advertise'] === 'unavailable') &&
-    isSafeNonNegativeInt(value['pairedDevices']) &&
-    isSafeNonNegativeInt(value['sessions']) &&
-    (value['lastSyncAt'] === null ||
-      isFiniteNumber(value['lastSyncAt'])) &&
-    (value['engine'] === 'ready' || value['engine'] === 'absent') &&
-    isBoundedString(value['name'], 128) &&
-    (value['fingerprint'] === null ||
-      isBoundedString(value['fingerprint'], 128))
-  );
-}
+export type SyncPairingResult = v.Guarded<typeof isSyncPairingResult>;
 
-export type SyncPairingResult = {
+export const isSyncPairingResult = v.object({
   /** QR-payload text: JSON {v, endpoint, endpoints, code, fp}. */
-  readonly payload: string;
+  payload: v.boundedString(1_024),
   /** The 6-digit typed path — same session as the QR payload. */
-  readonly code: string;
+  code: v.pattern(/^[0-9]{6}$/),
   /** Primary `ip:port` for the typed path — shown next to the code. */
-  readonly endpoint: string;
-  readonly expiresAt: number;
-};
-
-export function isSyncPairingResult(
-  value: unknown,
-): value is SyncPairingResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['payload', 'code', 'endpoint', 'expiresAt']) &&
-    isBoundedString(value['payload'], 1_024) &&
-    typeof value['code'] === 'string' &&
-    /^[0-9]{6}$/.test(value['code']) &&
-    isBoundedString(value['endpoint'], 64) &&
-    isFiniteNumber(value['expiresAt'])
-  );
-}
+  endpoint: v.boundedString(64),
+  expiresAt: v.finite(),
+});
 
 /**
  * `sync:nearby*` — the LocalSend-style discovery surface: the utility
@@ -1041,152 +573,75 @@ export function isSyncPairingResult(
  * still authorizes by the 6-digit code (or a scanned payload); the
  * advertised `fp` only pins it.
  */
-export type SyncNearbyPeer = {
-  /** Stable per-service identity — rows key on it, `lost` carries it. */
-  readonly key: string;
-  readonly name: string;
-  readonly host: string;
-  readonly port: number;
-  /** Advertised identity fingerprint (TXT `dev`) — null when absent. */
-  readonly fp: string | null;
-};
+export type SyncNearbyPeer = v.Guarded<typeof isSyncNearbyPeer>;
 
-export type SyncNearbyEvent =
-  | { readonly type: 'found'; readonly peer: SyncNearbyPeer }
-  | { readonly type: 'lost'; readonly key: string }
+const isSyncNearbyPeer = v.object({
+  /** Stable per-service identity — rows key on it, `lost` carries it. */
+  key: v.boundedString(320),
+  name: v.boundedString(128),
+  host: v.boundedString(64),
+  port: v.int(),
+  /** Advertised identity fingerprint (TXT `dev`) — null when absent. */
+  fp: v.nullable(v.boundedString(128)),
+});
+
+export type SyncNearbyEvent = v.Guarded<typeof isSyncNearbyEvent>;
+
+export const isSyncNearbyEvent = v.union(
+  v.object({ type: v.literal('found'), peer: isSyncNearbyPeer }),
+  v.object({ type: v.literal('lost'), key: v.boundedString(320) }),
   // A caller just consumed our minted offer — the sheet remints so
   // it never displays a dead code.
-  | { readonly type: 'paired' };
+  v.object({ type: v.literal('paired') }),
+);
 
-function isSyncNearbyPeer(value: unknown): value is SyncNearbyPeer {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['key', 'name', 'host', 'port', 'fp']) &&
-    isBoundedString(value['key'], 320) &&
-    isBoundedString(value['name'], 128) &&
-    isBoundedString(value['host'], 64) &&
-    isSafeNonNegativeInt(value['port']) &&
-    (value['fp'] === null || isBoundedString(value['fp'], 128))
-  );
-}
+export type SyncDeviceInfo = v.Guarded<typeof isSyncDeviceInfo>;
 
-export function isSyncNearbyEvent(
-  value: unknown,
-): value is SyncNearbyEvent {
-  if (!isRecord(value)) {
-    return false;
-  }
-  if (
-    value['type'] === 'found' &&
-    hasOnlyKeys(value, ['type', 'peer'])
-  ) {
-    return isSyncNearbyPeer(value['peer']);
-  }
-  if (
-    value['type'] === 'lost' &&
-    hasOnlyKeys(value, ['type', 'key'])
-  ) {
-    return isBoundedString(value['key'], 320);
-  }
-  return (
-    value['type'] === 'paired' && hasOnlyKeys(value, ['type'])
-  );
-}
+const isSyncDeviceInfo = v.object({
+  id: v.boundedString(64),
+  name: v.boundedString(128),
+  pairedAt: v.finite(),
+  lastSeenAt: v.finite(),
+});
 
 /**
  * `sync:dial` — pair TO a phone-hosted offer: the desktop is the
  * caller, the typed/scanned code is the auth secret. `fp` pins the
  * responder when mDNS/QR disclosed it.
  */
-export type SyncDialArgs = {
-  readonly host: string;
-  readonly port: number;
-  readonly code: string;
-  readonly fp?: string;
-};
+export type SyncDialArgs = v.Guarded<typeof isSyncDialArgs>;
 
-export function isSyncDialArgs(value: unknown): value is SyncDialArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['host', 'port', 'code', 'fp']) &&
-    isBoundedString(value['host'], 64) &&
-    isSafeNonNegativeInt(value['port']) &&
-    typeof value['code'] === 'string' &&
-    /^[0-9]{6}$/.test(value['code']) &&
-    (value['fp'] === undefined || isBoundedString(value['fp'], 128))
-  );
-}
+export const isSyncDialArgs = v.object({
+  host: v.boundedString(64),
+  port: v.int(),
+  code: v.pattern(/^[0-9]{6}$/),
+  fp: v.optional(v.boundedString(128)),
+});
 
 /** `sync:dialPayload` — pair TO a phone's QR payload verbatim. */
-export type SyncDialPayloadArgs = { readonly payload: string };
+export type SyncDialPayloadArgs = v.Guarded<typeof isSyncDialPayloadArgs>;
 
-export function isSyncDialPayloadArgs(
-  value: unknown,
-): value is SyncDialPayloadArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['payload']) &&
-    isBoundedString(value['payload'], 1_024)
-  );
-}
+export const isSyncDialPayloadArgs = v.object({
+  payload: v.boundedString(1_024),
+});
 
-export type SyncDialResult = { readonly device: SyncDeviceInfo };
+export type SyncDialResult = v.Guarded<typeof isSyncDialResult>;
 
-export function isSyncDialResult(
-  value: unknown,
-): value is SyncDialResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['device']) &&
-    isSyncDeviceInfo(value['device'])
-  );
-}
+export const isSyncDialResult = v.object({
+  device: isSyncDeviceInfo,
+});
 
-export type SyncDeviceInfo = {
-  readonly id: string;
-  readonly name: string;
-  readonly pairedAt: number;
-  readonly lastSeenAt: number;
-};
+export type SyncDevicesResult = v.Guarded<typeof isSyncDevicesResult>;
 
-function isSyncDeviceInfo(value: unknown): value is SyncDeviceInfo {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['id', 'name', 'pairedAt', 'lastSeenAt']) &&
-    isBoundedString(value['id'], 64) &&
-    isBoundedString(value['name'], 128) &&
-    isFiniteNumber(value['pairedAt']) &&
-    isFiniteNumber(value['lastSeenAt'])
-  );
-}
+export const isSyncDevicesResult = v.object({
+  devices: v.array(isSyncDeviceInfo, { max: 64 }),
+});
 
-export type SyncDevicesResult = {
-  readonly devices: readonly SyncDeviceInfo[];
-};
+export type SyncUnpairArgs = v.Guarded<typeof isSyncUnpairArgs>;
 
-export function isSyncDevicesResult(
-  value: unknown,
-): value is SyncDevicesResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['devices']) &&
-    Array.isArray(value['devices']) &&
-    value['devices'].length <= 64 &&
-    value['devices'].every(isSyncDeviceInfo)
-  );
-}
-
-export type SyncUnpairArgs = { readonly id: string };
-
-export function isSyncUnpairArgs(
-  value: unknown,
-): value is SyncUnpairArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['id']) &&
-    isBoundedString(value['id'], 64)
-  );
-}
+export const isSyncUnpairArgs = v.object({
+  id: v.boundedString(64),
+});
 
 /**
  * The strict JSON domain — values that survive a serialize/parse round
@@ -1346,7 +801,7 @@ export function isSyncDeltaDoc(value: unknown): boolean {
   );
 }
 
-export type SyncDeltasArgs = { readonly since: string };
+export type SyncDeltasArgs = v.Guarded<typeof isSyncDeltasArgs>;
 
 /**
  * The serialized-cursor bound: `since` is `JSON.stringify(SyncCursor)`
@@ -1356,76 +811,42 @@ export type SyncDeltasArgs = { readonly since: string };
  */
 export const MAX_SYNC_CURSOR_CHARS = 80_000;
 
-export function isSyncDeltasArgs(
-  value: unknown,
-): value is SyncDeltasArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['since']) &&
-    // '' is a legal cursor — the engine reads it as "full snapshot".
-    typeof value['since'] === 'string' &&
-    value['since'].length <= MAX_SYNC_CURSOR_CHARS
-  );
-}
+export const isSyncDeltasArgs = v.object({
+  // '' is a legal cursor — the engine reads it as "full snapshot".
+  since: v.string(MAX_SYNC_CURSOR_CHARS),
+});
 
-export type SyncDeltasResult = { readonly delta: unknown };
+export type SyncDeltasResult = v.Guarded<typeof isSyncDeltasResult>;
 
-export function isSyncDeltasResult(
-  value: unknown,
-): value is SyncDeltasResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['delta']) &&
-    isSyncDeltaDoc(value['delta'])
-  );
-}
+export const isSyncDeltasResult = v.object({
+  delta: v.checked(isSyncDeltaDoc),
+});
 
-export type SyncImportDeltaArgs = {
-  readonly delta: unknown;
-  readonly deviceId?: string;
-};
+export type SyncImportDeltaArgs = v.Guarded<typeof isSyncImportDeltaArgs>;
 
-export function isSyncImportDeltaArgs(
-  value: unknown,
-): value is SyncImportDeltaArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['delta', 'deviceId']) &&
-    isSyncDeltaDoc(value['delta']) &&
-    (value['deviceId'] === undefined ||
-      isBoundedString(value['deviceId'], 64))
-  );
-}
+export const isSyncImportDeltaArgs = v.object({
+  delta: v.checked(isSyncDeltaDoc),
+  deviceId: v.optional(v.boundedString(64)),
+});
 
-export type SyncImportDeltaResult = { readonly result: unknown };
+export type SyncImportDeltaResult = v.Guarded<
+  typeof isSyncImportDeltaResult
+>;
 
-export function isSyncImportDeltaResult(
-  value: unknown,
-): value is SyncImportDeltaResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['result']) &&
-    // The engine's apply receipt is `unknown` — any bounded JSON value
-    // (including `null`) is a valid result, not just full documents.
-    isBoundedJson(value['result'], MAX_SYNC_DOC_BYTES)
-  );
-}
+export const isSyncImportDeltaResult = v.object({
+  // The engine's apply receipt is `unknown` — any bounded JSON value
+  // (including `null`) is a valid result, not just full documents.
+  result: v.checked((entry) =>
+    isBoundedJson(entry, MAX_SYNC_DOC_BYTES),
+  ),
+});
 
-export type SyncTriggerResult = {
-  readonly triggered: boolean;
-  readonly pending: boolean;
-};
+export type SyncTriggerResult = v.Guarded<typeof isSyncTriggerResult>;
 
-export function isSyncTriggerResult(
-  value: unknown,
-): value is SyncTriggerResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['triggered', 'pending']) &&
-    isBoolean(value['triggered']) &&
-    isBoolean(value['pending'])
-  );
-}
+export const isSyncTriggerResult = v.object({
+  triggered: v.boolean(),
+  pending: v.boolean(),
+});
 
 /**
  * `sync:localChanges` — domain edits the renderer already committed,
@@ -1438,55 +859,34 @@ export function isSyncTriggerResult(
 const MAX_SYNC_LOCAL_WRITES = 256;
 const MAX_SYNC_FIELD_BYTES = 65_536;
 
-type SyncLocalWriteDoc =
-  | {
-      readonly kind: string;
-      readonly recordId: string;
-      readonly field: string;
-      readonly value: unknown;
-    }
-  | {
-      readonly kind: string;
-      readonly recordId: string;
-      readonly tombstone: true;
-    };
+export type SyncLocalWriteDoc = v.Guarded<typeof isSyncLocalWriteDoc>;
 
-function isSyncLocalWriteDoc(
-  value: unknown,
-): value is SyncLocalWriteDoc {
-  if (
-    !isRecord(value) ||
-    !isBoundedString(value['kind'], 64) ||
-    !isBoundedString(value['recordId'], 1024)
-  ) {
-    return false;
-  }
-  if (hasOnlyKeys(value, ['kind', 'recordId', 'tombstone'])) {
-    return value['tombstone'] === true;
-  }
-  return (
-    hasOnlyKeys(value, ['kind', 'recordId', 'field', 'value']) &&
-    isBoundedString(value['field'], 64) &&
-    isBoundedJson(value['value'], MAX_SYNC_FIELD_BYTES)
-  );
-}
+export const isSyncLocalWriteDoc = v.union(
+  v.object({
+    kind: v.boundedString(64),
+    recordId: v.boundedString(1024),
+    field: v.boundedString(64),
+    value: v.checked((entry) =>
+      isBoundedJson(entry, MAX_SYNC_FIELD_BYTES),
+    ),
+  }),
+  v.object({
+    kind: v.boundedString(64),
+    recordId: v.boundedString(1024),
+    tombstone: v.literal(true),
+  }),
+);
 
-export type SyncLocalChangesArgs = {
-  readonly writes: readonly SyncLocalWriteDoc[];
-};
+export type SyncLocalChangesArgs = v.Guarded<
+  typeof isSyncLocalChangesArgs
+>;
 
-export function isSyncLocalChangesArgs(
-  value: unknown,
-): value is SyncLocalChangesArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['writes']) &&
-    Array.isArray(value['writes']) &&
-    value['writes'].length > 0 &&
-    value['writes'].length <= MAX_SYNC_LOCAL_WRITES &&
-    value['writes'].every(isSyncLocalWriteDoc)
-  );
-}
+export const isSyncLocalChangesArgs = v.object({
+  writes: v.array(isSyncLocalWriteDoc, {
+    min: 1,
+    max: MAX_SYNC_LOCAL_WRITES,
+  }),
+});
 
 /**
  * The result is a small acknowledgement, not the per-write outcome
@@ -1496,37 +896,24 @@ export function isSyncLocalChangesArgs(
  * transport failure AFTER the engine already appended (Review #46
  * round-9). `accepted` counts the stamped batch.
  */
-export type SyncLocalChangesResult = { readonly accepted: number };
+export type SyncLocalChangesResult = v.Guarded<
+  typeof isSyncLocalChangesResult
+>;
 
-export function isSyncLocalChangesResult(
-  value: unknown,
-): value is SyncLocalChangesResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['accepted']) &&
-    typeof value['accepted'] === 'number' &&
-    Number.isSafeInteger(value['accepted']) &&
-    value['accepted'] >= 0
-  );
-}
+export const isSyncLocalChangesResult = v.object({
+  accepted: v.int(),
+});
 
 /**
  * `sync:applied` — the utility→main→renderer push that remote-applied
  * merge outcomes are waiting in the drain outbox. The renderer still
  * pulls `sync:drainApplied`; the event only says how deep the queue is.
  */
-export type SyncAppliedEvent = { readonly pending: number };
+export type SyncAppliedEvent = v.Guarded<typeof isSyncAppliedEvent>;
 
-export function isSyncAppliedEvent(
-  value: unknown,
-): value is SyncAppliedEvent {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['pending']) &&
-    isSafeNonNegativeInt(value['pending']) &&
-    value['pending'] <= 1_000_000
-  );
-}
+export const isSyncAppliedEvent = v.object({
+  pending: v.int(1_000_000),
+});
 
 /**
  * `sync:drainApplied` — one byte-bounded pull off the applied-outcome
@@ -1534,26 +921,17 @@ export function isSyncAppliedEvent(
  * validates entry shapes itself); `dropped` reports outbox overflow
  * since the previous drain; `remaining` drives the drain loop.
  */
-export type SyncDrainAppliedResult = {
-  readonly outcomes: readonly unknown[];
-  readonly dropped: boolean;
-  readonly remaining: number;
-};
+export type SyncDrainAppliedResult = v.Guarded<
+  typeof isSyncDrainAppliedResult
+>;
 
-export function isSyncDrainAppliedResult(
-  value: unknown,
-): value is SyncDrainAppliedResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['outcomes', 'dropped', 'remaining']) &&
-    Array.isArray(value['outcomes']) &&
-    value['outcomes'].every(isJsonValue) &&
-    isBoundedJson(value['outcomes'], MAX_SYNC_DOC_BYTES) &&
-    isBoolean(value['dropped']) &&
-    isSafeNonNegativeInt(value['remaining']) &&
-    value['remaining'] <= 1_000_000
-  );
-}
+export const isSyncDrainAppliedResult = v.object({
+  outcomes: v.refine(v.array(v.checked(isJsonValue)), (entries) =>
+    isBoundedJson(entries, MAX_SYNC_DOC_BYTES),
+  ),
+  dropped: v.boolean(),
+  remaining: v.int(1_000_000),
+});
 
 /**
  * `sync:materialized` — paged pull of the engine's materialized
@@ -1561,39 +939,24 @@ export function isSyncDrainAppliedResult(
  * JSON — the session validates each via `isMaterializedRecord`;
  * `nextOffset` continues the pull, `null` ends it.
  */
-export type SyncMaterializedArgs = {
-  readonly offset: number;
-};
+export type SyncMaterializedArgs = v.Guarded<
+  typeof isSyncMaterializedArgs
+>;
 
-export function isSyncMaterializedArgs(
-  value: unknown,
-): value is SyncMaterializedArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['offset']) &&
-    isSafeNonNegativeInt(value['offset']) &&
-    value['offset'] <= 1_000_000
-  );
-}
+export const isSyncMaterializedArgs = v.object({
+  offset: v.int(1_000_000),
+});
 
-export type SyncMaterializedResult = {
-  readonly records: readonly unknown[];
-  readonly nextOffset: number | null;
-};
+export type SyncMaterializedResult = v.Guarded<
+  typeof isSyncMaterializedResult
+>;
 
-export function isSyncMaterializedResult(
-  value: unknown,
-): value is SyncMaterializedResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['records', 'nextOffset']) &&
-    Array.isArray(value['records']) &&
-    value['records'].every(isJsonValue) &&
-    isBoundedJson(value['records'], MAX_SYNC_DOC_BYTES) &&
-    (value['nextOffset'] === null ||
-      isSafeNonNegativeInt(value['nextOffset']))
-  );
-}
+export const isSyncMaterializedResult = v.object({
+  records: v.refine(v.array(v.checked(isJsonValue)), (entries) =>
+    isBoundedJson(entries, MAX_SYNC_DOC_BYTES),
+  ),
+  nextOffset: v.nullable(v.int()),
+});
 
 /**
  * The renderer's `api.sync.*` — one method per `sync:*` channel; the
@@ -1681,263 +1044,123 @@ const MAX_TRANSFER_WRITE_BASE64 = 5_592_408;
 const MAX_SWEEP_KEEP = 65_536;
 const MAX_LIST_ENTRIES = 65_536;
 
-export type TransferBeginArgs = {
-  readonly destPath: string;
-  readonly resumeAtBytes: number;
-};
+export type TransferBeginArgs = v.Guarded<typeof isTransferBeginArgs>;
 
-export function isTransferBeginArgs(
-  value: unknown,
-): value is TransferBeginArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['destPath', 'resumeAtBytes']) &&
-    isBoundedString(value['destPath'], MAX_TRANSFER_NAME) &&
-    isSafeNonNegativeInt(value['resumeAtBytes'])
-  );
-}
+export const isTransferBeginArgs = v.object({
+  destPath: v.boundedString(MAX_TRANSFER_NAME),
+  resumeAtBytes: v.int(),
+});
 
-type TransferBeginResult = { readonly sinkId: string };
-export type TransferSinkArgs = { readonly sinkId: string };
+export type TransferBeginResult = v.Guarded<typeof isTransferBeginResult>;
+export type TransferSinkArgs = v.Guarded<typeof isTransferSinkArgs>;
 
-function isSinkId(value: unknown): value is string {
-  return (
-    typeof value === 'string' &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
-      value,
-    )
-  );
-}
+export const isSinkId = v.pattern(
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+);
 
-export function isTransferBeginResult(
-  value: unknown,
-): value is TransferBeginResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['sinkId']) &&
-    isSinkId(value['sinkId'])
-  );
-}
+export const isTransferBeginResult = v.object({ sinkId: isSinkId });
 
-export function isTransferSinkArgs(
-  value: unknown,
-): value is TransferSinkArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['sinkId']) &&
-    isSinkId(value['sinkId'])
-  );
-}
+export const isTransferSinkArgs = v.object({ sinkId: isSinkId });
 
-export type TransferWriteArgs = {
-  readonly sinkId: string;
-  readonly data: string;
-};
+export type TransferWriteArgs = v.Guarded<typeof isTransferWriteArgs>;
 
-export function isTransferWriteArgs(
-  value: unknown,
-): value is TransferWriteArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['sinkId', 'data']) &&
-    isSinkId(value['sinkId']) &&
-    typeof value['data'] === 'string' &&
-    value['data'].length <= MAX_TRANSFER_WRITE_BASE64
-  );
-}
+export const isTransferWriteArgs = v.object({
+  sinkId: isSinkId,
+  data: v.string(MAX_TRANSFER_WRITE_BASE64),
+});
 
-type TransferCommitResult = { readonly offset: number };
+export type TransferCommitResult = v.Guarded<
+  typeof isTransferCommitResult
+>;
 
-export function isTransferCommitResult(
-  value: unknown,
-): value is TransferCommitResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['offset']) &&
-    isSafeNonNegativeInt(value['offset'])
-  );
-}
+export const isTransferCommitResult = v.object({ offset: v.int() });
 
-export type TransferFinalizeArgs = {
-  readonly sinkId: string;
-  readonly expected: string | null;
-};
+export type TransferFinalizeArgs = v.Guarded<
+  typeof isTransferFinalizeArgs
+>;
 
-export function isTransferFinalizeArgs(
-  value: unknown,
-): value is TransferFinalizeArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['sinkId', 'expected']) &&
-    isSinkId(value['sinkId']) &&
-    (value['expected'] === null ||
-      (typeof value['expected'] === 'string' &&
-        /^[0-9a-f]{64}$/.test(value['expected'])))
-  );
-}
+export const isTransferFinalizeArgs = v.object({
+  sinkId: isSinkId,
+  expected: v.nullable(v.pattern(/^[0-9a-f]{64}$/)),
+});
 
-type TransferFinalizeResult = { readonly digest: string };
+export type TransferFinalizeResult = v.Guarded<
+  typeof isTransferFinalizeResult
+>;
 
-export function isTransferFinalizeResult(
-  value: unknown,
-): value is TransferFinalizeResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['digest']) &&
-    typeof value['digest'] === 'string' &&
-    /^[0-9a-f]{64}$/.test(value['digest'])
-  );
-}
+export const isTransferFinalizeResult = v.object({
+  digest: v.pattern(/^[0-9a-f]{64}$/),
+});
 
-export type TransferAbortArgs = {
-  readonly sinkId: string;
-  readonly keep: boolean;
-};
+export type TransferAbortArgs = v.Guarded<typeof isTransferAbortArgs>;
 
-export function isTransferAbortArgs(
-  value: unknown,
-): value is TransferAbortArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['sinkId', 'keep']) &&
-    isSinkId(value['sinkId']) &&
-    isBoolean(value['keep'])
-  );
-}
+export const isTransferAbortArgs = v.object({
+  sinkId: isSinkId,
+  keep: v.boolean(),
+});
 
-export type TransferNameArgs = { readonly name: string };
+export type TransferNameArgs = v.Guarded<typeof isTransferNameArgs>;
 
-export function isTransferNameArgs(
-  value: unknown,
-): value is TransferNameArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['name']) &&
-    isBoundedString(value['name'], MAX_TRANSFER_NAME)
-  );
-}
+export const isTransferNameArgs = v.object({
+  name: v.boundedString(MAX_TRANSFER_NAME),
+});
 
-type TransferStatResult = {
-  readonly exists: boolean;
-  readonly bytes: number | null;
-};
+export type TransferStatResult = v.Guarded<typeof isTransferStatResult>;
 
-export function isTransferStatResult(
-  value: unknown,
-): value is TransferStatResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['exists', 'bytes']) &&
-    isBoolean(value['exists']) &&
-    (value['bytes'] === null || isSafeNonNegativeInt(value['bytes']))
-  );
-}
+export const isTransferStatResult = v.object({
+  exists: v.boolean(),
+  bytes: v.nullable(v.int()),
+});
 
-export type TransferSweepArgs = { readonly keepPaths: readonly string[] };
+export type TransferSweepArgs = v.Guarded<typeof isTransferSweepArgs>;
 
-export function isTransferSweepArgs(
-  value: unknown,
-): value is TransferSweepArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['keepPaths']) &&
-    Array.isArray(value['keepPaths']) &&
-    value['keepPaths'].length <= MAX_SWEEP_KEEP &&
-    value['keepPaths'].every((name) =>
-      isBoundedString(name, MAX_TRANSFER_NAME),
-    )
-  );
-}
+export const isTransferSweepArgs = v.object({
+  keepPaths: v.array(v.boundedString(MAX_TRANSFER_NAME), {
+    max: MAX_SWEEP_KEEP,
+  }),
+});
 
-type TransferSweepResult = { readonly swept: number };
+export type TransferSweepResult = v.Guarded<typeof isTransferSweepResult>;
 
-export function isTransferSweepResult(
-  value: unknown,
-): value is TransferSweepResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['swept']) &&
-    isSafeNonNegativeInt(value['swept'])
-  );
-}
+export const isTransferSweepResult = v.object({ swept: v.int() });
 
-export type TransferSinkInfo = {
-  readonly sinkId: string;
-  readonly destPath: string;
-  readonly committedBytes: number;
-  readonly openedMs: number;
-};
+export type TransferSinkInfo = v.Guarded<typeof isTransferSinkInfo>;
 
-function isTransferSinkInfo(
-  value: unknown,
-): value is TransferSinkInfo {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['sinkId', 'destPath', 'committedBytes', 'openedMs']) &&
-    isSinkId(value['sinkId']) &&
-    isBoundedString(value['destPath'], MAX_TRANSFER_NAME) &&
-    isSafeNonNegativeInt(value['committedBytes']) &&
-    isSafeNonNegativeInt(value['openedMs'])
-  );
-}
+export const isTransferSinkInfo = v.object({
+  sinkId: isSinkId,
+  destPath: v.boundedString(MAX_TRANSFER_NAME),
+  committedBytes: v.int(),
+  openedMs: v.int(),
+});
 
-type TransferFileInfo = { readonly name: string; readonly bytes: number };
+export type TransferFileInfo = v.Guarded<typeof isTransferFileInfo>;
 
-function isTransferFileInfo(
-  value: unknown,
-): value is TransferFileInfo {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['name', 'bytes']) &&
-    isBoundedString(value['name'], MAX_TRANSFER_NAME) &&
-    isSafeNonNegativeInt(value['bytes'])
-  );
-}
+export const isTransferFileInfo = v.object({
+  name: v.boundedString(MAX_TRANSFER_NAME),
+  bytes: v.int(),
+});
 
-type TransferListResult = {
-  readonly sinks: readonly TransferSinkInfo[];
-  readonly files: readonly TransferFileInfo[];
-};
+export type TransferListResult = v.Guarded<typeof isTransferListResult>;
 
-export function isTransferListResult(
-  value: unknown,
-): value is TransferListResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['sinks', 'files']) &&
-    Array.isArray(value['sinks']) &&
-    value['sinks'].length <= MAX_LIST_ENTRIES &&
-    value['sinks'].every(isTransferSinkInfo) &&
-    Array.isArray(value['files']) &&
-    value['files'].length <= MAX_LIST_ENTRIES &&
-    value['files'].every(isTransferFileInfo)
-  );
-}
+export const isTransferListResult = v.object({
+  sinks: v.array(isTransferSinkInfo, { max: MAX_LIST_ENTRIES }),
+  files: v.array(isTransferFileInfo, { max: MAX_LIST_ENTRIES }),
+});
 
-type TransferStatusResult = TransferSinkInfo;
+export type TransferStatusResult = v.Guarded<
+  typeof isTransferStatusResult
+>;
 
 export const isTransferStatusResult = isTransferSinkInfo;
 
-type TransferStatsResult = {
-  readonly bytes: number;
-  readonly files: number;
-  readonly partials: number;
-  readonly freeBytes: number | null;
-};
+export type TransferStatsResult = v.Guarded<typeof isTransferStatsResult>;
 
-export function isTransferStatsResult(
-  value: unknown,
-): value is TransferStatsResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['bytes', 'files', 'partials', 'freeBytes']) &&
-    isSafeNonNegativeInt(value['bytes']) &&
-    isSafeNonNegativeInt(value['files']) &&
-    isSafeNonNegativeInt(value['partials']) &&
-    (value['freeBytes'] === null ||
-      isSafeNonNegativeInt(value['freeBytes']))
-  );
-}
+export const isTransferStatsResult = v.object({
+  bytes: v.int(),
+  files: v.int(),
+  partials: v.int(),
+  freeBytes: v.nullable(v.int()),
+});
 
 /**
  * `tagread:*` — the `TagReaderPort` read plane for granted trees.
@@ -1950,157 +1173,78 @@ const MAX_DOC_ID = 4096;
 export const MAX_ENUM_ENTRIES = 50_000;
 export const MAX_TAG_FIELD = 4096;
 
-export type TagreadEnumerateArgs = { readonly treeUri: string };
+export type TagreadEnumerateArgs = v.Guarded<
+  typeof isTagreadEnumerateArgs
+>;
 
-export function isTagreadEnumerateArgs(
-  value: unknown,
-): value is TagreadEnumerateArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['treeUri']) &&
-    isBoundedString(value['treeUri'], MAX_DOC_ID)
-  );
-}
+export const isTagreadEnumerateArgs = v.object({
+  treeUri: v.boundedString(MAX_DOC_ID),
+});
 
-type LocalEntryPayload = {
-  readonly docId: string;
-  readonly name: string;
-  readonly size: number;
-  readonly mime: string;
-  readonly modifiedMs: number | null;
-};
+export type LocalEntryPayload = v.Guarded<typeof isLocalEntryPayload>;
 
-function isLocalEntryPayload(
-  value: unknown,
-): value is LocalEntryPayload {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['docId', 'name', 'size', 'mime', 'modifiedMs']) &&
-    isBoundedString(value['docId'], MAX_DOC_ID) &&
-    isBoundedString(value['name'], 1024) &&
-    isSafeNonNegativeInt(value['size']) &&
-    isBoundedString(value['mime'], 128) &&
-    (value['modifiedMs'] === null ||
-      isSafeNonNegativeInt(value['modifiedMs']))
-  );
-}
+export const isLocalEntryPayload = v.object({
+  docId: v.boundedString(MAX_DOC_ID),
+  name: v.boundedString(1024),
+  size: v.int(),
+  mime: v.boundedString(128),
+  modifiedMs: v.nullable(v.int()),
+});
 
-type TagreadEnumerateResult = {
-  readonly entries: readonly LocalEntryPayload[];
-};
+export type TagreadEnumerateResult = v.Guarded<
+  typeof isTagreadEnumerateResult
+>;
 
-export function isTagreadEnumerateResult(
-  value: unknown,
-): value is TagreadEnumerateResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['entries']) &&
-    Array.isArray(value['entries']) &&
-    value['entries'].length <= MAX_ENUM_ENTRIES &&
-    value['entries'].every(isLocalEntryPayload)
-  );
-}
+export const isTagreadEnumerateResult = v.object({
+  entries: v.array(isLocalEntryPayload, { max: MAX_ENUM_ENTRIES }),
+});
 
-export type TagreadBatchArgs = {
-  readonly treeUri: string;
-  readonly docIds: readonly string[];
-};
+export type TagreadBatchArgs = v.Guarded<typeof isTagreadBatchArgs>;
 
-export function isTagreadBatchArgs(
-  value: unknown,
-): value is TagreadBatchArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['treeUri', 'docIds']) &&
-    isBoundedString(value['treeUri'], MAX_DOC_ID) &&
-    Array.isArray(value['docIds']) &&
-    value['docIds'].length <= MAX_TAGREAD_BATCH &&
-    value['docIds'].every((id) => isBoundedString(id, MAX_DOC_ID))
-  );
-}
+export const isTagreadBatchArgs = v.object({
+  treeUri: v.boundedString(MAX_DOC_ID),
+  docIds: v.array(v.boundedString(MAX_DOC_ID), {
+    max: MAX_TAGREAD_BATCH,
+  }),
+});
 
-type FileFingerprintPayload = {
-  readonly docId: string;
-  readonly fingerprint: string;
-};
+export type FileFingerprintPayload = v.Guarded<
+  typeof isFileFingerprintPayload
+>;
 
-function isFileFingerprintPayload(
-  value: unknown,
-): value is FileFingerprintPayload {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['docId', 'fingerprint']) &&
-    isBoundedString(value['docId'], MAX_DOC_ID) &&
-    isBoundedString(value['fingerprint'], 128)
-  );
-}
+export const isFileFingerprintPayload = v.object({
+  docId: v.boundedString(MAX_DOC_ID),
+  fingerprint: v.boundedString(128),
+});
 
-type TagreadFingerprintResult = {
-  readonly fingerprints: readonly (FileFingerprintPayload | null)[];
-};
+export type TagreadFingerprintResult = v.Guarded<
+  typeof isTagreadFingerprintResult
+>;
 
-export function isTagreadFingerprintResult(
-  value: unknown,
-): value is TagreadFingerprintResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['fingerprints']) &&
-    Array.isArray(value['fingerprints']) &&
-    value['fingerprints'].length <= MAX_TAGREAD_BATCH &&
-    value['fingerprints'].every(
-      (fp) => fp === null || isFileFingerprintPayload(fp),
-    )
-  );
-}
+export const isTagreadFingerprintResult = v.object({
+  fingerprints: v.array(v.nullable(isFileFingerprintPayload), {
+    max: MAX_TAGREAD_BATCH,
+  }),
+});
 
-type LocalTagsPayload = {
-  readonly docId: string;
-  readonly title: string | null;
-  readonly artist: string | null;
-  readonly album: string | null;
-  readonly durationMs: number | null;
-  readonly genre: string | null;
-};
+export type LocalTagsPayload = v.Guarded<typeof isLocalTagsPayload>;
 
-function isLocalTagsPayload(
-  value: unknown,
-): value is LocalTagsPayload {
-  const tagField = (v: unknown) => v === null || isBoundedString(v, MAX_TAG_FIELD);
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, [
-      'docId',
-      'title',
-      'artist',
-      'album',
-      'durationMs',
-      'genre',
-    ]) &&
-    isBoundedString(value['docId'], MAX_DOC_ID) &&
-    tagField(value['title']) &&
-    tagField(value['artist']) &&
-    tagField(value['album']) &&
-    tagField(value['genre']) &&
-    (value['durationMs'] === null ||
-      isSafeNonNegativeInt(value['durationMs']))
-  );
-}
+export const isLocalTagsPayload = v.object({
+  docId: v.boundedString(MAX_DOC_ID),
+  title: v.nullable(v.boundedString(MAX_TAG_FIELD)),
+  artist: v.nullable(v.boundedString(MAX_TAG_FIELD)),
+  album: v.nullable(v.boundedString(MAX_TAG_FIELD)),
+  durationMs: v.nullable(v.int()),
+  genre: v.nullable(v.boundedString(MAX_TAG_FIELD)),
+});
 
-type TagreadReadResult = {
-  readonly tags: readonly (LocalTagsPayload | null)[];
-};
+export type TagreadReadResult = v.Guarded<typeof isTagreadReadResult>;
 
-export function isTagreadReadResult(
-  value: unknown,
-): value is TagreadReadResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['tags']) &&
-    Array.isArray(value['tags']) &&
-    value['tags'].length <= MAX_TAGREAD_BATCH &&
-    value['tags'].every((t) => t === null || isLocalTagsPayload(t))
-  );
-}
+export const isTagreadReadResult = v.object({
+  tags: v.array(v.nullable(isLocalTagsPayload), {
+    max: MAX_TAGREAD_BATCH,
+  }),
+});
 
 /**
  * `local:*` — the desktop local-files surface. `local:add` validates
@@ -2112,183 +1256,91 @@ const MAX_LOCAL_PATHS = 1024;
 const MAX_LOCAL_PATH = 4096;
 const MAX_PLAYBACK_ENTRIES = 100_000;
 
-export type LocalAddArgs = { readonly paths: readonly string[] };
+export type LocalAddArgs = v.Guarded<typeof isLocalAddArgs>;
 
-export function isLocalAddArgs(value: unknown): value is LocalAddArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['paths']) &&
-    Array.isArray(value['paths']) &&
-    value['paths'].length > 0 &&
-    value['paths'].length <= MAX_LOCAL_PATHS &&
-    value['paths'].every((p) => isBoundedString(p, MAX_LOCAL_PATH))
-  );
-}
+export const isLocalAddArgs = v.object({
+  paths: v.array(v.boundedString(MAX_LOCAL_PATH), {
+    min: 1,
+    max: MAX_LOCAL_PATHS,
+  }),
+});
 
-export type LocalPickPayload = {
-  readonly treeUri: string;
-  readonly label: string;
-  readonly kind: 'dir' | 'file';
-};
+export type LocalPickPayload = v.Guarded<typeof isLocalPickPayload>;
 
-function isLocalPickPayload(
-  value: unknown,
-): value is LocalPickPayload {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['treeUri', 'label', 'kind']) &&
-    isBoundedString(value['treeUri'], MAX_LOCAL_PATH + 16) &&
-    isBoundedString(value['label'], 1024) &&
-    (value['kind'] === 'dir' || value['kind'] === 'file')
-  );
-}
+export const isLocalPickPayload = v.object({
+  treeUri: v.boundedString(MAX_LOCAL_PATH + 16),
+  label: v.boundedString(1024),
+  kind: v.literals('dir', 'file'),
+});
 
-type LocalAddResult = {
-  readonly picks: readonly LocalPickPayload[];
-};
+export type LocalAddResult = v.Guarded<typeof isLocalAddResult>;
 
-export function isLocalAddResult(
-  value: unknown,
-): value is LocalAddResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['picks']) &&
-    Array.isArray(value['picks']) &&
-    value['picks'].length <= MAX_LOCAL_PATHS &&
-    value['picks'].every(isLocalPickPayload)
-  );
-}
+export const isLocalAddResult = v.object({
+  picks: v.array(isLocalPickPayload, { max: MAX_LOCAL_PATHS }),
+});
 
-export type LocalProbeArgs = { readonly recordingId: string };
+export type LocalProbeArgs = v.Guarded<typeof isLocalProbeArgs>;
 
-export function isLocalProbeArgs(
-  value: unknown,
-): value is LocalProbeArgs {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['recordingId']) &&
-    isBoundedString(value['recordingId'], 512)
-  );
-}
+export const isLocalProbeArgs = v.object({
+  recordingId: v.boundedString(512),
+});
 
-type LocalProbeResult = { readonly uri: string | null };
+export type LocalProbeResult = v.Guarded<typeof isLocalProbeResult>;
 
-export function isLocalProbeResult(
-  value: unknown,
-): value is LocalProbeResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['uri']) &&
-    (value['uri'] === null ||
-      (isBoundedString(value['uri'], MAX_LOCAL_PATH + 16) &&
-        (value['uri'] as string).startsWith('file://')))
-  );
-}
+export const isLocalProbeResult = v.object({
+  uri: v.nullable(
+    v.refine(v.boundedString(MAX_LOCAL_PATH + 16), (uri) =>
+      uri.startsWith('file://'),
+    ),
+  ),
+});
 
-type LocalSourcePayload = {
-  readonly sourceId: string;
-  readonly treeUri: string;
-  readonly label: string;
-  readonly addedMs: number;
-  readonly lastScanMs: number | null;
-  readonly fileCount: number;
-};
+export type LocalSourcePayload = v.Guarded<typeof isLocalSourcePayload>;
 
-function isLocalSourcePayload(
-  value: unknown,
-): value is LocalSourcePayload {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, [
-      'sourceId',
-      'treeUri',
-      'label',
-      'addedMs',
-      'lastScanMs',
-      'fileCount',
-    ]) &&
-    isBoundedString(value['sourceId'], 128) &&
-    isBoundedString(value['treeUri'], MAX_LOCAL_PATH + 16) &&
-    isBoundedString(value['label'], 1024) &&
-    isSafeNonNegativeInt(value['addedMs']) &&
-    (value['lastScanMs'] === null ||
-      isSafeNonNegativeInt(value['lastScanMs'])) &&
-    isSafeNonNegativeInt(value['fileCount'])
-  );
-}
+export const isLocalSourcePayload = v.object({
+  sourceId: v.boundedString(128),
+  treeUri: v.boundedString(MAX_LOCAL_PATH + 16),
+  label: v.boundedString(1024),
+  addedMs: v.int(),
+  lastScanMs: v.nullable(v.int()),
+  fileCount: v.int(),
+});
 
-type LocalListResult = {
-  readonly sources: readonly LocalSourcePayload[];
-};
+export type LocalListResult = v.Guarded<typeof isLocalListResult>;
 
-export function isLocalListResult(
-  value: unknown,
-): value is LocalListResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['sources']) &&
-    Array.isArray(value['sources']) &&
-    value['sources'].length <= MAX_LIST_ENTRIES &&
-    value['sources'].every(isLocalSourcePayload)
-  );
-}
+export const isLocalListResult = v.object({
+  sources: v.array(isLocalSourcePayload, { max: MAX_LIST_ENTRIES }),
+});
 
-type LocalPlaybackEntry = {
-  readonly recordingId: string;
-  readonly uri: string;
-};
+export type LocalPlaybackEntry = v.Guarded<typeof isLocalPlaybackEntry>;
 
-function isLocalPlaybackEntry(
-  value: unknown,
-): value is LocalPlaybackEntry {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['recordingId', 'uri']) &&
-    isBoundedString(value['recordingId'], 512) &&
-    isBoundedString(value['uri'], MAX_LOCAL_PATH + 16) &&
-    (value['uri'] as string).startsWith('file://')
-  );
-}
+export const isLocalPlaybackEntry = v.object({
+  recordingId: v.boundedString(512),
+  uri: v.refine(v.boundedString(MAX_LOCAL_PATH + 16), (uri) =>
+    uri.startsWith('file://'),
+  ),
+});
 
-type LocalPlaybackResult = {
-  readonly entries: readonly LocalPlaybackEntry[];
-};
+export type LocalPlaybackResult = v.Guarded<typeof isLocalPlaybackResult>;
 
-export function isLocalPlaybackResult(
-  value: unknown,
-): value is LocalPlaybackResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['entries']) &&
-    Array.isArray(value['entries']) &&
-    value['entries'].length <= MAX_PLAYBACK_ENTRIES &&
-    value['entries'].every(isLocalPlaybackEntry)
-  );
-}
+export const isLocalPlaybackResult = v.object({
+  entries: v.array(isLocalPlaybackEntry, {
+    max: MAX_PLAYBACK_ENTRIES,
+  }),
+});
 
-type LocalSweepResult = {
-  readonly missing: number;
-  readonly sources: readonly { readonly sourceId: string; readonly missing: number }[];
-};
+export type LocalSweepResult = v.Guarded<typeof isLocalSweepResult>;
 
-export function isLocalSweepResult(
-  value: unknown,
-): value is LocalSweepResult {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['missing', 'sources']) &&
-    isSafeNonNegativeInt(value['missing']) &&
-    Array.isArray(value['sources']) &&
-    value['sources'].length <= MAX_LIST_ENTRIES &&
-    value['sources'].every(
-      (s) =>
-        isRecord(s) &&
-        hasOnlyKeys(s, ['sourceId', 'missing']) &&
-        isBoundedString(s['sourceId'], 128) &&
-        isSafeNonNegativeInt(s['missing']),
-    )
-  );
-}
+export const isLocalSweepResult = v.object({
+  missing: v.int(),
+  sources: v.array(
+    v.object({
+      sourceId: v.boundedString(128),
+      missing: v.int(),
+    }),
+    { max: MAX_LIST_ENTRIES },
+  ),
+});
 
 /**
  * The `window.auqw` surface the preload exposes. Every method resolves
