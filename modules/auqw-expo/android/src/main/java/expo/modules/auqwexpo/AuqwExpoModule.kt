@@ -38,6 +38,7 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.records.Field
 import expo.modules.kotlin.records.Record
+import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -191,21 +192,44 @@ class AuqwExpoModule : Module() {
   private var host: PluginHost? = null
   private val streamRegistry = AuqwStreamRegistry()
   private val streamDataSourceFactory = AuqwStreamDataSource.Factory(streamRegistry)
-  private val waveformPeaks = AuqwWaveformPeaks(streamRegistry) { handle ->
-    // provider:'local' handles are device files — no seam session
-    // exists for them, so peaks decode straight off the
-    // file/content URI the way `play` resolves them.
-    localHandles[handle]?.let { local ->
-      val ctx = appContext.reactContext
-        ?: throw CodedException("unavailable", "no react context", null)
-      LocalSource(
-        Uri.parse(
+  private val waveformPeaks = AuqwWaveformPeaks(
+    streamRegistry,
+    { handle ->
+      // provider:'local' handles are device files — no seam session
+      // exists for them, so peaks decode straight off the
+      // file/content URI the way `play` resolves them.
+      localHandles[handle]?.let { local ->
+        val ctx = appContext.reactContext
+          ?: throw CodedException("unavailable", "no react context", null)
+        val uri = Uri.parse(
           if (local.path.contains("://")) local.path else "file://${local.path}"
-        ),
-        ctx
-      )
+        )
+        // The encoded length enforces the same extraction cap the
+        // stream pull applies; -1 leaves the bound to the decode
+        // loop's consumed-byte count.
+        val bytes = if (local.path.contains("://")) {
+          try {
+            ctx.contentResolver.openAssetFileDescriptor(uri, "r")?.use {
+              it.length
+            } ?: -1L
+          } catch (_: Exception) {
+            -1L
+          }
+        } else {
+          try {
+            File(local.path).let { if (it.isFile) it.length() else -1L }
+          } catch (_: Exception) {
+            -1L
+          }
+        }
+        LocalSource(uri, ctx, bytes)
+      }
+    },
+    {
+      appContext.reactContext?.cacheDir
+        ?: throw CodedException("unavailable", "no react context", null)
     }
-  }
+  )
   // The seam's terminal kinds (released/expired/superseded/…) can
   // never succeed on retry — let them fail to onPlayerError at once
   // instead of burning the default policy's ~3s of retries; the

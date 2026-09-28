@@ -11,8 +11,12 @@ import android.os.SystemClock
 import android.util.Log
 import expo.modules.kotlin.exception.CodedException
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.channels.FileChannel
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.coroutineContext
 import kotlin.math.sqrt
@@ -52,12 +56,19 @@ private val DEAD_HANDLE_KINDS = setOf(
 )
 
 /** A provider:'local' backing for an lf-* handle — the file or content
- *  URI plus the Context the extractor needs to open it. */
-internal class LocalSource(val uri: Uri, val context: Context)
+ *  URI, the Context the extractor needs to open it, and the resolved
+ *  encoded length (-1 when the resolver can't size it — the decode
+ *  loop then enforces the cap by counting consumed bytes). */
+internal class LocalSource(
+  val uri: Uri,
+  val context: Context,
+  val bytes: Long,
+)
 
-/** Decoded PCM plus the negotiated shape the bucketer needs. */
+/** The decoded PCM's negotiated shape; the samples themselves live in
+ *  the caller's spill file, never on the heap. */
 private class DecodedPcm(
-  val bytes: ByteArray,
+  val bytes: Long,
   val channels: Int,
   val floatPcm: Boolean,
 )
@@ -83,10 +94,16 @@ private class DecodedPcm(
 internal class AuqwWaveformPeaks(
   private val registry: AuqwStreamRegistry,
   private val localFor: (String) -> LocalSource?,
+  private val cacheDirFor: () -> File,
 ) {
   private val jobs = ConcurrentHashMap<String, Job>()
+  /** Request ids cancelled before their coroutine registered — the
+   *  tombstone makes an early cancel sticky so the late-starting
+   *  extract dies at entry instead of decoding on. */
+  private val cancels = ConcurrentHashMap.newKeySet<String>()
 
   fun cancel(requestId: String) {
+    cancels.add(requestId)
     jobs.remove(requestId)?.cancel()
   }
 
@@ -95,6 +112,7 @@ internal class AuqwWaveformPeaks(
       job.cancel()
     }
     jobs.clear()
+    cancels.clear()
   }
 
   /**
@@ -114,34 +132,68 @@ internal class AuqwWaveformPeaks(
     provisionalCap: Boolean,
   ): List<Double> {
     val job = coroutineContext[Job]
-    if (job !== null) {
-      jobs[requestId] = job
-    }
+    val cap = minOf(maxBytes, MAX_PEAK_BYTES.toLong())
+    // PCM spills to a cache file, not the heap: bucketing memory-maps
+    // it, so peak allocation stays ~bounded regardless of track size
+    // alongside the player.
+    val pcmFile = File(
+      cacheDirFor(),
+      "auqw-peaks-" + requestId.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".pcm"
+    )
     try {
+      if (job !== null) {
+        jobs[requestId] = job
+      }
+      // A cancel that beat coroutine start lands on the tombstone —
+      // consume it and die rather than decode a track the caller
+      // already walked away from.
+      if (cancels.remove(requestId)) {
+        throw CancellationException("cancelled before extraction started")
+      }
       val local = localFor(handle)
       val decoded = if (local !== null) {
-        decodePcm { extractor ->
-          extractor.setDataSource(local.context, local.uri, null)
+        if (local.bytes > cap) {
+          throw CodedException(
+            if (provisionalCap) "not-applicable" else "budget-exceeded",
+            "audio too large for peak extraction",
+            null
+          )
         }
+        decodePcm(
+          { extractor ->
+            extractor.setDataSource(local.context, local.uri, null)
+          },
+          cap,
+          provisionalCap,
+          pcmFile,
+        )
       } else {
         val host = registry.hostFor(handle)
           ?: throw CodedException("released", "unknown stream handle", null)
-        val cap = minOf(maxBytes, MAX_PEAK_BYTES.toLong())
         val encoded = pullBytes(host, handle, cap, provisionalCap)
-        decodePcm { extractor ->
-          extractor.setDataSource(ByteArrayMediaDataSource(encoded))
-        }
+        decodePcm(
+          { extractor ->
+            extractor.setDataSource(ByteArrayMediaDataSource(encoded))
+          },
+          cap,
+          provisionalCap,
+          pcmFile,
+        )
       }
-      return bucket(decoded.bytes, decoded.channels, decoded.floatPcm, count)
+      return bucket(
+        pcmFile, decoded.bytes, decoded.channels, decoded.floatPcm, count
+      )
     } catch (_: CancellationException) {
       throw CodedException("cancelled", "peak extraction cancelled", null)
     } finally {
+      pcmFile.delete()
       // Only the registering job may drop its slot — a stale
       // extraction finishing late must not evict the replacement
       // that started under the same request id.
       if (job !== null) {
         jobs.remove(requestId, job)
       }
+      cancels.remove(requestId)
     }
   }
 
@@ -209,15 +261,23 @@ internal class AuqwWaveformPeaks(
     return out.toByteArray()
   }
 
-  /** MediaExtractor + MediaCodec over `setSource` → raw PCM bytes,
-   *  the output channel count, and whether the decoder negotiated
-   *  float samples. The source is either the pulled stream bytes or
-   *  a local file/content URI — decode is identical from there. */
+  /** MediaExtractor + MediaCodec over `setSource` → PCM spilled to
+   *  `pcmFile` (never the heap — a long stereo track is ~92 MiB of
+   *  PCM alongside the player), plus the negotiated shape the
+   *  bucketer needs. The source is either the pulled stream bytes
+   *  or a local file/content URI — decode is identical from there,
+   *  and `encodedCap` bounds consumed compressed bytes for sources
+   *  whose size was unknown (local paths that couldn't be stat'ed).
+   */
   private suspend fun decodePcm(
     setSource: (MediaExtractor) -> Unit,
+    encodedCap: Long,
+    provisionalCap: Boolean,
+    pcmFile: File,
   ): DecodedPcm = withContext(Dispatchers.IO) {
     val extractor = MediaExtractor()
     var codec: MediaCodec? = null
+    var pcmOut: FileChannel? = null
     try {
       try {
         setSource(extractor)
@@ -226,6 +286,7 @@ internal class AuqwWaveformPeaks(
           "unavailable", e.message ?: "audio source unavailable", e
         )
       }
+      pcmOut = FileOutputStream(pcmFile).channel
       var track = -1
       var format: MediaFormat? = null
       for (i in 0 until extractor.trackCount) {
@@ -254,7 +315,8 @@ internal class AuqwWaveformPeaks(
       var channels = formatInt(format, MediaFormat.KEY_CHANNEL_COUNT) ?: 0
       // Missing KEY_PCM_ENCODING means 16-bit — the documented default.
       var pcmEncoding = AudioFormat.ENCODING_PCM_16BIT
-      val pcm = ByteArrayOutputStream()
+      var pcmBytes = 0L
+      var consumedBytes = 0L
       val info = MediaCodec.BufferInfo()
       var inputEOS = false
       var outputEOS = false
@@ -275,6 +337,14 @@ internal class AuqwWaveformPeaks(
               )
               inputEOS = true
             } else {
+              consumedBytes += n
+              if (consumedBytes > encodedCap) {
+                throw CodedException(
+                  if (provisionalCap) "not-applicable" else "budget-exceeded",
+                  "audio too large for peak extraction",
+                  null
+                )
+              }
               decoder.queueInputBuffer(inIdx, 0, n, extractor.sampleTime, 0)
               extractor.advance()
             }
@@ -298,7 +368,7 @@ internal class AuqwWaveformPeaks(
           }
           outIdx >= 0 -> {
             if (info.size > 0) {
-              if (pcm.size() + info.size > MAX_PCM_BYTES) {
+              if (pcmBytes + info.size > MAX_PCM_BYTES) {
                 throw CodedException(
                   "budget-exceeded",
                   "decoded audio too large for peaks",
@@ -307,9 +377,10 @@ internal class AuqwWaveformPeaks(
               }
               val buf = decoder.getOutputBuffer(outIdx)
               if (buf !== null) {
-                val data = ByteArray(info.size)
-                buf.get(data)
-                pcm.write(data, 0, data.size)
+                buf.position(info.offset)
+                buf.limit(info.offset + info.size)
+                pcmOut?.write(buf)
+                pcmBytes += info.size
               }
             }
             decoder.releaseOutputBuffer(outIdx, false)
@@ -320,7 +391,7 @@ internal class AuqwWaveformPeaks(
         }
       }
       DecodedPcm(
-        pcm.toByteArray(),
+        pcmBytes,
         channels,
         pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT,
       )
@@ -344,58 +415,77 @@ internal class AuqwWaveformPeaks(
         Log.i(TAG, "codec release: ${e.message}")
       }
       extractor.release()
+      try {
+        pcmOut?.close()
+      } catch (e: Exception) {
+        Log.i(TAG, "pcm spill close: ${e.message}")
+      }
     }
   }
 
-  /** Decoded PCM frames → `count` raw `[up, down]` RMS windows — the
+  /** Spilled PCM file → `count` raw `[up, down]` RMS windows — the
    *  same split `peakWindowsFromChannels` applies in ui-shared:
    *  stereo+ feeds even channels to `up` and odd to `down`; mono
-   *  splits by sign, positive samples up and negative down. Sample
-   *  reads follow the negotiated encoding: little-endian 16-bit
+   *  splits by sign, positive samples up and negative down. The file
+   *  is read through a memory map — page cache, not heap — and
+   *  samples follow the negotiated encoding: little-endian 16-bit
    *  divided by full-scale, or float PCM used directly. */
   private fun bucket(
-    pcm: ByteArray,
+    pcmFile: File,
+    pcmBytes: Long,
     channels: Int,
     floatPcm: Boolean,
     count: Int,
   ): List<Double> {
     val out = ArrayList<Double>(count * 2)
-    if (count <= 0 || channels <= 0) {
+    if (count <= 0 || channels <= 0 || pcmBytes <= 0) {
       return out
     }
-    val buf = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN)
-    val sampleCount: Int
-    val sample: (Int) -> Double
-    if (floatPcm) {
-      val floats = buf.asFloatBuffer()
-      sampleCount = floats.remaining()
-      sample = { i -> floats.get(i).toDouble() }
-    } else {
-      val shorts = buf.asShortBuffer()
-      sampleCount = shorts.remaining()
-      sample = { i -> shorts.get(i).toDouble() / 32768.0 }
-    }
-    val frames = sampleCount / channels
-    if (frames <= 0) {
-      return out
-    }
-    val stereo = channels >= 2
-    for (w in 0 until count) {
-      val from = (w.toLong() * frames / count).toInt()
-      val to = minOf(
-        frames,
-        maxOf(((w + 1).toLong() * frames / count).toInt(), from + 1)
-      )
-      var upSq = 0.0
-      var downSq = 0.0
-      var upN = 0
-      var downN = 0
-      for (f in from until to) {
-        val base = f * channels
-        if (stereo) {
-          for (ch in 0 until channels) {
-            val v = sample(base + ch)
-            if (ch % 2 == 0) {
+    FileInputStream(pcmFile).channel.use { ch ->
+      val buf = ch.map(FileChannel.MapMode.READ_ONLY, 0, pcmBytes)
+        .order(ByteOrder.LITTLE_ENDIAN)
+      val sampleCount: Int
+      val sample: (Int) -> Double
+      if (floatPcm) {
+        val floats = buf.asFloatBuffer()
+        sampleCount = floats.remaining()
+        sample = { i -> floats.get(i).toDouble() }
+      } else {
+        val shorts = buf.asShortBuffer()
+        sampleCount = shorts.remaining()
+        sample = { i -> shorts.get(i).toDouble() / 32768.0 }
+      }
+      val frames = sampleCount / channels
+      if (frames <= 0) {
+        return out
+      }
+      val stereo = channels >= 2
+      for (w in 0 until count) {
+        val from = (w.toLong() * frames / count).toInt()
+        val to = minOf(
+          frames,
+          maxOf(((w + 1).toLong() * frames / count).toInt(), from + 1)
+        )
+        var upSq = 0.0
+        var downSq = 0.0
+        var upN = 0
+        var downN = 0
+        for (f in from until to) {
+          val base = f * channels
+          if (stereo) {
+            for (c in 0 until channels) {
+              val v = sample(base + c)
+              if (c % 2 == 0) {
+                upSq += v * v
+                upN += 1
+              } else {
+                downSq += v * v
+                downN += 1
+              }
+            }
+          } else {
+            val v = sample(base)
+            if (v >= 0) {
               upSq += v * v
               upN += 1
             } else {
@@ -403,19 +493,10 @@ internal class AuqwWaveformPeaks(
               downN += 1
             }
           }
-        } else {
-          val v = sample(base)
-          if (v >= 0) {
-            upSq += v * v
-            upN += 1
-          } else {
-            downSq += v * v
-            downN += 1
-          }
         }
+        out.add(if (upN > 0) sqrt(upSq / upN) else 0.0)
+        out.add(if (downN > 0) sqrt(downSq / downN) else 0.0)
       }
-      out.add(if (upN > 0) sqrt(upSq / upN) else 0.0)
-      out.add(if (downN > 0) sqrt(downSq / downN) else 0.0)
     }
     return out
   }
