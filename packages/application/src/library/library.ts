@@ -4,6 +4,7 @@ import {
   hasKeys,
   isArtworkRef,
   isEntityRef,
+  isFiniteNumber,
   isLike,
   isOptString,
   isQueueSnapshot,
@@ -201,10 +202,6 @@ const MATCH_REVIEW_STATUSES: ReadonlySet<string> = new Set([
 
 function isEntityKind(value: unknown): value is EntityKind {
   return value === 'album' || value === 'artist';
-}
-
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value);
 }
 
 function isBoundedText(value: unknown, max: number): value is string | null {

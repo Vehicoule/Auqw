@@ -1,5 +1,5 @@
 import type { AppError } from '../errors.ts';
-import { isSourceRef } from '../domain.ts';
+import { isSafeNonNegative, isSourceRef } from '../domain.ts';
 import type { QueueOccurrence, SourceRef } from '../domain.ts';
 
 export type QueueMode = 'stopped' | 'paused' | 'playing';
@@ -12,10 +12,6 @@ export type QueueSnapshot = {
   readonly mode: QueueMode;
   readonly blockedError?: AppError;
 };
-
-function isSafeNonNegative(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
 
 function cloneRef(ref: SourceRef | null): SourceRef | null {
   return ref === null ? null : Object.freeze({ ...ref });

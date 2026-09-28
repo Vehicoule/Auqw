@@ -5,11 +5,7 @@ import type {
   RandomPort,
   Result,
 } from '@auqw/application';
-import { appError, err, ok } from '@auqw/application';
-
-function isSafeNonNegative(value: number): boolean {
-  return Number.isSafeInteger(value) && value >= 0;
-}
+import { appError, err, isSafeNonNegative, ok } from '@auqw/application';
 
 function cancelledError() {
   return appError('cancelled', 'cancelled');

@@ -8,6 +8,7 @@ import type {
   SourceRef,
   TrackMetadata,
 } from '../domain.ts';
+import { isSafeNonNegative } from '../domain.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { IdPort, RandomPort } from '../ports/runtime.ts';
 import type { LogPort } from '../ports/log.ts';
@@ -65,10 +66,6 @@ import {
 
 import { isExportDocument, isPersistedState } from '../library/library.ts';
 import type { ExportDocument } from '../library/library.ts';
-
-function isSafeNonNegative(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
 
 export class SequenceIds implements IdPort {
   #next = 0;

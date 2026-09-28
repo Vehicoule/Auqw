@@ -20,6 +20,7 @@ import type {
 } from '../domain.ts';
 import {
   isEntityRef,
+  isSafeNonNegative,
   isSettings,
   isSourceRef,
   isString,
@@ -373,10 +374,6 @@ const DEAD_STREAM_KINDS: ReadonlySet<ErrorKind> = new Set([
   'superseded',
   'not-found',
 ]);
-
-function isSafeNonNegative(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
 
 function saturatingAdd(a: number, b: number): number {
   const sum = a + b;

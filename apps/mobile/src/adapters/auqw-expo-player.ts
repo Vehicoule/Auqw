@@ -8,7 +8,15 @@ import type {
   QueueProjection,
   Result,
 } from '@auqw/application';
-import { appError, err, isAttemptTrace, ok } from '@auqw/application';
+import {
+  appError,
+  err,
+  isAttemptTrace,
+  isRecord,
+  isSafeNonNegative,
+  isString,
+  ok,
+} from '@auqw/application';
 import type {
   AuqwExpoPlaybackStatusEvent,
   AuqwExpoPhaseMarkEvent,
@@ -35,25 +43,11 @@ const TRANSITION_REASONS: ReadonlySet<string> = new Set([
   'remote-previous',
 ]);
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function isBoundedString(value: unknown, max: number): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= max;
-}
-
-function isSafeNonNegative(value: unknown): value is number {
-  return (
-    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-  );
-}
-
 function toIdentity(
   attemptId: unknown,
   queueRev: unknown,
 ): PlaybackIdentity | null {
-  return isBoundedString(attemptId, 128) && isSafeNonNegative(queueRev)
+  return isString(attemptId, 128) && isSafeNonNegative(queueRev)
     ? { attemptId, queueRev }
     : null;
 }
@@ -86,10 +80,10 @@ function toPreparedStream(value: unknown): PreparedStream | null {
   if (!isRecord(value)) {
     return null;
   }
-  if (!isBoundedString(value['handle'], 512)) {
+  if (!isString(value['handle'], 512)) {
     return null;
   }
-  if (!isBoundedString(value['mime'], 128)) {
+  if (!isString(value['mime'], 128)) {
     return null;
   }
   const stream: {
@@ -170,7 +164,7 @@ export function createAuqwExpoPlayer(
     sourceRef: string;
     identity: PlaybackIdentity;
   }): Promise<Result<string>> {
-    const path = isBoundedString(input.sourceRef, 4096)
+    const path = isString(input.sourceRef, 4096)
       ? input.sourceRef
       : null;
     const requestId = `lf-req-${++localSeq}`;
@@ -232,7 +226,7 @@ export function createAuqwExpoPlayer(
     if (!isRecord(event)) {
       return;
     }
-    if (!isBoundedString(event.requestId, 128)) {
+    if (!isString(event.requestId, 128)) {
       return;
     }
     const identity = toIdentity(event.attemptId, event.queueRev);
@@ -289,7 +283,7 @@ export function createAuqwExpoPlayer(
       return;
     }
     if (
-      !isBoundedString(event.handle, 512) ||
+      !isString(event.handle, 512) ||
       !isSafeNonNegative(event.positionMs) ||
       (event.durationMs !== undefined &&
         !isSafeNonNegative(event.durationMs)) ||
@@ -327,8 +321,8 @@ export function createAuqwExpoPlayer(
     const identity = toIdentity(event.attemptId, event.queueRev);
     if (
       identity === null ||
-      !isBoundedString(event.handle, 512) ||
-      !isBoundedString(event.name, 128) ||
+      !isString(event.handle, 512) ||
+      !isString(event.name, 128) ||
       !isSafeNonNegative(event.atMs) ||
       !isSafeNonNegative(event.sinceStartMs)
     ) {
@@ -355,7 +349,7 @@ export function createAuqwExpoPlayer(
           ? toIdentity(event.identity.attemptId, event.identity.queueRev)
           : null;
     if (
-      !isBoundedString(event.projectionId, 128) ||
+      !isString(event.projectionId, 128) ||
       !isSafeNonNegative(event.projectedQueueRev) ||
       !isSafeNonNegative(event.positionMs) ||
       typeof event.reason !== 'string' ||

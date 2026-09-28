@@ -247,6 +247,10 @@ export function isOptSafeNonNegative(
   return value === null || isSafeNonNegative(value);
 }
 
+export function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
 function isSimilarity(value: unknown): value is number {
   return typeof value === 'number' && value >= 0 && value <= 1;
 }
@@ -260,7 +264,7 @@ function isVersionLabelArray(value: unknown): value is readonly VersionLabel[] {
   );
 }
 
-function isStorefront(value: unknown): value is string | null {
+export function isStorefront(value: unknown): value is string | null {
   return (
     value === null || (typeof value === 'string' && /^[A-Z]{2}$/.test(value))
   );

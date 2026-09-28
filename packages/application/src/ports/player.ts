@@ -1,3 +1,4 @@
+import { isSafeNonNegative, isString } from '../domain.ts';
 import type { AppError, Result } from '../errors.ts';
 
 export type PlaybackIdentity = {
@@ -55,18 +56,6 @@ function hasExactTraceKeys(
   );
 }
 
-function isSafeNonNegativeNumber(value: unknown): value is number {
-  return (
-    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-  );
-}
-
-function isBoundedString(value: unknown, max: number): value is string {
-  return (
-    typeof value === 'string' && value.length > 0 && value.length <= max
-  );
-}
-
 /**
  * The trace entry the host writes in place of a pot-provider URL — the
  * provider is an operator LAN address that must not reach diagnostics,
@@ -82,7 +71,7 @@ function isTraceUrl(value: unknown): value is string {
     return true;
   }
   return (
-    isBoundedString(value, 2048) &&
+    isString(value, 2048) &&
     (value.startsWith('http://') || value.startsWith('https://')) &&
     !value.includes('?') &&
     !value.includes('#')
@@ -111,12 +100,12 @@ function isHttpTraceEntry(value: unknown): value is HttpTraceEntry {
     return false;
   }
   return (
-    isBoundedString(value['method'], 32) &&
+    isString(value['method'], 32) &&
     isTraceUrl(value['url']) &&
     (value['status'] === undefined ||
-      isSafeNonNegativeNumber(value['status'])) &&
-    isSafeNonNegativeNumber(value['bytes']) &&
-    isSafeNonNegativeNumber(value['elapsedMs'])
+      isSafeNonNegative(value['status'])) &&
+    isSafeNonNegative(value['bytes']) &&
+    isSafeNonNegative(value['elapsedMs'])
   );
 }
 
@@ -148,12 +137,12 @@ export function isAttemptTrace(value: unknown): value is AttemptTrace {
       'httpTrace',
       'guestLog',
     ]) &&
-    isBoundedString(value['requestId'], 128) &&
-    isSafeNonNegativeNumber(value['steps']) &&
-    isSafeNonNegativeNumber(value['httpCalls']) &&
-    isSafeNonNegativeNumber(value['bytes']) &&
-    isSafeNonNegativeNumber(value['fuelUsed']) &&
-    isSafeNonNegativeNumber(value['elapsedMs']) &&
+    isString(value['requestId'], 128) &&
+    isSafeNonNegative(value['steps']) &&
+    isSafeNonNegative(value['httpCalls']) &&
+    isSafeNonNegative(value['bytes']) &&
+    isSafeNonNegative(value['fuelUsed']) &&
+    isSafeNonNegative(value['elapsedMs']) &&
     Array.isArray(value['httpTrace']) &&
     value['httpTrace'].length <= 32 &&
     value['httpTrace'].every(isHttpTraceEntry) &&

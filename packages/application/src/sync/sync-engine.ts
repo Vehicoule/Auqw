@@ -15,6 +15,7 @@ import {
   hasExactKeys,
   isArtworkRef,
   isEntityRef,
+  isFiniteNumber,
   isLike,
   isOptSafeNonNegative,
   isOptString,
@@ -608,10 +609,6 @@ function isBooleanValue(value: unknown): boolean {
 
 function isOptBoolean(value: unknown): boolean {
   return value === null || typeof value === 'boolean';
-}
-
-function isFiniteNumber(value: unknown): boolean {
-  return typeof value === 'number' && Number.isFinite(value);
 }
 
 function isReleaseYear(value: unknown): boolean {

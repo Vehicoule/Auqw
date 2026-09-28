@@ -2,6 +2,7 @@ import {
   hasExactKeys,
   hasKeys,
   isRecord,
+  isSafeNonNegative,
   isString,
 } from '../domain.ts';
 import { appError, type AppError, type ErrorKind } from '../errors.ts';
@@ -172,10 +173,6 @@ export type SyncEndpoint = {
 };
 
 /* ---------------------------- validators -------------------------- */
-
-function isSafeNonNegative(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
 
 function isFp(value: unknown): value is string {
   return typeof value === 'string' && FINGERPRINT_PATTERN.test(value);
