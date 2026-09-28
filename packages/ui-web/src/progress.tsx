@@ -161,7 +161,11 @@ function useScrubCommit(
     durationMs !== null && durationMs > 0 && onSeek !== undefined;
   const [scrubMs, setScrubMs] = useState<number | null>(null);
   const [heldMs, setHeldMs] = useState<number | null>(null);
-  const dragging = useRef(false);
+  // Pointer lifecycle — 'drag' a live scrub; 'abandoned' a still-
+  // pressed pointer whose gesture died (track flip, disable): its
+  // stray `input` events stay ignored until the release lands, so
+  // they can't commit as a fake keyboard seek.
+  const pointerPhase = useRef<'none' | 'drag' | 'abandoned'>('none');
   const scrubRef = useRef<number | null>(null);
   const positionRef = useRef(positionMs);
   positionRef.current = positionMs;
@@ -174,7 +178,7 @@ function useScrubCommit(
 
   const commit = useCallback(
     (ms: number) => {
-      dragging.current = false;
+      pointerPhase.current = 'none';
       scrubRef.current = null;
       setScrubMs(null);
       heldBaseline.current = positionRef.current;
@@ -221,8 +225,8 @@ function useScrubCommit(
   // A disable landing mid-drag abandons the gesture (pointerup will
   // never arrive on a disabled input) — restore the real fill.
   useEffect(() => {
-    if (!enabled && dragging.current) {
-      dragging.current = false;
+    if (!enabled && pointerPhase.current === 'drag') {
+      pointerPhase.current = 'abandoned';
       scrubRef.current = null;
       gestureKey.current = undefined;
       setScrubMs(null);
@@ -241,16 +245,17 @@ function useScrubCommit(
     }
   }, [trackKey, heldMs]);
   // A track change mid-drag abandons the gesture entirely: the
-  // preview belongs to a track no longer playing, and a release
-  // must never seek it — `onScrubEnd` double-checks the key for
-  // the same reason (a release can land before this effect).
+  // preview belongs to a track no longer playing, a release must
+  // never seek it, and the still-pressed pointer's later inputs
+  // stay ignored until its release — `onScrubEnd` double-checks
+  // the key since a release can land before this effect.
   useEffect(() => {
     if (
-      dragging.current &&
+      pointerPhase.current === 'drag' &&
       gestureKey.current !== undefined &&
       gestureKey.current !== trackKey
     ) {
-      dragging.current = false;
+      pointerPhase.current = 'abandoned';
       scrubRef.current = null;
       gestureKey.current = undefined;
       setScrubMs(null);
@@ -259,19 +264,20 @@ function useScrubCommit(
 
   const onScrubStart = useCallback(() => {
     if (enabled) {
-      dragging.current = true;
+      pointerPhase.current = 'drag';
       scrubRef.current = null;
       gestureKey.current = trackKeyRef.current;
     }
   }, [enabled]);
   const onScrubValue = useCallback(
     (ms: number) => {
-      if (dragging.current) {
+      if (pointerPhase.current === 'drag') {
         scrubRef.current = ms;
         setScrubMs(ms);
-      } else if (enabled) {
-        // No pointer drag in flight — keyboard Home/End and AT
-        // commits seek immediately, as before.
+      } else if (pointerPhase.current === 'none' && enabled) {
+        // No pointer gesture in flight — keyboard Home/End and AT
+        // commits seek immediately, as before. An abandoned
+        // pointer's inputs are ignored until its release lands.
         commit(ms);
       }
     },
@@ -279,19 +285,21 @@ function useScrubCommit(
   );
   const onScrubEnd = useCallback(
     (commitMs: number | null) => {
-      if (!dragging.current) {
+      if (pointerPhase.current === 'none') {
         return;
       }
-      // Abandoned gestures — a cancelled pointer or a track change
-      // since pointer-down — restore the real fill. The key check
-      // matters: releasing on a new track must not seek it to a
-      // position the preview only ever showed on the old one.
+      // Abandoned gestures — a cancelled pointer, a dead gesture's
+      // release, or a track change since pointer-down — restore
+      // the real fill. The key check matters: releasing on a new
+      // track must not seek it to a position the preview only ever
+      // showed on the old one.
       if (
+        pointerPhase.current === 'abandoned' ||
         commitMs === null ||
         (gestureKey.current !== undefined &&
           gestureKey.current !== trackKeyRef.current)
       ) {
-        dragging.current = false;
+        pointerPhase.current = 'none';
         scrubRef.current = null;
         gestureKey.current = undefined;
         setScrubMs(null);
@@ -305,7 +313,7 @@ function useScrubCommit(
     heldMs !== null && heldKey.current === trackKey ? heldMs : null;
   const shownScrub =
     scrubMs !== null &&
-    gestureKey.current !== undefined &&
+    pointerPhase.current === 'drag' &&
     gestureKey.current === trackKey
       ? scrubMs
       : null;

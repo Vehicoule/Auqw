@@ -367,6 +367,10 @@ export function LinearScrubber({
   trackKeyRef.current = trackKey;
   const heldKey = useRef(trackKey);
   const gestureKey = useRef<string | null | undefined>(undefined);
+  // A pan whose track flipped mid-gesture: its remaining updates
+  // and finalize are dead — previews must not restart a gesture on
+  // the new track or let the release seek it.
+  const gestureDead = useRef(false);
   const heldTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The first preview of a pan marks the gesture's track — the hold
   // it may produce belongs to that identity even if a new track
@@ -374,8 +378,14 @@ export function LinearScrubber({
   const onPreview = useCallback((ms: number | null) => {
     if (ms === null) {
       gestureKey.current = undefined;
-    } else if (gestureKey.current === undefined) {
-      gestureKey.current = trackKeyRef.current;
+      gestureDead.current = false;
+    } else {
+      if (gestureDead.current) {
+        return;
+      }
+      if (gestureKey.current === undefined) {
+        gestureKey.current = trackKeyRef.current;
+      }
     }
     setPreviewMs(ms);
   }, []);
@@ -384,6 +394,13 @@ export function LinearScrubber({
   // hold the waveform seek applies.
   const commit = useCallback(
     (ms: number) => {
+      // A dead gesture's release does nothing but drain it.
+      if (gestureDead.current) {
+        gestureDead.current = false;
+        gestureKey.current = undefined;
+        setPreviewMs(null);
+        return;
+      }
       // A track change since the pan began abandons the release —
       // it must not seek the new track to a position the preview
       // only ever showed on the old one.
@@ -437,6 +454,7 @@ export function LinearScrubber({
       gestureKey.current !== trackKey
     ) {
       gestureKey.current = undefined;
+      gestureDead.current = true;
       setPreviewMs(null);
     }
   }, [trackKey, heldMs]);
@@ -455,7 +473,6 @@ export function LinearScrubber({
   );
   const shownMs =
     (previewMs !== null &&
-    gestureKey.current !== undefined &&
     gestureKey.current === trackKey
       ? previewMs
       : null) ??
@@ -682,8 +699,17 @@ export function WaveformSeek({
   const trackKeyRef = useRef(trackKey);
   trackKeyRef.current = trackKey;
   const gestureKey = useRef<string | null | undefined>(undefined);
+  // A pan whose track flipped mid-gesture: its remaining updates
+  // and finalize are dead — previews must not restart a gesture on
+  // the new track or let the release seek it. `gestureDead` guards
+  // the JS side; `dead` stops the worklet from moving the fill.
+  const gestureDead = useRef(false);
+  const dead = useSharedValue(0);
   const preview = useCallback(
     (fraction: number) => {
+      if (gestureDead.current) {
+        return;
+      }
       // The first preview of a pan marks the track the gesture
       // began on — a release checks it before seeking.
       if (!scrubActive.current) {
@@ -709,6 +735,7 @@ export function WaveformSeek({
     scrubActive.current = false;
     scrubSec.current = -1;
     gestureKey.current = undefined;
+    gestureDead.current = false;
     setScrubMs(null);
     fill.value = theme.reducedMotion
       ? latestProgress.current
@@ -718,6 +745,11 @@ export function WaveformSeek({
   }, [fill, theme.motion.state, theme.reducedMotion]);
   const commit = useCallback(
     (fraction: number) => {
+      // A dead gesture's release does nothing but drain it.
+      if (gestureDead.current) {
+        gestureDead.current = false;
+        return;
+      }
       // A track change since the pan began abandons the release —
       // seeking now would move a song the preview never showed.
       if (
@@ -754,8 +786,9 @@ export function WaveformSeek({
     },
     [cancelScrub, durationMs, fill, onSeek, theme.motion.state, theme.reducedMotion],
   );
-  // A track change mid-pan abandons the gesture the way a cancelled
-  // pan does — the release may still land before this effect.
+  // A track change mid-pan kills the gesture the way a cancelled
+  // pan does — and marks it dead so the still-running pan's later
+  // updates and finalize can't restart it or seek the new track.
   useEffect(() => {
     if (
       scrubActive.current &&
@@ -763,8 +796,10 @@ export function WaveformSeek({
       gestureKey.current !== trackKey
     ) {
       cancelScrub();
+      gestureDead.current = true;
+      dead.value = 1;
     }
-  }, [cancelScrub, trackKey]);
+  }, [cancelScrub, dead, trackKey]);
   const enabled =
     durationMs !== null && durationMs > 0 && onSeek !== undefined;
   // Stable gesture object — a fresh Pan() per render would cancel a
@@ -776,6 +811,9 @@ export function WaveformSeek({
         .enabled(enabled)
         .onBegin((e) => {
           'worklet';
+          if (dead.value === 1) {
+            return;
+          }
           const f = Math.min(1, Math.max(0, e.x / width));
           fill.value = f;
           scrubbing.value = 1;
@@ -783,17 +821,21 @@ export function WaveformSeek({
         })
         .onUpdate((e) => {
           'worklet';
+          if (dead.value === 1) {
+            return;
+          }
           const f = Math.min(1, Math.max(0, e.x / width));
           fill.value = f;
           scheduleOnRN(preview, f);
         })
         .onFinalize((e, success) => {
           'worklet';
+          dead.value = 0;
           const f = Math.min(1, Math.max(0, e.x / width));
           scrubbing.value = 0;
           scheduleOnRN(success ? commit : cancelScrub, f);
         }),
-    [cancelScrub, commit, enabled, fill, preview, scrubbing, width],
+    [cancelScrub, commit, dead, enabled, fill, preview, scrubbing, width],
   );
   const dLow = useDerivedValue(() =>
     barsPathD(
@@ -857,7 +899,7 @@ export function WaveformSeek({
 
   const shownMs =
     (scrubMs !== null &&
-    gestureKey.current !== undefined &&
+    scrubActive.current &&
     gestureKey.current === trackKey
       ? scrubMs
       : null) ?? positionMs;

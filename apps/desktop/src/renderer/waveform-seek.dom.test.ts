@@ -121,6 +121,11 @@ export async function run(): Promise<void> {
       await act(async () => {
         slide(input, 60_000);
       });
+      assertEqual(
+        input.value,
+        '60000',
+        'an unkeyed control still previews the live drag',
+      );
       await act(async () => {
         slide(input, 120_000);
       });
@@ -374,6 +379,17 @@ export async function run(): Promise<void> {
       await act(async () => {
         root.render(render('occ-b', 0, 90_000));
       });
+      // The still-pressed pointer keeps generating input — a dead
+      // gesture must ignore it, not commit it as a keyboard seek.
+      await act(async () => {
+        slide(input, 30_000);
+      });
+      assertEqual(
+        seeks.length,
+        0,
+        'a dead pointer’s stray input commits nothing',
+      );
+      assertEqual(input.value, '0', 'the dead pointer previews nothing');
       await act(async () => {
         pointer(input, 'pointerup');
       });
