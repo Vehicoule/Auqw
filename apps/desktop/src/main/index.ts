@@ -519,15 +519,26 @@ function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
   win.webContents.on('will-navigate', (event) => {
     event.preventDefault();
   });
-  // Sandbox-first: the app requests no web permissions, so a renderer
-  // that asks (media, notifications, geolocation…) is refused rather
-  // than silently granted by Electron's default handler.
+  // Sandbox-first: the only web permissions granted are the clipboard
+  // pair the sync panel's copy/paste rows and pairing-code copy need —
+  // and only to this window's own webContents; every other request
+  // (media, notifications, geolocation…) stays refused rather than
+  // silently granted by Electron's default handler.
+  const appPermissions = new Set([
+    'clipboard-read',
+    'clipboard-sanitized-write',
+  ]);
   win.webContents.session.setPermissionRequestHandler(
-    (_wc, _permission, callback) => {
-      callback(false);
+    (webContents, permission, callback) => {
+      callback(
+        webContents === win.webContents && appPermissions.has(permission),
+      );
     },
   );
-  win.webContents.session.setPermissionCheckHandler(() => false);
+  win.webContents.session.setPermissionCheckHandler(
+    (webContents, permission) =>
+      webContents === win.webContents && appPermissions.has(permission),
+  );
   trackWindowState(win, statePath, stateRef);
   void win.loadFile(RENDERER);
   return win;
