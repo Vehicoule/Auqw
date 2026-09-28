@@ -970,6 +970,17 @@ export async function createSessionController(
       try {
         const imported = await session.importLibrary(text);
         if (imported.ok) {
+          // Imported settings may name providers this bundle lacks or
+          // ids whose manifests no longer declare the slot — reconcile
+          // through the same repair the boot path runs so playback
+          // does not strand until the next restart.
+          const snap = session.snapshot();
+          if (snap.type === 'ready') {
+            const repaired = repairedSettings(snap.settings, providers);
+            if (repaired !== null) {
+              await session.updateSettings(repaired);
+            }
+          }
           // The swap landed — delete the old ledger's files by their
           // captured paths. A failed import instead leaves the ledger
           // untouched; the finally's rehydrate resumes its rows.

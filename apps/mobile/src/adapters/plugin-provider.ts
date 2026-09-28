@@ -7,6 +7,7 @@ import type {
 } from '@auqw/application';
 import {
   appError,
+  CancellationSource,
   createProviderWirePort,
   decodeProviderOutcome,
   err,
@@ -151,9 +152,24 @@ export function createPluginProvider(
       );
       // The caller's signal races the handshake alongside the
       // deadline — a startRequest parked host-side must not hold a
-      // cancelled caller to it.
-      const first = await Promise.race([raced(call, signal), expired]);
+      // cancelled caller to it. Race a CHILD source: if the deadline
+      // wins, raced()'s subscription would stay parked on the caller's
+      // signal until the host call settles — one retained listener
+      // per timed-out request. Cancelling the child settles raced()
+      // on every exit and frees its listener without touching the
+      // caller's signal.
+      const handshakeSource = new CancellationSource();
+      const bridge = signal.subscribe(() => handshakeSource.cancel());
+      if (signal.cancelled) {
+        handshakeSource.cancel();
+      }
+      const first = await Promise.race([
+        raced(call, handshakeSource.signal),
+        expired,
+      ]);
       clearTimeout(startTimer);
+      bridge();
+      handshakeSource.cancel();
       // A handshake that outlives its race still settles — its late
       // request id is cancelled so nothing minted leaks host-side.
       const reapLateId = (): void => {

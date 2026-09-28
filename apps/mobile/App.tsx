@@ -1899,6 +1899,27 @@ function Main({
         setQualityPickerOpen(true);
         return;
       }
+      // A committed mutation lands on the instance the op ran on —
+      // a mid-flight rehydrate swaps `localSource`, and projecting the
+      // live replacement's pre-commit snapshot hides the committed
+      // rows. When the instance swapped, persisted storage holds the
+      // commit: rehydrate rebuilds the live source from it (and
+      // projects itself). When it is the same instance, its rows ARE
+      // post-commit — project them directly.
+      const syncCommittedLocal = (mutated: NonNullable<ReturnType<typeof controller.local>>): void => {
+        const live = controller.local();
+        if (live === null) {
+          return;
+        }
+        if (live !== mutated) {
+          void controller
+            .rehydrateMedia(new CancellationSource().signal)
+            .then(refreshLocal);
+          return;
+        }
+        session.syncLocalRecordings(live.recordings());
+        refreshLocal();
+      };
       if (key === 'addLocalFolder') {
         const local = controller.local();
         if (local === null) {
@@ -1908,13 +1929,8 @@ function Main({
           .addFolder(new CancellationSource().signal)
           .then((added) => {
             reportResult('settings.addLocalFolder', added);
-            // Re-read the live source — a mid-flight rehydrate swaps
-            // the instance, and committing the captured one's stale
-            // snapshot would clobber rows it never saw.
-            const source = controller.local();
-            if (added.ok && source !== null) {
-              session.syncLocalRecordings(source.recordings());
-              refreshLocal();
+            if (added.ok) {
+              syncCommittedLocal(local);
             }
           });
         return;
@@ -1938,10 +1954,8 @@ function Main({
           .removeSource(sourceId, new CancellationSource().signal)
           .then((removed) => {
             reportResult('action.removeLocalFolder', removed);
-            const source = controller.local();
-            if (removed.ok && source !== null) {
-              session.syncLocalRecordings(source.recordings());
-              refreshLocal();
+            if (removed.ok) {
+              syncCommittedLocal(local);
             }
           });
         return;
@@ -1955,10 +1969,8 @@ function Main({
           .rescan(undefined, new CancellationSource().signal)
           .then((scanned) => {
             reportResult('settings.rescanLocal', scanned);
-            const source = controller.local();
-            if (scanned.ok && source !== null) {
-              session.syncLocalRecordings(source.recordings());
-              refreshLocal();
+            if (scanned.ok) {
+              syncCommittedLocal(local);
             }
           });
         return;
