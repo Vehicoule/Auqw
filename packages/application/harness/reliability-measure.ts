@@ -559,5 +559,6 @@ for (const run of scenarios) {
         crashed: thrown instanceof Error ? thrown.message : String(thrown),
       }),
     );
+    process.exitCode = 1;
   }
 }
