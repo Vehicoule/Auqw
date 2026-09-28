@@ -455,6 +455,20 @@ export const isStorageExecuteArgs = v.object({
 
 export const isStorageQueryArgs = isStorageExecuteArgs;
 
+export type StorageStatement = v.Guarded<typeof isStorageStatement>;
+
+export const isStorageStatement = v.object({
+  sql: v.boundedString(65_536),
+  params: isSqlParams,
+});
+
+export type StorageExecManyArgs = v.Guarded<typeof isStorageExecManyArgs>;
+
+export const isStorageExecManyArgs = v.object({
+  txId: v.boundedString(64),
+  statements: v.array(isStorageStatement, { max: 4_096 }),
+});
+
 export type StorageExecuteResult = v.Guarded<
   typeof isStorageExecuteResult
 >;
