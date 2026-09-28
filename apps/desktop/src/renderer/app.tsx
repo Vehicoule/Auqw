@@ -1627,16 +1627,19 @@ function Main({
   // so identity-dedupe via lastPlayErrorRef reports each failure once
   // regardless of which channel delivers it first.
   const lastPlayErrorRef = useRef<AppError | null>(null);
+  // The action of the most recently dispatched play op — the engine
+  // publishes `playback.failed` BEFORE the op's promise resolves, so
+  // the state watcher names whatever action initiated the attempt
+  // rather than a generic 'play'.
+  const playActionRef = useRef<MessageId>('common.play');
   const reportPlayError = useCallback(
     (action: MessageId, error: AppError) => {
       // A newer play replacing this attempt resolves 'superseded' (or
-      // 'cancelled'); engine disposal resolves 'released' — that's the
-      // queue working, not a failure worth a toast.
-      if (
-        error.kind === 'superseded' ||
-        error.kind === 'cancelled' ||
-        error.kind === 'released'
-      ) {
+      // 'cancelled') — that's the queue working, not a failure worth a
+      // toast. 'released' is NOT silent here: a live prepare can also
+      // resolve released when its host drops the request, and that
+      // strands playback with no other signal.
+      if (error.kind === 'superseded' || error.kind === 'cancelled') {
         return;
       }
       if (lastPlayErrorRef.current === error) {
@@ -1670,10 +1673,11 @@ function Main({
   // A prepare/stream failure that lands after the play promise already
   // resolved reaches the UI only through `playback.failed` — the
   // watcher reports it through the same deduped funnel as the promise
-  // path so the failure can't pass silently.
+  // path so the failure can't pass silently. The action comes from
+  // playActionRef: whichever op initiated the attempt owns its name.
   useEffect(() => {
     if (state.playback.type === 'failed') {
-      reportPlayError('common.play', state.playback.error);
+      reportPlayError(playActionRef.current, state.playback.error);
     }
   }, [state.playback, reportPlayError]);
 
@@ -1687,6 +1691,7 @@ function Main({
         reportResult('action.enqueueTrack', enqueued);
         return;
       }
+      playActionRef.current = 'common.play';
       reportPlay('common.play', await session.playOccurrence(enqueued.value));
     },
     [session, canPlay, reportPlay],
@@ -1702,6 +1707,7 @@ function Main({
       if (occurrence !== undefined && !canPlay(occurrence.recordingId)) {
         return;
       }
+      playActionRef.current = 'common.play';
       void session
         .playOccurrence(occurrenceId)
         .then((r) => reportPlay('common.play', r));
@@ -1751,6 +1757,8 @@ function Main({
       if (target === undefined || !canPlay(target.recordingId)) {
         return;
       }
+      playActionRef.current =
+        method === 'next' ? 'common.next' : 'common.previous';
       void (method === 'next' ? session.next() : session.previous()).then(
         (r) =>
           reportPlay(
@@ -1797,6 +1805,7 @@ function Main({
       const meta = resultMeta.current.get(row.key);
       if (meta !== undefined && canPlayMeta(meta)) {
         recordRecentSearch(query);
+        playActionRef.current = 'action.playResult';
         void session
           .addAndPlay(meta)
           .then((r) => reportPlay('action.playResult', r));
@@ -1984,6 +1993,7 @@ function Main({
     ) {
       return;
     }
+    playActionRef.current = intentPlaying ? 'common.pause' : 'action.resume';
     void (intentPlaying ? session.pause() : session.resume()).then((r) =>
       reportPlay(intentPlaying ? 'common.pause' : 'action.resume', r),
     );
@@ -2577,6 +2587,7 @@ function Main({
       if (playable.length === 0) {
         return;
       }
+      playActionRef.current = 'action.playCollection';
       void session
         .playRecordings(
           playable.map((row) => ({
@@ -2600,6 +2611,7 @@ function Main({
       if (playable.length === 0) {
         return;
       }
+      playActionRef.current = 'action.playPlaylist';
       void session
         .playRecordings(
           playable.map((entry) => ({
@@ -2861,6 +2873,7 @@ function Main({
                   if (searchState.type === 'content') {
                     recordRecentSearch(searchState.query);
                   }
+                  playActionRef.current = 'action.playResult';
                   void session
                     .addAndPlay(meta)
                     .then((r) => reportPlay('action.playResult', r));
@@ -2918,6 +2931,7 @@ function Main({
               if (!canPlay(entry.recordingId)) {
                 return;
               }
+              playActionRef.current = 'action.playPlaylistEntry';
               void session
                 .playRecordings([
                   {
@@ -2990,6 +3004,7 @@ function Main({
               if (metas.length === 0) {
                 return;
               }
+              playActionRef.current = 'collection.playAll';
               void session
                 .playMetadata(metas)
                 .then((r) => reportPlay('collection.playAll', r));
@@ -3004,6 +3019,7 @@ function Main({
               if (metas.length === 0) {
                 return;
               }
+              playActionRef.current = 'action.shuffleAll';
               void session
                 .playMetadata(metas, { shuffle: true })
                 .then((r) => reportPlay('action.shuffleAll', r));
@@ -3017,6 +3033,7 @@ function Main({
             onPressItem={(row) => {
               const meta = metaFor(row);
               if (meta !== undefined && canPlayMeta(meta)) {
+                playActionRef.current = 'action.playResult';
                 void session
                   .addAndPlay(meta)
                   .then((r) => reportPlay('action.playResult', r));
