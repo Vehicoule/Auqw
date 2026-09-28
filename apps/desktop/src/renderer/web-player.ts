@@ -905,26 +905,89 @@ export function createWebPlayerPort(deps: {
     return null;
   }
 
+  /**
+   * Issue a stream-seam resolve+prepare and translate its terminal
+   * outcome into the `prepare` event — shared by `prepare` and
+   * `prewarm`; the difference is the caller's playback-intent
+   * side effects (op generation, attach teardown), not this path.
+   */
+  function issueStreamPrepare(
+    input: {
+      provider: string;
+      sourceRef: string;
+      identity: PlaybackIdentity;
+    },
+    requestId: string,
+  ): void {
+    const emitFailed = (error: AppError): void => {
+      emit({
+        type: 'prepare',
+        requestId,
+        identity: input.identity,
+        outcome: {
+          type: 'failed',
+          error,
+          attempt: toAttemptTrace(undefined, requestId),
+        },
+      });
+    };
+    if (input.provider === 'local') {
+      // Desktop local files are the Phase-4 adapter — no seam leg yet.
+      emitFailed(
+        appError('unavailable', 'desktop local files not implemented'),
+      );
+      return;
+    }
+    void stream
+      .prepare({
+        pluginId: input.provider,
+        sourceRef: input.sourceRef,
+        requestId,
+      })
+      .then((outcome: PrepareOutcomePayload) => {
+        if (
+          outcome.type === 'prepared' &&
+          outcome.stream !== undefined
+        ) {
+          const prepared = toPreparedStream(outcome.stream);
+          dropSuperseded(outcome.superseded);
+          noteMime(prepared.handle, prepared.mime);
+          emit({
+            type: 'prepare',
+            requestId,
+            identity: input.identity,
+            outcome: {
+              type: 'prepared',
+              stream: prepared,
+              attempt: toAttemptTrace(outcome.attempt, requestId),
+            },
+          });
+        } else {
+          const kind = toKind(outcome.kind);
+          emit({
+            type: 'prepare',
+            requestId,
+            identity: input.identity,
+            outcome: {
+              type: 'failed',
+              error: appError(
+                kind,
+                outcome.message ?? 'prepare failed',
+              ),
+              attempt: toAttemptTrace(outcome.attempt, requestId),
+            },
+          });
+        }
+      })
+      .catch((thrown) => emitFailed(toError(thrown)));
+  }
+
   return {
     async prepare(input) {
       const requestId = `wreq-${++seq}`;
-      const emitFailed = (error: AppError): void => {
-        emit({
-          type: 'prepare',
-          requestId,
-          identity: input.identity,
-          outcome: {
-            type: 'failed',
-            error,
-            attempt: toAttemptTrace(undefined, requestId),
-          },
-        });
-      };
       if (input.provider === 'local') {
         // Desktop local files are the Phase-4 adapter — no seam leg yet.
-        emitFailed(
-          appError('unavailable', 'desktop local files not implemented'),
-        );
+        issueStreamPrepare(input, requestId);
         return ok(requestId);
       }
       // Return the requestId up front — the terminal outcome arrives
@@ -936,48 +999,21 @@ export function createWebPlayerPort(deps: {
       // stream keeps its pump lease for a settle that will never be
       // accepted.
       abortPendingAttaches();
-      void stream
-        .prepare({
-          pluginId: input.provider,
-          sourceRef: input.sourceRef,
-          requestId,
-        })
-        .then((outcome: PrepareOutcomePayload) => {
-          if (
-            outcome.type === 'prepared' &&
-            outcome.stream !== undefined
-          ) {
-            const prepared = toPreparedStream(outcome.stream);
-            dropSuperseded(outcome.superseded);
-            noteMime(prepared.handle, prepared.mime);
-            emit({
-              type: 'prepare',
-              requestId,
-              identity: input.identity,
-              outcome: {
-                type: 'prepared',
-                stream: prepared,
-                attempt: toAttemptTrace(outcome.attempt, requestId),
-              },
-            });
-          } else {
-            const kind = toKind(outcome.kind);
-            emit({
-              type: 'prepare',
-              requestId,
-              identity: input.identity,
-              outcome: {
-                type: 'failed',
-                error: appError(
-                  kind,
-                  outcome.message ?? 'prepare failed',
-                ),
-                attempt: toAttemptTrace(outcome.attempt, requestId),
-              },
-            });
-          }
-        })
-        .catch((thrown) => emitFailed(toError(thrown)));
+      issueStreamPrepare(input, requestId);
+      return ok(requestId);
+    },
+
+    /**
+     * Advisory warm: identical resolve+prepare leg minus the playback
+     * intent — no op-generation bump and no attach teardown, so an
+     * in-flight attach or pending play outlives the speculation. The
+     * seam enforces the one-unattached-session bound on its side, and
+     * a later same-ref prepare adopts the warm session without
+     * re-resolving. The terminal outcome is still a `prepare` event.
+     */
+    async prewarm(input) {
+      const requestId = `wreq-${++seq}`;
+      issueStreamPrepare(input, requestId);
       return ok(requestId);
     },
 

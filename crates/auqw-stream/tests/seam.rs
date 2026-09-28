@@ -1406,6 +1406,189 @@ async fn coalesced_prepare_still_supersedes_detached_sibling() {
     assert_eq!(err_of(reg.attach(&a.handle, 0)).kind(), "superseded");
 }
 
+fn now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+/// `adopt_reusable` hands a live unattached session — an advisory
+/// warm minted moments earlier — to the adopting caller: same handle,
+/// no new session, no survivor on its own supersede list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adopt_reusable_returns_the_warm_session() {
+    let d = TestDir::new("adopt");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let warm = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("warm prepare: {e}"));
+    let adopted = reg
+        .adopt_reusable("test", "vid")
+        .unwrap_or_else(|e| panic!("adopt: {e}"))
+        .unwrap_or_else(|| panic!("the warm session must be adoptable"));
+    assert_eq!(
+        adopted.handle, warm.handle,
+        "adoption returns the warm session's handle"
+    );
+    assert!(
+        adopted.superseded.is_empty(),
+        "nothing else was unattached: {:?}",
+        adopted.superseded
+    );
+    // Still live and unattached, the session stays adoptable — and a
+    // normal prepare on the same key coalesces onto it rather than
+    // minting a twin.
+    let again = reg
+        .adopt_reusable("test", "vid")
+        .unwrap_or_else(|e| panic!("adopt again: {e}"));
+    assert_eq!(
+        again.map(|i| i.handle),
+        Some(warm.handle.clone()),
+        "a live unattached session stays adoptable"
+    );
+    let reprepare = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("reprepare: {e}"));
+    assert_eq!(
+        reprepare.handle, warm.handle,
+        "same-key prepare coalesces onto the adopted session"
+    );
+    reg.release(&warm.handle)
+        .unwrap_or_else(|e| panic!("release: {e}"));
+}
+
+/// Adoption still owns the supersede scan: an attached-then-detached
+/// sibling must not coexist with the adopted warm session, and its
+/// ended handle belongs on the unregister list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adopt_reusable_supersedes_detached_sibling() {
+    let d = TestDir::new("adoptsup");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    // A attaches (exempt from supersede), then B warms — both live.
+    let a = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare a: {e}"));
+    reg.attach(&a.handle, 0)
+        .unwrap_or_else(|e| panic!("attach a: {e}"));
+    let mut sb = source(1024);
+    sb.source_ref = "b".into();
+    let b = reg
+        .prepare(sb, Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare b: {e}"));
+    // DataSource close: A is unattached again but still live.
+    reg.close(&a.handle)
+        .unwrap_or_else(|e| panic!("close a: {e}"));
+    let adopted = reg
+        .adopt_reusable("test", "b")
+        .unwrap_or_else(|e| panic!("adopt: {e}"))
+        .unwrap_or_else(|| panic!("B's warm session must be adoptable"));
+    assert_eq!(adopted.handle, b.handle, "adopted the warm session");
+    assert!(
+        adopted.superseded.contains(&a.handle),
+        "the detached sibling must be superseded: {:?}",
+        adopted.superseded
+    );
+    assert!(
+        !adopted.superseded.contains(&b.handle),
+        "the adopted session never names itself: {:?}",
+        adopted.superseded
+    );
+    assert_eq!(err_of(reg.attach(&a.handle, 0)).kind(), "superseded");
+}
+
+/// Adoption keys on (provider, source_ref) and freshness: a different
+/// provider, an unknown ref, an attached session, a terminal session,
+/// and a URL inside the expiry margin all miss — the caller then runs
+/// the normal resolve.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adopt_reusable_respects_keying_and_liveness() {
+    let d = TestDir::new("adoptkey");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let warm = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("warm prepare: {e}"));
+    assert!(
+        reg.adopt_reusable("other-provider", "vid")
+            .unwrap_or_else(|e| panic!("adopt: {e}"))
+            .is_none(),
+        "a same-ref session under another provider never inherits"
+    );
+    assert!(
+        reg.adopt_reusable("test", "other-ref")
+            .unwrap_or_else(|e| panic!("adopt: {e}"))
+            .is_none(),
+        "a different ref misses"
+    );
+    // Attached is exempt — playing audio is never handed out as a
+    // reusable warm.
+    reg.attach(&warm.handle, 0)
+        .unwrap_or_else(|e| panic!("attach: {e}"));
+    assert!(
+        reg.adopt_reusable("test", "vid")
+            .unwrap_or_else(|e| panic!("adopt: {e}"))
+            .is_none(),
+        "an attached session is not reusable"
+    );
+    reg.close(&warm.handle)
+        .unwrap_or_else(|e| panic!("close: {e}"));
+    // Inside the expiry margin the URL is about to die — minted but
+    // useless to a later tap, so adoption misses (this prepare also
+    // supersedes the still-live warm, correctly).
+    let mut exp = source(1024);
+    exp.source_ref = "exp".into();
+    exp.expires_at_ms = Some(now_ms() + 30_000);
+    let exp_h = reg
+        .prepare(exp, Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare exp: {e}"))
+        .handle;
+    assert!(
+        reg.adopt_reusable("test", "exp")
+            .unwrap_or_else(|e| panic!("adopt: {e}"))
+            .is_none(),
+        "inside the expiry margin is not reusable"
+    );
+    // A terminal session misses too.
+    reg.release(&exp_h)
+        .unwrap_or_else(|e| panic!("release: {e}"));
+    assert!(
+        reg.adopt_reusable("test", "exp")
+            .unwrap_or_else(|e| panic!("adopt: {e}"))
+            .is_none(),
+        "a released session is not reusable"
+    );
+    // Beyond the margin the session is reusable again.
+    let mut fresh = source(1024);
+    fresh.source_ref = "fresh".into();
+    fresh.expires_at_ms = Some(now_ms() + 300_000);
+    let f = reg
+        .prepare(fresh, Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare fresh: {e}"));
+    let adopted = reg
+        .adopt_reusable("test", "fresh")
+        .unwrap_or_else(|e| panic!("adopt: {e}"))
+        .unwrap_or_else(|| panic!("a fresh warm must adopt"));
+    assert_eq!(adopted.handle, f.handle);
+}
+
 /// The named read bound must outlive the recovery path a parked read
 /// waits on: one re-mint plus one bounded fetch attempt. A shorter
 /// deadline would surface cap death to the player as `transient`.

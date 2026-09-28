@@ -298,6 +298,31 @@ struct PreparedSlot {
     delivered: bool,
 }
 
+/// The held result of `begin_admission`: the duplicate checks ran and
+/// both ownership maps stay locked until the caller commits its own
+/// reservation — a `cancels` `LiveRequest` for an invocation, or a
+/// `prepared_handles` `PreparedSlot` for a warm adoption. `cancels`
+/// nests inside `prepared_handles`, matching the delivery path's
+/// lock order; `cancel` never holds both, so no cycle exists.
+struct Admission<'a> {
+    prepared: MutexGuard<'a, HashMap<String, PreparedSlot>>,
+    cancels: MutexGuard<'a, HashMap<String, LiveRequest>>,
+    /// A `cancel` tombstone consumed for this id — the caller applies
+    /// it to whatever it registers next.
+    tombstoned: bool,
+}
+
+/// One typed start's wire fields, bundled so `start_typed_admitted`
+/// stays inside the argument lint while carrying the caller's
+/// reservation.
+pub(crate) struct TypedRequest {
+    pub plugin_id: String,
+    pub capability: String,
+    pub payload: Value,
+    pub request_id: String,
+    pub is_prepare: bool,
+}
+
 /// Counts deliveries inside their insert→wire→flip window per
 /// request id, so a `cancel` that finds a not-yet-delivered slot waits
 /// only for its own request's delivery instead of every in-flight one
@@ -314,13 +339,15 @@ struct PrepareDelivery {
 impl PrepareDelivery {
     /// Enter the delivery window for `request_id`. The returned
     /// ticket decrements the count on drop, so a panic mid-callback
-    /// can't strand waiters.
-    fn track(&self, request_id: String) -> PrepareDeliveryTicket<'_> {
+    /// can't strand waiters. Owning the `Arc` keeps the ticket
+    /// `'static` — the adoption fast-path registers it synchronously
+    /// on the caller's stack and drops it inside the delivery task.
+    fn track(self: &Arc<Self>, request_id: String) -> PrepareDeliveryTicket {
         if let Ok(mut m) = self.in_flight.lock() {
             *m.entry(request_id.clone()).or_insert(0) += 1;
         }
         PrepareDeliveryTicket {
-            delivery: self,
+            delivery: Arc::clone(self),
             request_id,
         }
     }
@@ -341,12 +368,12 @@ impl PrepareDelivery {
     }
 }
 
-struct PrepareDeliveryTicket<'a> {
-    delivery: &'a PrepareDelivery,
+struct PrepareDeliveryTicket {
+    delivery: Arc<PrepareDelivery>,
     request_id: String,
 }
 
-impl Drop for PrepareDeliveryTicket<'_> {
+impl Drop for PrepareDeliveryTicket {
     fn drop(&mut self) {
         if let Ok(mut m) = self.delivery.in_flight.lock() {
             if let Some(n) = m.get_mut(&self.request_id) {
@@ -760,10 +787,17 @@ impl PluginHost {
                 Some(slot.handle)
             }
         });
-        drop(m);
+        // The last-owner verdict and the conditional registry kill run
+        // under the same `m`: dropped between them, an adoption could
+        // commit its ownership slot for this handle — the registry
+        // still reads it unattached — and this kill would then end the
+        // session the new request just received. `prepared_handles`
+        // outermost matches the admission path's lock order, so the
+        // serialization introduces no cycle.
         if let (Some(stream), Some(handle)) = (&self.stream, handle) {
             let _ = stream.cancel_if_unattached(&handle);
         }
+        drop(m);
         // Tombstone when no delivered handle was found AND a race
         // still exists: a never-admitted id (cancel-before-start),
         // or a live prepare whose `Prepared` is mid-registration.
@@ -826,6 +860,65 @@ impl PluginHost {
 }
 
 impl PluginHost {
+    /// Atomic request-id admission shared by `start_typed` and the
+    /// prepare-adoption fast-path in `stream.rs`: the duplicate checks
+    /// (a delivered/adopted `PreparedSlot`, an in-flight `LiveRequest`)
+    /// and the caller's reservation run inside one critical section
+    /// spanning both maps, so neither path can slip a second request
+    /// past the other's check and double-own a stream session. The
+    /// guards come back held — the caller inserts its own record
+    /// while still inside the section.
+    fn begin_admission(&self, request_id: &str) -> Result<Admission<'_>, HostError> {
+        let mut prepared = lock(&self.prepared_handles)?;
+        // A slot can outlive its registry entry once the
+        // abandoned-session reaper evicts the stream — prune slots
+        // whose sessions are no longer live first, or a dead session
+        // still blocks the id's reuse.
+        if let Some(stream) = &self.stream {
+            prepared.retain(|_, s| stream.is_live(&s.handle));
+        }
+        if prepared.contains_key(request_id) {
+            return Err(HostError::RequestInFlight {
+                id: request_id.to_string(),
+            });
+        }
+        let mut cancels = lock(&self.cancels)?;
+        // A settled generic entry no longer blocks its id — the
+        // invocation ended; evict it so this generation owns the id
+        // even while the previous outcome is still on the wire.
+        if cancels
+            .get(request_id)
+            .is_some_and(|r| r.settled && !r.is_prepare)
+        {
+            cancels.remove(request_id);
+        }
+        if cancels.contains_key(request_id) {
+            return Err(HostError::RequestInFlight {
+                id: request_id.to_string(),
+            });
+        }
+        // Admission consumes a tombstone for this id: a cancel that
+        // outran the bookkeeping still lands on the request it was
+        // meant for, but a stone left by an earlier, settled
+        // generation can't poison a later reuse — it dies with this
+        // admission. An EXPIRED stone dies without cancelling: the
+        // TTL bounds the race window, so it is honored on the consume
+        // side too, not only on insert.
+        let tombstoned = self
+            .cancelled_requests
+            .lock()
+            .map(|mut c| {
+                c.remove(request_id)
+                    .is_some_and(|t| t.elapsed() < CANCEL_TOMBSTONE_TTL)
+            })
+            .unwrap_or(false);
+        Ok(Admission {
+            prepared,
+            cancels,
+            tombstoned,
+        })
+    }
+
     /// Spawn one invocation on the runtime and deliver it to `deliver`
     /// on a worker thread — `deliver` returns a future so callers can
     /// offload blocking work with `spawn_blocking` instead of stalling
@@ -850,6 +943,41 @@ impl PluginHost {
         F: FnOnce(String, auqw_plugin_host::Invocation) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        let admission = self.begin_admission(&request_id)?;
+        self.start_typed_admitted(
+            TypedRequest {
+                plugin_id,
+                capability,
+                payload,
+                request_id,
+                is_prepare,
+            },
+            admission,
+            deliver,
+        )
+    }
+
+    /// `start_typed` under a reservation the caller already holds —
+    /// `start_prepare`'s invoke fallback carries the same admission it
+    /// ran `adopt_reusable` under, so the request id never goes
+    /// unreserved between the adopt-miss and this insert.
+    fn start_typed_admitted<F, Fut>(
+        &self,
+        request: TypedRequest,
+        mut admission: Admission<'_>,
+        deliver: F,
+    ) -> Result<(), HostError>
+    where
+        F: FnOnce(String, auqw_plugin_host::Invocation) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let TypedRequest {
+            plugin_id,
+            capability,
+            payload,
+            request_id,
+            is_prepare,
+        } = request;
         let plugin = {
             let plugins = lock(&self.plugins)?;
             match plugins.get(&plugin_id) {
@@ -875,71 +1003,23 @@ impl PluginHost {
             payload
         };
         let token = CancellationToken::new();
-        // Caller-minted ids must be unique while live: a duplicate
-        // would replace the first invocation's token (and, for
-        // prepare, steal the earlier session's ownership slot) —
-        // reject rather than corrupt. The `prepared_handles` check
-        // runs before admission, never nested under `cancels`:
-        // `prepared_handles` is only populated by a request whose
-        // `cancels` entry still exists or has just been delivered, so
-        // the atomic contains+insert below closes the race.
-        {
-            let mut m = lock(&self.prepared_handles)?;
-            // A slot can outlive its registry entry once the
-            // abandoned-session reaper evicts the stream — prune
-            // slots whose sessions are no longer live first, or a
-            // dead session still blocks the id's reuse.
-            if let Some(stream) = &self.stream {
-                m.retain(|_, s| stream.is_live(&s.handle));
-            }
-            if m.contains_key(&request_id) {
-                return Err(HostError::RequestInFlight { id: request_id });
-            }
+        // The caller's reservation is already held — commit this
+        // invocation's `LiveRequest` inside it, then release both
+        // guards before any spawn work.
+        if admission.tombstoned {
+            token.cancel();
         }
-        let generation = {
-            let mut m = lock(&self.cancels)?;
-            // A settled generic entry no longer blocks its id — the
-            // invocation ended; evict it so this generation owns the
-            // id even while the previous outcome is still on the wire.
-            if m.get(&request_id)
-                .is_some_and(|r| r.settled && !r.is_prepare)
-            {
-                m.remove(&request_id);
-            }
-            if m.contains_key(&request_id) {
-                return Err(HostError::RequestInFlight { id: request_id });
-            }
-            // Admission consumes a tombstone for this id: a cancel
-            // that outran the bookkeeping still lands on the request
-            // it was meant for (the token starts cancelled), but a
-            // stone left by an earlier, settled generation can't
-            // poison a later reuse — it dies with this admission.
-            // An EXPIRED stone dies without cancelling: the TTL
-            // bounds the race window, so it is honored on the consume
-            // side too, not only on insert.
-            if self
-                .cancelled_requests
-                .lock()
-                .map(|mut c| {
-                    c.remove(&request_id)
-                        .is_some_and(|t| t.elapsed() < CANCEL_TOMBSTONE_TTL)
-                })
-                .unwrap_or(false)
-            {
-                token.cancel();
-            }
-            let generation = self.request_generation.fetch_add(1, Ordering::Relaxed);
-            m.insert(
-                request_id.clone(),
-                LiveRequest {
-                    token: token.clone(),
-                    is_prepare,
-                    settled: false,
-                    generation,
-                },
-            );
-            generation
-        };
+        let generation = self.request_generation.fetch_add(1, Ordering::Relaxed);
+        admission.cancels.insert(
+            request_id.clone(),
+            LiveRequest {
+                token: token.clone(),
+                is_prepare,
+                settled: false,
+                generation,
+            },
+        );
+        drop(admission);
         let budgets = self.budgets.clone();
         let http = Arc::clone(&self.http);
         let kv = Arc::clone(&self.kv);
@@ -1419,5 +1499,506 @@ mod tests {
         );
         let max = "x".repeat(8192);
         assert_eq!(valid_auth_token(Some(max.clone())), Some(max));
+    }
+
+    // --- start_prepare warm-adoption ------------------------------------
+
+    /// A fetch that parks every request — a warm session's pump stays
+    /// inside a live fill forever, so adoption tests never race a
+    /// terminal state the real transport would eventually write.
+    struct HangFetch;
+
+    impl auqw_stream::Fetch for HangFetch {
+        fn get_range<'a>(
+            &'a self,
+            _url: &'a str,
+            _offset: u64,
+            _max_len: u64,
+            _stall: std::time::Duration,
+            _deadline: std::time::Duration,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<auqw_stream::FetchResponse, auqw_stream::StreamError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// A re-mint that never answers — adoption tests mint warm
+    /// sessions directly; the trait still demands the seam exist.
+    struct HangRemint;
+
+    impl auqw_stream::Remint for HangRemint {
+        fn remint(
+            &self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<auqw_stream::PreparedSource, auqw_stream::StreamError>,
+                    > + Send,
+            >,
+        > {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// A temp cache dir cleaned up when the test ends.
+    struct StreamDir(std::path::PathBuf);
+
+    impl StreamDir {
+        fn new(tag: &str) -> Self {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let p = std::env::temp_dir().join(format!(
+                "auqw-host-surface-{tag}-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match std::fs::create_dir_all(&p) {
+                Ok(()) => Self(p),
+                Err(e) => panic!("mkdir {e}"),
+            }
+        }
+    }
+
+    impl Drop for StreamDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn warm_source(provider: &str, source_ref: &str) -> auqw_stream::PreparedSource {
+        auqw_stream::PreparedSource {
+            url: "https://signed.example/s?sig=SECRET".into(),
+            mime: "audio/mp4".into(),
+            itag: Some(140),
+            bitrate_kbps: Some(129),
+            content_length: Some(1024),
+            expires_at_ms: None,
+            source_ref: source_ref.to_string(),
+            provider: provider.to_string(),
+        }
+    }
+
+    /// A host with an echo plugin plus a stream seam whose transport
+    /// parks — warm sessions minted directly into the registry stay
+    /// live for the adoption under test.
+    fn stream_host(tag: &str) -> (PluginHost, Arc<auqw_stream::StreamRegistry>, StreamDir) {
+        let dir = StreamDir::new(tag);
+        let mut host = match PluginHost::new(config()) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let reg = Arc::new(
+            auqw_stream::StreamRegistry::with_fetch(
+                auqw_stream::StreamConfig::new(dir.0.clone()),
+                host.runtime.handle().clone(),
+                Arc::new(HangFetch),
+            )
+            .unwrap_or_else(|e| panic!("registry: {e}")),
+        );
+        host.stream = Some(Arc::clone(&reg));
+        (host, reg, dir)
+    }
+
+    fn load_echo(host: &PluginHost) -> String {
+        match host.load_plugin(ECHO_WASM.to_vec(), manifest_json("echo", ECHO_WASM, "[]")) {
+            Ok(id) => id,
+            Err(e) => panic!("load echo: {e}"),
+        }
+    }
+
+    /// Mint a warm session directly in the registry — the seam-side
+    /// half of the adapter's `prewarm` call.
+    fn mint_warm(
+        reg: &Arc<auqw_stream::StreamRegistry>,
+        provider: &str,
+        source_ref: &str,
+    ) -> auqw_stream::PrepareInfo {
+        match reg.prepare(warm_source(provider, source_ref), Arc::new(HangRemint)) {
+            Ok(info) => info,
+            Err(e) => panic!("warm prepare: {e}"),
+        }
+    }
+
+    type OutcomeTx = std::sync::mpsc::Sender<(String, PrepareOutcome)>;
+    type OutcomeRx = std::sync::mpsc::Receiver<(String, PrepareOutcome)>;
+
+    fn deliver_chan() -> (OutcomeTx, OutcomeRx) {
+        std::sync::mpsc::channel()
+    }
+
+    /// Adoption happy path: a live warm session for this exact
+    /// (plugin, ref) is delivered Prepared under the new request id —
+    /// the guest never runs, the attempt trace is honestly zero, and
+    /// the ownership slot + cancel lifecycle are indistinguishable
+    /// from a resolved prepare.
+    #[test]
+    fn prepare_adopts_a_live_warm_session() {
+        let (host, reg, _dir) = stream_host("adopt");
+        let id = load_echo(&host);
+        let warm = mint_warm(&reg, &id, "vid");
+        let (tx, rx) = deliver_chan();
+        match host.start_prepare(id, "vid".into(), "req-adopt".into(), move |rid, outcome| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send((rid, outcome));
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start: {e}"),
+        }
+        let (rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        assert_eq!(rid, "req-adopt");
+        match outcome {
+            PrepareOutcome::Prepared {
+                stream,
+                attempt,
+                superseded,
+            } => {
+                assert_eq!(
+                    stream.handle, warm.handle,
+                    "adoption delivers the warm session's handle"
+                );
+                assert!(
+                    superseded.is_empty(),
+                    "nothing else was unattached: {superseded:?}"
+                );
+                assert_eq!(
+                    (attempt.steps, attempt.http_calls, attempt.elapsed_ms),
+                    (0, 0, 0),
+                    "adoption ran no guest invocation"
+                );
+            }
+            PrepareOutcome::Failed { kind, .. } => {
+                panic!("expected Prepared, got Failed({kind})")
+            }
+        }
+        // The ownership slot is committed under this request id and
+        // flips delivered once the Prepared is on the wire.
+        let mut guard = 0;
+        loop {
+            let delivered = host
+                .prepared_handles
+                .lock()
+                .ok()
+                .and_then(|m| m.get("req-adopt").map(|s| (s.handle.clone(), s.delivered)));
+            match delivered {
+                Some((h, true)) => {
+                    assert_eq!(h, warm.handle);
+                    break;
+                }
+                Some(_) | None if guard < 200 => {
+                    guard += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                _ => panic!("ownership slot for req-adopt never delivered"),
+            }
+        }
+        // Cancelling the delivered-but-unattached session abandons it —
+        // the same lifecycle a resolved prepare would unwind.
+        host.cancel("req-adopt".to_string());
+        assert!(
+            !reg.is_live(&warm.handle),
+            "cancel unwinds the adopted warm session"
+        );
+    }
+
+    /// Tombstone consume: a cancel that outran the adoption still
+    /// lands on this request — the outcome reports cancelled, no slot
+    /// is committed, and the warm session survives under its minting
+    /// request's ownership rather than being abandoned by a request
+    /// that never owned it.
+    #[test]
+    fn prepare_adoption_consumes_a_tombstoned_cancel() {
+        let (host, reg, _dir) = stream_host("tomb");
+        let id = load_echo(&host);
+        let warm = mint_warm(&reg, &id, "vid");
+        host.cancel("req-tomb".to_string());
+        let (tx, rx) = deliver_chan();
+        match host.start_prepare(id, "vid".into(), "req-tomb".into(), move |rid, outcome| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send((rid, outcome));
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start: {e}"),
+        }
+        let (_rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        match outcome {
+            PrepareOutcome::Failed { kind, attempt, .. } => {
+                assert_eq!(kind, "cancelled");
+                assert_eq!(attempt.steps, 0, "a cancelled adoption ran no guest");
+            }
+            PrepareOutcome::Prepared { .. } => {
+                panic!("expected Failed(cancelled), got Prepared")
+            }
+        }
+        assert!(
+            host.prepared_handles
+                .lock()
+                .map(|m| !m.contains_key("req-tomb"))
+                .unwrap_or(false),
+            "a cancelled adoption commits no ownership slot"
+        );
+        assert!(
+            reg.is_live(&warm.handle),
+            "the warm session survives under its minting request's slot"
+        );
+    }
+
+    /// Dead-warm fallback: a released session fails `adopt_reusable`'s
+    /// freshness check, so the request runs the normal resolve —
+    /// observable through a real attempt summary and no delivery of
+    /// the dead handle.
+    #[test]
+    fn prepare_dead_warm_falls_back_to_the_invoke_path() {
+        let (host, reg, _dir) = stream_host("dead");
+        let id = load_echo(&host);
+        let warm = mint_warm(&reg, &id, "vid");
+        match reg.release(&warm.handle) {
+            Ok(()) => {}
+            Err(e) => panic!("release: {e}"),
+        }
+        let (tx, rx) = deliver_chan();
+        match host.start_prepare(id, "vid".into(), "req-dead".into(), move |rid, outcome| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send((rid, outcome));
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start: {e}"),
+        }
+        let (_rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(v) => v,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        match outcome {
+            PrepareOutcome::Failed { attempt, .. } => {
+                assert!(
+                    attempt.steps >= 1,
+                    "the fallback ran the guest's resolve for real"
+                );
+            }
+            PrepareOutcome::Prepared { stream, .. } => {
+                panic!("a dead warm must never deliver — got {}", stream.handle)
+            }
+        }
+    }
+
+    /// Duplicate request ids are rejected on the adoption path too —
+    /// the second admission sees the committed slot and fails
+    /// `RequestInFlight` before it can double-own the warm session.
+    #[test]
+    fn prepare_adoption_rejects_a_duplicate_request_id() {
+        let (host, reg, _dir) = stream_host("dup");
+        let id = load_echo(&host);
+        mint_warm(&reg, &id, "vid");
+        let (tx1, _rx1) = deliver_chan();
+        let (tx2, _rx2) = deliver_chan();
+        let deliver = |tx: OutcomeTx| {
+            move |rid: String, outcome: PrepareOutcome| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send((rid, outcome));
+                }
+            }
+        };
+        match host.start_prepare(id.clone(), "vid".into(), "dup".into(), deliver(tx1)) {
+            Ok(()) => {}
+            Err(e) => panic!("first start: {e}"),
+        }
+        match host.start_prepare(id, "vid".into(), "dup".into(), deliver(tx2)) {
+            Err(HostError::RequestInFlight { id }) => assert_eq!(id, "dup"),
+            other => panic!("expected RequestInFlight, got {other:?}"),
+        }
+    }
+
+    /// Cross-path duplicate: the first claim on the id sits in
+    /// `cancels` (an invoke-path prepare still resolving). An adoption
+    /// admitting under the same id would commit a second ownership
+    /// slot — two requests both believing they own stream sessions,
+    /// one's `cancel` abandoning the other's. `begin_admission`
+    /// checks both maps under one critical section, so the invoke's
+    /// `LiveRequest` blocks the adoption.
+    #[test]
+    fn prepare_adoption_rejects_an_id_in_flight_on_the_invoke_path() {
+        let (host, reg, _dir) = stream_host("dup-cancels");
+        let id = load_echo(&host);
+        let (tx1, _rx1) = deliver_chan();
+        let (tx2, _rx2) = deliver_chan();
+        // No warm for "other" — the first request lands on the invoke
+        // path and registers `cancels["dup"]` before returning.
+        match host.start_prepare(id.clone(), "other".into(), "dup".into(), move |rid, o| {
+            let tx = tx1.clone();
+            async move {
+                let _ = tx.send((rid, o));
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("first start: {e}"),
+        }
+        mint_warm(&reg, &id, "vid");
+        match host.start_prepare(id, "vid".into(), "dup".into(), move |rid, o| {
+            let tx = tx2.clone();
+            async move {
+                let _ = tx.send((rid, o));
+            }
+        }) {
+            Err(HostError::RequestInFlight { id }) => assert_eq!(id, "dup"),
+            other => panic!("expected RequestInFlight, got {other:?}"),
+        }
+    }
+
+    /// Admission must precede `adopt_reusable`: the registry's
+    /// supersede scan is destructive, so a request id that will be
+    /// rejected must never reach it — the refused request would still
+    /// end every *other* unattached session, including the one its
+    /// own first delivery already owns.
+    #[test]
+    fn prepare_rejection_never_supersedes_an_unattached_session() {
+        let (host, reg, _dir) = stream_host("dup-supersede");
+        let id = load_echo(&host);
+        // The first request adopts a warm outright — its delivery
+        // registers the ownership slot that keeps "dup" in flight.
+        mint_warm(&reg, &id, "other");
+        let (tx1, rx1) = deliver_chan();
+        match host.start_prepare(id.clone(), "other".into(), "dup".into(), move |rid, o| {
+            let tx = tx1.clone();
+            async move {
+                let _ = tx.send((rid, o));
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("first start: {e}"),
+        }
+        let (_rid, outcome) = match rx1.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(v) => v,
+            Err(e) => panic!("first outcome: {e}"),
+        };
+        let first = match outcome {
+            PrepareOutcome::Prepared { stream, .. } => stream.handle,
+            _ => panic!("first prepare must deliver a session"),
+        };
+        // Attached, then detached: the session keeps living under the
+        // first request's slot and re-enters the supersedeable set —
+        // an attach→detach beside a fresh warm is the only way two
+        // unattached sessions coexist.
+        if let Err(e) = reg.attach(&first, 0) {
+            panic!("attach: {e}");
+        }
+        let warm = mint_warm(&reg, &id, "vid");
+        if let Err(e) = reg.close(&first) {
+            panic!("close: {e}");
+        }
+        let (tx2, _rx2) = deliver_chan();
+        match host.start_prepare(id, "vid".into(), "dup".into(), move |rid, o| {
+            let tx = tx2.clone();
+            async move {
+                let _ = tx.send((rid, o));
+            }
+        }) {
+            Err(HostError::RequestInFlight { id }) => assert_eq!(id, "dup"),
+            other => panic!("expected RequestInFlight, got {other:?}"),
+        }
+        assert!(
+            reg.is_live(&first),
+            "a rejected duplicate must not destroy the session it already owns"
+        );
+        assert!(
+            reg.is_live(&warm.handle),
+            "the adopt candidate stays live too"
+        );
+    }
+
+    /// Concurrent cancel-versus-adopt: whichever side commits first
+    /// decides — the cancel kills the warm before the adoption's
+    /// registry scan (the request falls back to a fresh resolve), or
+    /// sees the new owner and skips the kill. The adoption must never
+    /// deliver a session the racing cancel then ends: the last-owner
+    /// check and `cancel_if_unattached` run under the same
+    /// `prepared_handles` guard, so the new owner serializes either
+    /// way.
+    #[test]
+    fn cancel_racing_adoption_never_kills_the_new_owner() {
+        for round in 0..64 {
+            let (host, reg, _dir) = stream_host("race");
+            let host = Arc::new(host);
+            let id = load_echo(&host);
+            let warm = mint_warm(&reg, &id, "vid");
+            // The warm rides an owner slot the way a delivered
+            // prepared request's would.
+            match host.prepared_handles.lock() {
+                Ok(mut m) => {
+                    m.insert(
+                        "req-warm".to_string(),
+                        PreparedSlot {
+                            handle: warm.handle.clone(),
+                            delivered: true,
+                        },
+                    );
+                }
+                Err(e) => panic!("handles: {e}"),
+            }
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let (tx, rx) = deliver_chan();
+            let cancel = {
+                let host = Arc::clone(&host);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    host.cancel("req-warm".to_string());
+                })
+            };
+            let adopt = {
+                let host = Arc::clone(&host);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let _ = host.start_prepare(
+                        id,
+                        "vid".into(),
+                        "req-adopt".into(),
+                        move |rid, outcome| {
+                            let tx = tx.clone();
+                            async move {
+                                let _ = tx.send((rid, outcome));
+                            }
+                        },
+                    );
+                })
+            };
+            match cancel.join() {
+                Ok(()) => {}
+                Err(_) => panic!("cancel thread panicked"),
+            }
+            match adopt.join() {
+                Ok(()) => {}
+                Err(_) => panic!("adopt thread panicked"),
+            }
+            if let Ok((_rid, PrepareOutcome::Prepared { stream, .. })) =
+                rx.recv_timeout(std::time::Duration::from_secs(30))
+            {
+                if stream.handle == warm.handle {
+                    assert!(
+                        reg.is_live(&warm.handle),
+                        "round {round}: the adopted session was killed \
+                         by the cancel it raced"
+                    );
+                }
+            }
+        }
     }
 }

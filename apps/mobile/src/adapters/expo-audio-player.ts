@@ -13,6 +13,7 @@ import type {
   PlaybackIdentity,
   PlayerEvent,
   PlayerPort,
+  PreparedStream,
   ProviderPort,
   Result,
   SourceRef,
@@ -57,6 +58,12 @@ function toStreamSource(resource: PlayableResource): StreamSource {
 const READY_AT_BYTES = 256 * 1024;
 const PREPARE_TTL_MS = 120_000;
 const RESOLVE_DEADLINE_MS = 15_000;
+/**
+ * The seam's own attach rule — `attach` refuses a session whose
+ * signed URL is inside the expiry margin (`expiry_margin`, 60s).
+ * Adoption must not coalesce a record the attach would reject.
+ */
+const ATTACH_EXPIRY_MARGIN_MS = 60_000;
 
 type AttachedRecord = {
   player: AudioPlayer;
@@ -83,6 +90,17 @@ type PreparedRecord = {
   /** Set while a premature file-end waits on the growing download. */
   resumeAtSec: number | null;
   onBytes: (() => void) | null;
+  /** The minted session payload as emitted — adopters arriving
+   *  post-ready are answered with it verbatim. */
+  stream: PreparedStream | null;
+  /** Signed-URL expiry from the minting resolve — the adoption
+   *  freshness gate runs before `stream` exists, so the value lives
+   *  on the record itself. */
+  expiresAtMs: number | null;
+  /** Every live request id owning this record — a coalesced prepare
+   *  shares the seam's last-owner cancel rule: the record dies only
+   *  when its last owner cancels while unattached. */
+  owners: Map<string, PlaybackIdentity>;
 };
 
 function zeroTrace(requestId: string, elapsedMs: number): AttemptTrace {
@@ -170,7 +188,27 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
       // A stale cache file is reclaimed by the OS sweep; not fatal.
     }
     prepared.delete(record.handle);
-    pending.delete(record.requestId);
+    unpend(record);
+  }
+
+  /** Drop every owner key out of `pending`. */
+  function unpend(record: PreparedRecord): void {
+    for (const requestId of record.owners.keys()) {
+      pending.delete(requestId);
+    }
+  }
+
+  /** Fan one prepare outcome out to every live owner — a coalesced
+   *  requester sees exactly what the minting request saw. */
+  function emitPrepareEach(
+    record: PreparedRecord,
+    outcome: (
+      requestId: string,
+    ) => Extract<PlayerEvent, { type: 'prepare' }>['outcome'],
+  ): void {
+    for (const [requestId, identity] of record.owners) {
+      emit({ type: 'prepare', requestId, identity, outcome: outcome(requestId) });
+    }
   }
 
   /**
@@ -180,25 +218,20 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
    * exempt: it wins the race exactly as the seam's terminal check lets
    * a landed attach win.
    */
-  function supersedeUnattached(): void {
+  function supersedeUnattached(except?: PreparedRecord): void {
     for (const record of [...prepared.values()]) {
-      if (record.attached !== null || record.attaching) {
+      if (record === except || record.attached !== null || record.attaching) {
         continue;
       }
       const evicted = now() - record.detachedAt >= PREPARE_TTL_MS;
-      emit({
-        type: 'prepare',
-        requestId: record.requestId,
-        identity: record.identity,
-        outcome: {
-          type: 'failed',
-          error: appError(
-            evicted ? 'evicted' : 'superseded',
-            evicted ? 'prepare evicted' : 'prepare superseded',
-          ),
-          attempt: zeroTrace(record.requestId, 0),
-        },
-      });
+      emitPrepareEach(record, (requestId) => ({
+        type: 'failed',
+        error: appError(
+          evicted ? 'evicted' : 'superseded',
+          evicted ? 'prepare evicted' : 'prepare superseded',
+        ),
+        attempt: zeroTrace(requestId, 0),
+      }));
       teardown(record);
     }
   }
@@ -228,7 +261,6 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
 
   function failPrepare(
     record: PreparedRecord,
-    requestId: string,
     error: AppError,
     elapsedMs: number,
   ): void {
@@ -236,16 +268,11 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
       return;
     }
     if (!record.ready) {
-      emit({
-        type: 'prepare',
-        requestId,
-        identity: record.identity,
-        outcome: {
-          type: 'failed',
-          error,
-          attempt: zeroTrace(requestId, elapsedMs),
-        },
-      });
+      emitPrepareEach(record, (requestId) => ({
+        type: 'failed',
+        error,
+        attempt: zeroTrace(requestId, elapsedMs),
+      }));
       teardown(record);
       return;
     }
@@ -266,8 +293,8 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
   async function runPrepare(record: PreparedRecord): Promise<void> {
     const started = now();
     const fail = (error: AppError): void => {
-      pending.delete(record.requestId);
-      failPrepare(record, record.requestId, error, now() - started);
+      unpend(record);
+      failPrepare(record, error, now() - started);
     };
     try {
       const provider = deps.providers.get(record.providerId);
@@ -303,6 +330,7 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
         return;
       }
       const first = toStreamSource(resolved.value);
+      record.expiresAtMs = first.expiresAtMs ?? null;
       const remint = async (): Promise<StreamSource> => {
         const again = await provider.resolvePlayback(
           ref,
@@ -331,29 +359,26 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
             return;
           }
           record.ready = true;
-          emit({
-            type: 'prepare',
-            requestId: record.requestId,
-            identity: record.identity,
-            outcome: {
-              type: 'prepared',
-              stream: {
-                handle: record.handle,
-                mime: first.mime,
-                ...(first.itag === undefined ? {} : { itag: first.itag }),
-                ...(first.contentLength === undefined
-                  ? {}
-                  : { contentLength: first.contentLength }),
-                ...(first.expiresAtMs === undefined
-                  ? {}
-                  : { expiresAtMs: first.expiresAtMs }),
-                ...(first.bitrateKbps === undefined
-                  ? {}
-                  : { bitrateKbps: first.bitrateKbps }),
-              },
-              attempt: zeroTrace(record.requestId, now() - started),
-            },
-          });
+          const stream: PreparedStream = {
+            handle: record.handle,
+            mime: first.mime,
+            ...(first.itag === undefined ? {} : { itag: first.itag }),
+            ...(first.contentLength === undefined
+              ? {}
+              : { contentLength: first.contentLength }),
+            ...(first.expiresAtMs === undefined
+              ? {}
+              : { expiresAtMs: first.expiresAtMs }),
+            ...(first.bitrateKbps === undefined
+              ? {}
+              : { bitrateKbps: first.bitrateKbps }),
+          };
+          record.stream = stream;
+          emitPrepareEach(record, (requestId) => ({
+            type: 'prepared',
+            stream,
+            attempt: zeroTrace(requestId, now() - started),
+          }));
         },
       });
       record.downloadDone = true;
@@ -362,7 +387,7 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
       fail(asAppError(thrown));
       return;
     }
-    pending.delete(record.requestId);
+    unpend(record);
   }
 
   function emitStatus(
@@ -419,43 +444,97 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
     });
   }
 
-  return {
-    prepare(input) {
-      const requestId = deps.ids.next('prep');
-      supersedeUnattached();
-      const record: PreparedRecord = {
-        handle: deps.ids.next('aud'),
-        requestId,
-        identity: input.identity,
-        providerId: input.provider,
-        sourceRef: input.sourceRef,
-        source: new CancellationSource(),
-        file: new File(directory, `${requestId}.tmp`),
-        sinkHandle: null,
-        downloadDone: false,
-        ready: false,
-        failed: null,
-        attached: null,
-        attaching: false,
-        detachedAt: now(),
-        resumeAtSec: null,
-        onBytes: null,
-      };
-      record.onBytes = () => {
-        if (record.resumeAtSec !== null && record.attached !== null) {
-          const at = record.resumeAtSec;
-          record.resumeAtSec = null;
-          void record.attached.player
-            .seekTo(at)
-            .then(() => record.attached?.player.play())
-            .catch(() => undefined);
+  function issuePrepare(input: {
+    provider: string;
+    sourceRef: string;
+    identity: PlaybackIdentity;
+  }): Promise<Result<string>> {
+    const requestId = deps.ids.next('prep');
+    // Same-key adoption: a live, unattached record resolving this exact
+    // (provider, sourceRef) — e.g. an advisory `prewarm` — co-owns the
+    // session under this request id instead of being superseded and
+    // re-resolved. It is the one call a warm exists to shorten.
+    for (const record of prepared.values()) {
+      if (
+        record.providerId === input.provider &&
+        record.sourceRef === input.sourceRef &&
+        record.failed === null &&
+        record.attached === null &&
+        !record.attaching &&
+        // The seam's own freshness rules: a record detached past the
+        // TTL or a URL inside the attach expiry margin is superseded
+        // and re-resolved, never coalesced — `attach` would refuse it.
+        now() - record.detachedAt < PREPARE_TTL_MS &&
+        (record.expiresAtMs === null ||
+          now() + ATTACH_EXPIRY_MARGIN_MS < record.expiresAtMs)
+      ) {
+        record.owners.set(requestId, input.identity);
+        pending.set(requestId, record);
+        supersedeUnattached(record);
+        if (record.stream !== null) {
+          // The minted session predates the adopt — answer it with the
+          // same prepared payload its first owner got.
+          emit({
+            type: 'prepare',
+            requestId,
+            identity: input.identity,
+            outcome: {
+              type: 'prepared',
+              stream: record.stream,
+              attempt: zeroTrace(requestId, 0),
+            },
+          });
         }
-      };
-      prepared.set(record.handle, record);
-      pending.set(requestId, record);
-      void runPrepare(record);
-      return Promise.resolve(ok(requestId));
-    },
+        return Promise.resolve(ok(requestId));
+      }
+    }
+    supersedeUnattached();
+    const record: PreparedRecord = {
+      handle: deps.ids.next('aud'),
+      requestId,
+      identity: input.identity,
+      providerId: input.provider,
+      sourceRef: input.sourceRef,
+      source: new CancellationSource(),
+      file: new File(directory, `${requestId}.tmp`),
+      sinkHandle: null,
+      downloadDone: false,
+      ready: false,
+      failed: null,
+      attached: null,
+      attaching: false,
+      detachedAt: now(),
+      resumeAtSec: null,
+      onBytes: null,
+      stream: null,
+      expiresAtMs: null,
+      owners: new Map([[requestId, input.identity]]),
+    };
+    record.onBytes = () => {
+      if (record.resumeAtSec !== null && record.attached !== null) {
+        const at = record.resumeAtSec;
+        record.resumeAtSec = null;
+        void record.attached.player
+          .seekTo(at)
+          .then(() => record.attached?.player.play())
+          .catch(() => undefined);
+      }
+    };
+    prepared.set(record.handle, record);
+    pending.set(requestId, record);
+    void runPrepare(record);
+    return Promise.resolve(ok(requestId));
+  }
+
+  return {
+    prepare: issuePrepare,
+    /**
+     * Advisory warm: the seam contract this surface mirrors already
+     * bounds speculative work — one unattached record at a time, so
+     * issuePrepare IS the warm. A later play() on its handle attaches
+     * the resolved file without re-resolving.
+     */
+    prewarm: issuePrepare,
 
     async play(input) {
       const record = prepared.get(input.handle);
@@ -544,17 +623,28 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
       if (record === undefined) {
         return Promise.resolve(ok(undefined));
       }
+      const ownerIdentity = record.owners.get(input.requestId);
+      pending.delete(input.requestId);
+      record.owners.delete(input.requestId);
+      // The freed slot answers 'cancelled' — but freeing a slot never
+      // kills an attached session (cancel_if_unattached): the consumer
+      // playing it keeps the stream.
+      if (record.attached !== null || record.attaching) {
+        return Promise.resolve(ok(undefined));
+      }
       emit({
         type: 'prepare',
-        requestId: record.requestId,
-        identity: record.identity,
+        requestId: input.requestId,
+        identity: ownerIdentity ?? input.identity,
         outcome: {
           type: 'failed',
           error: appError('cancelled', 'cancelled'),
-          attempt: zeroTrace(record.requestId, 0),
+          attempt: zeroTrace(input.requestId, 0),
         },
       });
-      teardown(record);
+      if (record.owners.size === 0) {
+        teardown(record);
+      }
       return Promise.resolve(ok(undefined));
     },
 

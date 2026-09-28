@@ -1377,8 +1377,17 @@ function Main({
       searchState.page.items.forEach((meta, index) => {
         map.set(toSearchRowModel(meta, index).key, meta);
       });
+      // Visible rows are the ones the user can tap — hand the refs to
+      // the session's advisory warm; prefetch/connectivity gates own
+      // the honesty policy inside the session.
+      session.prewarm({
+        sourceRefs: searchState.page.items
+          .slice(0, 9)
+          .map((meta) => meta.sourceRef),
+        tracks: searchState.page.items.slice(0, 9),
+      });
     }
-  }, [searchState]);
+  }, [searchState, session]);
 
   const [pendingReviews, setPendingReviews] = useState<number | null>(null);
 

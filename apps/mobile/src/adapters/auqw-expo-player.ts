@@ -408,6 +408,24 @@ export function createAuqwExpoPlayer(
         ),
       );
     },
+    prewarm(input) {
+      // The seam owns the warm: same startPrepare call — the registry
+      // already enforces at-most-one unattached session, supersedes
+      // stale ones, and lets a later same-ref prepare adopt this one
+      // without re-resolving. provider:'local' warms never issue here
+      // (the session gates them out); keep the delegate for symmetry.
+      if (input.provider === 'local') {
+        return prepareLocalFile(input);
+      }
+      return guard(() =>
+        module.prepare(
+          input.provider,
+          input.sourceRef,
+          input.identity.attemptId,
+          input.identity.queueRev,
+        ),
+      );
+    },
     play(input) {
       return guard(() =>
         module.play(
