@@ -541,7 +541,14 @@ function Main({
   const [positionMs, setPositionMs] = useState(() =>
     session.positionMs(),
   );
-  useEffect(() => session.subscribePosition(setPositionMs), [session]);
+  useEffect(() => {
+    const unsubscribe = session.subscribePosition(setPositionMs);
+    // Re-read after subscribing — the channel doesn't replay, so a
+    // tick landing between the render-time read and this effect
+    // would otherwise be missed.
+    setPositionMs(session.positionMs());
+    return unsubscribe;
+  }, [session]);
   const [tab, setTab] = useState('home');
   const [expanded, setExpanded] = useState(false);
   // Shared 0..1 morph progress between the mini-player pill and the
