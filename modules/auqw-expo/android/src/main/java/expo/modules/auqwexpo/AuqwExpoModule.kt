@@ -50,15 +50,11 @@ import uniffi.auqw_mobile_bindings.PrepareListener
 import uniffi.auqw_mobile_bindings.PrepareOutcome
 import uniffi.auqw_mobile_bindings.RequestListener
 import uniffi.auqw_mobile_bindings.RequestOutcome
-import uniffi.auqw_mobile_bindings.ResolveListener
-import uniffi.auqw_mobile_bindings.ResolveOutcome
-import uniffi.auqw_mobile_bindings.SpinReport
 import uniffi.auqw_mobile_bindings.StreamException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 private const val TAG = "AuqwExpo"
-private const val EVENT_OUTCOME = "onResolveOutcome"
 private const val EVENT_REQUEST_OUTCOME = "onRequestOutcome"
 private const val EVENT_PREPARE_OUTCOME = "onPrepareOutcome"
 private const val EVENT_PLAYBACK_STATUS = "onPlaybackStatus"
@@ -464,7 +460,6 @@ class AuqwExpoModule : Module() {
     Name("AuqwExpo")
 
     Events(
-      EVENT_OUTCOME,
       EVENT_REQUEST_OUTCOME,
       EVENT_PREPARE_OUTCOME,
       EVENT_PLAYBACK_STATUS,
@@ -741,43 +736,6 @@ class AuqwExpoModule : Module() {
       }
     }
 
-    AsyncFunction("startResolve") { pluginId: String, sourceRef: String ->
-      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
-      val listener = object : ResolveListener {
-        override fun onOutcome(requestId: String, outcome: ResolveOutcome) {
-          when (outcome) {
-            is ResolveOutcome.Resolved -> {
-              Log.i(
-                TAG,
-                "resolve $requestId resolved client=${outcome.resource.client} " +
-                  "mime=${outcome.resource.mime} steps=${outcome.attempt.steps} " +
-                  "elapsed=${outcome.attempt.elapsedMs}ms"
-              )
-            }
-            is ResolveOutcome.Failed -> {
-              Log.i(
-                TAG,
-                "resolve $requestId failed kind=${outcome.kind} " +
-                  "message=${outcome.message}"
-              )
-            }
-          }
-          sendEvent(
-            EVENT_OUTCOME,
-            Bundle().apply {
-              putString("requestId", requestId)
-              putBundle("outcome", outcomeBundle(outcome))
-            }
-          )
-        }
-      }
-      try {
-        h.startResolve(pluginId, sourceRef, listener)
-      } catch (e: HostException) {
-        throw coded(e)
-      }
-    }
-
     AsyncFunction("startRequest") { pluginId: String, capability: String, payloadJson: String ->
       val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
       val listener = object : RequestListener {
@@ -818,22 +776,6 @@ class AuqwExpoModule : Module() {
       host?.cancel(requestId)
       Log.i(TAG, "cancel requested: $requestId")
       null
-    }
-
-    AsyncFunction("runSpin") { wasmBase64: String, manifestJson: String ->
-      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
-      val wasm = Base64.decode(wasmBase64, Base64.DEFAULT)
-      val report = try {
-        h.runSpin(wasm, manifestJson)
-      } catch (e: HostException) {
-        throw coded(e)
-      }
-      Log.i(
-        TAG,
-        "spin: kind=${report.kind} elapsed=${report.elapsedMs}ms " +
-          "fuel=${report.fuelUsed}"
-      )
-      reportBundle(report)
     }
 
     // ---- Player surface: the PlayerPort transport contract ----
@@ -2127,31 +2069,6 @@ class AuqwExpoModule : Module() {
     )
   }
 
-  private fun outcomeBundle(outcome: ResolveOutcome): Bundle = when (outcome) {
-    is ResolveOutcome.Resolved -> Bundle().apply {
-      putString("type", "resolved")
-      putBundle(
-        "resource",
-        Bundle().apply {
-          putString("url", outcome.resource.url)
-          putString("mime", outcome.resource.mime)
-          outcome.resource.bitrateKbps?.let { putDouble("bitrateKbps", it.toDouble()) }
-          outcome.resource.expiresAtMs?.let { putDouble("expiresAtMs", it.toDouble()) }
-          putString("client", outcome.resource.client)
-          outcome.resource.contentLength?.let { putDouble("contentLength", it.toDouble()) }
-          outcome.resource.itag?.let { putDouble("itag", it.toDouble()) }
-        }
-      )
-      putBundle("attempt", attemptBundle(outcome.attempt))
-    }
-    is ResolveOutcome.Failed -> Bundle().apply {
-      putString("type", "failed")
-      putString("kind", outcome.kind)
-      putString("message", outcome.message)
-      putBundle("attempt", attemptBundle(outcome.attempt))
-    }
-  }
-
   private fun requestOutcomeBundle(outcome: RequestOutcome): Bundle = when (outcome) {
     is RequestOutcome.Succeeded -> Bundle().apply {
       putString("type", "succeeded")
@@ -2191,12 +2108,6 @@ class AuqwExpoModule : Module() {
       putString("message", outcome.message)
       putBundle("attempt", attemptBundle(outcome.attempt))
     }
-  }
-
-  private fun reportBundle(r: SpinReport) = Bundle().apply {
-    putDouble("elapsedMs", r.elapsedMs.toDouble())
-    putDouble("fuelUsed", r.fuelUsed.toDouble())
-    putString("kind", r.kind)
   }
 
   private fun coded(e: HostException): CodedException = when (e) {

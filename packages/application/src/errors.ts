@@ -46,6 +46,65 @@ const RETRYABLE: ReadonlySet<ErrorKind> = new Set([
   'internal',
 ]);
 
+/**
+ * A wire `kind` slug: every taxonomy kind is its own slug, plus the
+ * host-side transport kinds the seam folds onto the taxonomy.
+ */
+export type ErrorSlug =
+  | ErrorKind
+  | 'io-error'
+  | 'invalid-request'
+  | 'not-implemented'
+  | 'process-crashed'
+  | 'corrupt-state';
+
+/**
+ * Canonical slug → kind table for every boundary that receives a
+ * `kind` string over the wire (desktop host IPC, the mobile seam,
+ * prepare/status payloads). Anything outside the table degrades to
+ * `internal` in {@link appErrorKind} — an untyped slug never crosses
+ * a port.
+ */
+export const ERROR_KIND_BY_SLUG: Readonly<Record<ErrorSlug, ErrorKind>> = {
+  'no-result': 'no-result',
+  'not-applicable': 'not-applicable',
+  unsupported: 'unsupported',
+  'auth-required': 'auth-required',
+  'auth-expired': 'auth-expired',
+  'rate-limit': 'rate-limit',
+  transient: 'transient',
+  'expired-resource': 'expired-resource',
+  'permission-denied': 'permission-denied',
+  'invalid-response': 'invalid-response',
+  timeout: 'timeout',
+  cancelled: 'cancelled',
+  'budget-exceeded': 'budget-exceeded',
+  'guest-trap': 'guest-trap',
+  'invalid-message': 'invalid-message',
+  'artifact-rejected': 'artifact-rejected',
+  'streams-capped': 'streams-capped',
+  released: 'released',
+  superseded: 'superseded',
+  evicted: 'evicted',
+  expired: 'expired',
+  'not-found': 'not-found',
+  unavailable: 'unavailable',
+  'storage-full': 'storage-full',
+  'io-error': 'transient',
+  'invalid-request': 'invalid-response',
+  'not-implemented': 'unavailable',
+  'process-crashed': 'unavailable',
+  'corrupt-state': 'internal',
+  internal: 'internal',
+};
+
+/** Maps a wire `kind` slug to the taxonomy; unknown values are `internal`. */
+export function appErrorKind(slug: unknown): ErrorKind {
+  return typeof slug === 'string' && Object.hasOwn(ERROR_KIND_BY_SLUG, slug)
+    ? ERROR_KIND_BY_SLUG[slug as ErrorSlug]
+    : 'internal';
+}
+
 export function appError(
   kind: ErrorKind,
   message: string,

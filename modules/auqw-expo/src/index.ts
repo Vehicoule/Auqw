@@ -6,7 +6,7 @@ import { CodedError } from 'expo-modules-core';
 // Host surface — verbatim contract from the retired plugin-host-expo module.
 // ---------------------------------------------------------------------------
 
-type HostConfig = {
+export type HostConfig = {
   fuelPerEntry: number;
   fuelTotal: number;
   /** Base URL of a bgutil-compatible PO-token service; omit for anonymous resolves. */
@@ -25,7 +25,7 @@ type HostConfig = {
   authToken?: string | undefined;
 };
 
-type HttpTraceSummary = {
+export type HttpTraceSummary = {
   method: string;
   /** Query/fragment-free URL. */
   url: string;
@@ -34,53 +34,28 @@ type HttpTraceSummary = {
   elapsedMs: number;
 };
 
-type GuestLogSummary = {
+export type GuestLogSummary = {
   level: string;
   message: string;
 };
 
-type AttemptSummary = {
+export type AttemptSummary = {
   requestId: string;
   steps: number;
   httpCalls: number;
   bytes: number;
   fuelUsed: number;
   elapsedMs: number;
-  httpTrace: HttpTraceSummary[];
-  guestLog: GuestLogSummary[];
+  httpTrace: readonly HttpTraceSummary[];
+  guestLog: readonly GuestLogSummary[];
 };
-
-type ResolvedResource = {
-  url: string;
-  mime: string;
-  bitrateKbps?: number;
-  expiresAtMs?: number;
-  client: string;
-  contentLength?: number;
-  itag?: number;
-};
-
-type ResolveOutcome =
-  | { type: 'resolved'; resource: ResolvedResource; attempt: AttemptSummary }
-  | { type: 'failed'; kind: string; message: string; attempt: AttemptSummary };
 
 /** Outcome of a generic capability request: the raw result JSON plus attempt. */
-type RequestOutcome =
+export type RequestOutcome =
   | { type: 'succeeded'; resultJson: string; attempt: AttemptSummary }
   | { type: 'failed'; kind: string; message: string; attempt: AttemptSummary };
 
-type SpinReport = {
-  elapsedMs: number;
-  fuelUsed: number;
-  kind: string;
-};
-
-type OutcomeEvent = {
-  requestId: string;
-  outcome: ResolveOutcome;
-};
-
-type RequestOutcomeEvent = {
+export type RequestOutcomeEvent = {
   requestId: string;
   outcome: RequestOutcome;
 };
@@ -93,7 +68,7 @@ type RequestOutcomeEvent = {
 /** ABI error taxonomy plus the seam's terminal-transition kinds —
  * mirrors `packages/application/src/errors.ts` (wire kinds surface
  * verbatim from the host, so the union must cover the whole set). */
-type ErrorKind =
+export type ErrorKind =
   | 'no-result'
   | 'not-applicable'
   | 'unsupported'
@@ -117,10 +92,11 @@ type ErrorKind =
   | 'expired'
   | 'not-found'
   | 'unavailable'
+  | 'storage-full'
   | 'internal';
 
 /** A stream whose head bytes are staged for attach. Opaque: prepared → attached → released. */
-type PreparedStream = {
+export type PreparedStream = {
   handle: string;
   mime: string;
   itag?: number;
@@ -129,7 +105,7 @@ type PreparedStream = {
   bitrateKbps?: number;
 };
 
-type PrepareOutcome =
+export type PrepareOutcome =
   | { type: 'prepared'; stream: PreparedStream; attempt: AttemptSummary }
   | { type: 'failed'; kind: ErrorKind; message: string; attempt: AttemptSummary };
 
@@ -140,7 +116,7 @@ export type PrepareOutcomeEvent = {
   outcome: PrepareOutcome;
 };
 
-type PlaybackState =
+export type PlaybackState =
   | 'idle'
   | 'buffering'
   | 'ready'
@@ -149,7 +125,7 @@ type PlaybackState =
   | 'ended'
   | 'failed';
 
-type PlaybackStatusEvent = {
+export type PlaybackStatusEvent = {
   handle: string;
   attemptId: string;
   queueRev: number;
@@ -159,7 +135,7 @@ type PlaybackStatusEvent = {
   error?: { kind: ErrorKind; message: string };
 };
 
-type PhaseMark = {
+export type PhaseMark = {
   name: string;
   /** Epoch ms (Date.now domain) at the mark, for JS joins. */
   atMs: number;
@@ -167,7 +143,7 @@ type PhaseMark = {
   sinceStartMs: number;
 };
 
-type PhaseMarkEvent = PhaseMark & {
+export type PhaseMarkEvent = PhaseMark & {
   handle: string;
   attemptId: string;
   queueRev: number;
@@ -179,7 +155,7 @@ type PhaseMarkEvent = PhaseMark & {
  * durations (`resolveMs` of the minting resolve, `remintMs` of the
  * last re-mint). Diagnostics; available after terminal states.
  */
-type StreamPhaseMarks = {
+export type StreamPhaseMarks = {
   prepareStartedMs: number;
   resolveMs?: number;
   remintMs?: number;
@@ -189,7 +165,7 @@ type StreamPhaseMarks = {
 };
 
 /** One immutable projected queue item — never carries a signed URL. */
-type QueueProjectionItem = {
+export type QueueProjectionItem = {
   occurrenceId: string;
   provider: string | null;
   sourceRef: string | null;
@@ -203,7 +179,7 @@ type QueueProjectionItem = {
  * service moves only a cursor within it and reports
  * `queue-transition` events for reconciliation.
  */
-type QueueProjection = {
+export type QueueProjection = {
   projectionId: string;
   queueRev: number;
   currentOccurrenceId: string | null;
@@ -219,14 +195,14 @@ type QueueProjection = {
    * steps through — the identity when shuffle is off. Canonical item
    * order never changes; only the walk does (decisions.md).
    */
-  order: number[];
-  items: QueueProjectionItem[];
+  order: readonly number[];
+  items: readonly QueueProjectionItem[];
 };
 
-type QueueTransitionReason = 'ended' | 'remote-next' | 'remote-previous';
+export type QueueTransitionReason = 'ended' | 'remote-next' | 'remote-previous';
 
 /** Service-reported cursor move inside the installed projection. */
-type QueueTransitionEvent = {
+export type QueueTransitionEvent = {
   projectionId: string;
   projectedQueueRev: number;
   fromOccurrenceId: string | null;
@@ -239,7 +215,7 @@ type QueueTransitionEvent = {
 
 // ---- TagReaderPort surface (slice 3 local files) ----
 
-type TagReaderEntry = {
+export type TagReaderEntry = {
   docId: string;
   name: string;
   size: number;
@@ -251,12 +227,12 @@ type TagReaderEntry = {
   modifiedMs?: number | null;
 };
 
-type TagReaderFingerprint = {
+export type TagReaderFingerprint = {
   docId: string;
   fingerprint: string;
 };
 
-type TagReaderTags = {
+export type TagReaderTags = {
   docId: string;
   title: string | null;
   artist: string | null;
@@ -266,7 +242,6 @@ type TagReaderTags = {
 };
 
 type AuqwExpoEvents = {
-  onResolveOutcome: (event: OutcomeEvent) => void;
   onRequestOutcome: (event: RequestOutcomeEvent) => void;
   onPrepareOutcome: (event: PrepareOutcomeEvent) => void;
   onPlaybackStatus: (event: PlaybackStatusEvent) => void;
@@ -303,10 +278,8 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
    */
   setPotProvider(url: string | null): void;
   loadPlugin(wasmBase64: string, manifestJson: string): Promise<string>;
-  startResolve(pluginId: string, sourceRef: string): Promise<string>;
   startRequest(pluginId: string, capability: string, payloadJson: string): Promise<string>;
   cancel(requestId: string): void;
-  runSpin(wasmBase64: string, manifestJson: string): Promise<SpinReport>;
   prepare(provider: string, sourceRef: string, attemptId: string, queueRev: number): Promise<string>;
   prepareLocal(path: string, mime?: string | null): Promise<string>;
   play(handle: string, attemptId: string, queueRev: number, positionMs?: number): Promise<void>;
@@ -411,10 +384,6 @@ export function loadPlugin(wasmBase64: string, manifestJson: string): Promise<st
   return native.loadPlugin(wasmBase64, manifestJson);
 }
 
-export function startResolve(pluginId: string, sourceRef: string): Promise<string> {
-  return native.startResolve(pluginId, sourceRef);
-}
-
 /**
  * Begin a generic capability request; resolves with its request id.
  * `payload` is serialized to the plugin's input JSON — it must be an
@@ -426,10 +395,6 @@ export function startRequest(pluginId: string, capability: string, payload: Reco
 
 export function cancel(requestId: string): void {
   native.cancel(requestId);
-}
-
-export function runSpin(wasmBase64: string, manifestJson: string): Promise<SpinReport> {
-  return native.runSpin(wasmBase64, manifestJson);
 }
 
 /**
@@ -595,12 +560,6 @@ export function devPrepareUrl(
     : seam.devPrepareUrl(url, mime, contentLength, remintable);
 }
 
-export function addResolveOutcomeListener(
-  listener: (event: OutcomeEvent) => void,
-): EventSubscription {
-  return native.addListener('onResolveOutcome', listener);
-}
-
 export function addRequestOutcomeListener(
   listener: (event: RequestOutcomeEvent) => void,
 ): EventSubscription {
@@ -632,7 +591,7 @@ export function addQueueTransitionListener(
 }
 
 /** {online, metered} — snapshot read and the change-edge payload. */
-type ConnectivityChangedEvent = {
+export type ConnectivityChangedEvent = {
   online: boolean;
   metered: boolean;
 };
@@ -708,13 +667,13 @@ export function hasTagReader(): boolean {
 // ---- Sync-socket wrappers (LAN sync client, docs/specs/sync.md) ----
 
 /** Frame bytes cross the bridge as base64 — never raw binary JSON. */
-type SyncSocketDataEvent = {
+export type SyncSocketDataEvent = {
   socketId: string;
   data: string;
 };
 
 /** reason: 'peer' = remote FIN, 'error' = socket fault, 'local' = destroyed. */
-type SyncSocketClosedEvent = {
+export type SyncSocketClosedEvent = {
   socketId: string;
   reason: string;
 };
