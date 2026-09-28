@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { PairingModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
+import type { ProviderPickerOption } from '@auqw/ui-shared';
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { useOverlayDismiss, useOverlayFocus } from './stack.tsx';
@@ -290,12 +291,7 @@ export function RowActionsSheet({
   );
 }
 
-export type ProviderPickerOption = {
-  /** The settings value — a provider id, or 'auto' for auto-routing. */
-  readonly key: string;
-  readonly label: string;
-  readonly detail?: string | null | undefined;
-};
+export type { ProviderPickerOption };
 
 /**
  * One settings slot's provider choices — only providers that

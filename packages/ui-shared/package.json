@@ -16,8 +16,13 @@
     "@auqw/application": "workspace:*",
     "@auqw/design-tokens": "workspace:*"
   },
+  "peerDependencies": {
+    "react": "*"
+  },
   "devDependencies": {
     "@types/node": "26.6.2",
+    "@types/react": "~19.2.2",
+    "react": "19.2.3",
     "typescript": "~6.0.3"
   }
 }

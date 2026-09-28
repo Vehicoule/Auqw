@@ -40,15 +40,10 @@ import {
   selectionFromSettings,
 } from '@auqw/application';
 import type {
-  AppError,
   AttemptTrace,
-  EntityPage,
   EntityRef,
   ImportPreview,
-  LyricsSheet,
-  MatchReview,
   OperationContext,
-  ProviderCapability,
   ReadySession,
   Result,
   SearchState,
@@ -90,7 +85,6 @@ import {
   TransferScreen,
   ValueFieldSheet,
   entityIdForRef,
-  formatClock,
   languageOptionKey,
   languageOptions,
   resolveLocale,
@@ -123,14 +117,41 @@ import type {
   DiagnosticsModel,
   LyricsModel,
   MessageId,
-  NavItemModel,
   ProviderPickerOption,
-  SearchStateModel,
   StageMode,
   ThemeSource,
   TrackRowModel,
   TransferModel,
 } from '@auqw/ui-native';
+import {
+  DIAGNOSTICS_LIMIT,
+  IDLE_TRANSFER,
+  SEARCH_LIMIT,
+  THEME_ORDER,
+  attemptLabel,
+  entityRefKey,
+  formatBytes,
+  greeting,
+  navItems,
+  providerPickerModel,
+  qualityOptions,
+  reportResult,
+  setToastSink,
+  themeOptions,
+  toSearchModel,
+  useOverlayStack,
+  useSerializedWrite,
+  useSmoothedPosition,
+} from '@auqw/ui-shared';
+import type {
+  ActionTarget,
+  Boot,
+  EntityFetch,
+  LyricsFetch,
+  OverlayEntry,
+  ProviderSlot,
+  ReviewFetch,
+} from '@auqw/ui-shared';
 import { createSessionController } from './src/session/controller.ts';
 import type { SessionController } from './src/session/controller.ts';
 import { activateHomeCard } from './src/session/home-card.ts';
@@ -152,18 +173,6 @@ setLocale(resolveLocale(undefined, systemLocaleTag()));
 // emulator, http://10.0.2.2:4416 reaches a provider on the host
 // machine) > none — unset peers resolve on the anonymous ladder.
 const POT_PROVIDER_URL = process.env.EXPO_PUBLIC_POT_PROVIDER_URL || undefined;
-
-const SEARCH_LIMIT = 25;
-const DIAGNOSTICS_LIMIT = 20;
-
-function navItems(): readonly NavItemModel[] {
-  return [
-    { key: 'home', label: t('nav.home') },
-    { key: 'explore', label: t('nav.explore') },
-    { key: 'library', label: t('nav.library') },
-    { key: 'settings', label: t('nav.settings') },
-  ];
-}
 
 /**
  * The sync screen's QR scanner — expo-camera lives in the app (not
@@ -209,52 +218,6 @@ function SyncScanner({ onScan }: { readonly onScan: (data: string) => void }) {
   );
 }
 
-const THEME_ORDER = ['system', 'adaptive', 'dark', 'light', 'oled'] as const;
-
-// Stream-quality tiers, kbps — inside the domain's 1–512 qualityKbps
-// bound; 128 is the spec default (providers.md).
-function qualityOptions(): readonly ProviderPickerOption[] {
-  return [
-    { key: '64', label: '64 kbps' },
-    { key: '96', label: '96 kbps' },
-    { key: '128', label: '128 kbps', detail: t('optionDetail.default') },
-    { key: '192', label: '192 kbps' },
-    { key: '256', label: '256 kbps' },
-    { key: '320', label: '320 kbps', detail: t('optionDetail.maximum') },
-  ];
-}
-
-function themeOptions(): readonly ProviderPickerOption[] {
-  return [
-    {
-      key: 'system',
-      label: t('settings.themeValue.system'),
-      detail: t('optionDetail.themeSystem'),
-    },
-    {
-      key: 'adaptive',
-      label: t('settings.themeValue.adaptive'),
-      detail: t('optionDetail.themeAdaptive'),
-    },
-    // 'tokyo night' is the color scheme's name, not UI copy.
-    {
-      key: 'dark',
-      label: t('settings.themeValue.dark'),
-      detail: 'tokyo night',
-    },
-    {
-      key: 'light',
-      label: t('settings.themeValue.light'),
-      detail: t('optionDetail.themeLight'),
-    },
-    {
-      key: 'oled',
-      label: t('settings.themeValue.oled'),
-      detail: t('optionDetail.themeOled'),
-    },
-  ];
-}
-
 // On-disk artwork LRU sizes, MiB — inside the domain's 16 MiB–1 GiB
 // artworkCacheBytes bounds; 200 is the spec default (data.md).
 function artworkCacheOptions(): readonly ProviderPickerOption[] {
@@ -269,11 +232,6 @@ function artworkCacheOptions(): readonly ProviderPickerOption[] {
   ];
 }
 
-type Boot =
-  | { readonly type: 'loading' }
-  | { readonly type: 'failed'; readonly message: string }
-  | { readonly type: 'ready'; readonly controller: SessionController };
-
 export function App() {
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
@@ -281,7 +239,9 @@ export function App() {
     Inter_700Bold,
   });
   const [attempt, setAttempt] = useState(0);
-  const [boot, setBoot] = useState<Boot>({ type: 'loading' });
+  const [boot, setBoot] = useState<Boot<SessionController>>({
+    type: 'loading',
+  });
 
   useEffect(() => {
     let disposed = false;
@@ -377,7 +337,7 @@ function BootGate({
   fontsLoaded,
   onRetry,
 }: {
-  readonly boot: Boot;
+  readonly boot: Boot<SessionController>;
   readonly fontsLoaded: boolean;
   readonly onRetry: () => void;
 }) {
@@ -547,82 +507,6 @@ function SessionGate({
   );
 }
 
-function toSearchModel(
-  state: SearchState,
-  playingRef: SourceRef | null = null,
-): SearchStateModel {
-  switch (state.type) {
-    case 'idle':
-      return {
-        phase: 'idle',
-        query: '',
-        results: [],
-        providerId: null,
-        message: null,
-        retryable: false,
-      };
-    case 'loading':
-      return {
-        phase: 'loading',
-        query: state.query,
-        results: [],
-        providerId: null,
-        message: null,
-        retryable: false,
-      };
-    case 'empty':
-      return {
-        phase: 'empty',
-        query: state.query,
-        results: [],
-        providerId: null,
-        message: null,
-        retryable: false,
-      };
-    case 'content':
-      return {
-        phase: state.page.items.length === 0 ? 'empty' : 'ready',
-        query: state.query,
-        results: state.page.items.map((meta, index) =>
-          toSearchRowModel(meta, index, playingRef),
-        ),
-        providerId: null,
-        message: state.refreshError?.message ?? null,
-        retryable: false,
-      };
-    case 'error': {
-      const unavailable =
-        state.error.kind === 'unavailable' ||
-        state.error.kind === 'auth-required';
-      return {
-        phase: unavailable ? 'unavailable' : 'error',
-        query: state.query,
-        results: [],
-        providerId: null,
-        message: state.error.message,
-        retryable: true,
-      };
-    }
-  }
-}
-
-function greeting(now: Date): string {
-  const h = now.getHours();
-  if (h < 5) return t('home.greeting.night');
-  if (h < 12) return t('home.greeting.morning');
-  if (h < 18) return t('home.greeting.afternoon');
-  return t('home.greeting.evening');
-}
-
-function attemptLabel(trace: AttemptTrace): string {
-  return t('settings.diag.attemptLabel', {
-    requestId: trace.requestId,
-    steps: trace.steps,
-    httpCalls: trace.httpCalls,
-    elapsed: formatClock(trace.elapsedMs),
-  });
-}
-
 type Overlay =
   | { readonly type: 'collection'; readonly key: 'liked' | 'top50' | 'history' | 'downloads' }
   | { readonly type: 'playlist'; readonly playlistId: string }
@@ -630,165 +514,6 @@ type Overlay =
   | { readonly type: 'corrections' }
   | { readonly type: 'transfer' }
   | { readonly type: 'sync' };
-
-/** A pushed route on the native screen stack. */
-type OverlayEntry = { readonly key: string; readonly overlay: Overlay };
-
-const entityRefKey = (ref: EntityRef): string =>
-  `${ref.provider}:${ref.kind}:${ref.id}`;
-
-type EntityFetch = {
-  readonly ref: EntityRef;
-  readonly page: EntityPage | null;
-  readonly error: AppError | null;
-  readonly loading: boolean;
-  readonly loadingMore: boolean;
-};
-
-type LyricsFetch = {
-  readonly recordingId: string;
-  readonly sheet: LyricsSheet | null;
-  readonly error: AppError | null;
-  readonly loading: boolean;
-};
-
-type ReviewFetch = {
-  readonly reviews: readonly MatchReview[] | null;
-  readonly error: AppError | null;
-};
-
-type ActionTarget =
-  | { readonly kind: 'recording'; readonly recordingId: string }
-  | { readonly kind: 'metadata'; readonly meta: TrackMetadata };
-
-// The settings provider slots and the capabilities each one routes
-// by — a picker only ever lists providers that declared the slot's
-// capability (manifest-derived, via ProviderPort.capabilities).
-type ProviderSlot =
-  | 'catalogProvider'
-  | 'playbackProvider'
-  | 'lyricsProvider'
-  | 'radioProvider';
-
-const SLOT_CAPABILITIES: Record<
-  ProviderSlot,
-  readonly ProviderCapability[]
-> = {
-  catalogProvider: ['catalog.search'],
-  playbackProvider: ['playback.resolve'],
-  lyricsProvider: ['lyrics.synced', 'lyrics.plain'],
-  radioProvider: ['radio.seed'],
-};
-
-const SLOT_LABEL_IDS: Record<ProviderSlot, MessageId> = {
-  catalogProvider: 'settings.catalogProvider',
-  playbackProvider: 'settings.playbackProvider',
-  lyricsProvider: 'settings.lyricsProvider',
-  radioProvider: 'settings.radioProvider',
-};
-
-// Lyrics and radio are nullable overrides — 'auto' returns routing
-// to capability declaration; the required slots never offer it.
-const OPTIONAL_SLOTS: ReadonlySet<ProviderSlot> = new Set([
-  'lyricsProvider',
-  'radioProvider',
-]);
-
-function formatBytes(bytes: number, free: number): string {
-  const gb = (n: number) =>
-    n >= 1e9
-      ? `${(n / 1e9).toFixed(1)} gb`
-      : n >= 1e6
-        ? `${(n / 1e6).toFixed(0)} mb`
-        : n === 0
-          ? '0 kb'
-          : `${Math.max(1, Math.round(n / 1e3))} kb`;
-  return t('storage.usage', { used: gb(bytes), free: gb(free) });
-}
-
-const IDLE_TRANSFER: TransferModel = {
-  exportPhase: 'idle',
-  exportDetail: null,
-  importPhase: 'idle',
-  importDetail: null,
-  preview: null,
-};
-
-/**
- * Session ops resolve typed errors rather than throwing — a dropped
- * Result is a silent no-op. Keep failures observable: the console
- * keeps the `kind — message` taxonomy text (no secrets), and a
- * transient toast carries it to the operator. `toastSink` is
- * installed once by Main — reportResult is called from callbacks all
- * over this file, so a sink avoids threading the setter through
- * every dependency list.
- */
-let toastSink: ((text: string) => void) | null = null;
-
-/**
- * Lyrics-highlight position clock: engine ticks arrive ~1Hz (mobile)
- * to ~4Hz (desktop), so between ticks the raw snapshot position sits
- * stale and the active line lands visibly late. While `active`, the
- * last engine position is extrapolated forward at a fixed cadence —
- * each fresh engine position re-anchors the clock. `generation`
- * re-anchors without a position change: a seek landing on the last
- * reported tick would otherwise keep extrapolating from the pre-seek
- * anchor. The anchor clock is `performance.now()` — `Date.now()`
- * follows system-clock adjustments, which would jump the highlight.
- * Anchoring is keyed to position/generation/transport: a fresh
- * position or a seek re-anchors, and a `playing` transition re-anchors
- * too — the anchor's clock must freeze with the pause, otherwise
- * resume would count the paused wall-time as elapsed playback.
- * Re-entering the pane (`visible` flipping) must NOT re-anchor: the
- * anchor keeps the tick's real arrival time, so the elapsed fraction
- * since the last engine event is preserved instead of discarded.
- * Ticking only while the lyrics pane is live keeps the periodic
- * re-render off the idle path.
- */
-function useSmoothedPosition(
-  positionMs: number,
-  playing: boolean,
-  visible: boolean,
-  generation: number,
-): number {
-  const anchor = useRef({ ms: positionMs, at: performance.now() });
-  const [smoothMs, setSmoothMs] = useState(positionMs);
-  useEffect(() => {
-    anchor.current = { ms: positionMs, at: performance.now() };
-    setSmoothMs(positionMs);
-  }, [positionMs, generation, playing]);
-  useEffect(() => {
-    if (!playing || !visible) {
-      return undefined;
-    }
-    const tick = () => {
-      const a = anchor.current;
-      setSmoothMs(a.ms + (performance.now() - a.at));
-    };
-    tick();
-    const id = setInterval(tick, 200);
-    return () => clearInterval(id);
-  }, [playing, visible]);
-  return smoothMs;
-}
-
-function reportResult(action: MessageId, result: Result<unknown>): void {
-  if (!result.ok) {
-    console.warn(
-      `[ui] ${action} failed: ${result.error.kind} — ${result.error.message}`,
-    );
-    // The toast carries the taxonomy kind, never the message: an error
-    // surfaced from a native bridge can embed raw exception text (a
-    // signed request URL inside a fetch failure, say) that has no
-    // business on a user-facing surface.
-    toastSink?.(
-      t('toast.failed', {
-        action: t(action),
-        kind: result.error.kind,
-      }),
-    );
-  }
-}
 
 function Main({
   controller,
@@ -830,45 +555,18 @@ function Main({
     },
     [],
   );
-  // Every settings write goes through this one chain so writes land
-  // in submission order, and each MERGES ITS PATCH onto the session's
-  // latest committed settings at execution time. `updateSettings`
-  // persists a complete snapshot, so replaying one captured at call
-  // time would revert whatever landed in between. snapshot() — not
-  // React state — is the merge base, so writes that never entered
-  // the chain (the boot repair, a sync-applied change) are covered.
-  // A function patch reads the committed base at execution time —
-  // the only safe shape for read-modify-write toggles: two quick
-  // taps must flip twice, not write the same inverse twice.
-  const settingsWriteChain = useRef<Promise<unknown>>(Promise.resolve());
-  const latestSettingsRef = useRef(state.settings);
-  useEffect(() => {
-    latestSettingsRef.current = state.settings;
-  }, [state.settings]);
-  const queueSettingsWrite = useCallback(
-    (patch: Partial<Settings> | ((latest: Settings) => Partial<Settings>)) => {
-      const run = settingsWriteChain.current.then(() => {
-        const snap = session.snapshot();
-        const base =
-          snap.type === 'ready' ? snap.settings : latestSettingsRef.current;
-        const next = {
-          ...base,
-          ...(typeof patch === 'function' ? patch(base) : patch),
-        };
-        return session.updateSettings(next).then((result) => {
-          if (result.ok) {
-            latestSettingsRef.current = next;
-          }
-          return result;
-        });
-      });
-      settingsWriteChain.current = run.then(
-        () => undefined,
-        () => undefined,
-      );
-      return run;
+  // Every settings write serializes through the shared chain —
+  // updateSettings persists a complete snapshot, so each patch merges
+  // onto the session's latest committed settings at execution time
+  // (snapshot(), not React state, is the merge base; the live
+  // settings are the fallback while it isn't ready).
+  const queueSettingsWrite = useSerializedWrite(
+    (next: Settings) => session.updateSettings(next),
+    () => {
+      const snap = session.snapshot();
+      return snap.type === 'ready' ? snap.settings : null;
     },
-    [session],
+    state.settings,
   );
   // A persisted language (or 'system' resolution) applies once the
   // ready settings arrive — never during render. The ready UI stays
@@ -897,9 +595,9 @@ function Main({
   // the module-level sink (installed on mount), and it self-clears.
   const [toast, setToast] = useState<string | null>(null);
   useEffect(() => {
-    toastSink = setToast;
+    setToastSink(setToast);
     return () => {
-      toastSink = null;
+      setToastSink(null);
     };
   }, []);
   useEffect(() => {
@@ -915,14 +613,22 @@ function Main({
   // playlist editor, provider entity page — rendered as native push
   // screens above the tab shell. Entity pages keep a fetch per ref so
   // popping back to a deeper screen restores its loaded content.
-  const [overlayStack, setOverlayStack] = useState<readonly OverlayEntry[]>(
-    [],
-  );
-  const overlayCounter = useRef(0);
+  const {
+    stack: overlayStack,
+    top: overlay,
+    push: pushOverlay,
+    reset: resetOverlay,
+    close: closeOverlay,
+    dismiss: dismissOverlay,
+    clear: clearOverlayStack,
+  } = useOverlayStack<Overlay>();
   const [entityFetches, setEntityFetches] = useState<
     Readonly<Record<string, EntityFetch>>
   >({});
-  const overlay = overlayStack[overlayStack.length - 1]?.overlay ?? null;
+  const clearOverlays = useCallback(() => {
+    clearOverlayStack();
+    setEntityFetches({});
+  }, [clearOverlayStack]);
   const entityMeta = useRef(new Map<string, TrackMetadata>());
   const [actionsFor, setActionsFor] = useState<ActionTarget | null>(null);
   // Live download ledger — subscribed once; chips + the downloads
@@ -1778,41 +1484,6 @@ function Main({
       localeTick,
     ],
   );
-
-  // ---- library world: overlay routes ------------------------------
-
-  const pushOverlay = useCallback((next: Overlay) => {
-    overlayCounter.current += 1;
-    setOverlayStack((stack) => [
-      ...stack,
-      { key: `ov-${overlayCounter.current}`, overlay: next },
-    ]);
-  }, []);
-
-  const resetOverlay = useCallback((next: Overlay) => {
-    overlayCounter.current += 1;
-    setOverlayStack([
-      { key: `ov-${overlayCounter.current}`, overlay: next },
-    ]);
-  }, []);
-
-  /** Pop the top route — every screen's own back affordance. */
-  const closeOverlay = useCallback(() => {
-    setOverlayStack((stack) => stack.slice(0, -1));
-  }, []);
-
-  /** Native gesture/back dismissal removes a screen and all above it. */
-  const dismissOverlay = useCallback((key: string) => {
-    setOverlayStack((stack) => {
-      const index = stack.findIndex((entry) => entry.key === key);
-      return index === -1 ? stack : stack.slice(0, index);
-    });
-  }, []);
-
-  const clearOverlays = useCallback(() => {
-    setOverlayStack([]);
-    setEntityFetches({});
-  }, []);
 
   // ---- play actions ------------------------------------------------
 
@@ -2842,38 +2513,15 @@ function Main({
 
   // ---- provider pickers (capability-gated manifest options) -------
 
-  const providerPicker = useMemo(() => {
-    if (providerSlot === null) {
-      return null;
-    }
-    const required = SLOT_CAPABILITIES[providerSlot];
-    const options = controller.providers
-      .filter((provider) =>
-        required.some((capability) =>
-          provider.capabilities.includes(capability),
-        ),
-      )
-      .map((provider) => ({
-        key: provider.id,
-        label: provider.id,
-        detail: provider.capabilities.join(' · '),
-      }));
-    const selected = state.settings[providerSlot];
-    return {
-      title: t(SLOT_LABEL_IDS[providerSlot]),
-      options: OPTIONAL_SLOTS.has(providerSlot)
-        ? [
-          {
-            key: 'auto',
-            label: t('settings.value.auto'),
-            detail: t('optionDetail.autoRoute'),
-          },
-          ...options,
-        ]
-        : options,
-      selectedKey: selected ?? 'auto',
-    };
-  }, [providerSlot, controller, state.settings, localeTick]);
+  const providerPicker = useMemo(
+    () =>
+      providerPickerModel(
+        providerSlot,
+        controller.providers,
+        state.settings,
+      ),
+    [providerSlot, controller, state.settings, localeTick],
+  );
 
   const onPickProvider = useCallback(
     (key: string) => {
@@ -3901,7 +3549,7 @@ function Main({
     }
   };
 
-  const renderOverlayEntry = (entry: OverlayEntry) => {
+  const renderOverlayEntry = (entry: OverlayEntry<Overlay>) => {
     const current = entry.overlay;
     switch (current.type) {
       case 'collection': {

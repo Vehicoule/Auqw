@@ -5,7 +5,10 @@ import { useTheme } from './theme.tsx';
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { t } from '@auqw/ui-shared';
-import type { LanguageOption } from '@auqw/ui-shared';
+import type {
+  LanguageOption,
+  ProviderPickerOption,
+} from '@auqw/ui-shared';
 
 /**
  * Sheet building blocks: the content frame (title row + actions) plus
@@ -279,12 +282,7 @@ export function RowActionsSheet({
   );
 }
 
-export type ProviderPickerOption = {
-  /** The settings value — a provider id, or 'auto' for auto-routing. */
-  readonly key: string;
-  readonly label: string;
-  readonly detail?: string | null | undefined;
-};
+export type { ProviderPickerOption };
 
 /**
  * One settings slot's provider choices — only providers that
