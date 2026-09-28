@@ -1627,11 +1627,18 @@ function Main({
   // so identity-dedupe via lastPlayErrorRef reports each failure once
   // regardless of which channel delivers it first.
   const lastPlayErrorRef = useRef<AppError | null>(null);
-  // The action of the most recently dispatched play op — the engine
-  // publishes `playback.failed` BEFORE the op's promise resolves, so
-  // the state watcher names whatever action initiated the attempt
-  // rather than a generic 'play'.
-  const playActionRef = useRef<MessageId>('common.play');
+  // Action labels travel with the ATTEMPT, not the button: a pause
+  // during an in-flight prepare must not steal the play attempt's
+  // name. dispatchPlay records the pending action with a seq; the
+  // playback watcher binds it to the attemptId the moment the new
+  // attempt publishes, and clears it on settle so engine-advanced
+  // attempts (auto-next, queue drain) fall back to the neutral label.
+  const attemptActionsRef = useRef(new Map<string, MessageId>());
+  const pendingAttemptRef = useRef<{
+    seq: number;
+    action: MessageId;
+  } | null>(null);
+  const attemptSeqRef = useRef(0);
   const reportPlayError = useCallback(
     (action: MessageId, error: AppError) => {
       // A newer play replacing this attempt resolves 'superseded' (or
@@ -1670,14 +1677,52 @@ function Main({
     },
     [reportPlayError],
   );
+  const dispatchPlay = useCallback(
+    (action: MessageId, run: Promise<Result<unknown>>): Promise<void> => {
+      const seq = ++attemptSeqRef.current;
+      pendingAttemptRef.current = { seq, action };
+      return run.then((r) => {
+        if (pendingAttemptRef.current?.seq === seq) {
+          pendingAttemptRef.current = null;
+        }
+        reportPlay(action, r);
+      });
+    },
+    [reportPlay],
+  );
   // A prepare/stream failure that lands after the play promise already
   // resolved reaches the UI only through `playback.failed` — the
   // watcher reports it through the same deduped funnel as the promise
-  // path so the failure can't pass silently. The action comes from
-  // playActionRef: whichever op initiated the attempt owns its name.
+  // path so the failure can't pass silently. Its action comes from
+  // attemptActionsRef: whichever op created the attempt owns its name.
   useEffect(() => {
-    if (state.playback.type === 'failed') {
-      reportPlayError(playActionRef.current, state.playback.error);
+    const playback = state.playback;
+    const attemptId =
+      'identity' in playback ? playback.identity?.attemptId : undefined;
+    if (
+      attemptId !== undefined &&
+      !attemptActionsRef.current.has(attemptId)
+    ) {
+      const actions = attemptActionsRef.current;
+      actions.set(
+        attemptId,
+        pendingAttemptRef.current?.action ?? 'common.play',
+      );
+      // Bound the registry — attempts accumulate for the session's life.
+      if (actions.size > 64) {
+        const oldest = actions.keys().next().value;
+        if (oldest !== undefined) {
+          actions.delete(oldest);
+        }
+      }
+    }
+    if (playback.type === 'failed') {
+      reportPlayError(
+        (attemptId !== undefined &&
+          attemptActionsRef.current.get(attemptId)) ||
+          'common.play',
+        playback.error,
+      );
     }
   }, [state.playback, reportPlayError]);
 
@@ -1691,8 +1736,7 @@ function Main({
         reportResult('action.enqueueTrack', enqueued);
         return;
       }
-      playActionRef.current = 'common.play';
-      reportPlay('common.play', await session.playOccurrence(enqueued.value));
+      await dispatchPlay('common.play', session.playOccurrence(enqueued.value));
     },
     [session, canPlay, reportPlay],
   );
@@ -1707,10 +1751,7 @@ function Main({
       if (occurrence !== undefined && !canPlay(occurrence.recordingId)) {
         return;
       }
-      playActionRef.current = 'common.play';
-      void session
-        .playOccurrence(occurrenceId)
-        .then((r) => reportPlay('common.play', r));
+      void dispatchPlay('common.play', session.playOccurrence(occurrenceId));
     },
     [session, state.queue, canPlay, reportPlay],
   );
@@ -1757,14 +1798,9 @@ function Main({
       if (target === undefined || !canPlay(target.recordingId)) {
         return;
       }
-      playActionRef.current =
-        method === 'next' ? 'common.next' : 'common.previous';
-      void (method === 'next' ? session.next() : session.previous()).then(
-        (r) =>
-          reportPlay(
-            method === 'next' ? 'common.next' : 'common.previous',
-            r,
-          ),
+      void dispatchPlay(
+        method === 'next' ? 'common.next' : 'common.previous',
+        method === 'next' ? session.next() : session.previous(),
       );
     },
     [
@@ -1805,10 +1841,7 @@ function Main({
       const meta = resultMeta.current.get(row.key);
       if (meta !== undefined && canPlayMeta(meta)) {
         recordRecentSearch(query);
-        playActionRef.current = 'action.playResult';
-        void session
-          .addAndPlay(meta)
-          .then((r) => reportPlay('action.playResult', r));
+        void dispatchPlay('action.playResult', session.addAndPlay(meta));
       }
     },
     [session, canPlayMeta, query, recordRecentSearch, reportPlay],
@@ -1993,7 +2026,9 @@ function Main({
     ) {
       return;
     }
-    playActionRef.current = intentPlaying ? 'common.pause' : 'action.resume';
+    // pause/resume keep the SAME attempt identity — they never own a
+    // new one, so no pendingAttempt claim; their own promise still
+    // reports with their own action.
     void (intentPlaying ? session.pause() : session.resume()).then((r) =>
       reportPlay(intentPlaying ? 'common.pause' : 'action.resume', r),
     );
@@ -2587,15 +2622,15 @@ function Main({
       if (playable.length === 0) {
         return;
       }
-      playActionRef.current = 'action.playCollection';
-      void session
-        .playRecordings(
+      void dispatchPlay(
+        'action.playCollection',
+        session.playRecordings(
           playable.map((row) => ({
             recordingId: row.recordingId,
             selectedRef: null,
           })),
-        )
-        .then((r) => reportPlay('action.playCollection', r));
+        ),
+      );
     },
     [session, canPlay, reportPlay],
   );
@@ -2611,15 +2646,15 @@ function Main({
       if (playable.length === 0) {
         return;
       }
-      playActionRef.current = 'action.playPlaylist';
-      void session
-        .playRecordings(
+      void dispatchPlay(
+        'action.playPlaylist',
+        session.playRecordings(
           playable.map((entry) => ({
             recordingId: entry.recordingId,
             selectedRef: entry.selectedRef,
           })),
-        )
-        .then((r) => reportPlay('action.playPlaylist', r));
+        ),
+      );
     },
     [session, canPlay, reportPlay],
   );
@@ -2873,10 +2908,10 @@ function Main({
                   if (searchState.type === 'content') {
                     recordRecentSearch(searchState.query);
                   }
-                  playActionRef.current = 'action.playResult';
-                  void session
-                    .addAndPlay(meta)
-                    .then((r) => reportPlay('action.playResult', r));
+                  void dispatchPlay(
+                    'action.playResult',
+                    session.addAndPlay(meta),
+                  );
                 }
                 return;
               }
@@ -2931,15 +2966,15 @@ function Main({
               if (!canPlay(entry.recordingId)) {
                 return;
               }
-              playActionRef.current = 'action.playPlaylistEntry';
-              void session
-                .playRecordings([
+              void dispatchPlay(
+                'action.playPlaylistEntry',
+                session.playRecordings([
                   {
                     recordingId: entry.recordingId,
                     selectedRef: entry.selectedRef,
                   },
-                ])
-                .then((r) => reportPlay('action.playPlaylistEntry', r));
+                ]),
+              );
             }}
             onToggleLike={(entry) => void session.toggleLike(entry.recordingId)}
             onAddToPlaylist={(entry) =>
@@ -3004,10 +3039,10 @@ function Main({
               if (metas.length === 0) {
                 return;
               }
-              playActionRef.current = 'collection.playAll';
-              void session
-                .playMetadata(metas)
-                .then((r) => reportPlay('collection.playAll', r));
+              void dispatchPlay(
+                'collection.playAll',
+                session.playMetadata(metas),
+              );
             }}
             onShuffleAll={() => {
               const metas = entityModelFor(fetch)
@@ -3019,10 +3054,10 @@ function Main({
               if (metas.length === 0) {
                 return;
               }
-              playActionRef.current = 'action.shuffleAll';
-              void session
-                .playMetadata(metas, { shuffle: true })
-                .then((r) => reportPlay('action.shuffleAll', r));
+              void dispatchPlay(
+                'action.shuffleAll',
+                session.playMetadata(metas, { shuffle: true }),
+              );
             }}
             onToggleLike={
               entityId === null
@@ -3033,10 +3068,10 @@ function Main({
             onPressItem={(row) => {
               const meta = metaFor(row);
               if (meta !== undefined && canPlayMeta(meta)) {
-                playActionRef.current = 'action.playResult';
-                void session
-                  .addAndPlay(meta)
-                  .then((r) => reportPlay('action.playResult', r));
+                void dispatchPlay(
+                  'action.playResult',
+                  session.addAndPlay(meta),
+                );
               }
             }}
             onAddToPlaylist={(row) => {
