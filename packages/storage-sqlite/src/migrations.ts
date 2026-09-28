@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 9;
+export const CURRENT_SCHEMA_VERSION = 10;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -34,6 +34,7 @@ const KNOWN_TABLES: readonly string[] = Object.freeze([
   'sync_watermarks',
   'sync_meta',
   'sync_divergence_dropped',
+  'sync_peer_marks',
 ]);
 
 const MIGRATION_1: readonly string[] = [
@@ -361,6 +362,23 @@ const MIGRATION_9: readonly string[] = [
 )`,
 ];
 
+/**
+ * v9 -> v10: `sync_peer_marks` — the durable peer-watermark table the
+ * SyncEngine's log compaction consults (docs/specs/sync.md). One row
+ * per delta sender holds its last advertised cursor as a JSON
+ * document. Writes REPLACE the row, never max-fold it: a live claim
+ * that regresses must clear what the sender's previous (possibly
+ * lost-and-rebuilt) instance advertised. Hydrated rows seed the
+ * engine's stale-peer set — they pin compaction floors but never
+ * raise them until the sender's live cursor re-confirms the row.
+ */
+const MIGRATION_10: readonly string[] = [
+  `CREATE TABLE sync_peer_marks (
+  sender TEXT PRIMARY KEY,
+  marks_json TEXT NOT NULL
+)`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
@@ -372,6 +390,7 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_7]),
   Object.freeze([...MIGRATION_8]),
   Object.freeze([...MIGRATION_9]),
+  Object.freeze([...MIGRATION_10]),
 ]);
 
 const CREATED_OBJECT_NAME =
