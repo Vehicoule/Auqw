@@ -1,5 +1,7 @@
 export * from './view-models.ts';
 
+export * from './shell.ts';
+
 export * from './peaks.ts';
 export * from './waveform.ts';
 
