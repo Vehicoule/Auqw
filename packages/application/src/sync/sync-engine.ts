@@ -460,6 +460,15 @@ export type SyncLogSnapshot = {
    * every restart).
    */
   readonly divergenceFloor?: number;
+  /**
+   * Cumulative count of distinct divergence emissions produced by
+   * entries compaction has dropped. Hydration seeds the replay
+   * position with it so surviving entries' emission ordinals still
+   * line up with `divergenceFloor` — without it a compacted loser
+   * would shift every later position down and a row that was never
+   * pruned could be mistaken for one that was.
+   */
+  readonly divergenceReplayOffset?: number;
 };
 
 export type SyncLogWrite = {
@@ -482,6 +491,13 @@ export type SyncLogWrite = {
     readonly deviceId: string;
     readonly seq: number;
   }[];
+  /**
+   * Rides with `dropEntries`: the running total of distinct
+   * divergence emissions the dropped entries produced. Stores fold
+   * it with MAX so hydration can re-offset replay positions — a
+   * replayed value is idempotent, a stale smaller one a no-op.
+   */
+  readonly divergenceReplayOffset?: number;
 };
 
 /**
@@ -1303,10 +1319,14 @@ export async function createSyncEngine(
    * losers with emit positions below it were intentionally capped
    * away and must not be rebuilt (that would resurrect pruned history
    * with fresh seqs and churn the retained window on every restart).
+   * `divergenceReplayOffset` is the cumulative count of emissions by
+   * entries compaction dropped — hydrate seeds `repairPos` with it
+   * so surviving entries' positions still line up with the floor.
    */
   const replaySeen = new Set<string>();
   let repairPos = 0;
   let divergenceFloor = 0;
+  let divergenceReplayOffset = 0;
   let hlc = new HybridClock();
 
   /**
@@ -1895,7 +1915,14 @@ export async function createSyncEngine(
       ...(dropBefore === undefined
         ? {}
         : { dropDivergenceBefore: dropBefore }),
-      ...(drops.length > 0 ? { dropEntries: drops } : {}),
+      ...(drops.length > 0
+        ? {
+          dropEntries: drops,
+          // Sending the cumulative offset makes a replayed write
+          // idempotent — stores fold it with MAX.
+          divergenceReplayOffset,
+        }
+        : {}),
     };
     const appended = await call(() =>
       store.append(write, context('sync-div', deadlineMs, signal)),
@@ -1940,6 +1967,10 @@ export async function createSyncEngine(
       return [];
     }
     const drops: { deviceId: string; seq: number }[] = [];
+    // Distinct divergence emissions the dropped entries produced —
+    // persisted so hydrate replay can re-offset repair positions to
+    // the original emit ordinals the divergence floor refers to.
+    let emitted = 0;
     for (const [dev, list] of logByDevice) {
       let floor = Infinity;
       for (const marks of peerMarks.values()) {
@@ -1966,12 +1997,30 @@ export async function createSyncEngine(
           keptPrefix.push(entry);
         } else {
           drops.push({ deviceId: dev, seq: entry.seq });
+          // The seq is below our own contiguous mark too, so a
+          // redelivery re-applies harmlessly (it merges dead again
+          // and is re-dropped) — keeping the key would pin dedupe
+          // memory for every compacted entry forever.
+          seen.delete(entryKey(entry));
+          if (
+            divergenceSeen.has(
+              divergenceKey(
+                entry.kind,
+                entry.recordId,
+                entry.field,
+                toSide(entry),
+              ),
+            )
+          ) {
+            emitted += 1;
+          }
         }
       }
       if (keptPrefix.length !== boundary) {
         logByDevice.set(dev, [...keptPrefix, ...list.slice(boundary)]);
       }
     }
+    divergenceReplayOffset += emitted;
     return drops;
   }
 
@@ -2640,11 +2689,18 @@ export async function createSyncEngine(
     !isRecord(snapshot.watermarks) ||
     !isSyncCursor(snapshot.watermarks) ||
     (snapshot.divergenceFloor !== undefined &&
-      !isOptSafeNonNegative(snapshot.divergenceFloor))
+      !isOptSafeNonNegative(snapshot.divergenceFloor)) ||
+    (snapshot.divergenceReplayOffset !== undefined &&
+      !isOptSafeNonNegative(snapshot.divergenceReplayOffset))
   ) {
     return err(appError('invalid-response', 'sync log snapshot invalid'));
   }
   divergenceFloor = snapshot.divergenceFloor ?? 0;
+  // Compaction dropped entries that already consumed replay
+  // positions — seeding the offset keeps surviving entries' emit
+  // ordinals aligned with the stored divergence floor.
+  divergenceReplayOffset = snapshot.divergenceReplayOffset ?? 0;
+  repairPos = divergenceReplayOffset;
   // Stored divergence rows seed the dedupe set BEFORE replay, so
   // 'repair' emit materializes exactly the rows the store is missing.
   for (const row of snapshot.divergence) {

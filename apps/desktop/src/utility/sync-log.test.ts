@@ -173,6 +173,43 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— A compaction write parses and drops entries on reopen ——
+  {
+    const dir = await freshDir();
+    const path = join(dir, 'sync-log.jsonl');
+    const opened = await openSyncLogStore(path);
+    assert(opened.ok);
+    if (!opened.ok) {
+      return;
+    }
+    const writes: SyncLogWrite[] = [
+      { entries: [entry(1), entry(2), entry(3)] },
+      {
+        dropEntries: [{ deviceId: 'dsk-peer', seq: 2 }],
+        divergenceReplayOffset: 1,
+      },
+    ];
+    for (const write of writes) {
+      const appended = await opened.value.store.append(write, ctx());
+      assert(appended.ok);
+    }
+    const reopened = await openSyncLogStore(path);
+    assert(reopened.ok);
+    if (!reopened.ok) {
+      return;
+    }
+    assertEqual(reopened.value.repaired, false);
+    const loaded = await reopened.value.store.load(ctx());
+    assert(loaded.ok);
+    if (loaded.ok) {
+      assertDeepEqual(
+        loaded.value.entries.map((e) => e.seq),
+        [1, 3],
+      );
+      assertEqual(loaded.value.divergenceReplayOffset, 1);
+    }
+  }
+
   // —— A torn tail truncates at the first invalid line ——
   {
     const dir = await freshDir();

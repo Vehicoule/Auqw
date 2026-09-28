@@ -103,7 +103,9 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
       key !== 'entries' &&
       key !== 'divergence' &&
       key !== 'watermarks' &&
-      key !== 'dropDivergenceBefore'
+      key !== 'dropDivergenceBefore' &&
+      key !== 'dropEntries' &&
+      key !== 'divergenceReplayOffset'
     ) {
       return false;
     }
@@ -137,6 +139,32 @@ function isWriteDoc(value: unknown): value is SyncLogWrite {
   ) {
     return false;
   }
+  if (
+    value['dropEntries'] !== undefined &&
+    !(
+      Array.isArray(value['dropEntries']) &&
+      value['dropEntries'].every(
+        (drop) =>
+          isRecord(drop) &&
+          typeof drop['deviceId'] === 'string' &&
+          typeof drop['seq'] === 'number' &&
+          Number.isSafeInteger(drop['seq']) &&
+          drop['seq'] >= 0,
+      )
+    )
+  ) {
+    return false;
+  }
+  if (
+    value['divergenceReplayOffset'] !== undefined &&
+    !(
+      typeof value['divergenceReplayOffset'] === 'number' &&
+      Number.isSafeInteger(value['divergenceReplayOffset']) &&
+      value['divergenceReplayOffset'] >= 0
+    )
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -159,10 +187,11 @@ type Parsed =
  * honest boundary rather than guessing.
  */
 function parseFile(raw: string): Parsed {
-  const entries: ChangeEntry[] = [];
+  let entries: ChangeEntry[] = [];
   const divergence: DivergenceEntry[] = [];
   const watermarks: Record<string, number> = {};
   let floor = 0;
+  let replayOffset = 0;
   let offset = 0;
   const lines = raw.split('\n');
   for (let i = 0; i < lines.length; i++) {
@@ -207,6 +236,20 @@ function parseFile(raw: string): Parsed {
     for (const entry of write.entries ?? []) {
       entries.push(entry);
     }
+    if (write.dropEntries !== undefined && write.dropEntries.length > 0) {
+      // Compaction drops apply in write order — a seq dropped here
+      // may legitimately re-append on a later line (a redelivery),
+      // so the fold cannot defer this filter to the end.
+      const dropped = new Set(
+        write.dropEntries.map((drop) => `${drop.deviceId} ${drop.seq}`),
+      );
+      entries = entries.filter(
+        (entry) => !dropped.has(`${entry.deviceId} ${entry.seq}`),
+      );
+    }
+    if (write.divergenceReplayOffset !== undefined) {
+      replayOffset = Math.max(replayOffset, write.divergenceReplayOffset);
+    }
     if (write.dropDivergenceBefore !== undefined) {
       floor = Math.max(floor, write.dropDivergenceBefore);
     }
@@ -233,6 +276,7 @@ function parseFile(raw: string): Parsed {
       divergence: kept,
       watermarks,
       ...(floor > 0 ? { divergenceFloor: floor } : {}),
+      ...(replayOffset > 0 ? { divergenceReplayOffset: replayOffset } : {}),
     },
   };
 }

@@ -2205,6 +2205,56 @@ async function prunedDivergenceNotResurrected(): Promise<void> {
 }
 
 
+async function compactionKeepsRepairPositions(): Promise<void> {
+  // Compaction dropped two loser-emitting entries whose rows were
+  // already pruned. Replay positions must still line up with the
+  // stored floor: with the offset the surviving losers land at their
+  // original emit ordinals — the 'v1' row is missing above the floor
+  // and must be rebuilt; without it both would replay below the
+  // floor and the row would be lost permanently.
+  const peerEntries = [
+    rawEntry('recording', 'r1', 'title', 'old', { l: 10, c: 0 }, 'x'),
+    rawEntry('recording', 'r1', 'title', 'new', { l: 20, c: 0 }, 'x'),
+    rawEntry('recording', 'r2', 'title', 'v1', { l: 30, c: 0 }, 'x'),
+    rawEntry('recording', 'r2', 'title', 'v2', { l: 40, c: 0 }, 'x'),
+  ];
+  // Original emit order: two compacted losers (positions 1,2), then
+  // 'old' (position 3, row kept), then 'v1' (position 4, row lost).
+  const compacted = new FakeSyncLogStore({
+    entries: peerEntries,
+    divergence: [
+      {
+        historyId: 'h-kept',
+        seq: 3,
+        kind: 'recording',
+        recordId: 'r1',
+        field: 'title',
+        loser: {
+          deviceId: 'x',
+          hlc: { l: 10, c: 0 },
+          tombstone: false,
+          value: 'old',
+        },
+        winner: {
+          deviceId: 'x',
+          hlc: { l: 20, c: 0 },
+          tombstone: false,
+          value: 'new',
+        },
+        observedMs: 1_000,
+        origin: 'remote',
+      },
+    ],
+    watermarks: {},
+    divergenceFloor: 3,
+    divergenceReplayOffset: 2,
+  });
+  await makeEngine('a', 1_000, compacted);
+  assertEqual(compacted.divergenceRows.length, 2);
+  assertEqual(compacted.divergenceRows[1]?.loser.value, 'v1');
+}
+
+
 async function recordIdsAreInjective(): Promise<void> {
   // Separator-bearing components must not alias distinct claims.
   const a = likeRecordId('track', 'a');
@@ -2417,6 +2467,7 @@ export async function run(): Promise<void> {
   await localFreezeImmunity();
   await exportLimitZero();
   await prunedDivergenceNotResurrected();
+  await compactionKeepsRepairPositions();
   await recordIdsAreInjective();
   await exportedEntriesFrozen();
   await sumSaturation();

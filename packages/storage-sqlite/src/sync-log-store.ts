@@ -154,11 +154,30 @@ export class SqliteSyncLogStore implements SyncLogStore {
           }
           divergenceFloor = value;
         }
+        const offsetRows = await conn.query<SqlRow>(
+          `SELECT value FROM sync_meta WHERE key = 'divergence_replay_offset'`,
+          undefined,
+          context.signal,
+        );
+        let divergenceReplayOffset = 0;
+        if (offsetRows.length > 0) {
+          const value = offsetRows[0]?.['value'];
+          if (!isSafeInt(value)) {
+            return err(
+              appError(
+                'invalid-response',
+                'stored divergence replay offset failed validation',
+              ),
+            );
+          }
+          divergenceReplayOffset = value;
+        }
         return ok({
           entries,
           divergence,
           watermarks,
           divergenceFloor,
+          divergenceReplayOffset,
         });
       }, context.signal);
     } catch (thrown) {
@@ -182,7 +201,9 @@ export class SqliteSyncLogStore implements SyncLogStore {
       (write.dropEntries !== undefined &&
         !write.dropEntries.every(
           (drop) => typeof drop.deviceId === 'string' && isSafeInt(drop.seq),
-        ))
+        )) ||
+      (write.divergenceReplayOffset !== undefined &&
+        !isSafeInt(write.divergenceReplayOffset))
     ) {
       return err(
         appError('invalid-response', 'sync append batch failed validation'),
@@ -225,6 +246,17 @@ export class SqliteSyncLogStore implements SyncLogStore {
               context.signal,
             );
           }
+        }
+        if (write.divergenceReplayOffset !== undefined) {
+          // Cumulative emissions by compacted entries — MAX-folded so
+          // a replayed write is idempotent.
+          await conn.execute(
+            `INSERT INTO sync_meta (key, value)
+             VALUES ('divergence_replay_offset', ?)
+             ON CONFLICT (key) DO UPDATE SET value = MAX(value, excluded.value)`,
+            [write.divergenceReplayOffset],
+            context.signal,
+          );
         }
         if (write.divergence !== undefined) {
           for (const row of write.divergence) {

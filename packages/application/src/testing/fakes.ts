@@ -1303,6 +1303,8 @@ export class FakeSyncLogStore implements SyncLogStore {
   #watermarks: Record<string, number> = {};
   /** Cumulative prune frontier — the largest seq ever capped away. */
   #divergenceFloor = 0;
+  /** Cumulative emissions by compaction-dropped entries (max-fold). */
+  #divergenceReplayOffset = 0;
   #failNextAppend: AppError | null = null;
   #deferNextAppend = false;
   #appendDeferreds: Deferred<Result<void>>[] = [];
@@ -1315,6 +1317,7 @@ export class FakeSyncLogStore implements SyncLogStore {
       this.#divergence = [...initial.divergence];
       this.#watermarks = { ...initial.watermarks };
       this.#divergenceFloor = initial.divergenceFloor ?? 0;
+      this.#divergenceReplayOffset = initial.divergenceReplayOffset ?? 0;
     }
   }
 
@@ -1362,6 +1365,10 @@ export class FakeSyncLogStore implements SyncLogStore {
     return this.#divergenceFloor;
   }
 
+  get storedDivergenceReplayOffset(): number {
+    return this.#divergenceReplayOffset;
+  }
+
   load(context: OperationContext): Promise<Result<SyncLogSnapshot>> {
     this.loads.push(context);
     if (context.signal.cancelled) {
@@ -1377,6 +1384,7 @@ export class FakeSyncLogStore implements SyncLogStore {
           divergence: this.#divergence,
           watermarks: this.#watermarks,
           divergenceFloor: this.#divergenceFloor,
+          divergenceReplayOffset: this.#divergenceReplayOffset,
         }),
       ),
     );
@@ -1429,7 +1437,9 @@ export class FakeSyncLogStore implements SyncLogStore {
           (drop) =>
             typeof drop.deviceId === 'string' &&
             isSafeNonNegative(drop.seq),
-        ))
+        )) ||
+      (write.divergenceReplayOffset !== undefined &&
+        !isSafeNonNegative(write.divergenceReplayOffset))
     ) {
       return err(
         appError('invalid-response', 'append batch failed validation'),
@@ -1444,6 +1454,12 @@ export class FakeSyncLogStore implements SyncLogStore {
       );
       this.#entries = this.#entries.filter(
         (entry) => !dropped.has(`${entry.deviceId}${entry.seq}`),
+      );
+    }
+    if (write.divergenceReplayOffset !== undefined) {
+      this.#divergenceReplayOffset = Math.max(
+        this.#divergenceReplayOffset,
+        write.divergenceReplayOffset,
       );
     }
     if (write.entries !== undefined) {
