@@ -36,6 +36,7 @@ export * from './sync/engine-port.ts';
 export * from './sync/sync-client.ts';
 export * from './sync/sync-scheduler.ts';
 export * from './sync/sync-host.ts';
+export * from './sync/sync-responder.ts';
 export * from './library/playlists.ts';
 export * from './library/history.ts';
 export * from './library/lyrics.ts';
