@@ -313,14 +313,23 @@ export function NowPlayingScreen({
   const activeMode = mode ?? internalMode;
   // Player mode is artwork-led — full-bleed art under the bottom
   // cluster; missing art (and lyrics/queue) keeps the flat stage.
-  // A failed request drops to that same flat treatment: the failed
-  // url is recorded so a track change re-arms the immersive stage,
-  // and the missing-art glyph stands in instead of two broken imgs.
-  const [failedArtworkUrl, setFailedArtworkUrl] = useState<string | null>(
-    null,
-  );
+  // A failed request drops to that same flat treatment — the
+  // missing-art glyph stands in instead of two broken imgs — but
+  // the failure is remembered only for the occurrence that saw it:
+  // the next track (or a return to this one as a fresh occurrence)
+  // retries the image rather than hiding it behind the glyph.
+  const [failedArtwork, setFailedArtwork] = useState<{
+    readonly occurrence: string | null;
+    readonly url: string;
+  } | null>(null);
   const artworkUrl = activeMode === 'player' ? player.artworkUrl : null;
-  const liveArtwork = artworkUrl !== failedArtworkUrl ? artworkUrl : null;
+  const liveArtwork =
+    artworkUrl !== null &&
+    (failedArtwork === null ||
+      failedArtwork.url !== artworkUrl ||
+      failedArtwork.occurrence !== player.occurrenceId)
+      ? artworkUrl
+      : null;
   return (
     <div
       className={`uw-stage${liveArtwork !== null ? ' uw-stage--immersive t-dark' : ''}`}
@@ -329,7 +338,12 @@ export function NowPlayingScreen({
       {liveArtwork !== null && (
         <StageBackdrop
           url={liveArtwork}
-          onError={() => setFailedArtworkUrl(liveArtwork)}
+          onError={() =>
+            setFailedArtwork({
+              occurrence: player.occurrenceId,
+              url: liveArtwork,
+            })
+          }
         />
       )}
       <div className="uw-stage__body">
