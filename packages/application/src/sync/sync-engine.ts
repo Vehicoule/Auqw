@@ -855,21 +855,30 @@ export function isSyncCursor(value: unknown): value is SyncCursor {
 }
 
 /**
- * Wire-level shape check for the materialized pull — field VALUES go
- * unvalidated here because the projector only reads them through
- * per-field typed accessors and the field whitelist.
+ * Wire-level check for the materialized pull: the envelope plus the
+ * same per-field whitelist + value contract `isChangeEntry` applies —
+ * the projector casts these values into domain rows, so a field that
+ * would never survive the delta path must not enter through this one.
+ * Empty `fields` is the record's tombstone form and stays valid.
  */
 export function isMaterializedRecord(
   value: unknown,
 ): value is MaterializedRecord {
-  return (
-    isRecord(value) &&
-    hasExactKeys(value, ['kind', 'recordId', 'fields']) &&
-    isSyncRecordKind(value['kind']) &&
-    isString(value['recordId'], MAX_RECORD_ID) &&
-    isRecord(value['fields']) &&
-    Object.keys(value['fields']).every((k) => k.length <= MAX_FIELD)
-  );
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['kind', 'recordId', 'fields']) ||
+    !isSyncRecordKind(value['kind']) ||
+    !isString(value['recordId'], MAX_RECORD_ID) ||
+    !isRecord(value['fields'])
+  ) {
+    return false;
+  }
+  const kind = value['kind'];
+  return Object.entries(value['fields']).every(([field, fieldValue]) => {
+    const fieldRule =
+      field.length <= MAX_FIELD ? syncFieldRule(kind, field) : undefined;
+    return fieldRule !== undefined && fieldRule.valid(fieldValue);
+  });
 }
 
 /** Envelope-level check; entries are validated per-row on apply. */

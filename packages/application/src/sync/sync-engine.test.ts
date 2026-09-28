@@ -4,6 +4,7 @@ import {
   TOMBSTONE_FIELD,
   createSyncEngine,
   decodeRecordId,
+  isMaterializedRecord,
   isSyncDelta,
   likeRecordId,
   entitySourceRefRecordId,
@@ -1732,6 +1733,62 @@ async function materializeParentsFirst(): Promise<void> {
   );
 }
 
+// The materialized pull enforces the same per-field whitelist the
+// delta path does: a record whose fields would never survive
+// isChangeEntry — bad value shape, off-whitelist field, over-long
+// name — is rejected at the guard instead of being cast into a row.
+async function materializedFieldValidation(): Promise<void> {
+  assert(
+    isMaterializedRecord({
+      kind: 'recording',
+      recordId: 'r1',
+      fields: { title: 'Song', durationMs: 100 },
+    }),
+    'rule-conformant record passes',
+  );
+  // Empty fields is the tombstone form ('synced then deleted').
+  assert(
+    isMaterializedRecord({
+      kind: 'recording',
+      recordId: 'r1',
+      fields: {},
+    }),
+    'empty field set stays valid',
+  );
+  assert(
+    !isMaterializedRecord({
+      kind: 'recording',
+      recordId: 'r1',
+      fields: { title: 42 },
+    }),
+    'whitelisted field with a bad value is rejected',
+  );
+  assert(
+    !isMaterializedRecord({
+      kind: 'settings',
+      recordId: SETTINGS_RECORD_ID,
+      fields: { theme: 'purple' },
+    }),
+    'enum-rule violation is rejected',
+  );
+  assert(
+    !isMaterializedRecord({
+      kind: 'recording',
+      recordId: 'r1',
+      fields: { title: 'ok', sessionToken: 'leak' },
+    }),
+    'off-whitelist field is rejected',
+  );
+  assert(
+    !isMaterializedRecord({
+      kind: 'recording',
+      recordId: 'r1',
+      fields: { ['x'.repeat(65)]: 1 },
+    }),
+    'over-long field name is rejected',
+  );
+}
+
 async function expiredHistoryPagination(): Promise<void> {
   // A permanently-filtered seq (expired playEvent) must not stall the
   // receiver's cursor: the delta's `skipped` map lists retired seqs so
@@ -2347,6 +2404,7 @@ export async function run(): Promise<void> {
   await sumWriteAssertsAggregate();
   await materializeIncludesTombstones();
   await materializeParentsFirst();
+  await materializedFieldValidation();
   await restoreLoserSumComponent();
   await expiredHistoryPagination();
   await relayedSkipListing();
