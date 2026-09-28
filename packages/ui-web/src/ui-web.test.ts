@@ -357,11 +357,32 @@ function render(node: ReactNode): string {
 
 {
   const markup = render(
+    h(NowPlayingScreen, { player: fixturePlayerPlaying }),
+  );
+  check(
+    'player mode is artwork-led (immersive scope)',
+    markup.includes('uw-stage--immersive'),
+  );
+  check(
+    'player mode mounts the backdrop layers',
+    markup.includes('uw-stage__backdrop'),
+  );
+  check(
+    'player mode floats the mode segment',
+    markup.includes('uw-stage__segment'),
+  );
+}
+{
+  const markup = render(
     h(NowPlayingScreen, {
       player: fixturePlayerPlaying,
       mode: 'lyrics',
       lyrics: fixtureLyrics,
     }),
+  );
+  check(
+    'lyrics mode stays flat (no artwork backdrop)',
+    !markup.includes('uw-stage--immersive'),
   );
   for (const line of fixtureLyrics.lines.slice(0, 3)) {
     assertIncludes('lyrics line renders', markup, line.replace(/&/g, '&amp;').replace(/</g, '&lt;'));
@@ -511,7 +532,6 @@ function render(node: ReactNode): string {
       onFocusSearch: () => {},
       onOpenSettings: () => {},
       stage: h(NowPlayingScreen, { player: fixturePlayerPlaying }),
-      onStopPlayback: () => {},
       children: h('div'),
     }),
   );
@@ -520,8 +540,12 @@ function render(node: ReactNode): string {
   check('chrome renders the stage column', markup.includes('uw-stage-col'));
   check('chrome renders the world toolbar', markup.includes('uw-world-bar'));
   check(
-    'chrome offers a stage stop control',
-    markup.includes('aria-label="stop and dismiss"'),
+    'chrome has no separate stage stop control',
+    !markup.includes('uw-stage-col__stop'),
+  );
+  check(
+    'world tabs use the segment pill language',
+    markup.includes('uw-segment--tabs'),
   );
   for (const item of fixtureNavItems) {
     assertIncludes('chrome renders tab', markup, item.label);

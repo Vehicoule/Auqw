@@ -11,6 +11,9 @@ export type PlatformTabsProps = {
   readonly renderTab: (key: string) => ReactNode;
   /** Mini player: native Now Playing capsule on iOS 26, docked above the bar elsewhere. */
   readonly accessory?: ReactNode;
+  /** Hide the nav bar (and the accessory with it — it lives in the
+      bar's slot on iOS): the expanded stage sheet owns the screen. */
+  readonly tabBarHidden?: boolean | undefined;
 };
 
 // Non-native fallback (web/desktop): the app's own navbar + docked accessory.
@@ -20,13 +23,16 @@ export function PlatformTabs({
   onSelect,
   renderTab,
   accessory,
+  tabBarHidden = false,
 }: PlatformTabsProps) {
   const theme = useTheme();
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
       <View style={{ flex: 1 }}>{renderTab(activeKey)}</View>
-      {accessory}
+      {tabBarHidden ? null : accessory}
+      {tabBarHidden ? null : (
       <AppNavbar items={items} activeKey={activeKey} onSelect={onSelect} />
+      )}
     </View>
   );
 }

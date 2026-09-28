@@ -13,6 +13,10 @@ export type QueueListProps = {
   readonly queue: QueueModel;
   readonly reordering?: boolean | undefined;
   readonly scrollEnabled?: boolean | undefined;
+  /** Bottom inset inside the scroll content — the stage's floating
+      mode segment overlays this zone; the pad lets the last row
+      scroll fully clear of it. */
+  readonly contentPaddingBottom?: number | undefined;
   readonly onPressItem?: ((occurrenceId: string) => void) | undefined;
   readonly onRemoveItem?: ((occurrenceId: string) => void) | undefined;
   readonly onMoveItem?:
@@ -27,6 +31,7 @@ export function QueueList({
   queue,
   reordering = false,
   scrollEnabled = true,
+  contentPaddingBottom = 0,
   onPressItem,
   onRemoveItem,
   onMoveItem,
@@ -41,6 +46,7 @@ export function QueueList({
       keyExtractor={(item) => item.occurrenceId}
       scrollEnabled={scrollEnabled}
       initialNumToRender={15}
+      contentContainerStyle={{ paddingBottom: contentPaddingBottom }}
       renderItem={({ item, index }) => (
         <View>
           {item.current && (

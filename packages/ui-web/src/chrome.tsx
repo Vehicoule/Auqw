@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Icon, IconButton, Pressable, Text } from './primitives.tsx';
+import type { IconName } from './primitives.tsx';
 import { globalKeyAction } from './keyboard.ts';
 import { useOverlayDismiss } from './stack.tsx';
 import { t } from '@auqw/ui-shared';
@@ -21,31 +22,52 @@ export type WorldTabsProps = {
   readonly onSelect: (key: string) => void;
 };
 
-/** Centered page switcher — text pills, active one reads accent. */
+/** Same key→glyph map the native navbar resolves items with. */
+const NAV_ICONS: Record<string, IconName> = {
+  home: 'home',
+  explore: 'compass',
+  search: 'search',
+  library: 'library',
+  queue: 'queue',
+  settings: 'settings',
+};
+
+/**
+ * Centered page switcher — the same segmented-pill construction as
+ * the stage's mode segment (accentSoft tonal fill, accent glyph +
+ * label), just sized down for the strip and carrying larger text.
+ */
 export function WorldTabs({ tabs, activeKey, onSelect }: WorldTabsProps) {
   return (
     <nav className="uw-tabs" aria-label={t('nav.primaryA11y')}>
-      {tabs.map((item) => {
-        const active = item.key === activeKey;
-        return (
-          <Pressable
-            key={item.key}
-            onPress={() => onSelect(item.key)}
-            ariaLabel={item.label}
-            ariaSelected={active}
-            className={`uw-tabs__item${active ? ' uw-tabs__item--on' : ''}`}
-          >
-            <Text
-              variant="metadata"
-              color={active ? 'accent' : 'secondary'}
-              numberOfLines={1}
-              className={active ? 'uw-text--bold' : undefined}
+      <div className="uw-segment uw-segment--tabs">
+        {tabs.map((item) => {
+          const active = item.key === activeKey;
+          return (
+            <Pressable
+              key={item.key}
+              onPress={() => onSelect(item.key)}
+              ariaLabel={item.label}
+              ariaSelected={active}
+              className={`uw-segment__item${active ? ' uw-segment__item--on' : ''}`}
             >
-              {item.label}
-            </Text>
-          </Pressable>
-        );
-      })}
+              <Icon
+                name={NAV_ICONS[item.key] ?? 'note'}
+                size={13}
+                color={active ? 'var(--accent)' : 'var(--text-secondary)'}
+              />
+              <Text
+                variant="body"
+                color={active ? 'accent' : 'secondary'}
+                numberOfLines={1}
+                className={active ? 'uw-text--bold' : undefined}
+              >
+                {item.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </div>
     </nav>
   );
 }
@@ -114,12 +136,6 @@ export type DesktopChromeProps = {
   readonly stageOpen?: boolean | undefined;
   readonly onStageOpenChange?: ((open: boolean) => void) | undefined;
   /**
-   * Stops playback and clears the stage's track (the queue keeps its
-   * items — the old mini-player's dismiss). Omitted when nothing is
-   * loaded, so no dead button shows over the empty state.
-   */
-  readonly onStopPlayback?: (() => void) | undefined;
-  /**
    * '/' targets the search field app-wide — the chrome owns the global
    * keydown so screens never duplicate it. Editable elements keep
    * their keys (isEditableTarget guards inside globalKeyAction).
@@ -137,7 +153,6 @@ export function DesktopChrome({
   stage,
   stageOpen,
   onStageOpenChange,
-  onStopPlayback,
   onFocusSearch,
   onOpenSettings,
   children,
@@ -165,17 +180,6 @@ export function DesktopChrome({
     <div className="uw-chrome" data-stage={open ? 'open' : 'closed'}>
       <aside className="uw-stage-col">
         <div className="uw-stage-col__body">{stage}</div>
-        {onStopPlayback !== undefined && (
-          <IconButton
-            icon="close"
-            size={32}
-            iconSize={14}
-            color="var(--text-secondary)"
-            ariaLabel={t('player.a11y.stopDismiss')}
-            onPress={onStopPlayback}
-            className="uw-stage-col__stop"
-          />
-        )}
       </aside>
       {/* Only visible under the 860px overlay breakpoint — tap-outside
           dismissal for the floating column. */}

@@ -48,13 +48,13 @@ export type TransportProps = {
   /** Current repeat mode — off / all / one from the player port. */
   readonly repeat?: 'off' | 'all' | 'one' | undefined;
   readonly onCycleRepeat?: (() => void) | undefined;
-  /** Owned-bytes state of the current track; null hides the button. */
-  readonly download?: DownloadChip | null | undefined;
-  readonly onDownload?: (() => void) | undefined;
 };
 
 // The desktop transport keeps the m3e layout (raised main pill,
-// accent play slab) — the ios glass variant exists for parity.
+// accent play slab) — the ios glass variant exists for parity. The
+// row is pure transport `like · shuffle · prev · play · next ·
+// repeat` on both platforms; ownership actions (download, add) live
+// on the metadata line above it.
 export function TransportControls({
   variant = 'm3e',
   status,
@@ -70,8 +70,6 @@ export function TransportControls({
   onToggleShuffle,
   repeat = 'off',
   onCycleRepeat,
-  download = null,
-  onDownload,
 }: TransportProps) {
   const busy = status === 'preparing' || status === 'buffering';
   const playing = intentPlaying;
@@ -148,38 +146,6 @@ export function TransportControls({
         onPress={onCycleRepeat}
         className="uw-transport__side"
       />
-      {download !== null && (
-        <IconButton
-          icon={
-            download === 'stored'
-              ? 'check'
-              : download === 'failed'
-                ? 'warn'
-                : 'download'
-          }
-          size={32}
-          iconSize={14}
-          color={
-            download === 'failed'
-              ? 'var(--warn)'
-              : download === 'stored'
-                ? 'var(--accent)'
-                : 'var(--text-secondary)'
-          }
-          ariaLabel={
-            download === 'stored'
-              ? t('stage.download.storedA11y')
-              : download === 'failed'
-                ? t('stage.download.failedA11y')
-                : download === 'queued' || download === 'downloading'
-                  ? t('stage.download.busyA11y')
-                  : t('stage.download.idleA11y')
-          }
-          active={download === 'stored'}
-          onPress={onDownload}
-          className="uw-transport__side"
-        />
-      )}
     </div>
   );
 }
@@ -211,14 +177,16 @@ export function ModeSegment({
             ariaSelected={active}
             className={`uw-segment__item${active ? ' uw-segment__item--on' : ''}`}
           >
+            {/* Tonal pill — same construction as the native segment's
+                m3e fill: accentSoft chip, accent icon + label. */}
             <Icon
               name={m.icon}
               size={12}
-              color={active ? 'var(--text-bright)' : 'var(--text-secondary)'}
+              color={active ? 'var(--accent)' : 'var(--text-secondary)'}
             />
             <Text
               variant="metadata"
-              color={active ? 'bright' : 'secondary'}
+              color={active ? 'accent' : 'secondary'}
               className={active ? 'uw-text--bold' : undefined}
             >
               {t(m.label)}
@@ -248,6 +216,8 @@ export type NowPlayingScreenProps = {
   readonly onCycleRepeat?: (() => void) | undefined;
   readonly download?: DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
+  /** Add-to-playlist affordance on the meta row (same as native). */
+  readonly onAddToPlaylist?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
   /** Real measured peaks for the playing recording; null/undefined
    * keeps the seeded pattern (pending state and failure fallback). */
@@ -267,6 +237,23 @@ export type NowPlayingScreenProps = {
     | undefined;
 };
 
+// Immersive player backdrop (the native StageSheet's treatment ported
+// to DOM): full-bleed artwork, a statically blurred copy revealed by an
+// alpha-gradient mask so the frost fades in under the bottom cluster
+// only — one CSS blur pass, no hard edge — and a dark scrim gradient
+// over the top for text contrast. The `t-dark` class on the stage
+// re-scopes every token for this subtree, matching the sheet's nested
+// dark ThemeProvider.
+function StageBackdrop({ url }: { readonly url: string }) {
+  return (
+    <div className="uw-stage__backdrop" aria-hidden="true">
+      <img className="uw-stage__backdrop-art" src={url} alt="" />
+      <img className="uw-stage__backdrop-frost" src={url} alt="" />
+      <div className="uw-stage__backdrop-scrim" />
+    </div>
+  );
+}
+
 export function NowPlayingScreen({
   player,
   mode,
@@ -285,6 +272,7 @@ export function NowPlayingScreen({
   onCycleRepeat,
   download = null,
   onDownload,
+  onAddToPlaylist,
   onSeek,
   peaks,
   onRetryLyrics,
@@ -299,15 +287,81 @@ export function NowPlayingScreen({
 }: NowPlayingScreenProps) {
   const [internalMode, setInternalMode] = useState<StageMode>('player');
   const activeMode = mode ?? internalMode;
+  // Player mode is artwork-led — full-bleed art under the bottom
+  // cluster; missing art (and lyrics/queue) keeps the flat stage.
+  const artworkUrl = activeMode === 'player' ? player.artworkUrl : null;
   return (
-    <div className="uw-stage" data-mode={activeMode}>
+    <div
+      className={`uw-stage${artworkUrl !== null ? ' uw-stage--immersive t-dark' : ''}`}
+      data-mode={activeMode}
+    >
+      {artworkUrl !== null && <StageBackdrop url={artworkUrl} />}
+      <div className="uw-stage__body">
       {activeMode === 'player' && (
         <>
+            {/*
+               * The live radio element: a seed affordance when no tail is
+               * armed, the tail's honest status when one is — 'failed'
+               * carries the typed message, and stop always clears. Same
+               * top-center accent pill the sheet pins under its handle.
+               */}
+            {radio !== undefined && (radio.armed || onStartRadio !== undefined) && (
+              <div className="uw-stage__radio">
+                <div className="uw-stage__radio-pill">
+                  <Icon
+                    name="radio"
+                    size={13}
+                    color={
+                      radio.status === 'failed'
+                        ? 'var(--warn)'
+                        : 'var(--accent)'
+                    }
+                  />
+                  {radio.armed ? (
+                    <>
+                      <Text
+                        variant="metadata"
+                        color={radio.status === 'failed' ? 'warn' : 'accent'}
+                      >
+                        {radio.label}
+                        {radio.fetching ? t('stage.radio.fetchingSuffix') : ''}
+                        {radio.detail === null ? '' : ` · ${radio.detail}`}
+                      </Text>
+                      <Pressable
+                        onPress={onStopRadio}
+                        ariaLabel={t('stage.radio.stopA11y')}
+                        className="uw-stage__radio-action"
+                      >
+                        <Text variant="metadata" color="primary">
+                          {t('stage.radio.stop')}
+                        </Text>
+                      </Pressable>
+                    </>
+                  ) : (
+                    <Pressable
+                      onPress={onStartRadio}
+                      ariaLabel={t('stage.radio.start')}
+                      className="uw-stage__radio-action"
+                    >
+                      <Text variant="metadata" color="accent">
+                        {t('stage.radio.start')}
+                      </Text>
+                    </Pressable>
+                  )}
+                </div>
+              </div>
+            )}
+            {/* Bottom-anchored meta in the frost zone — the column's
+                  dead space lives above it; a long title scrolls. */}
+            <div className="uw-stage__scroll">
+              {player.artworkUrl === null && (
           <div className="uw-stage__art">
-            <Artwork url={player.artworkUrl} fill />
+                  <Artwork url={null} fill />
           </div>
+              )}
+              <div className="uw-stage__meta-row">
           <div className="uw-stage__meta">
-            <Text variant="title" color="bright" numberOfLines={2}>
+                  <Text variant="display" color="bright" numberOfLines={2}>
               {player.title}
             </Text>
             <Text variant="body" color="primary" numberOfLines={1}>
@@ -328,6 +382,56 @@ export function NowPlayingScreen({
               </Text>
             )}
           </div>
+                {/* Ownership actions hug the right edge of the meta
+                      line — download state icon first, then the
+                      playlist-picker affordance (native parity). */}
+                {(download !== null || onAddToPlaylist !== undefined) && (
+                  <div className="uw-stage__actions">
+                    {download !== null && (
+                      <IconButton
+                        icon={
+                          download === 'stored'
+                            ? 'check'
+                            : download === 'failed'
+                              ? 'warn'
+                              : 'download'
+                        }
+                        size={36}
+                        iconSize={15}
+                        color={
+                          download === 'failed'
+                            ? 'var(--warn)'
+                            : download === 'stored'
+                              ? 'var(--accent)'
+                              : 'var(--text-secondary)'
+                        }
+                        ariaLabel={
+                          download === 'stored'
+                            ? t('stage.download.storedA11y')
+                            : download === 'failed'
+                              ? t('stage.download.failedA11y')
+                              : download === 'queued' || download === 'downloading'
+                                ? t('stage.download.busyA11y')
+                                : t('stage.download.idleA11y')
+                        }
+                        active={download === 'stored'}
+                        onPress={onDownload}
+                      />
+                    )}
+                    {onAddToPlaylist !== undefined && (
+                      <IconButton
+                        icon="list-plus"
+                        size={36}
+                        iconSize={15}
+                        color="var(--text-secondary)"
+                        ariaLabel={t('sheets.addToPlaylist')}
+                        onPress={onAddToPlaylist}
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
           <WaveformSeek
             positionMs={player.positionMs}
             durationMs={player.durationMs}
@@ -351,58 +455,7 @@ export function NowPlayingScreen({
             onToggleShuffle={onToggleShuffle}
             repeat={repeat}
             onCycleRepeat={onCycleRepeat}
-            download={download}
-            onDownload={onDownload}
-          />
-          {/*
-           * The live radio element: a seed affordance when no tail is
-           * armed, the tail's honest status when one is — 'failed'
-           * carries the typed message, and stop always clears.
-           */}
-          {radio !== undefined && (radio.armed || onStartRadio !== undefined) && (
-            <div className="uw-stage__radio">
-              <Icon
-                name="radio"
-                size={13}
-                color={
-                  radio.armed && radio.status !== 'failed'
-                    ? 'var(--accent)'
-                    : 'var(--text-secondary)'
-                }
               />
-              {radio.armed ? (
-                <>
-                  <Text
-                    variant="metadata"
-                    color={radio.status === 'failed' ? 'warn' : 'secondary'}
-                  >
-                    {radio.label}
-                    {radio.fetching ? t('stage.radio.fetchingSuffix') : ''}
-                    {radio.detail === null ? '' : ` · ${radio.detail}`}
-                  </Text>
-                  <Pressable
-                    onPress={onStopRadio}
-                    ariaLabel={t('stage.radio.stopA11y')}
-                    className="uw-stage__radio-action"
-                  >
-                    <Text variant="metadata" color="primary">
-                      {t('stage.radio.stop')}
-                    </Text>
-                  </Pressable>
-                </>
-              ) : (
-                <Pressable
-                  onPress={onStartRadio}
-                  ariaLabel={t('stage.radio.start')}
-                  className="uw-stage__radio-action"
-                >
-                  <Text variant="metadata" color="secondary">
-                    {t('stage.radio.start')}
-                  </Text>
-                </Pressable>
-              )}
-            </div>
-          )}
         </>
       )}
       {activeMode === 'lyrics' && (
@@ -506,6 +559,11 @@ export function NowPlayingScreen({
           )}
         </div>
       )}
+      </div>
+      {/* The mode segment floats over the stage's bottom safe zone —
+          it takes no layout space, so lyrics/queue rows and the
+          transport never reflow around it or hide beneath it. */}
+      <div className="uw-stage__segment">
       <ModeSegment
         mode={activeMode}
         onSelect={(m) => {
@@ -515,6 +573,7 @@ export function NowPlayingScreen({
           }
         }}
       />
+    </div>
     </div>
   );
 }

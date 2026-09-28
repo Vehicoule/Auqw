@@ -19,6 +19,10 @@ export type QueueListProps = {
   readonly queue: QueueModel;
   readonly reordering?: boolean | undefined;
   readonly scrollEnabled?: boolean | undefined;
+  /** Bottom inset inside the scroll content — the stage's floating
+      mode segment overlays this zone; the pad lets the last row
+      scroll fully clear of it. */
+  readonly contentPaddingBottom?: number | undefined;
   readonly onPressItem?: ((occurrenceId: string) => void) | undefined;
   readonly onRemoveItem?: ((occurrenceId: string) => void) | undefined;
   readonly onMoveItem?:
@@ -33,6 +37,7 @@ export function QueueList({
   queue,
   reordering = false,
   scrollEnabled = true,
+  contentPaddingBottom = 0,
   onPressItem,
   onRemoveItem,
   onMoveItem,
@@ -96,6 +101,7 @@ export function QueueList({
         data={queue.items.slice()}
         keyExtractor={(item) => item.occurrenceId}
         scrollEnabled={scrollEnabled}
+        contentContainerStyle={{ paddingBottom: contentPaddingBottom }}
         onDragEnd={({ from, to }) => {
           const item = queue.items[from];
           if (item !== undefined) {
@@ -128,6 +134,7 @@ export function QueueList({
       renderItem={({ item, index }) => renderItem({ item, index })}
       scrollEnabled={scrollEnabled}
       initialNumToRender={15}
+      contentContainerStyle={{ paddingBottom: contentPaddingBottom }}
     />
   );
 }

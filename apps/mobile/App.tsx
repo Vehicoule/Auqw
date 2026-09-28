@@ -810,6 +810,10 @@ function Main({
   // drag converts finger distance to progress over the same distance
   // the sheet physically translates.
   const stageTravel = useSharedValue(0);
+  // Which gesture owns the in-flight settle (-1 = none): a release
+  // writes its committed anchor here so the sheet's `expanded`-flip
+  // effect doesn't restart the spring and drop the flick velocity.
+  const stageAnchor = useSharedValue(-1);
   const [showGallery, setShowGallery] = useState(false);
   const [stageMode, setStageMode] = useState<StageMode>('player');
   const [reordering, setReordering] = useState(false);
@@ -4194,6 +4198,7 @@ function Main({
           <PlatformTabs
             items={navItems()}
             activeKey={tab}
+            tabBarHidden={expanded}
             onSelect={(key) => {
               setTab(key);
               clearOverlays();
@@ -4208,6 +4213,7 @@ function Main({
                   player={player}
                   progress={stageProgress}
                   travel={stageTravel}
+                  anchor={stageAnchor}
                   interactive={!expanded}
                   onPress={() => {
                     setStageMode('player');
@@ -4229,6 +4235,7 @@ function Main({
               expanded={expanded}
               progress={stageProgress}
               travel={stageTravel}
+              anchor={stageAnchor}
               onExpandChange={(value) => {
                 if (value) setStageMode('player');
                 setExpanded(value);
@@ -4238,6 +4245,7 @@ function Main({
               queue={queueModel}
               queueReordering={reordering}
               topInset={topInset}
+              bottomInset={insets.bottom}
               lyrics={lyricsModel}
               radio={radioModel}
               onPlayPause={onPlayPause}
