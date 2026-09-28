@@ -137,6 +137,7 @@ import {
   planRadioPage,
   publishRadio,
   remainingAfterCurrent,
+  samePublishedRadio,
   shouldGrowRadio,
   RADIO_DRAIN_CHASE_PAGES,
   RADIO_FETCH_AHEAD,
@@ -584,6 +585,33 @@ type SyncApplySections = {
     | 'localFiles']: PersistedState[K];
 };
 
+/**
+ * The source refs the last published snapshot was built from. A
+ * publish whose inputs still point at the same objects reuses the
+ * frozen output sections instead of re-cloning the whole library —
+ * sections here are copy-on-write (mutation paths always reassign
+ * the array), so an identical ref proves an identical section.
+ */
+type PublishSource = {
+  readonly ready: Ready;
+  readonly recordings: readonly Recording[];
+  readonly likes: readonly Like[];
+  readonly entities: readonly Entity[];
+  readonly entitySourceRefs: readonly EntitySourceRef[];
+  readonly playlists: readonly Playlist[];
+  readonly playlistEntries: readonly PlaylistEntry[];
+  readonly playHistory: readonly PlayEvent[];
+  readonly playCounts: readonly PlayCount[];
+  readonly queue: QueueEngine;
+  readonly queueRevision: number;
+  readonly settings: Settings;
+  /** `ready.shuffleOrder` at resolve time — the dealt-order input. */
+  readonly shuffleInput: readonly string[] | null;
+  /** The resolved dealt order `prev.shuffleOrder` was built from. */
+  readonly dealt: readonly string[] | null;
+  readonly persistenceError: AppError | undefined;
+};
+
 function playlistSections(r: Ready): PlaylistState {
   return { playlists: r.playlists, entries: r.playlistEntries };
 }
@@ -852,7 +880,12 @@ function adoptAutomaticMapping(
 function deepFreeze<T>(value: T): T {
   const seen = new Set<object>();
   const visit = (node: unknown): void => {
-    if (typeof node !== 'object' || node === null || seen.has(node)) {
+    if (
+      typeof node !== 'object' ||
+      node === null ||
+      seen.has(node) ||
+      Object.isFrozen(node)
+    ) {
       return;
     }
     seen.add(node);
@@ -915,6 +948,15 @@ export class Session {
   #radioTail: Promise<void> = Promise.resolve();
   #entityTail: Promise<void> = Promise.resolve();
   #listeners = new Set<(state: SessionState) => void>();
+  /**
+   * The light channel for playback position: status ticks whose only
+   * delta is `positionMs` refresh the snapshot but notify here, so a
+   * ~4 Hz tick never wakes whole-model subscribers.
+   */
+  #positionListeners = new Set<(positionMs: number) => void>();
+  /** The value position listeners were last fired with. */
+  #emittedPositionMs = 0;
+  #publishSource: PublishSource | undefined;
   #playerUnsub: () => void;
   #disposed = false;
   #projection: ProjectionMarker | null = null;
@@ -1092,6 +1134,25 @@ export class Session {
     return this.#state;
   }
 
+  /**
+   * The live playback position — the playing/paused playback's last
+   * observed position, else the queue's. Status ticks that move only
+   * the position publish on the light channel; `subscribe` listeners
+   * aren't woken for them, so position readers live here.
+   */
+  positionMs(): number {
+    const ready = this.#ready;
+    if (ready === null) {
+      return 0;
+    }
+    const playback = ready.playback;
+    return playback.type === 'buffering' ||
+      playback.type === 'playing' ||
+      playback.type === 'paused'
+      ? playback.positionMs
+      : ready.queue.positionMs;
+  }
+
   subscribe(listener: (state: SessionState) => void): () => void {
     this.#listeners.add(listener);
     return () => {
@@ -1099,37 +1160,169 @@ export class Session {
     };
   }
 
-  #publish(): void {
-    if (this.#ready !== null) {
-      const ready = this.#ready;
-      // Reconcile on emit: mutation paths publish inside the storage
-      // segment, before #derived would re-key the deal.
-      const dealt = this.#dealtOrder(ready);
-      const base = deepFreeze({
-        type: 'ready' as const,
-        recordings: Object.freeze([...ready.recordings]),
-        likes: Object.freeze([...ready.likes]),
-        entities: Object.freeze([...ready.entities]),
-        entitySourceRefs: Object.freeze([...ready.entitySourceRefs]),
-        playlists: Object.freeze([...ready.playlists]),
-        playlistEntries: Object.freeze([...ready.playlistEntries]),
-        playHistory: Object.freeze([...ready.playHistory]),
-        playCounts: Object.freeze([...ready.playCounts]),
-        queue: ready.queue.snapshot(),
-        settings: { ...ready.settings },
-        playback: ready.playback,
-        repeat: ready.repeat,
-        shuffle: dealt !== null,
-        shuffleOrder: dealt === null ? null : [...dealt],
-        radio: publishRadio(ready.radio),
-        // The published error is a clone sealed by the same freeze —
-        // a subscriber must never mutate the mirror's own error.
-        ...(ready.persistenceError === undefined
-          ? {}
-          : { persistenceError: { ...ready.persistenceError } }),
-      });
-      this.#state = base;
+  /**
+   * Fires only when `positionMs()` actually moves — on full publishes
+   * and on coalesced position-only status ticks alike.
+   */
+  subscribePosition(listener: (positionMs: number) => void): () => void {
+    this.#positionListeners.add(listener);
+    return () => {
+      this.#positionListeners.delete(listener);
+    };
+  }
+
+  #emitPosition(): void {
+    const positionMs = this.positionMs();
+    if (positionMs === this.#emittedPositionMs) {
+      return;
     }
+    this.#emittedPositionMs = positionMs;
+    for (const listener of [...this.#positionListeners]) {
+      try {
+        listener(positionMs);
+      } catch {
+        // Subscriber exceptions are isolated.
+      }
+    }
+  }
+
+  /**
+   * Rebuilds `#state` from `ready`, sharing last publish's frozen
+   * sections whose source refs are unchanged. Sections are
+   * copy-on-write so an identical array ref is proof of an identical
+   * section; `radio` is the exception — its record mutates in place,
+   * so the projection compares field-wise instead.
+   */
+  #syncState(ready: Ready): boolean {
+    const prev = this.#state.type === 'ready' ? this.#state : undefined;
+    const src = this.#publishSource;
+    const shared =
+      prev !== undefined && src !== undefined && src.ready === ready;
+    const queueSnap = ready.queue.snapshot();
+    // Reconcile on emit: mutation paths publish inside the storage
+    // segment, before #derived would re-key the deal. The resolved
+    // order is a function of the queue's occurrence set and the dealt
+    // input — an unchanged engine revision and input resolve to it.
+    const dealt =
+      shared &&
+      ready.queue === src.queue &&
+      queueSnap.revision === src.queueRevision &&
+      ready.shuffleOrder === src.shuffleInput
+        ? src.dealt
+        : this.#dealtOrder(ready);
+    const radio = publishRadio(ready.radio);
+    const base: ReadySession = {
+      type: 'ready',
+      recordings:
+        shared && ready.recordings === src.recordings
+          ? prev.recordings
+          : deepFreeze([...ready.recordings]),
+      likes:
+        shared && ready.likes === src.likes
+          ? prev.likes
+          : deepFreeze([...ready.likes]),
+      entities:
+        shared && ready.entities === src.entities
+          ? prev.entities
+          : deepFreeze([...ready.entities]),
+      entitySourceRefs:
+        shared && ready.entitySourceRefs === src.entitySourceRefs
+          ? prev.entitySourceRefs
+          : deepFreeze([...ready.entitySourceRefs]),
+      playlists:
+        shared && ready.playlists === src.playlists
+          ? prev.playlists
+          : deepFreeze([...ready.playlists]),
+      playlistEntries:
+        shared && ready.playlistEntries === src.playlistEntries
+          ? prev.playlistEntries
+          : deepFreeze([...ready.playlistEntries]),
+      playHistory:
+        shared && ready.playHistory === src.playHistory
+          ? prev.playHistory
+          : deepFreeze([...ready.playHistory]),
+      playCounts:
+        shared && ready.playCounts === src.playCounts
+          ? prev.playCounts
+          : deepFreeze([...ready.playCounts]),
+      queue: queueSnap,
+      settings:
+        shared && ready.settings === src.settings
+          ? prev.settings
+          : deepFreeze({ ...ready.settings }),
+      playback: ready.playback,
+      repeat: ready.repeat,
+      shuffle: dealt !== null,
+      shuffleOrder:
+        shared && dealt === src.dealt
+          ? prev.shuffleOrder
+          : dealt === null
+            ? null
+            : deepFreeze([...dealt]),
+      radio:
+        prev !== undefined && samePublishedRadio(radio, prev.radio)
+          ? prev.radio
+          : radio,
+      // The published error is a clone sealed by the same freeze —
+      // a subscriber must never mutate the mirror's own error.
+      ...(ready.persistenceError === undefined
+        ? {}
+        : {
+          persistenceError:
+            shared && ready.persistenceError === src.persistenceError
+              ? prev.persistenceError
+              : { ...ready.persistenceError },
+        }),
+    };
+    // An identical publish resolves every field to the last
+    // snapshot's own refs — nothing moved, so nobody gets woken.
+    if (
+      prev !== undefined &&
+      base.recordings === prev.recordings &&
+      base.likes === prev.likes &&
+      base.entities === prev.entities &&
+      base.entitySourceRefs === prev.entitySourceRefs &&
+      base.playlists === prev.playlists &&
+      base.playlistEntries === prev.playlistEntries &&
+      base.playHistory === prev.playHistory &&
+      base.playCounts === prev.playCounts &&
+      base.queue === prev.queue &&
+      base.settings === prev.settings &&
+      base.playback === prev.playback &&
+      base.repeat === prev.repeat &&
+      base.shuffle === prev.shuffle &&
+      base.shuffleOrder === prev.shuffleOrder &&
+      base.radio === prev.radio &&
+      base.persistenceError === prev.persistenceError
+    ) {
+      return false;
+    }
+    this.#state = deepFreeze(base);
+    this.#publishSource = {
+      ready,
+      recordings: ready.recordings,
+      likes: ready.likes,
+      entities: ready.entities,
+      entitySourceRefs: ready.entitySourceRefs,
+      playlists: ready.playlists,
+      playlistEntries: ready.playlistEntries,
+      playHistory: ready.playHistory,
+      playCounts: ready.playCounts,
+      queue: ready.queue,
+      queueRevision: queueSnap.revision,
+      settings: ready.settings,
+      shuffleInput: ready.shuffleOrder,
+      dealt,
+      persistenceError: ready.persistenceError,
+    };
+    return true;
+  }
+
+  #publish(): void {
+    if (this.#ready !== null && !this.#syncState(this.#ready)) {
+      return;
+    }
+    this.#emitPosition();
     const state = this.#state;
     for (const listener of [...this.#listeners]) {
       try {
@@ -1138,6 +1331,19 @@ export class Session {
         // Subscriber exceptions are isolated.
       }
     }
+  }
+
+  /**
+   * A status tick whose only delta is the playback position: the
+   * snapshot still refreshes so pull readers stay current, but the
+   * whole-state channel is not woken — position listeners get the
+   * move instead.
+   */
+  #publishPosition(): void {
+    if (this.#ready !== null) {
+      this.#syncState(this.#ready);
+    }
+    this.#emitPosition();
   }
 
   #requireReady(): Result<Ready> {
@@ -6276,7 +6482,8 @@ export class Session {
         ? 'buffering'
         : event.state;
     if (mapped === 'buffering' || mapped === 'playing' || mapped === 'paused') {
-      const playback: SessionPlayback = {
+      const prev = r.playback;
+      r.playback = {
         type: mapped,
         recordingId: active.recordingId,
         occurrenceId: active.occurrenceId,
@@ -6288,8 +6495,24 @@ export class Session {
           ? {}
           : { durationMs: event.durationMs }),
       };
-      r.playback = playback;
-      this.#publish();
+      // A status tick that moved only the position takes the light
+      // channel — whole-state subscribers aren't woken for it.
+      if (
+        (prev.type === 'buffering' ||
+          prev.type === 'playing' ||
+          prev.type === 'paused') &&
+        prev.type === mapped &&
+        prev.recordingId === active.recordingId &&
+        prev.occurrenceId === active.occurrenceId &&
+        prev.identity === active.identity &&
+        prev.handle === active.handle &&
+        prev.ref === active.ref &&
+        prev.durationMs === event.durationMs
+      ) {
+        this.#publishPosition();
+      } else {
+        this.#publish();
+      }
       if (mapped === 'playing') {
         // The deal/queue rev is settled by now — the dealt
         // successor's advisory warm may (re)issue.

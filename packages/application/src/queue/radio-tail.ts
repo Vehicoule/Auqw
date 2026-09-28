@@ -109,8 +109,44 @@ export function publishRadio(record: RadioTailRecord | null): RadioTail | null {
     fetching: record.fetching,
   };
   const tail: RadioTail =
-    record.error === undefined ? base : { ...base, error: record.error };
+    record.error === undefined
+      ? base
+      : { ...base, error: Object.freeze({ ...record.error }) };
   return Object.freeze(tail);
+}
+
+function sameError(a: AppError | undefined, b: AppError | undefined): boolean {
+  if (a === undefined || b === undefined) {
+    return a === b;
+  }
+  return (
+    a.kind === b.kind &&
+    a.message === b.message &&
+    a.retryable === b.retryable &&
+    a.retryAfterMs === b.retryAfterMs
+  );
+}
+
+/**
+ * Field equality over two published tails. The source record mutates
+ * in place, so reference equality can never prove an unchanged
+ * projection — publish paths compare fields to reuse the last
+ * published object instead.
+ */
+export function samePublishedRadio(
+  a: RadioTail | null,
+  b: RadioTail | null,
+): boolean {
+  if (a === null || b === null) {
+    return a === b;
+  }
+  return (
+    a.providerId === b.providerId &&
+    a.status === b.status &&
+    a.fetching === b.fetching &&
+    sameRef(a.seedRef, b.seedRef) &&
+    sameError(a.error, b.error)
+  );
 }
 
 /**

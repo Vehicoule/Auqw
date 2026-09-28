@@ -88,6 +88,15 @@ export class QueueEngine {
   #positionMs: number;
   #mode: QueueMode;
   #blockedError: AppError | undefined;
+  /** Frozen occurrence clones keyed to the revision they were taken at. */
+  #occurrenceCache:
+    | {
+        readonly revision: number;
+        readonly occurrences: readonly QueueOccurrence[];
+      }
+    | undefined;
+  /** Last snapshot — (revision, positionMs) fully determines it. */
+  #snapshotCache: QueueSnapshot | undefined;
 
   constructor(initial?: QueueSnapshot) {
     const occurrences = initial?.occurrences ?? [];
@@ -145,12 +154,38 @@ export class QueueEngine {
     this.#blockedError = cloneError(blockedError);
   }
 
+  /** Observed playback position — the snapshot field without a clone. */
+  get positionMs(): number {
+    return this.#positionMs;
+  }
+
   snapshot(): QueueSnapshot {
+    const cached = this.#snapshotCache;
+    if (
+      cached !== undefined &&
+      cached.revision === this.#revision &&
+      cached.positionMs === this.#positionMs
+    ) {
+      return cached;
+    }
+    // Occurrence clones key on revision alone — position ticks rebuild
+    // only the small wrapper, not the array.
+    let occurrences =
+      this.#occurrenceCache?.revision === this.#revision
+        ? this.#occurrenceCache.occurrences
+        : undefined;
+    if (occurrences === undefined) {
+      occurrences = Object.freeze(
+        this.#occurrences.map(cloneOccurrence),
+      );
+      this.#occurrenceCache = {
+        revision: this.#revision,
+        occurrences,
+      };
+    }
     const base = {
       revision: this.#revision,
-      occurrences: Object.freeze(
-        this.#occurrences.map(cloneOccurrence),
-      ),
+      occurrences,
       currentOccurrenceId: this.#currentId,
       positionMs: this.#positionMs,
       mode: this.#mode,
@@ -159,7 +194,8 @@ export class QueueEngine {
       this.#blockedError === undefined
         ? base
         : { ...base, blockedError: this.#blockedError };
-    return Object.freeze(snap);
+    this.#snapshotCache = Object.freeze(snap);
+    return this.#snapshotCache;
   }
 
   /** Atomic capacity check: must run before any mutation. */

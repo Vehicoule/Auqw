@@ -535,6 +535,20 @@ function Main({
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const { session } = controller;
+  // Playback position rides the session's light channel — status
+  // ticks that only move position no longer publish whole state, so
+  // the position read subscribes here instead of through `state`.
+  const [positionMs, setPositionMs] = useState(() =>
+    session.positionMs(),
+  );
+  useEffect(() => {
+    const unsubscribe = session.subscribePosition(setPositionMs);
+    // Re-read after subscribing — the channel doesn't replay, so a
+    // tick landing between the render-time read and this effect
+    // would otherwise be missed.
+    setPositionMs(session.positionMs());
+    return unsubscribe;
+  }, [session]);
   const [tab, setTab] = useState('home');
   const [expanded, setExpanded] = useState(false);
   // Shared 0..1 morph progress between the mini-player pill and the
@@ -650,6 +664,29 @@ function Main({
   const [downloads, setDownloads] = useState(
     () => controller.downloads.list(),
   );
+  // Progress events stream per chunk — trailing-throttle the
+  // list() pull to ~1Hz so a large queue doesn't re-list on every
+  // chunk tick.
+  const downloadsLast = useRef(0);
+  const downloadsTimer = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const refreshDownloads = useCallback(() => {
+    const now = Date.now();
+    const gap = now - downloadsLast.current;
+    if (gap < 1_000) {
+      if (downloadsTimer.current === null) {
+        downloadsTimer.current = setTimeout(() => {
+          downloadsTimer.current = null;
+          downloadsLast.current = Date.now();
+          setDownloads(controller.downloads.list());
+        }, 1_000 - gap);
+      }
+      return;
+    }
+    downloadsLast.current = now;
+    setDownloads(controller.downloads.list());
+  }, [controller]);
   // null = connectivity unknown (no baseline yet) — the offline
   // banner renders only on an explicit false.
   const [online, setOnline] = useState<boolean | null>(null);
@@ -680,11 +717,18 @@ function Main({
   useEffect(() => {
     setDownloads(controller.downloads.list());
     refreshUsage();
-    return controller.downloads.subscribe(() => {
-      setDownloads(controller.downloads.list());
+    const unsubscribe = controller.downloads.subscribe(() => {
+      refreshDownloads();
       refreshUsage();
     });
-  }, [controller, refreshUsage]);
+    return () => {
+      unsubscribe();
+      if (downloadsTimer.current !== null) {
+        clearTimeout(downloadsTimer.current);
+        downloadsTimer.current = null;
+      }
+    };
+  }, [controller, refreshDownloads, refreshUsage]);
 
   const refreshLocal = useCallback(() => {
     setLocalTick((t) => t + 1);
@@ -1125,18 +1169,41 @@ function Main({
     return () => source.cancel();
   }, [tab, controller, session]);
 
-  const player = useMemo(
-    () =>
-      toPlayerModel({
-        playback: state.playback,
-        queue: state.queue,
-        recordings: state.recordings,
-        likes: state.likes,
-        repeat: state.repeat,
-        shuffleOrder: state.shuffleOrder,
-      }),
-    [state, localeTick],
-  );
+  // Published snapshots keep stable refs for unchanged sections, so
+  // model memos key on the slices they read — a queue-only publish
+  // no longer rebuilds the library model, and position-only ticks
+  // (which skip the state channel entirely) flow through positionMs.
+  const player = useMemo(() => {
+    const model = toPlayerModel({
+      playback: state.playback,
+      queue: state.queue,
+      recordings: state.recordings,
+      likes: state.likes,
+      repeat: state.repeat,
+      shuffleOrder: state.shuffleOrder,
+    });
+    // The model's position is a publish-time read — overlay the live
+    // tick value so the transport position moves between publishes.
+    if (
+      model !== null &&
+      (model.status === 'buffering' ||
+        model.status === 'playing' ||
+        model.status === 'paused') &&
+      model.positionMs !== positionMs
+    ) {
+      return { ...model, positionMs };
+    }
+    return model;
+  }, [
+    state.playback,
+    state.queue,
+    state.recordings,
+    state.likes,
+    state.repeat,
+    state.shuffleOrder,
+    positionMs,
+    localeTick,
+  ]);
   // Real waveform peaks for the Stage seek — lazy, cached per
   // recordingId|attemptId (a re-prepared stream never inherits the
   // attempt it replaced). The port borrows the live stream handle;
@@ -1166,7 +1233,16 @@ function Main({
     });
     // isOwned re-reads downloads/local after their mutations.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, online, isOwned, downloads, localTick, localeTick]);
+  }, [
+    state.queue,
+    state.recordings,
+    state.likes,
+    online,
+    isOwned,
+    downloads,
+    localTick,
+    localeTick,
+  ]);
   const libraryModel = useMemo(() => {
     // Local index rows (provenance 'local') are authoritative over
     // the session's in-memory copies — a scan commits fresher tags
@@ -1258,7 +1334,22 @@ function Main({
     };
     // localTick re-reads local.recordings() after a folder mutation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, downloads, online, controller, localTick, localeTick]);
+  }, [
+    state.recordings,
+    state.likes,
+    state.playlists,
+    state.playlistEntries,
+    state.playHistory,
+    state.playCounts,
+    state.entities,
+    state.entitySourceRefs,
+    state.playback,
+    downloads,
+    online,
+    controller,
+    localTick,
+    localeTick,
+  ]);
   const playlistModelFor = useCallback(
     (playlistId: string) => {
       const model = toPlaylistModel({
@@ -1310,7 +1401,11 @@ function Main({
     // localTick re-reads local.uriMap after a folder mutation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
-      state,
+      state.playlists,
+      state.playlistEntries,
+      state.recordings,
+      state.likes,
+      state.playback,
       downloads,
       downloadChipFor,
       online,
@@ -1471,7 +1566,13 @@ function Main({
           ? t('home.subline.empty')
           : t('home.subline.likes', { count: state.likes.length }),
     });
-  }, [state, searchState, localeTick]);
+  }, [
+    state.recordings,
+    state.likes,
+    state.playback,
+    searchState,
+    localeTick,
+  ]);
   const diagnostics: DiagnosticsModel = useMemo(
     () => ({
       providerIds: controller.providers.map((p) => p.id),
@@ -1487,7 +1588,13 @@ function Main({
       persistenceDetail: state.persistenceError?.message ?? null,
       pendingReviews,
     }),
-    [state, controller, attempts, pendingReviews, localeTick],
+    [
+      state.persistenceError,
+      controller,
+      attempts,
+      pendingReviews,
+      localeTick,
+    ],
   );
   const syncModel = useMemo(
     () =>
@@ -1517,7 +1624,7 @@ function Main({
         syncLabel: syncModel.statusLabel,
       }),
     [
-      state,
+      state.settings,
       diagnostics,
       storageText,
       localTick,
@@ -1602,7 +1709,10 @@ function Main({
   const advance = useCallback(
     (method: 'next' | 'previous') => {
       if (online === false) {
-        const { occurrences, currentOccurrenceId, positionMs } = state.queue;
+        const { occurrences, currentOccurrenceId } = state.queue;
+        // Position ticks ride the light channel now — read it live,
+        // not the (possibly position-stale) published snapshot.
+        const positionMs = session.positionMs();
         const walk =
           state.shuffleOrder ?? occurrences.map((o) => o.occurrenceId);
         const pos =
