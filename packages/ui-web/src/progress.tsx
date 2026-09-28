@@ -156,6 +156,7 @@ function useScrubCommit(
   readonly onScrubStart: (pointerId: number) => void;
   readonly onScrubValue: (ms: number) => void;
   readonly onScrubEnd: (commitMs: number | null, pointerId: number) => void;
+  readonly onScrubKey: (key: string) => boolean;
 } {
   const enabled =
     durationMs !== null && durationMs > 0 && onSeek !== undefined;
@@ -361,12 +362,38 @@ function useScrubCommit(
     gestureKey.current === trackKey
       ? scrubMs
       : null;
+  // Keyboard and AT steps go through `commit` so the hold tracks
+  // them — stepping off `shownMs` while a seek publish is pending
+  // must still move the hold forward, or the next arrow replays
+  // the same step.
+  const onScrubKey = useCallback(
+    (key: string): boolean => {
+      if (
+        !enabled ||
+        durationMs === null ||
+        pointerPhase.current === 'drag' ||
+        deadPointers.current.size > 0
+      ) {
+        return false;
+      }
+      const shown =
+        heldMs !== null && heldKey.current === trackKey ? heldMs : positionMs;
+      const stepped = seekStepMs(key, shown, durationMs);
+      if (stepped === null) {
+        return false;
+      }
+      commit(stepped);
+      return true;
+    },
+    [commit, durationMs, enabled, heldMs, positionMs, trackKey],
+  );
   return {
     enabled,
     shownMs: shownScrub ?? shownHeld ?? positionMs,
     onScrubStart,
     onScrubValue,
     onScrubEnd,
+    onScrubKey,
   };
 }
 
@@ -395,11 +422,8 @@ export function LinearScrubber({
   const { enabled, shownMs } = scrub;
   const p = progressOf(shownMs, durationMs);
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    const stepped =
-      onSeek === undefined ? null : seekStepMs(event.key, shownMs, durationMs);
-    if (stepped !== null) {
+    if (scrub.onScrubKey(event.key)) {
       event.preventDefault();
-      onSeek?.(stepped);
     }
   };
   return (
@@ -579,11 +603,8 @@ export function WaveformSeek({
   );
   const dAll = useMemo(() => barsPathD(layout.xs, bars), [layout, bars]);
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    const stepped =
-      onSeek === undefined ? null : seekStepMs(event.key, shownMs, durationMs);
-    if (stepped !== null) {
+    if (scrub.onScrubKey(event.key)) {
       event.preventDefault();
-      onSeek?.(stepped);
     }
   };
   const preview = hover ?? p;

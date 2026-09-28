@@ -198,7 +198,7 @@ internal class AuqwWaveformPeaks(
         )
       }
       return bucket(
-        pcmFile, decoded.bytes, decoded.channels, decoded.floatPcm, count
+        pcmFile, decoded.bytes, decoded.channels, decoded.floatPcm, count, job
       )
     } catch (_: CancellationException) {
       throw CodedException("cancelled", "peak extraction cancelled", null)
@@ -462,6 +462,7 @@ internal class AuqwWaveformPeaks(
     channels: Int,
     floatPcm: Boolean,
     count: Int,
+    job: Job?,
   ): List<Double> {
     val out = ArrayList<Double>(count * 2)
     if (count <= 0 || channels <= 0 || pcmBytes <= 0) {
@@ -487,6 +488,9 @@ internal class AuqwWaveformPeaks(
       }
       val stereo = channels >= 2
       for (w in 0 until count) {
+        // A cancel landing mid-frame must still reach extract's
+        // cleanup — a skipped track shouldn't scan the whole file.
+        job?.ensureActive()
         val from = (w.toLong() * frames / count).toInt()
         val to = minOf(
           frames,

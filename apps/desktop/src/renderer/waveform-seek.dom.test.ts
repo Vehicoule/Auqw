@@ -94,6 +94,11 @@ export async function run(): Promise<void> {
     const pointer = (input: InputEl, type: string): void => {
       input.dispatchEvent(new win.MouseEvent(type, { bubbles: true }));
     };
+    const key = (input: InputEl, key: string): void => {
+      input.dispatchEvent(
+        new win.KeyboardEvent('keydown', { key, bubbles: true }),
+      );
+    };
 
     // Drag right then left: moves only preview; each release commits
     // exactly one seek at the released position.
@@ -455,6 +460,56 @@ export async function run(): Promise<void> {
         'input commits once the dead pointer released',
       );
       assertEqual(seeks[0], 55_000, 'the keyboard commit lands');
+      await act(async () => {
+        root.unmount();
+      });
+    }
+
+    // Arrows during a pending seek publish step from the held
+    // target, not the stale published position — each press must
+    // advance the hold it just set.
+    {
+      const container = win.document.createElement('div');
+      win.document.body.appendChild(container);
+      const root = createRoot(container);
+      const seeks: number[] = [];
+      await act(async () => {
+        root.render(
+          createElement(WaveformSeek, {
+            positionMs: 10_000,
+            durationMs: 180_000,
+            labels: false,
+            onSeek: (ms) => seeks.push(ms),
+          }),
+        );
+      });
+      const input = container.querySelector('input');
+      assert(input !== null, 'the range input rendered');
+      await act(async () => {
+        pointer(input, 'pointerdown');
+      });
+      await act(async () => {
+        slide(input, 120_000);
+      });
+      await act(async () => {
+        pointer(input, 'pointerup');
+      });
+      assertEqual(seeks.length, 1, 'the drag committed its release');
+      // The commit hold is still pending — two arrows step from the
+      // held 120 s each time, not from the still-stale 10 s publish.
+      await act(async () => {
+        key(input, 'ArrowRight');
+      });
+      await act(async () => {
+        key(input, 'ArrowRight');
+      });
+      assertEqual(seeks.length, 3, 'each arrow seeks once');
+      assertEqual(seeks[1], 130_000, 'the first arrow steps the hold');
+      assertEqual(
+        seeks[2],
+        140_000,
+        'the second arrow advances the hold, not the published ms',
+      );
       await act(async () => {
         root.unmount();
       });
