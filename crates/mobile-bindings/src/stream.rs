@@ -217,6 +217,28 @@ impl PluginHost {
             .map_err(StreamError::from)
     }
 
+    /// Non-demanding positional read for decorative consumers
+    /// (waveform peaks): `Some(bytes)` a committed hit, `Some(empty)`
+    /// a confirmed EOF, `None` an unfetched hole. Queues no pump
+    /// demand and never parks — a caller abandoning it leaves no
+    /// Rust-side demand behind (unlike `stream_read`, whose parked
+    /// demand outlives any caller-side timeout). It still does the
+    /// store's disk read on a hit, so keep it off the main thread.
+    ///
+    /// # Errors
+    /// [`StreamError::Unavailable`] when the seam is not configured;
+    /// [`StreamError::Failed`] with the session's kind otherwise.
+    pub fn stream_peek(
+        &self,
+        handle: String,
+        position: u64,
+        max_len: u64,
+    ) -> Result<Option<Vec<u8>>, StreamError> {
+        self.inner
+            .stream_peek(handle, position, max_len)
+            .map_err(StreamError::from)
+    }
+
     /// DataSource close: detaches the consumer; the session stays live
     /// for re-attach.
     ///

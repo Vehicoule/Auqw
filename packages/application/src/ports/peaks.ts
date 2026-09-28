@@ -13,10 +13,31 @@ export type PeaksRequest = {
 };
 
 /**
+ * Decorative extraction bound shared by every `PeaksPort`: decoded
+ * PCM for a track past this is a renderer-paid spike, so ports refuse
+ * (or the tracker cancels) — the seeded pattern stays. Exported so
+ * the port and the tracker apply the same bound.
+ */
+export const PEAKS_MAX_DECODE_MS = 8 * 60 * 1000;
+
+/**
+ * One normalized asymmetric waveform bar: `up` is the upper
+ * excursion magnitude and `down` the lower, each in 0..1 after the
+ * shared percentile+gamma normalization (`normalizePeakWindows` in
+ * ui-shared). `up` and `down` come from DIFFERENT source energy —
+ * left/right channels on stereo material, positive/negative
+ * half-wave energy on mono — so real bars are not mirrors.
+ */
+export type WaveformPeak = {
+  readonly up: number;
+  readonly down: number;
+};
+
+/**
  * Waveform-peak extraction for the Stage seek bar. Peaks are
  * decoration, never semantics: callers render the seeded amplitude
  * pattern until this resolves and on any failure. Implementations
- * return one normalized amplitude per bucket at the shared canonical
+ * return one normalized pair per bucket at the shared canonical
  * resolution (`PEAKS_RESOLUTION` in ui-shared); renderers resample to
  * their bar count.
  */
@@ -24,5 +45,5 @@ export interface PeaksPort {
   peaks(
     request: PeaksRequest,
     context: OperationContext,
-  ): Promise<Result<readonly number[]>>;
+  ): Promise<Result<readonly WaveformPeak[]>>;
 }

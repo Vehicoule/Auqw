@@ -20,12 +20,13 @@ import type { Locale, MessageId } from './index.ts';
 import {
   shimmerHighlight,
   staggerProgress,
-  waveformAmplitudes,
   waveformBarExtent,
   waveformBarLayout,
+  waveformPeaks,
 } from './waveform.ts';
 import {
   PEAKS_RESOLUTION,
+  normalizePeakWindows,
   peaksFromChannels,
   resamplePeaks,
 } from './peaks.ts';
@@ -331,30 +332,34 @@ assertEqual(
 );
 setLocale('en');
 
-// waveformAmplitudes: deterministic per seed, every bar in [0.12, 1]
-const amps = waveformAmplitudes('track-a', 60);
-assertEqual(amps.length, 60);
+// waveformPeaks: deterministic per seed, every arm inside its clamp.
+const bars = waveformPeaks('track-a', 60);
+assertEqual(bars.length, 60);
 assert(
-  amps.every((v) => v >= 0.12 && v <= 1),
-  'every amplitude stays inside [0.12, 1]',
+  bars.every((p) => p.up >= 0.12 && p.up <= 1 && p.down >= 0.08 && p.down <= 1),
+  'every arm stays inside its seeded clamp',
 );
 assertEqual(
-  JSON.stringify(amps),
-  JSON.stringify(waveformAmplitudes('track-a', 60)),
+  JSON.stringify(bars),
+  JSON.stringify(waveformPeaks('track-a', 60)),
   'same seed and count is deterministic',
 );
 assert(
-  JSON.stringify(amps) !== JSON.stringify(waveformAmplitudes('track-b', 60)),
+  JSON.stringify(bars) !== JSON.stringify(waveformPeaks('track-b', 60)),
   'a different seed produces a different pattern',
 );
-assertEqual(waveformAmplitudes('track-a', 0).length, 0, 'count 0 yields no bars');
+assert(
+  bars.some((p) => Math.abs(p.up - p.down) > 0.02),
+  'seeded pairs are asymmetric — up and down differ',
+);
+assertEqual(waveformPeaks('track-a', 0).length, 0, 'count 0 yields no bars');
 assertEqual(
-  waveformAmplitudes('track-a', -3).length,
+  waveformPeaks('track-a', -3).length,
   0,
   'negative count yields no bars',
 );
 assert(
-  new Set(amps).size > 10,
+  new Set(bars.map((p) => p.up)).size > 10,
   'the pattern actually varies bar to bar',
 );
 
@@ -417,83 +422,172 @@ assert(
   'the band wraps across the 1→0 boundary',
 );
 
-// peaksFromChannels: max-abs bucket envelope, normalized and sqrt-lifted.
-// Synthetic PCM: a sine's flat envelope, an impulse train's spikes.
+// peaksFromChannels: per-window RMS buckets → normalized pairs.
+// Synthetic PCM: a sine's flat envelope, an impulse's spike.
+const FLOOR = Math.pow(0.05, 1.2); // normalized floor stub height
 {
-  const sine = new Float32Array(1024).map((_, i) =>
-    0.5 * Math.sin((2 * Math.PI * i) / 32),
-  );
-  // Bucket width (128 frames) spans four periods → every bucket
-  // contains a crest → the envelope reads as a flat full row.
-  const profile = peaksFromChannels([sine], 8);
+  // An exactly alternating ±0.5 signal gives every bucket the same
+  // energy — the degenerate percentile band maps each bar to the
+  // top, both arms.
+  const uniform = new Float32Array(1024);
+  for (let i = 0; i < uniform.length; i += 1) {
+    uniform[i] = i % 2 === 0 ? 0.5 : -0.5;
+  }
+  const profile = peaksFromChannels([uniform], 8);
   assertEqual(profile.length, 8, 'profile has the requested width');
   assert(
-    profile.every((p) => Math.abs(p - 1) < 1e-6),
-    'a constant sine envelope reads as a flat full row',
+    profile.every((p) => p.up === 1 && p.down === 1),
+    'a constant envelope reads as a flat full row',
   );
   assertEqual(
-    peaksFromChannels([sine], PEAKS_RESOLUTION).length,
+    peaksFromChannels([uniform], PEAKS_RESOLUTION).length,
     PEAKS_RESOLUTION,
     'canonical resolution yields the canonical width',
   );
 
-  // One loud impulse among silence → exactly one hot bucket.
-  const quiet = new Float32Array(1024);
-  quiet[768] = 1;
-  const spiked = peaksFromChannels([quiet], 4);
-  assertEqual(spiked[0], 0, 'silent buckets read zero');
-  assertEqual(spiked[3], 1, 'the impulse owns its bucket');
-  assertEqual(spiked[1], 0, 'neighbouring buckets stay silent');
+  // One loud positive-only burst over a quiet ±0.1 floor → the
+  // headroom-relaxed band keeps the floor low while the burst
+  // saturates its upper arm only. (A lone spike in pure silence is
+  // under the band's 5% mass and honestly renders nothing.)
+  const burst = new Float32Array(1024);
+  for (let i = 0; i < burst.length; i += 1) {
+    burst[i] = i % 2 === 0 ? 0.1 : -0.1;
+  }
+  for (let i = 768; i < 896; i += 1) {
+    burst[i] = 1;
+  }
+  const spiked = peaksFromChannels([burst], 8);
+  assertEqual(spiked[6]?.up, 1, 'the burst owns its bucket');
+  assertEqual(
+    spiked[6]?.down,
+    0,
+    'a unipolar burst leaves the lower arm an honest zero — asymmetric',
+  );
+  assert(
+    (spiked[0]?.up ?? 0) > FLOOR && (spiked[0]?.up ?? 0) < 0.25,
+    'quiet neighbours draw low — above the stub floor, far from the burst',
+  );
 
-  // Two channels take the max across both.
+  // Stereo splits channels: left → up, right → down.
   const left = new Float32Array(4);
   const right = new Float32Array(4);
-  left[0] = 0.25;
-  right[3] = -0.5;
+  left[0] = 0.5;
+  right[3] = -1;
   const stereo = peaksFromChannels([left, right], 4);
-  assertEqual(stereo[3], 1, 'the louder channel drives the bucket');
+  assertEqual(stereo[0]?.up, 1, 'the left channel feeds the upper arm');
+  assertEqual(stereo[3]?.down, 1, 'the right channel feeds the lower arm');
+  assertEqual(
+    stereo[0]?.down,
+    0,
+    'the absent lower channel reads zero — bars are not mirrors',
+  );
+
+  // Dynamics survive: a 14 dB-quiet tail does not normalize to full
+  // height the way the old loudest-bucket map read. Twenty buckets
+  // give the percentile band enough mass to anchor p95 at the loud
+  // level.
+  const loudHush = new Float32Array(2048);
+  loudHush.fill(0.5, 0, 1536);
+  loudHush.fill(0.1, 1536);
+  const dyn = peaksFromChannels([loudHush], 20);
+  assertEqual(dyn[0]?.up, 1, 'the loud section saturates');
   assert(
-    Math.abs((stereo[0] ?? 0) - Math.sqrt(0.5)) < 0.001,
-    'the quiet channel contributes half-weight after normalization',
+    (dyn[19]?.up ?? 1) < 0.2,
+    'a quieter section draws a lower envelope',
   );
 
   // Silence and emptiness are honest zeros, never a divide-by-NaN.
   const flat = peaksFromChannels([new Float32Array(64)], 8);
-  assert(flat.every((p) => p === 0), 'silence yields a zero profile');
+  assert(
+    flat.every((p) => p.up === 0 && p.down === 0),
+    'silence yields a zero profile',
+  );
   const empty = peaksFromChannels([new Float32Array(0)], 8);
-  assert(empty.every((p) => p === 0), 'empty input yields a zero profile');
-  assertEqual(peaksFromChannels([sine], 0).length, 0, 'zero count yields empty');
+  assert(
+    empty.every((p) => p.up === 0 && p.down === 0),
+    'empty input yields a zero profile',
+  );
+  assertEqual(
+    peaksFromChannels([uniform], 0).length,
+    0,
+    'zero count yields empty',
+  );
 }
 
-// resamplePeaks: max-pool downsample, linear upsample, zero-padding.
+// normalizePeakWindows: shared percentile band + gamma on one scale.
 {
-  const up = resamplePeaks([0, 1], 4);
-  assertEqual(up.length, 4, 'upsampled to the bar count');
-  assertEqual(up[0], 0, 'upsample starts at the first peak');
-  assertEqual(up[3], 1, 'upsample ends at the last peak');
+  const norm = normalizePeakWindows([
+    { up: 1, down: 0.5 },
+    { up: 0.2, down: 0.1 },
+  ]);
+  // Percentiles over the joint magnitudes keep a single shared scale:
+  // the loudest arm reaches 1, the quietest sits on the floor.
+  assertEqual(norm.length, 2, 'one pair per window');
   assert(
-    Math.abs((up[1] ?? 0) - 1 / 3) < 0.001,
+    norm.every((p) => p.up >= FLOOR - 1e-9 && p.up <= 1),
+    'normalized arms stay in range',
+  );
+  assert(
+    normalizePeakWindows([]).length === 0,
+    'empty input normalizes to empty',
+  );
+  const silent = normalizePeakWindows([{ up: 0, down: 0 }]);
+  assert(silent[0]?.up === 0 && silent[0]?.down === 0, 'silence stays zero');
+}
+
+// resamplePeaks: per-side max-pool downsample, per-side linear
+// upsample, zeroed-pair padding.
+{
+  const up = resamplePeaks(
+    [
+      { up: 0, down: 0.4 },
+      { up: 1, down: 0.2 },
+    ],
+    4,
+  );
+  assertEqual(up.length, 4, 'upsampled to the bar count');
+  assertEqual(up[0]?.up, 0, 'upsample starts at the first peak');
+  assertEqual(up[0]?.down, 0.4, 'the lower arm interpolates too');
+  assertEqual(up[3]?.up, 1, 'upsample ends at the last peak');
+  assert(
+    Math.abs((up[1]?.up ?? 0) - 1 / 3) < 0.001,
     'upsample interpolates linearly',
   );
 
-  // 4→2 max-pool: a transient survives aggregation.
-  const down = resamplePeaks([0.2, 1, 0.4, 0.1], 2);
-  assertEqual(down[0], 1, 'downsample keeps the bucket max');
-  assertEqual(down[1], 0.4, 'downsample keeps the second bucket max');
+  // 4→2 per-side max-pool: a transient survives aggregation.
+  const down = resamplePeaks(
+    [
+      { up: 0.2, down: 0.9 },
+      { up: 1, down: 0.3 },
+      { up: 0.4, down: 0.6 },
+      { up: 0.1, down: 0.8 },
+    ],
+    2,
+  );
+  assertEqual(down[0]?.up, 1, 'downsample keeps the bucket max up');
+  assertEqual(down[0]?.down, 0.9, 'downsample keeps the bucket max down');
+  assertEqual(down[1]?.up, 0.4, 'second bucket max up');
+  assertEqual(down[1]?.down, 0.8, 'second bucket max down');
 
   // Identity resample is exact.
-  const same = resamplePeaks([0.3, 0.7], 2);
-  assertEqual(same[0], 0.3, 'same-count resample is exact');
-  assertEqual(same[1], 0.7, 'same-count resample is exact');
+  const same = resamplePeaks(
+    [
+      { up: 0.3, down: 0.2 },
+      { up: 0.7, down: 0.5 },
+    ],
+    2,
+  );
+  assertEqual(same[0]?.up, 0.3, 'same-count resample is exact');
+  assertEqual(same[1]?.down, 0.5, 'same-count resample is exact');
 
   assert(
-    resamplePeaks([], 4).every((p) => p === 0),
-    'empty input yields zeros',
+    resamplePeaks([], 4).every((p) => p.up === 0 && p.down === 0),
+    'empty input yields zeroed pairs',
   );
-  assertEqual(resamplePeaks([1], 0).length, 0, 'zero count yields empty');
-  const single = resamplePeaks([0.5], 3);
+  assertEqual(resamplePeaks([{ up: 1, down: 1 }], 0).length, 0, 'zero count yields empty');
+  const single = resamplePeaks([{ up: 0.5, down: 0.3 }], 3);
   assert(
-    single.every((p) => p === 0.5),
+    single.every((p) => p.up === 0.5 && p.down === 0.3),
     'a lone peak broadcasts across the row',
   );
 }

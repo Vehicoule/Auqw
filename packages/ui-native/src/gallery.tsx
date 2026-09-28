@@ -83,6 +83,7 @@ import {
   fixtureSyncModelSyncing,
   fixtureSyncModelUnavailable,
   fixtureSyncModelUnpaired,
+  fixtureWaveformPeaks,
 } from '@auqw/ui-shared/fixtures';
 import type { ThemeName } from '@auqw/design-tokens';
 
@@ -434,6 +435,15 @@ function GalleryBody({
           <Artwork url={null} size={40} monogram="TC" />
         </View>
         <LinearScrubber positionMs={61_000} durationMs={180_000} onSeek={noop} />
+        <WaveformSeek
+          positionMs={90_000}
+          durationMs={180_000}
+          onSeek={noop}
+          peaks={fixtureWaveformPeaks}
+        />
+        <Text variant="metadata" color="secondary">
+          seeded fallback · no peaks yet
+        </Text>
         <WaveformSeek
           positionMs={90_000}
           durationMs={180_000}
