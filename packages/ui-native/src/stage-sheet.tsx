@@ -10,6 +10,7 @@ import {
 import type { StyleProp, ViewStyle } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
+  useAnimatedProps,
   useAnimatedReaction,
   useAnimatedStyle,
   useSharedValue,
@@ -699,8 +700,10 @@ export function StageSheet({
   // sheet shouldn't keep it mounted; it mounts the moment the sheet
   // starts rising (a mid-flight drag must never reveal bare surface)
   // and unmounts only once the morph is fully back at the pill — the
-  // settle-back path still gets its backdrop.
-  const [backdropOn, setBackdropOn] = useState(expanded);
+  // settle-back path still gets its backdrop. A frame of JS latency
+  // costs nothing here; the dismiss surface's touch gate can't wait
+  // on this hop, so it rides the UI thread instead (below).
+  const [artworkOn, setArtworkOn] = useState(expanded);
   // `expanded` mirrored onto the UI thread — the reaction below must
   // read a shared value; a captured ref only snapshots at worklet
   // creation and would pin a sheet mounted-expanded forever.
@@ -712,10 +715,23 @@ export function StageSheet({
     () => progress.value > 0.001,
     (risen, prev) => {
       if (risen === prev) return;
-      scheduleOnRN(setBackdropOn, risen || expandedShared.value);
+      scheduleOnRN(setArtworkOn, risen || expandedShared.value);
     },
     [progress],
   );
+  // The dismiss surface mounts always and its touch + a11y gate
+  // follows the morph on the UI thread: it starts intercepting the
+  // same frame the sheet lifts off the pill (or the expanded anchor
+  // lands), so a tap can't slip through the JS hop a state-mounted
+  // surface would leave open.
+  const dismissSurfaceProps = useAnimatedProps(() => {
+    const on = progress.value > 0.001 || expandedShared.value;
+    return {
+      pointerEvents: on ? 'auto' : 'none',
+      accessibilityElementsHidden: !on,
+      importantForAccessibility: on ? 'auto' : 'no-hide-descendants',
+    } as const;
+  });
 
   const body = (
     <>
@@ -1120,19 +1136,22 @@ export function StageSheet({
           scrimStyle,
         ]}
       />
-      {/* Dismiss surface — mounted the moment the sheet lifts off the
-          pill, not only at the expanded anchor: taps on the uncovered
-          region (or through the parked sheet's pointerEvents=none
-          mid-morph) collapse the morph instead of leaking to content
-          underneath. */}
-      {backdropOn && (
+      {/* Dismiss surface — always mounted, gated on the UI thread:
+          it intercepts the same frame the sheet lifts off the pill,
+          so taps on the uncovered region (or through the parked
+          sheet's pointerEvents=none mid-morph) collapse the morph
+          instead of leaking to content underneath. */}
+      <Animated.View
+        animatedProps={dismissSurfaceProps}
+        style={StyleSheet.absoluteFill}
+      >
         <Pressable
           compact
           onPress={dismissBackdrop}
           accessibilityLabel={t('sheets.closeA11y')}
           style={StyleSheet.absoluteFill}
         />
-      )}
+      </Animated.View>
       <Animated.View
         onLayout={(e) => {
           setHeight(e.nativeEvent.layout.height);
@@ -1160,7 +1179,7 @@ export function StageSheet({
             artwork and controls fade in through the pill's fade window
             and are fully present at the input gate. */}
         <Animated.View style={[StyleSheet.absoluteFill, contentStyle]}>
-          {immersive && backdropOn && (
+          {immersive && artworkOn && (
             <PlayerBackdrop artworkUrl={player.artworkUrl} />
           )}
           {immersive ? (

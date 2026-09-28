@@ -3245,6 +3245,7 @@ function Main({
                         })
                       : undefined
                   }
+                  onStopPlayback={() => void session.stop()}
                   onSeek={seekToPosition}
                   peaks={peaks}
                   onRetryLyrics={onRetryLyrics}

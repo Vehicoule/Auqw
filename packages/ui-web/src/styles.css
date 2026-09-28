@@ -1796,6 +1796,23 @@
   bottom: var(--spacing-lg);
 }
 
+/* Stop/dismiss floats over the stage's top-right — the loaded
+   track's only clear affordance (the queue keeps its items); the
+   world toolbar's stage toggle only hides the column. */
+.uw-stage__stop {
+  position: absolute;
+  top: var(--spacing-sm);
+  right: var(--spacing-sm);
+  z-index: 5;
+  background: var(--fg08);
+}
+
+/* The queue tools row's reorder button shares the top-right corner —
+   reserve the stop's footprint when it exists. */
+.uw-stage:has(> .uw-stage__stop) .uw-stage__queue-tools {
+  padding-right: 44px;
+}
+
 .uw-stage__body {
   position: relative;
   flex: 1;
@@ -1857,7 +1874,14 @@
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
+}
+
+/* The bottom anchor is an auto margin, not flex-end: it absorbs the
+   free space while the cluster fits and collapses to the scroll
+   origin on overflow, so a tall meta block can always scroll its top
+   back into view (flex-end would clip it above the origin). */
+.uw-stage__scroll > :first-child {
+  margin-top: auto;
 }
 
 .uw-stage__art {
@@ -1976,10 +2000,13 @@
 }
 
 /* The world's page switcher: content-width pills, larger-than-
-   metadata text, centered in the strip. */
+   metadata text, centered in the strip — the auto side margins only
+   center while the pill fits; on overflow they collapse to the
+   scroll origin, so narrow windows clip the last tab's tail
+   (scrollable) instead of the first tab's head (unreachable). */
 .uw-segment--tabs {
   display: inline-flex;
-  margin: 0;
+  margin: 0 auto;
 }
 
 .uw-segment--tabs .uw-segment__item {
@@ -2131,9 +2158,9 @@
 .uw-chrome[data-stage='closed'] .uw-stage-col {
   display: none;
 }
-/* No header strip or overlay control on the stage column — the
-   player runs edge to edge; stop/dismiss lives on the transport and
-   queue rows. */
+/* No header strip on the stage column — the player runs edge to
+   edge; the floating stop/dismiss (uw-stage__stop) is its only
+   overlay control. */
 /* macOS traffic lights pin over the stage column's top-left. The
    stage reserves the strip itself so full-bleed artwork still covers
    it; a non-stage body (the empty state) gets the same clearance. */
@@ -2218,11 +2245,13 @@
 .uw-tabs {
   min-width: 0;
   /* last resort for narrow windows + long translations: the pill
-     scrolls (bar stays reachable, nothing overlaps the clusters) */
+     scrolls (bar stays reachable, nothing overlaps the clusters).
+     Centering lives on the pill's auto margins — justify-content
+     here would pin an overflowing pill's head past the scroll
+     origin. */
   overflow-x: auto;
   scrollbar-width: none;
   display: flex;
-  justify-content: center;
 }
 
 .uw-world__content {

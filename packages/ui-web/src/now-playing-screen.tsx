@@ -218,6 +218,12 @@ export type NowPlayingScreenProps = {
   readonly onDownload?: (() => void) | undefined;
   /** Add-to-playlist affordance on the meta row (same as native). */
   readonly onAddToPlaylist?: (() => void) | undefined;
+  /**
+   * Stops playback and clears the stage's track (the queue keeps its
+   * items — the native mini-player's swipe-down dismiss). Overlays the
+   * stage's top-right in every mode; omitted hides the control.
+   */
+  readonly onStopPlayback?: (() => void) | undefined;
   readonly onSeek?: ((ms: number) => void) | undefined;
   /** Real measured peaks for the playing recording; null/undefined
    * keeps the seeded pattern (pending state and failure fallback). */
@@ -273,6 +279,7 @@ export function NowPlayingScreen({
   download = null,
   onDownload,
   onAddToPlaylist,
+  onStopPlayback,
   onSeek,
   peaks,
   onRetryLyrics,
@@ -560,6 +567,20 @@ export function NowPlayingScreen({
         </div>
       )}
       </div>
+      {/* Stop/dismiss floats over the stage's top-right — out of the
+          body flow, reachable in every mode (the old column-level
+          close's home; the stage toggle only hides the column). */}
+      {onStopPlayback !== undefined && (
+        <IconButton
+          icon="close"
+          size={32}
+          iconSize={14}
+          color="var(--text-secondary)"
+          ariaLabel={t('player.a11y.stopDismiss')}
+          onPress={onStopPlayback}
+          className="uw-stage__stop"
+        />
+      )}
       {/* The mode segment floats over the stage's bottom safe zone —
           it takes no layout space, so lyrics/queue rows and the
           transport never reflow around it or hide beneath it. */}

@@ -357,7 +357,10 @@ function render(node: ReactNode): string {
 
 {
   const markup = render(
-    h(NowPlayingScreen, { player: fixturePlayerPlaying }),
+    h(NowPlayingScreen, {
+      player: fixturePlayerPlaying,
+      onStopPlayback: () => {},
+    }),
   );
   check(
     'player mode is artwork-led (immersive scope)',
@@ -371,6 +374,11 @@ function render(node: ReactNode): string {
     'player mode floats the mode segment',
     markup.includes('uw-stage__segment'),
   );
+  check(
+    'stage carries the stop/dismiss control',
+    markup.includes('uw-stage__stop'),
+  );
+  assertIncludes('stop control has a11y label', markup, 'stop and dismiss');
 }
 {
   const markup = render(
