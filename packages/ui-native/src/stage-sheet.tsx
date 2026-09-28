@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Image,
   Platform,
@@ -704,9 +704,12 @@ export function StageSheet({
   const [risenOn, setRisenOn] = useState(expanded);
   // `expanded` mirrored onto the UI thread — the reaction below must
   // read a shared value; a captured ref only snapshots at worklet
-  // creation and would pin a sheet mounted-expanded forever.
+  // creation and would pin a sheet mounted-expanded forever. Synced
+  // in a layout effect so the write lands inside the same commit as
+  // the expanded flip: a passive effect would leave a window where
+  // the gate still reads stale and taps leak underneath.
   const expandedShared = useSharedValue(expanded);
-  useEffect(() => {
+  useLayoutEffect(() => {
     expandedShared.value = expanded;
   }, [expanded, expandedShared]);
   useAnimatedReaction(
