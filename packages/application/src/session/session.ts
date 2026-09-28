@@ -5146,8 +5146,7 @@ export class Session {
           attempt.terminalError ?? appError('superseded', 'play superseded'),
         );
       }
-      await this.#adoptPrepared(attempt, stream, warm.attempt, true);
-      return ok(undefined);
+      return this.#adoptPrepared(attempt, stream, warm.attempt, true);
     }
     const prepared = await retryBounded({
       deadlineMs,
@@ -6098,10 +6097,10 @@ export class Session {
     stream: PreparedStream,
     attempt: AttemptTrace | null,
     reprepareOnDeadHandle: boolean,
-  ): Promise<void> {
+  ): Promise<Result<void>> {
     const r = this.#ready;
     if (r === null) {
-      return;
+      return err(internalError());
     }
     active.handle = stream.handle;
     if (r.queue.snapshot().mode === 'paused') {
@@ -6112,7 +6111,7 @@ export class Session {
         await this.#persist({ attempts: [attempt] });
       }
       this.#maybeMapSuccessor();
-      return;
+      return ok(undefined);
     }
     const playResult = await this.#bounded(() =>
       this.#player.play({
@@ -6122,7 +6121,9 @@ export class Session {
       }),
     );
     if (this.#isStale(active)) {
-      return;
+      return err(
+        active.terminalError ?? appError('superseded', 'play superseded'),
+      );
     }
     if (!playResult.ok) {
       if (
@@ -6131,8 +6132,7 @@ export class Session {
       ) {
         // Same recovery as a dead-handle 'failed' status: the queue
         // still holds the intent — a fresh prepare resolves honestly.
-        await this.#startAttempt(active.occurrenceId);
-        return;
+        return this.#startAttempt(active.occurrenceId);
       }
       await this.#failOrRetryAttempt(active, playResult.error);
       // The trace survives the transport failure, same contract as
@@ -6140,13 +6140,19 @@ export class Session {
       if (attempt !== null) {
         await this.#persist({ attempts: [attempt] });
       }
-      return;
+      // An armed retry keeps this attempt as the live one — the
+      // intent still holds, so the call is not a failure. A straight
+      // `#failAttempt` cleared `#active`: propagate the verdict.
+      return this.#active === active
+        ? ok(undefined)
+        : err(active.terminalError ?? playResult.error);
     }
     this.#setPlaybackFromStatus(active, 'buffering');
     if (attempt !== null) {
       await this.#persist({ attempts: [attempt] });
     }
     this.#maybeMapSuccessor();
+    return ok(undefined);
   }
 
   // ---- queue projection ----------------------------------------------
@@ -6637,8 +6643,9 @@ export class Session {
     if (this.#pickRef(recording, successor.selectedRef) !== null) {
       return;
     }
-    // Speculative work spends the network too — skip when offline.
-    if (!this.#isOnline()) {
+    // Speculative work spends the network too — skip when offline or
+    // on a metered link, the same gate the warm passes run under.
+    if (!this.#isOnline() || this.#isMetered()) {
       return;
     }
     const routed = this.#router.providerFor(
@@ -6961,19 +6968,22 @@ export class Session {
   #nextWarmTarget(
     r: Ready,
   ): { recordingId: string; occurrenceId: string | null } | null {
-    // While an attempt owns the network (select through prepare),
-    // speculative resolve waits: the attempt may be resolving any of
-    // these rows, and a racing warm duplicates the call and the
-    // mapping write. Playback settling republishes and re-derives —
-    // the warm resumes the moment the attempt ends.
-    if (this.#active !== null) {
-      return null;
-    }
+    // Only the row the active attempt is itself resolving stays out
+    // of the pass: the attempt's candidates call and mapping commit
+    // are the truth for it, and a racing warm would duplicate both.
+    // Once the attempt holds its handle (`preparedHandled`) — e.g.
+    // during playback — it owns nothing speculative, so the window
+    // behind the cursor warms as designed.
+    const resolvingId =
+      this.#active !== null && !this.#active.preparedHandled
+        ? this.#active.recordingId
+        : null;
     for (const id of [...this.#warmPending]) {
       this.#warmPending.delete(id);
       const rec = r.recordings.find((x) => x.id === id);
       if (
         rec !== undefined &&
+        id !== resolvingId &&
         this.#pickRef(rec, null) === null &&
         !this.#warmSeenFresh(id)
       ) {
@@ -7007,6 +7017,7 @@ export class Session {
       if (
         occurrence !== undefined &&
         rec !== undefined &&
+        rec.id !== resolvingId &&
         this.#pickRef(rec, occurrence.selectedRef) === null &&
         !this.#warmSeenFresh(rec.id)
       ) {
@@ -7346,6 +7357,22 @@ export class Session {
         issueSource,
       );
       if (this.#streamWarm !== record) {
+        // The record was dropped while the port request was in
+        // flight — a request id arriving now has no owner: cancel it
+        // or the native prepare (and the session it mints) idles
+        // unowned until the seam's reaper collects it.
+        if (issued.ok) {
+          const requestId = issued.value;
+          await this.#bounded(() =>
+            this.#player.cancelPrepare({
+              requestId,
+              identity: {
+                attemptId: record.attemptId,
+                queueRev: record.queueRev,
+              },
+            }),
+          );
+        }
         return;
       }
       if (!issued.ok) {

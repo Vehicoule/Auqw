@@ -5919,6 +5919,16 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['windowWarmAmbiguousSkipsReview', windowWarmAmbiguousSkipsReview],
   ['windowWarmBoundSixtyFour', windowWarmBoundSixtyFour],
   ['windowWarmCancelOnConnectivity', windowWarmCancelOnConnectivity],
+  ['windowWarmReachesPastSuccessor', windowWarmReachesPastSuccessor],
+  ['successorMapSuppressedOnMetered', successorMapSuppressedOnMetered],
+  [
+    'streamWarmDroppedMidIssueCancelsLate',
+    streamWarmDroppedMidIssueCancelsLate,
+  ],
+  [
+    'streamWarmAdoptedPlayFailureFails',
+    streamWarmAdoptedPlayFailureFails,
+  ],
 ] as const;
 
 // The materialized rebuild: the durable log's surviving records
@@ -6954,6 +6964,171 @@ async function windowWarmCancelOnConnectivity(): Promise<void> {
     readyOf(r).queue.occurrences[1]?.selectedRef,
     null,
     'cancelled warm writes nothing',
+  );
+}
+
+/** The dealt window resolves rows past the mapped successor while
+ *  playing — the pass only shields the row the attempt is resolving,
+ *  not the whole playback. */
+async function windowWarmReachesPastSuccessor(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('itunes', 'iB')]),
+        recording('rC', [ref('itunes', 'iC')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oA', 'rA'),
+        occurrence('oB', 'rB'),
+        occurrence('oC', 'rC'),
+      ]),
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  // The successor pass resolves rB; the window pass must still reach
+  // rC — before the fix the whole pass froze while #active existed.
+  let guard = 0;
+  let resolvedR3 = false;
+  while (guard < 12 && !resolvedR3) {
+    while (r.ytm.pendingCount('candidates') > 0) {
+      const pending = r.ytm.calls
+        .filter((c) => c.method === 'candidates')
+        .at(-1);
+      const query = (pending?.input as { query?: { title?: string } })
+        ?.query;
+      const forC = query?.title === 'Song rC';
+      if (forC) {
+        resolvedR3 = true;
+      }
+      r.ytm.settleCandidates(
+        ok([
+          meta(
+            'youtube-music',
+            forC ? 'yC' : 'yB',
+            query?.title ?? 'Song rB',
+            'Artist',
+            300_000,
+          ),
+        ]),
+      );
+      await pump();
+    }
+    guard += 1;
+    await pump();
+  }
+  assert(resolvedR3, 'window warm resolved the row past the successor');
+  const recC = readyOf(r).recordings.find((x) => x.id === 'rC');
+  assert(
+    recC?.mappings.some((m) => m.status === 'automatic' && m.ref.id === 'yC') ===
+      true,
+    'rC landed as an automatic mapping',
+  );
+}
+
+/** A metered link suppresses the automatic successor mapping too —
+ *  not just the advisory warms. */
+async function successorMapSuppressedOnMetered(): Promise<void> {
+  let metered = true;
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('itunes', 'iB')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oA', 'rA'),
+        occurrence('oB', 'rB'),
+      ]),
+    }),
+    [],
+    undefined,
+    () => true,
+    undefined,
+    undefined,
+    () => metered,
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  const candidateCalls = () =>
+    r.ytm.calls.filter((c) => c.method === 'candidates').length;
+  assertEqual(
+    candidateCalls(),
+    0,
+    'metered: no speculative successor mapping',
+  );
+  assertEqual(
+    readyOf(r).queue.occurrences[1]?.selectedRef,
+    null,
+    'successor stays unresolved while metered',
+  );
+  // Dropping back to unmetered re-derives and maps it.
+  metered = false;
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(candidateCalls(), 1, 'unmetered edge resumes mapping');
+}
+
+/** A warm dropped before its request id lands cancels that id when
+ *  it arrives — the minted session never idles unowned. */
+async function streamWarmDroppedMidIssueCancelsLate(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+      ],
+      queue: stoppedQueue([occurrence('oA', 'rA')]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({ sourceRefs: [ref('youtube-music', 'yA')] });
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'first warm issued');
+  // Retarget while the first request id is still in flight — the
+  // record is dropped with requestId still null.
+  r.session.prewarm({ sourceRefs: [ref('youtube-music', 'yB')] });
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 2, 'newest ref re-issues');
+  assert(r.player.settlePrewarm(ok('req-w-1')), 'pending prewarm #1');
+  await pump();
+  const cancels = calls(r, 'cancelPrepare').map(
+    (c) => (c.input as { requestId: string }).requestId,
+  );
+  assert(
+    cancels.includes('req-w-1'),
+    'dropped warm cancels its late request id',
+  );
+}
+
+/** An adopted warm whose play fails reports the failure — the tap
+ *  never observes success on a dead attempt. */
+async function streamWarmAdoptedPlayFailureFails(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('rA', [ref('youtube-music', 'yA')])],
+      queue: stoppedQueue([occurrence('oA', 'rA')]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({ sourceRefs: [ref('youtube-music', 'yA')] });
+  await pump();
+  const input = warmInput(r);
+  assert(r.player.settlePrewarm(ok('req-warm-pf')), 'pending prewarm');
+  r.player.emit(warmPrepared(input.identity, 'h-warm'));
+  await pump();
+  // The adopted session's play refuses — non-retryable, non-dead.
+  r.player.setNextResult(err(appError('unavailable', 'attach refused')));
+  const started = r.session.playOccurrence('oA');
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 0, 'warm adopted: no prepare');
+  const res = await started;
+  assert(!res.ok, 'playOccurrence reports the play failure');
+  assertEqual(
+    readyOf(r).playback.type,
+    'failed',
+    'attempt ended failed, not silent',
   );
 }
 

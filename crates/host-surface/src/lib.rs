@@ -298,6 +298,20 @@ struct PreparedSlot {
     delivered: bool,
 }
 
+/// The held result of `begin_admission`: the duplicate checks ran and
+/// both ownership maps stay locked until the caller commits its own
+/// reservation — a `cancels` `LiveRequest` for an invocation, or a
+/// `prepared_handles` `PreparedSlot` for a warm adoption. `cancels`
+/// nests inside `prepared_handles`, matching the delivery path's
+/// lock order; `cancel` never holds both, so no cycle exists.
+struct Admission<'a> {
+    prepared: MutexGuard<'a, HashMap<String, PreparedSlot>>,
+    cancels: MutexGuard<'a, HashMap<String, LiveRequest>>,
+    /// A `cancel` tombstone consumed for this id — the caller applies
+    /// it to whatever it registers next.
+    tombstoned: bool,
+}
+
 /// Counts deliveries inside their insert→wire→flip window per
 /// request id, so a `cancel` that finds a not-yet-delivered slot waits
 /// only for its own request's delivery instead of every in-flight one
@@ -828,6 +842,65 @@ impl PluginHost {
 }
 
 impl PluginHost {
+    /// Atomic request-id admission shared by `start_typed` and the
+    /// prepare-adoption fast-path in `stream.rs`: the duplicate checks
+    /// (a delivered/adopted `PreparedSlot`, an in-flight `LiveRequest`)
+    /// and the caller's reservation run inside one critical section
+    /// spanning both maps, so neither path can slip a second request
+    /// past the other's check and double-own a stream session. The
+    /// guards come back held — the caller inserts its own record
+    /// while still inside the section.
+    fn begin_admission(&self, request_id: &str) -> Result<Admission<'_>, HostError> {
+        let mut prepared = lock(&self.prepared_handles)?;
+        // A slot can outlive its registry entry once the
+        // abandoned-session reaper evicts the stream — prune slots
+        // whose sessions are no longer live first, or a dead session
+        // still blocks the id's reuse.
+        if let Some(stream) = &self.stream {
+            prepared.retain(|_, s| stream.is_live(&s.handle));
+        }
+        if prepared.contains_key(request_id) {
+            return Err(HostError::RequestInFlight {
+                id: request_id.to_string(),
+            });
+        }
+        let mut cancels = lock(&self.cancels)?;
+        // A settled generic entry no longer blocks its id — the
+        // invocation ended; evict it so this generation owns the id
+        // even while the previous outcome is still on the wire.
+        if cancels
+            .get(request_id)
+            .is_some_and(|r| r.settled && !r.is_prepare)
+        {
+            cancels.remove(request_id);
+        }
+        if cancels.contains_key(request_id) {
+            return Err(HostError::RequestInFlight {
+                id: request_id.to_string(),
+            });
+        }
+        // Admission consumes a tombstone for this id: a cancel that
+        // outran the bookkeeping still lands on the request it was
+        // meant for, but a stone left by an earlier, settled
+        // generation can't poison a later reuse — it dies with this
+        // admission. An EXPIRED stone dies without cancelling: the
+        // TTL bounds the race window, so it is honored on the consume
+        // side too, not only on insert.
+        let tombstoned = self
+            .cancelled_requests
+            .lock()
+            .map(|mut c| {
+                c.remove(request_id)
+                    .is_some_and(|t| t.elapsed() < CANCEL_TOMBSTONE_TTL)
+            })
+            .unwrap_or(false);
+        Ok(Admission {
+            prepared,
+            cancels,
+            tombstoned,
+        })
+    }
+
     /// Spawn one invocation on the runtime and deliver it to `deliver`
     /// on a worker thread — `deliver` returns a future so callers can
     /// offload blocking work with `spawn_blocking` instead of stalling
@@ -880,58 +953,20 @@ impl PluginHost {
         // Caller-minted ids must be unique while live: a duplicate
         // would replace the first invocation's token (and, for
         // prepare, steal the earlier session's ownership slot) —
-        // reject rather than corrupt. The `prepared_handles` check
-        // runs before admission, never nested under `cancels`:
-        // `prepared_handles` is only populated by a request whose
-        // `cancels` entry still exists or has just been delivered, so
-        // the atomic contains+insert below closes the race.
-        {
-            let mut m = lock(&self.prepared_handles)?;
-            // A slot can outlive its registry entry once the
-            // abandoned-session reaper evicts the stream — prune
-            // slots whose sessions are no longer live first, or a
-            // dead session still blocks the id's reuse.
-            if let Some(stream) = &self.stream {
-                m.retain(|_, s| stream.is_live(&s.handle));
-            }
-            if m.contains_key(&request_id) {
-                return Err(HostError::RequestInFlight { id: request_id });
-            }
-        }
+        // reject rather than corrupt. The checks and the reservation
+        // share one critical section across both maps: the adoption
+        // fast-path claims the same id through `begin_admission`, so
+        // an in-flight `LiveRequest` here blocks an adoption and an
+        // adopted `PreparedSlot` there blocks this admission.
         let generation = {
-            let mut m = lock(&self.cancels)?;
-            // A settled generic entry no longer blocks its id — the
-            // invocation ended; evict it so this generation owns the
-            // id even while the previous outcome is still on the wire.
-            if m.get(&request_id)
-                .is_some_and(|r| r.settled && !r.is_prepare)
-            {
-                m.remove(&request_id);
-            }
-            if m.contains_key(&request_id) {
-                return Err(HostError::RequestInFlight { id: request_id });
-            }
-            // Admission consumes a tombstone for this id: a cancel
-            // that outran the bookkeeping still lands on the request
-            // it was meant for (the token starts cancelled), but a
-            // stone left by an earlier, settled generation can't
-            // poison a later reuse — it dies with this admission.
-            // An EXPIRED stone dies without cancelling: the TTL
-            // bounds the race window, so it is honored on the consume
-            // side too, not only on insert.
-            if self
-                .cancelled_requests
-                .lock()
-                .map(|mut c| {
-                    c.remove(&request_id)
-                        .is_some_and(|t| t.elapsed() < CANCEL_TOMBSTONE_TTL)
-                })
-                .unwrap_or(false)
-            {
+            let mut admission = self.begin_admission(&request_id)?;
+            // A tombstoned request starts cancelled — the cancel that
+            // outran the bookkeeping still lands on it.
+            if admission.tombstoned {
                 token.cancel();
             }
             let generation = self.request_generation.fetch_add(1, Ordering::Relaxed);
-            m.insert(
+            admission.cancels.insert(
                 request_id.clone(),
                 LiveRequest {
                     token: token.clone(),
@@ -1743,6 +1778,42 @@ mod tests {
             Err(e) => panic!("first start: {e}"),
         }
         match host.start_prepare(id, "vid".into(), "dup".into(), deliver(tx2)) {
+            Err(HostError::RequestInFlight { id }) => assert_eq!(id, "dup"),
+            other => panic!("expected RequestInFlight, got {other:?}"),
+        }
+    }
+
+    /// Cross-path duplicate: the first claim on the id sits in
+    /// `cancels` (an invoke-path prepare still resolving). An adoption
+    /// admitting under the same id would commit a second ownership
+    /// slot — two requests both believing they own stream sessions,
+    /// one's `cancel` abandoning the other's. `begin_admission`
+    /// checks both maps under one critical section, so the invoke's
+    /// `LiveRequest` blocks the adoption.
+    #[test]
+    fn prepare_adoption_rejects_an_id_in_flight_on_the_invoke_path() {
+        let (host, reg, _dir) = stream_host("dup-cancels");
+        let id = load_echo(&host);
+        let (tx1, _rx1) = deliver_chan();
+        let (tx2, _rx2) = deliver_chan();
+        // No warm for "other" — the first request lands on the invoke
+        // path and registers `cancels["dup"]` before returning.
+        match host.start_prepare(id.clone(), "other".into(), "dup".into(), move |rid, o| {
+            let tx = tx1.clone();
+            async move {
+                let _ = tx.send((rid, o));
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("first start: {e}"),
+        }
+        mint_warm(&reg, &id, "vid");
+        match host.start_prepare(id, "vid".into(), "dup".into(), move |rid, o| {
+            let tx = tx2.clone();
+            async move {
+                let _ = tx.send((rid, o));
+            }
+        }) {
             Err(HostError::RequestInFlight { id }) => assert_eq!(id, "dup"),
             other => panic!("expected RequestInFlight, got {other:?}"),
         }

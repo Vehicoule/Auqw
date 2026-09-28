@@ -375,14 +375,14 @@ impl PluginHost {
                 guest_log: Vec::new(),
             };
             let prepared_handles = Arc::clone(&self.prepared_handles);
-            let cancelled_requests = Arc::clone(&self.cancelled_requests);
             let prepared_delivery = Arc::clone(&self.prepared_delivery);
-            // Slot commit under one lock: a cancel that lands first
-            // tombstones instead (consumed below); a cancel that lands
-            // after sees the slot and abandons it — the request id can
-            // never race the adoption window. `track` precedes `insert`
-            // so `delivered: false` always implies the counted window —
-            // identical ordering to the invoke path.
+            // Admission and slot commit share one critical section
+            // with `start_typed` via `begin_admission`: an id owned by
+            // an in-flight invoke — or already committed for another
+            // adoption — is refused before any ownership claim, so a
+            // request id can never double-register a stream session.
+            // A cancel that lands first tombstones instead (consumed
+            // below); one landing after sees the slot and abandons it.
             enum Adopt {
                 Owned,
                 Cancelled,
@@ -396,31 +396,18 @@ impl PluginHost {
             // simply dropped unused.
             let ticket = prepared_delivery.track(request_id.clone());
             let adopt: Result<Adopt, HostError> = (|| {
-                let mut m = lock(&self.prepared_handles)?;
-                // Sessions ended by supersede/evict/expiry saw neither
-                // cancel nor release — prune stale mappings first so a
-                // dead session can't block the id's reuse.
-                m.retain(|_, s| s.handle == info.handle || stream.is_live(&s.handle));
-                if m.contains_key(&request_id) {
-                    return Err(HostError::RequestInFlight {
-                        id: request_id.clone(),
-                    });
-                }
+                let mut admission = self.begin_admission(&request_id)?;
                 // Consume this id's tombstone under the same critical
                 // section — a `cancel` that outran the slot insert
                 // owns the verdict; the session survives under the
                 // minting request's own ownership slot.
-                let tombstoned = cancelled_requests
-                    .lock()
-                    .map(|mut t| t.remove(&request_id).is_some())
-                    .unwrap_or(false);
-                if tombstoned {
+                if admission.tombstoned {
                     return Ok(Adopt::Cancelled);
                 }
                 if !stream.is_live(&info.handle) {
                     return Ok(Adopt::Dead);
                 }
-                m.insert(
+                admission.prepared.insert(
                     request_id.clone(),
                     PreparedSlot {
                         handle: info.handle.clone(),
