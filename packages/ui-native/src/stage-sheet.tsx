@@ -10,6 +10,7 @@ import {
 import type { StyleProp, ViewStyle } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
+  useAnimatedProps,
   useAnimatedReaction,
   useAnimatedStyle,
   useSharedValue,
@@ -699,10 +700,7 @@ export function StageSheet({
   // sheet shouldn't keep it mounted; it mounts the moment the sheet
   // starts rising (a mid-flight drag must never reveal bare surface)
   // and unmounts only once the morph is fully back at the pill — the
-  // settle-back path still gets its backdrop. The dismiss surface
-  // shares this JS-side "risen" truth for its mount (below), and ORs
-  // in the synchronous `expanded` flip so the tap path never waits
-  // on the reaction's hop.
+  // settle-back path still gets its backdrop.
   const [risenOn, setRisenOn] = useState(expanded);
   // `expanded` mirrored onto the UI thread — the reaction below must
   // read a shared value; a captured ref only snapshots at worklet
@@ -719,6 +717,24 @@ export function StageSheet({
     },
     [progress],
   );
+  // The dismiss surface's touch + a11y gate rides the morph on the
+  // UI thread: on native the surface stays mounted and starts
+  // intercepting the same frame the sheet lifts off the pill (or the
+  // expanded anchor lands) — a state-mounted surface would leave a
+  // JS-hop window where a tap slips through to content underneath.
+  // RNW writes these non-style animated props as inert DOM
+  // attributes, so web can't gate this way: there the surface's own
+  // mount is the gate, fed by the same truth in JS (`dismissOn`,
+  // which also covers the synchronous expanded flip).
+  const dismissSurfaceProps = useAnimatedProps(() => {
+    const on = progress.value > 0.001 || expandedShared.value;
+    return {
+      pointerEvents: on ? 'auto' : 'none',
+      accessibilityElementsHidden: !on,
+      importantForAccessibility: on ? 'auto' : 'no-hide-descendants',
+    } as const;
+  });
+  const dismissOn = risenOn || expanded;
 
   const body = (
     <>
@@ -1123,20 +1139,24 @@ export function StageSheet({
           scrimStyle,
         ]}
       />
-      {/* Dismiss surface — mounted the moment the sheet lifts off
-          the pill (`risenOn` rides the reaction) or the expanded
-          anchor lands (synchronous, so a tap can't slip through the
-          reaction's JS hop on the tap path): taps on the uncovered
-          region (or through the parked sheet's pointerEvents=none
-          mid-morph) collapse the morph instead of leaking to content
-          underneath. */}
-      {(risenOn || expanded) && (
-        <Pressable
-          compact
-          onPress={dismissBackdrop}
-          accessibilityLabel={t('sheets.closeA11y')}
+      {/* Dismiss surface — taps on the uncovered region (or through
+          the parked sheet's pointerEvents=none mid-morph) collapse
+          the morph instead of leaking to content underneath. On
+          native it mounts always and its gate rides the UI thread
+          (a JS-gated element in the hit path would reopen the hop);
+          on web the mount itself is the gate. */}
+      {(dismissOn || Platform.OS !== 'web') && (
+        <Animated.View
+          animatedProps={dismissSurfaceProps}
           style={StyleSheet.absoluteFill}
-        />
+        >
+          <Pressable
+            compact
+            onPress={dismissBackdrop}
+            accessibilityLabel={t('sheets.closeA11y')}
+            style={StyleSheet.absoluteFill}
+          />
+        </Animated.View>
       )}
       <Animated.View
         onLayout={(e) => {
