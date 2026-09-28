@@ -240,6 +240,22 @@ function useScrubCommit(
       setHeldMs(null);
     }
   }, [trackKey, heldMs]);
+  // A track change mid-drag abandons the gesture entirely: the
+  // preview belongs to a track no longer playing, and a release
+  // must never seek it — `onScrubEnd` double-checks the key for
+  // the same reason (a release can land before this effect).
+  useEffect(() => {
+    if (
+      dragging.current &&
+      gestureKey.current !== undefined &&
+      gestureKey.current !== trackKey
+    ) {
+      dragging.current = false;
+      scrubRef.current = null;
+      gestureKey.current = undefined;
+      setScrubMs(null);
+    }
+  }, [trackKey]);
 
   const onScrubStart = useCallback(() => {
     if (enabled) {
@@ -266,10 +282,15 @@ function useScrubCommit(
       if (!dragging.current) {
         return;
       }
-      if (commitMs === null) {
-        // A cancelled/empty gesture restores the real fill — only a
-        // released pointer's position may move playback, so the
-        // preview must be dropped before any fallback is consulted.
+      // Abandoned gestures — a cancelled pointer or a track change
+      // since pointer-down — restore the real fill. The key check
+      // matters: releasing on a new track must not seek it to a
+      // position the preview only ever showed on the old one.
+      if (
+        commitMs === null ||
+        (gestureKey.current !== undefined &&
+          gestureKey.current !== trackKeyRef.current)
+      ) {
         dragging.current = false;
         scrubRef.current = null;
         gestureKey.current = undefined;
@@ -282,9 +303,15 @@ function useScrubCommit(
   );
   const shownHeld =
     heldMs !== null && heldKey.current === trackKey ? heldMs : null;
+  const shownScrub =
+    scrubMs !== null &&
+    gestureKey.current !== undefined &&
+    gestureKey.current === trackKey
+      ? scrubMs
+      : null;
   return {
     enabled,
-    shownMs: scrubMs ?? shownHeld ?? positionMs,
+    shownMs: shownScrub ?? shownHeld ?? positionMs,
     onScrubStart,
     onScrubValue,
     onScrubEnd,

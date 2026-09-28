@@ -898,6 +898,7 @@ export function StageSheet({
             positionMs={player.positionMs}
             durationMs={player.durationMs}
             onSeek={onSeek}
+            trackKey={player.occurrenceId}
             seed={`${player.title}|${player.artist ?? ''}`}
             peaks={peaks}
             loading={player.status === 'preparing' || player.durationMs === null}

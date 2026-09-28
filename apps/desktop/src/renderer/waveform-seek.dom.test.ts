@@ -343,6 +343,54 @@ export async function run(): Promise<void> {
         root.unmount();
       });
     }
+
+    // A track change mid-drag abandons the gesture: the release must
+    // not seek the new track to a position previewed on the old one.
+    {
+      const container = win.document.createElement('div');
+      win.document.body.appendChild(container);
+      const root = createRoot(container);
+      const seeks: number[] = [];
+      const render = (trackKey: string, positionMs: number, durationMs: number) =>
+        createElement(WaveformSeek, {
+          positionMs,
+          durationMs,
+          trackKey,
+          labels: false,
+          onSeek: (ms) => seeks.push(ms),
+        });
+      await act(async () => {
+        root.render(render('occ-a', 10_000, 180_000));
+      });
+      const input = container.querySelector('input');
+      assert(input !== null, 'the range input rendered');
+      await act(async () => {
+        pointer(input, 'pointerdown');
+      });
+      await act(async () => {
+        slide(input, 120_000);
+      });
+      // Playback advances to a different track before pointer-up.
+      await act(async () => {
+        root.render(render('occ-b', 0, 90_000));
+      });
+      await act(async () => {
+        pointer(input, 'pointerup');
+      });
+      assertEqual(
+        seeks.length,
+        0,
+        'a release after a mid-drag track change seeks nothing',
+      );
+      assertEqual(
+        input.value,
+        '0',
+        'the abandoned gesture restores the new track’s position',
+      );
+      await act(async () => {
+        root.unmount();
+      });
+    }
   } finally {
     for (const key of GLOBALS) {
       const prior = saved.get(key);

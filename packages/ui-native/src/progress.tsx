@@ -384,13 +384,21 @@ export function LinearScrubber({
   // hold the waveform seek applies.
   const commit = useCallback(
     (ms: number) => {
+      // A track change since the pan began abandons the release —
+      // it must not seek the new track to a position the preview
+      // only ever showed on the old one.
+      if (
+        gestureKey.current !== undefined &&
+        gestureKey.current !== trackKeyRef.current
+      ) {
+        gestureKey.current = undefined;
+        setPreviewMs(null);
+        return;
+      }
+      gestureKey.current = undefined;
       setPreviewMs(null);
       heldBaseline.current = positionRef.current;
-      heldKey.current =
-        gestureKey.current !== undefined
-          ? gestureKey.current
-          : trackKeyRef.current;
-      gestureKey.current = undefined;
+      heldKey.current = trackKeyRef.current;
       setHeldMs(ms);
       if (heldTimer.current !== null) {
         clearTimeout(heldTimer.current);
@@ -413,7 +421,9 @@ export function LinearScrubber({
     }
   }, [positionMs, heldMs]);
   // A track change hides the hold at render regardless — clear the
-  // state + settle timer rather than let them die on the clock.
+  // state + settle timer rather than let them die on the clock, and
+  // drop a mid-flight preview too: the gesture's commit guard makes
+  // the same key check.
   useEffect(() => {
     if (heldMs !== null && heldKey.current !== trackKey) {
       if (heldTimer.current !== null) {
@@ -421,6 +431,13 @@ export function LinearScrubber({
         heldTimer.current = null;
       }
       setHeldMs(null);
+    }
+    if (
+      gestureKey.current !== undefined &&
+      gestureKey.current !== trackKey
+    ) {
+      gestureKey.current = undefined;
+      setPreviewMs(null);
     }
   }, [trackKey, heldMs]);
   useEffect(
@@ -437,7 +454,11 @@ export function LinearScrubber({
     onPreview,
   );
   const shownMs =
-    previewMs ??
+    (previewMs !== null &&
+    gestureKey.current !== undefined &&
+    gestureKey.current === trackKey
+      ? previewMs
+      : null) ??
     (heldMs !== null && heldKey.current === trackKey ? heldMs : null) ??
     positionMs;
   const { onAccessibilityAction } = useSeekA11y(shownMs, durationMs, onSeek);
@@ -551,6 +572,9 @@ export type WaveformSeekProps = {
   readonly loading?: boolean | undefined;
   readonly labels?: boolean | undefined;
   readonly visible?: boolean | undefined;
+  /** Identity of the track on the player — a pan that began on one
+   *  track abandons rather than seeking the next on release. */
+  readonly trackKey?: string | null | undefined;
   readonly style?: StyleProp<ViewStyle> | undefined;
 };
 
@@ -563,6 +587,7 @@ export function WaveformSeek({
   loading = false,
   labels = true,
   visible = true,
+  trackKey,
   style,
 }: WaveformSeekProps) {
   const theme = useTheme();
@@ -654,8 +679,16 @@ export function WaveformSeek({
     }
   }, [isLoading, shimmer, theme.reducedMotion, visible]);
 
+  const trackKeyRef = useRef(trackKey);
+  trackKeyRef.current = trackKey;
+  const gestureKey = useRef<string | null | undefined>(undefined);
   const preview = useCallback(
     (fraction: number) => {
+      // The first preview of a pan marks the track the gesture
+      // began on — a release checks it before seeking.
+      if (!scrubActive.current) {
+        gestureKey.current = trackKeyRef.current;
+      }
       // JS-side scrub flag so the position ticker doesn't fight the finger.
       scrubActive.current = true;
       if (durationMs === null) {
@@ -670,8 +703,31 @@ export function WaveformSeek({
     },
     [durationMs],
   );
+  // A cancelled pan clears the preview and restores the real fill —
+  // only a finished gesture may move playback.
+  const cancelScrub = useCallback(() => {
+    scrubActive.current = false;
+    scrubSec.current = -1;
+    gestureKey.current = undefined;
+    setScrubMs(null);
+    fill.value = theme.reducedMotion
+      ? latestProgress.current
+      : withTiming(latestProgress.current, {
+          duration: theme.motion.state,
+        });
+  }, [fill, theme.motion.state, theme.reducedMotion]);
   const commit = useCallback(
     (fraction: number) => {
+      // A track change since the pan began abandons the release —
+      // seeking now would move a song the preview never showed.
+      if (
+        gestureKey.current !== undefined &&
+        gestureKey.current !== trackKeyRef.current
+      ) {
+        cancelScrub();
+        return;
+      }
+      gestureKey.current = undefined;
       scrubActive.current = false;
       scrubSec.current = -1;
       setScrubMs(null);
@@ -696,20 +752,19 @@ export function WaveformSeek({
             });
       }, 400);
     },
-    [durationMs, fill, onSeek, theme.motion.state, theme.reducedMotion],
+    [cancelScrub, durationMs, fill, onSeek, theme.motion.state, theme.reducedMotion],
   );
-  // A cancelled pan clears the preview and restores the real fill —
-  // only a finished gesture may move playback.
-  const cancelScrub = useCallback(() => {
-    scrubActive.current = false;
-    scrubSec.current = -1;
-    setScrubMs(null);
-    fill.value = theme.reducedMotion
-      ? latestProgress.current
-      : withTiming(latestProgress.current, {
-          duration: theme.motion.state,
-        });
-  }, [fill, theme.motion.state, theme.reducedMotion]);
+  // A track change mid-pan abandons the gesture the way a cancelled
+  // pan does — the release may still land before this effect.
+  useEffect(() => {
+    if (
+      scrubActive.current &&
+      gestureKey.current !== undefined &&
+      gestureKey.current !== trackKey
+    ) {
+      cancelScrub();
+    }
+  }, [cancelScrub, trackKey]);
   const enabled =
     durationMs !== null && durationMs > 0 && onSeek !== undefined;
   // Stable gesture object — a fresh Pan() per render would cancel a
@@ -800,7 +855,12 @@ export function WaveformSeek({
     x: shimmer.value * (width + width * 0.16) - width * 0.16,
   }));
 
-  const shownMs = scrubMs ?? positionMs;
+  const shownMs =
+    (scrubMs !== null &&
+    gestureKey.current !== undefined &&
+    gestureKey.current === trackKey
+      ? scrubMs
+      : null) ?? positionMs;
   return (
     <View style={style}>
       <GestureDetector gesture={gesture}>

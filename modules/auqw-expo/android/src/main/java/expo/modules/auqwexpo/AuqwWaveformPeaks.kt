@@ -17,6 +17,8 @@ import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
+import java.util.Collections
+import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.coroutineContext
 import kotlin.math.sqrt
@@ -49,6 +51,8 @@ private const val PARK_TIMEOUT_MS = 400L
 private const val PEEK_POLL_MS = 50L
 /** Whole-decode deadline — a wedged codec never owns the sweep. */
 private const val DECODE_DEADLINE_MS = 60_000L
+/** Bound on pending cancel tombstones — see `cancels`. */
+private const val MAX_TOMBSTONES = 64
 private const val DEQUEUE_US = 10_000L
 
 private val DEAD_HANDLE_KINDS = setOf(
@@ -99,8 +103,21 @@ internal class AuqwWaveformPeaks(
   private val jobs = ConcurrentHashMap<String, Job>()
   /** Request ids cancelled before their coroutine registered — the
    *  tombstone makes an early cancel sticky so the late-starting
-   *  extract dies at entry instead of decoding on. */
-  private val cancels = ConcurrentHashMap.newKeySet<String>()
+   *  extract dies at entry instead of decoding on. Access-ordered
+   *  and capped: a cancel that lands after its job already finished
+   *  leaves a marker no registration will ever consume, so the
+   *  oldest tombstones fall away rather than growing without bound;
+   *  an extract that still exists waits far fewer than this many
+   *  cancels behind its registration. */
+  private val cancels = Collections.synchronizedSet(
+    Collections.newSetFromMap(
+      object : LinkedHashMap<String, Boolean>(64, 0.75f, true) {
+        override fun removeEldestEntry(
+          eldest: MutableMap.MutableEntry<String, Boolean>,
+        ): Boolean = size > MAX_TOMBSTONES
+      }
+    )
+  )
 
   fun cancel(requestId: String) {
     cancels.add(requestId)
