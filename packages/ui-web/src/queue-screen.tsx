@@ -1,22 +1,16 @@
 import { Artwork, EqBars, IconButton, Text } from './primitives.tsx';
 import { QueueList } from './queue-list.tsx';
 import type { PlayerModel, QueueModel } from '@auqw/ui-shared';
-import { formatClock, t } from '@auqw/ui-shared';
+import {
+  useQueueScreenController,
+  type QueueScreenHandlers,
+} from '@auqw/ui-shared/controllers';
 
-export type QueueScreenProps = {
+export type QueueScreenProps = QueueScreenHandlers & {
   readonly queue: QueueModel;
   readonly player?: PlayerModel | null | undefined;
   readonly reordering?: boolean | undefined;
   readonly scrollEnabled?: boolean | undefined;
-  readonly onToggleReorder?: (() => void) | undefined;
-  readonly onPressItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onRemoveItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onMoveItem?:
-    | ((occurrenceId: string, direction: -1 | 1) => void)
-    | undefined;
-  readonly onMoveItemTo?:
-    | ((occurrenceId: string, toIndex: number) => void)
-    | undefined;
 };
 
 export function QueueScreen({
@@ -30,6 +24,12 @@ export function QueueScreen({
   onMoveItem,
   onMoveItemTo,
 }: QueueScreenProps) {
+  const view = useQueueScreenController({
+    queue,
+    player,
+    reordering,
+    onToggleReorder,
+  });
   return (
     <div
       className="uw-screen uw-queue"
@@ -37,28 +37,30 @@ export function QueueScreen({
     >
       <div className="uw-queue__head">
         <Text variant="heading" color="bright">
-          {t('queue.title')}
+          {view.title}
         </Text>
         <Text variant="metadata" color="secondary" className="uw-queue__count">
-          {t('queue.count', { count: queue.items.length })}
+          {view.countLabel}
         </Text>
-        {onToggleReorder !== undefined && (
+        {view.reorder !== null && (
           <IconButton
-            icon="drag-handle"
+            icon={view.reorder.icon}
             size={32}
             iconSize={14}
-            color={reordering ? 'var(--accent)' : 'var(--text-secondary)'}
-            ariaLabel={reordering ? t('queue.reorderDone') : t('queue.reorder')}
-            active={reordering}
-            onPress={onToggleReorder}
+            color={
+              view.reorder.active ? 'var(--accent)' : 'var(--text-secondary)'
+            }
+            ariaLabel={view.reorder.a11yLabel}
+            active={view.reorder.active}
+            onPress={view.reorder.onPress}
           />
         )}
       </div>
-      {player !== null && (
-        <div className="uw-queue__current" data-status={player.status}>
+      {view.current !== null && (
+        <div className="uw-queue__current" data-status={view.current.status}>
           <span className="uw-track-row__art">
-            <Artwork url={player.artworkUrl} size={40} />
-            {player.status === 'playing' && (
+            <Artwork url={view.current.artworkUrl} size={40} />
+            {view.current.playing && (
               <span className="uw-track-row__eq">
                 <EqBars size={11} />
               </span>
@@ -66,11 +68,10 @@ export function QueueScreen({
           </span>
           <span className="uw-queue__current-text">
             <Text variant="body" color="accent" numberOfLines={1}>
-              {player.title}
+              {view.current.title}
             </Text>
             <Text variant="metadata" color="secondary" numberOfLines={1}>
-              {player.artist ?? '—'} · {formatClock(player.positionMs)} /{' '}
-              {formatClock(player.durationMs)}
+              {view.current.metaLabel}
             </Text>
           </span>
         </div>

@@ -7,10 +7,13 @@ import {
   LoadingState,
   UnavailableState,
 } from './states.tsx';
-import { t } from '@auqw/ui-shared';
-import type { SearchStateModel, TrackRowModel } from '@auqw/ui-shared';
+import type { SearchStateModel } from '@auqw/ui-shared';
+import {
+  useSearchScreenController,
+  type SearchScreenHandlers,
+} from '@auqw/ui-shared/controllers';
 
-export type SearchScreenProps = {
+export type SearchScreenProps = SearchScreenHandlers & {
   readonly state: SearchStateModel;
   /**
    * The live editing text for the input — `state.query` is the
@@ -20,24 +23,14 @@ export type SearchScreenProps = {
    */
   readonly query?: string | undefined;
   readonly scrollEnabled?: boolean | undefined;
-  readonly onQueryChange?: ((query: string) => void) | undefined;
-  readonly onSubmit?: (() => void) | undefined;
-  readonly onCancel?: (() => void) | undefined;
-  readonly onRetry?: (() => void) | undefined;
-  readonly onResultPress?: ((row: TrackRowModel) => void) | undefined;
-  readonly onToggleLike?: ((row: TrackRowModel) => void) | undefined;
-  readonly onAddToPlaylist?: ((row: TrackRowModel) => void) | undefined;
-  readonly onContext?: ((row: TrackRowModel) => void) | undefined;
   /** Submitted queries, newest first — rendered on the idle phase. */
   readonly recents?: readonly string[] | undefined;
-  readonly onRecentPress?: ((query: string) => void) | undefined;
   /**
    * Keystroke completions for the live text — rendered whenever the
    * box's text differs from the committed `state.query`, so results
    * from an older search never impersonate matches for the draft.
    */
   readonly suggestions?: readonly string[] | undefined;
-  readonly onSuggestionPress?: ((query: string) => void) | undefined;
   /** Focus the input on mount — the '/' global shortcut lands here. */
   readonly autoFocus?: boolean | undefined;
 };
@@ -60,11 +53,22 @@ export function SearchScreen({
   onSuggestionPress,
   autoFocus = false,
 }: SearchScreenProps) {
-  const loading = state.phase === 'loading';
-  const editing = query ?? state.query;
-  // Draft mode: the box carries text that was never committed as the
-  // shown query — completions own the pane until submit.
-  const draft = editing.trim() !== '' && editing.trim() !== state.query;
+  const view = useSearchScreenController({
+    state,
+    query,
+    onQueryChange,
+    onSubmit,
+    onCancel,
+    onRetry,
+    onResultPress,
+    onToggleLike,
+    onAddToPlaylist,
+    onContext,
+    recents,
+    onRecentPress,
+    suggestions,
+    onSuggestionPress,
+  });
   const inputRef = useRef<HTMLInputElement | null>(null);
   const list = useTrackList({
     count: state.results.length,
@@ -98,104 +102,97 @@ export function SearchScreen({
           ref={inputRef}
           type="search"
           className="uw-search__input"
-          aria-label={t('search.fieldLabel')}
-          placeholder={t('search.fieldLabel')}
+          aria-label={view.field.label}
+          placeholder={view.field.label}
           autoComplete="off"
           spellCheck={false}
           autoFocus={autoFocus}
-          value={editing}
+          value={view.field.value}
           onChange={
-            onQueryChange === undefined
+            view.field.onChange === undefined
               ? undefined
-              : (event) => onQueryChange(event.currentTarget.value)
+              : (event) => view.field.onChange?.(event.currentTarget.value)
           }
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
-              onSubmit?.();
+              view.field.onSubmit?.();
             }
           }}
-          readOnly={onQueryChange === undefined}
+          readOnly={view.field.readOnly}
         />
-        {loading && (
+        {view.field.loading && (
           <>
             <Spinner size={14} />
-            {onCancel !== undefined && (
+            {view.field.cancel !== null && (
               <Pressable
-                onPress={onCancel}
-                ariaLabel={t('search.a11y.cancel')}
+                onPress={view.field.cancel.onPress}
+                ariaLabel={view.field.cancel.a11yLabel}
                 className="uw-search__cancel"
               >
                 <Text variant="metadata" color="accent">
-                  {t('common.cancel')}
+                  {view.field.cancel.label}
                 </Text>
               </Pressable>
             )}
           </>
         )}
-        {!loading && editing !== '' && onQueryChange !== undefined && (
+        {view.field.clear !== null && (
           <Pressable
-            onPress={() => onQueryChange('')}
-            ariaLabel={t('search.a11y.clear')}
+            onPress={view.field.clear.onPress}
+            ariaLabel={view.field.clear.a11yLabel}
             className="uw-search__clear"
           >
             <Icon name="close" size={12} color="var(--text-secondary)" />
           </Pressable>
         )}
       </div>
-      {draft && (
-        <div role="list" aria-label={t('search.suggestions')}>
+      {view.suggestions !== null && (
+        <div role="list" aria-label={view.suggestions.a11yLabel}>
           <Text
             variant="label"
             color="secondary"
             uppercase
             className="uw-search__recents-label"
           >
-            {t('search.suggestions')}
+            {view.suggestions.heading}
           </Text>
           <Pressable
-            onPress={onSubmit}
-            ariaLabel={t('search.a11y.suggestion', { query: editing.trim() })}
+            onPress={view.suggestions.commit.onPress}
+            ariaLabel={view.suggestions.commit.a11yLabel}
             className="uw-search__recent"
           >
             <Icon name="search" size={14} color="var(--text-secondary)" />
             <Text variant="body" color="primary" numberOfLines={1}>
-              {t('search.commitQuery', { query: editing.trim() })}
+              {view.suggestions.commit.label}
             </Text>
           </Pressable>
-          {suggestions.map((suggestion) => (
+          {view.suggestions.items.map((suggestion) => (
             <Pressable
-              key={suggestion}
-              onPress={
-                onSuggestionPress === undefined
-                  ? undefined
-                  : () => onSuggestionPress(suggestion)
-              }
-              ariaLabel={t('search.a11y.suggestion', { query: suggestion })}
+              key={suggestion.label}
+              onPress={suggestion.onPress}
+              ariaLabel={suggestion.a11yLabel}
               className="uw-search__recent"
             >
               <Icon name="search" size={14} color="var(--text-secondary)" />
               <Text variant="body" color="primary" numberOfLines={1}>
-                {suggestion}
+                {suggestion.label}
               </Text>
             </Pressable>
           ))}
         </div>
       )}
-      {!draft && state.phase === 'ready' && (
+      {view.resultsHead !== null && (
         <div className="uw-search__results-head">
           <Text variant="heading" color="bright">
-            {t('search.results')}
+            {view.resultsHead.title}
           </Text>
           <Text variant="metadata" color="secondary" className="uw-search__count">
-            {t('search.resultsMeta', {
-              provider: state.providerId ?? t('search.providerFallback'),
-              count: state.results.length,
-            })}
+            {view.resultsHead.metaLabel}
           </Text>
         </div>
       )}
-      {!draft && state.phase === 'idle' &&
-        (recents.length > 0 ? (
+      {view.idle !== null &&
+        (view.idle.kind === 'recents' ? (
           <div>
             <Text
               variant="label"
@@ -203,94 +200,71 @@ export function SearchScreen({
               uppercase
               className="uw-search__recents-label"
             >
-              {t('search.recent')}
+              {view.idle.heading}
             </Text>
-            {recents.map((recent) => (
+            {view.idle.items.map((recent) => (
               <Pressable
-                key={recent}
-                onPress={
-                  onRecentPress === undefined
-                    ? undefined
-                    : () => onRecentPress(recent)
-                }
-                ariaLabel={t('search.a11y.again', { query: recent })}
+                key={recent.label}
+                onPress={recent.onPress}
+                ariaLabel={recent.a11yLabel}
                 className="uw-search__recent"
               >
                 <Icon name="clock" size={14} color="var(--text-secondary)" />
                 <Text variant="body" color="primary" numberOfLines={1}>
-                  {recent}
+                  {recent.label}
                 </Text>
               </Pressable>
             ))}
           </div>
         ) : (
           <EmptyState
-            title={t('search.emptyTitle')}
-            hint={t('search.emptyHint')}
-            icon="search"
+            title={view.idle.title}
+            hint={view.idle.hint}
+            icon={view.idle.icon}
           />
         ))}
-      {!draft && state.phase === 'loading' && state.results.length === 0 && (
-        <LoadingState title={t('search.loading')} hint={state.query} />
+      {view.status?.kind === 'loading' && (
+        <LoadingState title={view.status.title} hint={view.status.hint} />
       )}
-      {!draft && state.phase === 'empty' && (
+      {view.status?.kind === 'empty' && (
         <EmptyState
-          title={t('search.noResults', { query: state.query })}
-          hint={t('search.noResultsHint')}
-          icon="search"
+          title={view.status.title}
+          hint={view.status.hint}
+          icon={view.status.icon}
         />
       )}
-      {!draft && state.phase === 'error' && (
+      {view.status?.kind === 'error' && (
         <ErrorState
-          title={t('search.failed')}
-          hint={state.message}
-          onRetry={state.retryable ? onRetry : undefined}
+          title={view.status.title}
+          hint={view.status.hint}
+          onRetry={view.status.onRetry}
         />
       )}
-      {!draft && state.phase === 'unavailable' && (
-        <UnavailableState
-          title={t('search.unavailableTitle')}
-          hint={state.message}
-        />
+      {view.status?.kind === 'unavailable' && (
+        <UnavailableState title={view.status.title} hint={view.status.hint} />
       )}
-      {!draft &&
-        (state.phase === 'ready' || state.phase === 'loading') &&
-        state.results.length > 0 && (
-          <div
-            role="list"
-            aria-label={t('search.resultsA11y')}
-            className="uw-list"
-            data-scroll={scrollEnabled ? 'true' : 'false'}
-            onKeyDown={list.listProps.onKeyDown}
-          >
-            {state.results.map((row, index) => (
-              <TrackRow
-                key={row.key}
-                row={row}
-                tabIndex={list.rowTabIndex(index)}
-                onFocusRow={() => list.onRowFocus(index)}
-                onPress={
-                  onResultPress === undefined
-                    ? undefined
-                    : () => onResultPress(row)
-                }
-                onToggleLike={
-                  onToggleLike === undefined
-                    ? undefined
-                    : () => onToggleLike(row)
-                }
-                onAddToPlaylist={
-                  onAddToPlaylist === undefined
-                    ? undefined
-                    : () => onAddToPlaylist(row)
-                }
-                onContext={
-                  onContext === undefined ? undefined : () => onContext(row)
-                }
-              />
-            ))}
-          </div>
-        )}
+      {view.results !== null && (
+        <div
+          role="list"
+          aria-label={view.results.a11yLabel}
+          className="uw-list"
+          data-scroll={scrollEnabled ? 'true' : 'false'}
+          onKeyDown={list.listProps.onKeyDown}
+        >
+          {view.results.rows.map((row, index) => (
+            <TrackRow
+              key={row.row.key}
+              row={row.row}
+              tabIndex={list.rowTabIndex(index)}
+              onFocusRow={() => list.onRowFocus(index)}
+              onPress={row.onPress}
+              onToggleLike={row.onToggleLike}
+              onAddToPlaylist={row.onAddToPlaylist}
+              onContext={row.onContext}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

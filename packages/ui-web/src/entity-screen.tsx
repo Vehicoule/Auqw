@@ -6,48 +6,32 @@ import {
   Spinner,
   Text,
 } from './primitives.tsx';
-import type { IconName } from './primitives.tsx';
 import { TrackRow, useTrackList } from './track-row.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
-import { t } from '@auqw/ui-shared';
-import type { EntityScreenModel, TrackRowModel } from '@auqw/ui-shared';
+import type { EntityScreenModel } from '@auqw/ui-shared';
+import {
+  useEntityScreenController,
+  type EntityPillView,
+  type EntityScreenHandlers,
+} from '@auqw/ui-shared/controllers';
 
-export type EntityScreenProps = {
+export type EntityScreenProps = EntityScreenHandlers & {
   readonly model: EntityScreenModel;
   readonly scrollEnabled?: boolean | undefined;
-  readonly onBack?: (() => void) | undefined;
-  readonly onPlayAll?: (() => void) | undefined;
-  readonly onShuffleAll?: (() => void) | undefined;
-  readonly onToggleLike?: (() => void) | undefined;
-  readonly onPressItem?: ((row: TrackRowModel) => void) | undefined;
-  readonly onAddToPlaylist?: ((row: TrackRowModel) => void) | undefined;
-  readonly onContext?: ((row: TrackRowModel) => void) | undefined;
-  readonly onLoadMore?: (() => void) | undefined;
-  readonly onRetry?: (() => void) | undefined;
 };
 
-function HeaderPill({
-  label,
-  icon,
-  accent = false,
-  disabled = false,
-  onPress,
-}: {
-  readonly label: string;
-  readonly icon: IconName;
-  readonly accent?: boolean | undefined;
-  readonly disabled?: boolean | undefined;
-  readonly onPress?: (() => void) | undefined;
-}) {
+function HeaderPill({ view }: { readonly view: EntityPillView }) {
+  const disabled = view.disabled ?? false;
+  const accent = view.accent;
   return (
     <Pressable
-      onPress={disabled ? undefined : onPress}
+      onPress={disabled ? undefined : view.onPress}
       disabled={disabled}
-      ariaLabel={label}
+      ariaLabel={view.label}
       className={`uw-pill${accent ? ' uw-pill--accent' : ''}`}
     >
       <Icon
-        name={icon}
+        name={view.icon}
         size={13}
         color={
           disabled
@@ -61,16 +45,22 @@ function HeaderPill({
         variant="metadata"
         color={disabled ? 'secondary' : accent ? 'canvas' : 'primary'}
       >
-        {label}
+        {view.label}
       </Text>
     </Pressable>
   );
 }
 
-function BackRow({ onBack }: { readonly onBack?: (() => void) | undefined }) {
+function BackRow({
+  a11yLabel,
+  onBack,
+}: {
+  readonly a11yLabel: string;
+  readonly onBack?: (() => void) | undefined;
+}) {
   return (
     <div className="uw-back-row">
-      <Pressable onPress={onBack} ariaLabel={t('common.back')} className="uw-back">
+      <Pressable onPress={onBack} ariaLabel={a11yLabel} className="uw-back">
         <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
       </Pressable>
     </div>
@@ -90,6 +80,17 @@ export function EntityScreen({
   onLoadMore,
   onRetry,
 }: EntityScreenProps) {
+  const view = useEntityScreenController({
+    model,
+    onPlayAll,
+    onShuffleAll,
+    onToggleLike,
+    onPressItem,
+    onAddToPlaylist,
+    onContext,
+    onLoadMore,
+    onRetry,
+  });
   const items = model.phase === 'ready' ? model.items : [];
   const list = useTrackList({
     count: items.length,
@@ -112,22 +113,22 @@ export function EntityScreen({
             }
           },
   });
-  if (model.phase === 'loading') {
+  if (view.kind === 'loading') {
     return (
       <div className="uw-screen uw-entity">
-        <BackRow onBack={onBack} />
-        <LoadingState title={t('state.loading')} />
+        <BackRow a11yLabel={view.backA11yLabel} onBack={onBack} />
+        <LoadingState title={view.title} />
       </div>
     );
   }
-  if (model.phase === 'error') {
+  if (view.kind === 'error') {
     return (
       <div className="uw-screen uw-entity">
-        <BackRow onBack={onBack} />
+        <BackRow a11yLabel={view.backA11yLabel} onBack={onBack} />
         <ErrorState
-          title={t('entity.errorTitle')}
-          hint={model.message}
-          onRetry={onRetry}
+          title={view.title}
+          hint={view.hint}
+          onRetry={view.onRetry}
         />
       </div>
     );
@@ -137,7 +138,7 @@ export function EntityScreen({
       className="uw-screen uw-entity"
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
-      <BackRow onBack={onBack} />
+      <BackRow a11yLabel={view.backA11yLabel} onBack={onBack} />
 
       {/* Hero: centered artwork + title block, then the action pills. */}
       <div className="uw-entity__hero">
@@ -148,7 +149,7 @@ export function EntityScreen({
           uppercase
           className="uw-entity__kind"
         >
-          {model.kind === null ? t('entity.kind.fallback') : t(`entity.kind.${model.kind}`)}
+          {view.kindLabel}
         </Text>
         <Text variant="heading" color="bright" numberOfLines={2}>
           {model.title}
@@ -161,83 +162,64 @@ export function EntityScreen({
       </div>
 
       <div className="uw-entity__actions">
-        <HeaderPill
-          label={t('common.play')}
-          icon="play"
-          accent
-          disabled={model.items.length === 0}
-          onPress={onPlayAll}
-        />
-        <HeaderPill
-          label={t('entity.shuffle')}
-          icon="shuffle"
-          disabled={model.items.length === 0}
-          onPress={onShuffleAll}
-        />
+        <HeaderPill view={view.play} />
+        <HeaderPill view={view.shuffle} />
         {/*
          * Like only binds to a materialized entity (canLike); an
          * unmaterialized page shows the heart disabled — an honest
          * absence, never a no-op.
          */}
         <IconButton
-          icon={model.liked ? 'heart-filled' : 'heart'}
+          icon={view.like.icon}
           size={34}
           iconSize={16}
-          color={model.liked ? 'var(--liked)' : undefined}
-          ariaLabel={model.liked ? t('common.unlike') : t('common.like')}
-          onPress={model.canLike ? onToggleLike : undefined}
+          color={view.like.liked ? 'var(--liked)' : undefined}
+          ariaLabel={view.like.a11yLabel}
+          onPress={view.like.onPress}
         />
       </div>
 
       {/* Honesty flags: a partial page is never silently complete. */}
-      {(!model.complete || model.message !== null) && (
+      {view.notice !== null && (
         <div className="uw-notice uw-notice--warn">
           <Icon name="warn" size={14} color="var(--warn)" />
           <Text variant="metadata" color="secondary">
-            {model.message ?? t('entity.partial')}
+            {view.notice.text}
           </Text>
         </div>
       )}
 
-      {model.items.length === 0 ? (
+      {view.body.kind === 'empty' ? (
         <EmptyState
-          title={t('entity.empty')}
-          hint={t('entity.emptyHint')}
-          icon="note"
+          title={view.body.title}
+          hint={view.body.hint}
+          icon={view.body.icon}
         />
       ) : (
         <div
           role="list"
-          aria-label={model.title ?? undefined}
+          aria-label={view.body.listA11yLabel}
           className="uw-list"
           onKeyDown={list.listProps.onKeyDown}
         >
-          {items.map((item, index) => (
+          {view.body.rows.map((item, index) => (
             <TrackRow
-              key={item.key}
-              row={item}
+              key={item.row.key}
+              row={item.row}
               tabIndex={list.rowTabIndex(index)}
               onFocusRow={() => list.onRowFocus(index)}
-              onPress={
-                onPressItem === undefined ? undefined : () => onPressItem(item)
-              }
-              onAddToPlaylist={
-                onAddToPlaylist === undefined
-                  ? undefined
-                  : () => onAddToPlaylist(item)
-              }
-              onContext={
-                onContext === undefined ? undefined : () => onContext(item)
-              }
+              onPress={item.onPress}
+              onAddToPlaylist={item.onAddToPlaylist}
+              onContext={item.onContext}
             />
           ))}
-          {model.hasMore && (
+          {view.body.loadMore !== null && (
             <Pressable
-              onPress={model.loadingMore ? undefined : onLoadMore}
-              ariaLabel={t('entity.loadMore')}
+              onPress={view.body.loadMore.onPress}
+              ariaLabel={view.body.loadMore.a11yLabel}
               className="uw-load-more"
             >
-              {model.loadingMore ? (
+              {view.body.loadMore.busy ? (
                 <Spinner size={13} />
               ) : (
                 <Icon
@@ -247,7 +229,7 @@ export function EntityScreen({
                 />
               )}
               <Text variant="metadata" color="secondary">
-                {model.loadingMore ? t('state.loading') : t('entity.loadMore')}
+                {view.body.loadMore.label}
               </Text>
             </Pressable>
           )}

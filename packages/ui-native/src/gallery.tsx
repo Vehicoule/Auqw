@@ -45,29 +45,21 @@ import { SyncScreen } from './sync-screen.tsx';
 import { HomeScreen } from './home-screen.tsx';
 import {
   fixtureCollectionModels,
-  fixtureCorrectionsModel,
-  fixtureCorrectionsModelEmpty,
-  fixtureCorrectionsModelError,
-  fixtureCorrectionsModelLoading,
-  fixtureCorrectionsModelPending,
+  fixtureCorrectionsScenarios,
   fixtureEntityModel,
   fixtureEntityModelError,
   fixtureEntityModelPartial,
   fixtureHomeModel,
   fixtureLibraryModel,
   fixtureLibraryModelEmpty,
-  fixtureLyricsError,
-  fixtureLyricsInstrumental,
-  fixtureLyricsPlain,
-  fixtureLyricsUnavailable,
+  fixtureLyricsScenarios,
   fixturePlaylistModel,
   fixturePlaylistModelEmpty,
   fixtureLyrics,
   fixtureNavItems,
   fixtureRadioModels,
-  fixtureTransferModelDone,
-  fixtureTransferModelError,
-  fixtureTransferModelPreview,
+  fixtureSearchRecents,
+  fixtureTransferScenarios,
   fixturePlayerBuffering,
   fixturePlayerFailed,
   fixturePlayerPaused,
@@ -85,7 +77,10 @@ import {
   fixtureSyncModelUnpaired,
   fixtureWaveformPeaks,
 } from '@auqw/ui-shared/fixtures';
-import type { ThemeName } from '@auqw/design-tokens';
+import {
+  useGalleryControls,
+  type GalleryControls,
+} from '@auqw/ui-shared/controllers';
 
 function noop() { }
 
@@ -224,31 +219,16 @@ const ICON_SET: readonly IconName[] = [
 ];
 
 export function GalleryScreen() {
-  const [scheme, setScheme] = useState<ThemeName>('dark');
-  const [reduced, setReduced] = useState(false);
-  const [nav, setNav] = useState('home');
-  const [expanded, setExpanded] = useState(true);
-  const [searchPhase, setSearchPhase] = useState(2);
-  const [textScale, setTextScale] = useState(1);
-  const [artworkCondition, setArtworkCondition] = useState('missing');
+  const controls = useGalleryControls();
   const [gestureState, setGestureState] = useState<'rest' | 'mid-drag' | 'dismissed'>('rest');
   return (
-    <ThemeProvider theme={scheme} reducedMotion={reduced} textScale={textScale}>
+    <ThemeProvider
+      theme={controls.scheme}
+      reducedMotion={controls.reduced}
+      textScale={controls.textScale}
+    >
       <GalleryBody
-        scheme={scheme}
-        setScheme={setScheme}
-        reduced={reduced}
-        setReduced={setReduced}
-        nav={nav}
-        setNav={setNav}
-        expanded={expanded}
-        setExpanded={setExpanded}
-        searchPhase={searchPhase}
-        setSearchPhase={setSearchPhase}
-        textScale={textScale}
-        setTextScale={setTextScale}
-        artworkCondition={artworkCondition}
-        setArtworkCondition={setArtworkCondition}
+        {...controls}
         gestureState={gestureState}
         setGestureState={setGestureState}
       />
@@ -273,21 +253,7 @@ function GalleryBody({
   setArtworkCondition,
   gestureState,
   setGestureState,
-}: {
-  readonly scheme: ThemeName;
-  readonly setScheme: (t: ThemeName) => void;
-  readonly reduced: boolean;
-  readonly setReduced: (b: boolean) => void;
-  readonly nav: string;
-  readonly setNav: (k: string) => void;
-  readonly expanded: boolean;
-  readonly setExpanded: (b: boolean) => void;
-  readonly searchPhase: number;
-  readonly setSearchPhase: (i: number) => void;
-  readonly textScale: number;
-  readonly setTextScale: (value: number) => void;
-  readonly artworkCondition: string;
-  readonly setArtworkCondition: (value: string) => void;
+}: GalleryControls & {
   readonly gestureState: 'rest' | 'mid-drag' | 'dismissed';
   readonly setGestureState: (value: 'rest' | 'mid-drag' | 'dismissed') => void;
 }) {
@@ -668,14 +634,7 @@ function GalleryBody({
           lyrics · plain / instrumental / unavailable / error — never
           synced-treated
         </Text>
-        {(
-          [
-            ['plain', fixtureLyricsPlain],
-            ['instrumental', fixtureLyricsInstrumental],
-            ['unavailable', fixtureLyricsUnavailable],
-            ['error', fixtureLyricsError],
-          ] as const
-        ).map(([label, lyrics]) => (
+        {fixtureLyricsScenarios.map(([label, lyrics]) => (
           <View key={label} style={{ marginTop: theme.spacing.sm }}>
             <Text
               variant="metadata"
@@ -751,7 +710,7 @@ function GalleryBody({
               onRetry={noop}
               onResultPress={noop}
               onContext={noop}
-              recents={['radiohead ok computer', 'boards of canada']}
+              recents={fixtureSearchRecents}
               onRecentPress={noop}
               scrollEnabled={false}
             />
@@ -954,15 +913,7 @@ function GalleryBody({
         title="corrections"
         note="pending · resolved · empty · loading · error"
       >
-        {(
-          [
-            ['all reviews', fixtureCorrectionsModel],
-            ['pending only', fixtureCorrectionsModelPending],
-            ['empty queue', fixtureCorrectionsModelEmpty],
-            ['loading', fixtureCorrectionsModelLoading],
-            ['error', fixtureCorrectionsModelError],
-          ] as const
-        ).map(([label, model]) => (
+        {fixtureCorrectionsScenarios.map(([label, model]) => (
           <View key={label} style={{ marginBottom: theme.spacing.md }}>
             <Text
               variant="metadata"
@@ -989,13 +940,7 @@ function GalleryBody({
         title="transfer"
         note="preview → confirm → apply · typed errors"
       >
-        {(
-          [
-            ['preview', fixtureTransferModelPreview],
-            ['applied', fixtureTransferModelDone],
-            ['error', fixtureTransferModelError],
-          ] as const
-        ).map(([label, model]) => (
+        {fixtureTransferScenarios.map(([label, model]) => (
           <View key={label} style={{ marginBottom: theme.spacing.md }}>
             <Text
               variant="metadata"

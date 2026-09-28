@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
-import type { ThemeName } from '@auqw/design-tokens';
 import { ThemeProvider } from './theme.tsx';
 import {
   Artwork,
@@ -40,11 +39,7 @@ import { TransferScreen } from './transfer-screen.tsx';
 import { HomeScreen } from './home-screen.tsx';
 import {
   fixtureCollectionModels,
-  fixtureCorrectionsModel,
-  fixtureCorrectionsModelEmpty,
-  fixtureCorrectionsModelError,
-  fixtureCorrectionsModelLoading,
-  fixtureCorrectionsModelPending,
+  fixtureCorrectionsScenarios,
   fixtureEntityModel,
   fixtureEntityModelError,
   fixtureEntityModelPartial,
@@ -52,15 +47,12 @@ import {
   fixtureLibraryModel,
   fixtureLibraryModelEmpty,
   fixtureLyrics,
-  fixtureLyricsError,
-  fixtureLyricsInstrumental,
-  fixtureLyricsPlain,
-  fixtureLyricsUnavailable,
+  fixtureLyricsScenarios,
   fixtureNavItems,
-  fixturePlayerBuffering,
   fixturePlayerFailed,
   fixturePlayerPaused,
   fixturePlayerPlaying,
+  fixturePlayerStates,
   fixturePlaylistModel,
   fixturePlaylistModelEmpty,
   fixtureQueueModel,
@@ -71,12 +63,11 @@ import {
   fixtureSearchStates,
   fixtureSettingsModel,
   fixtureSettingsModelDegraded,
-  fixtureTransferModelDone,
-  fixtureTransferModelError,
-  fixtureTransferModelPreview,
+  fixtureSearchRecents,
+  fixtureTransferScenarios,
   fixtureWaveformPeaks,
 } from '@auqw/ui-shared/fixtures';
-import type { PlayerModel } from '@auqw/ui-shared';
+import { useGalleryControls } from '@auqw/ui-shared/controllers';
 
 function noop() { }
 
@@ -195,14 +186,23 @@ const ICON_SET: readonly IconName[] = [
 ];
 
 export function GalleryScreen() {
-  const [scheme, setScheme] = useState<ThemeName>('dark');
-  const [reduced, setReduced] = useState(false);
-  const [nav, setNav] = useState('home');
-  const [expanded, setExpanded] = useState(true);
+  const {
+    scheme,
+    setScheme,
+    reduced,
+    setReduced,
+    nav,
+    setNav,
+    expanded,
+    setExpanded,
+    searchPhase,
+    setSearchPhase,
+    textScale,
+    setTextScale,
+    artworkCondition,
+    setArtworkCondition,
+  } = useGalleryControls();
   const [sheetOpen, setSheetOpen] = useState(true);
-  const [searchPhase, setSearchPhase] = useState(2);
-  const [textScale, setTextScale] = useState(1);
-  const [artworkCondition, setArtworkCondition] = useState('missing');
   return (
     <ThemeProvider theme={scheme} reducedMotion={reduced} textScale={textScale}>
       <div className="uw-gallery">
@@ -346,13 +346,7 @@ export function GalleryScreen() {
         </Section>
 
         <Section title="mini player" note="playing · paused · buffering">
-          {(
-            [
-              ['playing', fixturePlayerPlaying],
-              ['paused', fixturePlayerPaused],
-              ['buffering', fixturePlayerBuffering],
-            ] as readonly [string, PlayerModel][]
-          ).map(([label, player]) => (
+          {fixturePlayerStates.map(([label, player]) => (
             <div key={label} className="uw-gallery__stack">
               <Text variant="metadata" color="secondary">
                 {label}
@@ -466,14 +460,7 @@ export function GalleryScreen() {
             lyrics · plain / instrumental / unavailable / error — never
             synced-treated
           </Text>
-          {(
-            [
-              ['plain', fixtureLyricsPlain],
-              ['instrumental', fixtureLyricsInstrumental],
-              ['unavailable', fixtureLyricsUnavailable],
-              ['error', fixtureLyricsError],
-            ] as const
-          ).map(([label, lyrics]) => (
+          {fixtureLyricsScenarios.map(([label, lyrics]) => (
             <div key={label} className="uw-gallery__stack">
               <Text variant="metadata" color="secondary">
                 {label}
@@ -559,7 +546,7 @@ export function GalleryScreen() {
                 onRetry={noop}
                 onResultPress={noop}
                 onContext={noop}
-                recents={['radiohead ok computer', 'boards of canada']}
+                recents={fixtureSearchRecents}
                 onRecentPress={noop}
                 scrollEnabled={false}
               />
@@ -753,15 +740,7 @@ export function GalleryScreen() {
           title="corrections"
           note="pending · resolved · empty · loading · error"
         >
-          {(
-            [
-              ['all reviews', fixtureCorrectionsModel],
-              ['pending only', fixtureCorrectionsModelPending],
-              ['empty queue', fixtureCorrectionsModelEmpty],
-              ['loading', fixtureCorrectionsModelLoading],
-              ['error', fixtureCorrectionsModelError],
-            ] as const
-          ).map(([label, model]) => (
+          {fixtureCorrectionsScenarios.map(([label, model]) => (
             <div key={label} className="uw-gallery__stack">
               <Text variant="metadata" color="secondary">
                 {label}
@@ -784,13 +763,7 @@ export function GalleryScreen() {
           title="transfer"
           note="preview → confirm → apply · typed errors"
         >
-          {(
-            [
-              ['preview', fixtureTransferModelPreview],
-              ['applied', fixtureTransferModelDone],
-              ['error', fixtureTransferModelError],
-            ] as const
-          ).map(([label, model]) => (
+          {fixtureTransferScenarios.map(([label, model]) => (
             <div key={label} className="uw-gallery__stack">
               <Text variant="metadata" color="secondary">
                 {label}

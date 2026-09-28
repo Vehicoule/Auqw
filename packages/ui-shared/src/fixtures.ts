@@ -1270,6 +1270,14 @@ export const fixtureImportPreview: ImportPreview = {
 export const fixtureImportPreviewModel: ImportPreviewModel =
   toImportPreviewModel(fixtureImportPreview, 'auqw-library.json');
 
+export const fixtureTransferModel: TransferModel = {
+  exportPhase: 'idle',
+  exportDetail: null,
+  importPhase: 'idle',
+  importDetail: null,
+  preview: null,
+};
+
 export const fixtureTransferModelPreview: TransferModel = {
   exportPhase: 'done',
   exportDetail: 'auqw-library-2023-11-14.json',
@@ -1350,6 +1358,53 @@ export const fixtureWaveformPeaks: readonly WaveformPeak[] = (() => {
   return peaks;
 })();
 
+// ---- gallery scenario tuples -----------------------------------------
+// `[label, model]` rows both galleries iterate over identically.
+
+export const fixturePlayerStates: readonly (readonly [
+  string,
+  PlayerModel,
+])[] = [
+  ['playing', fixturePlayerPlaying],
+  ['paused', fixturePlayerPaused],
+  ['buffering', fixturePlayerBuffering],
+];
+
+export const fixtureLyricsScenarios: readonly (readonly [
+  string,
+  LyricsModel,
+])[] = [
+  ['plain', fixtureLyricsPlain],
+  ['instrumental', fixtureLyricsInstrumental],
+  ['unavailable', fixtureLyricsUnavailable],
+  ['error', fixtureLyricsError],
+];
+
+export const fixtureCorrectionsScenarios: readonly (readonly [
+  string,
+  CorrectionsModel,
+])[] = [
+  ['all reviews', fixtureCorrectionsModel],
+  ['pending only', fixtureCorrectionsModelPending],
+  ['empty queue', fixtureCorrectionsModelEmpty],
+  ['loading', fixtureCorrectionsModelLoading],
+  ['error', fixtureCorrectionsModelError],
+];
+
+export const fixtureTransferScenarios: readonly (readonly [
+  string,
+  TransferModel,
+])[] = [
+  ['preview', fixtureTransferModelPreview],
+  ['applied', fixtureTransferModelDone],
+  ['error', fixtureTransferModelError],
+];
+
+/** Recent-search strings the gallery search section seeds. */
+export const fixtureSearchRecents: readonly string[] = [
+  'radiohead ok computer',
+  'boards of canada',
+];
 export type GalleryCoverage = {
   readonly sections: readonly string[];
   readonly schemes: readonly ThemeName[];

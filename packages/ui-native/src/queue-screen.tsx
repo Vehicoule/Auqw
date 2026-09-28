@@ -7,27 +7,18 @@ import {
   Text,
 } from './primitives.tsx';
 import { QueueList } from './queue-list';
-import type {
-  PlayerModel,
-  QueueModel,
-} from '@auqw/ui-shared';
-import { formatClock, t } from '@auqw/ui-shared';
+import type { PlayerModel, QueueModel } from '@auqw/ui-shared';
+import {
+  useQueueScreenController,
+  type QueueScreenHandlers,
+} from '@auqw/ui-shared/controllers';
 
-export type QueueScreenProps = {
+export type QueueScreenProps = QueueScreenHandlers & {
   readonly queue: QueueModel;
   readonly player?: PlayerModel | null | undefined;
   readonly reordering?: boolean | undefined;
   readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
-  readonly onToggleReorder?: (() => void) | undefined;
-  readonly onPressItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onRemoveItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onMoveItem?:
-    | ((occurrenceId: string, direction: -1 | 1) => void)
-    | undefined;
-  readonly onMoveItemTo?:
-    | ((occurrenceId: string, toIndex: number) => void)
-    | undefined;
 };
 
 export function QueueScreen({
@@ -43,6 +34,12 @@ export function QueueScreen({
   onMoveItemTo,
 }: QueueScreenProps) {
   const theme = useTheme();
+  const view = useQueueScreenController({
+    queue,
+    player,
+    reordering,
+    onToggleReorder,
+  });
   return (
     <View
       style={{
@@ -61,29 +58,29 @@ export function QueueScreen({
         }}
       >
         <Text variant="heading" color="bright">
-          {t('queue.title')}
+          {view.title}
         </Text>
         <Text variant="metadata" color="secondary" style={{ marginLeft: 10 }}>
-          {t('queue.count', { count: queue.items.length })}
+          {view.countLabel}
         </Text>
         <View style={{ flex: 1 }} />
-        {onToggleReorder !== undefined && (
+        {view.reorder !== null && (
           <IconButton
-            icon="drag-handle"
+            icon={view.reorder.icon}
             size={32}
             iconSize={14}
             color={
-              reordering ? theme.colors.accent : theme.colors.textSecondary
+              view.reorder.active
+                ? theme.colors.accent
+                : theme.colors.textSecondary
             }
-            accessibilityLabel={
-              reordering ? t('queue.reorderDone') : t('queue.reorder')
-            }
-            active={reordering}
-            onPress={onToggleReorder}
+            accessibilityLabel={view.reorder.a11yLabel}
+            active={view.reorder.active}
+            onPress={view.reorder.onPress}
           />
         )}
       </View>
-      {player !== null && (
+      {view.current !== null && (
         <View
           style={{
             flexDirection: 'row',
@@ -104,8 +101,8 @@ export function QueueScreen({
               overflow: 'hidden',
             }}
           >
-            <Artwork url={player.artworkUrl} size={40} />
-            {player.status === 'playing' && (
+            <Artwork url={view.current.artworkUrl} size={40} />
+            {view.current.playing && (
               <View
                 style={{
                   position: 'absolute',
@@ -124,11 +121,10 @@ export function QueueScreen({
           </View>
           <View style={{ flex: 1, minWidth: 0 }}>
             <Text variant="body" color="accent" numberOfLines={1}>
-              {player.title}
+              {view.current.title}
             </Text>
             <Text variant="metadata" color="secondary" numberOfLines={1}>
-              {player.artist ?? '—'} · {formatClock(player.positionMs)} /{' '}
-              {formatClock(player.durationMs)}
+              {view.current.metaLabel}
             </Text>
           </View>
         </View>

@@ -2,18 +2,18 @@ import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Icon, PillButton, Pressable, Text } from './primitives.tsx';
 import { ErrorState } from './states.tsx';
-import type { ImportPreviewModel, TransferModel } from '@auqw/ui-shared';
-import { t } from '@auqw/ui-shared';
+import type { TransferModel } from '@auqw/ui-shared';
+import {
+  useTransferScreenController,
+  type TransferImportView,
+  type TransferRowView,
+  type TransferScreenHandlers,
+} from '@auqw/ui-shared/controllers';
 
-export type TransferScreenProps = {
+export type TransferScreenProps = TransferScreenHandlers & {
   readonly model: TransferModel;
   readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
-  readonly onBack?: (() => void) | undefined;
-  readonly onExport?: (() => void) | undefined;
-  readonly onPickImportFile?: (() => void) | undefined;
-  readonly onApplyImport?: (() => void) | undefined;
-  readonly onResetImport?: (() => void) | undefined;
 };
 
 /**
@@ -35,9 +35,13 @@ export function TransferScreen({
   onResetImport,
 }: TransferScreenProps) {
   const theme = useTheme();
-  const exportBusy = model.exportPhase === 'working';
-  const importBusy =
-    model.importPhase === 'reading' || model.importPhase === 'applying';
+  const view = useTransferScreenController({
+    model,
+    onExport,
+    onPickImportFile,
+    onApplyImport,
+    onResetImport,
+  });
   return (
     <View
       style={{
@@ -58,7 +62,7 @@ export function TransferScreen({
         <Pressable
           compact
           onPress={onBack}
-          accessibilityLabel={t('common.back')}
+          accessibilityLabel={view.backA11yLabel}
           style={{ padding: theme.spacing.xs }}
         >
           <Icon
@@ -68,7 +72,7 @@ export function TransferScreen({
           />
         </Pressable>
         <Text variant="display" color="bright" style={{ flex: 1 }}>
-          {t('transfer.title')}
+          {view.title}
         </Text>
       </View>
       <ScrollView
@@ -86,21 +90,9 @@ export function TransferScreen({
             uppercase
             style={{ paddingHorizontal: theme.spacing.sm }}
           >
-            {t('transfer.exportSection')}
+            {view.exportSectionLabel}
           </Text>
-          <TransferRow
-            label={
-              exportBusy ? t('transfer.exporting') : t('transfer.export')
-            }
-            detail={
-              model.exportPhase === 'done' || model.exportPhase === 'error'
-                ? model.exportDetail
-                : null
-            }
-            detailTone={model.exportPhase === 'error' ? 'warn' : 'secondary'}
-            disabled={exportBusy || onExport === undefined}
-            onPress={onExport}
-          />
+          <TransferRow view={view.exportRow} />
         </View>
         <View>
           <Text
@@ -109,45 +101,23 @@ export function TransferScreen({
             uppercase
             style={{ paddingHorizontal: theme.spacing.sm }}
           >
-            {t('transfer.importSection')}
+            {view.importSectionLabel}
           </Text>
-          <TransferRow
-            label={importBusy ? t('transfer.working') : t('transfer.import')}
-            detail={model.importPhase === 'error' ? model.importDetail : null}
-            detailTone="warn"
-            disabled={importBusy || onPickImportFile === undefined}
-            onPress={onPickImportFile}
-          />
-          <ImportBody
-            model={model}
-            onApplyImport={onApplyImport}
-            onResetImport={onResetImport}
-          />
+          <TransferRow view={view.importRow} />
+          <ImportBody body={view.importBody} />
         </View>
       </ScrollView>
     </View>
   );
 }
 
-function TransferRow({
-  label,
-  detail,
-  detailTone,
-  disabled,
-  onPress,
-}: {
-  readonly label: string;
-  readonly detail: string | null;
-  readonly detailTone: 'secondary' | 'warn';
-  readonly disabled: boolean;
-  readonly onPress?: (() => void) | undefined;
-}) {
+function TransferRow({ view }: { readonly view: TransferRowView }) {
   const theme = useTheme();
   return (
     <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      accessibilityLabel={label}
+      onPress={view.onPress}
+      disabled={view.disabled}
+      accessibilityLabel={view.label}
       style={({ pressed }) => [
         {
           flexDirection: 'row',
@@ -159,7 +129,7 @@ function TransferRow({
           borderRadius: theme.radius.control,
           borderWidth: theme.strokes.hairline,
           borderColor: theme.colors.hairline,
-          opacity: disabled ? 0.5 : 1,
+          opacity: view.disabled ? 0.5 : 1,
         },
         pressed && { backgroundColor: theme.colors.fg08 },
       ]}
@@ -167,11 +137,11 @@ function TransferRow({
       <Icon name="download" size={14} color={theme.colors.textSecondary} />
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text variant="body" color="primary" numberOfLines={1}>
-          {label}
+          {view.label}
         </Text>
-        {detail === null ? null : (
-          <Text variant="metadata" color={detailTone} numberOfLines={2}>
-            {detail}
+        {view.detail === null ? null : (
+          <Text variant="metadata" color={view.detailTone} numberOfLines={2}>
+            {view.detail}
           </Text>
         )}
       </View>
@@ -181,19 +151,15 @@ function TransferRow({
 }
 
 function ImportBody({
-  model,
-  onApplyImport,
-  onResetImport,
+  body,
 }: {
-  readonly model: TransferModel;
-  readonly onApplyImport?: (() => void) | undefined;
-  readonly onResetImport?: (() => void) | undefined;
+  readonly body: TransferImportView | null;
 }) {
   const theme = useTheme();
-  const preview: ImportPreviewModel | null = model.preview;
-  if (preview === null) {
+  if (body === null) {
     return null;
   }
+  const { footer } = body;
   return (
     <View
       style={{
@@ -205,21 +171,17 @@ function ImportBody({
       }}
     >
       <Text variant="body" color="bright">
-        {t('transfer.previewTitle')}
+        {body.title}
       </Text>
       <Text
         variant="metadata"
         color="secondary"
         style={{ marginTop: theme.spacing.xs }}
       >
-        {t('transfer.format', { version: preview.formatVersion })}
-        {preview.exportedLabel === null
-          ? ''
-          : t('transfer.exportedSuffix', { date: preview.exportedLabel })}
-        {t('transfer.sourceSuffix', { source: preview.sourceLabel })}
+        {body.metaLabel}
       </Text>
       <View style={{ marginTop: theme.spacing.sm, gap: 4 }}>
-        {preview.rows.map((row) => (
+        {body.rows.map((row) => (
           <View
             key={row.key}
             style={{ flexDirection: 'row', gap: theme.spacing.sm }}
@@ -233,7 +195,7 @@ function ImportBody({
           </View>
         ))}
       </View>
-      {model.importPhase === 'done' ? (
+      {footer.kind === 'done' ? (
         <View
           style={{
             flexDirection: 'row',
@@ -244,30 +206,30 @@ function ImportBody({
         >
           <Icon name="check" size={14} color={theme.colors.accent} />
           <Text variant="metadata" color="accent" style={{ flex: 1 }}>
-            {model.importDetail ?? t('transfer.applied')}
+            {footer.detail}
           </Text>
           <Pressable
             compact
-            onPress={onResetImport}
-            accessibilityLabel={t('transfer.resetA11y')}
+            onPress={footer.onReset}
+            accessibilityLabel={footer.resetA11yLabel}
             style={{ paddingHorizontal: theme.spacing.xs }}
           >
             <Text variant="metadata" color="primary">
-              {t('common.done')}
+              {footer.resetLabel}
             </Text>
           </Pressable>
         </View>
-      ) : model.importPhase === 'error' ? (
+      ) : footer.kind === 'error' ? (
         <View style={{ marginTop: theme.spacing.sm }}>
-          <ErrorState title={t('transfer.failed')} hint={model.importDetail} />
+          <ErrorState title={footer.title} hint={footer.hint} />
           <Pressable
             compact
-            onPress={onResetImport}
-            accessibilityLabel={t('transfer.resetA11y')}
+            onPress={footer.onReset}
+            accessibilityLabel={footer.resetA11yLabel}
             style={{ paddingHorizontal: theme.spacing.sm }}
           >
             <Text variant="metadata" color="primary">
-              {t('transfer.startOver')}
+              {footer.resetLabel}
             </Text>
           </Pressable>
         </View>
@@ -280,22 +242,18 @@ function ImportBody({
           }}
         >
           <PillButton
-            label={
-              model.importPhase === 'applying'
-                ? t('transfer.applying')
-                : t('transfer.apply')
-            }
+            label={footer.applyLabel}
             tone="accent"
-            onPress={onApplyImport}
-            disabled={model.importPhase === 'applying'}
-            accessibilityLabel={t('transfer.apply')}
+            onPress={footer.onApply}
+            disabled={footer.applying}
+            accessibilityLabel={footer.applyA11yLabel}
             style={{ paddingHorizontal: theme.spacing.sm }}
           />
           <PillButton
-            label={t('common.cancel')}
+            label={footer.cancelLabel}
             minHeight={26}
-            onPress={onResetImport}
-            accessibilityLabel={t('transfer.cancelA11y')}
+            onPress={footer.onCancel}
+            accessibilityLabel={footer.cancelA11yLabel}
           />
         </View>
       )}

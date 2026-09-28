@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./controllers": "./src/controllers.ts",
     "./fixtures": "./src/fixtures.ts",
     "./view-models": "./src/view-models.ts"
   },

@@ -1,77 +1,40 @@
-import { useMemo, useState } from 'react';
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
-import type { IconName } from './primitives.tsx';
 import { TrackRow, useTrackList } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import { NameField } from './sheets.tsx';
-import { t } from '@auqw/ui-shared';
-import type {
-  ArtistRailModel,
-  CollectionKey,
-  LibraryCardModel,
-  LibraryModel,
-  MessageId,
-} from '@auqw/ui-shared';
+import type { LibraryModel } from '@auqw/ui-shared';
+import {
+  useLibraryScreenController,
+  type LibraryCardView,
+  type LibraryCollectionView,
+  type LibraryScreenHandlers,
+} from '@auqw/ui-shared/controllers';
 
-export type LibraryScreenProps = {
+export type LibraryScreenProps = LibraryScreenHandlers & {
   readonly model: LibraryModel;
   readonly scrollEnabled?: boolean | undefined;
-  readonly onPressItem?: ((recordingId: string) => void) | undefined;
-  readonly onToggleLike?: ((recordingId: string) => void) | undefined;
-  readonly onAddToPlaylist?: ((recordingId: string) => void) | undefined;
-  readonly onContext?: ((recordingId: string) => void) | undefined;
-  readonly onOpenCollection?:
-    | ((key: 'liked' | 'top50' | 'history' | 'downloads') => void)
-    | undefined;
-  readonly onOpenCard?: ((card: LibraryCardModel) => void) | undefined;
-  readonly onOpenArtist?: ((artist: ArtistRailModel) => void) | undefined;
-  readonly onCreatePlaylist?: ((name: string) => void) | undefined;
 };
 
-const COLLECTION_ICONS: Record<CollectionKey, IconName> = {
-  liked: 'heart',
-  downloads: 'download',
-  top50: 'podium',
-  history: 'clock',
-};
-
-// Labels are message ids resolved at render — never cache translated
-// strings at module scope or they go stale on a locale switch.
-const KIND_FILTERS: readonly {
-  readonly key: 'playlist' | 'album' | 'artist';
-  readonly label: MessageId;
-}[] = [
-  { key: 'playlist', label: 'library.filter.playlists' },
-  { key: 'album', label: 'library.filter.albums' },
-  { key: 'artist', label: 'library.filter.artists' },
-];
-
-function CollectionTile({
-  tile,
-  onOpen,
-}: {
-  readonly tile: LibraryModel['collections'][number];
-  readonly onOpen?: (() => void) | undefined;
-}) {
-  const enabled = tile.enabled;
+function CollectionTile({ view }: { readonly view: LibraryCollectionView }) {
+  const { tile } = view;
   return (
     <Pressable
-      onPress={enabled ? onOpen : undefined}
-      disabled={!enabled}
-      ariaLabel={t('library.tileA11y', { label: tile.label, count: tile.count })}
-      className={`uw-collection${enabled ? '' : ' uw-off'}`}
-      data-enabled={enabled ? 'true' : 'false'}
+      onPress={view.enabled ? view.onOpen : undefined}
+      disabled={!view.enabled}
+      ariaLabel={view.a11yLabel}
+      className={`uw-collection${view.enabled ? '' : ' uw-off'}`}
+      data-enabled={view.enabled ? 'true' : 'false'}
     >
       <span className="uw-collection__icon">
         <Icon
-          name={COLLECTION_ICONS[tile.key]}
+          name={view.icon}
           size={20}
-          color={enabled ? 'var(--accent)' : 'var(--text-secondary)'}
+          color={view.enabled ? 'var(--accent)' : 'var(--text-secondary)'}
         />
       </span>
       <Text
         variant="title"
-        color={enabled ? 'bright' : 'primary'}
+        color={view.enabled ? 'bright' : 'primary'}
         numberOfLines={1}
         className="uw-collection__label"
       >
@@ -83,7 +46,7 @@ function CollectionTile({
         numberOfLines={1}
         className="uw-collection__count"
       >
-        {tile.note ?? t('common.trackCount', { count: tile.count })}
+        {view.countLabel}
       </Text>
     </Pressable>
   );
@@ -114,23 +77,27 @@ function ToggleChip({
 
 function NewPlaylistCard({
   view,
+  label,
+  a11yLabel,
   onPress,
 }: {
   readonly view: 'grid' | 'list';
+  readonly label: string;
+  readonly a11yLabel: string;
   readonly onPress?: (() => void) | undefined;
 }) {
   if (view === 'list') {
     return (
       <Pressable
         onPress={onPress}
-        ariaLabel={t('common.newPlaylist')}
+        ariaLabel={a11yLabel}
         className="uw-newpl uw-newpl--row"
       >
         <span className="uw-newpl__art">
           <Icon name="list-plus" size={15} />
         </span>
         <Text variant="body" color="secondary">
-          {t('common.newPlaylist')}
+          {label}
         </Text>
       </Pressable>
     );
@@ -138,34 +105,32 @@ function NewPlaylistCard({
   return (
     <Pressable
       onPress={onPress}
-      ariaLabel={t('common.newPlaylist')}
+      ariaLabel={a11yLabel}
       className="uw-newpl uw-newpl--grid"
     >
       <Icon name="list-plus" size={16} />
       <Text variant="metadata" color="secondary" className="uw-newpl__label">
-        {t('common.newPlaylist')}
+        {label}
       </Text>
     </Pressable>
   );
 }
 
 function LibraryCard({
-  card,
   view,
-  onPress,
+  layout,
 }: {
-  readonly card: LibraryCardModel;
-  readonly view: 'grid' | 'list';
-  readonly onPress?: (() => void) | undefined;
+  readonly view: LibraryCardView;
+  readonly layout: 'grid' | 'list';
 }) {
+  const { card } = view;
   const openable = card.playlistId !== null || card.entityRef !== null;
-  const press = openable ? onPress : undefined;
-  const label = t('common.cardA11y', { title: card.title, subtitle: card.subtitle });
-  if (view === 'list') {
+  const press = openable ? view.onPress : undefined;
+  if (layout === 'list') {
     return (
       <Pressable
         onPress={press}
-        ariaLabel={label}
+        ariaLabel={view.a11yLabel}
         className="uw-libcard uw-libcard--row"
       >
         <Artwork url={card.artworkUrl} size={40} dimmed={!openable} />
@@ -186,7 +151,7 @@ function LibraryCard({
   return (
     <Pressable
       onPress={press}
-      ariaLabel={label}
+      ariaLabel={view.a11yLabel}
       className="uw-libcard uw-libcard--grid"
     >
       <Artwork url={card.artworkUrl} size={132} dimmed={!openable} />
@@ -212,28 +177,17 @@ export function LibraryScreen({
   onOpenArtist,
   onCreatePlaylist,
 }: LibraryScreenProps) {
-  const [filter, setFilter] = useState<'all' | 'playlist' | 'album' | 'artist'>(
-    'all',
-  );
-  const [sort, setSort] = useState<'recent' | 'title'>('recent');
-  const [view, setView] = useState<'grid' | 'list'>('grid');
-  const [creating, setCreating] = useState(false);
-  const [draft, setDraft] = useState('');
-
-  const kindsPresent = useMemo(() => {
-    const kinds = new Set(model.cards.map((card) => card.kind));
-    return KIND_FILTERS.filter((f) => kinds.has(f.key));
-  }, [model.cards]);
-
-  const cards = useMemo(() => {
-    const filtered =
-      filter === 'all'
-        ? model.cards
-        : model.cards.filter((card) => card.kind === filter);
-    return sort === 'recent'
-      ? [...filtered].sort((a, b) => b.sortMs - a.sortMs)
-      : [...filtered].sort((a, b) => a.title.localeCompare(b.title));
-  }, [filter, model.cards, sort]);
+  const view = useLibraryScreenController({
+    model,
+    onPressItem,
+    onToggleLike,
+    onAddToPlaylist,
+    onContext,
+    onOpenCollection,
+    onOpenCard,
+    onOpenArtist,
+    onCreatePlaylist,
+  });
 
   const list = useTrackList({
     count: model.recentlyAdded.length,
@@ -263,214 +217,164 @@ export function LibraryScreen({
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
       <Text variant="display" color="bright">
-        {t('nav.library')}
+        {view.title}
       </Text>
 
       {/* collections — liked · downloads · top 50 · history */}
       <div className="uw-collections" role="list">
-        {model.collections.map((tile) => {
-          const key = tile.key;
-          return (
-            <div key={tile.key} role="listitem" className="uw-collections__cell">
-              <CollectionTile
-                tile={tile}
-                onOpen={
-                  key === null || onOpenCollection === undefined
-                    ? undefined
-                    : () => onOpenCollection(key)
-                }
-              />
-            </div>
-          );
-        })}
+        {view.collections.map((tile) => (
+          <div
+            key={tile.tile.key}
+            role="listitem"
+            className="uw-collections__cell"
+          >
+            <CollectionTile view={tile} />
+          </div>
+        ))}
       </div>
 
       <div className="uw-library__controls">
         <div className="uw-library__controls-row">
           <Text variant="heading" color="bright">
-            {t('library.heading')}
+            {view.headingLabel}
           </Text>
           <ToggleChip
-            label={t(`library.sort.${sort}`)}
+            label={view.sortChip.label}
             active={false}
-            onPress={() => setSort(sort === 'recent' ? 'title' : 'recent')}
+            onPress={view.sortChip.onPress}
           />
           <ToggleChip
-            label={t(`library.view.${view}`)}
+            label={view.layoutChip.label}
             active={false}
-            onPress={() => setView(view === 'grid' ? 'list' : 'grid')}
+            onPress={view.layoutChip.onPress}
           />
         </div>
-        <div className="uw-library__filters" role="toolbar" aria-label={t('library.kindFilterA11y')}>
-          <ToggleChip
-            label={t('library.filter.all')}
-            active={filter === 'all'}
-            onPress={() => setFilter('all')}
-          />
-          {kindsPresent.map((f) => (
+        <div
+          className="uw-library__filters"
+          role="toolbar"
+          aria-label={view.filterA11yLabel}
+        >
+          {view.filterOptions.map((option) => (
             <ToggleChip
-              key={f.key}
-              label={t(f.label)}
-              active={filter === f.key}
-              onPress={() => setFilter(f.key)}
+              key={option.key}
+              label={option.label}
+              active={option.active}
+              onPress={option.onPress}
             />
           ))}
         </div>
       </div>
 
-      {creating && (
+      {view.nameField !== null && (
         <NameField
-          value={draft}
-          placeholder={t('common.newPlaylistName')}
+          value={view.nameField.value}
+          placeholder={view.nameField.placeholder}
           autoFocus
-          onChange={setDraft}
-          onSubmit={
-            onCreatePlaylist === undefined
-              ? undefined
-              : (name) => {
-                  onCreatePlaylist(name);
-                  setDraft('');
-                  setCreating(false);
-                }
-          }
-          onCancel={() => {
-            setDraft('');
-            setCreating(false);
-          }}
+          onChange={view.nameField.onChange}
+          onSubmit={view.nameField.onSubmit}
+          onCancel={view.nameField.onCancel}
         />
       )}
 
-      {cards.length === 0 && !creating ? (
+      {view.showEmpty ? (
         <div className="uw-library__empty">
           <EmptyState
-            title={t('library.emptyTitle')}
-            hint={t('library.emptyHint')}
-            icon="list-plus"
+            title={view.empty.title}
+            hint={view.empty.hint}
+            icon={view.empty.icon}
           />
-          <NewPlaylistCard
-            view="grid"
-            onPress={
-              onCreatePlaylist === undefined
-                ? undefined
-                : () => setCreating(true)
-            }
-          />
-        </div>
-      ) : view === 'grid' ? (
-        <div className="uw-libcards uw-libcards--grid" role="list">
-          {cards.map((card) => (
-            <LibraryCard
-              key={card.key}
-              card={card}
-              view="grid"
-              onPress={
-                onOpenCard === undefined ? undefined : () => onOpenCard(card)
-              }
-            />
-          ))}
-          {creating ? null : (
+          {view.newCard !== null && (
             <NewPlaylistCard
               view="grid"
-              onPress={
-                onCreatePlaylist === undefined
-                  ? undefined
-                  : () => setCreating(true)
-              }
+              label={view.newCard.label}
+              a11yLabel={view.newCard.a11yLabel}
+              onPress={view.newCard.onPress}
+            />
+          )}
+        </div>
+      ) : view.layout === 'grid' ? (
+        <div className="uw-libcards uw-libcards--grid" role="list">
+          {view.cards.map((card) => (
+            <LibraryCard key={card.card.key} view={card} layout="grid" />
+          ))}
+          {view.newCard !== null && (
+            <NewPlaylistCard
+              view="grid"
+              label={view.newCard.label}
+              a11yLabel={view.newCard.a11yLabel}
+              onPress={view.newCard.onPress}
             />
           )}
         </div>
       ) : (
         <div className="uw-libcards uw-libcards--list" role="list">
-          {cards.map((card) => (
-            <LibraryCard
-              key={card.key}
-              card={card}
-              view="list"
-              onPress={
-                onOpenCard === undefined ? undefined : () => onOpenCard(card)
-              }
-            />
+          {view.cards.map((card) => (
+            <LibraryCard key={card.card.key} view={card} layout="list" />
           ))}
-          {creating ? null : (
+          {view.newCard !== null && (
             <NewPlaylistCard
               view="list"
-              onPress={
-                onCreatePlaylist === undefined
-                  ? undefined
-                  : () => setCreating(true)
-              }
+              label={view.newCard.label}
+              a11yLabel={view.newCard.a11yLabel}
+              onPress={view.newCard.onPress}
             />
           )}
         </div>
       )}
 
-      {model.artists.length > 0 && (
+      {view.artists !== null && (
         <div className="uw-library__section">
           <Text variant="heading" color="bright">
-            {t('library.artistsHeading')}
+            {view.artists.heading}
           </Text>
           <div className="uw-artist-rail" role="list">
-            {model.artists.map((artist) => {
-              const openable =
-                artist.entityRef !== null && onOpenArtist !== undefined;
-              return (
-                <Pressable
-                  key={artist.key}
-                  onPress={openable ? () => onOpenArtist(artist) : undefined}
-                  ariaLabel={artist.name}
-                  className="uw-artist"
+            {view.artists.items.map((item) => (
+              <Pressable
+                key={item.artist.key}
+                onPress={item.onPress}
+                ariaLabel={item.a11yLabel}
+                className="uw-artist"
+              >
+                <Artwork
+                  url={item.artist.artworkUrl}
+                  size={96}
+                  cornerRadius={48}
+                />
+                <Text
+                  variant="metadata"
+                  color="secondary"
+                  numberOfLines={2}
+                  className="uw-artist__name"
                 >
-                  <Artwork url={artist.artworkUrl} size={96} cornerRadius={48} />
-                  <Text
-                    variant="metadata"
-                    color="secondary"
-                    numberOfLines={2}
-                    className="uw-artist__name"
-                  >
-                    {artist.name}
-                  </Text>
-                </Pressable>
-              );
-            })}
+                  {item.artist.name}
+                </Text>
+              </Pressable>
+            ))}
           </div>
         </div>
       )}
 
-      {model.recentlyAdded.length > 0 && (
+      {view.recent !== null && (
         <div className="uw-library__section">
           <Text variant="heading" color="bright">
-            {t('library.recentlyLiked')}
+            {view.recent.heading}
           </Text>
           <div
             role="list"
-            aria-label={t('library.recentlyLiked')}
+            aria-label={view.recent.a11yLabel}
             className="uw-list"
             onKeyDown={list.listProps.onKeyDown}
           >
-            {model.recentlyAdded.map((item, index) => (
+            {view.recent.rows.map((item, index) => (
               <TrackRow
-                key={`recent-${item.key}`}
-                row={item}
+                key={`recent-${item.row.key}`}
+                row={item.row}
                 tabIndex={list.rowTabIndex(index)}
                 onFocusRow={() => list.onRowFocus(index)}
-                onPress={
-                  onPressItem === undefined
-                    ? undefined
-                    : () => onPressItem(item.key)
-                }
-                onToggleLike={
-                  onToggleLike === undefined
-                    ? undefined
-                    : () => onToggleLike(item.key)
-                }
-                onAddToPlaylist={
-                  onAddToPlaylist === undefined
-                    ? undefined
-                    : () => onAddToPlaylist(item.key)
-                }
-                onContext={
-                  onContext === undefined ? undefined : () => onContext(item.key)
-                }
+                onPress={item.onPress}
+                onToggleLike={item.onToggleLike}
+                onAddToPlaylist={item.onAddToPlaylist}
+                onContext={item.onContext}
               />
             ))}
           </div>
