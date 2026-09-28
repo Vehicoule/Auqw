@@ -460,13 +460,7 @@ export function LinearScrubber({
         enabled ? (event) => scrub.onScrubEnd(null, event.pointerId) : undefined
       }
       onLostPointerCapture={
-        enabled
-          ? (event) =>
-            scrub.onScrubEnd(
-              Number(event.currentTarget.value),
-              event.pointerId,
-            )
-          : undefined
+        enabled ? (event) => scrub.onScrubEnd(null, event.pointerId) : undefined
       }
       onChange={
         enabled
@@ -769,11 +763,7 @@ export function WaveformSeek({
         }
         onLostPointerCapture={
           enabled
-            ? (event) =>
-              scrub.onScrubEnd(
-                Number(event.currentTarget.value),
-                event.pointerId,
-              )
+            ? (event) => scrub.onScrubEnd(null, event.pointerId)
             : undefined
         }
         onChange={
