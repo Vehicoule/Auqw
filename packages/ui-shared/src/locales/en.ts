@@ -478,7 +478,7 @@ export const en = {
   'error.authExpired': 'provider sign-in expired — reconnect it',
   'error.rateLimited': 'the provider is rate-limiting right now',
   'error.expiredLink': 'the link expired — try again',
-  'error.permission': 'access was denied — check permissions',
+  'error.permission': 'access was denied — double-check and try again',
   'error.unexpected': 'got an unexpected reply — try again',
   'error.timeout': 'still loading — try again',
   'error.limit': 'over a limit — slim it down or try later',

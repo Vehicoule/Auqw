@@ -498,7 +498,7 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'error.authExpired': 'connexion au fournisseur expirée — reconnectez-la',
   'error.rateLimited': 'le fournisseur limite les requêtes en ce moment',
   'error.expiredLink': 'le lien a expiré — réessayer',
-  'error.permission': 'accès refusé — vérifiez les permissions',
+  'error.permission': 'accès refusé — vérifiez les informations et réessayez',
   'error.unexpected': 'réponse inattendue — réessayer',
   'error.timeout': 'chargement encore en cours — réessayer',
   'error.limit': 'au-delà d’une limite — réduisez ou réessayez plus tard',

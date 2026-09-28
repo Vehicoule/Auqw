@@ -474,7 +474,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'error.authExpired': '提供方登录已过期 — 重新连接',
   'error.rateLimited': '提供方正在限制请求',
   'error.expiredLink': '链接已过期 — 重试',
-  'error.permission': '访问被拒绝 — 检查权限',
+  'error.permission': '访问被拒绝 — 请检查后重试',
   'error.unexpected': '收到了意外的回复 — 重试',
   'error.timeout': '仍在加载 — 重试',
   'error.limit': '超出限制 — 缩小请求或稍后重试',

@@ -504,7 +504,7 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'error.authExpired': 'la sesión del proveedor expiró — reconéctala',
   'error.rateLimited': 'el proveedor está limitando peticiones ahora',
   'error.expiredLink': 'el enlace expiró — inténtalo de nuevo',
-  'error.permission': 'acceso denegado — revisa los permisos',
+  'error.permission': 'acceso denegado — revisa los datos e inténtalo de nuevo',
   'error.unexpected': 'respuesta inesperada — inténtalo de nuevo',
   'error.timeout': 'sigue cargando — inténtalo de nuevo',
   'error.limit': 'sobre un límite — hazlo más pequeño o reintenta luego',

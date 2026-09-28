@@ -497,7 +497,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'error.authExpired': 'anbieter-anmeldung abgelaufen — neu verbinden',
   'error.rateLimited': 'der anbieter limitiert gerade anfragen',
   'error.expiredLink': 'der link ist abgelaufen — erneut versuchen',
-  'error.permission': 'zugriff verweigert — berechtigungen prüfen',
+  'error.permission': 'zugriff verweigert — angaben prüfen und erneut versuchen',
   'error.unexpected': 'unerwartete antwort — erneut versuchen',
   'error.timeout': 'lädt noch — erneut versuchen',
   'error.limit': 'über ein limit hinaus — kleiner oder später erneut',
