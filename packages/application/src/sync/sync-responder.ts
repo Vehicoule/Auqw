@@ -504,10 +504,7 @@ export function createSyncResponder<
     return session.pump.send(codec.seal(plain));
   }
 
-  function dropSession(session: ResponderSession): void {
-    if (!sessions.delete(session)) {
-      return;
-    }
+  function cleanupSession(session: ResponderSession): void {
     session.handshakeTimer?.cancel();
     session.handshakeTimer = null;
     session.idleTimer?.cancel();
@@ -515,8 +512,19 @@ export function createSyncResponder<
     session.cancel.cancel();
   }
 
+  function dropSession(session: ResponderSession): void {
+    if (!sessions.delete(session)) {
+      return;
+    }
+    cleanupSession(session);
+  }
+
   function killSession(session: ResponderSession): void {
-    dropSession(session);
+    // Cleanup isn't gated on the LIVE set: rotateGeneration() moves
+    // doomed sessions out before teardown kills them, and their
+    // timers/cancellation must still run (pump.close is idempotent).
+    sessions.delete(session);
+    cleanupSession(session);
     session.pump.close();
   }
 
