@@ -43,3 +43,4 @@ export * from './library/playlists.ts';
 export * from './library/history.ts';
 export * from './library/lyrics.ts';
 export * from './providers/provider-router.ts';
+export * from './providers/provider-wire.ts';
