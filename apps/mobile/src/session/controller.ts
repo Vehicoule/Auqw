@@ -269,6 +269,13 @@ export type SessionController = {
    */
   rehydrateMedia(signal: CancellationSignal): Promise<void>;
   /**
+   * Local-source-only variant: rebuilds `localSource` from persisted
+   * rows and projects them into the session WITHOUT touching the
+   * download ledger — safe while transfers are live (rehydrateMedia's
+   * downloads.init would sweep their partial files).
+   */
+  rehydrateLocal(signal: CancellationSignal): Promise<void>;
+  /**
    * Whole-library replace with the ordering the media owners need:
    * the download manager stops and clears its files BEFORE the
    * section swap commits — a live runner or a finalized file must
@@ -572,9 +579,9 @@ export async function createSessionController(
    * and rebuild the local source from the post-import snapshot
    * before the UI calls back in.
    */
-  const rehydrateMedia = async (
+  const reloadLocalSource = async (
     signal: CancellationSignal,
-  ): Promise<void> => {
+  ) => {
     const loaded = await storage.load({
       requestId: ids.next('media-rehydrate'),
       deadlineMs: clock.nowMs() + 30_000,
@@ -586,7 +593,7 @@ export async function createSessionController(
         message: 'media rehydrate skipped: storage load failed',
         atMs: clock.nowMs(),
       });
-      return;
+      return null;
     }
     localSource = new LocalFileSource(
       { storage, tagReader: createExpoTagReader(host), ids, clock, log },
@@ -596,7 +603,16 @@ export async function createSessionController(
         recordings: loaded.value.recordings,
       },
     );
-    const inited = await downloads.init(loaded.value.downloads, signal);
+    return loaded.value;
+  };
+  const rehydrateMedia = async (
+    signal: CancellationSignal,
+  ): Promise<void> => {
+    const loaded = await reloadLocalSource(signal);
+    if (loaded === null) {
+      return;
+    }
+    const inited = await downloads.init(loaded.downloads, signal);
     if (!inited.ok) {
       void log.write({
         level: 'warn',
@@ -606,7 +622,16 @@ export async function createSessionController(
     }
     // Imported recordings replace prior local rows — the session
     // re-merges provenance-local rows through this hook.
-    session.syncLocalRecordings(localSource.recordings());
+    session.syncLocalRecordings(localSource?.recordings() ?? []);
+  };
+  const rehydrateLocal = async (
+    signal: CancellationSignal,
+  ): Promise<void> => {
+    // NO downloads.init — a folder commit that lands on a superseded
+    // source must not clear live transfer rows or sweep .part files.
+    if ((await reloadLocalSource(signal)) !== null) {
+      session.syncLocalRecordings(localSource?.recordings() ?? []);
+    }
   };
   return {
     session,
@@ -945,6 +970,7 @@ export async function createSessionController(
       }
     },
     rehydrateMedia,
+    rehydrateLocal,
     async replaceLibrary(text, signal) {
       // Validate BEFORE the drain: a malformed document must not
       // destroy existing downloads. Session.importLibrary revalidates

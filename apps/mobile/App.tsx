@@ -1912,8 +1912,10 @@ function Main({
           return;
         }
         if (live !== mutated) {
+          // rehydrateLocal only — rehydrateMedia's downloads.init
+          // would clear live transfer rows and sweep .part files.
           void controller
-            .rehydrateMedia(new CancellationSource().signal)
+            .rehydrateLocal(new CancellationSource().signal)
             .then(refreshLocal);
           return;
         }
