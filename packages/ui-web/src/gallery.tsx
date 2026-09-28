@@ -6,7 +6,6 @@ import {
   Artwork,
   EqBars,
   Icon,
-  IconButton,
   Pressable,
   Spinner,
   Text,
@@ -22,7 +21,7 @@ import {
 } from './states.tsx';
 import { MiniPlayer } from './mini-player.tsx';
 import { DesktopChrome } from './chrome.tsx';
-import { NowPlayingScreen, StageSheet, TransportControls } from './now-playing-screen.tsx';
+import { NowPlayingScreen, TransportControls } from './now-playing-screen.tsx';
 import { QueueScreen } from './queue-screen.tsx';
 import { SearchScreen } from './search-screen.tsx';
 import { LibraryScreen } from './library-screen.tsx';

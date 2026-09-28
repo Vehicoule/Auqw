@@ -109,7 +109,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
- "wat",
 ]
 
 [[package]]

@@ -6,7 +6,6 @@ import type {
   SyncPeer,
 } from '@auqw/application';
 import { err, ok } from '@auqw/application';
-import { appError } from '@auqw/application';
 
 /**
  * SyncHostRegistry over SyncClientKeys — the pair host's custody seam

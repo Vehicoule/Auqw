@@ -680,7 +680,7 @@ export function SyncScreen({
                     : t('sync.nearby.tap')}
                 </Text>
               </View>
-              {nearbyPeers.map((peer, i) => (
+              {nearbyPeers.map((peer) => (
                 <View key={peer.key}>
                   <Hairline />
                   <NearbyRow

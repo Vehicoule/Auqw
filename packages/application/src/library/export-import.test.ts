@@ -11,7 +11,6 @@ import type {
   Settings,
   SourceRef,
 } from '../domain.ts';
-import type { ExportDocument } from './library.ts';
 import { isExportDocument } from './library.ts';
 import {
   applyImport,

@@ -1,4 +1,3 @@
-import React from 'react';
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Icon, PillButton, Pressable, Text } from './primitives.tsx';

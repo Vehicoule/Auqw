@@ -18,7 +18,7 @@ import {
   FakeSyncLogStore,
   SequenceIds,
 } from '../testing/fakes.ts';
-import { createSyncEngine, type SyncEngine } from './sync-engine.ts';
+import { createSyncEngine } from './sync-engine.ts';
 import { createSyncClient } from './sync-client.ts';
 import {
   createSyncPairHost,

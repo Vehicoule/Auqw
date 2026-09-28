@@ -1,7 +1,6 @@
 import type {
   OperationContext,
   ProviderCapability,
-  Result,
   SourceRef,
 } from '@auqw/application';
 import { CancellationSource } from '@auqw/application';

@@ -1,6 +1,5 @@
 import type {
   EntityRef,
-  QueueOccurrence,
   Recording,
   SourceMapping,
   SourceRef,
@@ -42,7 +41,6 @@ import {
   projectMaterialized,
   recordingDeleteWrites,
   recordingUpsertWrites,
-  reviewSyncWrites,
   settingsWrites,
   unsyncedWrites,
 } from './sync-projection.ts';

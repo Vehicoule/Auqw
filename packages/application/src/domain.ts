@@ -933,27 +933,3 @@ export function isLocalFile(value: unknown): value is LocalFile {
   );
 }
 
-export function isDownloadProgress(
-  value: unknown,
-): value is DownloadProgress {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const { downloadId, recordingId, state, transferredBytes, totalBytes } =
-    value;
-  return (
-    hasExactKeys(value, [
-      'downloadId',
-      'recordingId',
-      'state',
-      'transferredBytes',
-      'totalBytes',
-    ]) &&
-    isString(downloadId, 64) &&
-    isString(recordingId, 64) &&
-    isDownloadState(state) &&
-    isSafeNonNegative(transferredBytes) &&
-    isOptSafeNonNegative(totalBytes) &&
-    (totalBytes === null || transferredBytes <= totalBytes)
-  );
-}

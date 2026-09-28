@@ -327,10 +327,6 @@ export function isSyncRequestMsg(
   );
 }
 
-function isByeMsg(value: unknown): value is ByeMsg {
-  return isRecord(value) && hasExactKeys(value, ['t']) && value['t'] === 'bye';
-}
-
 export function isErrorMsg(value: unknown): value is ErrorMsg {
   return (
     isRecord(value) &&

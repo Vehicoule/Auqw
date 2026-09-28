@@ -1,4 +1,3 @@
-import { CancellationSource } from '../cancellation.ts';
 import type { CancellationSignal, OperationContext } from '../cancellation.ts';
 import { ok, err, appError } from '../errors.ts';
 import type { ErrorKind, Result } from '../errors.ts';
@@ -805,7 +804,7 @@ async function rebandsOnQueueChange(): Promise<void> {
   assert(req.ok);
   assertEqual(req.value.priority, 2, 'explicit band');
   q = queue([oc('occ-1', 'rec-1')], 'occ-1');
-  const rebanded = await manager.updatePriorities(NEVER);
+  const rebanded = await manager.updatePriorities();
   assert(rebanded.ok);
   const rec = manager.recordFor('rec-1');
   assertEqual(rec?.priority, 0, 'rebands to now-playing');

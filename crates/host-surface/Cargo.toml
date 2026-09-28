@@ -18,4 +18,3 @@ tokio-util = { version = "0.7.18", features = ["rt"] }
 
 [dev-dependencies]
 sha2 = "0.10.9"
-wat = "1.259.0"

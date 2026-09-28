@@ -56,7 +56,6 @@ import {
   type DevicesMsg,
   type ErrorMsg,
   type RejectMsg,
-  type ServerMsg,
   type SyncDeviceSummary,
   type SyncEndpoint,
   type SyncWirePump,

@@ -660,7 +660,7 @@ function Main({
           void controller.downloads.cancel(existing.downloadId, signal);
           return;
         case 'failed_with_retry':
-          void controller.downloads.retry(existing.downloadId, signal);
+          void controller.downloads.retry(existing.downloadId);
           return;
         case 'available':
           // The 'removing' transition fires before the file is gone —

@@ -205,13 +205,8 @@ pub trait Remint: Send + Sync {
 
 /// Ensure the futures and trait objects the crate threads through are
 /// `Send` — the pump runs on a multi-thread runtime.
-#[allow(dead_code)]
-fn _assert_send<T: Send>(_: &T) {
-    // compile-time only
-}
-
-#[allow(dead_code)]
-fn _assertions(reg: &StreamRegistry, rem: &Arc<dyn Remint>) {
-    _assert_send(reg);
-    _assert_send(rem);
-}
+const _: () = {
+    const fn check<T: Send>() {}
+    check::<StreamRegistry>();
+    check::<Arc<dyn Remint>>();
+};

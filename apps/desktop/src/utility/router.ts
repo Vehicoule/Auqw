@@ -8,21 +8,6 @@ import type { UtilityRequest, UtilityResponse } from './envelope.ts';
 
 export type UtilityHandler = (args: unknown) => Promise<unknown>;
 
-/**
- * Channel families that land on this process in later slices — storage,
- * stream, sync, transfer, and tag-reading port adapters. Until an
- * adapter registers a handler the family answers `not-implemented`
- * rather than `invalid-request`.
- */
-const STUB_FAMILIES: readonly string[] = [
-  'storage:',
-  'stream:',
-  'sync:',
-  'transfer:',
-  'tagread:',
-  'local:',
-];
-
 function handlePing(args: unknown): Promise<unknown> {
   if (!isUtilityPingArgs(args)) {
     return Promise.reject(
@@ -57,16 +42,6 @@ export function createUtilityRouter(
           error: isShellError(thrown) ? thrown : fromUnknown(thrown),
         };
       }
-    }
-    if (STUB_FAMILIES.some((family) => request.channel.startsWith(family))) {
-      return {
-        id: request.id,
-        ok: false,
-        error: shellError(
-          'not-implemented',
-          `channel ${request.channel} is not implemented yet`,
-        ),
-      };
     }
     return {
       id: request.id,

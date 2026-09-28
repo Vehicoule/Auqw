@@ -387,7 +387,6 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'settings.languageValue.fr': 'français',
   'settings.languageValue.es': 'español',
   'settings.languageValue.zh': '中文',
-  'settings.heading.settings': '设置',
   'settings.heading.diagnostics': '诊断',
   'settings.heading.sync': '同步',
   'settings.section.appearance': '外观',

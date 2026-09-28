@@ -407,7 +407,6 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'settings.languageValue.fr': 'français',
   'settings.languageValue.es': 'español',
   'settings.languageValue.zh': '中文',
-  'settings.heading.settings': 'réglages',
   'settings.heading.diagnostics': 'diagnostics',
   'settings.heading.sync': 'sync',
   'settings.section.appearance': 'apparence',

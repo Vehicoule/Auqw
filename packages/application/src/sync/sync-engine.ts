@@ -26,7 +26,6 @@ import {
   isTrackRef,
 } from '../domain.ts';
 import { PLAY_HISTORY_RETENTION_MS } from '../library/history.ts';
-import type { PlayEvent } from '../library/library.ts';
 import {
   isCandidateSnapshot,
   isMatchResolution,

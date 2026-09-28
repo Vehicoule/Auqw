@@ -6,7 +6,7 @@ import type { PlayableResource } from '../ports/provider.ts';
 import { FakeClock, FakeTransfer } from '../testing/fakes.ts';
 import { assert, assertDeepEqual, assertEqual } from '../testing/assert.ts';
 import { createSha256 } from './sha256.ts';
-import type { ChunkHasher, RangeFetchResponse, TransferOutcome } from './transfer-policy.ts';
+import type { RangeFetchResponse, TransferOutcome } from './transfer-policy.ts';
 import { runTransfer } from './transfer-policy.ts';
 
 type WireRequest = {

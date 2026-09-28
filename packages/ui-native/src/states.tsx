@@ -41,7 +41,6 @@ export function LoadingState({
   readonly hint?: string | null | undefined;
   readonly onCancel?: (() => void) | undefined;
 }) {
-  const theme = useTheme();
   return (
     <StateShell>
       <Spinner size={18} />
