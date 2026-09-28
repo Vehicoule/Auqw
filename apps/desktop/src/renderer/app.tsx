@@ -9,13 +9,13 @@ import {
 import { createRoot } from 'react-dom/client';
 import {
   CancellationSource,
-  LOCAL_PROVIDER,
   ProviderRouter,
   SearchSession,
   appError,
   collectSyncDeltaDocs,
   effectiveMapping,
   err,
+  isMatchGate,
   isRefRejected,
   isSyncDelta,
   ok,
@@ -121,6 +121,7 @@ import type {
   Boot,
   EntityFetch,
   LyricsFetch,
+  MessageId,
   OverlayEntry,
   ProviderSlot,
   ReviewFetch,
@@ -136,6 +137,7 @@ import { isShellError } from '../shared/errors.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { createClock, createIds } from '@auqw/application';
+import { shellToAppError } from './ipc-errors.ts';
 import { createWebPeaksPort } from './web-peaks.ts';
 import { useWaveformPeaks } from '@auqw/ui-shared';
 import type { PeaksTarget } from '@auqw/ui-shared';
@@ -1237,12 +1239,30 @@ function Main({
         queue: state.queue,
         recordings: state.recordings,
         likes: state.likes,
+        // Same honesty rule as the library rows: offline + unowned
+        // marks 'unavailable' so a dead press isn't a surprise — a
+        // row the local probe resolves stays playable.
         unavailableRecordingIds:
           online === false
-            ? new Set(state.queue.occurrences.map((o) => o.recordingId))
+            ? new Set(
+                state.queue.occurrences
+                  .map((o) => o.recordingId)
+                  .filter(
+                    (id) => controller.localPlaybackFor(id) === null,
+                  ),
+              )
             : undefined,
       }),
-    [state.queue, state.recordings, state.likes, online, localeTick],
+    [
+      state.queue,
+      state.recordings,
+      state.likes,
+      online,
+      controller,
+      downloads,
+      localTick,
+      localeTick,
+    ],
   );
   const libraryModel = useMemo(() => {
     const model = toLibraryModel({
@@ -1562,6 +1582,10 @@ function Main({
         // strand a partially imported array.
         const docs = parseSyncDeltaDocs(text);
         if (docs === null) {
+          reportResult(
+            'sync.panel.pasteDelta',
+            err(appError('invalid-message', 'clipboard has no delta')),
+          );
           return;
         }
         for (const delta of docs) {
@@ -1569,11 +1593,47 @@ function Main({
         }
       })
       .then(syncRefresh)
-      .catch(() => {
-        // A non-JSON or invalid clipboard payload lands nowhere — the
-        // panel just re-reads status.
+      .catch((thrown: unknown) => {
+        reportResult(
+          'sync.panel.pasteDelta',
+          err(shellToAppError(thrown)),
+        );
       });
   }, [syncRefresh]);
+
+  // ---- play actions ------------------------------------------------
+
+  const loadReviews = useCallback(() => {
+    setReviewFetch({ reviews: null, error: null });
+    void session.listMatchReviews({ status: 'all' }).then((result) => {
+      setReviewFetch(
+        result.ok
+          ? { reviews: result.value, error: null }
+          : { reviews: null, error: result.error },
+      );
+    });
+  }, [session]);
+
+  // The ambiguous-match gate parks candidates in a review the user
+  // must resolve — retrying the press only fails the same way, so a
+  // play that hits the gate opens the review surface instead of
+  // dying quietly on a dead queue item.
+  const reportPlay = useCallback(
+    (action: MessageId, result: Result<unknown>) => {
+      reportResult(action, result);
+      if (!result.ok && isMatchGate(result.error)) {
+        // Land the user on the fresh pending row: a stale 'resolved'
+        // filter or an already-open screen would hide it, so the
+        // route always selects pending and reloads.
+        setReviewFilter('pending');
+        loadReviews();
+        if (overlay?.type !== 'corrections') {
+          pushOverlay({ type: 'corrections' });
+        }
+      }
+    },
+    [pushOverlay, overlay, loadReviews],
+  );
 
   const playRecording = useCallback(
     async (recordingId: string) => {
@@ -1581,11 +1641,13 @@ function Main({
         return;
       }
       const enqueued = await session.enqueueRecording(recordingId);
-      if (enqueued.ok) {
-        await session.playOccurrence(enqueued.value);
+      if (!enqueued.ok) {
+        reportResult('action.enqueueTrack', enqueued);
+        return;
       }
+      reportPlay('common.play', await session.playOccurrence(enqueued.value));
     },
-    [session, canPlay],
+    [session, canPlay, reportPlay],
   );
 
   // Queue presses and transport follow the same offline rule as
@@ -1598,9 +1660,11 @@ function Main({
       if (occurrence !== undefined && !canPlay(occurrence.recordingId)) {
         return;
       }
-      void session.playOccurrence(occurrenceId);
+      void session
+        .playOccurrence(occurrenceId)
+        .then((r) => reportPlay('common.play', r));
     },
-    [session, state.queue, canPlay],
+    [session, state.queue, canPlay, reportPlay],
   );
 
   // Mirrors the cursor's targeting in walk space — the dealt order
@@ -1645,7 +1709,13 @@ function Main({
       if (target === undefined || !canPlay(target.recordingId)) {
         return;
       }
-      void (method === 'next' ? session.next() : session.previous());
+      void (method === 'next' ? session.next() : session.previous()).then(
+        (r) =>
+          reportPlay(
+            method === 'next' ? 'common.next' : 'common.previous',
+            r,
+          ),
+      );
     },
     [
       session,
@@ -1653,17 +1723,31 @@ function Main({
       state.shuffleOrder,
       state.repeat,
       canPlay,
+      reportPlay,
     ],
   );
 
   // Offline honesty for metadata paths (cached search/entity rows):
-  // the materialized recording plays only when a stream can resolve —
-  // the exception is a meta already file-backed by the 'local'
-  // provider.
+  // the materialized recording is playable offline only when owned —
+  // a provider ref alone would start a remote attempt the UI says
+  // waits for connectivity.
   const canPlayMeta = useCallback(
-    (meta: TrackMetadata): boolean =>
-      online !== false || meta.sourceRef.provider === LOCAL_PROVIDER,
-    [online],
+    (meta: TrackMetadata): boolean => {
+      if (online !== false) {
+        return true;
+      }
+      const ref = meta.sourceRef;
+      const recording = state.recordings.find((r) =>
+        r.sourceRefs.some(
+          (s) =>
+            s.provider === ref.provider &&
+            s.kind === ref.kind &&
+            s.id === ref.id,
+        ),
+      );
+      return recording !== undefined && canPlay(recording.id);
+    },
+    [online, state.recordings, canPlay],
   );
 
   const onResultPress = useCallback(
@@ -1671,10 +1755,12 @@ function Main({
       const meta = resultMeta.current.get(row.key);
       if (meta !== undefined && canPlayMeta(meta)) {
         recordRecentSearch(query);
-        void session.addAndPlay(meta);
+        void session
+          .addAndPlay(meta)
+          .then((r) => reportPlay('action.playResult', r));
       }
     },
-    [session, canPlayMeta, query, recordRecentSearch],
+    [session, canPlayMeta, query, recordRecentSearch, reportPlay],
   );
 
   const onSettingsSelect = useCallback(
@@ -1856,8 +1942,10 @@ function Main({
     ) {
       return;
     }
-    void (intentPlaying ? session.pause() : session.resume());
-  }, [session, state.queue.mode, state.playback.type, currentRecordingId, canPlay]);
+    void (intentPlaying ? session.pause() : session.resume()).then((r) =>
+      reportPlay(intentPlaying ? 'common.pause' : 'action.resume', r),
+    );
+  }, [session, state.queue.mode, state.playback.type, currentRecordingId, canPlay, reportPlay]);
   const onToggleLike = useCallback(() => {
     if (currentRecordingId !== null) {
       void session.toggleLike(currentRecordingId);
@@ -2042,17 +2130,6 @@ function Main({
   }, [session]);
 
   // ---- corrections (live read + serialized review ops) -----------
-
-  const loadReviews = useCallback(() => {
-    setReviewFetch({ reviews: null, error: null });
-    void session.listMatchReviews({ status: 'all' }).then((result) => {
-      setReviewFetch(
-        result.ok
-          ? { reviews: result.value, error: null }
-          : { reviews: null, error: result.error },
-      );
-    });
-  }, [session]);
 
   // The queue reloads whenever the corrections overlay opens — the
   // rows are live reads, never stale session state.
@@ -2458,14 +2535,16 @@ function Main({
       if (playable.length === 0) {
         return;
       }
-      void session.playRecordings(
-        playable.map((row) => ({
-          recordingId: row.recordingId,
-          selectedRef: null,
-        })),
-      );
+      void session
+        .playRecordings(
+          playable.map((row) => ({
+            recordingId: row.recordingId,
+            selectedRef: null,
+          })),
+        )
+        .then((r) => reportPlay('action.playCollection', r));
     },
-    [session, canPlay],
+    [session, canPlay, reportPlay],
   );
 
   const playPlaylist = useCallback(
@@ -2479,14 +2558,16 @@ function Main({
       if (playable.length === 0) {
         return;
       }
-      void session.playRecordings(
-        playable.map((entry) => ({
-          recordingId: entry.recordingId,
-          selectedRef: entry.selectedRef,
-        })),
-      );
+      void session
+        .playRecordings(
+          playable.map((entry) => ({
+            recordingId: entry.recordingId,
+            selectedRef: entry.selectedRef,
+          })),
+        )
+        .then((r) => reportPlay('action.playPlaylist', r));
     },
-    [session, canPlay],
+    [session, canPlay, reportPlay],
   );
 
   const addToPlaylist = useCallback(
@@ -2738,7 +2819,9 @@ function Main({
                   if (searchState.type === 'content') {
                     recordRecentSearch(searchState.query);
                   }
-                  void session.addAndPlay(meta);
+                  void session
+                    .addAndPlay(meta)
+                    .then((r) => reportPlay('action.playResult', r));
                 }
                 return;
               }
@@ -2793,12 +2876,14 @@ function Main({
               if (!canPlay(entry.recordingId)) {
                 return;
               }
-              void session.playRecordings([
-                {
-                  recordingId: entry.recordingId,
-                  selectedRef: entry.selectedRef,
-                },
-              ]);
+              void session
+                .playRecordings([
+                  {
+                    recordingId: entry.recordingId,
+                    selectedRef: entry.selectedRef,
+                  },
+                ])
+                .then((r) => reportPlay('action.playPlaylistEntry', r));
             }}
             onToggleLike={(entry) => void session.toggleLike(entry.recordingId)}
             onAddToPlaylist={(entry) =>
@@ -2863,7 +2948,9 @@ function Main({
               if (metas.length === 0) {
                 return;
               }
-              void session.playMetadata(metas);
+              void session
+                .playMetadata(metas)
+                .then((r) => reportPlay('collection.playAll', r));
             }}
             onShuffleAll={() => {
               const metas = entityModelFor(fetch)
@@ -2875,7 +2962,9 @@ function Main({
               if (metas.length === 0) {
                 return;
               }
-              void session.playMetadata(metas, { shuffle: true });
+              void session
+                .playMetadata(metas, { shuffle: true })
+                .then((r) => reportPlay('action.shuffleAll', r));
             }}
             onToggleLike={
               entityId === null
@@ -2886,7 +2975,9 @@ function Main({
             onPressItem={(row) => {
               const meta = metaFor(row);
               if (meta !== undefined && canPlayMeta(meta)) {
-                void session.addAndPlay(meta);
+                void session
+                  .addAndPlay(meta)
+                  .then((r) => reportPlay('action.playResult', r));
               }
             }}
             onAddToPlaylist={(row) => {
