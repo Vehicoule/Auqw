@@ -669,9 +669,10 @@ export async function createSessionController(
                 clock,
                 maxAttempts: 4,
                 baseBackoffMs: 400,
-                call: (_signal, attempt) =>
+                call: (attemptSignal, attempt) =>
                   session.applySyncedEntries(
                     attempt === 1 ? applied.outcomes : [],
+                    attemptSignal,
                   ),
               });
               if (signal.cancelled) {
@@ -752,9 +753,10 @@ export async function createSessionController(
               clock,
               maxAttempts: 4,
               baseBackoffMs: 400,
-              call: (_signal, attempt) =>
+              call: (attemptSignal, attempt) =>
                 session.applyMaterializedEntries(
                   attempt === 1 ? materialized : [],
+                  attemptSignal,
                 ),
             });
             if (signal.cancelled) {

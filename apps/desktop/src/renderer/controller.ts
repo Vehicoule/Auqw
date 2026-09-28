@@ -641,11 +641,12 @@ export async function createSessionController(
           clock,
           maxAttempts: APPLY_RETRY_MAX + 1,
           baseBackoffMs: APPLY_RETRY_MS,
-          call: (_signal, attempt) =>
+          call: (attemptSignal, attempt) =>
             session.applyMaterializedEntries(
               attempt === 1
                 ? (page.records as readonly MaterializedRecord[])
                 : [],
+              attemptSignal,
             ),
         });
         if (disposed) {
@@ -730,11 +731,12 @@ export async function createSessionController(
             clock,
             maxAttempts: APPLY_RETRY_MAX + 1,
             baseBackoffMs: APPLY_RETRY_MS,
-            call: (_signal, attempt) =>
+            call: (attemptSignal, attempt) =>
               session.applySyncedEntries(
                 attempt === 1
                   ? (batch.outcomes as readonly MergeOutcome[])
                   : [],
+                attemptSignal,
               ),
           });
           if (disposed) {
