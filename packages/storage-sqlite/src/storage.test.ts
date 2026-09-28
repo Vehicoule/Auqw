@@ -2081,6 +2081,111 @@ async function deltaWriteScope(): Promise<void> {
   driver.close();
 }
 
+async function committedOrderPersists(): Promise<void> {
+  const { driver, storage } = rig();
+  const r1 = recording('r1', [ref('itunes', 'i1')]);
+  const r2 = recording('r2', [ref('itunes', 'i2')]);
+  const r3 = recording('r3', [ref('itunes', 'i3')]);
+  assert(
+    (await storage.commit({ recordings: [r1, r2, r3] }, ctx().context))
+      .ok,
+    'seed commit',
+  );
+  // No row values change — the committed array order must still win.
+  assert(
+    (await storage.commit({ recordings: [r3, r1, r2] }, ctx().context))
+      .ok,
+    'reorder commits',
+  );
+  assertDeepEqual(
+    (await loadOk(storage)).recordings.map((r) => r.id),
+    ['r3', 'r1', 'r2'],
+    'load returns the committed order',
+  );
+  // A new recording committed mid-array lands mid-order, not appended.
+  const r4 = recording('r4', [ref('itunes', 'i4')]);
+  assert(
+    (
+      await storage.commit({ recordings: [r2, r4, r3] }, ctx().context)
+    ).ok,
+    'remove + mid-array insert commits',
+  );
+  assertDeepEqual(
+    (await loadOk(storage)).recordings.map((r) => r.id),
+    ['r2', 'r4', 'r3'],
+    'insertion respects committed position',
+  );
+  driver.close();
+}
+
+async function artworkCacheEviction(): Promise<void> {
+  const { driver, storage } = rig();
+  const entry = (
+    url: string,
+    lastAccessedMs: number,
+  ): ArtworkCacheEntry => ({
+    url,
+    filePath: `/art/${url}`,
+    bytes: 10,
+    lastAccessedMs,
+  });
+  assert(
+    (
+      await storage.commit(
+        {
+          artworkCache: [
+            entry('https://a.example/1', 1),
+            entry('https://a.example/2', 2),
+          ],
+        },
+        ctx().context,
+      )
+    ).ok,
+    'seed commit',
+  );
+  assert(
+    (
+      await storage.commit(
+        { artworkCache: [entry('https://a.example/2', 3)] },
+        ctx().context,
+      )
+    ).ok,
+    'evict + touch commits',
+  );
+  const after = await loadOk(storage);
+  assertDeepEqual(
+    after.artworkCache,
+    [entry('https://a.example/2', 3)],
+    'evicted row stays gone',
+  );
+  driver.close();
+}
+
+async function largeRemovalCommits(): Promise<void> {
+  const { driver, storage } = rig();
+  // Removing >256 recordings used to blow the desktop bridge's
+  // per-query parameter cap when dependent probes bound every id.
+  const many = Array.from({ length: 300 }, (_, i) =>
+    recording(`r${i}`, [ref('itunes', `i${i}`)]),
+  );
+  assert(
+    (await storage.commit({ recordings: many }, ctx().context)).ok,
+    'seed commit',
+  );
+  assert(
+    (
+      await storage.commit({ recordings: many.slice(0, 1) }, ctx().context)
+    ).ok,
+    'large removal commits',
+  );
+  assertDeepEqual(
+    (await loadOk(storage)).recordings.map((r) => r.id),
+    ['r0'],
+    'survivor persists',
+  );
+  driver.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentOperations', concurrentOperations],
   ['initializeAndCoalesce', initializeAndCoalesce],
@@ -2120,6 +2225,9 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['migrationV5toV6', migrationV5toV6],
   ['migrationV7toV8', migrationV7toV8],
   ['deltaWriteScope', deltaWriteScope],
+  ['committedOrderPersists', committedOrderPersists],
+  ['artworkCacheEviction', artworkCacheEviction],
+  ['largeRemovalCommits', largeRemovalCommits],
 ];
 
 for (const [name, fn] of TESTS) {

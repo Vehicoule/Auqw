@@ -260,6 +260,8 @@ export function decodeRecordingRows(
 /* against non-PK UNIQUE columns (a swapped ordinal/unique tuple can  */
 /* never collide once the old rows are gone). FK parents UPDATE in    */
 /* place instead: a delete there would cascade away dependent rows.   */
+/* Tables read `ORDER BY rowid` also update in place so an edited row */
+/* keeps its position in the committed array's physical order.        */
 /* ------------------------------------------------------------------ */
 
 type RowTuple = readonly SqlValue[];
@@ -318,7 +320,7 @@ const LIKES: TableDef = {
   table: 'likes',
   columns: ['entity_kind', 'target_id', 'liked_ms'],
   key: ['entity_kind', 'target_id'],
-  reinsert: true,
+  reinsert: false,
 };
 
 const ENTITIES: TableDef = {
@@ -380,7 +382,7 @@ const PLAY_COUNTS: TableDef = {
   table: 'play_counts',
   columns: ['recording_id', 'count', 'last_ms'],
   key: ['recording_id'],
-  reinsert: true,
+  reinsert: false,
 };
 
 const MATCH_REVIEWS: TableDef = {
@@ -395,7 +397,7 @@ const MATCH_REVIEWS: TableDef = {
     'resolved_ms',
   ],
   key: ['review_id'],
-  reinsert: true,
+  reinsert: false,
 };
 
 const LYRICS_CACHE: TableDef = {
@@ -409,14 +411,14 @@ const LYRICS_CACHE: TableDef = {
     'provider_version',
   ],
   key: ['recording_id'],
-  reinsert: true,
+  reinsert: false,
 };
 
 const ARTWORK_CACHE: TableDef = {
   table: 'artwork_cache',
   columns: ['url', 'file_path', 'bytes', 'last_accessed_ms'],
   key: ['url'],
-  reinsert: true,
+  reinsert: false,
 };
 
 const DOWNLOADS: TableDef = {
@@ -483,6 +485,19 @@ const QUEUE_OCCURRENCES: TableDef = {
   key: ['occurrence_id'],
   reinsert: true,
 };
+
+// `load` reads these tables `ORDER BY rowid`, so physical row order
+// is part of the committed contract — see `diffRows`'s reorder pass.
+const ORDERED_TABLES: ReadonlySet<TableDef> = new Set([
+  RECORDINGS,
+  LIKES,
+  ENTITIES,
+  PLAYLISTS,
+  PLAY_COUNTS,
+  MATCH_REVIEWS,
+  LYRICS_CACHE,
+  ARTWORK_CACHE,
+]);
 
 /* ------------------------- row encoders --------------------------- */
 
@@ -807,17 +822,26 @@ type DiffResult = {
   readonly deletes: SqlStatement[];
   /** Statements for the parent-first write phase. */
   readonly writes: SqlStatement[];
+  /** Rowid reassignment after writes, for `ORDER BY rowid` tables. */
+  readonly reorder: SqlStatement[];
   /** Key tuples present now but absent from the merged section. */
   readonly removedKeys: RowTuple[];
   /** Current/merged pairs sharing a key but differing elsewhere. */
   readonly changedPairs: readonly (readonly [RowTuple, RowTuple])[];
 };
 
-/** Diffs already-read current rows against merged row tuples. */
+/**
+ * Diffs already-read current rows against merged row tuples.
+ * `reinsertChanged` (update-in-place tables only) forces the
+ * delete+insert path for a changed pair — needed when its row still
+ * names a parent row this commit deletes, since the in-place UPDATE
+ * would land only after that delete broke the immediate FK.
+ */
 function diffRows(
   def: TableDef,
   currentRows: readonly SqlRow[],
   mergedRows: readonly RowTuple[],
+  reinsertChanged?: (cur: RowTuple) => boolean,
 ): DiffResult {
   const keyIdx = def.key.map((k) => def.columns.indexOf(k));
   const nonKeyIdx = def.columns
@@ -854,19 +878,74 @@ function diffRows(
   // `reinsert` (leaf) tables: a changed row deletes by its key first —
   // after every delete lands, its replacement inserts freely even on
   // UNIQUE non-key columns (a swapped ordinal/tuple can never collide).
-  const changedKeys = changedPairs.map(([, next]) =>
-    keyIdx.map((i) => next[i] ?? null),
-  );
-  const deletes = def.reinsert
-    ? deleteStatements(def, [...removedKeys, ...changedKeys])
-    : deleteStatements(def, removedKeys);
-  const writes = def.reinsert
-    ? insertStatements(def, [...changed, ...added])
-    : [
-        ...updateStatements(def, changed, keyIdx, nonKeyIdx),
-        ...insertStatements(def, added),
+  // On update-in-place tables a changed pair can still be forced down
+  // that path when its stored FK target dies this commit.
+  const reinsertedPairs = def.reinsert
+    ? changedPairs
+    : changedPairs.filter(([cur]) => reinsertChanged?.(cur) === true);
+  const updatedPairs = def.reinsert
+    ? []
+    : changedPairs.filter(([cur]) => reinsertChanged?.(cur) !== true);
+  const deletes = deleteStatements(def, [
+    ...removedKeys,
+    ...reinsertedPairs.map(([, next]) => keyIdx.map((i) => next[i] ?? null)),
+  ]);
+  const writes = [
+    ...updateStatements(
+      def,
+      updatedPairs.map(([, next]) => next),
+      keyIdx,
+      nonKeyIdx,
+    ),
+    ...insertStatements(def, [
+      ...reinsertedPairs.map(([, next]) => next),
+      ...added,
+    ]),
+  ];
+  let reorder: SqlStatement[] = [];
+  if (ORDERED_TABLES.has(def)) {
+    // Ordered tables are diffed in rowid order. The old commit rewrote
+    // every row in array order, so physical order after the writes must
+    // equal the merged order: surviving rows keep their rowids (updates
+    // do not move a row) and inserts append at the end. When the
+    // simulated post-write order differs — a pure reorder, or added
+    // rows committed mid-array — reassign rowids 1..N in merged order.
+    // The negating pass first dodges rowid collisions between assigns.
+    const mergedKeyOrder = mergedRows.map(keyOf);
+    const currentKeyOrder = currentRows.map((row) =>
+      keyOf(def.columns.map((c) => row[c] ?? null)),
+    );
+    // Reinserted changed pairs get fresh rowids — they land with the
+    // appends, not at their old positions.
+    const reinsertedKeys = new Set(
+      reinsertedPairs.map(([, next]) => keyOf(next)),
+    );
+    const postWriteOrder = [
+      ...currentKeyOrder.filter(
+        (key) => merged.has(key) && !reinsertedKeys.has(key),
+      ),
+      ...reinsertedPairs.map(([, next]) => keyOf(next)),
+      ...mergedKeyOrder.filter((key) => !current.has(key)),
+    ];
+    if (
+      postWriteOrder.length !== mergedKeyOrder.length ||
+      postWriteOrder.some((key, i) => key !== mergedKeyOrder[i])
+    ) {
+      const whereClause = keyIdx
+        .map((i) => `${def.columns[i]} = ?`)
+        .join(' AND ');
+      reorder = [
+        stmt(`UPDATE ${def.table} SET rowid = -rowid`),
+        ...mergedRows.map((tuple, i) =>
+          stmt(`UPDATE ${def.table} SET rowid = ? WHERE ${whereClause}`, [
+            i + 1,
+            ...keyIdx.map((k) => tuple[k] ?? null),
+          ]),
+        ),
       ];
-  return { deletes, writes, removedKeys, changedPairs };
+    }
+  }
+  return { deletes, writes, reorder, removedKeys, changedPairs };
 }
 
 async function diffTable(
@@ -874,13 +953,16 @@ async function diffTable(
   def: TableDef,
   mergedRows: readonly RowTuple[],
   signal: CancellationSignal,
+  reinsertChanged?: (cur: RowTuple) => boolean,
 ): Promise<DiffResult> {
   const currentRows = await conn.query<SqlRow>(
-    `SELECT ${def.columns.join(', ')} FROM ${def.table}`,
+    `SELECT ${def.columns.join(', ')} FROM ${def.table}${
+      ORDERED_TABLES.has(def) ? ' ORDER BY rowid' : ''
+    }`,
     undefined,
     signal,
   );
-  return diffRows(def, currentRows, mergedRows);
+  return diffRows(def, currentRows, mergedRows, reinsertChanged);
 }
 
 /* ------------------------- validation ------------------------------ */
@@ -1216,6 +1298,13 @@ export async function planCommit(
     );
   }
   if (matchReviews !== undefined) {
+    // match_reviews.recording_id is a non-key immediate FK: a changed
+    // row that still names a recording this commit deletes must take
+    // the delete+insert path — its UPDATE would land after the delete.
+    const goneRecordings = new Set(
+      (plans.get(RECORDINGS)?.removedKeys ?? []).map((key) => key[0]),
+    );
+    const recordingIdx = MATCH_REVIEWS.columns.indexOf('recording_id');
     plans.set(
       MATCH_REVIEWS,
       await diffTable(
@@ -1223,6 +1312,9 @@ export async function planCommit(
         MATCH_REVIEWS,
         matchReviews.map(matchReviewRow),
         signal,
+        goneRecordings.size === 0
+          ? undefined
+          : (cur) => goneRecordings.has(cur[recordingIdx] as string),
       ),
     );
   }
@@ -1512,93 +1604,86 @@ export async function planCommit(
     plans.get(LOCAL_SOURCES)?.removedKeys ?? []
   ).map((key) => key[0] as string);
 
-  const probe = async (
-    sql: string,
-    params: SqlParams,
-  ): Promise<readonly SqlRow[]> =>
-    conn.query<SqlRow>(sql, params, signal);
+  // Probe queries stay under the bridge's per-query parameter cap —
+  // id lists chunk at the same bound the write statements use.
+  const probeChunks = async (
+    sql: (inClause: string) => string,
+    ids: readonly string[],
+  ): Promise<readonly SqlRow[]> => {
+    const rows: SqlRow[] = [];
+    for (let i = 0; i < ids.length; i += MAX_PARAMS) {
+      const chunk = ids.slice(i, i + MAX_PARAMS);
+      rows.push(
+        ...(await conn.query<SqlRow>(
+          sql(placeholders(chunk.length)),
+          chunk,
+          signal,
+        )),
+      );
+    }
+    return rows;
+  };
 
   if (removedRecordingIds.length > 0) {
-    const inIds = placeholders(removedRecordingIds.length);
-    const probes: string[] = [];
-    if (queue === undefined) {
-      probes.push(
-        `SELECT 1 FROM queue_occurrences WHERE recording_id IN ${inIds} LIMIT 1`,
+    const dependents: readonly (readonly [
+      skip: boolean,
+      table: string,
+    ])[] = [
+      [queue !== undefined, 'queue_occurrences'],
+      [playHistory !== undefined, 'play_history'],
+      [playCounts !== undefined, 'play_counts'],
+      [matchReviews !== undefined, 'match_reviews'],
+      [lyricsCache !== undefined, 'lyrics_cache'],
+      [downloads !== undefined, 'downloads'],
+    ];
+    for (const [skip, table] of dependents) {
+      if (skip) {
+        continue;
+      }
+      const hit = await probeChunks(
+        (inIds) =>
+          `SELECT 1 FROM ${table} WHERE recording_id IN ${inIds} LIMIT 1`,
+        removedRecordingIds,
       );
-    }
-    if (playHistory === undefined) {
-      probes.push(
-        `SELECT 1 FROM play_history WHERE recording_id IN ${inIds} LIMIT 1`,
-      );
-    }
-    if (playCounts === undefined) {
-      probes.push(
-        `SELECT 1 FROM play_counts WHERE recording_id IN ${inIds} LIMIT 1`,
-      );
-    }
-    if (matchReviews === undefined) {
-      probes.push(
-        `SELECT 1 FROM match_reviews WHERE recording_id IN ${inIds} LIMIT 1`,
-      );
-    }
-    if (lyricsCache === undefined) {
-      probes.push(
-        `SELECT 1 FROM lyrics_cache WHERE recording_id IN ${inIds} LIMIT 1`,
-      );
-    }
-    if (downloads === undefined) {
-      probes.push(
-        `SELECT 1 FROM downloads WHERE recording_id IN ${inIds} LIMIT 1`,
-      );
-    }
-    for (const sql of probes) {
-      if ((await probe(sql, removedRecordingIds)).length > 0) {
+      if (hit.length > 0) {
         return err(invalidBatch());
       }
     }
   }
   if (playlistEntries === undefined) {
-    const conds: string[] = [];
-    const params: SqlValue[] = [];
-    if (removedPlaylistIds.length > 0) {
-      conds.push(`playlist_id IN ${placeholders(removedPlaylistIds.length)}`);
-      params.push(...removedPlaylistIds);
-    }
-    if (removedRecordingIds.length > 0) {
-      conds.push(
-        `recording_id IN ${placeholders(removedRecordingIds.length)}`,
+    const conds: readonly (readonly [string, readonly string[]])[] = [
+      ['playlist_id', removedPlaylistIds],
+      ['recording_id', removedRecordingIds],
+    ];
+    for (const [column, ids] of conds) {
+      if (ids.length === 0) {
+        continue;
+      }
+      const hit = await probeChunks(
+        (inIds) =>
+          `SELECT 1 FROM playlist_entries WHERE ${column} IN ${inIds} LIMIT 1`,
+        ids,
       );
-      params.push(...removedRecordingIds);
-    }
-    if (conds.length > 0) {
-      const rows = await probe(
-        `SELECT 1 FROM playlist_entries WHERE ${conds.join(' OR ')} LIMIT 1`,
-        params,
-      );
-      if (rows.length > 0) {
+      if (hit.length > 0) {
         return err(invalidBatch());
       }
     }
   }
   if (localFiles === undefined) {
-    const conds: string[] = [];
-    const params: SqlValue[] = [];
-    if (removedSourceIds.length > 0) {
-      conds.push(`source_id IN ${placeholders(removedSourceIds.length)}`);
-      params.push(...removedSourceIds);
-    }
-    if (removedRecordingIds.length > 0) {
-      conds.push(
-        `recording_id IN ${placeholders(removedRecordingIds.length)}`,
+    const conds: readonly (readonly [string, readonly string[]])[] = [
+      ['source_id', removedSourceIds],
+      ['recording_id', removedRecordingIds],
+    ];
+    for (const [column, ids] of conds) {
+      if (ids.length === 0) {
+        continue;
+      }
+      const hit = await probeChunks(
+        (inIds) =>
+          `SELECT 1 FROM local_files WHERE ${column} IN ${inIds} LIMIT 1`,
+        ids,
       );
-      params.push(...removedRecordingIds);
-    }
-    if (conds.length > 0) {
-      const rows = await probe(
-        `SELECT 1 FROM local_files WHERE ${conds.join(' OR ')} LIMIT 1`,
-        params,
-      );
-      if (rows.length > 0) {
+      if (hit.length > 0) {
         return err(invalidBatch());
       }
     }
@@ -1606,33 +1691,29 @@ export async function planCommit(
   // likes.target_id is polymorphic — a removed recording dangles a
   // 'track' like; a removed/re-kinded entity dangles the rest.
   if (likes === undefined) {
-    const conds: string[] = [];
-    const params: SqlValue[] = [];
-    if (removedRecordingIds.length > 0) {
-      conds.push(
-        `(entity_kind = 'track' AND target_id IN ${placeholders(removedRecordingIds.length)})`,
-      );
-      params.push(...removedRecordingIds);
+    if (
+      removedRecordingIds.length > 0 &&
+      (
+        await probeChunks(
+          (inIds) =>
+            `SELECT 1 FROM likes WHERE entity_kind = 'track' AND target_id IN ${inIds} LIMIT 1`,
+          removedRecordingIds,
+        )
+      ).length > 0
+    ) {
+      return err(invalidBatch());
     }
     if (touchedEntityIds.length > 0) {
-      conds.push(
-        `(entity_kind != 'track' AND target_id IN ${placeholders(touchedEntityIds.length)})`,
+      const rows = await probeChunks(
+        (inIds) =>
+          `SELECT entity_kind, target_id FROM likes WHERE entity_kind != 'track' AND target_id IN ${inIds}`,
+        touchedEntityIds,
       );
-      params.push(...touchedEntityIds);
-    }
-    if (conds.length > 0) {
-      const rows = await probe(
-        `SELECT entity_kind, target_id FROM likes WHERE ${conds.join(' OR ')}`,
-        params,
-      );
+      const kinds = await getEntityKinds();
       for (const row of rows) {
         const kind = row['entity_kind'];
         const target = row['target_id'] as string;
-        const resolves =
-          kind === 'track'
-            ? false
-            : (await getEntityKinds()).get(target) === kind;
-        if (!resolves) {
+        if (kinds.get(target) !== kind) {
           return err(invalidBatch());
         }
       }
@@ -1640,8 +1721,9 @@ export async function planCommit(
   }
   if (entitySourceRefs === undefined && touchedEntityIds.length > 0) {
     const kinds = await getEntityKinds();
-    const rows = await probe(
-      `SELECT entity_id, ref_json FROM entity_source_refs WHERE entity_id IN ${placeholders(touchedEntityIds.length)}`,
+    const rows = await probeChunks(
+      (inIds) =>
+        `SELECT entity_id, ref_json FROM entity_source_refs WHERE entity_id IN ${inIds}`,
       touchedEntityIds,
     );
     for (const row of rows) {
@@ -1687,6 +1769,7 @@ export async function planCommit(
     MAPPINGS,
     SOURCE_REFS,
     RECORDINGS,
+    ARTWORK_CACHE,
   ];
   const WRITE_ORDER: readonly TableDef[] = [
     RECORDINGS,
@@ -1718,6 +1801,7 @@ export async function planCommit(
     const plan = plans.get(def);
     if (plan !== undefined) {
       statements.push(...plan.writes);
+      statements.push(...plan.reorder);
     }
   }
   if (queue !== undefined) {
