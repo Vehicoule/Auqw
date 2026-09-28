@@ -480,16 +480,19 @@ export class SyncIngress {
           (batch.recordings !== undefined ||
             batch.recordingsMerge !== undefined ||
             batch.downloads !== undefined ||
-            batch.localFiles !== undefined)
+            batch.localFiles !== undefined ||
+            batch.matchReviews !== undefined ||
+            batch.lyricsCache !== undefined)
         ) {
-          // DownloadManager and LocalFileSource commit on their own
-          // lanes — rows cached from an earlier page may be stale, so
-          // a batch that rewrites either section re-loads and
-          // re-projects against fresh truth before committing it. A
-          // recordings write must reload too even when no media
-          // section projected: a fresh off-tail row referencing a
-          // deleted recording is invisible to the cached projection,
-          // but the commit's in-transaction merge still validates it.
+          // DownloadManager, LocalFileSource, and the matchReview /
+          // lyrics lanes commit on their own lanes — rows cached
+          // from an earlier page may be stale, so a batch that
+          // rewrites either section re-loads and re-projects
+          // against fresh truth before committing it. A recordings
+          // write must reload too even when no media section
+          // projected: a fresh off-tail row referencing a deleted
+          // recording is invisible to the cached projection, but
+          // the commit's in-transaction merge still validates it.
           r.syncApplyCache = null;
           const fresh = await this.#syncApplySections(
             r,
@@ -614,12 +617,15 @@ export class SyncIngress {
           (batch.recordings !== undefined ||
             batch.recordingsMerge !== undefined ||
             batch.downloads !== undefined ||
-            batch.localFiles !== undefined)
+            batch.localFiles !== undefined ||
+            batch.matchReviews !== undefined ||
+            batch.lyricsCache !== undefined)
         ) {
-          // Off-tail owners (downloads, local files) may have moved
-          // the cached rows — reload and re-project before a rewrite,
-          // and before a recording write: the commit re-validates
-          // fresh dependent rows a cached projection never saw.
+          // Off-lane owners (downloads, local files, match reviews,
+          // lyrics cache) may have moved the cached rows — reload
+          // and re-project before a rewrite, and before a recording
+          // write: the commit re-validates fresh dependent rows a
+          // cached projection never saw.
           r.syncApplyCache = null;
           const fresh = await this.#syncApplySections(
             r,
