@@ -734,10 +734,13 @@ export function StageSheet({
   // intercepting the same frame the sheet lifts off the pill (or the
   // expanded anchor lands) — a state-mounted surface would leave a
   // JS-hop window where a tap slips through to content underneath.
-  // RNW writes these non-style animated props as inert DOM
-  // attributes, so web can't gate this way: there the surface's own
-  // mount is the gate, fed by the same truth in JS (`dismissOn`,
-  // which also covers the synchronous expanded flip).
+  // RNW writes those non-style animated props as inert DOM
+  // attributes: the wrapper's pe:none class is baked at mount and
+  // never swaps, so a Pressable mounting inside later still emits
+  // its own pe:auto — the mount is the web gate, fed by the same
+  // truth in JS (`dismissOn`, which also covers the synchronous
+  // expanded flip). The one broken shape is mounting wrapper and
+  // Pressable together: the button then inherits the dead class.
   const dismissSurfaceProps = useAnimatedProps(() => {
     const on = progress.value > 0.001 || expandedShared.value;
     return {
@@ -1155,23 +1158,26 @@ export function StageSheet({
       />
       {/* Dismiss surface — taps on the uncovered region (or through
           the parked sheet's pointerEvents=none mid-morph) collapse
-          the morph instead of leaking to content underneath. On
-          native it mounts always and its gate rides the UI thread
-          (a JS-gated element in the hit path would reopen the hop);
-          on web the mount itself is the gate. */}
-      {(dismissOn || Platform.OS !== 'web') && (
-        <Animated.View
-          animatedProps={dismissSurfaceProps}
-          style={StyleSheet.absoluteFill}
-        >
+          the morph instead of leaking to content underneath. The
+          wrapper mounts always: on native its gate rides the UI
+          thread — a JS-gated ancestor in the hit path would reopen
+          the hop — while on web it is inert and the Pressable's own
+          mount is the gate (RNW semantics differ: a pe:none parent
+          passes hits through, and the mounted button overrides the
+          inherited dead class with its own pe:auto). */}
+      <Animated.View
+        animatedProps={dismissSurfaceProps}
+        style={StyleSheet.absoluteFill}
+      >
+        {(dismissOn || Platform.OS !== 'web') && (
           <Pressable
             compact
             onPress={dismissBackdrop}
             accessibilityLabel={t('sheets.closeA11y')}
             style={StyleSheet.absoluteFill}
           />
-        </Animated.View>
-      )}
+        )}
+      </Animated.View>
       <Animated.View
         onLayout={(e) => {
           setHeight(e.nativeEvent.layout.height);
