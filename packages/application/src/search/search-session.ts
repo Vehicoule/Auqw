@@ -2,6 +2,7 @@ import { CancellationSource } from '../cancellation.ts';
 import type { OperationContext } from '../cancellation.ts';
 import type { AppError, Result } from '../errors.ts';
 import { appError, fromUnknown } from '../errors.ts';
+import { isSafeNonNegative } from '../domain.ts';
 import { retryBounded } from '../retry.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import type { ClockPort } from '../ports/clock.ts';
@@ -34,10 +35,6 @@ const DEFAULT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_ENTRIES = 100;
 const REQUEST_DEADLINE_MS = 15_000;
 const RATE_LIMIT_FALLBACK_MS = 60_000;
-
-function isSafeNonNegative(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
 
 function saturatingAdd(a: number, b: number): number {
   const sum = a + b;

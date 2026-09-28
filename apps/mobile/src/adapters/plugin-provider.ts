@@ -24,10 +24,14 @@ import type {
 import {
   appError,
   err,
+  hasExactKeys,
+  hasKeys,
   isArtworkRef,
   isEntityRef,
   isProviderCapability,
+  isRecord,
   isSourceRef,
+  isStorefront,
   isTrackMetadata,
   ok,
 } from '@auqw/application';
@@ -49,43 +53,6 @@ import { appErrorKind, nativeError } from './auqw-expo-surface.ts';
 
 /** Cap on stashed outcomes that outraced startRequest's promise. */
 const EARLY_OUTCOME_CAP = 64;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(
-  value: Record<string, unknown>,
-  keys: readonly string[],
-): boolean {
-  const own = Object.keys(value);
-  return own.length === keys.length && keys.every((k) => Object.hasOwn(value, k));
-}
-
-/** Exact-keys with declared optionals: required present, own keys ⊆ required ∪ optional. */
-function hasKeys(
-  value: Record<string, unknown>,
-  required: readonly string[],
-  optional: readonly string[] = [],
-): boolean {
-  const own = Object.keys(value);
-  return (
-    own.every((k) => required.includes(k) || optional.includes(k)) &&
-    required.every((k) => Object.hasOwn(value, k))
-  );
-}
-
-function isStorefront(value: unknown): value is string | null {
-  return (
-    value === null || (typeof value === 'string' && /^[A-Z]{2}$/.test(value))
-  );
-}
-
-function isSafeNonNegative(value: unknown): value is number {
-  return (
-    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-  );
-}
 
 function isOptInt(
   value: unknown,

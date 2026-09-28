@@ -8,6 +8,7 @@ import type {
   SourceMapping,
   SourceRef,
 } from '../domain.ts';
+import { isSafeNonNegative } from '../domain.ts';
 import { MatchingEngine } from '../matching/matching-engine.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { LogPort } from '../ports/log.ts';
@@ -126,12 +127,6 @@ function statusRank(status: MappingStatus): number {
 
 function refKey(ref: SourceRef): string {
   return `${ref.provider}\u001f${ref.kind}\u001f${ref.id}`;
-}
-
-function isSafeNonNegative(value: unknown): value is number {
-  return (
-    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-  );
 }
 
 function saturatingAdd(a: number, b: number): number {

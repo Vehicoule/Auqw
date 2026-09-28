@@ -21,15 +21,18 @@ import type {
 import {
   appError,
   err,
+  hasExactKeys,
+  hasKeys,
   isArtworkRef,
   isEntityRef,
   isProviderCapability,
+  isRecord,
   isSourceRef,
+  isStorefront,
   isTrackMetadata,
   ok,
 } from '@auqw/application';
 import type { ErrorKind } from '@auqw/application';
-import { isRecord } from '../shared/check.ts';
 import type { AuqwApi, RequestOutcomePayload } from '../shared/contract.ts';
 import { createIds } from './runtime.ts';
 
@@ -102,33 +105,6 @@ function hostError(thrown: unknown): AppError {
     return appError(kind, message);
   }
   return appError('internal', 'host call failed');
-}
-
-function hasExactKeys(
-  value: Record<string, unknown>,
-  keys: readonly string[],
-): boolean {
-  const own = Object.keys(value);
-  return own.length === keys.length && keys.every((k) => Object.hasOwn(value, k));
-}
-
-/** Exact-keys with declared optionals: required present, own keys ⊆ required ∪ optional. */
-function hasKeys(
-  value: Record<string, unknown>,
-  required: readonly string[],
-  optional: readonly string[] = [],
-): boolean {
-  const own = Object.keys(value);
-  return (
-    own.every((k) => required.includes(k) || optional.includes(k)) &&
-    required.every((k) => Object.hasOwn(value, k))
-  );
-}
-
-function isStorefront(value: unknown): value is string | null {
-  return (
-    value === null || (typeof value === 'string' && /^[A-Z]{2}$/.test(value))
-  );
 }
 
 function isOptInt(

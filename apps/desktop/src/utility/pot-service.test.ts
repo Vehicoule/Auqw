@@ -1,3 +1,4 @@
+import { isRecord } from '@auqw/application';
 import { assert, assertEqual } from '@auqw/application/testing';
 import type { FetchResponse } from './pot-service.ts';
 import {
@@ -21,10 +22,6 @@ async function post(
     body,
   });
   return { status: res.status, body: await res.json() };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
 }
 
 /**
