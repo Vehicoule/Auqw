@@ -23,6 +23,7 @@ import {
   isSafeNonNegative,
   isSettings,
   isSourceRef,
+  isString,
   isTrackMetadata,
   isTrackRef,
   mergeRecordingMetadata,
