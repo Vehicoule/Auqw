@@ -1421,6 +1421,7 @@ function Main({
         sourceRefs: searchState.page.items
           .slice(0, 9)
           .map((meta) => meta.sourceRef),
+        tracks: searchState.page.items.slice(0, 9),
       });
     }
   }, [searchState, session]);

@@ -465,6 +465,14 @@ type StreamWarm = {
   requestId: string | null;
   stream: PreparedStream | null;
   attempt: AttemptTrace | null;
+  /**
+   * The attempt that adopted this warm's session while its request id
+   * was still in flight — set on transfer so a late-arriving id joins
+   * the attempt's ownership bookkeeping instead of being cancelled
+   * (cancel would kill the unattached session the attempt is about
+   * to attach).
+   */
+  adoptedAttempt: ActiveAttempt | null;
 };
 
 type Ready = {
@@ -910,6 +918,15 @@ export class Session {
     sourceRef: string;
     atMs: number;
   } | null = null;
+  /**
+   * Track rows a surface handed `prewarm()` whose catalog provider
+   * differs from the playback provider — they carry no usable ref, so
+   * the window pass candidates-resolves them into a `(provider, ref)`
+   * the stream warm can mint (the tap's own resolve still runs; only
+   * its mint+prepare is already spent).
+   */
+  #warmPendingQueries: { key: string; query: RecordingQuery }[] = [];
+
   /**
    * Recording ids a surface handed `prewarm()` — the window loop
    * drains them into `#warmSeen` bookkeeping; bounded at add time.
@@ -2265,6 +2282,7 @@ export class Session {
   prewarm(input: {
     readonly recordingIds?: readonly string[];
     readonly sourceRefs?: readonly SourceRef[];
+    readonly tracks?: readonly TrackMetadata[];
   }): void {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -2293,6 +2311,36 @@ export class Session {
     for (const id of ids.slice(0, PREWARM_INPUT_LIMIT)) {
       if (isString(id, 256) && this.#warmPending.size < WARM_SEEN_CAP) {
         this.#warmPending.add(id);
+      }
+    }
+    const tracks = input.tracks ?? [];
+    for (const meta of tracks.slice(0, PREWARM_INPUT_LIMIT)) {
+      // Rows already carrying a playback-provider ref are covered by
+      // the sourceRefs hand; everything else needs a candidates
+      // resolve before anything can be minted.
+      if (
+        !isTrackMetadata(meta) ||
+        meta.sourceRef.provider === r.settings.playbackProvider ||
+        meta.sourceRef.provider === LOCAL_PROVIDER
+      ) {
+        continue;
+      }
+      const key = `q:${meta.sourceRef.provider}:${meta.sourceRef.id}`;
+      if (
+        this.#warmPendingQueries.length < WARM_SEEN_CAP &&
+        !this.#warmPendingQueries.some((t) => t.key === key)
+      ) {
+        this.#warmPendingQueries.push({
+          key,
+          query: {
+            title: meta.title,
+            artist: meta.artist,
+            album: meta.album,
+            durationMs: meta.durationMs,
+            versionLabels: [],
+            isrc: meta.isrc ?? null,
+          },
+        });
       }
     }
     this.#maybeWarmWindow();
@@ -5127,6 +5175,7 @@ export class Session {
       // `preparedHandled` guards every later cancelPrepare for this
       // request; `release` by handle remains the session's exit.
       this.#streamWarm = null;
+      warm.adoptedAttempt = attempt;
       attempt.preparedHandled = true;
       if (warm.requestId !== null) {
         attempt.requestId = warm.requestId;
@@ -6840,6 +6889,22 @@ export class Session {
     }
   }
 
+  /**
+   * A row torn down mid-flight never got its attempt — undo the seen
+   * mark and requeue the surface hand so the restarted pass retries
+   * it (provider switches and transient gate flips own the teardown).
+   * Rows that completed — settled or failed — keep their suppression.
+   */
+  #unseeWarmTarget(target: {
+    recordingId: string;
+    occurrenceId: string | null;
+  }): void {
+    this.#warmSeen.delete(target.recordingId);
+    if (target.occurrenceId === null) {
+      this.#warmPending.add(target.recordingId);
+    }
+  }
+
   /** A failed stream warm is denied briefly — bounded list. */
   #denyStreamWarm(key: string): void {
     const now = this.#safeNow();
@@ -6957,10 +7022,15 @@ export class Session {
       if (next === null) {
         return;
       }
-      this.#warmBatchTarget = next.recordingId;
+      this.#warmBatchTarget =
+        next.kind === 'query' ? next.key : next.recordingId;
       this.#warmBatchDone = (async () => {
         try {
-          await this.#warmOne(next, source);
+          if (next.kind === 'query') {
+            await this.#warmOneQuery(next, source);
+          } else {
+            await this.#warmOne(next, source);
+          }
         } finally {
           this.#warmBatchTarget = null;
           this.#warmBatchDone = null;
@@ -6977,9 +7047,10 @@ export class Session {
    * cursor. A row with any `#pickRef` hit — occurrence pin, owned
    * bytes, mapping, unvetoed source ref — is already resolved.
    */
-  #nextWarmTarget(
-    r: Ready,
-  ): { recordingId: string; occurrenceId: string | null } | null {
+  #nextWarmTarget(r: Ready):
+    | { kind: 'row'; recordingId: string; occurrenceId: string | null }
+    | { kind: 'query'; query: RecordingQuery; key: string }
+    | null {
     // Only the row the active attempt is itself resolving stays out
     // of the pass: the attempt's candidates call and mapping commit
     // are the truth for it, and a racing warm would duplicate both.
@@ -6999,7 +7070,16 @@ export class Session {
         this.#pickRef(rec, null) === null &&
         !this.#warmSeenFresh(id)
       ) {
-        return { recordingId: id, occurrenceId: null };
+        return { kind: 'row', recordingId: id, occurrenceId: null };
+      }
+    }
+    while (this.#warmPendingQueries.length > 0) {
+      const next = this.#warmPendingQueries.shift();
+      if (next === undefined) {
+        break;
+      }
+      if (!this.#warmSeenFresh(next.key)) {
+        return { kind: 'query', query: next.query, key: next.key };
       }
     }
     // The dealt window is a while-playing warm: a session exists and
@@ -7034,6 +7114,7 @@ export class Session {
         !this.#warmSeenFresh(rec.id)
       ) {
         return {
+          kind: 'row',
           recordingId: rec.id,
           occurrenceId: occurrence.occurrenceId,
         };
@@ -7093,6 +7174,7 @@ export class Session {
       this.#disposed ||
       this.#warmBatchSource !== source
     ) {
+      this.#unseeWarmTarget(target);
       return;
     }
     if (!result.ok) {
@@ -7101,6 +7183,7 @@ export class Session {
     }
     const ready2 = this.#ready;
     if (ready2 === null || this.#disposed || this.#warmBatchSource !== source) {
+      this.#unseeWarmTarget(target);
       return;
     }
     const rec = ready2.recordings.find((x) => x.id === target.recordingId);
@@ -7195,6 +7278,9 @@ export class Session {
       });
     });
     if (!staged.ok) {
+      if (source.signal.cancelled || this.#warmBatchSource !== source) {
+        this.#unseeWarmTarget(target);
+      }
       return;
     }
     this.#derived();
@@ -7203,6 +7289,109 @@ export class Session {
       // projection must carry it.
       this.#own(this.#projectQueue());
     }
+  }
+
+  /**
+   * Candidates-resolve one surface-handed track row: catalog-only
+   * metadata never becomes a recording, so a match feeds the stream
+   * warm's `(provider, ref)` key directly — no mapping or pin
+   * commits (there is nothing to land them on). Only an unclaimed
+   * slot takes the match: a live warm stays the single speculative
+   * session and later matches park on their seen marks instead of
+   * churning mints.
+   */
+  async #warmOneQuery(
+    target: { query: RecordingQuery; key: string },
+    source: CancellationSource,
+  ): Promise<void> {
+    const r = this.#ready;
+    if (r === null) {
+      return;
+    }
+    this.#noteWarmSeen(target.key);
+    const routed = this.#router.providerFor(
+      'playback.candidates',
+      selectionFromSettings(r.settings),
+    );
+    if (!routed.ok) {
+      return;
+    }
+    const provider = routed.value;
+    if (this.#warmBatchTarget === target.key) {
+      this.#warmBatchProvider = provider.id;
+    }
+    const deadlineMs = this.#deadline();
+    const context = this.#newContext('warm', deadlineMs, source.signal);
+    const result = await this.#withDeadline(
+      () =>
+        provider.candidates(
+          { query: target.query, limit: CANDIDATE_LIMIT },
+          context,
+        ),
+      deadlineMs,
+      source,
+    );
+    if (
+      source.signal.cancelled ||
+      this.#disposed ||
+      this.#warmBatchSource !== source
+    ) {
+      this.#warmSeen.delete(target.key);
+      this.#warmPendingQueries.unshift(target);
+      return;
+    }
+    if (!result.ok) {
+      this.#logWarn('row warm failed');
+      return;
+    }
+    // The match needs a recording's fields — the query itself is the
+    // probe; nothing here persists.
+    const probe: Recording = {
+      id: '',
+      title: target.query.title,
+      artist: target.query.artist,
+      album: target.query.album,
+      durationMs: target.query.durationMs,
+      releaseYear: null,
+      artwork: [],
+      explicit: null,
+      genre: null,
+      isrc: target.query.isrc,
+      versionLabels: target.query.versionLabels,
+      sourceRefs: [],
+      mappings: [],
+      provenance: 'provider',
+    };
+    let outcome: MatchOutcome;
+    try {
+      outcome = MatchingEngine.match(probe, result.value, []);
+    } catch {
+      this.#logWarn('row warm threw on malformed candidates');
+      return;
+    }
+    if (outcome.type !== 'matched') {
+      // 'ambiguous' parks on the row, not in a review — the tap's own
+      // resolve produces the review honestly.
+      return;
+    }
+    const ref = outcome.candidate.sourceRef;
+    if (
+      ref.provider !== provider.id ||
+      !isTrackRef(ref) ||
+      ref.provider === LOCAL_PROVIDER
+    ) {
+      return;
+    }
+    const now = this.#safeNow();
+    if (now === null || this.#streamWarm !== null) {
+      return;
+    }
+    this.#surfaceWarm = {
+      provider: ref.provider,
+      sourceRef: ref.id,
+      atMs: now,
+    };
+    this.#maybeWarmStream();
   }
 
   /** The advisory stream warm's current want — see `StreamWarm`. */
@@ -7308,6 +7497,15 @@ export class Session {
       return;
     }
     if (warm !== null) {
+      // The cursor may have just landed ON the warmed row — a Next /
+      // advance re-evaluates with the following row as want while the
+      // just-selected row's attempt is still one tick out. Dropping
+      // the warm here would force that attempt to resolve and mint
+      // again; park it for the attempt to claim, same as the
+      // want-null 'playing' rule.
+      if (type === 'playing' && this.#warmIsCurrentRow(r, warm)) {
+        return;
+      }
       // The drop's owned tail re-evaluates — the new warm issues only
       // after the old request's cancel/release actually landed.
       this.#dropStreamWarm(warm);
@@ -7364,6 +7562,7 @@ export class Session {
       requestId: null,
       stream: null,
       attempt: null,
+      adoptedAttempt: null,
     };
     this.#streamWarm = record;
     const issueSource = new CancellationSource();
@@ -7383,20 +7582,29 @@ export class Session {
       );
       if (this.#streamWarm !== record) {
         // The record was dropped while the port request was in
-        // flight — a request id arriving now has no owner: cancel it
-        // or the native prepare (and the session it mints) idles
-        // unowned until the seam's reaper collects it.
+        // flight — a request id arriving now has no owner unless an
+        // attempt already adopted the warm's session: then the id
+        // joins that attempt's bookkeeping (identical to the
+        // early-arrival case — `preparedHandled` guards every later
+        // cancelPrepare for it, so it persists as the host-side owner
+        // the attach needs). No owner at all means a true drop:
+        // cancel or the native prepare (and the session it mints)
+        // idles unowned until the seam's reaper collects it.
         if (issued.ok) {
           const requestId = issued.value;
-          await this.#bounded(() =>
-            this.#player.cancelPrepare({
-              requestId,
-              identity: {
-                attemptId: record.attemptId,
-                queueRev: record.queueRev,
-              },
-            }),
-          );
+          if (record.adoptedAttempt !== null) {
+            record.adoptedAttempt.requestId = requestId;
+          } else {
+            await this.#bounded(() =>
+              this.#player.cancelPrepare({
+                requestId,
+                identity: {
+                  attemptId: record.attemptId,
+                  queueRev: record.queueRev,
+                },
+              }),
+            );
+          }
         }
         return;
       }

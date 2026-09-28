@@ -5938,6 +5938,19 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
     warmPassRestartsAfterProviderSwitch,
   ],
   ['cancelledWarmSkipsQueuedCommit', cancelledWarmSkipsQueuedCommit],
+  ['advanceKeepsWarmedTrack', advanceKeepsWarmedTrack],
+  [
+    'lateWarmRequestIdSurvivesAdoption',
+    lateWarmRequestIdSurvivesAdoption,
+  ],
+  [
+    'providerSwitchRetriesCancelledRow',
+    providerSwitchRetriesCancelledRow,
+  ],
+  [
+    'catalogRowsResolveIntoStreamWarm',
+    catalogRowsResolveIntoStreamWarm,
+  ],
 ] as const;
 
 // The materialized rebuild: the durable log's surviving records
@@ -7283,6 +7296,205 @@ async function cancelledWarmSkipsQueuedCommit(): Promise<void> {
   assert(
     (recC?.mappings.length ?? 0) === 0,
     'cancelled warm commits no mapping',
+  );
+}
+
+/** The cursor landing on a warmed row parks its warm — the new want
+ *  is the following successor, but the attempt starting one tick
+ *  later must claim the minted session, not re-resolve. */
+async function advanceKeepsWarmedTrack(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+        recording('rC', [ref('youtube-music', 'yC')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oA', 'rA'),
+        occurrence('oB', 'rB'),
+        occurrence('oC', 'rC'),
+      ]),
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  const playback = readyOf(r).playback;
+  const idA = 'identity' in playback ? playback.identity : undefined;
+  assert(idA !== undefined);
+  r.player.emit(statusEvent(idA, 'h-oA', 'playing', 100));
+  await pump();
+  const input = warmInput(r);
+  assertEqual(input.sourceRef, 'yB', 'successor ref warmed');
+  assert(r.player.settlePrewarm(ok('req-warm-1')), 'pending prewarm');
+  r.player.emit(warmPrepared(input.identity, 'h-warmB'));
+  await pump();
+  const next = r.session.next();
+  await pump();
+  const cancels = calls(r, 'cancelPrepare').map(
+    (c) => (c.input as { requestId: string }).requestId,
+  );
+  assert(
+    !cancels.includes('req-warm-1'),
+    'just-advanced warm stays for its attempt',
+  );
+  assertEqual(calls(r, 'prepare').length, 1, 'warm adopted, not re-prepared');
+  const play = calls(r, 'play').at(-1);
+  assertEqual(
+    (play?.input as { handle: string } | undefined)?.handle,
+    'h-warmB',
+    'plays the warmed row handle',
+  );
+  assert((await next).ok, 'next failed');
+  await pump();
+}
+
+/** A warm's request id landing after its session was adopted joins
+ *  the adopting attempt's bookkeeping — cancelling it would kill the
+ *  session the attempt is about to attach. */
+async function lateWarmRequestIdSurvivesAdoption(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('rA', [ref('youtube-music', 'yA')])],
+      queue: stoppedQueue([occurrence('oA', 'rA')]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({ sourceRefs: [ref('youtube-music', 'yA')] });
+  await pump();
+  const input = warmInput(r);
+  // The stream lands while the request id is still in flight — the
+  // tap now adopts the minted session under a null request id.
+  r.player.emit(warmPrepared(input.identity, 'h-warm'));
+  await pump();
+  const started = r.session.playOccurrence('oA');
+  await pump();
+  assert(r.player.settlePrewarm(ok('req-warm-1')), 'pending prewarm');
+  await pump();
+  const cancels = calls(r, 'cancelPrepare').map(
+    (c) => (c.input as { requestId: string }).requestId,
+  );
+  assert(
+    !cancels.includes('req-warm-1'),
+    'late id joins the adopting attempt',
+  );
+  const play = calls(r, 'play').at(-1);
+  assertEqual(
+    (play?.input as { handle: string } | undefined)?.handle,
+    'h-warm',
+    'plays the adopted warm handle',
+  );
+  assert((await started).ok, 'playOccurrence failed');
+  await pump();
+}
+
+/** A row warm torn down mid-flight by a provider switch is retried by
+ *  the restarted pass — its seen mark is undone on cancellation, not
+ *  kept for the TTL. */
+async function providerSwitchRetriesCancelledRow(): Promise<void> {
+  const spotify = new FakeProvider('spotify');
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        // Resolved under both providers — the pass always targets rC.
+        recording('rB', [
+          ref('youtube-music', 'yB'),
+          ref('spotify', 'sB'),
+        ]),
+        recording('rC', [ref('itunes', 'iC')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oA', 'rA'),
+        occurrence('oB', 'rB'),
+        occurrence('oC', 'rC'),
+      ]),
+    }),
+    [spotify],
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    'window pass resolving rC on youtube-music',
+  );
+  const switched = await r.session.updateSettings({
+    ...SETTINGS,
+    playbackProvider: 'spotify',
+  });
+  assert(switched.ok);
+  await pump();
+  // The attempt re-resolves A under the new provider first — the pass
+  // runs again once playback settles back to buffering.
+  assert(
+    spotify.settleCandidates(
+      ok([meta('spotify', 'sA', 'Song rA', 'Artist', 300_000)]),
+    ),
+    'attempt re-resolve pending',
+  );
+  await pump();
+  // The attempt's prepare must land before playback leaves 'preparing'
+  // and the window pass can run again.
+  r.player.emit(preparedEvent(lastPrepareIdentity(r), 'h-oA-spotify'));
+  await pump();
+  assert(
+    r.player.settlePrepare(ok('req-oA-spotify')),
+    'attempt re-prepare pending',
+  );
+  // A re-derive (status ticks only re-evaluate the stream warm, not
+  // the window pass) restarts the pass — the torn-down row retries
+  // under the new provider.
+  r.session.connectivityChanged();
+  await pump();
+  assert(
+    spotify.calls.some(
+      (c) =>
+        c.method === 'candidates' &&
+        (c.input as { query: { title: string } }).query.title ===
+          'Song rC',
+    ),
+    'cancelled row retried under the switched provider',
+  );
+}
+
+/** A surface search row whose provider differs from playback resolves
+ *  through the warm pass and mints the stream warm — the tap pays
+ *  only its own resolve, not the mint. */
+async function catalogRowsResolveIntoStreamWarm(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('rA', [ref('youtube-music', 'yA')])],
+      queue: stoppedQueue([occurrence('oA', 'rA')]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({
+    tracks: [meta('itunes', 'i-search', 'Song Search', 'Artist', 300_000)],
+  });
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    'catalog row resolving via playback provider',
+  );
+  assertEqual(calls(r, 'prewarm').length, 0, 'no mint before the match');
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'y-search', 'Song Search', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'match mints the stream warm');
+  assertEqual(warmInput(r).sourceRef, 'y-search', 'matched ref warmed');
+  r.session.prewarm({
+    tracks: [meta('itunes', 'i-search', 'Song Search', 'Artist', 300_000)],
+  });
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    0,
+    'repeat hand deduped on the seen mark',
   );
 }
 
