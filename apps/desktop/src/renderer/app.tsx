@@ -172,7 +172,9 @@ function App() {
         setBoot({ type: 'ready', controller: created });
       } catch (thrown) {
         if (!disposed) {
-          console.warn('[ui] boot failed', thrown);
+          // Log the typed kind only — a bridge exception can embed a
+          // signed URL or token that has no business in renderer logs.
+          console.warn('[ui] boot failed:', shellToAppError(thrown).kind);
           setBoot({
             type: 'failed',
             message:

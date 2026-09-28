@@ -2036,6 +2036,7 @@ function Main({
       }
       setPairing(true);
       setPairError(null);
+      setPairNotice(null);
       void client
         .pair(request, new CancellationSource().signal)
         .then((result) => {
@@ -2274,9 +2275,15 @@ function Main({
         endpoint: null,
         expiresAt: null,
       });
+      // Sharing stopped — an advertise-unavailable notice is moot
+      // while nothing is advertised.
+      setPairNotice(null);
       return;
     }
     setShare((prev) => ({ ...prev, busy: true }));
+    // A fresh share re-subscribes onAdvertiseError — drop the last
+    // share's notice so it can't linger under the new code.
+    setPairNotice(null);
     // Mark wanted BEFORE the async work: the screen-close cleanup reads
     // shareGenRef to decide whether a stop is owed — a start() that
     // lands after dismissal would otherwise leave a live listener. The
