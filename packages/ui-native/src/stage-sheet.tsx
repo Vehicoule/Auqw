@@ -736,11 +736,12 @@ export function StageSheet({
   // JS-hop window where a tap slips through to content underneath.
   // RNW writes those non-style animated props as inert DOM
   // attributes: the wrapper's pe:none class is baked at mount and
-  // never swaps, so a Pressable mounting inside later still emits
-  // its own pe:auto — the mount is the web gate, fed by the same
-  // truth in JS (`dismissOn`, which also covers the synchronous
-  // expanded flip). The one broken shape is mounting wrapper and
-  // Pressable together: the button then inherits the dead class.
+  // never swaps, and `pointer-events` inherits — RNW Pressable
+  // emits no pe class of its own, so the web gate pairs the
+  // Pressable's mount (`dismissOn`, which also covers the
+  // synchronous expanded flip) with an explicit pointerEvents='auto'
+  // that overrides the inherited dead class. On native 'auto' is
+  // the default and the wrapper's 'none' still gates the subtree.
   const dismissSurfaceProps = useAnimatedProps(() => {
     const on = progress.value > 0.001 || expandedShared.value;
     return {
@@ -1162,9 +1163,8 @@ export function StageSheet({
           wrapper mounts always: on native its gate rides the UI
           thread — a JS-gated ancestor in the hit path would reopen
           the hop — while on web it is inert and the Pressable's own
-          mount is the gate (RNW semantics differ: a pe:none parent
-          passes hits through, and the mounted button overrides the
-          inherited dead class with its own pe:auto). */}
+          mount plus its explicit pointerEvents='auto' (overriding
+          the wrapper's inherited dead class) is the gate. */}
       <Animated.View
         animatedProps={dismissSurfaceProps}
         style={StyleSheet.absoluteFill}
@@ -1174,6 +1174,7 @@ export function StageSheet({
             compact
             onPress={dismissBackdrop}
             accessibilityLabel={t('sheets.closeA11y')}
+            pointerEvents="auto"
             style={StyleSheet.absoluteFill}
           />
         )}
