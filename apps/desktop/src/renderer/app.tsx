@@ -1240,8 +1240,10 @@ function Main({
         recordings: state.recordings,
         likes: state.likes,
         // Same honesty rule as the library rows: offline + unowned
-        // marks 'unavailable' so a dead press isn't a surprise — a
-        // row the local probe resolves stays playable.
+        // marks 'unavailable' so a dead press isn't a surprise. The
+        // probe is gated in the controller until web-player gains a
+        // `provider:'local'` route — owned rows flip to playable with
+        // it automatically.
         unavailableRecordingIds:
           online === false
             ? new Set(
@@ -1620,6 +1622,16 @@ function Main({
   // dying quietly on a dead queue item.
   const reportPlay = useCallback(
     (action: MessageId, result: Result<unknown>) => {
+      // A newer play replacing this attempt resolves 'superseded' (or
+      // 'cancelled') — that's the queue working, not a failure worth a
+      // toast.
+      if (
+        !result.ok &&
+        (result.error.kind === 'superseded' ||
+          result.error.kind === 'cancelled')
+      ) {
+        return;
+      }
       reportResult(action, result);
       if (!result.ok && isMatchGate(result.error)) {
         // Land the user on the fresh pending row: a stale 'resolved'

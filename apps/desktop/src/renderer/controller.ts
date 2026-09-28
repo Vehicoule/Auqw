@@ -361,8 +361,13 @@ export async function createSessionController(
   // the fallback seed. Every transition re-runs the session's
   // connectivity reconciliation.
   let lastOnline = true;
+  // The web player rejects every `provider:'local'` prepare — until the
+  // Phase-4 adapter lands the probe must answer null: otherwise the
+  // session picks refs the player refuses and offline marks advertise
+  // presses that can only fail. Flip once web-player gains the route.
+  const localPlaybackCapable = false;
   const localPlaybackFor = (id: string): string | null =>
-    probe?.(id) ?? uriForHook(id);
+    localPlaybackCapable ? (probe?.(id) ?? uriForHook(id)) : null;
   const session = new Session({
     storage,
     player,
