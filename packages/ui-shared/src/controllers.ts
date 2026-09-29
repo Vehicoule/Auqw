@@ -68,39 +68,42 @@ export type SharedIconName =
   | 'shuffle'
   | 'warn';
 
+/** An optional bound callback — absent handlers stay undefined so the
+ * affordance renders inert (the pattern every view derives on). */
+type MaybeFn<A extends readonly unknown[] = []> =
+  | ((...args: A) => void)
+  | undefined;
+
 /** A pressable control's semantic surface — the JSX picks colors. */
 export type ControlView = {
   readonly icon: SharedIconName;
   readonly a11yLabel: string;
   readonly active?: boolean | undefined;
   readonly disabled?: boolean | undefined;
-  readonly onPress: (() => void) | undefined;
+  readonly onPress: MaybeFn;
 };
+
+/** Bind a handler to fixed args. */
+function bind<A extends readonly unknown[]>(
+  fn: MaybeFn<A>,
+  ...args: A
+): MaybeFn {
+  return fn === undefined ? undefined : () => fn(...args);
+}
 
 // ---- queue ------------------------------------------------------------
 
 /** Localized header label for a queue display section. */
 export function queueSectionLabel(key: QueueSectionKey): string {
-  switch (key) {
-    case 'nowPlaying':
-      return t('queue.nowPlaying');
-    case 'upNext':
-      return t('queue.upNext');
-    case 'history':
-      return t('queue.history');
-  }
+  return t(`queue.${key}`);
 }
 
 export type QueueScreenHandlers = {
-  readonly onToggleReorder?: (() => void) | undefined;
-  readonly onPressItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onRemoveItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onMoveItem?:
-    | ((occurrenceId: string, direction: -1 | 1) => void)
-    | undefined;
-  readonly onMoveItemTo?:
-    | ((occurrenceId: string, toIndex: number) => void)
-    | undefined;
+  readonly onToggleReorder?: MaybeFn;
+  readonly onPressItem?: MaybeFn<[occurrenceId: string]>;
+  readonly onRemoveItem?: MaybeFn<[occurrenceId: string]>;
+  readonly onMoveItem?: MaybeFn<[occurrenceId: string, direction: -1 | 1]>;
+  readonly onMoveItemTo?: MaybeFn<[occurrenceId: string, toIndex: number]>;
 };
 
 export type QueueReorderButton = ControlView & {
@@ -112,7 +115,7 @@ export type QueueReorderButton = ControlView & {
 /** The reorder toggle — absent when the host never binds a handler. */
 export function queueReorderButton(
   reordering: boolean,
-  onToggleReorder: (() => void) | undefined,
+  onToggleReorder: MaybeFn,
 ): QueueReorderButton | null {
   if (onToggleReorder === undefined) {
     return null;
@@ -147,7 +150,7 @@ export function useQueueScreenController({
   readonly queue: QueueModel;
   readonly player?: PlayerModel | null | undefined;
   readonly reordering?: boolean | undefined;
-  readonly onToggleReorder?: (() => void) | undefined;
+  readonly onToggleReorder?: MaybeFn;
 }): QueueScreenView {
   return {
     title: t('queue.title'),
@@ -171,14 +174,12 @@ export function useQueueScreenController({
 // ---- corrections ------------------------------------------------------
 
 export type CorrectionsScreenHandlers = {
-  readonly onBack?: (() => void) | undefined;
-  readonly onFilter?: ((filter: CorrectionsFilter) => void) | undefined;
-  readonly onConfirm?:
-    | ((reviewId: string, candidateIndex: number) => void)
-    | undefined;
-  readonly onReject?: ((reviewId: string) => void) | undefined;
-  readonly onUndo?: ((reviewId: string) => void) | undefined;
-  readonly onRetry?: (() => void) | undefined;
+  readonly onBack?: MaybeFn;
+  readonly onFilter?: MaybeFn<[filter: CorrectionsFilter]>;
+  readonly onConfirm?: MaybeFn<[reviewId: string, candidateIndex: number]>;
+  readonly onReject?: MaybeFn<[reviewId: string]>;
+  readonly onUndo?: MaybeFn<[reviewId: string]>;
+  readonly onRetry?: MaybeFn;
 };
 
 const CORRECTIONS_FILTERS: readonly {
@@ -195,7 +196,7 @@ export type CorrectionsFilterChip = {
   readonly label: string;
   readonly selected: boolean;
   readonly a11yLabel: string;
-  readonly onPress: (() => void) | undefined;
+  readonly onPress: MaybeFn;
 };
 
 export type CorrectionsCandidateView = {
@@ -205,14 +206,14 @@ export type CorrectionsCandidateView = {
   /** `pending` AND bound — a resolved review's candidates are inert. */
   readonly enabled: boolean;
   readonly a11yLabel: string;
-  readonly onPress: (() => void) | undefined;
+  readonly onPress: MaybeFn;
 };
 
 export type CorrectionsRowAction = {
   readonly kind: 'reject' | 'undo';
   readonly label: string;
   readonly a11yLabel: string;
-  readonly onPress: (() => void) | undefined;
+  readonly onPress: MaybeFn;
 };
 
 export type CorrectionsRowView = {
@@ -232,7 +233,7 @@ export type CorrectionsBodyView =
       readonly kind: 'error';
       readonly title: string;
       readonly hint: string | null;
-      readonly onRetry: (() => void) | undefined;
+      readonly onRetry: MaybeFn;
     }
   | {
       readonly kind: 'empty';
@@ -302,10 +303,9 @@ export function useCorrectionsScreenController({
                     a11yLabel: t('corrections.a11y.confirm', {
                       title: candidate.title,
                     }),
-                    onPress:
-                      pending && onConfirm !== undefined
-                        ? () => onConfirm(row.reviewId, candidate.index)
-                        : undefined,
+                    onPress: pending
+                      ? bind(onConfirm, row.reviewId, candidate.index)
+                      : undefined,
                   })),
                   action:
                     pending
@@ -315,10 +315,7 @@ export function useCorrectionsScreenController({
                           a11yLabel: t('corrections.a11y.reject', {
                             title: row.title,
                           }),
-                          onPress:
-                            onReject === undefined
-                              ? undefined
-                              : () => onReject(row.reviewId),
+                          onPress: bind(onReject, row.reviewId),
                         }
                       : {
                           kind: 'undo',
@@ -326,10 +323,7 @@ export function useCorrectionsScreenController({
                           a11yLabel: t('corrections.a11y.undo', {
                             title: row.title,
                           }),
-                          onPress:
-                            onUndo === undefined
-                              ? undefined
-                              : () => onUndo(row.reviewId),
+                          onPress: bind(onUndo, row.reviewId),
                         },
                 };
               }),
@@ -347,8 +341,7 @@ export function useCorrectionsScreenController({
       label: t(filter.label),
       selected: model.filter === filter.value,
       a11yLabel: t('corrections.filterA11y', { label: t(filter.label) }),
-      onPress:
-        onFilter === undefined ? undefined : () => onFilter(filter.value),
+      onPress: bind(onFilter, filter.value),
     })),
     body,
   };
@@ -357,11 +350,11 @@ export function useCorrectionsScreenController({
 // ---- transfer ---------------------------------------------------------
 
 export type TransferScreenHandlers = {
-  readonly onBack?: (() => void) | undefined;
-  readonly onExport?: (() => void) | undefined;
-  readonly onPickImportFile?: (() => void) | undefined;
-  readonly onApplyImport?: (() => void) | undefined;
-  readonly onResetImport?: (() => void) | undefined;
+  readonly onBack?: MaybeFn;
+  readonly onExport?: MaybeFn;
+  readonly onPickImportFile?: MaybeFn;
+  readonly onApplyImport?: MaybeFn;
+  readonly onResetImport?: MaybeFn;
 };
 
 export type TransferRowView = {
@@ -369,7 +362,7 @@ export type TransferRowView = {
   readonly detail: string | null;
   readonly detailTone: 'secondary' | 'warn';
   readonly disabled: boolean;
-  readonly onPress: (() => void) | undefined;
+  readonly onPress: MaybeFn;
 };
 
 export type TransferImportFooterView =
@@ -378,7 +371,7 @@ export type TransferImportFooterView =
       readonly detail: string;
       readonly resetLabel: string;
       readonly resetA11yLabel: string;
-      readonly onReset: (() => void) | undefined;
+      readonly onReset: MaybeFn;
     }
   | {
       readonly kind: 'error';
@@ -386,17 +379,17 @@ export type TransferImportFooterView =
       readonly hint: string | null;
       readonly resetLabel: string;
       readonly resetA11yLabel: string;
-      readonly onReset: (() => void) | undefined;
+      readonly onReset: MaybeFn;
     }
   | {
       readonly kind: 'confirm';
       readonly applying: boolean;
       readonly applyLabel: string;
       readonly applyA11yLabel: string;
-      readonly onApply: (() => void) | undefined;
+      readonly onApply: MaybeFn;
       readonly cancelLabel: string;
       readonly cancelA11yLabel: string;
-      readonly onCancel: (() => void) | undefined;
+      readonly onCancel: MaybeFn;
     };
 
 export type TransferImportView = {
@@ -508,19 +501,19 @@ export function useTransferScreenController({
 // ---- library ----------------------------------------------------------
 
 export type LibraryScreenHandlers = {
-  readonly onPressItem?: ((recordingId: string) => void) | undefined;
-  readonly onToggleLike?: ((recordingId: string) => void) | undefined;
-  readonly onAddToPlaylist?: ((recordingId: string) => void) | undefined;
-  readonly onContext?: ((recordingId: string) => void) | undefined;
-  readonly onOpenCollection?:
-    | ((key: 'liked' | 'top50' | 'history' | 'downloads') => void)
-    | undefined;
-  readonly onPlayCollection?:
-    | ((key: 'liked' | 'top50' | 'history' | 'downloads') => void)
-    | undefined;
-  readonly onOpenCard?: ((card: LibraryCardModel) => void) | undefined;
-  readonly onOpenArtist?: ((artist: ArtistRailModel) => void) | undefined;
-  readonly onCreatePlaylist?: ((name: string) => void) | undefined;
+  readonly onPressItem?: MaybeFn<[recordingId: string]>;
+  readonly onToggleLike?: MaybeFn<[recordingId: string]>;
+  readonly onAddToPlaylist?: MaybeFn<[recordingId: string]>;
+  readonly onContext?: MaybeFn<[recordingId: string]>;
+  readonly onOpenCollection?: MaybeFn<
+    [key: 'liked' | 'top50' | 'history' | 'downloads']
+  >;
+  readonly onPlayCollection?: MaybeFn<
+    [key: 'liked' | 'top50' | 'history' | 'downloads']
+  >;
+  readonly onOpenCard?: MaybeFn<[card: LibraryCardModel]>;
+  readonly onOpenArtist?: MaybeFn<[artist: ArtistRailModel]>;
+  readonly onCreatePlaylist?: MaybeFn<[name: string]>;
 };
 
 export type LibraryKindFilter = 'all' | 'playlist' | 'album' | 'artist';
@@ -554,23 +547,23 @@ export type LibraryCollectionView = {
   readonly a11yLabel: string;
   readonly countLabel: string;
   readonly playA11yLabel: string;
-  readonly onOpen: (() => void) | undefined;
-  readonly onPlay: (() => void) | undefined;
+  readonly onOpen: MaybeFn;
+  readonly onPlay: MaybeFn;
 };
 
 export type LibraryCardView = {
   readonly card: LibraryCardModel;
   readonly a11yLabel: string;
   /** Bound when a handler exists; the card component gates on `openable`. */
-  readonly onPress: (() => void) | undefined;
+  readonly onPress: MaybeFn;
 };
 
 export type LibraryRowView = {
   readonly row: TrackRowModel;
-  readonly onPress: (() => void) | undefined;
-  readonly onToggleLike: (() => void) | undefined;
-  readonly onAddToPlaylist: (() => void) | undefined;
-  readonly onContext: (() => void) | undefined;
+  readonly onPress: MaybeFn;
+  readonly onToggleLike: MaybeFn;
+  readonly onAddToPlaylist: MaybeFn;
+  readonly onContext: MaybeFn;
 };
 
 export type LibraryScreenView = {
@@ -593,7 +586,7 @@ export type LibraryScreenView = {
     readonly value: string;
     readonly placeholder: string;
     readonly onChange: (value: string) => void;
-    readonly onSubmit: ((name: string) => void) | undefined;
+    readonly onSubmit: MaybeFn<[name: string]>;
     readonly onCancel: () => void;
   } | null;
   /** cards.length === 0 while not creating — the honest empty state. */
@@ -606,7 +599,7 @@ export type LibraryScreenView = {
   readonly newCard: {
     readonly label: string;
     readonly a11yLabel: string;
-    readonly onPress: (() => void) | undefined;
+    readonly onPress: MaybeFn;
   } | null;
   readonly cards: readonly LibraryCardView[];
   readonly artists: {
@@ -614,7 +607,7 @@ export type LibraryScreenView = {
     readonly items: readonly {
       readonly artist: ArtistRailModel;
       readonly a11yLabel: string;
-      readonly onPress: (() => void) | undefined;
+      readonly onPress: MaybeFn;
     }[];
   } | null;
   readonly recent: {
@@ -706,14 +699,9 @@ export function libraryScreenView(
       }),
       countLabel: tile.note ?? t('common.trackCount', { count: tile.count }),
       playA11yLabel: t('library.tilePlayA11y', { label: tile.label }),
-      onOpen:
-        onOpenCollection === undefined
-          ? undefined
-          : () => onOpenCollection(tile.key),
+      onOpen: bind(onOpenCollection, tile.key),
       onPlay:
-        onPlayCollection === undefined || tile.count === 0
-          ? undefined
-          : () => onPlayCollection(tile.key),
+        tile.count === 0 ? undefined : bind(onPlayCollection, tile.key),
     })),
     headingLabel: t('library.heading'),
     sortChip: {
@@ -782,8 +770,7 @@ export function libraryScreenView(
         title: card.title,
         subtitle: card.subtitle,
       }),
-      onPress:
-        onOpenCard === undefined ? undefined : () => onOpenCard(card),
+      onPress: bind(onOpenCard, card),
     })),
     artists:
       model.artists.length === 0
@@ -794,9 +781,9 @@ export function libraryScreenView(
               artist,
               a11yLabel: artist.name,
               onPress:
-                artist.entityRef !== null && onOpenArtist !== undefined
-                  ? () => onOpenArtist(artist)
-                  : undefined,
+                artist.entityRef === null
+                  ? undefined
+                  : bind(onOpenArtist, artist),
             })),
           },
     recent:
@@ -807,22 +794,10 @@ export function libraryScreenView(
             a11yLabel: t('library.recentlyLiked'),
             rows: model.recentlyAdded.map((item) => ({
               row: item,
-              onPress:
-                onPressItem === undefined
-                  ? undefined
-                  : () => onPressItem(item.key),
-              onToggleLike:
-                onToggleLike === undefined
-                  ? undefined
-                  : () => onToggleLike(item.key),
-              onAddToPlaylist:
-                onAddToPlaylist === undefined
-                  ? undefined
-                  : () => onAddToPlaylist(item.key),
-              onContext:
-                onContext === undefined
-                  ? undefined
-                  : () => onContext(item.key),
+              onPress: bind(onPressItem, item.key),
+              onToggleLike: bind(onToggleLike, item.key),
+              onAddToPlaylist: bind(onAddToPlaylist, item.key),
+              onContext: bind(onContext, item.key),
             })),
           },
   };
@@ -867,15 +842,15 @@ export function useLibraryScreenController({
 // ---- entity -----------------------------------------------------------
 
 export type EntityScreenHandlers = {
-  readonly onBack?: (() => void) | undefined;
-  readonly onPlayAll?: (() => void) | undefined;
-  readonly onShuffleAll?: (() => void) | undefined;
-  readonly onToggleLike?: (() => void) | undefined;
-  readonly onPressItem?: ((row: TrackRowModel) => void) | undefined;
-  readonly onAddToPlaylist?: ((row: TrackRowModel) => void) | undefined;
-  readonly onContext?: ((row: TrackRowModel) => void) | undefined;
-  readonly onLoadMore?: (() => void) | undefined;
-  readonly onRetry?: (() => void) | undefined;
+  readonly onBack?: MaybeFn;
+  readonly onPlayAll?: MaybeFn;
+  readonly onShuffleAll?: MaybeFn;
+  readonly onToggleLike?: MaybeFn;
+  readonly onPressItem?: MaybeFn<[row: TrackRowModel]>;
+  readonly onAddToPlaylist?: MaybeFn<[row: TrackRowModel]>;
+  readonly onContext?: MaybeFn<[row: TrackRowModel]>;
+  readonly onLoadMore?: MaybeFn;
+  readonly onRetry?: MaybeFn;
 };
 
 export type EntityPillView = {
@@ -883,14 +858,14 @@ export type EntityPillView = {
   readonly icon: SharedIconName;
   readonly accent: boolean;
   readonly disabled: boolean;
-  readonly onPress: (() => void) | undefined;
+  readonly onPress: MaybeFn;
 };
 
 export type EntityRowView = {
   readonly row: TrackRowModel;
-  readonly onPress: (() => void) | undefined;
-  readonly onAddToPlaylist: (() => void) | undefined;
-  readonly onContext: (() => void) | undefined;
+  readonly onPress: MaybeFn;
+  readonly onAddToPlaylist: MaybeFn;
+  readonly onContext: MaybeFn;
 };
 
 export type EntityScreenView =
@@ -904,7 +879,7 @@ export type EntityScreenView =
       readonly title: string;
       readonly backA11yLabel: string;
       readonly hint: string | null;
-      readonly onRetry: (() => void) | undefined;
+      readonly onRetry: MaybeFn;
     }
   | {
       readonly kind: 'ready';
@@ -917,7 +892,7 @@ export type EntityScreenView =
         readonly icon: 'heart-filled' | 'heart';
         readonly liked: boolean;
         readonly a11yLabel: string;
-        readonly onPress: (() => void) | undefined;
+        readonly onPress: MaybeFn;
       };
       readonly notice: { readonly text: string } | null;
       readonly body:
@@ -935,7 +910,7 @@ export type EntityScreenView =
               readonly busy: boolean;
               readonly label: string;
               readonly a11yLabel: string;
-              readonly onPress: (() => void) | undefined;
+              readonly onPress: MaybeFn;
             } | null;
           };
     };
@@ -1014,14 +989,9 @@ export function useEntityScreenController({
           listA11yLabel: model.title ?? undefined,
           rows: model.items.map((item) => ({
             row: item,
-            onPress:
-              onPressItem === undefined ? undefined : () => onPressItem(item),
-            onAddToPlaylist:
-              onAddToPlaylist === undefined
-                ? undefined
-                : () => onAddToPlaylist(item),
-            onContext:
-              onContext === undefined ? undefined : () => onContext(item),
+            onPress: bind(onPressItem, item),
+            onAddToPlaylist: bind(onAddToPlaylist, item),
+            onContext: bind(onContext, item),
           })),
           loadMore: model.hasMore
             ? {
@@ -1037,20 +1007,19 @@ export function useEntityScreenController({
   };
 }
 
-
 // ---- search -----------------------------------------------------------
 
 export type SearchScreenHandlers = {
-  readonly onQueryChange?: ((query: string) => void) | undefined;
-  readonly onSubmit?: (() => void) | undefined;
-  readonly onCancel?: (() => void) | undefined;
-  readonly onRetry?: (() => void) | undefined;
-  readonly onResultPress?: ((row: TrackRowModel) => void) | undefined;
-  readonly onToggleLike?: ((row: TrackRowModel) => void) | undefined;
-  readonly onAddToPlaylist?: ((row: TrackRowModel) => void) | undefined;
-  readonly onContext?: ((row: TrackRowModel) => void) | undefined;
-  readonly onRecentPress?: ((query: string) => void) | undefined;
-  readonly onSuggestionPress?: ((query: string) => void) | undefined;
+  readonly onQueryChange?: MaybeFn<[query: string]>;
+  readonly onSubmit?: MaybeFn;
+  readonly onCancel?: MaybeFn;
+  readonly onRetry?: MaybeFn;
+  readonly onResultPress?: MaybeFn<[row: TrackRowModel]>;
+  readonly onToggleLike?: MaybeFn<[row: TrackRowModel]>;
+  readonly onAddToPlaylist?: MaybeFn<[row: TrackRowModel]>;
+  readonly onContext?: MaybeFn<[row: TrackRowModel]>;
+  readonly onRecentPress?: MaybeFn<[query: string]>;
+  readonly onSuggestionPress?: MaybeFn<[query: string]>;
 };
 
 export type SearchFieldView = {
@@ -1059,8 +1028,8 @@ export type SearchFieldView = {
   readonly value: string;
   readonly readOnly: boolean;
   readonly loading: boolean;
-  readonly onChange: ((query: string) => void) | undefined;
-  readonly onSubmit: (() => void) | undefined;
+  readonly onChange: MaybeFn<[query: string]>;
+  readonly onSubmit: MaybeFn;
   readonly cancel: {
     readonly label: string;
     readonly a11yLabel: string;
@@ -1075,10 +1044,10 @@ export type SearchFieldView = {
 
 export type SearchRowView = {
   readonly row: TrackRowModel;
-  readonly onPress: (() => void) | undefined;
-  readonly onToggleLike: (() => void) | undefined;
-  readonly onAddToPlaylist: (() => void) | undefined;
-  readonly onContext: (() => void) | undefined;
+  readonly onPress: MaybeFn;
+  readonly onToggleLike: MaybeFn;
+  readonly onAddToPlaylist: MaybeFn;
+  readonly onContext: MaybeFn;
 };
 
 export type SearchScreenView = {
@@ -1092,13 +1061,13 @@ export type SearchScreenView = {
       readonly icon: 'search';
       readonly label: string;
       readonly a11yLabel: string;
-      readonly onPress: (() => void) | undefined;
+      readonly onPress: MaybeFn;
     };
     readonly items: readonly {
       readonly label: string;
       readonly icon: 'search';
       readonly a11yLabel: string;
-      readonly onPress: (() => void) | undefined;
+      readonly onPress: MaybeFn;
     }[];
   } | null;
   readonly resultsHead: {
@@ -1113,7 +1082,7 @@ export type SearchScreenView = {
           readonly label: string;
           readonly icon: 'clock';
           readonly a11yLabel: string;
-          readonly onPress: (() => void) | undefined;
+          readonly onPress: MaybeFn;
         }[];
       }
     | {
@@ -1139,7 +1108,7 @@ export type SearchScreenView = {
         readonly kind: 'error';
         readonly title: string;
         readonly hint: string | null;
-        readonly onRetry: (() => void) | undefined;
+        readonly onRetry: MaybeFn;
       }
     | {
         readonly kind: 'unavailable';
@@ -1176,10 +1145,10 @@ export function useSearchScreenController({
 } & SearchScreenHandlers): SearchScreenView {
   const loading = state.phase === 'loading';
   const editing = query ?? state.query;
+  const trimmed = editing.trim();
   // Draft mode: the box carries text that was never committed as the
   // shown query — completions own the pane until submit.
-  const draft = editing.trim() !== '' && editing.trim() !== state.query;
-  const trimmed = editing.trim();
+  const draft = trimmed !== '' && trimmed !== state.query;
   return {
     draft,
     field: {
@@ -1221,10 +1190,7 @@ export function useSearchScreenController({
             label: suggestion,
             icon: 'search' as const,
             a11yLabel: t('search.a11y.suggestion', { query: suggestion }),
-            onPress:
-              onSuggestionPress === undefined
-                ? undefined
-                : () => onSuggestionPress(suggestion),
+            onPress: bind(onSuggestionPress, suggestion),
           })),
         }
       : null,
@@ -1248,10 +1214,7 @@ export function useSearchScreenController({
                 label: recent,
                 icon: 'clock' as const,
                 a11yLabel: t('search.a11y.again', { query: recent }),
-                onPress:
-                  onRecentPress === undefined
-                    ? undefined
-                    : () => onRecentPress(recent),
+                onPress: bind(onRecentPress, recent),
               })),
             }
           : {
@@ -1262,33 +1225,33 @@ export function useSearchScreenController({
             }
         : null,
     status:
-      draft || state.phase !== 'loading' || state.results.length > 0
-        ? !draft && state.phase === 'empty'
+      !draft && state.phase === 'empty'
+        ? {
+            kind: 'empty' as const,
+            title: t('search.noResults', { query: state.query }),
+            hint: t('search.noResultsHint'),
+            icon: 'search' as const,
+          }
+        : !draft && state.phase === 'error'
           ? {
-              kind: 'empty' as const,
-              title: t('search.noResults', { query: state.query }),
-              hint: t('search.noResultsHint'),
-              icon: 'search' as const,
+              kind: 'error' as const,
+              title: t('search.failed'),
+              hint: state.message,
+              onRetry: state.retryable ? onRetry : undefined,
             }
-          : !draft && state.phase === 'error'
+          : !draft && state.phase === 'unavailable'
             ? {
-                kind: 'error' as const,
-                title: t('search.failed'),
+                kind: 'unavailable' as const,
+                title: t('search.unavailableTitle'),
                 hint: state.message,
-                onRetry: state.retryable ? onRetry : undefined,
               }
-            : !draft && state.phase === 'unavailable'
+            : !draft && state.phase === 'loading' && state.results.length === 0
               ? {
-                  kind: 'unavailable' as const,
-                  title: t('search.unavailableTitle'),
-                  hint: state.message,
+                  kind: 'loading' as const,
+                  title: t('search.loading'),
+                  hint: state.query,
                 }
-              : null
-        : {
-            kind: 'loading' as const,
-            title: t('search.loading'),
-            hint: state.query,
-          },
+              : null,
     results:
       !draft &&
       (state.phase === 'ready' || state.phase === 'loading') &&
@@ -1297,20 +1260,10 @@ export function useSearchScreenController({
             a11yLabel: t('search.resultsA11y'),
             rows: state.results.map((row) => ({
               row,
-              onPress:
-                onResultPress === undefined
-                  ? undefined
-                  : () => onResultPress(row),
-              onToggleLike:
-                onToggleLike === undefined
-                  ? undefined
-                  : () => onToggleLike(row),
-              onAddToPlaylist:
-                onAddToPlaylist === undefined
-                  ? undefined
-                  : () => onAddToPlaylist(row),
-              onContext:
-                onContext === undefined ? undefined : () => onContext(row),
+              onPress: bind(onResultPress, row),
+              onToggleLike: bind(onToggleLike, row),
+              onAddToPlaylist: bind(onAddToPlaylist, row),
+              onContext: bind(onContext, row),
             })),
           }
         : null,
@@ -1320,38 +1273,34 @@ export function useSearchScreenController({
 // ---- stage (now-playing screen ↔ stage sheet) -------------------------
 
 export type StageQueueHandlers = {
-  readonly onPressQueueItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onRemoveQueueItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onToggleQueueReorder?: (() => void) | undefined;
-  readonly onMoveQueueItem?:
-    | ((occurrenceId: string, direction: -1 | 1) => void)
-    | undefined;
-  readonly onMoveQueueItemTo?:
-    | ((occurrenceId: string, toIndex: number) => void)
-    | undefined;
+  readonly onPressQueueItem?: MaybeFn<[occurrenceId: string]>;
+  readonly onRemoveQueueItem?: MaybeFn<[occurrenceId: string]>;
+  readonly onToggleQueueReorder?: MaybeFn;
+  readonly onMoveQueueItem?: MaybeFn<[occurrenceId: string, direction: -1 | 1]>;
+  readonly onMoveQueueItemTo?: MaybeFn<[occurrenceId: string, toIndex: number]>;
 };
 
 export type StageScreenHandlers = StageQueueHandlers & {
-  readonly onPlayPause?: (() => void) | undefined;
-  readonly onNext?: (() => void) | undefined;
-  readonly onPrevious?: (() => void) | undefined;
-  readonly onToggleLike?: (() => void) | undefined;
-  readonly onToggleShuffle?: (() => void) | undefined;
-  readonly onCycleRepeat?: (() => void) | undefined;
-  readonly onDownload?: (() => void) | undefined;
+  readonly onPlayPause?: MaybeFn;
+  readonly onNext?: MaybeFn;
+  readonly onPrevious?: MaybeFn;
+  readonly onToggleLike?: MaybeFn;
+  readonly onToggleShuffle?: MaybeFn;
+  readonly onCycleRepeat?: MaybeFn;
+  readonly onDownload?: MaybeFn;
   /** Add-to-playlist affordance on the meta row (same as native). */
-  readonly onAddToPlaylist?: (() => void) | undefined;
+  readonly onAddToPlaylist?: MaybeFn;
   /**
    * Stops playback and clears the stage's track (the queue keeps its
    * items — the native mini-player's swipe-down dismiss). Overlays the
    * stage's top-right in every mode; omitted hides the control.
    */
-  readonly onStopPlayback?: (() => void) | undefined;
-  readonly onSeek?: ((ms: number) => void) | undefined;
-  readonly onRetryLyrics?: (() => void) | undefined;
-  readonly onStartRadio?: (() => void) | undefined;
-  readonly onStopRadio?: (() => void) | undefined;
-  readonly onModeChange?: ((mode: StageMode) => void) | undefined;
+  readonly onStopPlayback?: MaybeFn;
+  readonly onSeek?: MaybeFn<[ms: number]>;
+  readonly onRetryLyrics?: MaybeFn;
+  readonly onStartRadio?: MaybeFn;
+  readonly onStopRadio?: MaybeFn;
+  readonly onModeChange?: MaybeFn<[mode: StageMode]>;
 };
 
 /** Stage tab order — shared by both platforms. */
@@ -1375,14 +1324,14 @@ export type StageModeTab = {
   readonly label: string;
   readonly icon: SharedIconName;
   readonly active: boolean;
-  readonly onPress: (() => void) | undefined;
+  readonly onPress: MaybeFn;
 };
 
 /** Resolved tabs in the caller's order — pass `STAGE_MODE_ORDER`. */
 export function stageModeTabs(
   order: readonly StageMode[],
   mode: StageMode,
-  onSelect: ((mode: StageMode) => void) | undefined,
+  onSelect: MaybeFn<[mode: StageMode]>,
 ): readonly StageModeTab[] {
   return order.map((key) => {
     const meta = STAGE_MODE_META[key];
@@ -1391,7 +1340,7 @@ export function stageModeTabs(
       label: t(meta.label),
       icon: meta.icon,
       active: key === mode,
-      onPress: onSelect === undefined ? undefined : () => onSelect(key),
+      onPress: bind(onSelect, key),
     };
   });
 }
@@ -1406,7 +1355,7 @@ export function stageModeTabs(
  */
 export function useStageMode(
   mode: StageMode | undefined,
-  onModeChange: ((mode: StageMode) => void) | undefined,
+  onModeChange: MaybeFn<[mode: StageMode]>,
   open?: boolean | undefined,
 ): {
   readonly activeMode: StageMode;
@@ -1424,9 +1373,7 @@ export function useStageMode(
     activeMode: mode ?? internalMode,
     select: (m) => {
       setInternalMode(m);
-      if (onModeChange !== undefined) {
-        onModeChange(m);
-      }
+      onModeChange?.(m);
     },
   };
 }
@@ -1437,39 +1384,37 @@ export type DownloadButtonView = {
   readonly failed: boolean;
   readonly busy: boolean;
   readonly a11yLabel: string;
-  readonly onPress: (() => void) | undefined;
+  readonly onPress: MaybeFn;
+};
+
+const DOWNLOAD_BUTTON_META: Record<
+  DownloadChip,
+  {
+    readonly icon: DownloadButtonView['icon'];
+    readonly busy: boolean;
+    readonly a11y: MessageId;
+  }
+> = {
+  idle: { icon: 'download', busy: false, a11y: 'stage.download.idleA11y' },
+  queued: { icon: 'download', busy: true, a11y: 'stage.download.busyA11y' },
+  downloading: { icon: 'download', busy: true, a11y: 'stage.download.busyA11y' },
+  stored: { icon: 'check', busy: false, a11y: 'stage.download.storedA11y' },
+  failed: { icon: 'warn', busy: false, a11y: 'stage.download.failedA11y' },
+  removing: { icon: 'spinner', busy: true, a11y: 'stage.download.busyA11y' },
 };
 
 /** The owned-bytes affordance — absent when `download` is null. */
 export function downloadButtonView(
   download: DownloadChip,
-  onDownload: (() => void) | undefined,
+  onDownload: MaybeFn,
 ): DownloadButtonView {
+  const meta = DOWNLOAD_BUTTON_META[download];
   return {
-    icon:
-      download === 'stored'
-        ? 'check'
-        : download === 'failed'
-          ? 'warn'
-          : download === 'removing'
-            ? 'spinner'
-            : 'download',
+    icon: meta.icon,
     stored: download === 'stored',
     failed: download === 'failed',
-    busy:
-      download === 'queued' ||
-      download === 'downloading' ||
-      download === 'removing',
-    a11yLabel:
-      download === 'stored'
-        ? t('stage.download.storedA11y')
-        : download === 'failed'
-          ? t('stage.download.failedA11y')
-          : download === 'queued' ||
-              download === 'downloading' ||
-              download === 'removing'
-            ? t('stage.download.busyA11y')
-            : t('stage.download.idleA11y'),
+    busy: meta.busy,
+    a11yLabel: t(meta.a11y),
     onPress: download === 'removing' ? undefined : onDownload,
   };
 }
@@ -1491,13 +1436,13 @@ export type TransportInput = {
   readonly repeat?: RepeatMode | undefined;
   /** Owned-bytes state of the current track; null hides the button. */
   readonly download?: DownloadChip | null | undefined;
-  readonly onPlayPause?: (() => void) | undefined;
-  readonly onPrevious?: (() => void) | undefined;
-  readonly onNext?: (() => void) | undefined;
-  readonly onToggleLike?: (() => void) | undefined;
-  readonly onToggleShuffle?: (() => void) | undefined;
-  readonly onCycleRepeat?: (() => void) | undefined;
-  readonly onDownload?: (() => void) | undefined;
+  readonly onPlayPause?: MaybeFn;
+  readonly onPrevious?: MaybeFn;
+  readonly onNext?: MaybeFn;
+  readonly onToggleLike?: MaybeFn;
+  readonly onToggleShuffle?: MaybeFn;
+  readonly onCycleRepeat?: MaybeFn;
+  readonly onDownload?: MaybeFn;
 };
 
 export type TransportView = {
@@ -1509,38 +1454,38 @@ export type TransportView = {
     readonly liked: boolean;
     readonly a11yLabel: string;
     readonly active: boolean;
-    readonly onPress: (() => void) | undefined;
+    readonly onPress: MaybeFn;
   };
   readonly shuffle: {
     readonly icon: 'shuffle';
     readonly a11yLabel: string;
     readonly disabled: boolean;
     readonly active: boolean;
-    readonly onPress: (() => void) | undefined;
+    readonly onPress: MaybeFn;
   };
   readonly previous: {
     readonly icon: 'previous';
     readonly a11yLabel: string;
     readonly disabled: boolean;
-    readonly onPress: (() => void) | undefined;
+    readonly onPress: MaybeFn;
   };
   readonly play: {
     readonly a11yLabel: string;
     readonly pressed: boolean;
-    readonly onPress: (() => void) | undefined;
+    readonly onPress: MaybeFn;
   };
   readonly next: {
     readonly icon: 'next';
     readonly a11yLabel: string;
     readonly disabled: boolean;
-    readonly onPress: (() => void) | undefined;
+    readonly onPress: MaybeFn;
   };
   readonly repeat: {
     readonly icon: 'repeat-one' | 'repeat';
     readonly a11yLabel: string;
     readonly active: boolean;
     readonly disabled: boolean;
-    readonly onPress: (() => void) | undefined;
+    readonly onPress: MaybeFn;
   };
   readonly download: DownloadButtonView | null;
 };
@@ -1626,19 +1571,19 @@ export type RadioRowView = {
   readonly start: {
     readonly label: string;
     readonly a11yLabel: string;
-    readonly onPress: (() => void) | undefined;
+    readonly onPress: MaybeFn;
   };
   readonly stop: {
     readonly label: string;
     readonly a11yLabel: string;
-    readonly onPress: (() => void) | undefined;
+    readonly onPress: MaybeFn;
   };
 };
 
 export function radioRowView(
   radio: RadioModel | undefined,
-  onStartRadio: (() => void) | undefined,
-  onStopRadio: (() => void) | undefined,
+  onStartRadio: MaybeFn,
+  onStopRadio: MaybeFn,
 ): RadioRowView | null {
   if (radio === undefined || (!radio.armed && onStartRadio === undefined)) {
     return null;
@@ -1724,7 +1669,7 @@ export type LyricsPaneView =
       readonly kind: 'error';
       readonly title: string;
       readonly hint: string | null;
-      readonly onRetry: (() => void) | undefined;
+      readonly onRetry: MaybeFn;
     }
   | {
       readonly kind: 'lines';
@@ -1740,7 +1685,7 @@ export type LyricsPaneView =
 
 export function lyricsPaneView(
   lyrics: LyricsModel | undefined,
-  onRetryLyrics: (() => void) | undefined,
+  onRetryLyrics: MaybeFn,
 ): LyricsPaneView {
   if (lyrics === undefined) {
     return { kind: 'empty', title: t('lyrics.empty'), hint: null, icon: 'lyrics' };

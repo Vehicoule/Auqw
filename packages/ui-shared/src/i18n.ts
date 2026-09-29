@@ -101,11 +101,6 @@ export function setLocale(locale: Locale): void {
   current = locale;
 }
 
-/** The active UI language. */
-export function getLocale(): Locale {
-  return current;
-}
-
 /**
  * Map a BCP-47 tag to a supported `Locale` by primary-language subtag
  * ('de-DE' → 'de', 'zh-Hans-CN' → 'zh'), or `null` when the language
@@ -121,27 +116,24 @@ export function fromTag(tag: string | null | undefined): Locale | null {
   }
   const parts = tag.trim().toLowerCase().split('-');
   const primary = parts[0];
-  switch (primary) {
-    case 'en':
-    case 'de':
-    case 'es':
-    case 'fr':
-      return primary;
-    case 'zh': {
-      // Script is the first subtag only — a 'hans'/'hant' later in the
-      // tag (e.g. inside private use, zh-Hant-x-hans) is not a script.
-      if (parts[1] === 'hans') {
-        return 'zh';
-      }
-      return parts
-        .slice(1)
-        .some((p) => p === 'hant' || p === 'tw' || p === 'hk' || p === 'mo')
-        ? null
-        : 'zh';
+  if (primary === 'zh') {
+    // Script is the first subtag only — a 'hans'/'hant' later in the
+    // tag (e.g. inside private use, zh-Hant-x-hans) is not a script.
+    if (parts[1] === 'hans') {
+      return 'zh';
     }
-    default:
-      return null;
+    return parts
+      .slice(1)
+      .some((p) => p === 'hant' || p === 'tw' || p === 'hk' || p === 'mo')
+      ? null
+      : 'zh';
   }
+  return primary === 'en' ||
+    primary === 'de' ||
+    primary === 'es' ||
+    primary === 'fr'
+    ? primary
+    : null;
 }
 
 /**
@@ -163,16 +155,11 @@ function lookup(
   id: MessageId,
   category: PluralCategory,
 ): string | undefined {
-  const catalog: Readonly<Record<string, Message>> | undefined =
-    Object.hasOwn(catalogs, locale) ? catalogs[locale] : undefined;
-  const message: Message | undefined = catalog?.[id];
-  if (message === undefined) {
-    return undefined;
-  }
+  const message = catalogs[locale]?.[id];
   if (typeof message === 'string') {
     return message;
   }
-  return message[category] ?? message['other'];
+  return message?.[category] ?? message?.['other'];
 }
 
 function interpolate(
@@ -199,12 +186,10 @@ export function t(
   id: MessageId,
   params?: Readonly<Record<string, string | number>>,
 ): string {
-  const count = params === undefined ? undefined : params['count'];
+  const count = params?.['count'];
   const category: PluralCategory =
     typeof count === 'number' ? pluralCategory(current, count) : 'other';
   const template =
-    lookup(current, id, category) ??
-    lookup(SYSTEM_LOCALE, id, category) ??
-    id;
+    lookup(current, id, category) ?? lookup(SYSTEM_LOCALE, id, category) ?? id;
   return interpolate(template, params);
 }

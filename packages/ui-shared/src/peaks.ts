@@ -74,20 +74,11 @@ export function normalizePeakWindows(
   if (windows.length === 0) {
     return [];
   }
-  const mags = new Array<number>(windows.length * 2);
-  for (let i = 0; i < windows.length; i += 1) {
-    mags[i * 2] = windows[i]!.up;
-    mags[i * 2 + 1] = windows[i]!.down;
-  }
-  mags.sort((a, b) => a - b);
+  const mags = windows.flatMap((w) => [w.up, w.down]).sort((a, b) => a - b);
   const peak = mags[mags.length - 1]!;
   if (peak <= 0) {
     // A wholly silent profile is honest zeros, not floor stubs.
-    const zeros = new Array<WaveformPeak>(windows.length);
-    for (let i = 0; i < windows.length; i += 1) {
-      zeros[i] = { up: 0, down: 0 };
-    }
-    return zeros;
+    return windows.map(() => ({ up: 0, down: 0 }));
   }
   const lo = percentile(mags, 5);
   const hi = Math.max(percentile(mags, 95), lo, peak * 0.5);
@@ -99,14 +90,7 @@ export function normalizePeakWindows(
     const t = span > 1e-9 ? (v - lo) / span : 1;
     return Math.pow(Math.min(1, Math.max(PEAK_FLOOR, t)), PEAK_GAMMA);
   };
-  const out = new Array<WaveformPeak>(windows.length);
-  for (let i = 0; i < windows.length; i += 1) {
-    out[i] = {
-      up: shape(windows[i]!.up),
-      down: shape(windows[i]!.down),
-    };
-  }
-  return out;
+  return windows.map((w) => ({ up: shape(w.up), down: shape(w.down) }));
 }
 
 /**
@@ -127,17 +111,14 @@ export function peakWindowsFromChannels(
   if (!Number.isFinite(count) || count <= 0) {
     return [];
   }
-  const out = new Array<PeakWindow>(count);
   const frames = channels.reduce(
     (min, ch) => Math.min(min, ch.length),
     Number.POSITIVE_INFINITY,
   );
   if (!Number.isFinite(frames) || frames === 0 || channels.length === 0) {
-    for (let i = 0; i < count; i += 1) {
-      out[i] = { up: 0, down: 0 };
-    }
-    return out;
+    return Array.from({ length: count }, () => ({ up: 0, down: 0 }));
   }
+  const out = new Array<PeakWindow>(count);
   const step = frames / count;
   const stereo = channels.length >= 2;
   for (let i = 0; i < count; i += 1) {
@@ -147,26 +128,12 @@ export function peakWindowsFromChannels(
     let downSq = 0;
     let upN = 0;
     let downN = 0;
-    if (stereo) {
-      for (let c = 0; c < channels.length; c += 1) {
-        const ch = channels[c]!;
-        const even = c % 2 === 0;
-        for (let s = from; s < to; s++) {
-          const v = ch[s]!;
-          if (even) {
-            upSq += v * v;
-            upN += 1;
-          } else {
-            downSq += v * v;
-            downN += 1;
-          }
-        }
-      }
-    } else {
-      const ch = channels[0]!;
+    for (let c = 0; c < (stereo ? channels.length : 1); c += 1) {
+      const ch = channels[c]!;
+      const even = c % 2 === 0;
       for (let s = from; s < to; s++) {
         const v = ch[s]!;
-        if (v >= 0) {
+        if (stereo ? even : v >= 0) {
           upSq += v * v;
           upN += 1;
         } else {
@@ -232,12 +199,12 @@ export function resamplePeaks(
   }
   for (let i = 0; i < count; i += 1) {
     const pos = count > 1 ? (i * (source - 1)) / (count - 1) : 0;
-    const lo = Math.floor(pos);
-    const hi = Math.min(source - 1, lo + 1);
-    const frac = pos - lo;
+    const a = peaks[Math.floor(pos)]!;
+    const b = peaks[Math.min(source - 1, Math.floor(pos) + 1)]!;
+    const frac = pos - Math.floor(pos);
     out[i] = {
-      up: peaks[lo]!.up + (peaks[hi]!.up - peaks[lo]!.up) * frac,
-      down: peaks[lo]!.down + (peaks[hi]!.down - peaks[lo]!.down) * frac,
+      up: a.up + (b.up - a.up) * frac,
+      down: a.down + (b.down - a.down) * frac,
     };
   }
   return out;

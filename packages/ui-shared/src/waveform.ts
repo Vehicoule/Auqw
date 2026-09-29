@@ -120,25 +120,3 @@ export function waveformBarExtent(
     : 0;
   return minExtent + (maxExtent - minExtent) * amplitude * eased;
 }
-
-export function staggerProgress(
-  progress: number,
-  index: number,
-  count: number,
-): number {
-  if (count <= 0) {
-    return 1;
-  }
-  const delay = (index / count) * 0.55;
-  return clamp01((progress - delay) / (1 - delay));
-}
-
-export function shimmerHighlight(
-  fraction: number,
-  phase: number,
-  band = 0.16,
-): number {
-  const d = Math.abs(fraction - phase);
-  const wrapped = Math.min(d, 1 - d);
-  return clamp01(1 - wrapped / band);
-}

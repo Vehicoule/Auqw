@@ -41,13 +41,10 @@ declare const performance: { now(): number };
 export const SEARCH_LIMIT = 25;
 export const DIAGNOSTICS_LIMIT = 20;
 
+const NAV_KEYS = ['home', 'explore', 'library', 'settings'] as const;
+
 export function navItems(): readonly NavItemModel[] {
-  return [
-    { key: 'home', label: t('nav.home') },
-    { key: 'explore', label: t('nav.explore') },
-    { key: 'library', label: t('nav.library') },
-    { key: 'settings', label: t('nav.settings') },
-  ];
+  return NAV_KEYS.map((key) => ({ key, label: t(`nav.${key}`) }));
 }
 
 export const THEME_ORDER = [
@@ -67,46 +64,40 @@ export type ProviderPickerOption = {
 
 // Stream-quality tiers, kbps — inside the domain's 1–512 qualityKbps
 // bound; 128 is the spec default (providers.md).
+const QUALITY_TIERS: readonly (readonly [number, MessageId?])[] = [
+  [64],
+  [96],
+  [128, 'optionDetail.default'],
+  [192],
+  [256],
+  [320, 'optionDetail.maximum'],
+];
+
 export function qualityOptions(): readonly ProviderPickerOption[] {
-  return [
-    { key: '64', label: '64 kbps' },
-    { key: '96', label: '96 kbps' },
-    { key: '128', label: '128 kbps', detail: t('optionDetail.default') },
-    { key: '192', label: '192 kbps' },
-    { key: '256', label: '256 kbps' },
-    { key: '320', label: '320 kbps', detail: t('optionDetail.maximum') },
-  ];
+  return QUALITY_TIERS.map(([kbps, detail]) => ({
+    key: `${kbps}`,
+    label: `${kbps} kbps`,
+    ...(detail === undefined ? {} : { detail: t(detail) }),
+  }));
 }
 
+const THEME_DETAIL: Record<
+  Exclude<(typeof THEME_ORDER)[number], 'dark'>,
+  MessageId
+> = {
+  system: 'optionDetail.themeSystem',
+  adaptive: 'optionDetail.themeAdaptive',
+  light: 'optionDetail.themeLight',
+  oled: 'optionDetail.themeOled',
+};
+
 export function themeOptions(): readonly ProviderPickerOption[] {
-  return [
-    {
-      key: 'system',
-      label: t('settings.themeValue.system'),
-      detail: t('optionDetail.themeSystem'),
-    },
-    {
-      key: 'adaptive',
-      label: t('settings.themeValue.adaptive'),
-      detail: t('optionDetail.themeAdaptive'),
-    },
+  return THEME_ORDER.map((key) => ({
+    key,
+    label: t(`settings.themeValue.${key}`),
     // 'tokyo night' is the color scheme's name, not UI copy.
-    {
-      key: 'dark',
-      label: t('settings.themeValue.dark'),
-      detail: 'tokyo night',
-    },
-    {
-      key: 'light',
-      label: t('settings.themeValue.light'),
-      detail: t('optionDetail.themeLight'),
-    },
-    {
-      key: 'oled',
-      label: t('settings.themeValue.oled'),
-      detail: t('optionDetail.themeOled'),
-    },
-  ];
+    detail: key === 'dark' ? 'tokyo night' : t(THEME_DETAIL[key]),
+  }));
 }
 
 export type Boot<TController> =
@@ -118,54 +109,34 @@ export function toSearchModel(
   state: SearchState,
   playingRef: SourceRef | null = null,
 ): SearchStateModel {
+  const base = {
+    query: state.type === 'idle' ? '' : state.query,
+    results: [],
+    providerId: null,
+    message: null,
+    retryable: false,
+  };
   switch (state.type) {
     case 'idle':
-      return {
-        phase: 'idle',
-        query: '',
-        results: [],
-        providerId: null,
-        message: null,
-        retryable: false,
-      };
     case 'loading':
-      return {
-        phase: 'loading',
-        query: state.query,
-        results: [],
-        providerId: null,
-        message: null,
-        retryable: false,
-      };
     case 'empty':
-      return {
-        phase: 'empty',
-        query: state.query,
-        results: [],
-        providerId: null,
-        message: null,
-        retryable: false,
-      };
+      return { ...base, phase: state.type };
     case 'content':
       return {
+        ...base,
         phase: state.page.items.length === 0 ? 'empty' : 'ready',
-        query: state.query,
         results: state.page.items.map((meta, index) =>
           toSearchRowModel(meta, index, playingRef),
         ),
-        providerId: null,
         message: errorText(state.refreshError),
-        retryable: false,
       };
     case 'error': {
       const unavailable =
         state.error.kind === 'unavailable' ||
         state.error.kind === 'auth-required';
       return {
+        ...base,
         phase: unavailable ? 'unavailable' : 'error',
-        query: state.query,
-        results: [],
-        providerId: null,
         message: errorText(state.error),
         retryable: true,
       };
@@ -226,35 +197,43 @@ export type ActionTarget =
 // The settings provider slots and the capabilities each one routes
 // by — a picker only ever lists providers that declared the slot's
 // capability (manifest-derived, via ProviderPort.capabilities).
+// Lyrics and radio are nullable overrides — 'auto' returns routing
+// to capability declaration; the required slots never offer it.
 export type ProviderSlot =
   | 'catalogProvider'
   | 'playbackProvider'
   | 'lyricsProvider'
   | 'radioProvider';
 
-export const SLOT_CAPABILITIES: Record<
+const SLOT_META: Record<
   ProviderSlot,
-  readonly ProviderCapability[]
+  {
+    readonly label: MessageId;
+    readonly capabilities: readonly ProviderCapability[];
+    readonly optional: boolean;
+  }
 > = {
-  catalogProvider: ['catalog.search'],
-  playbackProvider: ['playback.resolve'],
-  lyricsProvider: ['lyrics.synced', 'lyrics.plain'],
-  radioProvider: ['radio.seed'],
+  catalogProvider: {
+    label: 'settings.catalogProvider',
+    capabilities: ['catalog.search'],
+    optional: false,
+  },
+  playbackProvider: {
+    label: 'settings.playbackProvider',
+    capabilities: ['playback.resolve'],
+    optional: false,
+  },
+  lyricsProvider: {
+    label: 'settings.lyricsProvider',
+    capabilities: ['lyrics.synced', 'lyrics.plain'],
+    optional: true,
+  },
+  radioProvider: {
+    label: 'settings.radioProvider',
+    capabilities: ['radio.seed'],
+    optional: true,
+  },
 };
-
-export const SLOT_LABEL_IDS: Record<ProviderSlot, MessageId> = {
-  catalogProvider: 'settings.catalogProvider',
-  playbackProvider: 'settings.playbackProvider',
-  lyricsProvider: 'settings.lyricsProvider',
-  radioProvider: 'settings.radioProvider',
-};
-
-// Lyrics and radio are nullable overrides — 'auto' returns routing
-// to capability declaration; the required slots never offer it.
-export const OPTIONAL_SLOTS: ReadonlySet<ProviderSlot> = new Set([
-  'lyricsProvider',
-  'radioProvider',
-]);
 
 export type ProviderPickerModel = {
   readonly title: string;
@@ -275,10 +254,10 @@ export function providerPickerModel(
   if (slot === null) {
     return null;
   }
-  const required = SLOT_CAPABILITIES[slot];
+  const meta = SLOT_META[slot];
   const options = providers
     .filter((provider) =>
-      required.some((capability) =>
+      meta.capabilities.some((capability) =>
         provider.capabilities.includes(capability),
       ),
     )
@@ -287,10 +266,9 @@ export function providerPickerModel(
       label: provider.id,
       detail: provider.capabilities.join(' · '),
     }));
-  const selected = settings[slot];
   return {
-    title: t(SLOT_LABEL_IDS[slot]),
-    options: OPTIONAL_SLOTS.has(slot)
+    title: t(meta.label),
+    options: meta.optional
       ? [
           {
             key: 'auto',
@@ -300,7 +278,7 @@ export function providerPickerModel(
           ...options,
         ]
       : options,
-    selectedKey: selected ?? 'auto',
+    selectedKey: settings[slot] ?? 'auto',
   };
 }
 
@@ -346,30 +324,23 @@ export function reportResult(
   action: MessageId,
   result: Result<unknown>,
 ): void {
-  if (!result.ok) {
-    // Log the typed kind only — an error message crossing a bridge can
-    // embed a signed URL or token that has no business in renderer logs.
-    console.warn(`[ui] ${action} failed: ${result.error.kind}`);
-    // Teardown suppression lives at this ops-level funnel — 'cancelled'
-    // can also be a provider's real verdict, so surfaces don't silence
-    // it, but an op torn down by a newer intent never toasts.
-    if (
-      result.error.kind === 'cancelled' ||
-      result.error.kind === 'superseded'
-    ) {
-      return;
-    }
-    // The toast carries the humanized reason, never the raw kind or
-    // message; silent (disposal) outcomes don't toast at all.
-    const detail = errorText(result.error);
-    if (detail !== null) {
-      toastSink?.(
-        t('toast.failed', {
-          action: t(action),
-          detail,
-        }),
-      );
-    }
+  if (result.ok) {
+    return;
+  }
+  // Log the typed kind only — an error message crossing a bridge can
+  // embed a signed URL or token that has no business in renderer logs.
+  console.warn(`[ui] ${action} failed: ${result.error.kind}`);
+  // Teardown suppression lives at this ops-level funnel — 'cancelled'
+  // can also be a provider's real verdict, so surfaces don't silence
+  // it, but an op torn down by a newer intent never toasts.
+  if (result.error.kind === 'cancelled' || result.error.kind === 'superseded') {
+    return;
+  }
+  // The toast carries the humanized reason, never the raw kind or
+  // message; silent (disposal) outcomes don't toast at all.
+  const detail = errorText(result.error);
+  if (detail !== null) {
+    toastSink?.(t('toast.failed', { action: t(action), detail }));
   }
 }
 
@@ -552,29 +523,23 @@ export function overlayReducer<O>(
 export function useOverlayStack<O>(): OverlayStack<O> {
   const [stack, setStack] = useState<readonly OverlayEntry<O>[]>([]);
   const counter = useRef(0);
-  const push = useCallback((next: O) => {
-    const key = `ov-${(counter.current += 1)}`;
-    setStack((stack) =>
-      overlayReducer(stack, { type: 'push', key, overlay: next }),
-    );
-  }, []);
-  const reset = useCallback((next: O) => {
-    const key = `ov-${(counter.current += 1)}`;
-    setStack((stack) =>
-      overlayReducer(stack, { type: 'reset', key, overlay: next }),
-    );
-  }, []);
-  /** Pop the top route — every screen's own back affordance. */
-  const close = useCallback(() => {
-    setStack((stack) => overlayReducer(stack, { type: 'close' }));
-  }, []);
-  /** Screen-stack dismissal removes a screen and all above it. */
-  const dismiss = useCallback((key: string) => {
-    setStack((stack) => overlayReducer(stack, { type: 'dismiss', key }));
-  }, []);
-  const clear = useCallback(() => {
-    setStack((stack) => overlayReducer(stack, { type: 'clear' }));
-  }, []);
+  const mintKey = (): string => `ov-${(counter.current += 1)}`;
+  const run = useCallback(
+    (command: OverlayCommand<O>) =>
+      setStack((s) => overlayReducer(s, command)),
+    [],
+  );
+  const push = useCallback(
+    (next: O) => run({ type: 'push', key: mintKey(), overlay: next }),
+    [],
+  );
+  const reset = useCallback(
+    (next: O) => run({ type: 'reset', key: mintKey(), overlay: next }),
+    [],
+  );
+  const close = useCallback(() => run({ type: 'close' }), []);
+  const dismiss = useCallback((key: string) => run({ type: 'dismiss', key }), []);
+  const clear = useCallback(() => run({ type: 'clear' }), []);
   const top = stack[stack.length - 1]?.overlay ?? null;
   return { stack, top, push, reset, close, dismiss, clear };
 }
