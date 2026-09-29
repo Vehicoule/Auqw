@@ -527,7 +527,9 @@ export type StageSheetProps = {
   readonly onToggleShuffle?: (() => void) | undefined;
   readonly repeat?: 'off' | 'all' | 'one' | undefined;
   readonly onCycleRepeat?: (() => void) | undefined;
-  readonly onSeek?: ((ms: number) => void) | undefined;
+  readonly onSeek?:
+    | ((ms: number, expectedOccurrenceId?: string) => void)
+    | undefined;
   /**
    * Real measured waveform peaks (canonical `PEAKS_RESOLUTION`
    * pairs) for the Stage seek — Android extractor output normalized
@@ -881,7 +883,13 @@ export function StageSheet({
     ) {
       return;
     }
-    seek(Math.round(Math.min(1, Math.max(0, x / width)) * durationMs));
+    // The captured occurrence rides to the session too — the meta
+    // compare covers flips React already rendered; the session
+    // guard covers the sub-frame window before the effect ran.
+    seek(
+      Math.round(Math.min(1, Math.max(0, x / width)) * durationMs),
+      tappedOccurrence ?? undefined,
+    );
   }, []);
   const seekTap = useMemo(
     () =>
@@ -912,6 +920,9 @@ export function StageSheet({
     [],
   );
   const lyricScrolledKey = useRef<string | null>(null);
+  // Layouts live in refs — a counter re-runs the owed-scroll effect
+  // when the active row or the scroller itself first measures in.
+  const [lyricLayoutTick, bumpLyricLayout] = useState(0);
   const lyricActiveIndex =
     lyricsPane.kind === 'lines' ? lyricsPane.activeIndex : null;
   const lyricScrollKey =
@@ -928,7 +939,10 @@ export function StageSheet({
   const scrollToLyricLine = useCallback(
     (index: number) => {
       const line = lyricLayouts.current[index];
-      if (line === undefined) {
+      // A zero scroller height means its own layout has not landed —
+      // scrollTo against uncommitted content clamps and loses, so
+      // the owed key must stay unsettled rather than mark a miss.
+      if (line === undefined || lyricsScrollH.current <= 0) {
         return false;
       }
       lyricsScrollRef.current?.scrollTo({
@@ -940,19 +954,26 @@ export function StageSheet({
     [theme.reducedMotion],
   );
   useEffect(() => {
-    if (lyricScrollKey === null) {
+    if (lyricScrollKey === null || activeMode !== 'lyrics') {
+      // Leaving the pane resets the owed key — the ScrollView
+      // unmounts with it, so re-entry must center again.
       lyricScrolledKey.current = null;
       return;
     }
     if (
-      activeMode === 'lyrics' &&
       lyricScrolledKey.current !== lyricScrollKey &&
       lyricActiveIndex !== null &&
       scrollToLyricLine(lyricActiveIndex)
     ) {
       lyricScrolledKey.current = lyricScrollKey;
     }
-  }, [activeMode, lyricActiveIndex, lyricScrollKey, scrollToLyricLine]);
+  }, [
+    activeMode,
+    lyricActiveIndex,
+    lyricScrollKey,
+    scrollToLyricLine,
+    lyricLayoutTick,
+  ]);
 
   // The lyrics-mode header rides the pane chrome — the same element
   // sits above the lines list or the state block.
@@ -1213,6 +1234,7 @@ export function StageSheet({
               ref={lyricsScrollRef}
               onLayout={(e) => {
                 lyricsScrollH.current = e.nativeEvent.layout.height;
+                bumpLyricLayout((tick) => tick + 1);
               }}
               style={{ flex: 1, marginTop: theme.spacing.sm }}
               // Lines glide beneath the floating segment; the pad lets
@@ -1232,15 +1254,10 @@ export function StageSheet({
                     };
                     // Layout arriving after the scroll effect ran —
                     // first open mid-song, or a swap clearing the
-                    // measurements — still owes the active line's
-                    // scroll once its own measurement exists.
-                    if (
-                      lyricScrollKey !== null &&
-                      i === lyricActiveIndex &&
-                      lyricScrolledKey.current !== lyricScrollKey &&
-                      scrollToLyricLine(i)
-                    ) {
-                      lyricScrolledKey.current = lyricScrollKey;
+                    // measurements — bumps the owed-scroll effect
+                    // once the active line's own measurement exists.
+                    if (i === lyricActiveIndex) {
+                      bumpLyricLayout((tick) => tick + 1);
                     }
                   }}
                 >

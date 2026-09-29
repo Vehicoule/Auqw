@@ -962,7 +962,10 @@ export class PlaybackEngine {
     return this.startAttempt(before.currentOccurrenceId);
   }
 
-  async seekTo(positionMs: number): Promise<Result<void>> {
+  async seekTo(
+    positionMs: number,
+    expectedOccurrenceId?: string,
+  ): Promise<Result<void>> {
     const ready = this.#host.requireReady();
     if (!ready.ok) {
       return ready;
@@ -977,6 +980,16 @@ export class PlaybackEngine {
     const before = r.queue.snapshot();
     if (before.currentOccurrenceId === null) {
       return err(appError('unavailable', 'no active playback to seek'));
+    }
+    // A gesture-bound seek names the row it started on; a cursor that
+    // already moved must not take a position meant for its
+    // predecessor. The drop reads as success — nothing went wrong,
+    // the intent simply outlived its track.
+    if (
+      expectedOccurrenceId !== undefined &&
+      before.currentOccurrenceId !== expectedOccurrenceId
+    ) {
+      return ok(undefined);
     }
     try {
       r.queue.seekTo(positionMs);
