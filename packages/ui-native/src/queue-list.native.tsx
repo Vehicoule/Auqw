@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { FlatList, View } from 'react-native';
 import DraggableFlatList, {
   ScaleDecorator,
@@ -50,6 +50,9 @@ export function QueueList({
   // up-next is clamped on write, so the list remounts to re-render
   // from the model — otherwise it keeps showing the rejected landing.
   const [dragRemount, bumpDragRemount] = useState(0);
+  // The remount's fresh list starts at the top — carry the last
+  // scroll offset across so deep-queue reordering stays put.
+  const dragScrollY = useRef(0);
   if (queue.items.length === 0) {
     return <EmptyState title={t('queue.empty')} icon="queue" />;
   }
@@ -136,6 +139,11 @@ export function QueueList({
         data={items.slice()}
         keyExtractor={(item) => item.occurrenceId}
         scrollEnabled={scrollEnabled}
+        scrollEventThrottle={64}
+        onScroll={(event) => {
+          dragScrollY.current = event.nativeEvent.contentOffset.y;
+        }}
+        contentOffset={{ x: 0, y: dragScrollY.current }}
         contentContainerStyle={{ paddingBottom: contentPaddingBottom }}
         onDragEnd={({ from, to }) => {
           const item = items[from];
