@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Artwork,
   Icon,
@@ -276,22 +276,17 @@ export function NowPlayingScreen({
   ...transport
 }: NowPlayingScreenProps) {
   const { activeMode, select } = useStageMode(mode, onModeChange);
-  // A visited pane stays mounted — display:none preserves scroll and
-  // fetched state, so switching back doesn't remount the whole list.
-  const [visited, setVisited] = useState<ReadonlySet<StageMode>>(
-    () => new Set([activeMode]),
-  );
-  useEffect(() => {
-    setVisited((prev) =>
-      prev.has(activeMode) ? prev : new Set(prev).add(activeMode),
-    );
-  }, [activeMode]);
+  // All three panes stay mounted — display:none preserves scroll and
+  // fetched state, so a mode switch never remounts a list.
   const paneHidden = (m: StageMode) => ({
     display: m === activeMode ? 'contents' : 'none',
   });
   const meta = stageMetaView(player);
   const lyricsHeader = lyricsHeaderView(player, lyrics);
-  const lyricsPane = lyricsPaneView(lyrics, onRetryLyrics);
+  const lyricsPane = useMemo(
+    () => lyricsPaneView(lyrics, onRetryLyrics),
+    [lyrics, onRetryLyrics],
+  );
   const radioRow = radioRowView(radio, onStartRadio, onStopRadio);
   const reorder = queueReorderButton(queueReordering, onToggleQueueReorder);
   const downloadBtn =
@@ -334,6 +329,51 @@ export function NowPlayingScreen({
       ?.querySelector('.uw-lyrics__line--active')
       ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }, [activeMode, lyricActiveIndex, player.occurrenceId]);
+
+  // The two heavy subtrees get element-level memoization: an identical
+  // element bails out of reconciliation, so a mode switch or a
+  // position tick leaves the kept-alive rows/lines untouched.
+  const queueListEl = useMemo(
+    () =>
+      queue === undefined ? null : (
+        <QueueList
+          queue={queue}
+          reordering={queueReordering}
+          scrollEnabled={queueScrollEnabled}
+          onPressItem={onPressQueueItem}
+          onRemoveItem={onRemoveQueueItem}
+          onMoveItem={onMoveQueueItem}
+          onMoveItemTo={onMoveQueueItemTo}
+        />
+      ),
+    [
+      queue,
+      queueReordering,
+      queueScrollEnabled,
+      onPressQueueItem,
+      onRemoveQueueItem,
+      onMoveQueueItem,
+      onMoveQueueItemTo,
+    ],
+  );
+
+  const lyricLineEls = useMemo(
+    () =>
+      lyricsPane.kind === 'lines'
+        ? lyricsPane.lines.map((line, i) => (
+            <Text
+              key={i}
+              variant="body"
+              color={line.color}
+              className={`uw-lyrics__line${line.active ? ' uw-lyrics__line--active' : ''}`}
+            >
+              {line.text}
+            </Text>
+          ))
+        : null,
+    [lyricsPane],
+  );
+
   return (
     <div
       className={`uw-stage${immersive ? ' uw-stage--immersive t-dark' : ''}`}
@@ -351,8 +391,7 @@ export function NowPlayingScreen({
         />
       )}
       <div className="uw-stage__body">
-        {(visited.has('player') || activeMode === 'player') && (
-          <div style={paneHidden('player')}>
+        <div style={paneHidden('player')}>
             {/*
              * The live radio element: a seed affordance when no tail is
              * armed, the tail's honest status when one is — 'failed'
@@ -464,10 +503,8 @@ export function NowPlayingScreen({
               canNext={player.canNext}
               {...transport}
             />
-          </div>
-        )}
-        {(visited.has('lyrics') || activeMode === 'lyrics') && (
-          <div style={paneHidden('lyrics')}>
+        </div>
+        <div style={paneHidden('lyrics')}>
             <div className="uw-stage__meta uw-stage__meta--lyrics">
               <Text variant="body" color="bright" numberOfLines={1}>
                 {lyricsHeader.title}
@@ -502,22 +539,11 @@ export function NowPlayingScreen({
                 data-state={lyricsPane.state}
                 ref={lyricsRef}
               >
-                {lyricsPane.lines.map((line, i) => (
-                  <Text
-                    key={i}
-                    variant="body"
-                    color={line.color}
-                    className={`uw-lyrics__line${line.active ? ' uw-lyrics__line--active' : ''}`}
-                  >
-                    {line.text}
-                  </Text>
-                ))}
+                {lyricLineEls}
               </div>
             )}
-          </div>
-        )}
-        {(visited.has('queue') || activeMode === 'queue') && (
-          <div style={paneHidden('queue')}>
+        </div>
+        <div style={paneHidden('queue')}>
           <div className="uw-stage__queue">
             {queue === undefined ? (
               <EmptyState title={t('queue.empty')} icon="queue" />
@@ -538,20 +564,11 @@ export function NowPlayingScreen({
                     />
                   </div>
                 )}
-                <QueueList
-                  queue={queue}
-                  reordering={queueReordering}
-                  scrollEnabled={queueScrollEnabled}
-                  onPressItem={onPressQueueItem}
-                  onRemoveItem={onRemoveQueueItem}
-                  onMoveItem={onMoveQueueItem}
-                  onMoveItemTo={onMoveQueueItemTo}
-                />
+                {queueListEl}
               </>
             )}
           </div>
-          </div>
-        )}
+        </div>
       </div>
       {/* Stop/dismiss floats over the stage's top-right — out of the
           body flow, reachable in every mode (the old column-level

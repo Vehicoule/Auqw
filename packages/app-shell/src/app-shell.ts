@@ -919,6 +919,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // the set so a row the cursor moved past keeps its 'error' mark;
   // a fresh attempt for the occurrence clears it, removals prune.
   const failedQueueIds = useRef(new Set<string>());
+  // Rows never read playback.positionMs — dep on the fields the
+  // bookkeeping uses so a position tick doesn't rebuild the model.
+  const playbackType = state.playback.type;
+  const playbackOccurrenceId =
+    state.playback.type === 'idle' ? null : state.playback.occurrenceId;
   const queueModel = useMemo(() => {
     const playback = state.playback;
     if (playback.type === 'failed') {
@@ -962,7 +967,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     state.queue,
     state.recordings,
     state.likes,
-    state.playback,
+    playbackType,
+    playbackOccurrenceId,
     state.shuffleOrder,
     online,
     localPlayable,
@@ -1993,12 +1999,17 @@ export function useAppShell<E extends { readonly type: string } = never>(
     },
     [session],
   );
+  const lyricsVisible = stageOpen && stageMode === 'lyrics';
   const lyricsPositionMs = useSmoothedPosition(
     stagePlayer?.positionMs ?? 0,
     playback.type === 'playing',
-    stageOpen && stageMode === 'lyrics',
+    lyricsVisible,
     seekGeneration,
   );
+  // Hidden panes don't show the position — dep on null while off
+  // screen so an engine tick doesn't rebuild the model; the body
+  // still reads the live value whenever the pane is visible.
+  const lyricsPositionDep = lyricsVisible ? lyricsPositionMs : null;
   const lyricsModel: LyricsModel | undefined = useMemo(() => {
     if (currentRecordingId === null) {
       return undefined;
@@ -2013,7 +2024,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
       loading: fetch === null ? true : fetch.loading,
       positionMs: lyricsPositionMs,
     });
-  }, [lyricsFetch, currentRecordingId, lyricsPositionMs, localeTick]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lyricsFetch, currentRecordingId, lyricsPositionDep, localeTick]);
 
   const onRetryLyrics = useCallback(() => {
     if (currentRecordingId !== null) {

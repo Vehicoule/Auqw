@@ -3,13 +3,14 @@
 Branch `devin/ui-tabs`. HEAD already carried the first half of the fix
 (`466659b fix(stage): keep-alive stage panes — visited tabs hide instead of
 remounting`); this pass verified it, found it was defeated by a second
-remount boundary plus one regression it introduced, and finished the job.
+remount boundary plus one regression it introduced, then eliminated the
+remaining per-switch render cost the keep-alive alone could not touch.
 
 ## Root cause
 
 The stage renders three panes (`queue` / `player` / `lyrics`) under one
 mode state (`useStageMode`; mode owned by `useAppShell` → `stageMode`).
-Two separate mechanisms caused the per-switch "freeze":
+Four separate mechanisms caused the per-switch "freeze":
 
 1. **Conditional mounting (fixed at 466659b).**
    `packages/ui-native/src/stage-sheet.tsx` and
@@ -31,7 +32,7 @@ Two separate mechanisms caused the per-switch "freeze":
    Player felt "smoother" only because its subtree is shallower than a
    list — it paid the same remount.
 
-2. **The immersive boundary still remounted everything (fixed here).**
+2. **The immersive boundary still remounted everything (fixed at 25b1e06).**
    `stage-sheet.tsx` ended with
    `{immersive ? <ThemeProvider theme="dark">…content…</ThemeProvider> : content}`
    (`immersive = activeMode === 'player' && player.artworkUrl !== null`).
@@ -39,16 +40,34 @@ Two separate mechanisms caused the per-switch "freeze":
    remounts the entire `content` subtree — so with artwork present (the
    common case), every switch **to or from** player mode remounted all
    three kept-alive panes at once, defeating 466659b exactly where it
-   mattered. queue↔lyrics switches (both non-immersive) were already
-   fixed by HEAD; anything touching player was not.
+   mattered.
 
-3. **Regression introduced by 466659b (fixed here).**
+3. **Regression introduced by 466659b (fixed at 25b1e06).**
    `chromePan` was one `Gesture.Pan()` instance shared by the lyrics
    pane's chrome `GestureDetector`s and the queue pane's — legal while
    only one pane mounted at a time. With keep-alive both panes are
    mounted concurrently and a gesture object binds a single detector:
    the later-mounted pane stole the recognizer, leaving the other's
    dismiss-drag chrome dead.
+
+4. **Kept-alive panes still reconciled on every render (fixed in this
+   commit).** The `visited` set mounted each pane lazily — so the first
+   visit still paid the cold-mount on a user gesture (the freeze
+   survived for the queue's first entry) — and nothing isolated hidden
+   panes from the parent's render. Every `stageMode` change, and every
+   position tick the shell emits (`session.subscribePosition` feeds the
+   `player` model at tick rate), reconciled all mounted subtrees:
+   ~160 `TrackRow`s on web, the 15-row FlatList window + 80 lyric
+   `Text`s on native. The inputs were stable — `queue`/`lyrics` models
+   are `useMemo`d in `useAppShell` — but two deps forced them to churn
+   at tick rate anyway: `queueModel` listed the whole `state.playback`
+   object (which carries `positionMs`, `session.ts:142`) though the
+   body only reads `type`/`occurrenceId` for `failedQueueIds`
+   bookkeeping (`app-shell.ts:928-938`), and `lyricsModel` listed
+   `lyricsPositionMs`, which `useSmoothedPosition` still re-anchors on
+   every engine tick while the pane is hidden (`ui-shared/shell.ts:375-378`).
+   `onRemoveQueueItem` also arrived as a fresh inline closure per app
+   render, which would have busted any memo regardless.
 
 ## Not the cause (verified)
 
@@ -82,8 +101,31 @@ Two separate mechanisms caused the per-switch "freeze":
   `importantForAccessibility` (the `mini-player.tsx:247` idiom) so a
   `display:none` pane stays unreachable to screen readers, matching the
   old unmounted semantics.
-- Stale comment corrected: the lyrics scroller no longer "unmounts with"
-  the pane-leaving reset.
+- **`visited` dropped — all three panes mount eagerly** (`stage-sheet.tsx`,
+  `now-playing-screen.tsx`). The lazy set was the last thing remounting
+  under a user gesture: first entry into queue still paid the cold
+  160-row mount. The mount cost moves to the sheet mount — on mobile
+  that is the collapsed sheet created at playback start, not a UI
+  interaction; on desktop it is the stage column's first open.
+- **Element-level memoization of the two heavy subtrees** — `useMemo`
+  returns a `QueueList` element and a lyric-lines element array
+  (`queueListEl`/`lyricLineEls` on both platforms) plus the
+  `lyricsPane` view model. React bails out of reconciliation on an
+  identical element, so a mode switch, a position tick, or an unrelated
+  shell render leaves the kept-alive rows/lines untouched instead of
+  diffing every row.
+- **`useAppShell` dep narrowing so the memos hold at tick rate**:
+  `queueModel` deps drop `state.playback` for the two fields the body
+  actually reads (`playbackType`, `playbackOccurrenceId`) — position
+  publishes no longer rebuild the row model; `lyricsModel`'s position
+  dep is gated by pane visibility (`lyricsPositionDep`) — the model
+  still reads the live `lyricsPositionMs` whenever the pane is visible,
+  but a hidden pane no longer rebuilds per engine tick.
+- **Stable `onRemoveQueueItem`**: `removeQueueOccurrence` is a
+  `useCallback` in `useAppShell` beside `onMoveQueueItem*`, replacing
+  the per-render `(id) => void session.removeOccurrence(id)` closure
+  at all three call sites (mobile stage, desktop stage, desktop
+  QueueScreen).
 
 ## Why behavior is identical
 
@@ -96,39 +138,63 @@ Two separate mechanisms caused the per-switch "freeze":
 - `DarkThemeScope on`/`off` provides exactly the values the old
   conditional provider/no-provider did; context consumers re-render on
   the flip instead of remounting — same output, preserved state.
+  Context changes propagate through the memoized elements, so the
+  scoped dark scheme still reaches every `useTheme` consumer inside
+  `queueListEl`/`lyricLineEls` the moment `immersive` flips.
 - Scroll/selection/gesture behavior unchanged: panes never leave the
   tree, so offsets, FlatList window state, and gesture attachment
   survive; the lyrics owed-scroll still settles on re-entry because the
   scroller's `onLayout` refires when `display` restores.
-- Lazily mounted: `visited` still mounts a pane on first visit, so the
-  sheet's first paint doesn't pay for three lists.
+- The memoized elements are pure projections of their props: an element
+  that bails out is provably identical to the one it replaces (same
+  inputs, same JSX), so a skipped reconcile can't diverge. Every input
+  the JSX reads is a dep — callbacks included, which is exactly why
+  `removeQueueOccurrence` had to be stabilized first.
+- The `queueModel` narrowing lists every field the memo body reads —
+  `failedQueueIds` bookkeeping is edge-triggered on
+  (type, occurrenceId), which is what the new deps track; a skipped
+  rebuild would have produced a bit-identical model.
+- The `lyricsModel` gate only freezes the position input while the pane
+  is invisible — no consumer can observe it. On re-entry the dep flips
+  back to the live value and the model rebuilds in the same frame, so
+  the first visible line state is correct; the 200 ms smoothed clock
+  then resumes exactly as before.
+- `t()` strings and a11y labels stay outside the memos (header texts,
+  `EmptyState`, reorder label are inline JSX), so locale flips still
+  repaint immediately.
 
 ## Evidence
 
-- Remount path (pre-fix, HEAD): `stage-sheet.tsx` `{immersive ? <ThemeProvider …` —
+- Remount path (pre-fix, 466659b): `stage-sheet.tsx` `{immersive ? <ThemeProvider …` —
   element-type change at a fixed position forces React unmount+mount of
   the `content` subtree (all visited panes) on every player↔queue/lyrics
   switch whenever `artworkUrl !== null`.
-- Gesture-sharing: HEAD bound `chromePan` to detectors at stage-sheet
+- Gesture-sharing: 466659b bound `chromePan` to detectors at stage-sheet
   1215/1271 (lyrics) and 1290/1298 (queue) — two concurrently mounted
   detectors after keep-alive.
-- Measured (`packages/ui-web/probe-tabs.mjs` — jsdom `createRoot`,
-  160-row queue + 80-line synced lyrics, React Profiler + MutationObserver
-  counting real DOM adds/removes per mode prop switch):
+- Measured (`packages/ui-web/probe-tabs.mjs` — jsdom `createRoot` +
+  `Profiler`, 160-row queue + 80-line synced lyrics, MutationObserver
+  counting real DOM adds/removes per mode prop switch; wall = commit
+  window, render = Profiler actualDuration):
 
-  | switch | before (466659b~1) | after |
+  | step | keep-alive only | eager + memoized |
   | --- | --- | --- |
-  | player → lyrics (1st visit) | +2 −3 nodes, 10.5 ms render | +1 −0, 12.2 ms |
-  | lyrics → queue (1st visit) | +1 −2, 159.2 ms | +1 −0, 190.7 ms |
-  | queue → player | +3 −1 | +0 −0, 16.7 ms |
-  | player → lyrics (2nd) | +2 −3 | +0 −0, 10.8 ms |
-  | lyrics → queue (2nd) | +1 −2, 118.0 ms | +0 −0, 13.2 ms |
+  | mount (player) | 39.3 ms / 30.2 render | 201.4 ms / 178.0 render |
+  | player → lyrics (1st) | 21.0 ms / 10.8, 2 commits | 11.8 ms / 3.0 |
+  | lyrics → queue (1st) | 221.4 ms / 192.8, 2 commits | 3.5 ms / 1.8 |
+  | queue → player | 38.5 ms / 17.2 | 7.0 ms / 4.9 |
+  | player → lyrics (2nd) | 26.6 ms / 13.1 | 3.3 ms / 1.8 |
+  | lyrics → queue (2nd) | 25.4 ms / 10.4 | 3.1 ms / 1.9 |
+  | queue → queue (no-op) | 27.4 ms / 12.6 | 2.5 ms / 1.6 |
+  | position tick in queue | 34.6 ms / 11.9 | 6.6 ms / 4.0 |
 
-  Before: every switch tore down one pane and cold-mounted the next —
-  the 160-row queue mount cost ~120–160 ms *every* visit. After: first
-  visits still pay one mount (lazy `visited`), revisits mutate zero DOM
-  nodes and render in ~11–16 ms. (`dom ±` counts top-level mutation
-  records, so `+1` = one subtree insertion.)
+  Before: the first queue visit paid ~193 ms of React work *on the
+  switch itself* (lazy mount + the `visited` bookkeeping render), and
+  every later switch still reconciled the whole mounted tree — the DOM
+  never changed (`+0 −0` after the first visits), so the 10–17 ms was
+  pure re-render. After: every switch is one commit under ~5 ms with
+  zero DOM mutation; the pane-mount cost moved to the one sheet mount
+  (~178 ms jsdom for all three panes — hidden panes, `display:none`).
 - Gates (all green, this branch):
   `pnpm install --frozen-lockfile`;
   `pnpm -C packages/ui-native typecheck` (+`test`: ui-native tests passed);
@@ -141,24 +207,22 @@ Two separate mechanisms caused the per-switch "freeze":
   the `renderToStaticMarkup` harness (effects never run), so on-device
   scroll/gesture verification stays provisional for the lead. The jsdom
   probe is the closest harness-level evidence and shows zero DOM churn
-  on revisit.
+  on every switch.
 
-## Diffstat (this pass, on top of 466659b)
+## Diffstat (vs merge-base, all three commits)
 
 ```
- apps/desktop/src/renderer/app.tsx      |  5 ++-
- apps/mobile/App.tsx                    |  3 +-
- packages/app-shell/src/app-shell.ts    |  6 +++
- packages/ui-native/src/stage-sheet.tsx | 77 ++++++++++++++++------------------
- packages/ui-native/src/theme.tsx       | 23 ++++++++++
- packages/ui-web/probe-tabs.mjs         | new (evidence harness)
+ REPORT.md                              | report
+ apps/desktop/src/renderer/app.tsx      | onRemoveQueueItem → removeQueueOccurrence ×2
+ apps/mobile/App.tsx                   | onRemoveQueueItem → removeQueueOccurrence
+ packages/app-shell/src/app-shell.ts   | removeQueueOccurrence; queueModel/lyricsModel dep narrowing
+ packages/ui-native/src/stage-sheet.tsx | DarkThemeScope boundary, per-pane chrome pans,
+                                        a11y pair, eager panes, queueListEl/lyricLineEls/lyricsPane memos
+ packages/ui-native/src/theme.tsx       | DarkThemeScope
+ packages/ui-web/src/now-playing-screen.tsx | eager panes, queueListEl/lyricLineEls/lyricsPane memos
+ packages/ui-web/probe-tabs.mjs         | jsdom Profiler harness (evidence)
 ```
 
-The app diffs finish the "unstable callback props" leg the same pass
-started: `onRemoveQueueItem` was a fresh inline closure per app render
-(`(id) => void session.removeOccurrence(id)`), now a memoized
-`removeQueueOccurrence` beside the already-memoized `onMoveQueueItem*`
-in `useAppShell`.
-
-466659b (already on branch): `stage-sheet.tsx` +40/-4-ish,
-`now-playing-screen.tsx` +19/-10-ish keep-alive wrappers.
+Series on `devin/ui-tabs` over `466659b` (the wave-1 keep-alive, already
+on branch): `25b1e06` stable immersive boundary + per-pane chrome pans;
+this commit — eager panes + render isolation.
