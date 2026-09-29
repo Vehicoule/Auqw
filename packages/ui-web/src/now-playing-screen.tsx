@@ -276,6 +276,19 @@ export function NowPlayingScreen({
   ...transport
 }: NowPlayingScreenProps) {
   const { activeMode, select } = useStageMode(mode, onModeChange);
+  // A visited pane stays mounted — display:none preserves scroll and
+  // fetched state, so switching back doesn't remount the whole list.
+  const [visited, setVisited] = useState<ReadonlySet<StageMode>>(
+    () => new Set([activeMode]),
+  );
+  useEffect(() => {
+    setVisited((prev) =>
+      prev.has(activeMode) ? prev : new Set(prev).add(activeMode),
+    );
+  }, [activeMode]);
+  const paneHidden = (m: StageMode) => ({
+    display: m === activeMode ? 'contents' : 'none',
+  });
   const meta = stageMetaView(player);
   const lyricsHeader = lyricsHeaderView(player, lyrics);
   const lyricsPane = lyricsPaneView(lyrics, onRetryLyrics);
@@ -338,8 +351,8 @@ export function NowPlayingScreen({
         />
       )}
       <div className="uw-stage__body">
-        {activeMode === 'player' && (
-          <>
+        {(visited.has('player') || activeMode === 'player') && (
+          <div style={paneHidden('player')}>
             {/*
              * The live radio element: a seed affordance when no tail is
              * armed, the tail's honest status when one is — 'failed'
@@ -451,10 +464,10 @@ export function NowPlayingScreen({
               canNext={player.canNext}
               {...transport}
             />
-          </>
+          </div>
         )}
-        {activeMode === 'lyrics' && (
-          <>
+        {(visited.has('lyrics') || activeMode === 'lyrics') && (
+          <div style={paneHidden('lyrics')}>
             <div className="uw-stage__meta uw-stage__meta--lyrics">
               <Text variant="body" color="bright" numberOfLines={1}>
                 {lyricsHeader.title}
@@ -501,9 +514,10 @@ export function NowPlayingScreen({
                 ))}
               </div>
             )}
-          </>
+          </div>
         )}
-        {activeMode === 'queue' && (
+        {(visited.has('queue') || activeMode === 'queue') && (
+          <div style={paneHidden('queue')}>
           <div className="uw-stage__queue">
             {queue === undefined ? (
               <EmptyState title={t('queue.empty')} icon="queue" />
@@ -535,6 +549,7 @@ export function NowPlayingScreen({
                 />
               </>
             )}
+          </div>
           </div>
         )}
       </div>

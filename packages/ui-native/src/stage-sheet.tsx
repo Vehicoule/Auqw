@@ -575,6 +575,17 @@ export function StageSheet({
     onModeChange,
     expanded,
   );
+  // A visited pane stays mounted — hiding it (display:none) keeps
+  // scroll position and fetched state, so switching back doesn't
+  // remount the whole list.
+  const [visited, setVisited] = useState<ReadonlySet<StageMode>>(
+    () => new Set([activeMode]),
+  );
+  useEffect(() => {
+    setVisited((prev) =>
+      prev.has(activeMode) ? prev : new Set(prev).add(activeMode),
+    );
+  }, [activeMode]);
   const meta = stageMetaView(player);
   const lyricsHeader = lyricsHeaderView(player, lyrics);
   const lyricsPane = lyricsPaneView(lyrics, onRetryLyrics);
@@ -1037,8 +1048,13 @@ export function StageSheet({
           </View>
         </View>
       )}
-      {activeMode === 'player' && (
-        <>
+      {(visited.has('player') || activeMode === 'player') && (
+        <View
+          style={[
+            { flex: 1 },
+            activeMode !== 'player' && { display: 'none' },
+          ]}
+        >
           {/* Title/artist bottom-anchored in the light-frost zone; the
               timeline/transport cluster stays pinned at the bottom. */}
           <ScrollView
@@ -1183,10 +1199,16 @@ export function StageSheet({
               onCycleRepeat={onCycleRepeat}
             />
           </View>
-        </>
+        </View>
       )}
-      {activeMode === 'lyrics' && (
-        lyricsPane.kind === 'lines' ? (
+      {(visited.has('lyrics') || activeMode === 'lyrics') && (
+        <View
+          style={[
+            { flex: 1 },
+            activeMode !== 'lyrics' && { display: 'none' },
+          ]}
+        >
+        {lyricsPane.kind === 'lines' ? (
           <>
             {/* The header chrome carries the sheet's dismiss drag —
                 only the lines list keeps a scroll gesture. */}
@@ -1252,9 +1274,16 @@ export function StageSheet({
               <StateFor view={lyricsPane} />
             </View>
           </GestureDetector>
-        )
+        )}
+        </View>
       )}
-      {activeMode === 'queue' && (
+      {(visited.has('queue') || activeMode === 'queue') && (
+        <View
+          style={[
+            { flex: 1 },
+            activeMode !== 'queue' && { display: 'none' },
+          ]}
+        >
         <View style={{ flex: 1, marginTop: theme.spacing.md }}>
           {queue === undefined ? (
             // No list to scroll — the pane is drag chrome.
@@ -1303,6 +1332,7 @@ export function StageSheet({
               />
             </>
           )}
+        </View>
         </View>
       )}
       {/* The mode segment floats over the sheet's bottom safe zone —
