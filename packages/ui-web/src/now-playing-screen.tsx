@@ -35,9 +35,9 @@ import {
   stageModeTabs,
   useStageMode,
   useTransportView,
+  type RadioRowView,
   type StageScreenHandlers,
 } from '@auqw/ui-shared/controllers';
-
 
 export type TransportProps = {
   readonly variant?: 'm3e' | 'ios' | undefined;
@@ -215,20 +215,38 @@ function StageBackdrop({
 }) {
   return (
     <div className="uw-stage__backdrop" aria-hidden="true">
-      <img
-        className="uw-stage__backdrop-art"
-        src={url}
-        alt=""
-        onError={onError}
-      />
-      <img
-        className="uw-stage__backdrop-frost"
-        src={url}
-        alt=""
-        onError={onError}
-      />
+      {['art', 'frost'].map((layer) => (
+        <img
+          key={layer}
+          className={`uw-stage__backdrop-${layer}`}
+          src={url}
+          alt=""
+          onError={onError}
+        />
+      ))}
       <div className="uw-stage__backdrop-scrim" />
     </div>
+  );
+}
+
+// The radio pill's inline action — 'stop' when armed, 'start' otherwise.
+function RadioAction({
+  action,
+  color,
+}: {
+  readonly action: RadioRowView['start'];
+  readonly color: 'primary' | 'accent';
+}) {
+  return (
+    <Pressable
+      onPress={action.onPress}
+      ariaLabel={action.a11yLabel}
+      className="uw-stage__radio-action"
+    >
+      <Text variant="metadata" color={color}>
+        {action.label}
+      </Text>
+    </Pressable>
   );
 }
 
@@ -240,14 +258,6 @@ export function NowPlayingScreen({
   radio,
   queueReordering = false,
   queueScrollEnabled = true,
-  onPlayPause,
-  onNext,
-  onPrevious,
-  onToggleLike,
-  shuffle = false,
-  onToggleShuffle,
-  repeat = 'off',
-  onCycleRepeat,
   download = null,
   onDownload,
   onAddToPlaylist,
@@ -263,6 +273,7 @@ export function NowPlayingScreen({
   onToggleQueueReorder,
   onMoveQueueItem,
   onMoveQueueItemTo,
+  ...transport
 }: NowPlayingScreenProps) {
   const { activeMode, select } = useStageMode(mode, onModeChange);
   const meta = stageMetaView(player);
@@ -351,26 +362,10 @@ export function NowPlayingScreen({
                       >
                         {radioRow.statusText}
                       </Text>
-                      <Pressable
-                        onPress={radioRow.stop.onPress}
-                        ariaLabel={radioRow.stop.a11yLabel}
-                        className="uw-stage__radio-action"
-                      >
-                        <Text variant="metadata" color="primary">
-                          {radioRow.stop.label}
-                        </Text>
-                      </Pressable>
+                      <RadioAction action={radioRow.stop} color="primary" />
                     </>
                   ) : (
-                    <Pressable
-                      onPress={radioRow.start.onPress}
-                      ariaLabel={radioRow.start.a11yLabel}
-                      className="uw-stage__radio-action"
-                    >
-                      <Text variant="metadata" color="accent">
-                        {radioRow.start.label}
-                      </Text>
-                    </Pressable>
+                    <RadioAction action={radioRow.start} color="accent" />
                   )}
                 </div>
               </div>
@@ -454,14 +449,7 @@ export function NowPlayingScreen({
               liked={player.liked}
               canPrevious={player.canPrevious}
               canNext={player.canNext}
-              onPlayPause={onPlayPause}
-              onPrevious={onPrevious}
-              onNext={onNext}
-              onToggleLike={onToggleLike}
-              shuffle={shuffle}
-              onToggleShuffle={onToggleShuffle}
-              repeat={repeat}
-              onCycleRepeat={onCycleRepeat}
+              {...transport}
             />
           </>
         )}
