@@ -4389,6 +4389,14 @@ function Main({
               onPlayPause={
                 heldOccurrenceId !== null
                   ? () => {
+                      // Same offline rule as queue rows — an unowned
+                      // remote target must not start a dead attempt.
+                      const held = state.queue.occurrences.find(
+                        (o) => o.occurrenceId === heldOccurrenceId,
+                      );
+                      if (held !== undefined && !canPlay(held.recordingId)) {
+                        return;
+                      }
                       void Haptics.impactAsync(
                         Haptics.ImpactFeedbackStyle.Light,
                       );
@@ -4430,13 +4438,29 @@ function Main({
               onSeek={
                 heldOccurrenceId !== null
                   ? (ms) => {
+                      const held = state.queue.occurrences.find(
+                        (o) => o.occurrenceId === heldOccurrenceId,
+                      );
+                      if (held !== undefined && !canPlay(held.recordingId)) {
+                        return;
+                      }
                       void session
                         .playOccurrence(heldOccurrenceId)
                         .then((r) => {
-                          if (r.ok) {
-                            seekToPosition(ms);
-                          } else {
+                          if (!r.ok) {
                             reportPlay('common.play', r);
+                            return;
+                          }
+                          // The await can outlive a re-cursor — a
+                          // queue tap during prepare would otherwise
+                          // have this seek land on the new song.
+                          const snap = session.snapshot();
+                          if (
+                            snap.type === 'ready' &&
+                            snap.queue.currentOccurrenceId ===
+                              heldOccurrenceId
+                          ) {
+                            seekToPosition(ms);
                           }
                         });
                     }
