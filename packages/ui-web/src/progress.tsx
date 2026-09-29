@@ -187,6 +187,19 @@ function useScrubCommit(
     clearDrag();
   };
 
+  // Held-position teardown — every release path (publish landed,
+  // track changed, unmount) clears the settle timer the same way.
+  const stopHoldTimer = () => {
+    if (heldTimer.current !== null) {
+      clearTimeout(heldTimer.current);
+      heldTimer.current = null;
+    }
+  };
+  const releaseHold = () => {
+    stopHoldTimer();
+    setHeldMs(null);
+  };
+
   const commit = useCallback(
     (ms: number) => {
       // `step="any"` hands fractional values to the DOM; session
@@ -205,9 +218,7 @@ function useScrubCommit(
           : trackKeyRef.current;
       gestureKey.current = undefined;
       setHeldMs(rounded);
-      if (heldTimer.current !== null) {
-        clearTimeout(heldTimer.current);
-      }
+      stopHoldTimer();
       heldTimer.current = setTimeout(() => {
         heldTimer.current = null;
         setHeldMs(null);
@@ -222,21 +233,10 @@ function useScrubCommit(
   // paused/noop seek that never republishes releases on the timer.
   useEffect(() => {
     if (heldMs !== null && positionMs !== heldBaseline.current) {
-      if (heldTimer.current !== null) {
-        clearTimeout(heldTimer.current);
-        heldTimer.current = null;
-      }
-      setHeldMs(null);
+      releaseHold();
     }
   }, [positionMs, heldMs]);
-  useEffect(
-    () => () => {
-      if (heldTimer.current !== null) {
-        clearTimeout(heldTimer.current);
-      }
-    },
-    [],
-  );
+  useEffect(() => stopHoldTimer, []);
   // Every pointer release bubbles to the document — even one
   // landing off the control or while it's disabled. Draining dead
   // ids there means a held dead pointer keeps ignoring its input
@@ -271,11 +271,7 @@ function useScrubCommit(
   // state + settle timer rather than let them die on the clock.
   useEffect(() => {
     if (heldMs !== null && heldKey.current !== trackKey) {
-      if (heldTimer.current !== null) {
-        clearTimeout(heldTimer.current);
-        heldTimer.current = null;
-      }
-      setHeldMs(null);
+      releaseHold();
     }
   }, [trackKey, heldMs]);
   // A track change mid-drag kills the gesture entirely: the
@@ -365,16 +361,14 @@ function useScrubCommit(
       ) {
         return false;
       }
-      const shown =
-        heldMs !== null && heldKey.current === trackKey ? heldMs : positionMs;
-      const stepped = seekStepMs(key, shown, durationMs);
+      const stepped = seekStepMs(key, shownHeld ?? positionMs, durationMs);
       if (stepped === null) {
         return false;
       }
       commit(stepped);
       return true;
     },
-    [commit, durationMs, enabled, heldMs, positionMs, trackKey],
+    [commit, durationMs, enabled, positionMs, shownHeld],
   );
   return {
     enabled,
@@ -535,6 +529,17 @@ export function WaveformSeek({
   // Forward preview tints unplayed bars with accent; backward preview
   // dims the played span that would be given back.
   const bandBackward = preview < p;
+  const wavePath = (d: string, stroke: string, opacity?: number, key?: number) => (
+    <path
+      key={key}
+      d={d}
+      stroke={stroke}
+      strokeWidth={WAVE_BAR_WIDTH}
+      strokeLinecap="round"
+      fill="none"
+      opacity={opacity}
+    />
+  );
   const minibar = (x: number, i: number, fill?: string) => (
     <rect
       key={i}
@@ -594,37 +599,18 @@ export function WaveformSeek({
               </clipPath>
             )}
             {([[dLow, 0.6], [dMid, 0.8], [dHigh, 1]] as const).map(
-              ([d, opacity]) => (
-                <path
-                  key={opacity}
-                  d={d}
-                  stroke="var(--fg18)"
-                  strokeWidth={WAVE_BAR_WIDTH}
-                  strokeLinecap="round"
-                  fill="none"
-                  opacity={opacity}
-                />
-              ),
+              ([d, opacity]) => wavePath(d, 'var(--fg18)', opacity, opacity),
             )}
             <g clipPath={`url(#played-${uid})`}>
-              <path
-                d={dAll}
-                stroke="var(--accent)"
-                strokeWidth={WAVE_BAR_WIDTH}
-                strokeLinecap="round"
-                fill="none"
-              />
+              {wavePath(dAll, 'var(--accent)')}
             </g>
             {hover !== null && (
               <g clipPath={`url(#hover-${uid})`}>
-                <path
-                  d={dAll}
-                  stroke={bandBackward ? 'var(--bg)' : 'var(--accent)'}
-                  strokeWidth={WAVE_BAR_WIDTH}
-                  strokeLinecap="round"
-                  fill="none"
-                  opacity={bandBackward ? 0.45 : 0.55}
-                />
+                {wavePath(
+                  dAll,
+                  bandBackward ? 'var(--bg)' : 'var(--accent)',
+                  bandBackward ? 0.45 : 0.55,
+                )}
               </g>
             )}
           </>
