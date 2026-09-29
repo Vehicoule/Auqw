@@ -1,4 +1,4 @@
-import type { CSSProperties, MouseEvent, ReactNode } from 'react';
+import type { CSSProperties, MouseEvent, ReactNode, Ref } from 'react';
 import { useTheme } from './theme.tsx';
 import { PAUSE_LEFT, PAUSE_RIGHT, PLAY_LEFT, PLAY_RIGHT, quadPath } from './motion.ts';
 
@@ -99,6 +99,7 @@ export type PressableProps = {
   readonly title?: string | undefined;
   readonly tabIndex?: number | undefined;
   readonly onFocus?: (() => void) | undefined;
+  readonly ref?: Ref<HTMLButtonElement> | undefined;
   readonly children?: ReactNode | undefined;
 };
 
@@ -117,6 +118,7 @@ export function Pressable({
   title,
   tabIndex,
   onFocus,
+  ref,
   children,
 }: PressableProps) {
   const off = disabled || (onPress === undefined && onContextMenu === undefined);
@@ -142,6 +144,7 @@ export function Pressable({
       title={title ?? undefined}
       tabIndex={off ? -1 : tabIndex}
       onFocus={onFocus}
+      ref={ref}
     >
       {children}
     </button>

@@ -51,6 +51,21 @@ function SettingsRow({
   readonly onToggleRow?: ((key: string) => void) | undefined;
 }) {
   const [armed, setArmed] = useState(false);
+  // Focus follows the slot: arming replaces the row's button with the
+  // confirm pair — without the hand-off a keyboard press strands focus
+  // on the removed control.
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const rowRef = useRef<HTMLButtonElement>(null);
+  const wasArmed = useRef(false);
+  useEffect(() => {
+    if (armed) {
+      wasArmed.current = true;
+      confirmRef.current?.focus();
+    } else if (wasArmed.current) {
+      wasArmed.current = false;
+      rowRef.current?.focus();
+    }
+  }, [armed]);
   const interactive =
     row.kind === 'toggle' ? onToggleRow !== undefined : onSelectRow !== undefined;
   // `enabled` is the toggle's checked state (kind 'toggle') and the
@@ -62,11 +77,19 @@ function SettingsRow({
   // Destructive rows confirm in place — the playlist delete's two-tap:
   // the first press arms, the armed slot splits into commit + cancel.
   const confirms = row.destructive === true && row.kind !== 'toggle';
+  // Arm state must not outlive the row it was armed on — a re-rendered
+  // (disabled, rekeyed) row silently drops any pending confirm.
+  useEffect(() => {
+    if (!confirms || !interactive || !row.enabled) {
+      setArmed(false);
+    }
+  }, [confirms, interactive, row.enabled, row.key]);
   if (armed && interactive) {
     const confirmLabel = t('settings.confirmAction', { action: row.label });
     return (
       <div className="uw-settings-confirm" role="group" aria-label={label}>
         <Pressable
+          ref={confirmRef}
           onPress={() => {
             setArmed(false);
             onSelectRow?.(row.key);
@@ -134,6 +157,7 @@ function SettingsRow({
   }
   return (
     <Pressable
+      ref={rowRef}
       onPress={
         !interactive
           ? undefined
