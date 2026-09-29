@@ -10,6 +10,11 @@ const ERROR_KINDS = [
   'cancelled',
   'corrupt-state',
   'io-error',
+  // The stream seam's own kinds — the napi slugs ride the envelope
+  // verbatim so both renderer maps land on the same app kind.
+  'transient',
+  'rate-limit',
+  'auth-required',
   'permission-denied',
   'storage-full',
   'internal',
@@ -29,6 +34,8 @@ const RETRYABLE: ReadonlySet<ShellErrorKind> = new Set([
   'unavailable',
   'process-crashed',
   'io-error',
+  'transient',
+  'rate-limit',
   'internal',
 ]);
 

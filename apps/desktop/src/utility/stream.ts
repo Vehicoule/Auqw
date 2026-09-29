@@ -25,8 +25,11 @@ import type { UtilityHandler } from './router.ts';
 /**
  * The napi side carries the typed error in `err.cause.message` as a
  * JSON blob `{"code": <slug>, ...}`; `err.code` is the coarse napi
- * status. Stream slugs map onto shell kinds; anything unrecognised is
- * `internal` — a raw napi throw never crosses the IPC boundary.
+ * status. Slugs with a same-named shell kind ride through verbatim —
+ * relabeling `transient`/`rate-limit`/`auth-required` laundered a
+ * provider wall into `internal`/`unavailable` app-side and dropped
+ * rate-limit's retryability. Anything unrecognised is `internal` —
+ * a raw napi throw never crosses the IPC boundary.
  */
 const SLUG_KIND: Readonly<Record<string, ShellErrorKind>> = {
   'invalid-argument': 'invalid-request',
@@ -39,9 +42,9 @@ const SLUG_KIND: Readonly<Record<string, ShellErrorKind>> = {
   cancelled: 'cancelled',
   unavailable: 'unavailable',
   'streams-capped': 'unavailable',
-  'rate-limit': 'unavailable',
-  transient: 'io-error',
-  'auth-required': 'io-error',
+  'rate-limit': 'rate-limit',
+  transient: 'transient',
+  'auth-required': 'auth-required',
   internal: 'internal',
 };
 

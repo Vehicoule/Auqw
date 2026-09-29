@@ -101,6 +101,22 @@ export async function run(): Promise<void> {
     !mapped.message.includes('/home/u') && mapped.message.length < 64,
     `message redacted: ${mapped.message}`,
   );
+  // Seam kinds pass through under their own names — laundering them
+  // into `io-error`/`unavailable` dropped retryability and made the
+  // two renderer maps disagree on one failure.
+  for (const slug of ['transient', 'rate-limit', 'auth-required'] as const) {
+    const seamError = new Error('x');
+    (seamError as { cause?: unknown }).cause = {
+      message: `{"code":"${slug}","kind":"${slug}","detail":"d"}`,
+    };
+    const mappedSeam = napiError(seamError);
+    assertEqual(mappedSeam.kind, slug, `${slug} rides through verbatim`);
+    assertEqual(
+      mappedSeam.retryable,
+      slug !== 'auth-required',
+      `${slug} retryable flag`,
+    );
+  }
 
   const runtime = fakeRuntime(fakeHost());
   const handlers = runtime.handlers;

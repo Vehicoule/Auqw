@@ -22,7 +22,10 @@ import { isRecord } from '../shared/check.ts';
  * lossy step UP into the app's taxonomy, chosen so the engines still
  * see the semantics they branch on (`permission-denied` for a revoked
  * grant, `storage-full` for ENOSPC, `invalid-response` for contract
- * violations).
+ * violations). Kinds a stream/host op can emit must agree with
+ * `ERROR_KIND_BY_SLUG` (which `rawToAppError` applies on the stream
+ * legs) — the same rejection crossed both maps and read `internal`
+ * here but `transient` there.
  */
 const SHELL_TO_APP: Readonly<Record<ShellErrorKind, ErrorKind>> = {
   'invalid-request': 'invalid-message',
@@ -33,7 +36,10 @@ const SHELL_TO_APP: Readonly<Record<ShellErrorKind, ErrorKind>> = {
   released: 'released',
   cancelled: 'cancelled',
   'corrupt-state': 'internal',
-  'io-error': 'internal',
+  'io-error': 'transient',
+  transient: 'transient',
+  'rate-limit': 'rate-limit',
+  'auth-required': 'auth-required',
   'permission-denied': 'permission-denied',
   'storage-full': 'storage-full',
   internal: 'internal',
