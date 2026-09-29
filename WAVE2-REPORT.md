@@ -13,8 +13,14 @@ imported `LocalFileSource` files sat on disk but never attached.
 `toFileUri` convention shared by `local-playback.ts` and the utility's
 `local:probe`). The player mints an `lf-*` handle keyed to that URI —
 the mobile adapter's `lf-*` convention — and `attachUrl` returns the URI
-straight to the element. No new protocol, no ranged IPC pump, no
-utility round-trip.
+straight to the element. No new protocol, no ranged IPC pump.
+
+Two utility channels DO ride the attach — they landed after review:
+`local:resolve` realpath-gates the mint to an indexed, grant-confined
+path (renderer URIs are lexical; only the utility can realpath), and
+`local:read` feeds waveform peaks the same gated ranged read. Both gate
+through `allowedLocalPath` (mediaDir confinement OR indexed `local_files`
+row + tree-root confinement).
 
 Why this leg over the alternatives evaluated:
 
@@ -170,7 +176,8 @@ Live (Electron 44, dev harness, `DISPLAY=:0`, test-only `--no-sandbox`):
   seam); per-file telemetry stays empty.
 - **`picked-file:`/`docUri` URIs** resolve to `file://` before they
   reach the port, so confinement is enforced upstream — the port
-  accepts any `file://` URI it is handed (within the 4 KiB bound);
+  accepts any `file://` URI it is handed (within the 8 KiB bound —
+  picked-dir URI plus nested docId can exceed a path bound alone);
   there is no additional sandboxing at the attach point, matching the
   stream leg's trust in its own prepares.
 - **`file:` in `media-src`** widens the element's fetchable surface to

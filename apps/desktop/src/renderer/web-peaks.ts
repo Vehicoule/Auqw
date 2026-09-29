@@ -268,7 +268,10 @@ export function createWebPeaksPort(deps: {
               timeoutMs,
               context,
             );
-      timeoutMs = parkTimeoutMs;
+      // The park bound exists to stop hole-chasing on the seam — a
+      // local:read parks only on slow disk, so local reads keep the
+      // cold-start patience every round.
+      timeoutMs = localUri !== null ? firstReadTimeoutMs : parkTimeoutMs;
       if (!chunk.ok) {
         // A park-timeout is not a failure worth caching hard —
         // 'unavailable' reads as "not buffered yet" to the caller.

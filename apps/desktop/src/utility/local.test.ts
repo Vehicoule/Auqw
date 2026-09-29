@@ -252,10 +252,17 @@ export async function run(): Promise<void> {
       'relative path refused',
     );
 
-    // `local:resolve` — a granted file's file:// URI comes back
-    // realpath'd; escapes, ungranted paths, and non-file URIs refuse.
+    // `local:resolve` — an indexed file's file:// URI comes back
+    // realpath'd; escapes, unindexed files, ungranted paths, and
+    // non-file URIs refuse. The gate needs a `local_files` row — the
+    // picked dir is granted, but only indexed bytes are readable.
     const granted = join(folder, 'again.wav');
     await writeFile(granted, Buffer.alloc(32, 7));
+    db.prepare(
+      `INSERT INTO local_files
+       (file_id, source_id, doc_id, size, fingerprint, recording_id)
+       VALUES ('lf-2', 'src-1', 'again.wav', 32, 'fp2', 'rec-1')`,
+    ).run();
     const grantedUri = pathToFileURL(granted).href;
     const resolved = await call(CHANNELS.localResolve, {
       uri: grantedUri,
@@ -264,7 +271,17 @@ export async function run(): Promise<void> {
       resolved.ok &&
         (resolved.result as { uri: string | null }).uri ===
           pathToFileURL(await realpath(granted)).href,
-      'resolve returns the realpath URI for a granted file',
+      'resolve returns the realpath URI for an indexed file',
+    );
+    const unindexed = join(folder, 'unindexed.wav');
+    await writeFile(unindexed, Buffer.alloc(8, 3));
+    const skipped = await call(CHANNELS.localResolve, {
+      uri: pathToFileURL(unindexed).href,
+    });
+    assert(
+      skipped.ok &&
+        (skipped.result as { uri: string | null }).uri === null,
+      'an unindexed file inside the granted folder refuses',
     );
     const outside = await call(CHANNELS.localResolve, {
       uri: pathToFileURL(join(root, 'notes.txt')).href,
@@ -278,6 +295,13 @@ export async function run(): Promise<void> {
     await writeFile(evil, Buffer.alloc(8, 0));
     const swap = join(folder, 'swap.wav');
     await symlink(evil, swap);
+    // Index the swap name so the refusal must come from the realpath
+    // gate — not merely from the file missing the index.
+    db.prepare(
+      `INSERT INTO local_files
+       (file_id, source_id, doc_id, size, fingerprint, recording_id)
+       VALUES ('lf-3', 'src-1', 'swap.wav', 8, 'fp3', 'rec-1')`,
+    ).run();
     const escaped = await call(CHANNELS.localResolve, {
       uri: pathToFileURL(swap).href,
     });
@@ -337,6 +361,40 @@ export async function run(): Promise<void> {
     assert(
       !denied.ok && denied.error?.kind === 'permission-denied',
       'an ungranted read is permission-denied',
+    );
+    const unindexedRead = await call(CHANNELS.localRead, {
+      uri: pathToFileURL(unindexed).href,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !unindexedRead.ok &&
+        unindexedRead.error?.kind === 'permission-denied',
+      'an unindexed file under the root is permission-denied',
+    );
+    // A file deleted between resolve and open reads as a typed
+    // 'unavailable' — never a malformed null result.
+    const gone = join(folder, 'gone.wav');
+    await writeFile(gone, Buffer.alloc(8, 5));
+    db.prepare(
+      `INSERT INTO local_files
+       (file_id, source_id, doc_id, size, fingerprint, recording_id)
+       VALUES ('lf-4', 'src-1', 'gone.wav', 8, 'fp4', 'rec-1')`,
+    ).run();
+    const goneUri = pathToFileURL(gone).href;
+    const goneResolve = await call(CHANNELS.localResolve, {
+      uri: goneUri,
+    });
+    assert(goneResolve.ok, 'gone file resolves while present');
+    rmSync(gone);
+    const goneRead = await call(CHANNELS.localRead, {
+      uri: goneUri,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !goneRead.ok && goneRead.error?.kind !== 'invalid-response',
+      'a vanished file reads a typed failure',
     );
   } finally {
     local.close();

@@ -589,11 +589,13 @@ export function createWebPlayerPort(deps: {
         // the `lf-*` handle the attach below reads as a `file://` URI.
         // Successors pass the same realpath confinement as prepare:
         // a lexical URI could resolve to an escaped path post-scan.
+        // A REJECTED resolve propagates to the outer catch — the
+        // retryable toError path — not the 'unavailable' a null means.
         const resolver = deps.localResolve;
         const resolved =
           resolver === undefined || resolver === null
             ? item.sourceRef
-            : await resolver(item.sourceRef).catch(() => null);
+            : await resolver(item.sourceRef);
         if (resolved === null) {
           if (gen === opGen && projection === p) {
             status(
@@ -1112,7 +1114,19 @@ export function createWebPlayerPort(deps: {
       queueMicrotask(() => mint(input.sourceRef));
       return;
     }
-    resolver(input.sourceRef).then(mint, () => mint(null));
+    // A REJECTED resolve is a bridge/utility failure — the retryable
+    // path via toError, not the terminal 'unavailable' a null answer
+    // means. The session's retry policy can then re-prepare after a
+    // utility restart rather than skipping a track that never played.
+    resolver(input.sourceRef).then(mint, (thrown) => {
+      if (!pendingLocalResolve.delete(requestId)) {
+        emitFailed(
+          appError('cancelled', 'local prepare cancelled'),
+        );
+        return;
+      }
+      emitFailed(toError(thrown));
+    });
     return;
   }
 

@@ -317,9 +317,11 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
    * A `file://` URI the renderer is allowed to touch — the lexical
    * path is realpath'd (a symlink swap can't smuggle an escape through
    * the gap between index-time resolution and playback-time open),
-   * then the resolved path must sit inside the media dir or under a
-   * granted tree root. Dir trees confine by `pathConfined`; picked-
-   * file roots grant exactly the file they name.
+   * then two gates must hold: media-dir confinement (the app's own
+   * managed-download dir), or the resolved path must BE an indexed
+   * `local_files` row (realpath compare) AND confine under that row's
+   * tree root. Tree confinement alone is not enough — a granted folder
+   * can hold files the index never imported, and those stay unreadable.
    */
   async function allowedLocalPath(uri: string): Promise<string | null> {
     const abs = fileUrlPath(uri);
@@ -343,39 +345,41 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
     if (db === null) {
       return null;
     }
-    try {
-      const rows = db
-        .prepare('SELECT tree_uri AS treeUri FROM local_sources')
-        .all() as { treeUri?: unknown }[];
-      for (const row of rows) {
-        if (typeof row.treeUri !== 'string') {
-          continue;
-        }
-        const tree = parseTree(row.treeUri);
-        if (tree === null) {
-          continue;
-        }
-        const rootReal = await realpathChecked(tree.absPath);
-        if (rootReal === null) {
-          continue;
-        }
-        if (
-          tree.kind === 'file'
-            ? real === rootReal
-            : pathConfined(rootReal, real)
-        ) {
-          return real;
-        }
+    for (const row of localRows(db)) {
+      // The file must BE an indexed row — compare realpath'd paths, not
+      // lexical URIs, so both the lexical docUri (resolve) and the
+      // minted realpath'd URI (read) answer the same.
+      const docUri = docUriFor(row.treeUri, row.docId);
+      if (docUri === null) {
+        continue;
       }
-      return null;
-    } catch (thrown) {
-      const message = thrown instanceof Error ? thrown.message : '';
-      if (message.includes('no such table')) {
-        return null;
+      const docAbs = fileUrlPath(docUri);
+      if (docAbs === null) {
+        continue;
       }
-      asIo('local resolve failed', thrown);
-      return null;
+      const docReal = await realpathChecked(docAbs);
+      if (docReal === null || docReal !== real) {
+        continue;
+      }
+      // …and still confine under its own tree root realpath — an
+      // indexed file swapped for a symlink pointing out stays denied.
+      const tree = parseTree(row.treeUri);
+      if (tree === null) {
+        continue;
+      }
+      const rootReal = await realpathChecked(tree.absPath);
+      if (rootReal === null) {
+        continue;
+      }
+      if (
+        tree.kind === 'file'
+          ? real === rootReal
+          : pathConfined(rootReal, real)
+      ) {
+        return real;
+      }
     }
+    return null;
   }
 
   /**
@@ -404,7 +408,11 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
     try {
       file = await open(real, 'r');
     } catch (thrown) {
-      return statError(thrown);
+      // A vanished file is a typed failure, not a null result — the
+      // contract result shape is `{data}` only; null would surface to
+      // the renderer as a malformed `invalid-response`.
+      statError(thrown);
+      throw shellError('unavailable', 'local file is gone');
     }
     try {
       const buffer = Buffer.alloc(args.maxLen);
