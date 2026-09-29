@@ -8,6 +8,7 @@ import type {
   EntityPage,
   EntityRef,
   EntitySourceRef,
+  ErrorKind,
   ImportPreview,
   Like,
   LyricsSheet,
@@ -879,6 +880,19 @@ export function nextQueueDestination(input: {
   return walk.find(unmarked) ?? null;
 }
 
+/**
+ * Verdicts the player line never paints: 'superseded'/'cancelled' are
+ * bookkeeping — a queue jump overtook the play or the caller unwound
+ * the attempt — not user-facing failure. `errorText` already silences
+ * 'superseded'; the player surface adds 'cancelled' (loud elsewhere —
+ * providers return it as a real search verdict — but on a playback
+ * attempt it can only mean the intent was torn down).
+ */
+const PLAYER_ERROR_SILENT: ReadonlySet<ErrorKind> = new Set([
+  'cancelled',
+  'superseded',
+]);
+
 export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
   const { playback, queue, recordings, likes, repeat, shuffleOrder } = input;
   if (playback.type === 'idle') {
@@ -929,7 +943,10 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
         positionMs: queue.positionMs,
         durationMs: recording?.durationMs ?? null,
         errorMessage:
-          playback.type === 'failed' ? errorText(playback.error) : null,
+          playback.type === 'failed' &&
+          !PLAYER_ERROR_SILENT.has(playback.error.kind)
+            ? errorText(playback.error)
+            : null,
       };
     case 'buffering':
     case 'playing':

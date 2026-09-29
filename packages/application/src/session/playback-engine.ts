@@ -1,6 +1,13 @@
 import { CancellationSource } from '../cancellation.ts';
 import type { AppError, ErrorKind, Result } from '../errors.ts';
-import { appError, err, fromUnknown, ok } from '../errors.ts';
+import {
+  appError,
+  err,
+  fromUnknown,
+  isBotCheckWall,
+  isPermanentFailure,
+  ok,
+} from '../errors.ts';
 import type {
   Recording,
   SourceMapping,
@@ -1613,8 +1620,9 @@ export class PlaybackEngine {
    * play, a mid-play 'failed' status — gets one re-attempt inside
    * the attempt's original deadline before the queue marks the item
    * unplayable. The budget includes retries, so a transient hiccup
-   * should not stop the queue; a non-retryable verdict or a spent
-   * budget still fails straight through. Playback stays published as
+   * should not stop the queue; a non-retryable verdict, a bot-check
+   * wall (retryable by kind but provider truth), or a spent budget
+   * still fails straight through. Playback stays published as
    * preparing throughout — no failed flicker while recovery is
    * still possible — and a supersede or dispose during the backoff
    * abandons the retry.
@@ -1634,6 +1642,7 @@ export class PlaybackEngine {
     );
     if (
       !error.retryable ||
+      isBotCheckWall(error) ||
       attempt.autoRetried === true ||
       attempt.preparesUsed >= PREPARE_CALL_BUDGET ||
       this.#host.disposed() ||
@@ -1755,7 +1764,14 @@ export class PlaybackEngine {
     const beforeMarks = r.queue.unplayableIds;
     if (before.currentOccurrenceId === attempt.occurrenceId) {
       try {
-        r.queue.markUnplayable(error);
+        // Only permanent verdicts flag the row unplayable — a
+        // transient wall, deadline, or bookkeeping kill pauses the
+        // queue on the typed error but leaves the row in the walk.
+        if (isPermanentFailure(error)) {
+          r.queue.markUnplayable(error);
+        } else {
+          r.queue.markFailed(error);
+        }
       } catch {
         // Revision overflow: still publish the failure.
       }
@@ -2169,7 +2185,27 @@ export class PlaybackEngine {
     active.timer?.cancel();
     if (event.outcome.type === 'failed') {
       const attempts = [event.outcome.attempt];
-      await this.#failOrRetryAttempt(active, event.outcome.error);
+      if (
+        DEAD_STREAM_KINDS.has(event.outcome.error.kind) &&
+        active.preparesUsed < PREPARE_CALL_BUDGET
+      ) {
+        // A dead-stream verdict on the outcome itself means the
+        // minted session died between commit and delivery — a
+        // registry kill, not provider truth. Same recovery as the
+        // dead-handle legs: re-run the intent inside its own
+        // deadline + prepare budget. The budget gate lives here,
+        // not inside startAttempt: a provider's real verdict rides
+        // the same kinds, so once the budget is spent the last
+        // verdict must surface verbatim — 'budget-exceeded' would
+        // mask a genuine 'not-found'.
+        await this.startAttempt(active.occurrenceId, {
+          deadlineMs: active.deadlineMs,
+          listenedMsAccum: active.listenedMsAccum,
+          preparesUsed: active.preparesUsed,
+        });
+      } else {
+        await this.#failOrRetryAttempt(active, event.outcome.error);
+      }
       await this.#host.persist({ attempts });
       return;
     }

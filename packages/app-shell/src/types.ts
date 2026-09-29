@@ -10,8 +10,10 @@ import {
   appError,
   appErrorKind,
   err,
+  isPermanentFailure,
 } from '@auqw/application';
 import type {
+  AppError,
   CancellationSignal,
   DownloadManager,
   DownloadRecord,
@@ -89,10 +91,11 @@ export interface AppShellPorts<E> {
   readonly localPlayable?: ((recordingId: string) => boolean) | undefined;
 
   /**
-   * Desktop's attempt-action funnel: pending action labels ride
+   * The attempt-action funnel: pending action labels ride
    * `attemptActionsRef` and a `playback.failed` watcher reports
-   * engine-advanced verdicts. Mobile reports each op's own Result
-   * directly. Default false (mobile).
+   * verdicts that land after the op promise settled — engine-advanced
+   * failures on desktop, late native `failed` statuses on mobile.
+   * Both shells set it. Default false.
    */
   readonly trackAttemptActions?: boolean | undefined;
 
@@ -298,6 +301,25 @@ export function advanceTargetId(input: {
           : 0
         : pos - 1;
   return walk[target] ?? null;
+}
+
+/**
+ * The advance gate's skip set: only permanent verdicts flag the row —
+ * a transient failure keeps the 'error' display mark but stays in the
+ * walk, matching the queue engine's mark policy (`isPermanentFailure`).
+ * The gate walks the same set `next()` does or it preflights a target
+ * the engine would never land on.
+ */
+export function failedSkipIds(
+  failed: ReadonlyMap<string, AppError>,
+): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const [id, error] of failed) {
+    if (isPermanentFailure(error)) {
+      out.add(id);
+    }
+  }
+  return out;
 }
 
 /** A row-actions sheet entry — `icon` is the subset of both

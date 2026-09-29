@@ -1,4 +1,4 @@
-import { appError, cancelledError, err, ok } from './errors.ts';
+import { appError, cancelledError, err, isBotCheckWall, ok } from './errors.ts';
 import type { AppError, Result } from './errors.ts';
 import { CancellationSource } from './cancellation.ts';
 import type { CancellationSignal } from './cancellation.ts';
@@ -182,7 +182,13 @@ export async function retryBounded<T>(
       return result;
     }
     lastError = result.error;
-    if (!result.error.retryable || attempt >= maxAttempts) {
+    // A bot-check wall wears `transient` but is provider truth, not
+    // weather — spending a retry on it can only hit the same wall.
+    if (
+      !result.error.retryable ||
+      isBotCheckWall(result.error) ||
+      attempt >= maxAttempts
+    ) {
       return result;
     }
     const now2 = nowMs();

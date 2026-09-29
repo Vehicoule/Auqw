@@ -227,6 +227,37 @@ function directTests(): void {
     assertEqual(e.snapshot().blockedError, undefined);
   }
 
+  // markFailed records the same pause+verdict with NO forward-skip
+  // flag — weather is not a reason to step over a playable row.
+  {
+    const e = engineWith(['a', 'b', 'c']);
+    e.select('b', true);
+    e.markFailed(appError('transient', 'weather'));
+    const snap = e.snapshot();
+    assertEqual(snap.mode, 'paused');
+    assertEqual(snap.currentOccurrenceId, 'b');
+    assertEqual(snap.blockedError?.kind, 'transient');
+    assertEqual(e.isUnplayable('b'), false, 'no forward-skip flag');
+    const rev = snap.revision;
+    e.markFailed(appError('transient', 'weather'));
+    assertEqual(e.snapshot().revision, rev, 'same blocked error is a no-op');
+    e.previous();
+    assertEqual(e.snapshot().currentOccurrenceId, 'a');
+    e.next();
+    assertEqual(
+      e.snapshot().currentOccurrenceId,
+      'b',
+      'an unflagged failed row stays in the forward walk',
+    );
+    // The same-verdict dedupe is flag-aware: markUnplayable on the
+    // same blocked error still flags instead of silently degrading.
+    const f = engineWith(['x']);
+    f.select('x', true);
+    f.markFailed(appError('transient', 'weather'));
+    f.markUnplayable(appError('transient', 'weather'));
+    assertEqual(f.isUnplayable('x'), true, 'same verdict can escalate');
+  }
+
   // fork() carries the session-scoped failed marks a snapshot
   // rebuild would drop; an explicit carry prunes non-members; a
   // bare snapshot rebuild (restore) intentionally starts clean.

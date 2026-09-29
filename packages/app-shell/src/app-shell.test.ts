@@ -13,9 +13,14 @@ import {
   fixtureEntityItems,
   fixtureQueue,
 } from '@auqw/ui-shared/fixtures';
-import type { DownloadRecord, TrackMetadata } from '@auqw/application';
+import type {
+  AppError,
+  DownloadRecord,
+  TrackMetadata,
+} from '@auqw/application';
 import {
   advanceTargetId,
+  failedSkipIds,
   playlistDownloadPlan,
   reportStoredDownloadError,
   rowActionsModel,
@@ -178,6 +183,25 @@ assertEqual(
   null,
   'no cursor → previous stays put',
 );
+
+// ---- failedSkipIds ---------------------------------------------------
+// The advance gate's skip set is only the permanent subset of the
+// hook's failed-row map — a transient mark displays 'error' but the
+// engine still walks to the row.
+{
+  const failed = new Map<string, AppError>([
+    ['occ-a', { kind: 'transient', message: 'hiccup', retryable: true }],
+    ['occ-b', { kind: 'not-found', message: 'gone', retryable: false }],
+    ['occ-c', { kind: 'auth-required', message: 'gate', retryable: false }],
+    ['occ-d', { kind: 'cancelled', message: 'book', retryable: false }],
+  ]);
+  const skip = failedSkipIds(failed);
+  assertEqual(
+    [...skip].sort().join(','),
+    'occ-b,occ-c',
+    'only permanent verdicts skip forward',
+  );
+}
 
 // ---- rowActionsModel -------------------------------------------------
 const ref: SourceRef = { provider: 'ytm', kind: 'track', id: 'x1' };

@@ -115,6 +115,43 @@ export function appError(
     : { kind, message, retryable: RETRYABLE.has(kind), retryAfterMs };
 }
 
+/**
+ * A provider-side bot wall wears `transient` plus the guest's
+ * `bot-check` detail. `AppError` carries no detail field, but every
+ * leg between the guest and the engine prepends its own
+ * `{kind}: ` prefix to the message (the guest SDK renders
+ * `{kind}: {detail}`, the host wraps it `guest failure ({kind}): …`),
+ * so the detail always survives as the LAST `:`-separated segment —
+ * `"guest failure (transient): transient: bot-check"`. A bot wall is
+ * per-IP/per-visitor provider truth, not weather: retry policies
+ * treat it as terminal and the row stays unmarked.
+ */
+export function isBotCheckWall(error: AppError): boolean {
+  return (
+    error.kind === 'transient' &&
+    error.message.split(':').at(-1)?.trim() === 'bot-check'
+  );
+}
+
+/**
+ * Verdicts that condemn the row itself — the source is gone,
+ * unplayable, or gated. Only these earn the forward-skip flag;
+ * every other failure still pauses the queue on its typed verdict
+ * but leaves the row in the walk. Shared by the engine's mark
+ * policy and the shells' advance gate — the two walks must agree.
+ */
+const PERMANENT_FAILURE_KINDS: ReadonlySet<ErrorKind> = new Set([
+  'not-found',
+  'unsupported',
+  'no-result',
+  'auth-required',
+  'expired-resource',
+]);
+
+export function isPermanentFailure(error: AppError): boolean {
+  return PERMANENT_FAILURE_KINDS.has(error.kind);
+}
+
 export function ok<T>(value: T): Result<T> {
   return { ok: true, value };
 }

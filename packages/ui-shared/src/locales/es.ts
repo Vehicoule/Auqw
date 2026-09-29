@@ -514,6 +514,8 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'error.timeout': 'sigue cargando — inténtalo de nuevo',
   'error.limit': 'sobre un límite — hazlo más pequeño o reintenta luego',
   'error.transient': 'algo lo interrumpió — inténtalo de nuevo',
+  'error.providerWall':
+    'el proveedor está rechazando solicitudes ahora mismo — inténtalo más tarde',
   'error.plugin': 'un plugin del proveedor se comportó mal',
   'error.rejected': 'la descarga no pasó las comprobaciones — inténtalo de nuevo',
   'error.capped': 'demasiados streams abiertos — espera un momento',

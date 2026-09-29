@@ -507,6 +507,8 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'error.timeout': 'lädt noch — erneut versuchen',
   'error.limit': 'über ein limit hinaus — kleiner oder später erneut',
   'error.transient': 'das wurde unterbrochen — nochmal versuchen',
+  'error.providerWall':
+    'der anbieter lehnt anfragen gerade ab — später nochmal versuchen',
   'error.plugin': 'ein anbieter-plugin hat sich falsch verhalten',
   'error.rejected': 'der download hat die prüfung nicht bestanden — erneut versuchen',
   'error.capped': 'zu viele streams offen — kurz warten',
