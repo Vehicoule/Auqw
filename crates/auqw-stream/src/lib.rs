@@ -48,6 +48,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 /// Tuning knobs for one [`StreamRegistry`].
 ///
 /// The defaults carry the slice's policy: a ~3 MiB speculative head
@@ -197,9 +199,14 @@ impl std::fmt::Debug for PreparedSource {
 /// invocation per call). The pump pins the prepared mime on the result.
 pub trait Remint: Send + Sync {
     /// Produce a fresh [`PreparedSource`] for the same `source_ref`, or
-    /// the typed failure the resolve ended in.
+    /// the typed failure the resolve ended in. `cancel` is a child of
+    /// the session's teardown token: it must reach the resolve's own
+    /// checks, so a session that ends mid-resolve aborts the re-mint's
+    /// in-flight work promptly rather than starting steps on a session
+    /// that is already dead (`mint_deadline` remains the bound).
     fn remint(
         &self,
+        cancel: CancellationToken,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<PreparedSource, StreamError>> + Send>>;
 }
 

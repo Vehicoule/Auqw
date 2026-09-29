@@ -452,12 +452,19 @@ async fn retry_backoff(session: &Arc<SessionInner>, through: bool) -> Backoff {
 /// Re-resolve the source through the host's [`Remint`]; budgets and
 /// the mime pin are enforced by the session. Cancel-safe and bounded
 /// by `mint_deadline` — a hung resolve must not zombie the session.
+/// The child token rides into the resolve's own cancel checks, so a
+/// teardown mid-resolve aborts its in-flight work promptly instead of
+/// only dropping this future (detached guest work would otherwise
+/// finish its fuel grant blind to the session being gone).
 async fn remint(session: &Arc<SessionInner>) -> Result<(), StreamError> {
     session.begin_mint()?;
     let remint: Arc<dyn Remint> = session.remint_fn()?;
     let t0 = Instant::now();
     let source = tokio::select! {
-        r = tokio::time::timeout(session.config.mint_deadline, remint.remint()) => match r {
+        r = tokio::time::timeout(
+            session.config.mint_deadline,
+            remint.remint(session.cancel.child_token()),
+        ) => match r {
             Ok(r) => r?,
             Err(_) => {
                 return Err(StreamError::Transient {
@@ -592,7 +599,7 @@ mod tests {
     use crate::session::PoolSignals;
     use crate::testkit::*;
     use crate::{PreparedSource, StreamConfig};
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -607,6 +614,7 @@ mod tests {
     impl Remint for CountingRemint {
         fn remint(
             &self,
+            _cancel: tokio_util::sync::CancellationToken,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<PreparedSource, StreamError>> + Send>,
         > {
@@ -1342,6 +1350,7 @@ mod tests {
         impl Remint for HangingRemint {
             fn remint(
                 &self,
+                _cancel: tokio_util::sync::CancellationToken,
             ) -> std::pin::Pin<
                 Box<dyn std::future::Future<Output = Result<PreparedSource, StreamError>> + Send>,
             > {
@@ -1366,6 +1375,55 @@ mod tests {
         );
         assert!(!s.is_terminal(), "a stalled mint must not kill the session");
         stop_pump(&s, task).await;
+    }
+
+    /// The session's token rides inside the re-mint as a child: a
+    /// teardown mid-resolve wakes the resolve's own cancel watch —
+    /// `mint_deadline` stays the bound, not the only exit. A fresh
+    /// detached token (the old shape) would leave the work parked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_cancel_reaches_in_flight_remint() {
+        /// A re-mint whose real work is a detached watcher on the
+        /// handed token — the pump's own cancel arm drops this future
+        /// when teardown wins the select, so the observation has to
+        /// outlive it to prove the child token itself fired.
+        struct WatchingRemint {
+            calls: AtomicU32,
+            woke: Arc<AtomicBool>,
+        }
+        impl Remint for WatchingRemint {
+            fn remint(
+                &self,
+                cancel: tokio_util::sync::CancellationToken,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<PreparedSource, StreamError>> + Send>,
+            > {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                let woke = Arc::clone(&self.woke);
+                tokio::spawn(async move {
+                    cancel.cancelled().await;
+                    woke.store(true, Ordering::Relaxed);
+                });
+                Box::pin(std::future::pending())
+            }
+        }
+        let d = TestDir::new("remintcancel");
+        let remint = Arc::new(WatchingRemint {
+            calls: AtomicU32::new(0),
+            woke: Arc::new(AtomicBool::new(false)),
+        });
+        let woke = Arc::clone(&remint.woke);
+        let s = session(config(&d), remint.clone());
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
+            status: 403,
+            content_range: None,
+            body: stream_body(vec![]),
+        })]));
+        let task = spawn_pump(&s, fetch);
+        wait_until(|| remint.calls.load(Ordering::Relaxed) > 0 || s.is_terminal()).await;
+        s.terminate(StreamError::Released);
+        let _ = task.await;
+        wait_until(|| woke.load(Ordering::Relaxed)).await;
     }
 
     /// A commit landing after a terminal transition is a data write

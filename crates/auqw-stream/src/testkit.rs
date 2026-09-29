@@ -139,6 +139,7 @@ pub(crate) struct StaticRemint;
 impl Remint for StaticRemint {
     fn remint(
         &self,
+        _cancel: tokio_util::sync::CancellationToken,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<PreparedSource, StreamError>> + Send>,
     > {

@@ -181,6 +181,7 @@ struct PluginRemint {
 impl Remint for PluginRemint {
     fn remint(
         &self,
+        cancel: CancellationToken,
     ) -> Pin<
         Box<
             dyn std::future::Future<Output = Result<PreparedSource, auqw_stream::StreamError>>
@@ -207,7 +208,7 @@ impl Remint for PluginRemint {
                 "playback.resolve",
                 remint_payload(&source_ref, pin_itag, &prefer, &auth_token),
                 &budgets,
-                CancellationToken::new(),
+                cancel,
                 HostServices {
                     http: &*http,
                     kv,
@@ -399,6 +400,12 @@ impl PluginHost {
             match stream.adopt_reusable(&plugin_id, &source_ref) {
                 Ok(Some(info)) if !stream.is_live(&info.handle) => Prep::Dead,
                 Ok(Some(info)) => {
+                    // The claim lands before the slot inside the same
+                    // admission critical section — a supersede scan
+                    // doesn't hold `prepared_handles`, so the session
+                    // must already read claimed before its ownership
+                    // slot is ever visible to `cancel`.
+                    let _ = stream.claim(&info.handle);
                     admission.prepared.insert(
                         request_id.clone(),
                         PreparedSlot {
@@ -576,6 +583,10 @@ impl PluginHost {
                                         // sees one waits for this window to close.
                                         delivery_ticket =
                                             Some(prepared_delivery.track(request_id.clone()));
+                                        // Same commit order as the
+                                        // adoption path: claimed
+                                        // before the slot is visible.
+                                        let _ = registry.claim(&prepared.handle);
                                         m.insert(
                                             request_id.clone(),
                                             PreparedSlot {
@@ -905,6 +916,7 @@ struct DevRemint {
 impl Remint for DevRemint {
     fn remint(
         &self,
+        _cancel: CancellationToken,
     ) -> Pin<
         Box<
             dyn std::future::Future<Output = Result<PreparedSource, auqw_stream::StreamError>>

@@ -1,218 +1,154 @@
-# Playback reliability: dead-outcome re-prepare, honest row marking, bot-check wall, cancelled verdicts, mobile watcher — REPORT
+# Prepared-session claim + re-mint cancel hygiene — REPORT
 
-Branch `devin/pb-engine`. Five fixes to the playback failure path so
-verdicts stay honest and recoverable: registry-induced dead streams
-re-prepare silently, transient weather no longer poisons queue rows,
-the provider bot-check wall gets its own policy + copy, bookkeeping
-verdicts stop painting the player line, and mobile surfaces late
-native failures exactly like desktop.
+Branch `devin/pb-race`. Fixes the delivered-but-unattached kill race:
+a `Prepared{handle}` in flight could be terminated between delivery
+and the consumer's attach, because every teardown keyed on
+`attached` alone.
 
-## Fix 1 — dead-stream prepare outcomes re-prepare silently
+## What changed
 
-**Before:** a `prepare` outcome arriving `{type:'failed', error.kind ∈
-DEAD_STREAM_KINDS}` (`not-found`/`released`/`superseded`/`evicted`/
-`expired`) went straight to `#failOrRetryAttempt` → `failAttempt` →
-`error.notFound`-style failure — even though the same dead-stream
-kinds on the `play()` and status legs already trigger a silent
-re-prepare. A `not-found` outcome here is a registry kill (the minted
-session died between commit and delivery), not provider truth.
+### Task 1 — atomic claim (`auqw-stream`, `host-surface`)
 
-**After:** `#handlePrepareEvent`
-(`packages/application/src/session/playback-engine.ts`, failed-outcome
-branch) checks `DEAD_STREAM_KINDS` first and hops through
-`startAttempt(occurrenceId, {deadlineMs, listenedMsAccum,
-preparesUsed})` — the same recovery shape `#adoptPrepared` already
-uses for a dead handle. The hop draws on the intent's own deadline and
-shared `preparesUsed`, and the budget gate lives in the branch itself:
-once `preparesUsed` reaches `PREPARE_CALL_BUDGET = 2` the outcome
-falls through to the ordinary failure path, so the terminal verdict
-is the LAST outcome verbatim — a provider's real `'not-found'` rides
-the same kinds and must never surface as `'budget-exceeded'`.
-Playback publishes `preparing` throughout — no failed flicker, no
-queue mark.
+- `crates/auqw-stream/src/session.rs`: `Shared.claimed: bool` beside
+  `attached` under the same mutex; `SessionInner::is_claimed()` and
+  `SessionInner::claim()` (monotonic — never cleared, including across
+  `close`; a claimed session keeps its owner through detach).
+- `crates/auqw-stream/src/registry.rs`: `StreamRegistry::claim(handle)`
+  plus the two predicate changes below.
+- `crates/host-surface/src/stream.rs`: `stream.claim(...)` runs inside
+  the `PreparedSlot` commit critical section at **both** commit sites —
+  the adoption fast-path (`admission.prepared`, ~line 408) and the
+  invoke-path delivery commit (`prepared_handles`, ~line 589). Claim is
+  written **before** the slot insert: a supersede scan doesn't hold
+  `prepared_handles`, so the session must already read claimed before
+  its slot is ever visible to `cancel`. A `cancel` (which holds
+  `prepared_handles`) can therefore never observe a slot whose session
+  is unclaimed.
+- `crates/host-surface/src/lib.rs` `cancel`: the delivered-request
+  path removes the request's slot, keeps the existing co-owner check
+  (`m.values().any(|v| v.handle == slot.handle)`), and now calls
+  `stream.release(&handle)` instead of `cancel_if_unattached`. Once
+  the slot is gone the session is ownerless — and claimed, so the
+  unattached-only predicate could never fire. The `is_live` rechecks,
+  mid-delivery `await_idle`, tombstone logic, and generation guards
+  are unchanged.
 
-## Fix 2 — only permanent verdicts flag the row
+### Exact predicates touched
 
-**Before:** `#failAttempt` called `r.queue.markUnplayable(error)` for
-every terminal failure. `markUnplayable` both pauses+records
-`blockedError` AND adds the occurrence to `#unplayable`, which drives
-`QueueProjectionItem.skipsForward` — so transient weather, timeouts,
-rate walls, cancellation, and budget exhaustion permanently
-forward-marked otherwise playable rows.
+| Site | Before | After |
+| --- | --- | --- |
+| `supersede_unattached` scan filter (`registry.rs`) | `!s.is_attached() && !s.is_terminal()` | `!s.is_attached() && !s.is_claimed() && !s.is_terminal()` |
+| `supersede_unattached` terminal transition | `terminate_if(Superseded, \|sh\| !sh.attached)` | `terminate_if(Superseded, \|sh\| !sh.attached && !sh.claimed)` |
+| `cancel_if_unattached` (`registry.rs`) | `terminate_if(Cancelled, \|sh\| !sh.attached)` | `terminate_if(Cancelled, \|sh\| !sh.attached && !sh.claimed)` |
+| delivered-request `cancel` (`lib.rs`) | `stream.cancel_if_unattached(&handle)` | `stream.release(&handle)` |
 
-**After:** `queue-engine.ts` splits the primitive:
-`#blockCurrent(error, unplayable)` shared by
-- `markFailed(error)` — pause + record the typed verdict, no flag.
-- `markUnplayable(error)` — same, plus the forward-skip flag.
+### Unchanged on purpose (verified)
 
-`#failAttempt` now gates on `PERMANENT_FAILURE_KINDS` =
-`{not-found, unsupported, no-result, auth-required, expired-resource}`.
-Every other kind (`transient`, `timeout`, `rate-limit`, `cancelled`,
-`superseded`, `budget-exceeded`, dead-stream kinds, `unavailable`, …)
-pauses the queue on its typed `blockedError` but leaves the row in the
-forward walk — `next()`/`previous()`/`select` still reach it. The
-same-verdict no-op dedupe is flag-aware so a `markFailed` →
-`markUnplayable` escalation can't silently degrade.
+- `attach()` checks only `terminal` and `stale_prepare` — a claimed
+  session attaches normally (covered by
+  `claimed_session_survives_unattached_teardowns_and_attaches`).
+- `detached_since`/`attach_ms`/pump priority/`stale_prepare` semantics
+  untouched; `claimed` does not gate the detached reaper — a claimed
+  session still reaps at `prepare_ttl` (120 s bound). An ownerless
+  attach is handled by `abandon` instead: the session is marked, and
+  its `close` drops `claimed` so supersede/reaper can retire the
+  detach — never a kill on a playing stream.
+- `reusable()` still ignores `claimed` — a claimed warm is still
+  adoptable by a real attempt (co-ownership; decision-log warm-adopt
+  row). The tombstone and `was_cancelled`/`dead` abandoned paths in
+  `start_prepare`'s delivery still call `cancel_if_unattached` —
+  those sessions were never slot-committed, so they are unclaimed and
+  still die.
+- `stream_release` is unchanged (still unconditional by handle + slot
+  prune): it is owner-explicit teardown, not a kill path the claim
+  covers — see "Notes" below.
 
-## Fix 3 — bot-check wall: detail survived; policy + honest copy added
+### Task 2 — re-mint cancellation (`Remint` trait)
 
-**Trace (where the detail lands).** The guest emits
-`Failed{kind:"transient", message:"bot-check"}`
-(`plugins/youtube-music/src/guest.rs` `ladder_error`). The guest SDK
-renders `{kind}: {message}` → `"transient: bot-check"`;
-`crates/plugin-host/src/invoke.rs` wraps it as
-`InvokeError::GuestFail` → `"guest failure (transient): transient:
-bot-check"`. Every JS leg then preserves `kind` and `message`
-verbatim: `crates/host-surface/src/stream.rs` `prepare_outcome`, the
-napi/node bindings, `apps/desktop/.../web-player.ts`
-(`appError(appErrorKind(kind), message)`), `rawToAppError`, and
-`apps/mobile/src/adapters/auqw-expo-player.ts`. **The detail is never
-laundered away** — it arrives at the engine as
-`AppError{kind:'transient', message:'…: bot-check'}`.
-
-**Detection:** `isBotCheckWall(error)` in
-`packages/application/src/errors.ts` — `kind === 'transient'` AND the
-LAST `:`-separated segment of `message` trims to exactly `bot-check`.
-Because every host leg prefixes rather than rewrites, the guest's
-detail token is always the trailing segment; non-suffix occurrences
-(`bot-check: recheck`, `bot-checksum`, a non-`transient` kind) do not
-match.
-
-**Policy:** the wall is provider truth (per-IP/visitor), not weather —
-- `#failOrRetryAttempt` bails to `#failAttempt` before arming the
-  400 ms auto-retry (so a wall never spends the attempt's one retry).
-- `retryBounded` (`retry.ts`) also refuses to retry it, covering
-  `prepare`/`candidates` call-level retries.
-- It is not in `PERMANENT_FAILURE_KINDS` → `markFailed` only: queue
-  pauses with `blockedError{transient, …bot-check}`, row unflagged,
-  explicit user retry still reaches it.
-
-**Copy:** new `error.providerWall` key in all 5 locales
-(en "the provider is refusing requests right now — try again later";
-fr/de/es/zh equivalents), selected in `errorText` before the generic
-kind map when `isBotCheckWall` holds. Generic transients keep
-`error.transient`. The raw guest message never reaches a surface —
-only the localized line.
-
-## Fix 4 — bookkeeping verdicts stay off the player line
-
-`toPlayerModel` (`packages/ui-shared/src/view-models.ts`) rendered
-`errorText(playback.error)` for every `failed` state. `errorText`
-deliberately keeps `cancelled` loud — providers return it as a real
-verdict on non-playback ops, and `reportResult`/`reportPlay` own
-teardown suppression at the ops level. The player surface is
-different: on a playback attempt, `cancelled`/`superseded` can only be
-bookkeeping (a torn-down intent or an overtaken play).
-
-**After:** `PLAYER_ERROR_SILENT = {cancelled, superseded}` gates the
-`errorMessage` field — the row still reports `status:'failed'` but
-never wears interruption copy. Real failure kinds render unchanged.
-
-## Fix 5 — mobile mounts the `playback.failed` watcher
-
-Desktop shells pass `trackAttemptActions: true` into
-`useAppShell` ports, which mounts the watcher that reports
-`playback.failed` verdicts landing after the op promise settled
-(engine-advanced failures) through the same deduped funnel
-(`attemptActionsRef` action labels + `lastPlayErrorRef` identity
-dedupe). Mobile reported only its own op Results — a late native
-`failed` status never surfaced.
-
-**After:** `apps/mobile/App.tsx` sets `trackAttemptActions: true` —
-the flag already parameterizes the whole funnel, so this is a one-line
-parity flip plus doc updates (`types.ts`, `app-shell.ts` comments now
-describe both shells instead of "desktop only").
+- `Remint::remint(cancel: CancellationToken)` — the pump passes
+  `session.cancel.child_token()`; `PluginRemint` hands it to `invoke`
+  (replacing the detached `CancellationToken::new()`), so session
+  teardown reaches the re-mint's own cancel checks/in-flight HTTP
+  promptly. `mint_deadline` remains the outer bound, and the pump's
+  own `select!` cancel arm still drops the future on teardown — the
+  token additionally keeps detached guest work from finishing blind.
+- All impls updated: `PluginRemint`, `DevRemint`, `StaticRemint`
+  (testkit), `CountingRemint`/`HangingRemint`/`WatchingRemint` (pump
+  tests), `NeverRemint`/`OkRemint` (seam), `HangRemint` (host tests).
 
 ## Tests added
 
-`packages/application/src/session/session.test.ts`:
-- `deadPrepareOutcomeRePrepares` — dead prepare outcome → second
-  prepare issued, playback stays `preparing`, no `blockedError`, the
-  fresh session adopts and plays; the superseded caller reads
-  `superseded` bookkeeping.
-- `deadPrepareOutcomeStopsAtBudget` — two dead outcomes → exactly 2
-  prepare calls, terminal `budget-exceeded`, queue paused, row
-  unflagged.
-- `transientFailureLeavesRowReachable` — generic `transient` still
-  gets the in-budget retry; a terminal transient pauses the queue with
-  `blockedError` but `skipsForward` stays unset and
-  previous→next still lands on the row (was oC-skipping before).
-- `permanentFailureSkipsForward` — `auth-required` flags
-  `skipsForward:true` and `next()` steps over the row.
-- `botCheckWallPolicy` — wall fails immediately (no `preparing`
-  backoff), no second prepare after `advance(2000)`, queue paused
-  unflagged, caller sees `transient`+`bot-check` intact, explicit
-  `retryCurrent()` re-prepares and plays.
-- `unplayableFailure` — strengthened: asserts the `unavailable`
-  verdict does NOT flag the row.
-- `unplayableRollbackRestoresMarks`, `repeatAllWrapSkipsMarkedHead` —
-  flag-dependent assertions re-pointed at `no-result` (a verdict the
-  policy still flags); assertions otherwise unchanged.
+- `auqw-stream` seam (`tests/seam.rs`):
+  - `claimed_session_survives_unattached_teardowns_and_attaches`
+  - `unclaimed_session_still_dies_to_unattached_teardowns`
+  - `claimed_session_stays_claimed_across_detach`
+- `auqw-stream` pump (`src/pump.rs` tests):
+  - `session_cancel_reaches_in_flight_remint` — a re-mint parked on
+    the handed token wakes on session teardown (detached watcher
+    proves the child token fired, not just the pump's select arm).
+- `host-surface` (`src/lib.rs` tests):
+  - `adopted_session_is_claimed_against_supersede` — the adoption's
+    slot commit claims the session.
+  - `delivered_owner_cancel_releases_only_at_last_owner` — co-owner
+    survives first owner's cancel; last owner's cancel releases.
 
-`packages/application/src/queue/queue-engine.test.ts` — `markFailed`
-block: pause+verdict without flag, dedupe, walk reachability, and the
-flag-aware `markUnplayable` escalation.
+Existing tests already covering the fixed behavior now exercise the
+new path: `prepare_adopts_a_live_warm_session`'s tail (`cancel`
+unwinds the adopted warm — now via `release`, which the claimed
+session requires) and `cancel_racing_adoption_never_kills_the_new_owner`.
 
-`packages/application/src/errors.test.ts` — `isBotCheckWall` matrix:
-5 wrap shapes recognized, 8 non-wall kind/message pairs rejected.
+## Contradictions / notes vs the analysis
 
-`packages/ui-shared/src/error-text.test.ts` — wall copy asserted for
-both the bare and host-wrapped message shapes; generic transient keeps
-`error.transient`; per-locale coverage loop now also verifies
-`error.providerWall` exists and differs in de/es/fr/zh.
+- **None found against the race analysis.** The three kill paths were
+  as described; the `is_live` rechecks narrow but don't close the gap.
+- The delivered-cancel swap from `cancel_if_unattached` to `release`
+  drops the old "a playing consumer is never cancelled" guard *for the
+  owning request's cancel*: an attached session whose last owner is
+  cancelled now ends `Released`. That is the intended ownership model —
+  once the request's slot is removed nothing else can end the session
+  (attached sessions are exempt from the detached reaper, so an
+  ownerless attached session would leak); player-side attached
+  teardown is `releaseStream`/`stream_release` by handle. The `cancel`
+  doc comment was updated to say so.
+- `stream_release`'s unconditional-by-handle kill of a co-adopted
+  handle (the third listed path) is not closed by this diff — per the
+  expected-diff scope it stays caller-discipline: the bindings only
+  release handles they own (`markReleased` ordering in
+  `AuqwExpoModule.kt`), and `stream_release` prunes co-owners' slots.
+  The claim prevents the *unattached-only* kills; explicit release
+  remains terminal.
+- Invoke-path `Prepared` can't be driven in host-surface tests (no
+  conformance guest emits a contract-valid `playbackResolveResult`
+  under `start_prepare`'s payload — echo echoes the step input,
+  scenario requires `payload.scenario`). The invoke-path claim commit
+  is covered by the registry-level claim tests plus the identical
+  adopt-path test; the diff is the same two-statement commit order.
 
-`packages/ui-native/src/ui-native.test.ts` — `testPlayerMapper`:
-`cancelled`/`superseded` failed playbacks produce `status:'failed'`
-with `errorMessage:null`; the fixture failure still renders.
+## Gate evidence
 
-Mobile watcher: the flag flip is hook wiring shared with desktop; no
-new unit harness exists for `useAppShell` effects (app-shell tests
-cover pure helpers, mobile shell tests cover adapters) — parity is by
-construction, verified by typecheck on both shells.
+Workspace package names are `auqw-stream`/`auqw-host-surface` (the
+`-p host-surface` spelling in the task doesn't resolve — same
+packages).
 
-## Gates run
+```text
+$ cargo fmt --all -- --check
+(clean — FMT_CLEAN)
 
+$ cargo test -p auqw-stream -p auqw-host-surface
+host-surface lib: 19 passed, 0 failed   (incl. adopted_session_is_claimed_against_supersede,
+                                       delivered_owner_cancel_releases_only_at_last_owner)
+auqw-stream lib:  70 passed, 0 failed   (incl. session_cancel_reaches_in_flight_remint)
+auqw-stream seam: 46 passed, 0 failed   (incl. claimed_session_survives_unattached_teardowns_and_attaches,
+                                       unclaimed_session_still_dies_to_unattached_teardowns,
+                                       claimed_session_stays_claimed_across_detach)
+
+$ cargo build -p auqw-stream -p auqw-host-surface
+Finished `dev` profile — clean
+
+$ cargo clippy -p auqw-stream -p auqw-host-surface --all-targets -- -D warnings
+Finished `dev` profile — clean
+
+$ cargo check -p auqw-mobile-bindings -p auqw-node-bindings
+Finished `dev` profile — clean (bindings unaffected by the internal
+Remint signature change)
 ```
-pnpm install --frozen-lockfile          ✓
-pnpm -C packages/application typecheck  ✓
-pnpm -C packages/application test       ✓ (incl. harness/reliability-measure)
-pnpm -C packages/ui-shared typecheck    ✓
-pnpm -C packages/ui-shared test         ✓ (ui-shared + error-text)
-pnpm -C packages/app-shell  typecheck   ✓
-pnpm -C packages/app-shell  test        ✓
-pnpm -C apps/desktop        typecheck   ✓
-pnpm -C apps/desktop        test        ✓
-pnpm -C apps/mobile         typecheck   ✓
-pnpm -C apps/mobile         test        ✓
-pnpm typecheck (all workspaces)         ✓
-pnpm -C packages/ui-native  typecheck+test ✓ (touched file)
-```
-
-## Diffstat
-
-```
- apps/mobile/App.tsx                                |   4 +
- packages/app-shell/src/app-shell.ts                |   6 +-
- packages/app-shell/src/types.ts                    |   7 +-
- packages/application/src/errors.test.ts            |  34 ++
- packages/application/src/errors.ts                 |  18 ++
- packages/application/src/queue/queue-engine.test.ts |  31 ++
- packages/application/src/queue/queue-engine.ts     |  34 +-
- packages/application/src/retry.ts                  |  10 +-
- packages/application/src/session/playback-engine.ts |  49 ++-
- packages/application/src/session/session.test.ts   | 351 ++++++++++++++++++-
- packages/ui-native/src/ui-native.test.ts           |  21 ++
- packages/ui-shared/src/error-text.test.ts          |  13 +
- packages/ui-shared/src/error-text.ts               |   7 +-
- packages/ui-shared/src/locales/de.ts               |   2 +
- packages/ui-shared/src/locales/en.ts               |   2 +
- packages/ui-shared/src/locales/es.ts               |   2 +
- packages/ui-shared/src/locales/fr.ts               |   2 +
- packages/ui-shared/src/locales/zh.ts               |   1 +
- packages/ui-shared/src/view-models.ts              |  19 +-
- 19 files changed, 591 insertions(+), 22 deletions(-)
-```
-
-No new dependencies; `exactOptionalPropertyTypes` preserved; no raw
-provider text, URLs, tokens, or guest payloads on any user surface,
-log, or fixture.
