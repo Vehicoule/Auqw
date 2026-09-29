@@ -19,7 +19,10 @@ import { retryBounded } from '../retry.ts';
 import type { Corrections } from '../library/corrections.ts';
 import { MATCH_GATE_MESSAGE } from '../library/corrections.ts';
 import { MatchingEngine } from '../matching/matching-engine.ts';
-import type { MatchOutcome } from '../matching/matching-engine.ts';
+import type {
+  MatchCandidate,
+  MatchOutcome,
+} from '../matching/matching-engine.ts';
 import { extractVersionLabels } from '../matching/matching-engine.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { IdPort } from '../ports/runtime.ts';
@@ -43,6 +46,7 @@ import { Serializer } from './serializer.ts';
 import type { Ready, SessionHostCore } from './ready.ts';
 import type { SessionPlayback } from './session.ts';
 import {
+  boundedOp,
   internalError,
   sameRef,
   saturatingAdd,
@@ -139,6 +143,78 @@ function winningMapping(
     }
   }
   return best;
+}
+
+/**
+ * A settled attempt reports its sealed verdict; a cancellation with
+ * no seal reports superseded.
+ */
+function sealedOrSuperseded(terminalError: AppError | undefined): AppError {
+  return terminalError ?? appError('superseded', 'play superseded');
+}
+
+/** A warm record's playback identity mints from its own ids. */
+function warmIdentity(warm: {
+  readonly attemptId: string;
+  readonly queueRev: number;
+}): PlaybackIdentity {
+  return { attemptId: warm.attemptId, queueRev: warm.queueRev };
+}
+
+/** The query every candidates/resolve path builds from a recording. */
+function recordingQuery(recording: Recording): RecordingQuery {
+  return {
+    title: recording.title,
+    artist: recording.artist,
+    album: recording.album,
+    durationMs: recording.durationMs,
+    versionLabels: recording.versionLabels,
+    isrc: recording.isrc,
+  };
+}
+
+/** Reinsert at the LRU tail, evicting oldest entries past cap. */
+function lruSet(
+  map: Map<string, number>,
+  key: string,
+  at: number,
+  cap: number,
+): void {
+  map.delete(key);
+  map.set(key, at);
+  while (map.size > cap) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    map.delete(oldest);
+  }
+}
+
+/**
+ * TTL check on an LRU map: `now === null` (clock unavailable) reads
+ * as fresh; `touch` LRU-bumps a hit.
+ */
+function lruFresh(
+  map: Map<string, number>,
+  key: string,
+  ttl: number,
+  now: number | null,
+  touch: boolean,
+): boolean {
+  const at = map.get(key);
+  if (at === undefined) {
+    return false;
+  }
+  if (now === null || now - at < ttl) {
+    if (touch) {
+      map.delete(key);
+      map.set(key, at);
+    }
+    return true;
+  }
+  map.delete(key);
+  return false;
 }
 
 type ActiveAttempt = {
@@ -297,6 +373,12 @@ export type PlaybackHost = SessionHostCore & {
     r: Ready,
     before: QueueSnapshot,
     beforeMarks: ReadonlySet<string>,
+  ) => Promise<Result<void>>;
+  /** Snapshot → mutate → commit-with-rollback; the caller ticks
+   * `derived` itself so it lands in the caller's continuation. */
+  readonly mutateQueue: (
+    r: Ready,
+    mutate: (queue: QueueEngine) => void,
   ) => Promise<Result<void>>;
   /** Port calls never throw by contract; throws map to internal. */
   readonly call: <T>(fn: () => Promise<Result<T>>) => Promise<Result<T>>;
@@ -726,11 +808,7 @@ export class PlaybackEngine {
         active.handle !== undefined &&
         active.occurrenceId === after.currentOccurrenceId
       ) {
-        const identity = {
-          attemptId: active.identity.attemptId,
-          queueRev: after.revision,
-        };
-        active.identity = identity;
+        const identity = this.#rekeyIdentity(active, after.revision);
         // Publish the re-keyed identity before the transport call: if
         // a supersede lands during the await the post-call publish is
         // skipped, and an unpublished identity must never reach the
@@ -743,8 +821,7 @@ export class PlaybackEngine {
           this.#player.seekTo({ positionMs: 0, identity }),
         );
         if (!result.ok) {
-          await this.#failAttempt(active, result.error);
-          return result;
+          return this.#failWith(active, result.error);
         }
       }
       this.#host.publish();
@@ -816,16 +893,9 @@ export class PlaybackEngine {
     if (active === null) {
       return err(appError('unavailable', 'no active playback to pause'));
     }
-    const before = r.queue.snapshot();
-    const beforeMarks = r.queue.unplayableIds;
-    try {
-      r.queue.pause();
-    } catch (thrown) {
-      return err(fromUnknown(thrown));
-    }
     // Commit the intent before touching transport: a failed commit
     // rolls the engine back and the native pause is never issued.
-    const persisted = await this.#host.persistQueue(r, before, beforeMarks);
+    const persisted = await this.#host.mutateQueue(r, (q) => q.pause());
     if (!persisted.ok) {
       return persisted;
     }
@@ -841,11 +911,10 @@ export class PlaybackEngine {
       this.#host.publish();
       return ok(undefined);
     }
-    const identity = {
-      attemptId: active.identity.attemptId,
-      queueRev: r.queue.snapshot().revision,
-    };
-    active.identity = identity;
+    const identity = this.#rekeyIdentity(
+      active,
+      r.queue.snapshot().revision,
+    );
     // Same ordering rule as play/seek: the re-keyed identity must be
     // published before the transport call carries it.
     this.#setPlaybackFromStatus(active, 'paused');
@@ -861,8 +930,7 @@ export class PlaybackEngine {
         this.#host.publish();
         return ok(undefined);
       }
-      await this.#failAttempt(active, result.error);
-      return result;
+      return this.#failWith(active, result.error);
     }
     if (!this.#isStale(active)) {
       this.#setPlaybackFromStatus(active, 'paused');
@@ -878,16 +946,10 @@ export class PlaybackEngine {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
-    const beforeMarks = r.queue.unplayableIds;
     if (before.currentOccurrenceId === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
     }
-    try {
-      r.queue.play();
-    } catch (thrown) {
-      return err(fromUnknown(thrown));
-    }
-    const persisted = await this.#host.persistQueue(r, before, beforeMarks);
+    const persisted = await this.#host.mutateQueue(r, (q) => q.play());
     if (!persisted.ok) {
       return persisted;
     }
@@ -904,11 +966,10 @@ export class PlaybackEngine {
         this.#host.publish();
         return ok(undefined);
       }
-      const identity = {
-        attemptId: active.identity.attemptId,
-        queueRev: r.queue.snapshot().revision,
-      };
-      active.identity = identity;
+      const identity = this.#rekeyIdentity(
+        active,
+        r.queue.snapshot().revision,
+      );
       // Same ordering rule: the identity the transport call carries
       // must already be observable in the published record, in case a
       // supersede during the await skips the post-call publish.
@@ -931,8 +992,7 @@ export class PlaybackEngine {
         ) {
           return this.startAttempt(active.occurrenceId);
         }
-        await this.#failAttempt(active, result.error);
-        return result;
+        return this.#failWith(active, result.error);
       }
       if (!this.#isStale(active)) {
         this.#setPlaybackFromStatus(active, 'playing');
@@ -960,7 +1020,6 @@ export class PlaybackEngine {
       );
     }
     const before = r.queue.snapshot();
-    const beforeMarks = r.queue.unplayableIds;
     if (before.currentOccurrenceId === null) {
       return err(appError('unavailable', 'no active playback to seek'));
     }
@@ -974,12 +1033,9 @@ export class PlaybackEngine {
     ) {
       return ok(undefined);
     }
-    try {
-      r.queue.seekTo(positionMs);
-    } catch (thrown) {
-      return err(fromUnknown(thrown));
-    }
-    const persisted = await this.#host.persistQueue(r, before, beforeMarks);
+    const persisted = await this.#host.mutateQueue(r, (q) =>
+      q.seekTo(positionMs),
+    );
     if (!persisted.ok) {
       return persisted;
     }
@@ -994,11 +1050,10 @@ export class PlaybackEngine {
       this.#host.publish();
       return ok(undefined);
     }
-    const identity = {
-      attemptId: active.identity.attemptId,
-      queueRev: r.queue.snapshot().revision,
-    };
-    active.identity = identity;
+    const identity = this.#rekeyIdentity(
+      active,
+      r.queue.snapshot().revision,
+    );
     // Publish the re-keyed identity before the transport call so a
     // supersede during the await can't leave a play/seek carrying an
     // identity no snapshot ever showed.
@@ -1019,8 +1074,7 @@ export class PlaybackEngine {
       ) {
         return this.startAttempt(active.occurrenceId);
       }
-      await this.#failAttempt(active, result.error);
-      return result;
+      return this.#failWith(active, result.error);
     }
     if (!this.#isStale(active)) {
       const mode = r.queue.snapshot().mode === 'paused' ? 'paused' : 'playing';
@@ -1106,12 +1160,10 @@ export class PlaybackEngine {
     // stream attach — both spend the network it doesn't have.
     const online = this.#host.isOnline();
     if (!online && (ref === null || ref.provider !== LOCAL_PROVIDER)) {
-      const error = appError(
-        'unavailable',
-        'offline — no local bytes for this recording',
+      return this.#failWith(
+        attempt,
+        appError('unavailable', 'offline — no local bytes for this recording'),
       );
-      await this.#failAttempt(attempt, error);
-      return err(error);
     }
     if (ref === null) {
       const resolved = await this.#resolveViaCandidates(
@@ -1126,9 +1178,10 @@ export class PlaybackEngine {
       ref = resolved.value;
     }
     if (ref === null) {
-      const error = appError('no-result', 'no playable source for recording');
-      await this.#failAttempt(attempt, error);
-      return err(error);
+      return this.#failWith(
+        attempt,
+        appError('no-result', 'no playable source for recording'),
+      );
     }
     // The pick is final here — consumers read `playback.ref` to mark
     // the catalog row the player actually resolved (a local pick
@@ -1147,9 +1200,7 @@ export class PlaybackEngine {
     // attempt was still resolving can seed the real version.
     this.#host.maybeArmRadio();
     if (this.#isStale(attempt) || attempt.source.signal.cancelled) {
-      return err(
-        attempt.terminalError ?? appError('superseded', 'play superseded'),
-      );
+      return err(sealedOrSuperseded(attempt.terminalError));
     }
 
     // A provider:'local' pick bypasses the plugin router — the adapter
@@ -1160,8 +1211,7 @@ export class PlaybackEngine {
         selectionFromSettings(r.settings),
       );
       if (!routed.ok) {
-        await this.#failAttempt(attempt, routed.error);
-        return err(routed.error);
+        return this.#failWith(attempt, routed.error);
       }
     }
     // A warm session issued for this exact ref may still be live in
@@ -1213,9 +1263,7 @@ export class PlaybackEngine {
         this.#host.publish();
       }
       if (this.#isStale(attempt) || attempt.source.signal.cancelled) {
-        return err(
-          attempt.terminalError ?? appError('superseded', 'play superseded'),
-        );
+        return err(sealedOrSuperseded(attempt.terminalError));
       }
       return this.#adoptPrepared(attempt, stream, warm.attempt, true);
     }
@@ -1246,25 +1294,17 @@ export class PlaybackEngine {
       },
     });
     if (this.#isStale(attempt)) {
-      return err(
-        attempt.terminalError ?? appError('superseded', 'play superseded'),
-      );
+      return err(sealedOrSuperseded(attempt.terminalError));
     }
     if (!prepared.ok) {
       // terminalError is set before a retry handoff or supersede
       // cancels the source — the early wake is bookkeeping, not a
       // fresh failure to publish. A bare deadline-cancelled call has
       // no seal: its own verdict stands.
-      if (attempt.terminalError !== undefined) {
-        return err(attempt.terminalError);
-      }
-      await this.#failAttempt(attempt, prepared.error);
-      return prepared;
+      return this.#failUnlessSealed(attempt, prepared);
     }
     if (attempt.source.signal.cancelled) {
-      return err(
-        attempt.terminalError ?? appError('superseded', 'play superseded'),
-      );
+      return err(sealedOrSuperseded(attempt.terminalError));
     }
     attempt.requestId = prepared.value;
     const ready2 = this.#host.ready();
@@ -1304,53 +1344,37 @@ export class PlaybackEngine {
       return err(routed.error);
     }
     const provider = routed.value;
-    const query: RecordingQuery = {
-      title: recording.title,
-      artist: recording.artist,
-      album: recording.album,
-      durationMs: recording.durationMs,
-      versionLabels: recording.versionLabels,
-      isrc: recording.isrc,
-    };
+    const query = recordingQuery(recording);
     const result = await retryBounded({
       deadlineMs,
       signal: attempt.source.signal,
       clock: this.#clock,
       call: (signal) =>
-        this.#host.withDeadline(
-          () =>
-            provider.candidates(
-              { query, limit: CANDIDATE_LIMIT },
-              this.#host.newContext('cand', deadlineMs, signal),
-            ),
-          deadlineMs,
+        boundedOp(
+          this.#host,
           attempt.source,
+          'cand',
+          (ctx) => provider.candidates({ query, limit: CANDIDATE_LIMIT }, ctx),
+          signal,
+          deadlineMs,
         ),
     });
     if (this.#isStale(attempt)) {
       // A newer intent owns playback — the loser reports
       // 'superseded' whatever its in-flight call resolved to.
-      return err(
-        attempt.terminalError ?? appError('superseded', 'play superseded'),
-      );
+      return err(sealedOrSuperseded(attempt.terminalError));
     }
     if (!result.ok) {
       // terminalError is set before a retry handoff or supersede
       // cancels the source — the early wake is bookkeeping, not a
       // fresh failure to publish. A bare deadline-cancelled call has
       // no seal: its own verdict stands.
-      if (attempt.terminalError !== undefined) {
-        return err(attempt.terminalError);
-      }
       // A source cancelled by the deadline or a retry handoff still
       // publishes the real verdict, not a bare 'superseded'.
-      await this.#failAttempt(attempt, result.error);
-      return result;
+      return this.#failUnlessSealed(attempt, result);
     }
     if (attempt.source.signal.cancelled) {
-      return err(
-        attempt.terminalError ?? appError('superseded', 'play superseded'),
-      );
+      return err(sealedOrSuperseded(attempt.terminalError));
     }
     // Malformed provider candidates can throw inside match — that
     // must fail the attempt honestly, not wedge it unwound.
@@ -1362,9 +1386,7 @@ export class PlaybackEngine {
         recording.mappings,
       );
     } catch (thrown) {
-      const error = fromUnknown(thrown);
-      await this.#failAttempt(attempt, error);
-      return err(error);
+      return this.#failWith(attempt, fromUnknown(thrown));
     }
     if (outcome.type === 'ambiguous') {
       // Park the candidates for user resolution; the attempt still
@@ -1384,24 +1406,17 @@ export class PlaybackEngine {
       );
       if (!enqueued.ok) {
         this.#host.logWarn(`match review enqueue failed: ${enqueued.error.kind}`);
-        await this.#failAttempt(attempt, enqueued.error);
-        return err(enqueued.error);
+        return this.#failWith(attempt, enqueued.error);
       }
-      const error = appError('unavailable', MATCH_GATE_MESSAGE);
-      await this.#failAttempt(attempt, error);
-      return err(error);
+      return this.#failWith(attempt, appError('unavailable', MATCH_GATE_MESSAGE));
     }
     if (outcome.type === 'unavailable') {
-      const error = appError('no-result', outcome.reason);
-      await this.#failAttempt(attempt, error);
-      return err(error);
+      return this.#failWith(attempt, appError('no-result', outcome.reason));
     }
     const ref = outcome.candidate.sourceRef;
     const matchedAt = this.#host.safeNow();
     if (matchedAt === null) {
-      const error = internalError();
-      await this.#failAttempt(attempt, error);
-      return err(error);
+      return this.#failWith(attempt, internalError());
     }
     const mapping: SourceMapping = {
       ref,
@@ -1488,24 +1503,14 @@ export class PlaybackEngine {
         }
         attempt.source.cancel();
         if (attempt.requestId !== undefined) {
-          await this.#host.bounded(() =>
-            this.#player.cancelPrepare({
-              requestId: attempt.requestId ?? '',
-              identity: attempt.identity,
-            }),
-          );
+          await this.#cancelPrepare(attempt.requestId, attempt.identity);
         }
         await this.#failAttempt(attempt, internalError());
         return;
       }
       attempt.source.cancel();
       if (attempt.requestId !== undefined) {
-        await this.#host.bounded(() =>
-          this.#player.cancelPrepare({
-            requestId: attempt.requestId ?? '',
-            identity: attempt.identity,
-          }),
-        );
+        await this.#cancelPrepare(attempt.requestId, attempt.identity);
       }
       await this.#failAttempt(attempt, timeoutError());
     })();
@@ -1515,13 +1520,8 @@ export class PlaybackEngine {
   async #teardownAttempt(attempt: ActiveAttempt): Promise<void> {
     attempt.source.cancel();
     attempt.timer?.cancel();
-    if (attempt.requestId !== undefined && !attempt.preparedHandled) {
-      await this.#host.bounded(() =>
-        this.#player.cancelPrepare({
-          requestId: attempt.requestId ?? '',
-          identity: attempt.identity,
-        }),
-      );
+    if (!attempt.preparedHandled && attempt.requestId !== undefined) {
+      await this.#cancelPrepare(attempt.requestId, attempt.identity);
     }
     if (attempt.handle !== undefined) {
       await this.#releaseHandle(attempt.handle, attempt.identity);
@@ -1755,6 +1755,54 @@ export class PlaybackEngine {
     this.#host.publish();
     await this.#host.persistQueue(r, before, beforeMarks);
     this.#host.derived();
+  }
+
+  /** Fail the attempt, propagating the verdict as the result. */
+  async #failWith(
+    attempt: ActiveAttempt,
+    error: AppError,
+  ): Promise<Result<never>> {
+    await this.#failAttempt(attempt, error);
+    return err(error);
+  }
+
+  /**
+   * A settled call's failure fails the attempt — unless a seal owns
+   * the verdict already (a retry handoff or supersede cancelled the
+   * source; the early wake is bookkeeping, not a fresh failure).
+   */
+  async #failUnlessSealed(
+    attempt: ActiveAttempt,
+    settled: { readonly ok: false; readonly error: AppError },
+  ): Promise<Result<never>> {
+    if (attempt.terminalError !== undefined) {
+      return err(attempt.terminalError);
+    }
+    await this.#failAttempt(attempt, settled.error);
+    return settled;
+  }
+
+  /** cancelPrepare on an issued request slot. */
+  async #cancelPrepare(
+    requestId: string,
+    identity: PlaybackIdentity,
+  ): Promise<void> {
+    await this.#host.bounded(() =>
+      this.#player.cancelPrepare({ requestId, identity }),
+    );
+  }
+
+  /** Re-key the attempt to the live queue revision. */
+  #rekeyIdentity(
+    attempt: ActiveAttempt,
+    queueRev: number,
+  ): PlaybackIdentity {
+    const identity: PlaybackIdentity = {
+      attemptId: attempt.identity.attemptId,
+      queueRev,
+    };
+    attempt.identity = identity;
+    return identity;
   }
 
   #setPlaybackFromStatus(
@@ -1992,46 +2040,34 @@ export class PlaybackEngine {
       return;
     }
     // Remote pause/play reconciles queue intent with the service.
-    if (event.state === 'paused' && r.queue.snapshot().mode === 'playing') {
+    const remoteMode =
+      event.state === 'paused'
+        ? 'playing'
+        : event.state === 'playing'
+          ? 'paused'
+          : null;
+    if (remoteMode !== null) {
       const before = r.queue.snapshot();
-      const beforeMarks = r.queue.unplayableIds;
-      try {
-        r.queue.pause();
-      } catch {
-        return;
+      if (before.mode === remoteMode) {
+        const beforeMarks = r.queue.unplayableIds;
+        try {
+          if (event.state === 'paused') {
+            r.queue.pause();
+          } else {
+            r.queue.play();
+          }
+        } catch {
+          return;
+        }
+        const priorIdentity = active.identity;
+        this.#rekeyIdentity(active, r.queue.snapshot().revision);
+        const synced = await this.#host.persistQueue(r, before, beforeMarks);
+        if (!synced.ok && this.#active === active) {
+          // Rolled back — the live engine is at `before`'s revision.
+          active.identity = priorIdentity;
+        }
+        this.#host.derived();
       }
-      const priorIdentity = active.identity;
-      active.identity = {
-        attemptId: active.identity.attemptId,
-        queueRev: r.queue.snapshot().revision,
-      };
-      const synced = await this.#host.persistQueue(r, before, beforeMarks);
-      if (!synced.ok && this.#active === active) {
-        // Rolled back — the live engine is at `before`'s revision.
-        active.identity = priorIdentity;
-      }
-      this.#host.derived();
-    } else if (
-      event.state === 'playing' &&
-      r.queue.snapshot().mode === 'paused'
-    ) {
-      const before = r.queue.snapshot();
-      const beforeMarks = r.queue.unplayableIds;
-      try {
-        r.queue.play();
-      } catch {
-        return;
-      }
-      const priorIdentity = active.identity;
-      active.identity = {
-        attemptId: active.identity.attemptId,
-        queueRev: r.queue.snapshot().revision,
-      };
-      const synced = await this.#host.persistQueue(r, before, beforeMarks);
-      if (!synced.ok && this.#active === active) {
-        active.identity = priorIdentity;
-      }
-      this.#host.derived();
     }
     if (this.#isStale(active)) {
       return;
@@ -2184,9 +2220,7 @@ export class PlaybackEngine {
       }),
     );
     if (this.#isStale(active)) {
-      return err(
-        active.terminalError ?? appError('superseded', 'play superseded'),
-      );
+      return err(sealedOrSuperseded(active.terminalError));
     }
     if (!playResult.ok) {
       if (
@@ -2295,7 +2329,7 @@ export class PlaybackEngine {
     }
     const active = this.#active;
     if (active !== null && active.occurrenceId === projection.currentOccurrenceId) {
-      active.identity = { ...active.identity, queueRev: projection.queueRev };
+      this.#rekeyIdentity(active, projection.queueRev);
     }
     const marker: ProjectionMarker = {
       projection,
@@ -2660,12 +2694,7 @@ export class PlaybackEngine {
         await this.#releaseHandle(prev.handle, prev.identity);
       }
       if (prev.requestId !== undefined && !prev.preparedHandled) {
-        await this.#host.bounded(() =>
-          this.#player.cancelPrepare({
-            requestId: prev.requestId ?? '',
-            identity: prev.identity,
-          }),
-        );
+        await this.#cancelPrepare(prev.requestId, prev.identity);
       }
     }
     const queueWritten = await queueWrite;
@@ -2772,21 +2801,14 @@ export class PlaybackEngine {
     this.#noteWarmSeen(recordingId);
     const work = (async () => {
       const deadlineMs = this.#host.deadline();
-      const query: RecordingQuery = {
-        title: recording.title,
-        artist: recording.artist,
-        album: recording.album,
-        durationMs: recording.durationMs,
-        versionLabels: recording.versionLabels,
-        isrc: recording.isrc,
-      };
-      const context = this.#host.newContext('map', deadlineMs, source.signal);
-      const result = await this.#host.withDeadline(
-        () => {
-          return provider.candidates({ query, limit: CANDIDATE_LIMIT }, context);
-        },
-        deadlineMs,
+      const query = recordingQuery(recording);
+      const result = await boundedOp(
+        this.#host,
         source,
+        'map',
+        (ctx) => provider.candidates({ query, limit: CANDIDATE_LIMIT }, ctx),
+        undefined,
+        deadlineMs,
       );
       if (
         source.signal.cancelled ||
@@ -2806,28 +2828,16 @@ export class PlaybackEngine {
       if (rec === undefined) {
         return;
       }
-      let outcome: MatchOutcome;
-      try {
-        outcome = MatchingEngine.match(rec, result.value, rec.mappings);
-      } catch {
-        this.#host.logWarn('successor mapping threw on malformed candidates');
+      const automatic = this.#warmMatch(
+        rec,
+        result.value,
+        'successor mapping threw on malformed candidates',
+        'successor mapping unresolved',
+      );
+      if (automatic === null) {
         return;
       }
-      if (outcome.type !== 'matched') {
-        this.#host.logWarn('successor mapping unresolved');
-        return;
-      }
-      const ref = outcome.candidate.sourceRef;
-      const matchedAt = this.#host.safeNow();
-      if (matchedAt === null) {
-        return;
-      }
-      const automatic: SourceMapping = {
-        ref,
-        status: 'automatic',
-        matchedAtMs: matchedAt,
-        evidence: outcome.evidence,
-      };
+      const ref = automatic.ref;
       const updated = adoptAutomaticMapping(rec, ref, automatic);
       // Recheck it is still the immediate successor of the same
       // current under the same playback provider, and that the
@@ -3006,34 +3016,56 @@ export class PlaybackEngine {
     );
   }
 
+  /**
+   * The match → automatic-mapping tail a warm resolve runs: a match
+   * earns the mapping; malformed candidates, a non-match, or a dead
+   * clock return null. The caller supplies its warn wording.
+   */
+  #warmMatch(
+    rec: Recording,
+    candidates: readonly MatchCandidate[],
+    throwLabel: string,
+    unmatchedLabel: string | null,
+  ): SourceMapping | null {
+    let outcome: MatchOutcome;
+    try {
+      outcome = MatchingEngine.match(rec, candidates, rec.mappings);
+    } catch {
+      this.#host.logWarn(throwLabel);
+      return null;
+    }
+    if (outcome.type !== 'matched') {
+      if (unmatchedLabel !== null) {
+        this.#host.logWarn(unmatchedLabel);
+      }
+      return null;
+    }
+    const matchedAt = this.#host.safeNow();
+    if (matchedAt === null) {
+      return null;
+    }
+    return {
+      ref: outcome.candidate.sourceRef,
+      status: 'automatic',
+      matchedAtMs: matchedAt,
+      evidence: outcome.evidence,
+    };
+  }
+
   /** A row counts as attempted recently — suppresses re-warm. */
   #warmSeenFresh(recordingId: string): boolean {
-    const at = this.#warmSeen.get(recordingId);
-    if (at === undefined) {
-      return false;
-    }
-    const now = this.#host.safeNow();
-    if (now === null || now - at < WARM_ROW_TTL_MS) {
-      // LRU touch — a hot row keeps its slot.
-      this.#warmSeen.delete(recordingId);
-      this.#warmSeen.set(recordingId, at);
-      return true;
-    }
-    this.#warmSeen.delete(recordingId);
-    return false;
+    // LRU touch — a hot row keeps its slot.
+    return lruFresh(
+      this.#warmSeen,
+      recordingId,
+      WARM_ROW_TTL_MS,
+      this.#host.safeNow(),
+      true,
+    );
   }
 
   #noteWarmSeen(recordingId: string): void {
-    const now = this.#host.safeNow();
-    this.#warmSeen.delete(recordingId);
-    this.#warmSeen.set(recordingId, now ?? 0);
-    while (this.#warmSeen.size > WARM_SEEN_CAP) {
-      const oldest = this.#warmSeen.keys().next().value;
-      if (oldest === undefined) {
-        break;
-      }
-      this.#warmSeen.delete(oldest);
-    }
+    lruSet(this.#warmSeen, recordingId, this.#host.safeNow() ?? 0, WARM_SEEN_CAP);
   }
 
   /**
@@ -3054,29 +3086,17 @@ export class PlaybackEngine {
 
   /** A failed stream warm is denied briefly — bounded list. */
   #denyStreamWarm(key: string): void {
-    const now = this.#host.safeNow();
-    this.#streamWarmDenied.delete(key);
-    this.#streamWarmDenied.set(key, now ?? 0);
-    while (this.#streamWarmDenied.size > STREAM_DENY_CAP) {
-      const oldest = this.#streamWarmDenied.keys().next().value;
-      if (oldest === undefined) {
-        break;
-      }
-      this.#streamWarmDenied.delete(oldest);
-    }
+    lruSet(this.#streamWarmDenied, key, this.#host.safeNow() ?? 0, STREAM_DENY_CAP);
   }
 
   #streamWarmDeniedFresh(key: string): boolean {
-    const at = this.#streamWarmDenied.get(key);
-    if (at === undefined) {
-      return false;
-    }
-    const now = this.#host.safeNow();
-    if (now === null || now - at < WARM_ROW_TTL_MS) {
-      return true;
-    }
-    this.#streamWarmDenied.delete(key);
-    return false;
+    return lruFresh(
+      this.#streamWarmDenied,
+      key,
+      WARM_ROW_TTL_MS,
+      this.#host.safeNow(),
+      false,
+    );
   }
 
   /**
@@ -3089,16 +3109,7 @@ export class PlaybackEngine {
     if (requestId === null) {
       return;
     }
-    const identity: PlaybackIdentity = {
-      attemptId: warm.attemptId,
-      queueRev: warm.queueRev,
-    };
-    const work = (async () => {
-      await this.#host.bounded(() =>
-        this.#player.cancelPrepare({ requestId, identity }),
-      );
-    })();
-    this.#host.own(work);
+    this.#host.own(this.#cancelPrepare(requestId, warmIdentity(warm)));
   }
 
   /**
@@ -3302,19 +3313,14 @@ export class PlaybackEngine {
       this.#warmBatchProvider = provider.id;
     }
     const deadlineMs = this.#host.deadline();
-    const query: RecordingQuery = {
-      title: recording.title,
-      artist: recording.artist,
-      album: recording.album,
-      durationMs: recording.durationMs,
-      versionLabels: recording.versionLabels,
-      isrc: recording.isrc,
-    };
-    const context = this.#host.newContext('warm', deadlineMs, source.signal);
-    const result = await this.#host.withDeadline(
-      () => provider.candidates({ query, limit: CANDIDATE_LIMIT }, context),
-      deadlineMs,
+    const query = recordingQuery(recording);
+    const result = await boundedOp(
+      this.#host,
       source,
+      'warm',
+      (ctx) => provider.candidates({ query, limit: CANDIDATE_LIMIT }, ctx),
+      undefined,
+      deadlineMs,
     );
     if (
       source.signal.cancelled ||
@@ -3337,29 +3343,18 @@ export class PlaybackEngine {
     if (rec === undefined) {
       return;
     }
-    let outcome: MatchOutcome;
-    try {
-      outcome = MatchingEngine.match(rec, result.value, rec.mappings);
-    } catch {
-      this.#host.logWarn('row warm threw on malformed candidates');
+    // 'ambiguous' parks on the row, not in a review — the tap's own
+    // resolve produces the review honestly.
+    const automatic = this.#warmMatch(
+      rec,
+      result.value,
+      'row warm threw on malformed candidates',
+      null,
+    );
+    if (automatic === null) {
       return;
     }
-    if (outcome.type !== 'matched') {
-      // 'ambiguous' parks on the row, not in a review — the tap's own
-      // resolve produces the review honestly.
-      return;
-    }
-    const ref = outcome.candidate.sourceRef;
-    const matchedAt = this.#host.safeNow();
-    if (matchedAt === null) {
-      return;
-    }
-    const automatic: SourceMapping = {
-      ref,
-      status: 'automatic',
-      matchedAtMs: matchedAt,
-      evidence: outcome.evidence,
-    };
+    const ref = automatic.ref;
     const occurrenceId = target.occurrenceId;
     const staged = await this.#host.commitStaged((ready3) => {
       // The storage tail can queue this write behind another one —
@@ -3815,10 +3810,7 @@ export class PlaybackEngine {
           this.#player.prewarm({
             provider: want.provider,
             sourceRef: want.sourceRef,
-            identity: {
-              attemptId: record.attemptId,
-              queueRev: record.queueRev,
-            },
+            identity: warmIdentity(record),
           }),
         this.#host.deadline(),
         issueSource,
@@ -3838,15 +3830,7 @@ export class PlaybackEngine {
           if (record.adoptedAttempt !== null) {
             record.adoptedAttempt.requestId = requestId;
           } else {
-            await this.#host.bounded(() =>
-              this.#player.cancelPrepare({
-                requestId,
-                identity: {
-                  attemptId: record.attemptId,
-                  queueRev: record.queueRev,
-                },
-              }),
-            );
+            await this.#cancelPrepare(requestId, warmIdentity(record));
           }
         }
         return;
@@ -3875,21 +3859,9 @@ export class PlaybackEngine {
     }
     const work = (async () => {
       if (warm.stream !== null) {
-        await this.#releaseHandle(warm.stream.handle, {
-          attemptId: warm.attemptId,
-          queueRev: warm.queueRev,
-        });
+        await this.#releaseHandle(warm.stream.handle, warmIdentity(warm));
       } else if (warm.requestId !== null) {
-        const requestId = warm.requestId;
-        await this.#host.bounded(() =>
-          this.#player.cancelPrepare({
-            requestId,
-            identity: {
-              attemptId: warm.attemptId,
-              queueRev: warm.queueRev,
-            },
-          }),
-        );
+        await this.#cancelPrepare(warm.requestId, warmIdentity(warm));
       }
       this.#maybeWarmStream();
     })();
@@ -3938,10 +3910,7 @@ export class PlaybackEngine {
       // release it and suppress the re-warm this row would earn.
       this.#streamWarm = null;
       this.#denyStreamWarm(`${warm.provider} ${warm.sourceRef}`);
-      await this.#releaseHandle(stream.handle, {
-        attemptId: warm.attemptId,
-        queueRev: warm.queueRev,
-      });
+      await this.#releaseHandle(stream.handle, warmIdentity(warm));
     }
   }
 }

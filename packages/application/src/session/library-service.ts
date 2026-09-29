@@ -55,7 +55,7 @@ import {
 import type { Ready, SessionHostCore } from './ready.ts';
 import { syncEmitInput } from './ready.ts';
 import { Serializer } from './serializer.ts';
-import { boundedLoad, internalError } from './util.ts';
+import { boundedLoad, internalError, supersededError } from './util.ts';
 
 export type LibraryHost = SessionHostCore & {
   /**
@@ -493,9 +493,7 @@ export class LibraryService {
       // otherwise apply an old-generation verdict to the imported
       // database — same guard as a persist/commitStaged segment.
       if (this.#host.ready() !== r) {
-        return err(
-          appError('superseded', 'session state was replaced'),
-        );
+        return err(supersededError());
       }
       const result = await op(context?.signal);
       if (!result.ok) {

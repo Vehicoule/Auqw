@@ -1,6 +1,7 @@
 import type {
   CancellationSignal,
   CancellationSource,
+  OperationContext,
 } from '../cancellation.ts';
 import type { AppError } from '../errors.ts';
 import { appError } from '../errors.ts';
@@ -39,35 +40,65 @@ export function saturatingAdd(a: number, b: number): number {
   return sum > Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : sum;
 }
 
+type BoundedHost = Pick<
+  SessionHostCore,
+  'deadline' | 'newContext' | 'withDeadline'
+>;
+
+/**
+ * One deadline-bounded port call under the op's own source: mints a
+ * context at the (possibly overridden) deadline and runs the op
+ * inside `withDeadline`.
+ */
+export function boundedOp<T>(
+  host: BoundedHost,
+  source: CancellationSource,
+  prefix: string,
+  op: (context: OperationContext) => Promise<Result<T>>,
+  signal?: CancellationSignal,
+  deadlineMs?: number,
+): Promise<Result<T>> {
+  const at = deadlineMs ?? host.deadline();
+  return host.withDeadline(
+    () => op(host.newContext(prefix, at, signal ?? source.signal)),
+    at,
+    source,
+  );
+}
+
 /** A deadline-bounded storage load under the op's own source. */
 export function boundedLoad(
-  host: Pick<SessionHostCore, 'deadline' | 'newContext' | 'withDeadline'>,
+  host: BoundedHost,
   storage: StoragePort,
   source: CancellationSource,
   prefix: string,
   signal?: CancellationSignal,
   deadlineMs?: number,
 ): Promise<Result<PersistedState>> {
-  const at = deadlineMs ?? host.deadline();
-  return host.withDeadline(
-    () => storage.load(host.newContext(prefix, at, signal ?? source.signal)),
-    at,
+  return boundedOp(
+    host,
     source,
+    prefix,
+    (ctx) => storage.load(ctx),
+    signal,
+    deadlineMs,
   );
 }
 
 /** A deadline-bounded storage commit under the op's own source. */
 export function boundedCommit(
-  host: Pick<SessionHostCore, 'deadline' | 'newContext' | 'withDeadline'>,
+  host: BoundedHost,
   storage: StoragePort,
   batch: StorageBatch,
   source: CancellationSource,
   deadlineMs?: number,
 ): Promise<Result<void>> {
-  const at = deadlineMs ?? host.deadline();
-  return host.withDeadline(
-    () => storage.commit(batch, host.newContext('persist', at, source.signal)),
-    at,
+  return boundedOp(
+    host,
     source,
+    'persist',
+    (ctx) => storage.commit(batch, ctx),
+    undefined,
+    deadlineMs,
   );
 }

@@ -110,6 +110,7 @@ import { PlaybackEngine } from './playback-engine.ts';
 import {
   boundedCommit,
   boundedLoad,
+  boundedOp,
   internalError,
   sameRef,
   saturatingAdd,
@@ -614,6 +615,7 @@ export class Session {
         commitStaged: (stage) => this.#commitStaged(stage),
         persistQueue: (r, before, beforeMarks) =>
           this.#persistQueue(r, before, beforeMarks),
+        mutateQueue: (r, mutate) => this.#mutateQueue(r, mutate),
         call: (fn) => this.#call(fn),
         bounded: (fn) => this.#bounded(fn),
         trackTimer: (timer) => {
@@ -714,40 +716,37 @@ export class Session {
         ? src.dealt
         : this.#dealtOrder(ready);
     const radio = publishRadio(ready.radio);
+    /** A shared section reuses the prior frozen array; changed data refreezes. */
+    const section = <T>(
+      live: readonly T[],
+      priorLive: readonly T[] | undefined,
+      priorPublished: readonly T[] | undefined,
+    ): readonly T[] =>
+      shared && live === priorLive && priorPublished !== undefined
+        ? priorPublished
+        : deepFreeze([...live]);
     const base: ReadySession = {
       type: 'ready',
-      recordings:
-        shared && ready.recordings === src.recordings
-          ? prev.recordings
-          : deepFreeze([...ready.recordings]),
-      likes:
-        shared && ready.likes === src.likes
-          ? prev.likes
-          : deepFreeze([...ready.likes]),
-      entities:
-        shared && ready.entities === src.entities
-          ? prev.entities
-          : deepFreeze([...ready.entities]),
-      entitySourceRefs:
-        shared && ready.entitySourceRefs === src.entitySourceRefs
-          ? prev.entitySourceRefs
-          : deepFreeze([...ready.entitySourceRefs]),
-      playlists:
-        shared && ready.playlists === src.playlists
-          ? prev.playlists
-          : deepFreeze([...ready.playlists]),
-      playlistEntries:
-        shared && ready.playlistEntries === src.playlistEntries
-          ? prev.playlistEntries
-          : deepFreeze([...ready.playlistEntries]),
-      playHistory:
-        shared && ready.playHistory === src.playHistory
-          ? prev.playHistory
-          : deepFreeze([...ready.playHistory]),
-      playCounts:
-        shared && ready.playCounts === src.playCounts
-          ? prev.playCounts
-          : deepFreeze([...ready.playCounts]),
+      recordings: section(ready.recordings, src?.recordings, prev?.recordings),
+      likes: section(ready.likes, src?.likes, prev?.likes),
+      entities: section(ready.entities, src?.entities, prev?.entities),
+      entitySourceRefs: section(
+        ready.entitySourceRefs,
+        src?.entitySourceRefs,
+        prev?.entitySourceRefs,
+      ),
+      playlists: section(ready.playlists, src?.playlists, prev?.playlists),
+      playlistEntries: section(
+        ready.playlistEntries,
+        src?.playlistEntries,
+        prev?.playlistEntries,
+      ),
+      playHistory: section(
+        ready.playHistory,
+        src?.playHistory,
+        prev?.playHistory,
+      ),
+      playCounts: section(ready.playCounts, src?.playCounts, prev?.playCounts),
       queue: queueSnap,
       settings:
         shared && ready.settings === src.settings
@@ -1077,6 +1076,15 @@ export class Session {
     }
   }
 
+  /** `#commitStaged` plus the post-commit derive every caller ticks. */
+  async #commitAndDerive<T>(
+    stage: (r: Ready) => Result<CommitStage<T>>,
+  ): Promise<Result<T>> {
+    const staged = await this.#commitStaged(stage);
+    this.#derived();
+    return staged;
+  }
+
   /**
    * Queue commit with a caller-visible failure contract. `before` is
    * the pre-mutation snapshot; the mutation itself stays synchronous
@@ -1092,6 +1100,24 @@ export class Session {
    * the mutation is derived inside the segment and the engine swaps
    * in only after a successful commit.)
    */
+  /** The shared tail of a queue mutation command: capture the
+   * pre-edit snapshot + marks, run the mutation, then commit with
+   * rollback. The caller ticks `#derived` itself — it must run in the
+   * caller's continuation, ahead of whatever follows the commit. */
+  async #mutateQueue(
+    r: Ready,
+    mutate: (queue: QueueEngine) => void,
+  ): Promise<Result<void>> {
+    const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
+    try {
+      mutate(r.queue);
+    } catch (thrown) {
+      return err(fromUnknown(thrown));
+    }
+    return this.#persistQueue(r, before, beforeMarks);
+  }
+
   async #persistQueue(
     r: Ready,
     before: QueueSnapshot,
@@ -1378,7 +1404,7 @@ export class Session {
     if (!isTrackMetadata(metadata)) {
       return err(appError('invalid-response', 'metadata failed validation'));
     }
-    const staged = await this.#commitStaged((r) => {
+    return this.#commitAndDerive((r) => {
       const up = upsertRecordingIn(
         r.recordings,
         metadata,
@@ -1403,11 +1429,6 @@ export class Session {
         },
       });
     });
-    this.#derived();
-    if (!staged.ok) {
-      return err(staged.error);
-    }
-    return ok(staged.value);
   }
 
   /**
@@ -1526,7 +1547,7 @@ export class Session {
     if (!r.recordings.some((rec) => rec.id === recordingId)) {
       return err(appError('not-found', 'unknown recording'));
     }
-    const staged = await this.#commitStaged((cur) => {
+    return this.#commitAndDerive((cur) => {
       const live = cur.recordings.find((rec) => rec.id === recordingId);
       if (live === undefined) {
         return err(appError('not-found', 'unknown recording'));
@@ -1546,11 +1567,6 @@ export class Session {
         },
       });
     });
-    this.#derived();
-    if (!staged.ok) {
-      return err(staged.error);
-    }
-    return ok(staged.value);
   }
 
   async addAndPlay(metadata: TrackMetadata): Promise<Result<void>> {
@@ -1576,7 +1592,7 @@ export class Session {
     if (!isTrackMetadata(metadata)) {
       return err(appError('invalid-response', 'metadata failed validation'));
     }
-    const staged = await this.#commitStaged((r) => {
+    return this.#commitAndDerive((r) => {
       const up = upsertRecordingIn(
         r.recordings,
         metadata,
@@ -1590,11 +1606,6 @@ export class Session {
         },
       });
     });
-    this.#derived();
-    if (!staged.ok) {
-      return err(staged.error);
-    }
-    return ok(staged.value);
   }
 
   /**
@@ -1775,14 +1786,13 @@ export class Session {
         signal: source.signal,
         clock: this.#clock,
         call: (signal) =>
-          this.#withDeadline(
-            () =>
-              this.#router.getEntity(
-                ref,
-                this.#newContext('entity', deadlineMs, signal),
-              ),
-            deadlineMs,
+          boundedOp(
+            this.#hostCore,
             source,
+            'entity',
+            (ctx) => this.#router.getEntity(ref, ctx),
+            signal,
+            deadlineMs,
           ),
       });
     } finally {
@@ -2030,14 +2040,13 @@ export class Session {
         signal: source.signal,
         clock: this.#clock,
         call: (signal) =>
-          this.#withDeadline(
-            () =>
-              provider.getLyrics(
-                { query, prefer: 'synced' },
-                this.#newContext('lyrics', deadlineMs, signal),
-              ),
-            deadlineMs,
+          boundedOp(
+            this.#hostCore,
             source,
+            'lyrics',
+            (ctx) => provider.getLyrics({ query, prefer: 'synced' }, ctx),
+            signal,
+            deadlineMs,
           ),
       });
       if (!fetched.ok) {
@@ -2187,16 +2196,12 @@ export class Session {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
-    const beforeMarks = r.queue.unplayableIds;
     if (!before.occurrences.some((o) => o.occurrenceId === occurrenceId)) {
       return err(appError('not-found', 'unknown occurrence'));
     }
-    try {
-      r.queue.select(occurrenceId, true);
-    } catch (thrown) {
-      return err(fromUnknown(thrown));
-    }
-    const persisted = await this.#persistQueue(r, before, beforeMarks);
+    const persisted = await this.#mutateQueue(r, (q) =>
+      q.select(occurrenceId, true),
+    );
     if (!persisted.ok) {
       return persisted;
     }
@@ -2431,18 +2436,11 @@ export class Session {
       return ready;
     }
     const r = ready.value;
-    const before = r.queue.snapshot();
-    const beforeMarks = r.queue.unplayableIds;
-    const current = before.currentOccurrenceId;
+    const current = r.queue.snapshot().currentOccurrenceId;
     if (current === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
     }
-    try {
-      r.queue.play();
-    } catch (thrown) {
-      return err(fromUnknown(thrown));
-    }
-    const persisted = await this.#persistQueue(r, before, beforeMarks);
+    const persisted = await this.#mutateQueue(r, (q) => q.play());
     if (!persisted.ok) {
       return persisted;
     }

@@ -33,7 +33,7 @@ import { emissionWrites } from '../sync/sync-projection.ts';
 import { Serializer } from './serializer.ts';
 import type { Ready, SessionHostCore } from './ready.ts';
 import { syncEmitInput } from './ready.ts';
-import { internalError } from './util.ts';
+import { internalError, supersededError } from './util.ts';
 
 /** The radio coordinator's per-service seams over SessionHostCore. */
 export type RadioHost = SessionHostCore & {
@@ -640,9 +640,7 @@ export class RadioCoordinator {
       return await this.#host.enqueueStorage(async () => {
         const r = this.#host.ready();
         if (generation === null || r !== generation) {
-          return err(
-            appError('superseded', 'session state was replaced'),
-          );
+          return err(supersededError());
         }
         if (r.radio !== record) {
           return ok({ changed: false, firstAppended: undefined });
