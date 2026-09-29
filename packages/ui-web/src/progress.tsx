@@ -1,6 +1,7 @@
 import {
   formatClock,
   formatRemaining,
+  progressPathState,
   resamplePeaks,
   t,
   waveformBarExtent,
@@ -9,7 +10,6 @@ import {
 } from '@auqw/ui-shared';
 import type { WaveformPeak } from '@auqw/ui-shared';
 import { Artwork, Text } from './primitives.tsx';
-import { progressPathState } from './motion.ts';
 import { seekStepMs } from './keyboard.ts';
 import {
   useCallback,

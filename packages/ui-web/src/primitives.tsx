@@ -1,6 +1,6 @@
 import type { CSSProperties, MouseEvent, ReactNode, Ref } from 'react';
 import { useTheme } from './theme.tsx';
-import { PAUSE_LEFT, PAUSE_RIGHT, PLAY_LEFT, PLAY_RIGHT, quadPath } from './motion.ts';
+import { PAUSE_LEFT, PAUSE_RIGHT, PLAY_LEFT, PLAY_RIGHT, quadPath } from '@auqw/ui-shared';
 
 export type TextVariant =
   | 'display'
