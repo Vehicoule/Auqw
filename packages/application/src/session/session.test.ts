@@ -1464,14 +1464,15 @@ async function unplayableRollbackRestoresMarks(): Promise<void> {
     'rollback restores the blocked row',
   );
   // The mark lives outside the snapshot — the projection walk is the
-  // observable: oA marked and no longer current must drop out of it.
+  // observable: oA marked and BEHIND the cursor stays reachable for
+  // media-control previous; only a marked row ahead drops out.
   assert((await r.session.skipCurrent()).ok);
   await pump();
   assertEqual(readyOf(r).queue.currentOccurrenceId, 'oB', 'skip lands on oB');
   assertDeepEqual(
     r.player.projections.at(-1)?.order,
-    [1],
-    'the projection walks past the failed row',
+    [0, 1],
+    'the projection keeps failed history for previous',
   );
 }
 

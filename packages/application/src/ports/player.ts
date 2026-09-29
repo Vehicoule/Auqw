@@ -178,9 +178,11 @@ export type QueueProjection = {
   /**
    * The dealt walk order: a unique subsequence of `items` indices the
    * cursor steps through — the identity under shuffle=off. Rows the
-   * session marked failed drop out of the walk; the current row always
-   * stays so the cursor can locate itself. Canonical item order never
-   * changes; only the walk does (decisions.md).
+   * session marked failed drop out only ahead of the cursor — forward
+   * moves skip them the way the engine does, while a marked row at or
+   * behind the cursor stays reachable for previous; the current row
+   * always stays so the cursor can locate itself. Canonical item order
+   * never changes; only the walk does (decisions.md).
    */
   readonly order: readonly number[];
   readonly items: readonly QueueProjectionItem[];

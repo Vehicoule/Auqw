@@ -348,11 +348,6 @@ export class QueueEngine {
 
   select(id: string, autoplay: boolean): void {
     this.#requireIndex(id);
-    if (autoplay) {
-      // A play-intent landing clears the failed mark — the attempt's
-      // own verdict decides whether it flags again.
-      this.#unplayable.delete(id);
-    }
     const mode: QueueMode = autoplay ? 'playing' : 'paused';
     if (
       this.#currentId === id &&
@@ -363,6 +358,12 @@ export class QueueEngine {
       return;
     }
     this.#requireTick();
+    if (autoplay) {
+      // A play-intent landing clears the failed mark — the attempt's
+      // own verdict decides whether it flags again. It stays below
+      // the capacity check so a rejected select can't mutate marks.
+      this.#unplayable.delete(id);
+    }
     this.#currentId = id;
     this.#positionMs = 0;
     this.#mode = mode;
@@ -513,6 +514,11 @@ export class QueueEngine {
   reorder(order: readonly string[]): void {
     if (order.length !== this.#occurrences.length) {
       throw new TypeError('reorder must cover every occurrence');
+    }
+    if (new Set(order).size !== order.length) {
+      // Same length + known ids isn't enough — a duplicate silently
+      // drops the occurrence it displaced.
+      throw new TypeError('reorder must not repeat an occurrence');
     }
     const byId = new Map(
       this.#occurrences.map((o) => [o.occurrenceId, o] as const),

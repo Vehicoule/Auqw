@@ -643,13 +643,16 @@ export class PlaybackEngine {
       if (method === 'next') {
         if (dealt === null) {
           r.queue.next();
-          // repeat=all: a move that ran off the tail wraps to the head
-          // instead of stopping — the same rule the service cursor uses.
+          // repeat=all: a move that ran off the tail wraps to the first
+          // unmarked head — wrapping onto a known-dead row just retries
+          // it, so all-failed ends the same as the dealt branch.
           if (r.repeat === 'all') {
             const tail = r.queue.snapshot();
             const head =
               tail.currentOccurrenceId === null
-                ? tail.occurrences[0]
+                ? tail.occurrences.find(
+                    (o) => !r.queue.isUnplayable(o.occurrenceId),
+                  )
                 : undefined;
             if (head !== undefined) {
               r.queue.select(head.occurrenceId, before.mode === 'playing');
@@ -1951,7 +1954,9 @@ export class PlaybackEngine {
             const tail = r.queue.snapshot();
             const head =
               tail.currentOccurrenceId === null
-                ? tail.occurrences[0]
+                ? tail.occurrences.find(
+                    (o) => !r.queue.isUnplayable(o.occurrenceId),
+                  )
                 : undefined;
             if (head !== undefined) {
               r.queue.select(head.occurrenceId, true);
@@ -1959,17 +1964,21 @@ export class PlaybackEngine {
             }
           }
         } else {
-          // Under shuffle the fallback walks the dealt order: dealt
-          // successor, dealt head under repeat=all, else run off.
+          // Under shuffle the fallback walks the dealt order with the
+          // same mark-skips advance() applies: dealt successor, first
+          // unmarked dealt head under repeat=all, else run off.
           const pos =
             before.currentOccurrenceId === null
               ? -1
               : dealt.indexOf(before.currentOccurrenceId);
-          const nextId = pos >= 0 ? dealt[pos + 1] : undefined;
+          const nextId =
+            pos >= 0
+              ? dealt.slice(pos + 1).find((id) => !r.queue.isUnplayable(id))
+              : undefined;
           if (nextId !== undefined) {
             r.queue.select(nextId, true);
           } else if (r.repeat === 'all' && dealt.length > 0) {
-            const head = dealt[0];
+            const head = dealt.find((id) => !r.queue.isUnplayable(id));
             if (head !== undefined) {
               r.queue.select(head, true);
               bumpListenCycle(r, head);
@@ -2264,25 +2273,36 @@ export class PlaybackEngine {
     );
     // The walk the cursor steps through: the dealt order under shuffle,
     // the identity otherwise — `items` itself stays canonical. Rows the
-    // engine marked failed are filtered out: player cursors walk this
-    // order on track end / remote next, so they must see the same skip
-    // the engine applies. The current row always stays — a cursor that
-    // can't locate it has no position to advance from.
+    // engine marked failed drop out only AHEAD of the cursor — player
+    // cursors walk this order on track end / remote next, so they must
+    // see the same forward skip the engine applies, while a marked row
+    // at or behind the cursor stays reachable for media-control
+    // previous (the engine's previous() deliberately steps onto them).
+    // The current row always stays — a cursor that can't locate it has
+    // no position to advance from.
     const dealt = this.#host.dealtOrder(r);
     const indexOfId = new Map(
       snap.occurrences.map((o, i) => [o.occurrenceId, i] as const),
     );
-    const order = (
+    const walkIndices =
       dealt === null
         ? snap.occurrences.map((_, i) => i)
         : dealt
             .map((id) => indexOfId.get(id))
-            .filter((i): i is number => i !== undefined)
-    ).filter((i) => {
+            .filter((i): i is number => i !== undefined);
+    const cursorWalkPos =
+      snap.currentOccurrenceId === null
+        ? -1
+        : walkIndices.findIndex(
+            (i) => snap.occurrences[i]?.occurrenceId === snap.currentOccurrenceId,
+          );
+    const order = walkIndices.filter((i, walkPos) => {
       const id = snap.occurrences[i]?.occurrenceId;
       return (
         id !== undefined &&
-        (!r.queue.isUnplayable(id) || id === snap.currentOccurrenceId)
+        (!r.queue.isUnplayable(id) ||
+          id === snap.currentOccurrenceId ||
+          walkPos <= cursorWalkPos)
       );
     });
     return {

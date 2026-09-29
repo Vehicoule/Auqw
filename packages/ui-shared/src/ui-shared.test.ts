@@ -292,6 +292,26 @@ assertEqual(
 );
 assertEqual(
   nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-7' },
+    repeat: 'all',
+    failedIds: new Set(['occ-1', 'occ-8']),
+  }),
+  'occ-2',
+  'canonical wrap skips a marked head',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-7' },
+    repeat: 'all',
+    failedIds: new Set(
+      fixtureQueue.occurrences.map((o) => o.occurrenceId),
+    ),
+  }),
+  null,
+  'all-failed canonical wrap ends the walk',
+);
+assertEqual(
+  nextQueueDestination({
     queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-4' },
     dealtOrder: ['occ-2', 'occ-8', 'occ-4'],
     repeat: 'all',

@@ -889,9 +889,8 @@ function likedIds(likes: readonly Like[]): ReadonlySet<string> {
  * availability) tests the same row the cursor actually plays. The
  * dealt order is the walk under shuffle, the canonical occurrence
  * order otherwise; rows already marked failed drop out of both.
- * Under repeat=all an exhausted forward walk wraps — canonical to
- * the head row, dealt to its first unmarked row — matching the
- * cursor's own wrap rules.
+ * Under repeat=all an exhausted forward walk wraps to the first
+ * unmarked row in both walks — matching the cursor's own wrap rules.
  */
 export function nextQueueDestination(input: {
   readonly queue: {
@@ -935,9 +934,10 @@ export function nextQueueDestination(input: {
   if (repeat !== 'all') {
     return null;
   }
-  // The canonical wrap selects the head row unconditionally — the
-  // same edge the engine makes after `next()` stops at the tail.
-  return ids[0] ?? null;
+  // The canonical wrap picks the first unmarked head — the same edge
+  // the engine makes after `next()` stops at the tail; all-failed
+  // ends the walk instead of replaying a known-dead row.
+  return ids.find(unmarked) ?? null;
 }
 
 export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
