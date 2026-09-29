@@ -8,12 +8,16 @@ import type {
   SourceMapping,
   SourceRef,
 } from '../domain.ts';
-import { isSafeNonNegative } from '../domain.ts';
+import { isSafeNonNegative, isString } from '../domain.ts';
 import { MatchingEngine } from '../matching/matching-engine.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { LogPort } from '../ports/log.ts';
 import type { IdPort } from '../ports/runtime.ts';
-import type { StoragePort } from '../ports/storage.ts';
+import type {
+  PersistedState,
+  StorageBatch,
+  StoragePort,
+} from '../ports/storage.ts';
 import { isCandidateSnapshot } from './library.ts';
 import type {
   CandidateSnapshot,
@@ -274,20 +278,24 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
     return { signal: source.signal, cancelled: false };
   }
 
-  async function confirm(
-    reviewId: string,
-    candidateIndex: number,
-    signal?: CancellationSignal,
-  ): Promise<Result<MatchReview>> {
-    if (
-      typeof reviewId !== 'string' ||
-      reviewId.length === 0 ||
-      reviewId.length > 64 ||
-      !Number.isSafeInteger(candidateIndex) ||
-      candidateIndex < 0
-    ) {
-      return err(appError('invalid-response', 'invalid confirm arguments'));
-    }
+  /** Loaded state plus the op's own clock stamp, deadline, and signal. */
+  type Session = {
+    readonly state: PersistedState;
+    readonly at: number;
+    readonly deadlineMs: number;
+    readonly sig: CancellationSignal;
+  };
+
+  /**
+   * Serialized load + the shared guards; `recheck` is false only for
+   * listReviews, which answers what it loaded rather than failing a
+   * read for a signal that landed mid-flight.
+   */
+  function loaded<T>(
+    signal: CancellationSignal | undefined,
+    recheck: boolean,
+    body: (s: Session) => Promise<Result<T>>,
+  ): Promise<Result<T>> {
     return serialized(async () => {
       const { signal: sig, cancelled } = resolveSignal(signal);
       if (cancelled) {
@@ -295,7 +303,9 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
       }
       const at = now();
       if (at === null) {
-        return err(appError('internal', 'clock returned an unsafe timestamp'));
+        return err(
+          appError('internal', 'clock returned an unsafe timestamp'),
+        );
       }
       const deadlineMs = saturatingAdd(at, OP_DEADLINE_MS);
       const loaded = await call(() =>
@@ -304,11 +314,68 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
       if (!loaded.ok) {
         return err(loaded.error);
       }
-      if (sig.cancelled) {
+      if (recheck && sig.cancelled) {
         return err(appError('cancelled', 'cancelled'));
       }
-      const state = loaded.value;
-      const review = state.matchReviews.find((r) => r.reviewId === reviewId);
+      return body({ state: loaded.value, at, deadlineMs, sig });
+    });
+  }
+
+  /** Section commit + shared warn; `op` names the log line. */
+  async function persist(
+    s: Session,
+    op: string,
+    batch: StorageBatch,
+  ): Promise<Result<void>> {
+    const committed = await call(() =>
+      storage.commit(batch, context('cor-commit', s.deadlineMs, s.sig)),
+    );
+    if (!committed.ok) {
+      warn(`review ${op} failed to persist`);
+    }
+    return committed;
+  }
+
+  const replaceRecording = (
+    rows: readonly Recording[],
+    updated: Recording,
+  ): Recording[] => rows.map((r) => (r.id === updated.id ? updated : r));
+
+  const replaceReview = (
+    rows: readonly MatchReview[],
+    updated: MatchReview,
+  ): MatchReview[] =>
+    rows.map((r) => (r.reviewId === updated.reviewId ? updated : r));
+
+  /** Recording+review swap every resolution writes. */
+  function persistResolution(
+    s: Session,
+    op: string,
+    recording: Recording,
+    review: MatchReview,
+  ): Promise<Result<void>> {
+    return persist(s, op, {
+      recordings: replaceRecording(s.state.recordings, recording),
+      matchReviews: replaceReview(s.state.matchReviews, review),
+    });
+  }
+
+  async function confirm(
+    reviewId: string,
+    candidateIndex: number,
+    signal?: CancellationSignal,
+  ): Promise<Result<MatchReview>> {
+    if (
+      !isString(reviewId, 64) ||
+      !Number.isSafeInteger(candidateIndex) ||
+      candidateIndex < 0
+    ) {
+      return err(appError('invalid-response', 'invalid confirm arguments'));
+    }
+    return loaded(signal, true, async (s) => {
+      const review = s.state.matchReviews.find(
+        (r) => r.reviewId === reviewId,
+      );
       if (review === undefined) {
         return err(appError('not-found', 'unknown review'));
       }
@@ -321,7 +388,7 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
           appError('invalid-response', 'candidate index out of range'),
         );
       }
-      const recording = state.recordings.find(
+      const recording = s.state.recordings.find(
         (r) => r.id === review.recordingId,
       );
       if (recording === undefined) {
@@ -330,7 +397,7 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
       const mapping: SourceMapping = {
         ref: candidate.ref,
         status: 'user-confirmed',
-        matchedAtMs: at,
+        matchedAtMs: s.at,
         evidence: MatchingEngine.userEvidence(recording, candidate.metadata),
       };
       const updatedRecording: Recording = {
@@ -341,26 +408,15 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
         ...review,
         status: 'confirmed',
         resolution: { ref: candidate.ref },
-        resolvedMs: at,
+        resolvedMs: s.at,
       };
-      const committed = await call(() =>
-        storage.commit(
-          {
-            recordings: state.recordings.map((r) =>
-              r.id === updatedRecording.id ? updatedRecording : r,
-            ),
-            matchReviews: state.matchReviews.map((r) =>
-              r.reviewId === updatedReview.reviewId ? updatedReview : r,
-            ),
-          },
-          context('cor-commit', deadlineMs, sig),
-        ),
+      const done = await persistResolution(
+        s,
+        'confirm',
+        updatedRecording,
+        updatedReview,
       );
-      if (!committed.ok) {
-        warn('review confirm failed to persist');
-        return err(committed.error);
-      }
-      return ok(updatedReview);
+      return done.ok ? ok(updatedReview) : done;
     });
   }
 
@@ -368,41 +424,20 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
     reviewId: string,
     signal?: CancellationSignal,
   ): Promise<Result<MatchReview>> {
-    if (
-      typeof reviewId !== 'string' ||
-      reviewId.length === 0 ||
-      reviewId.length > 64
-    ) {
+    if (!isString(reviewId, 64)) {
       return err(appError('invalid-response', 'invalid reject arguments'));
     }
-    return serialized(async () => {
-      const { signal: sig, cancelled } = resolveSignal(signal);
-      if (cancelled) {
-        return err(appError('cancelled', 'cancelled'));
-      }
-      const at = now();
-      if (at === null) {
-        return err(appError('internal', 'clock returned an unsafe timestamp'));
-      }
-      const deadlineMs = saturatingAdd(at, OP_DEADLINE_MS);
-      const loaded = await call(() =>
-        storage.load(context('cor-load', deadlineMs, sig)),
+    return loaded(signal, true, async (s) => {
+      const review = s.state.matchReviews.find(
+        (r) => r.reviewId === reviewId,
       );
-      if (!loaded.ok) {
-        return err(loaded.error);
-      }
-      if (sig.cancelled) {
-        return err(appError('cancelled', 'cancelled'));
-      }
-      const state = loaded.value;
-      const review = state.matchReviews.find((r) => r.reviewId === reviewId);
       if (review === undefined) {
         return err(appError('not-found', 'unknown review'));
       }
       if (review.status !== 'pending') {
         return err(appError('not-applicable', 'review already resolved'));
       }
-      const recording = state.recordings.find(
+      const recording = s.state.recordings.find(
         (r) => r.id === review.recordingId,
       );
       if (recording === undefined) {
@@ -422,9 +457,12 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
         seen.add(key);
         vetoes.push({
           ref: candidate.ref,
-          status: 'rejected' as const,
-          matchedAtMs: at,
-          evidence: MatchingEngine.userEvidence(recording, candidate.metadata),
+          status: 'rejected',
+          matchedAtMs: s.at,
+          evidence: MatchingEngine.userEvidence(
+            recording,
+            candidate.metadata,
+          ),
         });
       }
       const updatedRecording: Recording = {
@@ -435,26 +473,15 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
         ...review,
         status: 'rejected',
         resolution: { ref: null },
-        resolvedMs: at,
+        resolvedMs: s.at,
       };
-      const committed = await call(() =>
-        storage.commit(
-          {
-            recordings: state.recordings.map((r) =>
-              r.id === updatedRecording.id ? updatedRecording : r,
-            ),
-            matchReviews: state.matchReviews.map((r) =>
-              r.reviewId === updatedReview.reviewId ? updatedReview : r,
-            ),
-          },
-          context('cor-commit', deadlineMs, sig),
-        ),
+      const done = await persistResolution(
+        s,
+        'reject',
+        updatedRecording,
+        updatedReview,
       );
-      if (!committed.ok) {
-        warn('review reject failed to persist');
-        return err(committed.error);
-      }
-      return ok(updatedReview);
+      return done.ok ? ok(updatedReview) : done;
     });
   }
 
@@ -462,34 +489,13 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
     reviewId: string,
     signal?: CancellationSignal,
   ): Promise<Result<MatchReview>> {
-    if (
-      typeof reviewId !== 'string' ||
-      reviewId.length === 0 ||
-      reviewId.length > 64
-    ) {
+    if (!isString(reviewId, 64)) {
       return err(appError('invalid-response', 'invalid undo arguments'));
     }
-    return serialized(async () => {
-      const { signal: sig, cancelled } = resolveSignal(signal);
-      if (cancelled) {
-        return err(appError('cancelled', 'cancelled'));
-      }
-      const at = now();
-      if (at === null) {
-        return err(appError('internal', 'clock returned an unsafe timestamp'));
-      }
-      const deadlineMs = saturatingAdd(at, OP_DEADLINE_MS);
-      const loaded = await call(() =>
-        storage.load(context('cor-load', deadlineMs, sig)),
+    return loaded(signal, true, async (s) => {
+      const review = s.state.matchReviews.find(
+        (r) => r.reviewId === reviewId,
       );
-      if (!loaded.ok) {
-        return err(loaded.error);
-      }
-      if (sig.cancelled) {
-        return err(appError('cancelled', 'cancelled'));
-      }
-      const state = loaded.value;
-      const review = state.matchReviews.find((r) => r.reviewId === reviewId);
       if (review === undefined) {
         return err(appError('not-found', 'unknown review'));
       }
@@ -504,7 +510,7 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
           appError('invalid-response', 'resolved review missing stamp'),
         );
       }
-      const recording = state.recordings.find(
+      const recording = s.state.recordings.find(
         (r) => r.id === review.recordingId,
       );
       if (recording === undefined) {
@@ -552,24 +558,13 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
         resolution: null,
         resolvedMs: null,
       };
-      const committed = await call(() =>
-        storage.commit(
-          {
-            recordings: state.recordings.map((r) =>
-              r.id === updatedRecording.id ? updatedRecording : r,
-            ),
-            matchReviews: state.matchReviews.map((r) =>
-              r.reviewId === updatedReview.reviewId ? updatedReview : r,
-            ),
-          },
-          context('cor-commit', deadlineMs, sig),
-        ),
+      const done = await persistResolution(
+        s,
+        'undo',
+        updatedRecording,
+        updatedReview,
       );
-      if (!committed.ok) {
-        warn('review undo failed to persist');
-        return err(committed.error);
-      }
-      return ok(updatedReview);
+      return done.ok ? ok(updatedReview) : done;
     });
   }
 
@@ -579,39 +574,18 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
     signal?: CancellationSignal,
   ): Promise<Result<MatchReview>> {
     if (
-      typeof recordingId !== 'string' ||
-      recordingId.length === 0 ||
-      recordingId.length > 64 ||
+      !isString(recordingId, 64) ||
       candidates.length < 1 ||
       candidates.length > MAX_CANDIDATES ||
       !candidates.every(isCandidateSnapshot)
     ) {
       return err(appError('invalid-response', 'invalid review candidates'));
     }
-    return serialized(async () => {
-      const { signal: sig, cancelled } = resolveSignal(signal);
-      if (cancelled) {
-        return err(appError('cancelled', 'cancelled'));
-      }
-      const at = now();
-      if (at === null) {
-        return err(appError('internal', 'clock returned an unsafe timestamp'));
-      }
-      const deadlineMs = saturatingAdd(at, OP_DEADLINE_MS);
-      const loaded = await call(() =>
-        storage.load(context('cor-load', deadlineMs, sig)),
-      );
-      if (!loaded.ok) {
-        return err(loaded.error);
-      }
-      if (sig.cancelled) {
-        return err(appError('cancelled', 'cancelled'));
-      }
-      const state = loaded.value;
-      if (!state.recordings.some((r) => r.id === recordingId)) {
+    return loaded(signal, true, async (s) => {
+      if (!s.state.recordings.some((r) => r.id === recordingId)) {
         return err(appError('not-found', 'unknown recording'));
       }
-      const existing = state.matchReviews.find(
+      const existing = s.state.matchReviews.find(
         (r) => r.recordingId === recordingId && r.status === 'pending',
       );
       if (existing !== undefined) {
@@ -623,20 +597,13 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
         candidates,
         status: 'pending',
         resolution: null,
-        createdMs: at,
+        createdMs: s.at,
         resolvedMs: null,
       };
-      const committed = await call(() =>
-        storage.commit(
-          { matchReviews: [...state.matchReviews, review] },
-          context('cor-commit', deadlineMs, sig),
-        ),
-      );
-      if (!committed.ok) {
-        warn('review enqueue failed to persist');
-        return err(committed.error);
-      }
-      return ok(review);
+      const done = await persist(s, 'enqueue', {
+        matchReviews: [...s.state.matchReviews, review],
+      });
+      return done.ok ? ok(review) : done;
     });
   }
 
@@ -645,32 +612,18 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
     signal?: CancellationSignal,
   ): Promise<Result<readonly MatchReview[]>> {
     const status = filter?.status ?? 'pending';
-    return serialized(async () => {
-      const { signal: sig, cancelled } = resolveSignal(signal);
-      if (cancelled) {
-        return err(appError('cancelled', 'cancelled'));
-      }
-      const at = now();
-      if (at === null) {
-        return err(appError('internal', 'clock returned an unsafe timestamp'));
-      }
-      const loaded = await call(() =>
-        storage.load(
-          context('cor-load', saturatingAdd(at, OP_DEADLINE_MS), sig),
-        ),
-      );
-      if (!loaded.ok) {
-        return err(loaded.error);
-      }
+    return loaded(signal, false, async (s) =>
       // Oldest first: the queue drains in enqueue order.
-      const reviews = loaded.value.matchReviews
-        .filter((r) => status === 'all' || r.status === status)
-        .sort(
-          (a, b) =>
-            a.createdMs - b.createdMs || a.reviewId.localeCompare(b.reviewId),
-        );
-      return ok(reviews);
-    });
+      ok(
+        s.state.matchReviews
+          .filter((r) => status === 'all' || r.status === status)
+          .sort(
+            (a, b) =>
+              a.createdMs - b.createdMs ||
+              a.reviewId.localeCompare(b.reviewId),
+          ),
+      ),
+    );
   }
 
   return { enqueueReview, listReviews, confirm, reject, undo };
