@@ -123,7 +123,6 @@ function transportVariant(
   readonly side: ViewStyle;
   readonly main: ViewStyle;
   readonly play: ViewStyle;
-  readonly playSize: number;
 } {
   if (variant === 'm3e') {
     return {
@@ -135,7 +134,6 @@ function transportVariant(
         width: 56,
         height: 44,
       },
-      playSize: 56,
     };
   }
   const glass: ViewStyle = {
@@ -148,7 +146,6 @@ function transportVariant(
     side: { borderRadius: 999 },
     main: glass,
     play: { ...glass, width: 56, height: 56 },
-    playSize: 56,
   };
 }
 
