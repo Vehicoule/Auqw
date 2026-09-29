@@ -796,11 +796,12 @@ export function Icon({
       accessible={false}
     >
       {glyph.shapes.map((shape, i) => {
-        const common = { key: i, stroke, strokeWidth: strokeW, fill };
+        const common = { stroke, strokeWidth: strokeW, fill };
         switch (shape.kind) {
           case 'path':
             return (
               <Path
+                key={i}
                 {...common}
                 d={shape.d}
                 strokeLinecap="round"
@@ -809,11 +810,18 @@ export function Icon({
             );
           case 'circle':
             return (
-              <Circle {...common} cx={shape.cx} cy={shape.cy} r={shape.r} />
+              <Circle
+                key={i}
+                {...common}
+                cx={shape.cx}
+                cy={shape.cy}
+                r={shape.r}
+              />
             );
           case 'rect':
             return (
               <Rect
+                key={i}
                 {...common}
                 x={shape.x}
                 y={shape.y}
