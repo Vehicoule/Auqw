@@ -1,6 +1,6 @@
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { BackButton, Icon, PillButton, Pressable, Text } from './primitives.tsx';
+import { BackRow, Icon, PillButton, Pressable, Text } from './primitives.tsx';
 import { StateFor } from './states.tsx';
 import type { CorrectionsModel } from '@auqw/ui-shared';
 import {
@@ -50,26 +50,14 @@ export function CorrectionsScreen({
         paddingTop: topInset + theme.spacing.sm,
       }}
     >
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: theme.spacing.sm,
-          paddingHorizontal: theme.spacing.lg,
-          marginBottom: theme.spacing.sm,
-        }}
-      >
-        <BackButton
-          onPress={onBack}
-          accessibilityLabel={view.backA11yLabel}
-        />
+      <BackRow onPress={onBack} accessibilityLabel={view.backA11yLabel}>
         <Text variant="display" color="bright" style={{ flex: 1 }}>
           {view.title}
         </Text>
         <Text variant="metadata" color="secondary">
           {view.countsLabel}
         </Text>
-      </View>
+      </BackRow>
       <View
         style={{
           flexDirection: 'row',

@@ -165,6 +165,36 @@ export function BackButton({
   );
 }
 
+// The pushed-screen header shell: chevron + trailing content row.
+export function BackRow({
+  onPress,
+  accessibilityLabel,
+  children,
+}: {
+  readonly onPress?: (() => void) | undefined;
+  readonly accessibilityLabel: string;
+  readonly children?: ReactNode;
+}) {
+  const theme = useTheme();
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: theme.spacing.sm,
+        paddingHorizontal: theme.spacing.lg,
+        marginBottom: theme.spacing.sm,
+      }}
+    >
+      <BackButton
+        onPress={onPress}
+        accessibilityLabel={accessibilityLabel}
+      />
+      {children}
+    </View>
+  );
+}
+
 // Curry an optional handler — undefined stays undefined so the control
 // stays honest-inert instead of shipping a dead press.
 export function bind<A extends readonly unknown[]>(
