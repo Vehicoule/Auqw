@@ -72,11 +72,7 @@ function analyzeTitle(title: string): AnalyzedTitle {
   // Labels are detected over the whole title, including any suffix we
   // later strip from the base.
   const allTokens = tokenize(lower);
-  for (let i = 0; i < allTokens.length; i += 1) {
-    const token = allTokens[i];
-    if (token === undefined) {
-      continue;
-    }
+  for (const [i, token] of allTokens.entries()) {
     const label = LABEL_TOKEN.get(token);
     if (label !== undefined) {
       labels.add(label);
@@ -171,11 +167,7 @@ function dice(a: string, b: string): number {
   }
   const bigrams = (s: string): string[] => {
     const chars = [...s];
-    const out: string[] = [];
-    for (let i = 0; i + 1 < chars.length; i += 1) {
-      out.push(`${chars[i] ?? ''}${chars[i + 1] ?? ''}`);
-    }
-    return out;
+    return chars.slice(1).map((c, i) => `${chars[i] ?? ''}${c}`);
   };
   // One-code-point strings have no bigrams; unequal strings score 0,
   // never NaN.
@@ -280,12 +272,9 @@ function bestArtistSimilarity(a: string, b: string): number {
   let best = 0;
   for (const left of artistViews(a)) {
     for (const right of artistViews(b)) {
-      const score = artistSimilarityBetween(left, right);
-      if (score > best) {
-        best = score;
-        if (best === 1) {
-          return 1;
-        }
+      best = Math.max(best, artistSimilarityBetween(left, right));
+      if (best === 1) {
+        return 1;
       }
     }
   }
@@ -358,8 +347,8 @@ export class MatchingEngine {
     // automatic.
     const mappingByRef = collapseByRef(userMappings);
 
-    const eligible: { candidate: MatchCandidate; index: number }[] = [];
-    for (const [i, candidate] of candidates.entries()) {
+    const scored: Scored[] = [];
+    for (const [index, candidate] of candidates.entries()) {
       const mapping = mappingByRef.get(refKey(candidate.sourceRef));
       if (mapping?.status === 'rejected') {
         continue;
@@ -374,11 +363,6 @@ export class MatchingEngine {
           evidence: this.userEvidence(recording, candidate),
         };
       }
-      eligible.push({ candidate, index: i });
-    }
-
-    const scored: Scored[] = [];
-    for (const { candidate, index } of eligible) {
       const outcome = this.evidence(recording, candidate);
       if (outcome !== null) {
         scored.push({ candidate, evidence: outcome.evidence, index });
@@ -561,13 +545,14 @@ export class MatchingEngine {
     let durationDeltaMs: number | null = null;
     if (recording.durationMs !== null && candidate.durationMs !== null) {
       durationDeltaMs = Math.abs(recording.durationMs - candidate.durationMs);
-      if (durationDeltaMs <= 2000) {
-        adjustment = 10;
-      } else if (durationDeltaMs <= 6000) {
-        adjustment = 4;
-      } else if (durationDeltaMs > 15000) {
-        adjustment = -10;
-      }
+      adjustment =
+        durationDeltaMs <= 2000
+          ? 10
+          : durationDeltaMs <= 6000
+            ? 4
+            : durationDeltaMs > 15000
+              ? -10
+              : 0;
     }
 
     return {

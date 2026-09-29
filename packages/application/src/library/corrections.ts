@@ -235,17 +235,6 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
     );
   }
 
-  function resolveSignal(signal: CancellationSignal | undefined): {
-    signal: CancellationSignal;
-    cancelled: boolean;
-  } {
-    if (signal !== undefined) {
-      return { signal, cancelled: signal.cancelled };
-    }
-    const source = new CancellationSource();
-    return { signal: source.signal, cancelled: false };
-  }
-
   /** Loaded state plus the op's own clock stamp, deadline, and signal. */
   type Session = {
     readonly state: PersistedState;
@@ -265,8 +254,8 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
     body: (s: Session) => Promise<Result<T>>,
   ): Promise<Result<T>> {
     return serialized(async () => {
-      const { signal: sig, cancelled } = resolveSignal(signal);
-      if (cancelled) {
+      const sig = signal ?? new CancellationSource().signal;
+      if (sig.cancelled) {
         return err(cancelledError());
       }
       const at = now();

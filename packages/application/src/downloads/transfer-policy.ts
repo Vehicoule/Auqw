@@ -329,7 +329,7 @@ export async function runTransfer(options: {
     // file (fresh start or an encoding restart back to offset 0).
     let hasher = options.hasher();
     let digestCoversFile = start === 0;
-    let sink: TransferSink;
+    let sinkOpen = false;
     const openSink = async (resume: number): Promise<TransferSink> => {
       const opened = await transfer.begin(
         { destPath: destName, resumeAtBytes: resume },
@@ -338,12 +338,11 @@ export async function runTransfer(options: {
       if (!opened.ok) {
         raise(opened.error);
       }
-      sink = opened.value;
-      return sink;
+      sinkOpen = true;
+      return opened.value;
     };
-    sink = await openSink(start);
+    let sink = await openSink(start);
 
-    let sinkOpen = true;
     const closeAbort = async (keep: boolean): Promise<void> => {
       if (!sinkOpen) {
         return;
@@ -408,7 +407,6 @@ export async function runTransfer(options: {
             hasher = options.hasher();
             digestCoversFile = true;
             sink = await openSink(start);
-            sinkOpen = true;
           }
           continue;
         }

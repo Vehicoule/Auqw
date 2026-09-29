@@ -1,6 +1,7 @@
 import type { AppError } from '../errors.ts';
 import { isSafeNonNegative, isSourceRef } from '../domain.ts';
 import type { QueueOccurrence, Recording, SourceRef } from '../domain.ts';
+import { sameRef } from '../session/util.ts';
 
 export type QueueMode = 'stopped' | 'paused' | 'playing';
 
@@ -70,13 +71,6 @@ export function sameError(
     a.retryable === b.retryable &&
     a.retryAfterMs === b.retryAfterMs
   );
-}
-
-function sameRef(a: SourceRef | null, b: SourceRef | null): boolean {
-  if (a === null || b === null) {
-    return a === b;
-  }
-  return a.provider === b.provider && a.kind === b.kind && a.id === b.id;
 }
 
 /**
@@ -427,34 +421,28 @@ export class QueueEngine {
     if (index < 0) {
       return;
     }
-    // The >3s restart applies to live playback — a blocked row's
-    // retained position isn't progress it can resume from, so prev
-    // steps to the predecessor instead of consuming the press.
-    if (this.#positionMs > 3000 && this.#blockedError === undefined) {
+    // Rewind instead of stepping: live playback past 3s restarts the
+    // row (a blocked row's retained position isn't progress to resume
+    // from — it steps), and at the head any nonzero position rewinds.
+    if (
+      this.#positionMs > 0 &&
+      (index === 0 ||
+        (this.#positionMs > 3000 && this.#blockedError === undefined))
+    ) {
       this.#requireTick();
       this.#positionMs = 0;
       this.#tick();
       return;
     }
+    // At the first occurrence with position 0: a true no-op.
     if (index === 0) {
-      // At the first occurrence with position 0: a true no-op.
-      if (this.#positionMs === 0) {
-        return;
-      }
-      this.#requireTick();
-      this.#positionMs = 0;
-      this.#tick();
       return;
     }
     this.#requireTick();
     const prev = this.#occurrences[index - 1];
     // The cursor moved: the failed item's blocked error must not
     // misattribute to the new current occurrence.
-    this.#apply(
-      prev?.occurrenceId ?? this.#currentId,
-      0,
-      this.#mode,
-    );
+    this.#apply(prev?.occurrenceId ?? this.#currentId, 0, this.#mode);
   }
 
   remove(id: string): void {
