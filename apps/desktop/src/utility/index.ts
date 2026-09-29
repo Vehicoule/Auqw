@@ -35,6 +35,8 @@ import {
 import { createTagService } from './tags.ts';
 import { createTransferService } from './transfer.ts';
 import { hasRequestId, isUtilityRequest } from './validators.ts';
+import { createAuthService } from './auth.ts';
+import { createServiceAuthCustody } from './auth-custody.ts';
 
 /**
  * The Electron-specific shape of `process.parentPort` in a utility
@@ -147,6 +149,10 @@ if (port === null) {
         .catch(() => null);
     }
   };
+  // The live OAuth access token — kept here so a token minted before
+  // the lazy bindings load still reaches the PluginHost constructor;
+  // a running host gets updates through setAuthToken instead.
+  let authTokenCurrent: string | null = null;
   const runtime = createHostRuntime({
     env: process.env,
     resourcesPath:
@@ -154,6 +160,7 @@ if (port === null) {
         ? process.resourcesPath
         : undefined,
     repoRoot: process.env.AUQW_REPO_ROOT,
+    authToken: () => authTokenCurrent,
     potProviderUrl: () => {
       const url = pot.loopbackUrl();
       if (url === null) {
@@ -204,6 +211,27 @@ if (port === null) {
       () => undefined,
       () => undefined,
     );
+  // OAuth session trust: custody rides `auth:custody` up to main's
+  // sealed store; the access token (memory-only) lands in the host
+  // slot — a host that isn't loaded yet gets it via the constructor
+  // thunk when the first stream call builds it. Env overrides are the
+  // advanced path (settings' client-id row wins over them).
+  const auth = createAuthService({
+    custody: createServiceAuthCustody(serviceClient.request),
+    applyToken: (token) => {
+      authTokenCurrent = token;
+      runtime.hostIfLoaded()?.setAuthToken(token);
+    },
+    ...(process.env.AUQW_OAUTH_CLIENT_ID !== undefined &&
+    process.env.AUQW_OAUTH_CLIENT_ID.trim() !== ''
+      ? { clientId: process.env.AUQW_OAUTH_CLIENT_ID }
+      : {}),
+    ...(process.env.AUQW_OAUTH_CLIENT_SECRET !== undefined &&
+    process.env.AUQW_OAUTH_CLIENT_SECRET !== ''
+      ? { clientSecret: process.env.AUQW_OAUTH_CLIENT_SECRET }
+      : {}),
+    push,
+  });
   // The merge engine: a JSONL change log under userData plus the
   // app's DOM-free runtime ports (clock/ids/log are shared with the
   // renderer — one clock, one id source, one log voice). The store
@@ -345,6 +373,7 @@ if (port === null) {
     ...transfer.handlers,
     ...createTagService({ database: indexDb.get }).handlers,
     ...createLocalService({ database: indexDb.get, mediaDir }).handlers,
+    ...auth.handlers,
   });
   // Startup integrity resolves before the port starts delivering:
   // `.replace` recovery renames and the orphan reap can only race
@@ -376,6 +405,10 @@ if (port === null) {
       void respond(port, raw, route);
     });
     port.start();
+    // Boot restore: read custody + exchange a stored refresh grant for
+    // an access token. Kicked only after port.start() — the custody
+    // channel's replies ride the same parent-port dispatch.
+    void auth.restore();
   });
   // The supervisor kills the child outright on shutdown; when the
   // platform delivers SIGTERM first, drain what this entry owns — the

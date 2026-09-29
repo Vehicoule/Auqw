@@ -257,6 +257,19 @@ function fakeApi(): Rig {
         playback: () => Promise.reject(new Error('seam: inject local')),
         sweep: () => Promise.reject(new Error('seam: inject local')),
       },
+      auth: {
+        status: () =>
+          Promise.resolve({
+            status: { state: 'signed-out' },
+            clientId: null,
+          }),
+        begin: () => Promise.resolve(),
+        cancel: () => Promise.resolve(),
+        signOut: () => Promise.resolve(),
+        setClient: () => Promise.resolve(),
+        openUrl: () => Promise.resolve(),
+        onState: () => () => {},
+      },
     },
   };
   return rig;

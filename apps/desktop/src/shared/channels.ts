@@ -91,4 +91,19 @@ export const CHANNELS = {
   localList: 'local:list',
   localPlayback: 'local:playback',
   localSweep: 'local:sweep',
+  /**
+   * OAuth session trust — snapshot pull, flow verbs, the client-id
+   * override, and the allowlisted verification-URL open. Token
+   * material never crosses these channels.
+   */
+  authStatus: 'auth:status',
+  authBegin: 'auth:begin',
+  authCancel: 'auth:cancel',
+  authSignOut: 'auth:signOut',
+  authSetClient: 'auth:setClient',
+  authOpenUrl: 'auth:openUrl',
+  /** Main→renderer push of each new auth snapshot. */
+  authState: 'auth:state',
+  authSubscribe: 'auth:subscribe',
+  authUnsubscribe: 'auth:unsubscribe',
 } as const;

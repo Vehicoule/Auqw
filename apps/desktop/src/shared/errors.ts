@@ -31,6 +31,12 @@ export type ShellError = {
 
 const ERROR_KIND_SET: ReadonlySet<string> = new Set(ERROR_KINDS);
 
+/** A raw string → the envelope's own vocabulary (narrower than the
+    app's ErrorKind — callers fold what the envelope can't carry). */
+export function isShellErrorKind(value: unknown): value is ShellErrorKind {
+  return typeof value === 'string' && ERROR_KIND_SET.has(value);
+}
+
 const RETRYABLE: ReadonlySet<ShellErrorKind> = new Set([
   'unavailable',
   'process-crashed',

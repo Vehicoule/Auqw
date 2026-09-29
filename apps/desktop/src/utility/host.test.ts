@@ -95,6 +95,7 @@ export async function run(): Promise<void> {
       return {};
     },
     setPotProvider() {},
+    setAuthToken() {},
   };
   const fakeModule: NodeBindingsModule = {
     PluginHost: class {

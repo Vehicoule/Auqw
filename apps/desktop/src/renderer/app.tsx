@@ -52,6 +52,7 @@ import type {
 import {
   AddToPlaylistSheet,
   AppStack,
+  AuthSheet,
   CollectionScreen,
   CorrectionsScreen,
   DesktopChrome,
@@ -95,6 +96,7 @@ import {
   qualityOptions,
   reportResult,
   themeOptions,
+  toAuthSheetModel,
 } from '@auqw/ui-shared';
 import type { Boot, OverlayEntry } from '@auqw/ui-shared';
 import type {
@@ -106,6 +108,7 @@ import type {
 import type { ThemeSource } from '@auqw/design-tokens/adaptive';
 import { useAppShell } from '@auqw/app-shell';
 import type { AppShellPorts } from '@auqw/app-shell';
+import { createDesktopAuth } from './auth.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { shellToAppError } from './ipc-errors.ts';
@@ -601,9 +604,20 @@ function Main({
   // keeps only the platform seams (connectivity, the local-playback
   // capability probe, the sync IPC surface, browser file pickers /
   // clipboard, the artwork-cache row omission) wired through ports.
+  const authPort = useMemo(
+    () => createDesktopAuth(window.auqw),
+    [],
+  );
   const ports = useMemo<AppShellPorts<Overlay>>(
     () => ({
       subscribeOnline: controller.subscribeOnline,
+      // OAuth session trust — the IPC-backed auth surface; token
+      // material never crosses into this renderer. The adapter is
+      // hoisted to a stable memo: each instance wires one `auth:state`
+      // ipcRenderer listener, so rebuilding it per ports-memo churn
+      // would leak listeners (the preload helper caps at 10 before
+      // warning).
+      auth: authPort,
       localPlayable: (id) => controller.localPlaybackFor(id) !== null,
       trackAttemptActions: true,
       gateAdvanceAlways: true,
@@ -758,6 +772,17 @@ function Main({
     onSubmitStorefront,
     onClearStorefront,
     closeStorefront,
+    authSnapshot,
+    authSheetOpen,
+    openAuthSheet,
+    closeAuthSheet,
+    retryAuthFlow,
+    onAuthSignOut,
+    authClientSheetOpen,
+    authClientDraft,
+    onSubmitAuthClient,
+    onClearAuthClient,
+    closeAuthClient,
     qualityPickerOpen,
     onPickQuality,
     closeQualityPicker,
@@ -1211,6 +1236,7 @@ function Main({
                   onDownload={onStageDownload}
                   onAddToPlaylist={onStageAddToPlaylist}
                   onStopPlayback={() => void session.stop()}
+                  onRecovery={openAuthSheet}
                   onSeek={seekToPosition}
                   peaks={peaks}
                   onRetryLyrics={onRetryLyrics}
@@ -1386,6 +1412,35 @@ function Main({
             onDismiss={closeLanguagePicker}
           />
         ))}
+        {sheet('sheet-auth', closeAuthSheet, authSheetOpen, () => (
+          <AuthSheet
+            model={toAuthSheetModel(
+              authSnapshot?.status ?? { state: 'signed-out' },
+            )}
+            onCopyCode={ports.auth?.copyText}
+            onOpenLink={ports.auth?.openUrl}
+            onRetry={retryAuthFlow}
+            onSignOut={onAuthSignOut}
+            onDismiss={closeAuthSheet}
+          />
+        ))}
+        {sheet(
+          'sheet-auth-client',
+          closeAuthClient,
+          authClientSheetOpen,
+          () => (
+            <ValueFieldSheet
+              title={t('auth.clientId.title')}
+              initial={authClientDraft}
+              placeholder={t('auth.clientId.placeholder')}
+              submitLabel={t('common.save')}
+              clearLabel={t('auth.clientId.clear')}
+              onSubmit={onSubmitAuthClient}
+              onClear={onClearAuthClient}
+              onDismiss={closeAuthClient}
+            />
+          ),
+        )}
       </AppStack>
     </div>
   );
