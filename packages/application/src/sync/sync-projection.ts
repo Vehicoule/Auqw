@@ -1366,12 +1366,13 @@ function finishProjection(
 
   const applyRecordingPlans = (
     rows: readonly Recording[],
+    plans: ReadonlyMap<string, RecordingPlan> = recordingPlans,
   ): { next: Recording[]; dead: Set<string> } => {
     const next: Recording[] = [];
     const dead = new Set<string>();
     const seen = new Set<string>();
     for (const rec of rows) {
-      const plan = recordingPlans.get(rec.id);
+      const plan = plans.get(rec.id);
       seen.add(rec.id);
       if (plan === undefined) {
         next.push(rec);
@@ -1392,7 +1393,7 @@ function finishProjection(
       };
       next.push(isRecording(candidate) ? candidate : rec);
     }
-    for (const [id, plan] of recordingPlans) {
+    for (const [id, plan] of plans) {
       if (seen.has(id) || plan.action !== 'upsert') {
         continue;
       }
@@ -2031,37 +2032,8 @@ function finishProjection(
     [...recordingPlans].filter(([, plan]) => plan.action !== 'pending'),
   );
   if (batchablePlans.size > 0) {
-    batch.recordingsMerge = (fresh: readonly Recording[]) => {
-      const next: Recording[] = [];
-      const seen = new Set<string>();
-      for (const rec of fresh) {
-        const plan = batchablePlans.get(rec.id);
-        seen.add(rec.id);
-        if (plan === undefined || plan.action === 'pending') {
-          next.push(rec);
-          continue;
-        }
-        if (plan.action === 'delete') {
-          continue;
-        }
-        const candidate: Recording = {
-          ...overlayRecording(rec, plan.fields),
-          sourceRefs: applyRefOps(rec.sourceRefs, plan),
-          mappings: applyMapOps(rec.mappings, plan),
-        };
-        next.push(isRecording(candidate) ? candidate : rec);
-      }
-      for (const [id, plan] of batchablePlans) {
-        if (seen.has(id) || plan.action !== 'upsert') {
-          continue;
-        }
-        const built = buildRecording(plan.fields, plan, id);
-        if (built !== null) {
-          next.push(built);
-        }
-      }
-      return next;
-    };
+    batch.recordingsMerge = (fresh) =>
+      applyRecordingPlans(fresh, batchablePlans).next;
   }
   if (!sameArray(nextLikes, current.likes)) {
     batch.likes = nextLikes;
