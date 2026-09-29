@@ -94,7 +94,7 @@ export const isPickFilesArgs = (
  * Secure-store keys map to one file each under userData — the pattern
  * refuses separators so a key can never walk the directory.
  */
-export const isSecureKey = v.refine(
+const isSecureKey = v.refine(
   v.pattern(/^[a-z0-9][a-z0-9._-]{0,127}$/i),
   // `auqw.sync.*` is the pairing-custody namespace — it lives in the
   // sync-secure store behind `sync:keys`, never on these
@@ -149,7 +149,7 @@ export type PluginManifestPayload = v.Guarded<
   typeof isPluginManifestPayload
 >;
 
-export const isPluginManifestPayload = v.object({
+const isPluginManifestPayload = v.object({
   pluginId: v.boundedString(128),
   providerId: v.boundedString(128),
   capabilities: v.array(v.boundedString(64)),
@@ -184,8 +184,6 @@ export const isPreparedStreamPayload = v.object({
   bitrateKbps: v.optional(v.int()),
 });
 
-export type HttpTracePayload = v.Guarded<typeof isHttpTracePayload>;
-
 /**
  * Mirrors the port's trace-URL rule: a redacted `http(s)` URL, or the
  * literal `<pot-provider>` sentinel the host emits for pot mints (the
@@ -208,8 +206,6 @@ const isHttpTracePayload = v.object({
   bytes: v.int(),
   elapsedMs: v.int(),
 });
-
-export type GuestLogPayload = v.Guarded<typeof isGuestLogPayload>;
 
 const isGuestLogPayload = v.object({
   level: v.boundedString(16),
@@ -310,7 +306,7 @@ export const isStreamOpenArgs = v.object({
 });
 
 /** `stream:open` result — `null` remaining = unknown total. */
-export type StreamOpenResult = v.Guarded<typeof isStreamOpenResult>;
+type StreamOpenResult = v.Guarded<typeof isStreamOpenResult>;
 
 export const isStreamOpenResult = v.object({
   remaining: v.nullable(v.int()),
@@ -327,13 +323,13 @@ export const isStreamReadArgs = v.object({
 });
 
 /** `stream:read` result — raw bytes ride base64; empty = EOF. */
-export type StreamReadResult = v.Guarded<typeof isStreamReadResult>;
+type StreamReadResult = v.Guarded<typeof isStreamReadResult>;
 
 export const isStreamReadResult = v.object({
   data: v.string(MAX_READ_LEN * 2),
 });
 
-export type StreamServeUrlResult = v.Guarded<
+type StreamServeUrlResult = v.Guarded<
   typeof isStreamServeUrlResult
 >;
 
@@ -447,7 +443,6 @@ const isSqlRowValue: v.Guard<SqlRow> = (
   Object.values(value).every(isSqlValue);
 
 export type StorageExecuteArgs = v.Guarded<typeof isStorageExecuteArgs>;
-export type StorageQueryArgs = v.Guarded<typeof isStorageQueryArgs>;
 
 export const isStorageExecuteArgs = v.object({
   txId: v.boundedString(64),
@@ -459,7 +454,7 @@ export const isStorageQueryArgs = isStorageExecuteArgs;
 
 export type StorageStatement = v.Guarded<typeof isStorageStatement>;
 
-export const isStorageStatement = v.object({
+const isStorageStatement = v.object({
   sql: v.boundedString(65_536),
   params: isSqlParams,
 });
@@ -537,8 +532,6 @@ const syncListenerState = v.literals(
   'dormant',
   'disabled',
 );
-
-export type SyncListenerState = v.Guarded<typeof syncListenerState>;
 
 export type SyncStatusResult = v.Guarded<typeof isSyncStatusResult>;
 
@@ -870,9 +863,7 @@ export const isSyncTriggerResult = v.object({
 const MAX_SYNC_LOCAL_WRITES = 256;
 const MAX_SYNC_FIELD_BYTES = 65_536;
 
-export type SyncLocalWriteDoc = v.Guarded<typeof isSyncLocalWriteDoc>;
-
-export const isSyncLocalWriteDoc = v.union(
+const isSyncLocalWriteDoc = v.union(
   v.object({
     kind: v.boundedString(64),
     recordId: v.boundedString(1024),
@@ -1062,10 +1053,10 @@ export const isTransferBeginArgs = v.object({
   resumeAtBytes: v.int(),
 });
 
-export type TransferBeginResult = v.Guarded<typeof isTransferBeginResult>;
+type TransferBeginResult = v.Guarded<typeof isTransferBeginResult>;
 export type TransferSinkArgs = v.Guarded<typeof isTransferSinkArgs>;
 
-export const isSinkId = v.pattern(
+const isSinkId = v.pattern(
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
 );
 
@@ -1080,7 +1071,7 @@ export const isTransferWriteArgs = v.object({
   data: v.string(MAX_TRANSFER_WRITE_BASE64),
 });
 
-export type TransferCommitResult = v.Guarded<
+type TransferCommitResult = v.Guarded<
   typeof isTransferCommitResult
 >;
 
@@ -1095,7 +1086,7 @@ export const isTransferFinalizeArgs = v.object({
   expected: v.nullable(v.pattern(/^[0-9a-f]{64}$/)),
 });
 
-export type TransferFinalizeResult = v.Guarded<
+type TransferFinalizeResult = v.Guarded<
   typeof isTransferFinalizeResult
 >;
 
@@ -1116,7 +1107,7 @@ export const isTransferNameArgs = v.object({
   name: v.boundedString(MAX_TRANSFER_NAME),
 });
 
-export type TransferStatResult = v.Guarded<typeof isTransferStatResult>;
+type TransferStatResult = v.Guarded<typeof isTransferStatResult>;
 
 export const isTransferStatResult = v.object({
   exists: v.boolean(),
@@ -1131,40 +1122,38 @@ export const isTransferSweepArgs = v.object({
   }),
 });
 
-export type TransferSweepResult = v.Guarded<typeof isTransferSweepResult>;
+type TransferSweepResult = v.Guarded<typeof isTransferSweepResult>;
 
 export const isTransferSweepResult = v.object({ swept: v.int() });
 
 export type TransferSinkInfo = v.Guarded<typeof isTransferSinkInfo>;
 
-export const isTransferSinkInfo = v.object({
+const isTransferSinkInfo = v.object({
   sinkId: isSinkId,
   destPath: v.boundedString(MAX_TRANSFER_NAME),
   committedBytes: v.int(),
   openedMs: v.int(),
 });
 
-export type TransferFileInfo = v.Guarded<typeof isTransferFileInfo>;
-
-export const isTransferFileInfo = v.object({
+const isTransferFileInfo = v.object({
   name: v.boundedString(MAX_TRANSFER_NAME),
   bytes: v.int(),
 });
 
-export type TransferListResult = v.Guarded<typeof isTransferListResult>;
+type TransferListResult = v.Guarded<typeof isTransferListResult>;
 
 export const isTransferListResult = v.object({
   sinks: v.array(isTransferSinkInfo, { max: MAX_LIST_ENTRIES }),
   files: v.array(isTransferFileInfo, { max: MAX_LIST_ENTRIES }),
 });
 
-export type TransferStatusResult = v.Guarded<
+type TransferStatusResult = v.Guarded<
   typeof isTransferStatusResult
 >;
 
 export const isTransferStatusResult = isTransferSinkInfo;
 
-export type TransferStatsResult = v.Guarded<typeof isTransferStatsResult>;
+type TransferStatsResult = v.Guarded<typeof isTransferStatsResult>;
 
 export const isTransferStatsResult = v.object({
   bytes: v.int(),
@@ -1192,9 +1181,7 @@ export const isTagreadEnumerateArgs = v.object({
   treeUri: v.boundedString(MAX_DOC_ID),
 });
 
-export type LocalEntryPayload = v.Guarded<typeof isLocalEntryPayload>;
-
-export const isLocalEntryPayload = v.object({
+const isLocalEntryPayload = v.object({
   docId: v.boundedString(MAX_DOC_ID),
   name: v.boundedString(1024),
   size: v.int(),
@@ -1202,7 +1189,7 @@ export const isLocalEntryPayload = v.object({
   modifiedMs: v.nullable(v.int()),
 });
 
-export type TagreadEnumerateResult = v.Guarded<
+type TagreadEnumerateResult = v.Guarded<
   typeof isTagreadEnumerateResult
 >;
 
@@ -1219,16 +1206,12 @@ export const isTagreadBatchArgs = v.object({
   }),
 });
 
-export type FileFingerprintPayload = v.Guarded<
-  typeof isFileFingerprintPayload
->;
-
-export const isFileFingerprintPayload = v.object({
+const isFileFingerprintPayload = v.object({
   docId: v.boundedString(MAX_DOC_ID),
   fingerprint: v.boundedString(128),
 });
 
-export type TagreadFingerprintResult = v.Guarded<
+type TagreadFingerprintResult = v.Guarded<
   typeof isTagreadFingerprintResult
 >;
 
@@ -1238,9 +1221,7 @@ export const isTagreadFingerprintResult = v.object({
   }),
 });
 
-export type LocalTagsPayload = v.Guarded<typeof isLocalTagsPayload>;
-
-export const isLocalTagsPayload = v.object({
+const isLocalTagsPayload = v.object({
   docId: v.boundedString(MAX_DOC_ID),
   title: v.nullable(v.boundedString(MAX_TAG_FIELD)),
   artist: v.nullable(v.boundedString(MAX_TAG_FIELD)),
@@ -1249,7 +1230,7 @@ export const isLocalTagsPayload = v.object({
   genre: v.nullable(v.boundedString(MAX_TAG_FIELD)),
 });
 
-export type TagreadReadResult = v.Guarded<typeof isTagreadReadResult>;
+type TagreadReadResult = v.Guarded<typeof isTagreadReadResult>;
 
 export const isTagreadReadResult = v.object({
   tags: v.array(v.nullable(isLocalTagsPayload), {
@@ -1278,13 +1259,13 @@ export const isLocalAddArgs = v.object({
 
 export type LocalPickPayload = v.Guarded<typeof isLocalPickPayload>;
 
-export const isLocalPickPayload = v.object({
+const isLocalPickPayload = v.object({
   treeUri: v.boundedString(MAX_LOCAL_PATH + 16),
   label: v.boundedString(1024),
   kind: v.literals('dir', 'file'),
 });
 
-export type LocalAddResult = v.Guarded<typeof isLocalAddResult>;
+type LocalAddResult = v.Guarded<typeof isLocalAddResult>;
 
 export const isLocalAddResult = v.object({
   picks: v.array(isLocalPickPayload, { max: MAX_LOCAL_PATHS }),
@@ -1304,7 +1285,7 @@ export const isLocalResolveArgs = v.object({
   uri: v.boundedString(MAX_LOCAL_URI),
 });
 
-export type LocalResolveResult = v.Guarded<typeof isLocalResolveResult>;
+type LocalResolveResult = v.Guarded<typeof isLocalResolveResult>;
 
 export const isLocalResolveResult = v.object({
   uri: v.nullable(v.boundedString(MAX_LOCAL_URI)),
@@ -1318,13 +1299,13 @@ export const isLocalReadArgs = v.object({
   maxLen: v.refine(v.int(), (n) => n > 0 && n <= MAX_READ_LEN),
 });
 
-export type LocalReadResult = v.Guarded<typeof isLocalReadResult>;
+type LocalReadResult = v.Guarded<typeof isLocalReadResult>;
 
 export const isLocalReadResult = v.object({
   data: v.string(MAX_READ_LEN * 2),
 });
 
-export type LocalProbeResult = v.Guarded<typeof isLocalProbeResult>;
+type LocalProbeResult = v.Guarded<typeof isLocalProbeResult>;
 
 export const isLocalProbeResult = v.object({
   uri: v.nullable(
@@ -1334,9 +1315,7 @@ export const isLocalProbeResult = v.object({
   ),
 });
 
-export type LocalSourcePayload = v.Guarded<typeof isLocalSourcePayload>;
-
-export const isLocalSourcePayload = v.object({
+const isLocalSourcePayload = v.object({
   sourceId: v.boundedString(128),
   treeUri: v.boundedString(MAX_LOCAL_PATH + 16),
   label: v.boundedString(1024),
@@ -1345,22 +1324,20 @@ export const isLocalSourcePayload = v.object({
   fileCount: v.int(),
 });
 
-export type LocalListResult = v.Guarded<typeof isLocalListResult>;
+type LocalListResult = v.Guarded<typeof isLocalListResult>;
 
 export const isLocalListResult = v.object({
   sources: v.array(isLocalSourcePayload, { max: MAX_LIST_ENTRIES }),
 });
 
-export type LocalPlaybackEntry = v.Guarded<typeof isLocalPlaybackEntry>;
-
-export const isLocalPlaybackEntry = v.object({
+const isLocalPlaybackEntry = v.object({
   recordingId: v.boundedString(512),
   uri: v.refine(v.boundedString(MAX_LOCAL_PATH + 16), (uri) =>
     uri.startsWith('file://'),
   ),
 });
 
-export type LocalPlaybackResult = v.Guarded<typeof isLocalPlaybackResult>;
+type LocalPlaybackResult = v.Guarded<typeof isLocalPlaybackResult>;
 
 export const isLocalPlaybackResult = v.object({
   entries: v.array(isLocalPlaybackEntry, {
@@ -1368,7 +1345,7 @@ export const isLocalPlaybackResult = v.object({
   }),
 });
 
-export type LocalSweepResult = v.Guarded<typeof isLocalSweepResult>;
+type LocalSweepResult = v.Guarded<typeof isLocalSweepResult>;
 
 export const isLocalSweepResult = v.object({
   missing: v.int(),

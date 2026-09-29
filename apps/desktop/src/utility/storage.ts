@@ -21,7 +21,7 @@ import type { ShellError } from '../shared/errors.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
 import type { UtilityHandler } from './router.ts';
 
-export type StorageServiceOptions = {
+type StorageServiceOptions = {
   /**
    * File path of the main database — main resolves it under userData
    * and hands it to the fork through `AUQW_DB_PATH`. Undefined degrades
@@ -30,7 +30,7 @@ export type StorageServiceOptions = {
   readonly dbPath: string | undefined;
 };
 
-export type StorageService = {
+type StorageService = {
   readonly handlers: Readonly<Record<string, UtilityHandler>>;
   /** Rolls back any open transaction and closes the database. */
   readonly close: () => void;

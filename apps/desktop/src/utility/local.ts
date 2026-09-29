@@ -46,14 +46,14 @@ import { isBareName } from './transfer.ts';
  * integrity sweep (`local:sweep` — index rows whose files vanished).
  */
 
-export type LocalServiceOptions = {
+type LocalServiceOptions = {
   /** Shared read accessor over the domain database file. */
   readonly database: () => DatabaseSync | null;
   /** Managed media dir — for probing `downloads.file_path` rows. */
   readonly mediaDir: string | undefined;
 };
 
-export type LocalService = {
+type LocalService = {
   readonly handlers: Readonly<Record<string, UtilityHandler>>;
   readonly close: () => void;
 };
@@ -330,7 +330,6 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         return { uri: null };
       }
       asIo('local probe failed', thrown);
-      return { uri: null };
     }
   }
 
@@ -453,7 +452,6 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
           rows = [];
         } else {
           asIo('local resolve failed', thrown);
-          return null;
         }
       }
       const mediaReal = await realpathChecked(options.mediaDir);
@@ -618,7 +616,6 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         return { sources: [] };
       }
       asIo('local list failed', thrown);
-      return { sources: [] };
     }
   }
 
@@ -696,7 +693,6 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         return { entries: [] };
       }
       asIo('local playback failed', thrown);
-      return { entries: [] };
     }
   }
 

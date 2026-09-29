@@ -52,7 +52,7 @@ import type { UtilityHandler } from './router.ts';
  * escape the managed dir or collide with another sink's partial.
  */
 
-export type TransferServiceOptions = {
+type TransferServiceOptions = {
   /**
    * Managed media dir (`AUQW_USER_DATA/media`). Undefined degrades
    * every channel to `unavailable` instead of a crash.
@@ -70,7 +70,7 @@ export type TransferServiceOptions = {
   readonly maxWaiters?: number | undefined;
 };
 
-export type TransferService = {
+type TransferService = {
   readonly handlers: Readonly<Record<string, UtilityHandler>>;
   /** Startup orphan sweep — bounded, ledger-aware, best-effort. */
   readonly sweepOrphans: () => Promise<number>;
@@ -572,14 +572,8 @@ export function createTransferService(
     }
   }
 
-  async function sweepPartials(
-    args: TransferSweepArgs,
-  ): Promise<unknown> {
-    return sweep(args.keepPaths);
-  }
-
-  async function sweep(keepPaths: readonly string[]): Promise<unknown> {
-    const keep = new Set<string>([...keepPaths, ...livePartNames()]);
+  async function sweep(args: TransferSweepArgs): Promise<unknown> {
+    const keep = new Set<string>([...args.keepPaths, ...livePartNames()]);
     let entries;
     try {
       entries = await readdir(dir());
@@ -592,7 +586,6 @@ export function createTransferService(
         return { swept: 0 };
       }
       asIo('transfer sweep failed', thrown);
-      return { swept: 0 };
     }
     let swept = 0;
     for (const name of entries) {
@@ -839,7 +832,7 @@ export function createTransferService(
       [CHANNELS.transferSweepPartials]: guarded(
         CHANNELS.transferSweepPartials,
         isTransferSweepArgs,
-        sweepPartials,
+        sweep,
       ),
       [CHANNELS.transferList]: guarded(
         CHANNELS.transferList,

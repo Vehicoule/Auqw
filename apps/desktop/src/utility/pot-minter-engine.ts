@@ -40,15 +40,16 @@ export class HttpError extends Error {
 
 /* ----------------------------- IPC wire ---------------------------- */
 
-export type MinterRequest =
-  | { readonly id: number; readonly op: 'build' }
+type MinterRequestBody =
+  | { readonly op: 'build' }
   | {
-      readonly id: number;
       readonly op: 'mint';
       readonly sessionId: number;
       readonly contentBinding: string;
     }
-  | { readonly id: number; readonly op: 'dispose'; readonly sessionId: number };
+  | { readonly op: 'dispose'; readonly sessionId: number };
+
+export type MinterRequest = MinterRequestBody & { readonly id: number };
 
 type MinterBuilt = {
   readonly sessionId: number;
@@ -252,16 +253,7 @@ export function createProcessMinter(deps: ProcessMinterDeps): MinterEngine {
     return child;
   }
 
-  type RequestBody =
-    | { readonly op: 'build' }
-    | {
-        readonly op: 'mint';
-        readonly sessionId: number;
-        readonly contentBinding: string;
-      }
-    | { readonly op: 'dispose'; readonly sessionId: number };
-
-  function request(msg: RequestBody): Promise<unknown> {
+  function request(msg: MinterRequestBody): Promise<unknown> {
     const id = nextReqId++;
     let target: ChildProcess;
     try {
@@ -296,7 +288,7 @@ export function createProcessMinter(deps: ProcessMinterDeps): MinterEngine {
         },
       });
       try {
-        target.send({ ...msg, id } as MinterRequest);
+        target.send({ ...msg, id });
       } catch (thrown) {
         clearTimeout(timer);
         pending.delete(id);

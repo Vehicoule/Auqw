@@ -741,13 +741,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     ownDeviceId = deps.ownDeviceId === undefined
       ? null
       : await deps.ownDeviceId.catch(() => null);
-    server = createServer((socket) => responder.accept(socket));
+    const srv = createServer((socket) => responder.accept(socket));
+    server = srv;
     const bound = await new Promise<number | null>((resolve) => {
-      const srv = server;
-      if (srv === null) {
-        resolve(null);
-        return;
-      }
       srv.once('error', () => resolve(null));
       srv.listen(
         { host, port: deps.port ?? 0 },

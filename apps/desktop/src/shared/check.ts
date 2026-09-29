@@ -25,12 +25,6 @@ export function hasOnlyKeys(
   return Object.keys(value).every((k) => keys.includes(k));
 }
 
-export function isStringOrUndefined(
-  value: unknown,
-): value is string | undefined {
-  return value === undefined || typeof value === 'string';
-}
-
 export function isBoolean(value: unknown): value is boolean {
   return typeof value === 'boolean';
 }

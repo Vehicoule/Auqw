@@ -85,7 +85,7 @@ export function parseWindowState(value: unknown): WindowState | null {
   return null;
 }
 
-export type LoadedWindowState = {
+type LoadedWindowState = {
   readonly state: WindowState;
   readonly error: ShellError | null;
 };

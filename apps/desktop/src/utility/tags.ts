@@ -48,11 +48,11 @@ import type { UtilityHandler } from './router.ts';
  * file.
  */
 
-export type TagServiceOptions = {
+type TagServiceOptions = {
   readonly database: () => DatabaseSync | null;
 };
 
-export type TagService = {
+type TagService = {
   readonly handlers: Readonly<Record<string, UtilityHandler>>;
   readonly close: () => void;
 };

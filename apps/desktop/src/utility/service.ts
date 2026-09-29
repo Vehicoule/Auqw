@@ -12,7 +12,7 @@ import { isUtilityResponse } from './validators.ts';
  * the sending side; request and response shapes are disjoint, so a
  * reply can never be misrouted as an inbound request.
  */
-export interface ServiceClient {
+interface ServiceClient {
   request(channel: string, args: unknown): Promise<unknown>;
   /**
    * Returns true when `raw` was a service response this client owns —
