@@ -955,9 +955,13 @@ export function StageSheet({
   );
   useEffect(() => {
     if (lyricScrollKey === null || activeMode !== 'lyrics') {
-      // Leaving the pane resets the owed key — the ScrollView
-      // unmounts with it, so re-entry must center again.
+      // Leaving the pane resets the owed key AND the measurements —
+      // the ScrollView unmounts with them, so a re-entry must not
+      // scroll against the previous scroller's height before the new
+      // one has measured itself and its lines.
       lyricScrolledKey.current = null;
+      lyricsScrollH.current = 0;
+      lyricLayouts.current = [];
       return;
     }
     if (
