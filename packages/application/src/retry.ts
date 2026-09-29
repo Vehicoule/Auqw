@@ -150,7 +150,10 @@ export async function retryBounded<T>(
           // is still dead (a live getter may have moved it forward).
           await Promise.resolve();
           const recheck = nowMs();
-          if (recheck === undefined || opts.deadlineMs - recheck <= 0) {
+          if (recheck === undefined) {
+            return { tag: 'sleep' as const, slept: err(internalError()) };
+          }
+          if (opts.deadlineMs - recheck <= 0) {
             return { tag: 'sleep' as const, slept: ok(undefined) };
           }
           continue;

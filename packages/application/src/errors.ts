@@ -100,7 +100,7 @@ export const ERROR_KIND_BY_SLUG: Readonly<Record<ErrorSlug, ErrorKind>> = {
 
 /** Maps a wire `kind` slug to the taxonomy; unknown values are `internal`. */
 export function appErrorKind(slug: unknown): ErrorKind {
-  return typeof slug === 'string' && slug in ERROR_KIND_BY_SLUG
+  return typeof slug === 'string' && Object.hasOwn(ERROR_KIND_BY_SLUG, slug)
     ? ERROR_KIND_BY_SLUG[slug as ErrorSlug]
     : 'internal';
 }

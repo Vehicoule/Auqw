@@ -127,7 +127,9 @@ export function decodeProviderOutcome<T>(
     return err(
       appError(
         kindOf(outcome.kind),
-        outcome.message || 'plugin request failed',
+        typeof outcome.message === 'string' && outcome.message.length > 0
+          ? outcome.message
+          : 'plugin request failed',
       ),
     );
   }
