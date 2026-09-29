@@ -615,6 +615,9 @@ function Main({
       trackAttemptActions: true,
       gateAdvanceAlways: true,
       entityPlayRequiresCanPlay: true,
+      // Desktop's home suggestion lookup only reached the first 12
+      // results (the rail's depth); mobile searched the whole page.
+      homeSuggestionLimit: 12,
       stageInitiallyOpen: true,
       openSync: () => setSyncFocusTick((n) => n + 1),
       afterLocalMutation: (_mutated, refreshLocal) => {

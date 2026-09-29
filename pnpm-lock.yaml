@@ -179,6 +179,9 @@ importers:
 
   apps/mobile:
     dependencies:
+      '@auqw/app-shell':
+        specifier: workspace:*
+        version: link:../../packages/app-shell
       '@auqw/application':
         specifier: workspace:*
         version: link:../../packages/application

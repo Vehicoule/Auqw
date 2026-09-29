@@ -119,8 +119,27 @@ import type {
   ShellOverlay,
 } from './types.ts';
 
-export function useAppShell<O extends ShellOverlay>(
-  deps: AppShellDeps<O>,
+const SHELL_OVERLAY_TYPES: ReadonlySet<string> = new Set([
+  'collection',
+  'playlist',
+  'entity',
+  'corrections',
+  'transfer',
+]);
+
+/** Narrows an app-extended overlay to the factory's own routes — a
+    platform extra (mobile's `{ type: 'sync' }`) is never a shell
+    route, so `type` membership is the whole check. */
+function shellOverlayOf<E extends { readonly type: string }>(
+  overlay: ShellOverlay | E | null | undefined,
+): ShellOverlay | null {
+  return overlay != null && SHELL_OVERLAY_TYPES.has(overlay.type)
+    ? (overlay as ShellOverlay)
+    : null;
+}
+
+export function useAppShell<E extends { readonly type: string } = never>(
+  deps: AppShellDeps<E>,
 ) {
   const { controller, state, ports } = deps;
   const { session } = controller;
@@ -223,7 +242,7 @@ export function useAppShell<O extends ShellOverlay>(
     close: closeOverlay,
     dismiss: dismissOverlay,
     clear: clearOverlayStack,
-  } = useOverlayStack<O>();
+  } = useOverlayStack<ShellOverlay | E>();
   const [entityFetches, setEntityFetches] = useState<
     Readonly<Record<string, EntityFetch>>
   >({});
@@ -1155,10 +1174,11 @@ export function useAppShell<O extends ShellOverlay>(
     const map = entityMeta.current;
     map.clear();
     for (const entry of overlayStack) {
-      if (entry.overlay.type !== 'entity') {
+      const route = shellOverlayOf(entry.overlay);
+      if (route?.type !== 'entity') {
         continue;
       }
-      const fetch = entityFetches[entityRefKey(entry.overlay.ref)];
+      const fetch = entityFetches[entityRefKey(route.ref)];
       fetch?.page?.items.forEach((meta, index) => {
         map.set(`${entry.key}:${toSearchRowModel(meta, index).key}`, meta);
       });
@@ -1296,12 +1316,19 @@ export function useAppShell<O extends ShellOverlay>(
   const suggestionMeta = useMemo(() => {
     const map = new Map<string, TrackMetadata>();
     if (searchState.type === 'content') {
-      for (const meta of searchState.page.items.slice(0, 12)) {
+      // Divergence: desktop bounded the card-activation lookup to the
+      // first 12 results; mobile searched the whole page. Parameterized
+      // via ports.homeSuggestionLimit (desktop: 12, mobile: unset).
+      const items =
+        ports.homeSuggestionLimit === undefined
+          ? searchState.page.items
+          : searchState.page.items.slice(0, ports.homeSuggestionLimit);
+      for (const meta of items) {
         map.set(`${meta.sourceRef.provider}:${meta.sourceRef.id}`, meta);
       }
     }
     return map;
-  }, [searchState]);
+  }, [searchState, ports.homeSuggestionLimit]);
 
   const diagnostics: DiagnosticsModel = useMemo(
     () => ({
@@ -1414,8 +1441,8 @@ export function useAppShell<O extends ShellOverlay>(
         // route always selects pending and reloads.
         setReviewFilter('pending');
         loadReviews();
-        if (overlay?.type !== 'corrections') {
-          pushOverlay({ type: 'corrections' } as O);
+        if (shellOverlayOf(overlay)?.type !== 'corrections') {
+          pushOverlay({ type: 'corrections' });
         }
       }
     },
@@ -1736,7 +1763,7 @@ export function useAppShell<O extends ShellOverlay>(
         importText.current = null;
         importPreviewRaw.current = null;
         setTransfer(IDLE_TRANSFER);
-        pushOverlay({ type: 'transfer' } as O);
+        pushOverlay({ type: 'transfer' });
         return;
       }
       if (key === 'storefront') {
@@ -2135,7 +2162,7 @@ export function useAppShell<O extends ShellOverlay>(
   // The queue reloads whenever the corrections overlay opens — the
   // rows are live reads, never stale session state.
   useEffect(() => {
-    if (overlay?.type === 'corrections') {
+    if (shellOverlayOf(overlay)?.type === 'corrections') {
       loadReviews();
     }
   }, [overlay, loadReviews]);
@@ -2322,6 +2349,15 @@ export function useAppShell<O extends ShellOverlay>(
     }));
   }, []);
 
+  // Full transfer-surface reset — the deep-link shell wipes the whole
+  // phase pair (export AND import) before driving a fresh leg, unlike
+  // onResetImport which only unwinds the import stage.
+  const resetTransfer = useCallback(() => {
+    importText.current = null;
+    importPreviewRaw.current = null;
+    setTransfer(IDLE_TRANSFER);
+  }, []);
+
   // ---- provider pickers (capability-gated manifest options) -------
 
   const providerPicker = useMemo(
@@ -2388,7 +2424,7 @@ export function useAppShell<O extends ShellOverlay>(
   const openEntity = useCallback(
     (ref: EntityRef) => {
       // Re-opening the entity already on top just reloads it.
-      const top = overlayStack[overlayStack.length - 1]?.overlay;
+      const top = shellOverlayOf(overlayStack[overlayStack.length - 1]?.overlay);
       if (
         top?.type === 'entity' &&
         entityRefKey(top.ref) === entityRefKey(ref)
@@ -2396,14 +2432,15 @@ export function useAppShell<O extends ShellOverlay>(
         loadEntityPage(ref);
         return;
       }
-      pushOverlay({ type: 'entity', ref } as O);
+      pushOverlay({ type: 'entity', ref });
       loadEntityPage(ref);
     },
     [overlayStack, pushOverlay, loadEntityPage],
   );
 
   const onLoadMore = useCallback(() => {
-    const top = overlay?.type === 'entity' ? overlay.ref : null;
+    const current = shellOverlayOf(overlay);
+    const top = current?.type === 'entity' ? current.ref : null;
     const key = top === null ? null : entityRefKey(top);
     const cur = key === null ? null : entityFetches[key] ?? null;
     const continuation = cur?.page?.continuation;
@@ -2779,7 +2816,7 @@ export function useAppShell<O extends ShellOverlay>(
       entityRef: EntityRef | null;
     }) => {
       if (card.playlistId !== null) {
-        pushOverlay({ type: 'playlist', playlistId: card.playlistId } as O);
+        pushOverlay({ type: 'playlist', playlistId: card.playlistId });
       } else if (card.entityRef !== null) {
         openEntity(card.entityRef);
       }
@@ -2794,7 +2831,7 @@ export function useAppShell<O extends ShellOverlay>(
           reportResult('action.createPlaylist', created);
           return;
         }
-        pushOverlay({ type: 'playlist', playlistId: created.value } as O);
+        pushOverlay({ type: 'playlist', playlistId: created.value });
       });
     },
     [session, pushOverlay],
@@ -3063,6 +3100,7 @@ export function useAppShell<O extends ShellOverlay>(
     // search
     query,
     setQuery,
+    searchState,
     runSearch,
     submitSearch,
     retrySearch,
@@ -3283,6 +3321,7 @@ export function useAppShell<O extends ShellOverlay>(
     failImportRead,
     onApplyImport,
     onResetImport,
+    resetTransfer,
     // diagnostics reads
     attempts,
     pendingReviews,

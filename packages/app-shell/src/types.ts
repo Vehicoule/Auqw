@@ -87,7 +87,7 @@ export type ExportWrite =
 /** Platform seams + the genuine behavior divergences. Every member is
     optional unless noted; an absent flag reproduces the mobile/desktop
     default documented on it. */
-export interface AppShellPorts<O extends ShellOverlay> {
+export interface AppShellPorts<E> {
   /**
    * Connectivity edge stream — REQUIRED. Desktop:
    * `controller.subscribeOnline`. Mobile wraps its connectivity port:
@@ -202,8 +202,16 @@ export interface AppShellPorts<O extends ShellOverlay> {
    * inline sync section instead (`openSync` callback bumping its
    * focus tick). Exactly one should be set.
    */
-  readonly openSyncOverlay?: O | undefined;
+  readonly openSyncOverlay?: E | undefined;
   readonly openSync?: (() => void) | undefined;
+
+  /**
+   * Bound on how many search results feed the home suggestion-card
+   * lookup. Desktop capped it at 12 (the rail's depth); mobile's
+   * activateHomeCard searched the whole page. Unset = unbounded
+   * (mobile behavior).
+   */
+  readonly homeSuggestionLimit?: number | undefined;
 
   /**
    * The mobile-only 'artworkCacheBytes' settings row opens a budget
@@ -268,10 +276,10 @@ export interface AppShellPorts<O extends ShellOverlay> {
   ) => Promise<ExportWrite>;
 }
 
-export interface AppShellDeps<O extends ShellOverlay> {
+export interface AppShellDeps<E = never> {
   readonly controller: AppShellController;
   readonly state: ReadySession;
-  readonly ports: AppShellPorts<O>;
+  readonly ports: AppShellPorts<E>;
 }
 
 // ---- pure helpers (tested node-side; the hook is thin wiring) ----
