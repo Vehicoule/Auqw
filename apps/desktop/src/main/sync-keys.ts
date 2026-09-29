@@ -83,8 +83,13 @@ export function syncHasPairedDevices(dir: string): boolean {
     }
   }
   try {
+    // A live sealed blob also arms: it can't be inspected without
+    // decrypting, and a deleted/empty mirror would otherwise strand the
+    // pairings it holds — arming lets loadOnce heal the mirror back.
     return readdirSync(dir).some(
-      (file) => file.startsWith(DEVICE_PREFIX) && file.endsWith('.b64'),
+      (file) =>
+        file === `${STORE_KEY}.b64` ||
+        (file.startsWith(DEVICE_PREFIX) && file.endsWith('.b64')),
     );
   } catch {
     // Missing/unreadable dir means nothing to migrate or arm.
@@ -260,6 +265,43 @@ export function createSyncKeysHandler(deps: {
     } catch {
       mirrorDirty = true;
     }
+  }
+
+  /**
+   * Device records salvaged from the plaintext mirror — reached only
+   * when the sealed blob is corrupt and `identity-replace` must not
+   * orphan every pairing. The mirror carries public fields only (the
+   * devices' own keys stay sealed on the phones), so restoring from it
+   * leaks no material; a forged record still has to complete the
+   * device's own handshake. Anything that doesn't read as a valid,
+   * deduped, in-cap registry degrades to the empty fallback the op
+   * already had.
+   */
+  async function mirrorDevices(): Promise<SyncDeviceRecord[]> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(join(dir, MIRROR_FILE), 'utf8'));
+    } catch {
+      return [];
+    }
+    const devices = isRecord(parsed) ? parsed['devices'] : undefined;
+    if (!Array.isArray(devices)) {
+      return [];
+    }
+    const out: SyncDeviceRecord[] = [];
+    for (const d of devices) {
+      if (!isSyncDeviceRecord(d)) {
+        continue;
+      }
+      if (out.some((o) => o.id === d.id || o.fp === d.fp)) {
+        continue;
+      }
+      if (out.length >= MAX_SYNC_DEVICES) {
+        break;
+      }
+      out.push(d);
+    }
+    return out;
   }
 
   /**
@@ -488,15 +530,18 @@ export function createSyncKeysHandler(deps: {
             s = await load();
           } catch (thrown) {
             // Recovery/rotation over a corrupt blob is exactly what
-            // this op exists for — unwedge with an empty registry
-            // rather than fail on the broken record it's replacing.
-            // Leftover pre-consolidation files still merge on the next
-            // load, so replaceable pairings aren't lost. A dead
-            // backend stays fatal: the write would fail anyway.
+            // this op exists for — unwedge rather than fail on the
+            // broken record it's replacing. The plaintext mirror keeps
+            // the registry's public fields, so salvaged pairings are
+            // restored from it; a mirror that's also unreadable falls
+            // back to the empty registry (the last resort this op is
+            // for). Leftover pre-consolidation files still merge on the
+            // next load. A dead backend stays fatal: the write would
+            // fail anyway.
             if (!isShellError(thrown) || thrown.kind !== 'corrupt-state') {
               throw thrown;
             }
-            s = { identity: null, devices: [] };
+            s = { identity: null, devices: await mirrorDevices() };
           }
           // Device pairings hold the devices' own keys, so they survive
           // a desktop-identity rotation; a phone that pinned our old

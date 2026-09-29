@@ -81,6 +81,30 @@ export function createSecureStore(opts: {
     }
   }
 
+  // Same-key mutations serialize through this chain — an overlapping
+  // set/delete otherwise races unlink-vs-rename, and the LAST cache
+  // write could belong to the operation the filesystem discarded,
+  // leaving reads stale for the life of the store. The fs work and the
+  // cache publish travel inside one chained step so they can't split.
+  const mutations = new Map<string, Promise<void>>();
+
+  function serialize(key: string, work: () => Promise<void>): Promise<void> {
+    const prior = mutations.get(key) ?? Promise.resolve();
+    // Run even when the prior op rejected — a failed delete must not
+    // wedge the key's queue.
+    const next = prior.then(work, work);
+    mutations.set(key, next);
+    const cleanup = () => {
+      if (mutations.get(key) === next) {
+        mutations.delete(key);
+      }
+    };
+    // Both branches handled — a rejected op still runs eviction without
+    // an unhandled rejection.
+    void next.then(cleanup, cleanup);
+    return next;
+  }
+
   return {
     async get(key) {
       requireEncryption();
@@ -111,27 +135,31 @@ export function createSecureStore(opts: {
       // half-written bytes.
       stagingSeq += 1;
       const staging = `${target}.${process.pid}.${stagingSeq}.tmp`;
-      try {
-        await mkdir(dir, { recursive: true });
-        await writeFile(staging, encrypted.toString('base64'), 'utf8');
-        await rename(staging, target);
-      } catch {
-        await unlink(staging).catch(() => undefined);
-        throw shellError('io-error', 'secure entry could not be written');
-      }
-      cache.set(key, Promise.resolve(value));
+      await serialize(key, async () => {
+        try {
+          await mkdir(dir, { recursive: true });
+          await writeFile(staging, encrypted.toString('base64'), 'utf8');
+          await rename(staging, target);
+        } catch {
+          await unlink(staging).catch(() => undefined);
+          throw shellError('io-error', 'secure entry could not be written');
+        }
+        cache.set(key, Promise.resolve(value));
+      });
     },
 
     async delete(key) {
       requireEncryption();
-      try {
-        await unlink(fileFor(key));
-      } catch (thrown) {
-        if (errorCode(thrown) !== 'ENOENT') {
-          throw shellError('io-error', 'secure entry could not be removed');
+      await serialize(key, async () => {
+        try {
+          await unlink(fileFor(key));
+        } catch (thrown) {
+          if (errorCode(thrown) !== 'ENOENT') {
+            throw shellError('io-error', 'secure entry could not be removed');
+          }
         }
-      }
-      cache.set(key, Promise.resolve(null));
+        cache.set(key, Promise.resolve(null));
+      });
     },
   };
 }
