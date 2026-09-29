@@ -1820,7 +1820,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   // ---- transport ---------------------------------------------------
   const playback = state.playback;
-  const playing = playback.type === 'playing';
   const currentRecordingId =
     playback.type === 'idle' ? null : playback.recordingId;
   // Real waveform peaks for the Stage seek — lazy, cached per
@@ -1985,7 +1984,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
   const lyricsPositionMs = useSmoothedPosition(
     stagePlayer?.positionMs ?? 0,
-    playing,
+    playback.type === 'playing',
     stageOpen && stageMode === 'lyrics',
     seekGeneration,
   );
