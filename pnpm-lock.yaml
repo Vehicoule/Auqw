@@ -115,6 +115,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@auqw/app-shell':
+        specifier: workspace:*
+        version: link:../../packages/app-shell
       '@auqw/design-tokens':
         specifier: workspace:*
         version: link:../../packages/design-tokens

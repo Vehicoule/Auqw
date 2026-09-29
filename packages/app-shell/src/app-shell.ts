@@ -2986,6 +2986,7 @@ export function useAppShell<O extends ShellOverlay>(
     state,
     // gate
     localeApplied,
+    localeTick,
     // channels
     positionMs,
     online,

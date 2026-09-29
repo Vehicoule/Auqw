@@ -45,6 +45,7 @@ import {
   reportResult,
   t,
 } from '@auqw/ui-shared';
+import type { DownloadChip } from '@auqw/ui-shared';
 
 /** The overlay variants the factory can push itself. Apps extend the
     union with their own routes (mobile adds `{ type: 'sync' }`). */
@@ -456,8 +457,8 @@ export function stageDownloadChip(input: {
     recordingId: string,
   ) => Pick<DownloadRecord, 'state' | 'error'> | null;
   readonly downloadRefFor: (recordingId: string) => SourceRef | null;
-  readonly chipFor: (recordingId: string) => string | null;
-}): string | null {
+  readonly chipFor: (recordingId: string) => DownloadChip | null;
+}): DownloadChip | null {
   if (
     input.recordingId === null ||
     (input.recordFor(input.recordingId) === null &&
