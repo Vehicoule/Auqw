@@ -13,21 +13,6 @@ import { toFileUri } from '../shared/local-paths.ts';
  *   disagree).
  * - `uriFor` is `LocalFileSource.uriFor` — the engine's in-memory row
  *   → `docUri` string math (also shared), so it stays sync too.
- *
- * Integration point for the mount leg (`renderer/controller.ts` on
- * `s4/ui-web-mount`): after constructing `DownloadManager` and
- * `LocalFileSource`, wire
- *
- * ```ts
- * localPlaybackFor: createLocalPlayback({
- *   mediaDir: `${meta.userDataPath}/media`,
- *   fileFor: (id) => downloads.fileFor(id),
- *   uriFor: (id) => localSource.uriFor(id),
- * }),
- * ```
- *
- * into the `Session` deps. No refresh call is needed after `local:*`
- * mutations — the hook reads live engine state on every probe.
  */
 export type LocalPlaybackDeps = {
   /** Managed media dir — `${userDataPath}/media`. */
