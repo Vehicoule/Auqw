@@ -31,9 +31,10 @@ object AuqwTagReader {
 
   /** Take the persistable read grant and resolve a display label. */
   fun persistAndLabel(ctx: Context, treeUri: Uri): Pair<String, String> {
-    val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
     try {
-      ctx.contentResolver.takePersistableUriPermission(treeUri, flags)
+      ctx.contentResolver.takePersistableUriPermission(
+        treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+      )
     } catch (e: SecurityException) {
       // Some providers return trees that can't persist — keep the row
       // honest: enumerate will surface permission-denied later.
@@ -49,7 +50,7 @@ object AuqwTagReader {
     } catch (e: Exception) {
       null
     } ?: treeDocId
-    return Pair(treeUri.toString(), label)
+    return treeUri.toString() to label
   }
 
   /**
@@ -65,21 +66,17 @@ object AuqwTagReader {
       val children = DocumentsContract.buildChildDocumentsUriUsingTree(
         treeUri, parentId
       )
-      val cursor = try {
-        ctx.contentResolver.query(
-          children,
-          arrayOf(
-            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-            DocumentsContract.Document.COLUMN_SIZE,
-            DocumentsContract.Document.COLUMN_MIME_TYPE,
-            DocumentsContract.Document.COLUMN_LAST_MODIFIED
-          ),
-          null, null, null
-        )
-      } catch (e: Exception) {
-        throw e
-      } ?: continue
+      val cursor = ctx.contentResolver.query(
+        children,
+        arrayOf(
+          DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+          DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+          DocumentsContract.Document.COLUMN_SIZE,
+          DocumentsContract.Document.COLUMN_MIME_TYPE,
+          DocumentsContract.Document.COLUMN_LAST_MODIFIED
+        ),
+        null, null, null
+      ) ?: continue
       cursor.use {
         while (it.moveToNext()) {
           val docId = it.getString(0) ?: continue
@@ -116,6 +113,22 @@ object AuqwTagReader {
       lower.endsWith(".aac") || lower.endsWith(".wma")
   }
 
+  /** Per-doc batch: null per entry on failure so the batch survives
+   * one bad file. */
+  private fun perDoc(
+    docIds: List<String>,
+    op: String,
+    each: (String) -> Map<String, Any?>
+  ): List<Map<String, Any?>?> =
+    docIds.map { docId ->
+      try {
+        each(docId)
+      } catch (e: Exception) {
+        Log.w(TAG, "$op failed for $docId: ${e.message}")
+        null
+      }
+    }
+
   /**
    * sha256(head 4KiB || tail 4KiB || sizeLE) per doc; null per entry
    * on open/read failure so the batch survives one bad file.
@@ -124,16 +137,8 @@ object AuqwTagReader {
     ctx: Context,
     treeUri: Uri,
     docIds: List<String>
-  ): List<Map<String, Any?>?> {
-    return docIds.map { docId ->
-      try {
-        fingerprintOne(ctx, treeUri, docId)
-      } catch (e: Exception) {
-        Log.w(TAG, "fingerprint failed for $docId: ${e.message}")
-        null
-      }
-    }
-  }
+  ): List<Map<String, Any?>?> =
+    perDoc(docIds, "fingerprint") { fingerprintOne(ctx, treeUri, it) }
 
   private fun fingerprintOne(
     ctx: Context,
@@ -151,18 +156,10 @@ object AuqwTagReader {
         val tail = ByteArray(
           maxOf(0L, size - head.size).coerceAtMost(SAMPLE.toLong()).toInt()
         )
-        val headBuf = java.nio.ByteBuffer.wrap(head)
-        while (headBuf.hasRemaining()) {
-          if (ch.read(headBuf) < 0) break
-        }
-        digest.update(head, 0, headBuf.position())
+        digest.update(head, 0, fill(ch, head))
         if (tail.isNotEmpty()) {
-          val tailBuf = java.nio.ByteBuffer.wrap(tail)
           ch.position(size - tail.size)
-          while (tailBuf.hasRemaining()) {
-            if (ch.read(tailBuf) < 0) break
-          }
-          digest.update(tail, 0, tailBuf.position())
+          digest.update(tail, 0, fill(ch, tail))
         }
       }
     }
@@ -174,21 +171,20 @@ object AuqwTagReader {
     return mapOf("docId" to docId, "fingerprint" to hex)
   }
 
+  /** Read `dst` end-to-end; returns the consumed byte count (short at EOF). */
+  private fun fill(ch: java.nio.channels.FileChannel, dst: ByteArray): Int {
+    val buf = java.nio.ByteBuffer.wrap(dst)
+    while (buf.hasRemaining() && ch.read(buf) >= 0) {}
+    return buf.position()
+  }
+
   /** MediaMetadataRetriever tags per doc; null per-entry on failure. */
   fun readTags(
     ctx: Context,
     treeUri: Uri,
     docIds: List<String>
-  ): List<Map<String, Any?>?> {
-    return docIds.map { docId ->
-      try {
-        tagsOne(ctx, treeUri, docId)
-      } catch (e: Exception) {
-        Log.w(TAG, "readTags failed for $docId: ${e.message}")
-        null
-      }
-    }
-  }
+  ): List<Map<String, Any?>?> =
+    perDoc(docIds, "readTags") { tagsOne(ctx, treeUri, it) }
 
   private fun tagsOne(
     ctx: Context,
@@ -198,26 +194,15 @@ object AuqwTagReader {
     val retriever = MediaMetadataRetriever()
     try {
       retriever.setDataSource(ctx, docUri(treeUri, docId))
-      val duration = retriever
-        .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-        ?.toLongOrNull()
+      fun meta(key: Int) = retriever.extractMetadata(key)
+      val duration = meta(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
       return mapOf(
         "docId" to docId,
-        "title" to retriever.extractMetadata(
-          MediaMetadataRetriever.METADATA_KEY_TITLE
-        ),
-        "artist" to retriever.extractMetadata(
-          MediaMetadataRetriever.METADATA_KEY_ARTIST
-        ),
-        "album" to retriever.extractMetadata(
-          MediaMetadataRetriever.METADATA_KEY_ALBUM
-        ),
-        "durationMs" to (duration?.toDouble() ?: 0.0).let {
-          if (it > 0) it else null
-        },
-        "genre" to retriever.extractMetadata(
-          MediaMetadataRetriever.METADATA_KEY_GENRE
-        )
+        "title" to meta(MediaMetadataRetriever.METADATA_KEY_TITLE),
+        "artist" to meta(MediaMetadataRetriever.METADATA_KEY_ARTIST),
+        "album" to meta(MediaMetadataRetriever.METADATA_KEY_ALBUM),
+        "durationMs" to duration?.toDouble()?.takeIf { it > 0 },
+        "genre" to meta(MediaMetadataRetriever.METADATA_KEY_GENRE)
       )
     } finally {
       retriever.release()

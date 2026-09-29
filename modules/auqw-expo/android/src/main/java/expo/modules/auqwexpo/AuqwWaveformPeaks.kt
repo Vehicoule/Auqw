@@ -168,7 +168,8 @@ internal class AuqwWaveformPeaks(
         throw CancellationException("cancelled before extraction started")
       }
       val local = localFor(handle)
-      val decoded = if (local !== null) {
+      val setSource: (MediaExtractor) -> Unit
+      if (local !== null) {
         if (local.bytes > cap) {
           throw CodedException(
             if (provisionalCap) "not-applicable" else "budget-exceeded",
@@ -176,27 +177,14 @@ internal class AuqwWaveformPeaks(
             null
           )
         }
-        decodePcm(
-          { extractor ->
-            extractor.setDataSource(local.context, local.uri, null)
-          },
-          cap,
-          provisionalCap,
-          pcmFile,
-        )
+        setSource = { it.setDataSource(local.context, local.uri, null) }
       } else {
         val host = registry.hostFor(handle)
           ?: throw CodedException("released", "unknown stream handle", null)
         val encoded = pullBytes(host, handle, cap, provisionalCap)
-        decodePcm(
-          { extractor ->
-            extractor.setDataSource(ByteArrayMediaDataSource(encoded))
-          },
-          cap,
-          provisionalCap,
-          pcmFile,
-        )
+        setSource = { it.setDataSource(ByteArrayMediaDataSource(encoded)) }
       }
+      val decoded = decodePcm(setSource, cap, provisionalCap, pcmFile)
       return bucket(
         pcmFile, decoded.bytes, decoded.channels, decoded.floatPcm, count, job
       )
@@ -227,16 +215,14 @@ internal class AuqwWaveformPeaks(
     provisionalCap: Boolean,
   ): ByteArray {
     val out = ByteArrayOutputStream()
-    var position = 0L
     var ended = false
     var deadline = SystemClock.uptimeMillis() + FIRST_READ_TIMEOUT_MS
     // `<=` so an exactly-`cap` stream still reaches its EOF read.
     while (out.size() <= cap) {
       coroutineContext.ensureActive()
-      val readPos = position
       val chunk = try {
         withContext(Dispatchers.IO) {
-          host.streamPeek(handle, readPos.toULong(), READ_CHUNK.toULong())
+          host.streamPeek(handle, out.size().toULong(), READ_CHUNK.toULong())
         }
       } catch (e: StreamException) {
         throw seamError(e)
@@ -263,7 +249,6 @@ internal class AuqwWaveformPeaks(
         }
         else -> {
           out.write(chunk, 0, chunk.size)
-          position += chunk.size
           deadline = SystemClock.uptimeMillis() + PARK_TIMEOUT_MS
         }
       }
@@ -430,22 +415,18 @@ internal class AuqwWaveformPeaks(
         "invalid-response", e.message ?: "audio decode failed", e
       )
     } finally {
-      try {
-        codec?.stop()
-      } catch (e: Exception) {
-        Log.i(TAG, "codec stop: ${e.message}")
-      }
-      try {
-        codec?.release()
-      } catch (e: Exception) {
-        Log.i(TAG, "codec release: ${e.message}")
-      }
+      quiet("codec stop") { codec?.stop() }
+      quiet("codec release") { codec?.release() }
       extractor.release()
-      try {
-        pcmOut?.close()
-      } catch (e: Exception) {
-        Log.i(TAG, "pcm spill close: ${e.message}")
-      }
+      quiet("pcm spill close") { pcmOut?.close() }
+    }
+  }
+
+  private fun quiet(what: String, block: () -> Unit) {
+    try {
+      block()
+    } catch (e: Exception) {
+      Log.i(TAG, "$what: ${e.message}")
     }
   }
 
@@ -532,13 +513,10 @@ internal class AuqwWaveformPeaks(
   }
 
   private fun formatInt(format: MediaFormat, key: String): Int? =
-    if (format.containsKey(key)) {
-      try {
-        format.getInteger(key)
-      } catch (_: Exception) {
-        null
-      }
-    } else {
+    if (!format.containsKey(key)) null
+    else try {
+      format.getInteger(key)
+    } catch (_: Exception) {
       null
     }
 

@@ -112,12 +112,7 @@ class AuqwSyncSockets(
               socketId,
               socket.inetAddress?.hostAddress ?: "unknown",
             )
-            val reader =
-              Thread({ readLoop(socketId, entry) }, "auqw-sync-$socketId").apply {
-                isDaemon = true
-                start()
-              }
-            entry.reader = reader
+            entry.reader = spawnReader(socketId, entry)
           }
         },
         "auqw-sync-accept",
@@ -128,6 +123,12 @@ class AuqwSyncSockets(
     acceptThread = thread
     return server.localPort
   }
+
+  private fun spawnReader(socketId: String, entry: Entry): Thread =
+    Thread({ readLoop(socketId, entry) }, "auqw-sync-$socketId").apply {
+      isDaemon = true
+      start()
+    }
 
   fun stopListening() {
     val server = listener ?: return
@@ -174,12 +175,7 @@ class AuqwSyncSockets(
       Log.w(TAG, "syncConnect failed", e)
       throw CodedException("unavailable", "syncConnect failed", e)
     }
-    val reader =
-      Thread({ readLoop(socketId, entry) }, "auqw-sync-$socketId").apply {
-        isDaemon = true
-        start()
-      }
-    entry.reader = reader
+    entry.reader = spawnReader(socketId, entry)
     return socket.inetAddress?.hostAddress
   }
 
@@ -195,8 +191,7 @@ class AuqwSyncSockets(
       }
     synchronized(entry.socket) {
       try {
-        entry.socket.getOutputStream().write(bytes)
-        entry.socket.getOutputStream().flush()
+        entry.socket.getOutputStream().apply { write(bytes); flush() }
       } catch (e: Exception) {
         reportClosed(socketId, entry, "error")
         Log.w(TAG, "syncSend failed", e)
@@ -234,9 +229,7 @@ class AuqwSyncSockets(
 
   fun destroyAll() {
     stopListening()
-    for (id in entries.keys.toList()) {
-      destroy(id)
-    }
+    entries.keys.toList().forEach(::destroy)
   }
 
   private fun readLoop(socketId: String, entry: Entry) {
