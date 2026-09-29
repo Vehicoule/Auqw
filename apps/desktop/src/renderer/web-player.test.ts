@@ -583,6 +583,107 @@ export async function run(): Promise<void> {
     );
   }
 
+  // `localResolve` re-keys the mint to the realpath'd URI — the
+  // lexical input is never what the element attaches, and
+  // `localUriFor` reports the resolved route.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      localResolve: (uri) =>
+        Promise.resolve(
+          uri === 'file:///music/lex.flac' ? 'file:///real/rip.flac' : null,
+        ),
+    });
+    const events = collect(player);
+    await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///music/lex.flac',
+      identity,
+    });
+    await settle();
+    const handle = preparedHandle(events);
+    assertEqual(
+      player.localUriFor(handle),
+      'file:///real/rip.flac',
+      'the minted handle keys to the resolved URI',
+    );
+    await player.play({ handle, identity });
+    assertEqual(
+      audio.src,
+      'file:///real/rip.flac',
+      'the element attaches the realpath answer',
+    );
+  }
+
+  // A null resolve answer fails 'unavailable' and mints nothing.
+  {
+    const stream = fakeStream();
+    const player = createWebPlayerPort({
+      stream,
+      audio: fakeAudio(),
+      localResolve: () => Promise.resolve(null),
+    });
+    const events = collect(player);
+    await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///escape/out.flac',
+      identity,
+    });
+    await settle();
+    const prepared = events.find((e) => e.type === 'prepare');
+    assert(
+      prepared !== undefined &&
+        prepared.type === 'prepare' &&
+        prepared.outcome.type === 'failed' &&
+        prepared.outcome.error.kind === 'unavailable',
+      'a refused URI fails unavailable',
+    );
+  }
+
+  // cancelPrepare during the in-flight resolve stops the mint and
+  // reports the same 'cancelled' outcome the minted path does.
+  {
+    const stream = fakeStream();
+    let resolveNow: ((uri: string | null) => void) | null = null;
+    const player = createWebPlayerPort({
+      stream,
+      audio: fakeAudio(),
+      localResolve: () =>
+        new Promise<string | null>((resolve) => {
+          resolveNow = resolve;
+        }),
+    });
+    const events = collect(player);
+    const res = await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///music/pending.flac',
+      identity,
+    });
+    assert(res.ok, 'local prepare resolves a requestId');
+    const cancelled = await player.cancelPrepare({
+      requestId: res.ok ? res.value : '',
+      identity,
+    });
+    assert(cancelled.ok, 'cancel during resolve resolves');
+    resolveNow?.('file:///real/pending.flac');
+    await settle();
+    const prepared = events.find((e) => e.type === 'prepare');
+    assert(
+      prepared !== undefined &&
+        prepared.type === 'prepare' &&
+        prepared.outcome.type === 'failed' &&
+        prepared.outcome.error.kind === 'cancelled',
+      'a cancelled resolve reports cancelled, never prepared',
+    );
+    assert(
+      preparedHandles(events).length === 0,
+      'the cancelled resolve mints no handle',
+    );
+  }
+
   // play → serveUrl, src set, buffering status then playing.
   {
     const audio = fakeAudio();

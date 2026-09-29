@@ -1,5 +1,5 @@
 import type { Stats } from 'node:fs';
-import { access, realpath, stat } from 'node:fs/promises';
+import { access, open, realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { CHANNELS } from '../shared/channels.ts';
@@ -7,13 +7,21 @@ import { errorCode } from '../shared/check.ts';
 import type {
   LocalAddArgs,
   LocalProbeArgs,
+  LocalReadArgs,
+  LocalResolveArgs,
 } from '../shared/contract.ts';
-import { isLocalAddArgs, isLocalProbeArgs } from '../shared/contract.ts';
+import {
+  isLocalAddArgs,
+  isLocalProbeArgs,
+  isLocalReadArgs,
+  isLocalResolveArgs,
+} from '../shared/contract.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
 import {
   dirTreeUri,
   docIdConfined,
   docUriFor,
+  fileUrlPath,
   parseTree,
   pathConfined,
   pickedFileTreeUri,
@@ -305,6 +313,113 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
     }
   }
 
+  /**
+   * A `file://` URI the renderer is allowed to touch — the lexical
+   * path is realpath'd (a symlink swap can't smuggle an escape through
+   * the gap between index-time resolution and playback-time open),
+   * then the resolved path must sit inside the media dir or under a
+   * granted tree root. Dir trees confine by `pathConfined`; picked-
+   * file roots grant exactly the file they name.
+   */
+  async function allowedLocalPath(uri: string): Promise<string | null> {
+    const abs = fileUrlPath(uri);
+    if (abs === null) {
+      return null;
+    }
+    const real = await realpathChecked(abs);
+    if (real === null) {
+      return null;
+    }
+    if (options.mediaDir !== undefined) {
+      const mediaReal = await realpathChecked(options.mediaDir);
+      if (
+        mediaReal !== null &&
+        (pathConfined(mediaReal, real) || real === mediaReal)
+      ) {
+        return real;
+      }
+    }
+    const db = options.database();
+    if (db === null) {
+      return null;
+    }
+    try {
+      const rows = db
+        .prepare('SELECT tree_uri AS treeUri FROM local_sources')
+        .all() as { treeUri?: unknown }[];
+      for (const row of rows) {
+        if (typeof row.treeUri !== 'string') {
+          continue;
+        }
+        const tree = parseTree(row.treeUri);
+        if (tree === null) {
+          continue;
+        }
+        const rootReal = await realpathChecked(tree.absPath);
+        if (rootReal === null) {
+          continue;
+        }
+        if (
+          tree.kind === 'file'
+            ? real === rootReal
+            : pathConfined(rootReal, real)
+        ) {
+          return real;
+        }
+      }
+      return null;
+    } catch (thrown) {
+      const message = thrown instanceof Error ? thrown.message : '';
+      if (message.includes('no such table')) {
+        return null;
+      }
+      asIo('local resolve failed', thrown);
+      return null;
+    }
+  }
+
+  /**
+   * `local:resolve` — the renderer's attach-time confinement check: a
+   * `file://` URI returns its realpath'd, grant-checked URI, or null
+   * when the path escapes every root. Consumed async at attach so a
+   * lexical-URI-minted `lf-*` handle can never resolve into bytes
+   * outside the granted set.
+   */
+  async function resolve(args: LocalResolveArgs): Promise<unknown> {
+    const real = await allowedLocalPath(args.uri);
+    return { uri: real === null ? null : toFileUri(real) };
+  }
+
+  /**
+   * `local:read` — ranged byte reads on a `file://` URI for features
+   * that need bytes, not an element attach (waveform peaks). The same
+   * `allowedLocalPath` gate as `resolve`; empty data reads as EOF.
+   */
+  async function read(args: LocalReadArgs): Promise<unknown> {
+    const real = await allowedLocalPath(args.uri);
+    if (real === null) {
+      throw shellError('permission-denied', 'path is not readable');
+    }
+    let file;
+    try {
+      file = await open(real, 'r');
+    } catch (thrown) {
+      return statError(thrown);
+    }
+    try {
+      const buffer = Buffer.alloc(args.maxLen);
+      const { bytesRead } = await file.read(
+        buffer,
+        0,
+        args.maxLen,
+        args.position,
+      );
+      return { data: buffer.subarray(0, bytesRead).toString('base64') };
+    } finally {
+      await file.close();
+    }
+  }
+
   async function list(): Promise<unknown> {
     const db = options.database();
     if (db === null) {
@@ -488,6 +603,16 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         CHANNELS.localProbe,
         isLocalProbeArgs,
         probe,
+      ),
+      [CHANNELS.localResolve]: guarded(
+        CHANNELS.localResolve,
+        isLocalResolveArgs,
+        resolve,
+      ),
+      [CHANNELS.localRead]: guarded(
+        CHANNELS.localRead,
+        isLocalReadArgs,
+        read,
       ),
       [CHANNELS.localList]: guarded(CHANNELS.localList, noArgs, list),
       [CHANNELS.localPlayback]: guarded(

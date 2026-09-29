@@ -26,8 +26,8 @@ export type ParsedTree =
   | { readonly kind: 'dir'; readonly absPath: string }
   | { readonly kind: 'file'; readonly absPath: string };
 
-/** OS path inside a `file:`-URL treeUri, else null. */
-function fileUrlPath(uri: string): string | null {
+/** OS path inside a `file:`-URL treeUri or playable `file://` URI, else null. */
+export function fileUrlPath(uri: string): string | null {
   if (!uri.startsWith('file:')) {
     return null;
   }

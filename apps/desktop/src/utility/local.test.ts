@@ -1,5 +1,12 @@
 import { mkdtempSync, rmSync } from 'node:fs';
-import { chmod, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -243,6 +250,93 @@ export async function run(): Promise<void> {
     assert(
       !relative.ok && relative.error?.kind === 'invalid-request',
       'relative path refused',
+    );
+
+    // `local:resolve` — a granted file's file:// URI comes back
+    // realpath'd; escapes, ungranted paths, and non-file URIs refuse.
+    const granted = join(folder, 'again.wav');
+    await writeFile(granted, Buffer.alloc(32, 7));
+    const grantedUri = pathToFileURL(granted).href;
+    const resolved = await call(CHANNELS.localResolve, {
+      uri: grantedUri,
+    });
+    assert(
+      resolved.ok &&
+        (resolved.result as { uri: string | null }).uri ===
+          pathToFileURL(await realpath(granted)).href,
+      'resolve returns the realpath URI for a granted file',
+    );
+    const outside = await call(CHANNELS.localResolve, {
+      uri: pathToFileURL(join(root, 'notes.txt')).href,
+    });
+    assert(
+      outside.ok &&
+        (outside.result as { uri: string | null }).uri === null,
+      'a path outside every root refuses',
+    );
+    const evil = join(root, 'evil.wav');
+    await writeFile(evil, Buffer.alloc(8, 0));
+    const swap = join(folder, 'swap.wav');
+    await symlink(evil, swap);
+    const escaped = await call(CHANNELS.localResolve, {
+      uri: pathToFileURL(swap).href,
+    });
+    assert(
+      escaped.ok &&
+        (escaped.result as { uri: string | null }).uri === null,
+      'a symlink escape refuses at attach time',
+    );
+    // The media dir counts as a root for managed-download URIs.
+    const dlUri = pathToFileURL(join(mediaDir, 'dl-1')).href;
+    const resolvedDl = await call(CHANNELS.localResolve, {
+      uri: dlUri,
+    });
+    assert(
+      resolvedDl.ok &&
+        (resolvedDl.result as { uri: string | null }).uri !== null,
+      'a media-dir URI resolves',
+    );
+
+    // `local:read` — ranged bytes over the same grant gate.
+    const read = await call(CHANNELS.localRead, {
+      uri: grantedUri,
+      position: 0,
+      maxLen: 16,
+    });
+    assert(
+      read.ok &&
+        (read.result as { data: string }).data ===
+          Buffer.alloc(16, 7).toString('base64'),
+      'read serves granted bytes',
+    );
+    const tail = await call(CHANNELS.localRead, {
+      uri: grantedUri,
+      position: 30,
+      maxLen: 16,
+    });
+    assert(
+      tail.ok &&
+        (tail.result as { data: string }).data ===
+          Buffer.alloc(2, 7).toString('base64'),
+      'read clips at EOF',
+    );
+    const eof = await call(CHANNELS.localRead, {
+      uri: grantedUri,
+      position: 32,
+      maxLen: 16,
+    });
+    assert(
+      eof.ok && (eof.result as { data: string }).data === '',
+      'read past EOF returns empty',
+    );
+    const denied = await call(CHANNELS.localRead, {
+      uri: pathToFileURL(evil).href,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !denied.ok && denied.error?.kind === 'permission-denied',
+      'an ungranted read is permission-denied',
     );
   } finally {
     local.close();

@@ -175,6 +175,9 @@ function toAttemptTrace(
  * page learned outside `prepare` (the dev-gate's `stream.devPrepare`). */
 export type WebPlayerPort = PlayerPort & {
   noteMime(handle: string, mime: string): void;
+  /** `lf-*` handle → its resolved `file://` URI, else null — the
+   * peaks port reads local bytes through `local:read` with this. */
+  localUriFor(handle: string): string | null;
 };
 
 export function createWebPlayerPort(deps: {
@@ -196,6 +199,14 @@ export function createWebPlayerPort(deps: {
    * reporting 'audio/*'. Absent in tests/the dev harness.
    */
   localMime?: ((uri: string) => string | null) | null;
+  /**
+   * `local:resolve` — the utility's realpath + grant-confinement gate
+   * on a `file://` URI, consumed at prepare time: a null answer fails
+   * the prepare 'unavailable' so a lexical-URI-minted ref can never
+   * attach bytes outside the granted set. Absent in tests/the dev
+   * harness (the URI is trusted there).
+   */
+  localResolve?: ((uri: string) => Promise<string | null>) | null;
 }): WebPlayerPort {
   const { stream, audio } = deps;
   const now = deps.now ?? Date.now;
@@ -219,6 +230,10 @@ export function createWebPlayerPort(deps: {
    * outlives the outcome so cancelPrepare can reclaim an adopted-
    * but-unattached handle; release drops it with the handle. */
   const localPrepares = new Map<string, string>();
+  /** `lf-req-*` ids whose `local:resolve` is still in flight — the
+   * requestId is live before the mint so `cancelPrepare` can stop a
+   * pending resolve from minting at all. */
+  const pendingLocalResolve = new Set<string>();
   let localSeq = 0;
   /** The live MSE attach, keyed by the handle it serves. */
   let activeMse: { handle: string; source: MseSource } | null = null;
@@ -276,6 +291,7 @@ export function createWebPlayerPort(deps: {
    */
   function releaseMinted(handle: string): void {
     if (localHandles.delete(handle)) {
+      handleMimes.delete(handle);
       for (const [requestId, minted] of localPrepares) {
         if (minted === handle) {
           localPrepares.delete(requestId);
@@ -1007,34 +1023,63 @@ export function createWebPlayerPort(deps: {
     requestId: string,
     emitFailed: (error: AppError) => void,
   ): void {
-    const minted = mintLocalHandle(input.sourceRef);
-    if (!minted.ok) {
-      emitFailed(minted.error);
-      return;
-    }
-    // The entry lands before the outcome so a `cancelPrepare` racing
-    // the microtask finds and reclaims the minted handle — the mobile
-    // adapter's reclaim-by-requestId contract.
-    localPrepares.set(requestId, minted.value.handle);
-    queueMicrotask(() => {
-      if (!localPrepares.has(requestId)) {
-        emitFailed(appError('cancelled', 'local prepare cancelled'));
+    // The URI mints on the utility's realpath-checked answer: a
+    // renderer-side `file://` string is lexical, and only the utility
+    // can realpath + confine it to the granted roots. A null answer
+    // (escape, revoke, gone) fails the prepare 'unavailable'. With no
+    // resolver (tests/dev harness) the lexical ref is trusted as-is.
+    pendingLocalResolve.add(requestId);
+    const mint = (resolved: string | null): void => {
+      if (!pendingLocalResolve.delete(requestId)) {
+        // cancelPrepare arrived while the resolve was in flight — the
+        // cancelled outcome mirrors the microtask path below.
+        emitFailed(
+          appError('cancelled', 'local prepare cancelled'),
+        );
         return;
       }
-      emit({
-        type: 'prepare',
-        requestId,
-        identity: input.identity,
-        outcome: {
-          type: 'prepared',
-          stream: {
-            handle: minted.value.handle,
-            mime: minted.value.mime,
+      if (resolved === null) {
+        emitFailed(
+          appError('unavailable', 'local file not readable'),
+        );
+        return;
+      }
+      const minted = mintLocalHandle(resolved);
+      if (!minted.ok) {
+        emitFailed(minted.error);
+        return;
+      }
+      // The entry lands before the outcome so a `cancelPrepare` racing
+      // the microtask finds and reclaims the minted handle — the mobile
+      // adapter's reclaim-by-requestId contract.
+      localPrepares.set(requestId, minted.value.handle);
+      queueMicrotask(() => {
+        if (!localPrepares.has(requestId)) {
+          emitFailed(appError('cancelled', 'local prepare cancelled'));
+          return;
+        }
+        emit({
+          type: 'prepare',
+          requestId,
+          identity: input.identity,
+          outcome: {
+            type: 'prepared',
+            stream: {
+              handle: minted.value.handle,
+              mime: minted.value.mime,
+            },
+            attempt: toAttemptTrace(undefined, requestId),
           },
-          attempt: toAttemptTrace(undefined, requestId),
-        },
+        });
       });
-    });
+    };
+    const resolver = deps.localResolve;
+    if (resolver === undefined || resolver === null) {
+      queueMicrotask(() => mint(input.sourceRef));
+      return;
+    }
+    resolver(input.sourceRef).then(mint, () => mint(null));
+    return;
   }
 
   /**
@@ -1318,6 +1363,7 @@ export function createWebPlayerPort(deps: {
       // the minted handle locally so a cancelled prepare can't
       // orphan it (the mobile adapter's convention).
       if (input.requestId.startsWith('lf-req-')) {
+        pendingLocalResolve.delete(input.requestId);
         const handle = localPrepares.get(input.requestId);
         localPrepares.delete(input.requestId);
         if (handle !== undefined) {
@@ -1330,6 +1376,8 @@ export function createWebPlayerPort(deps: {
     },
 
     noteMime,
+
+    localUriFor: (handle) => localHandles.get(handle) ?? null,
 
     async release(input) {
       if (current !== null && current.handle === input.handle) {

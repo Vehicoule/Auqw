@@ -251,6 +251,8 @@ function fakeApi(): Rig {
       local: {
         add: () => Promise.reject(new Error('seam: inject local')),
         probe: () => Promise.reject(new Error('seam: inject local')),
+        resolve: () => Promise.reject(new Error('seam: inject local')),
+        read: () => Promise.reject(new Error('seam: inject local')),
         list: () => Promise.reject(new Error('seam: inject local')),
         playback: () => Promise.reject(new Error('seam: inject local')),
         sweep: () => Promise.reject(new Error('seam: inject local')),

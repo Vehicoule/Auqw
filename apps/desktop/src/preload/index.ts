@@ -8,6 +8,8 @@ import {
   isLocalListResult,
   isLocalPlaybackResult,
   isLocalProbeResult,
+  isLocalReadResult,
+  isLocalResolveResult,
   isLocalSweepResult,
   isNetEvent,
   isPrepareOutcomePayload,
@@ -506,6 +508,10 @@ const api: AuqwApi = {
     add: (args) => invoke(CHANNELS.localAdd, args, isLocalAddResult),
     probe: (args) =>
       invoke(CHANNELS.localProbe, args, isLocalProbeResult),
+    resolve: (args) =>
+      invoke(CHANNELS.localResolve, args, isLocalResolveResult),
+    read: (args) =>
+      invoke(CHANNELS.localRead, args, isLocalReadResult),
     list: () => invoke(CHANNELS.localList, undefined, isLocalListResult),
     playback: () =>
       invoke(CHANNELS.localPlayback, undefined, isLocalPlaybackResult),
