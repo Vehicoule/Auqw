@@ -28,11 +28,17 @@ export async function run(): Promise<void> {
   const mediaDir = join(userData, 'media');
   const dbPath = join(userData, 'auqw.db');
   await mkdir(mediaDir, { recursive: true });
+  // Two connections mirror production: the services read through
+  // `db` (the indexDb accessor role) while every table write goes
+  // through `dbW` (the SqliteStorage role) — cross-connection commits
+  // are what PRAGMA data_version reports, so the gate's freshness
+  // stamp only behaves correctly under the two-handle shape.
   const db = new DatabaseSync(dbPath);
-  db.exec('PRAGMA foreign_keys = ON');
+  const dbW = new DatabaseSync(dbPath);
+  dbW.exec('PRAGMA foreign_keys = ON');
   for (const migration of MIGRATIONS) {
     for (const sql of migration) {
-      db.exec(sql);
+      dbW.exec(sql);
     }
   }
   const local = createLocalService({ database: () => db, mediaDir });
@@ -51,7 +57,7 @@ export async function run(): Promise<void> {
     return route({ id, channel, args });
   };
   const insertRecording = (id: string, provenance = 'provider'): void => {
-    db.prepare(
+    dbW.prepare(
       `INSERT INTO recordings (id, title, artwork_json, version_labels_json, provenance)
        VALUES (?, 'x', '[]', '[]', ?)`,
     ).run(id, provenance);
@@ -75,7 +81,7 @@ export async function run(): Promise<void> {
 
     // The engine commits the source row through storage:* — here the
     // insert stands in for SqliteStorage's write path.
-    db.prepare(
+    dbW.prepare(
       'INSERT INTO local_sources (source_id, tree_uri, label, added_ms) VALUES (?, ?, ?, ?)',
     ).run('src-1', pick?.treeUri ?? '', pick?.label ?? '', 1);
 
@@ -88,7 +94,7 @@ export async function run(): Promise<void> {
     assertEqual(docs[0]?.docId, 'demo.wav', 'picked dir lists the doc');
 
     insertRecording('rec-1', 'local');
-    db.prepare(
+    dbW.prepare(
       `INSERT INTO local_files
        (file_id, source_id, doc_id, size, fingerprint, recording_id)
        VALUES ('lf-1', 'src-1', 'demo.wav', 2048, 'fp', 'rec-1')`,
@@ -112,7 +118,7 @@ export async function run(): Promise<void> {
     // Downloads win over local rows — stored bytes are the owner.
     await writeFile(join(mediaDir, 'dl-1'), Buffer.alloc(64, 2));
     insertRecording('rec-2');
-    db.prepare(
+    dbW.prepare(
       `INSERT INTO downloads
        (download_id, recording_id, provider, source_ref_json, file_path,
         bytes, state, committed_offset, priority, requested_ms)
@@ -130,7 +136,7 @@ export async function run(): Promise<void> {
 
     // A download row that claims bytes but has none falls through.
     insertRecording('rec-3');
-    db.prepare(
+    dbW.prepare(
       `INSERT INTO downloads
        (download_id, recording_id, provider, source_ref_json, file_path,
         bytes, state, committed_offset, priority, requested_ms)
@@ -149,7 +155,7 @@ export async function run(): Promise<void> {
     // A download row carrying a separator can never resolve outside
     // the media dir — a non-bare file_path yields no playable bytes.
     insertRecording('rec-4');
-    db.prepare(
+    dbW.prepare(
       `INSERT INTO downloads
        (download_id, recording_id, provider, source_ref_json, file_path,
         bytes, state, committed_offset, priority, requested_ms)
@@ -258,7 +264,7 @@ export async function run(): Promise<void> {
     // picked dir is granted, but only indexed bytes are readable.
     const granted = join(folder, 'again.wav');
     await writeFile(granted, Buffer.alloc(32, 7));
-    db.prepare(
+    dbW.prepare(
       `INSERT INTO local_files
        (file_id, source_id, doc_id, size, fingerprint, recording_id)
        VALUES ('lf-2', 'src-1', 'again.wav', 32, 'fp2', 'rec-1')`,
@@ -297,7 +303,7 @@ export async function run(): Promise<void> {
     await symlink(evil, swap);
     // Index the swap name so the refusal must come from the realpath
     // gate — not merely from the file missing the index.
-    db.prepare(
+    dbW.prepare(
       `INSERT INTO local_files
        (file_id, source_id, doc_id, size, fingerprint, recording_id)
        VALUES ('lf-3', 'src-1', 'swap.wav', 8, 'fp3', 'rec-1')`,
@@ -344,7 +350,7 @@ export async function run(): Promise<void> {
     );
     // UPDATEs move the freshness stamp too — a download leaving
     // 'available' revokes its cached allow on the next call.
-    db.prepare(`UPDATE downloads SET state = 'removing'
+    dbW.prepare(`UPDATE downloads SET state = 'removing'
                 WHERE download_id = 'd-1'`).run();
     const revokedResolve = await call(CHANNELS.localResolve, {
       uri: dlUri,
@@ -354,7 +360,7 @@ export async function run(): Promise<void> {
         (revokedResolve.result as { uri: string | null }).uri === null,
       'a download leaving available loses its verdict',
     );
-    db.prepare(`UPDATE downloads SET state = 'available'
+    dbW.prepare(`UPDATE downloads SET state = 'available'
                 WHERE download_id = 'd-1'`).run();
     const restoredResolve = await call(CHANNELS.localResolve, {
       uri: dlUri,
@@ -420,7 +426,7 @@ export async function run(): Promise<void> {
     // 'unavailable' — never a malformed null result.
     const gone = join(folder, 'gone.wav');
     await writeFile(gone, Buffer.alloc(8, 5));
-    db.prepare(
+    dbW.prepare(
       `INSERT INTO local_files
        (file_id, source_id, doc_id, size, fingerprint, recording_id)
        VALUES ('lf-4', 'src-1', 'gone.wav', 8, 'fp4', 'rec-1')`,
@@ -444,6 +450,7 @@ export async function run(): Promise<void> {
     local.close();
     tags.close();
     db.close();
+    dbW.close();
     rmSync(root, { recursive: true, force: true });
   }
 }

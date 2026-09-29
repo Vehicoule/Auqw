@@ -315,13 +315,26 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
 
   // Verdicts memoized per URI — waveform reads hit the same URI per
   // 1 MiB chunk, and a full index scan per chunk multiplies realpaths
-  // by library size. Freshness is probed by a content hash over the
-  // gate-relevant columns (string work, no fs): inserts, deletes, AND
-  // updates (a file's doc move, a download leaving 'available') all
-  // shift the stamp and re-open the scan.
+  // by library size. Freshness is `PRAGMA data_version`: the index db
+  // is a read-only accessor — every write arrives via the storage
+  // service's connection, and data_version bumps on exactly those
+  // commits (inserts, deletes, AND updates — a file's doc move or a
+  // download leaving 'available' re-opens the scan). O(1) per call.
+  // If the pragma is unavailable the stamp falls back to a content
+  // hash over the gate-relevant columns (string work, still no fs).
   const gateCache = new Map<string, string | null>();
   let gateStamp = '';
   function indexStamp(db: DatabaseSync): string {
+    try {
+      const row = db
+        .prepare('PRAGMA data_version')
+        .get() as { data_version?: unknown };
+      if (typeof row.data_version === 'number') {
+        return `v${row.data_version}`;
+      }
+    } catch {
+      // fall through to the content-hash stamp
+    }
     let hash = 0x811c9dc5;
     const mix = (table: string, columns: string): void => {
       try {
@@ -344,7 +357,7 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
     mix('local_files', "COALESCE(file_id,'') || char(31) || COALESCE(doc_id,'')");
     mix('local_sources', "COALESCE(source_id,'') || char(31) || COALESCE(tree_uri,'')");
     mix('downloads', "COALESCE(file_path,'') || char(31) || COALESCE(state,'')");
-    return String(hash >>> 0);
+    return `h${hash >>> 0}`;
   }
 
   /**
