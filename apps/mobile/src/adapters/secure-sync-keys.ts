@@ -80,16 +80,10 @@ function isFpList(value: unknown): value is string[] {
   );
 }
 
-/**
- * Stored peer rows read through the shared custody reader — it accepts
- * the pre-unification untagged shape (same bounds this file shipped)
- * and normalizes to the tagged `role:'responder'` record, so records
- * minted by older builds still load.
- */
-function readPeerRecord(value: unknown): SyncPeer | null {
-  return readSyncPeer(value);
-}
-
+// Stored peer rows read through the shared custody reader —
+// readSyncPeer accepts the pre-unification untagged shape (same
+// bounds this file shipped) and normalizes to the tagged
+// `role:'responder'` record, so records minted by older builds load.
 function cancelled(signal?: CancellationSignal): Result<never> | null {
   return signal?.cancelled === true
     ? err(appError('cancelled', 'sync: store read cancelled'))
@@ -123,14 +117,9 @@ export function createSecureSyncKeys(): SyncClientKeys {
       if (!wrote.ok) {
         return wrote;
       }
-      if (fps.includes(peer.fp)) {
-        return ok(undefined);
-      }
-      const indexed = await writeJsonStore(PEER_INDEX_KEY, [
-        ...fps,
-        peer.fp,
-      ]);
-      return indexed.ok ? ok(undefined) : indexed;
+      return fps.includes(peer.fp)
+        ? ok(undefined)
+        : writeJsonStore(PEER_INDEX_KEY, [...fps, peer.fp]);
     });
   return {
     async identityGet(signal) {
@@ -195,7 +184,7 @@ export function createSecureSyncKeys(): SyncClientKeys {
         if (read.value === null) {
           continue; // stale index entry — prune on next write
         }
-        const peer = readPeerRecord(read.value);
+        const peer = readSyncPeer(read.value);
         if (peer === null) {
           return err(
             appError('invalid-response', 'sync: corrupt peer record'),
@@ -236,7 +225,7 @@ export function createSecureSyncKeys(): SyncClientKeys {
         if (!existingRead.ok) {
           return existingRead;
         }
-        const existing = readPeerRecord(existingRead.value);
+        const existing = readSyncPeer(existingRead.value);
         if (existing === null) {
           return ok(false);
         }
@@ -281,7 +270,7 @@ export function createSecureSyncKeys(): SyncClientKeys {
           if (!existingRead.ok) {
             return existingRead;
           }
-          const existing = readPeerRecord(existingRead.value);
+          const existing = readSyncPeer(existingRead.value);
           if (existing !== null) {
             merged = {
               ...peer,
@@ -298,14 +287,9 @@ export function createSecureSyncKeys(): SyncClientKeys {
         if (!wrote.ok) {
           return wrote;
         }
-        if (fps.includes(peer.fp)) {
-          return ok(undefined);
-        }
-        const indexed = await writeJsonStore(PEER_INDEX_KEY, [
-          ...fps,
-          peer.fp,
-        ]);
-        return indexed.ok ? ok(undefined) : indexed;
+        return fps.includes(peer.fp)
+          ? ok(undefined)
+          : writeJsonStore(PEER_INDEX_KEY, [...fps, peer.fp]);
       });
     },
 

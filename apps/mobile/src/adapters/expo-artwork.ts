@@ -94,9 +94,9 @@ export type ExpoArtworkDeps = {
   readonly directory?: Directory;
 };
 
-export function createExpoArtwork(
-  deps: ExpoArtworkDeps,
-): { cache: ArtworkCache; dir: string } {
+export function createExpoArtwork(deps: ExpoArtworkDeps): {
+  cache: ArtworkCache;
+} {
   const directory = deps.directory ?? new Directory(Paths.cache, 'artwork');
   const fetchImpl = deps.fetchImpl ?? ((...args) => fetch(...args));
 
@@ -231,5 +231,5 @@ export function createExpoArtwork(
     fetch: fetchPort,
     paths,
   });
-  return { cache, dir: directory.uri };
+  return { cache };
 }

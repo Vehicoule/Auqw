@@ -74,7 +74,6 @@ export type ExpoSyncDeps = {
 export type ExpoSyncSurface = {
   readonly client: SyncClient;
   readonly engine: SyncEngine;
-  readonly deviceId: string;
   /**
    * The pair-host half (symmetric pairing): this device listens and
    * accepts the other side's hello — QR + code flow in reverse.
@@ -112,8 +111,6 @@ export type ExpoPairHostSurface = {
     }>
   >;
   readonly port: number | null;
-  /** LAN IPv4:port list this host advertises — empty pre-start. */
-  localEndpoints(): Promise<readonly string[]>;
   /** Last-minted LAN endpoints with the CURRENT port — sync getter
    * for the client hello's `endpoints` advert. */
   advertisedEndpoints(): readonly string[];
@@ -168,7 +165,7 @@ export async function createExpoSync(
     let deviceName = `auqw ${deviceId.slice(0, 8)}`;
     try {
       const nativeName = deps.host.syncDeviceName?.().trim();
-      if (nativeName !== undefined && nativeName.length > 0) {
+      if (nativeName) {
         deviceName = nativeName.slice(0, DEVICE_NAME_MAX);
       }
     } catch {
@@ -265,13 +262,7 @@ export async function createExpoSync(
       deps.host.syncBrowse === undefined
         ? null
         : createExpoSyncDiscovery(deps.host);
-    return ok({
-      client,
-      engine: wrappedEngine,
-      deviceId,
-      host,
-      discovery,
-    });
+    return ok({ client, engine: wrappedEngine, host, discovery });
   } catch (thrown) {
     // Native exception text can carry paths, URLs, or stack detail and
     // the log sink performs no redaction — neither the typed error nor
@@ -401,7 +392,6 @@ function buildPairHost(opts: {
         ? []
         : cachedLanHosts.map((h) => formatEndpoint(h, port));
     },
-    localEndpoints,
     onPaired(cb) {
       pairedSubs.add(cb);
       return () => pairedSubs.delete(cb);

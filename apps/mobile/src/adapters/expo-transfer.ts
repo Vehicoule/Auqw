@@ -165,11 +165,8 @@ class ExpoTransferSink implements TransferSink {
   }
 }
 
-export function createExpoTransfer(
-  deps: ExpoTransferDeps = {},
-): {
+export function createExpoTransfer(deps: ExpoTransferDeps = {}): {
   transfer: MediaTransferPort;
-  dir: string;
   uriFor: (name: string) => string;
 } {
   const directory =
@@ -400,7 +397,6 @@ export function createExpoTransfer(
 
   return {
     transfer,
-    dir: directory.uri,
     // Full file:// URI for a finalized name — what the local player
     // must receive (the ledger stores bare names only).
     uriFor: (name: string): string => fileFor(name).uri,
