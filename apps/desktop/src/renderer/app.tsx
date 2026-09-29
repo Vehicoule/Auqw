@@ -30,6 +30,8 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type CSSProperties,
+  type ReactNode,
 } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
@@ -45,6 +47,7 @@ import type {
   EntityRef,
   ReadySession,
   SessionState,
+  TrackMetadata,
 } from '@auqw/application';
 import {
   AddToPlaylistSheet,
@@ -168,6 +171,28 @@ function App() {
   );
 }
 
+/** Full-screen centered gate frame shared by boot/restore/locale gates. */
+const gateStyle: CSSProperties = {
+  height: '100vh',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  backgroundColor: 'var(--canvas)',
+};
+
+/** Conditional SheetScreen — `body` renders only while the sheet is up. */
+const sheet = (
+  key: string,
+  onDismissed: () => void,
+  open: boolean,
+  body: () => ReactNode,
+): ReactNode =>
+  open ? (
+    <SheetScreen stackKey={key} onDismissed={onDismissed}>
+      {body()}
+    </SheetScreen>
+  ) : null;
+
 function BootGate({
   boot,
   onRetry,
@@ -176,16 +201,7 @@ function BootGate({
   readonly onRetry: () => void;
 }) {
   return (
-    <div
-      className="uw-boot"
-      style={{
-        height: '100vh',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: 'var(--canvas)',
-      }}
-    >
+    <div style={gateStyle}>
       {boot.type === 'failed' ? (
         <ErrorState
           title={t('boot.startFailed')}
@@ -293,15 +309,7 @@ function SessionGate({
   readonly controller: SessionController;
 }) {
   return (
-    <div
-      style={{
-        height: '100vh',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: 'var(--canvas)',
-      }}
-    >
+    <div style={gateStyle}>
       {state.type === 'restore-failed' ? (
         <ErrorState
           title={t('boot.restoreFailed')}
@@ -362,6 +370,55 @@ function Main({
   >([]);
   const [dialing, setDialing] = useState(false);
   const [dialError, setDialError] = useState<string | null>(null);
+  // Sheet-open generation — a mint resolving after dismissal must not
+  // resurrect an offer the remint effect would keep refreshing forever.
+  const pairSheetGen = useRef(0);
+  // Last-mint-wins + in-flight serialization: pairing() isn't instant,
+  // and a slow mint must not let an EARLIER reply overwrite a newer
+  // offer or stack concurrent mints behind the tick.
+  const pairMintRef = useRef(0);
+  const pairMintInFlight = useRef(false);
+  /** Mint a pairing offer — every mint path (sheet open, consumed-offer
+   * remint, expiry remint) lands its result only while it is still the
+   * newest attempt of a still-open sheet generation. */
+  const mintOffer = useCallback(
+    (
+      gen: number,
+      opts?: {
+        readonly inFlight?: boolean;
+        readonly onOk?: () => void;
+        readonly onFail?: (thrown: unknown) => void;
+      },
+    ): void => {
+      const attempt = ++pairMintRef.current;
+      if (opts?.inFlight === true) {
+        pairMintInFlight.current = true;
+      }
+      const alive = () =>
+        gen === pairSheetGen.current && attempt === pairMintRef.current;
+      void window.auqw.sync
+        .pairing()
+        .then((offer) => {
+          if (opts?.inFlight === true) {
+            pairMintInFlight.current = false;
+          }
+          if (alive()) {
+            setPairing(offer);
+            opts?.onOk?.();
+          }
+        })
+        .catch((thrown: unknown) => {
+          if (opts?.inFlight === true) {
+            pairMintInFlight.current = false;
+          }
+          opts?.onFail?.(thrown);
+          if (alive()) {
+            setPairing(null);
+          }
+        });
+    },
+    [],
+  );
   useEffect(() => {
     if (!pairSheetOpen) {
       setNearbyPeers([]);
@@ -374,30 +431,8 @@ function Main({
     const unsubscribe = window.auqw.sync.onNearby((event) => {
       if (event.type === 'paired') {
         // Our minted offer was just consumed — remint immediately so
-        // the sheet never displays a dead code (gen-gated like every
-        // other mint path).
-        const gen = pairSheetGen.current;
-        const attempt = ++pairMintRef.current;
-        void window.auqw.sync
-          .pairing()
-          .then((offer) => {
-            if (
-              gen === pairSheetGen.current &&
-              attempt === pairMintRef.current
-            ) {
-              setPairing(offer);
-            }
-          })
-          .catch(() => {
-            // The code we displayed was just consumed — a failed
-            // remint must not leave the dead QR on screen.
-            if (
-              gen === pairSheetGen.current &&
-              attempt === pairMintRef.current
-            ) {
-              setPairing(null);
-            }
-          });
+        // the sheet never displays a dead code.
+        mintOffer(pairSheetGen.current);
         return;
       }
       setNearbyPeers((prev) => {
@@ -416,51 +451,30 @@ function Main({
       void window.auqw.sync.nearbyStop().catch(() => undefined);
       unsubscribe();
     };
-  }, [pairSheetOpen]);
-  // Sheet-open generation — a mint resolving after dismissal must not
-  // resurrect an offer the remint effect would keep refreshing forever.
-  const pairSheetGen = useRef(0);
-  // Last-mint-wins + in-flight serialization: pairing() isn't instant,
-  // and a slow mint must not let an EARLIER reply overwrite a newer
-  // offer or stack concurrent mints behind the tick.
-  const pairMintRef = useRef(0);
-  const pairMintInFlight = useRef(false);
+  }, [pairSheetOpen, mintOffer]);
   const onPairDevice = useCallback(() => {
     setPairSheetOpen(true);
     const gen = ++pairSheetGen.current;
-    const attempt = ++pairMintRef.current;
-    void window.auqw.sync
-      .pairing()
-      .then((offer) => {
-        if (
-          gen !== pairSheetGen.current ||
-          attempt !== pairMintRef.current
-        ) {
-          return;
-        }
-        setPairing(offer);
-        setPairingError(null);
-      })
+    mintOffer(gen, {
+      onOk: () => setPairingError(null),
       // A mint failure (listener down, no LAN address) must surface —
       // a silent reject leaves the row looking dead-clicked.
-      .catch((thrown: unknown) => {
-        if (gen !== pairSheetGen.current) {
-          return;
+      onFail: (thrown) => {
+        if (gen === pairSheetGen.current) {
+          setPairing(null);
+          setPairingError(errorText(shellToAppError(thrown)));
         }
-        setPairing(null);
-        setPairingError(errorText(shellToAppError(thrown)));
-      });
-  }, []);
+      },
+    });
+  }, [mintOffer]);
   const syncRefresh = useCallback(() => {
     const { sync } = window.auqw;
-    void sync
-      .status()
-      .then((status) => setSyncStatus(status))
-      .catch(() => setSyncStatus(null));
+    void sync.status().then(setSyncStatus, () => setSyncStatus(null));
     void sync
       .devices()
-      .then((result) => setSyncDevices(result.devices))
-      .catch(() => setSyncDevices([]));
+      .then((result) => setSyncDevices(result.devices), () =>
+        setSyncDevices([]),
+      );
   }, []);
   const onUnpairDevice = useCallback(
     (deviceId: string) => {
@@ -478,71 +492,67 @@ function Main({
         reportResult('sync.syncNow', err(shellToAppError(thrown)));
       });
   }, [syncRefresh]);
+  const closePairSheet = useCallback(() => {
+    pairSheetGen.current += 1;
+    setPairing(null);
+    setPairSheetOpen(false);
+  }, []);
   // Every dial path settles the same: success retires the sheet like
   // a dismiss (generation bump so an in-flight offer mint can't land
   // a stale offer into `pairing` after close); failure surfaces the
   // typed message under the form.
   const finishDial = useCallback(() => {
     setDialing(false);
-    pairSheetGen.current += 1;
-    setPairing(null);
-    setPairSheetOpen(false);
+    closePairSheet();
     syncRefresh();
-  }, [syncRefresh]);
+  }, [closePairSheet, syncRefresh]);
   const failDial = useCallback((thrown: unknown) => {
     setDialing(false);
     setDialError(errorText(shellToAppError(thrown)));
   }, []);
-  const onDialNearby = useCallback(
-    (key: string, code: string) => {
-      const peer = nearbyPeers.find((entry) => entry.key === key);
-      if (peer === undefined || dialing) {
-        return;
-      }
-      setDialing(true);
-      setDialError(null);
-      void window.auqw.sync
-        .dial({
-          host: peer.host,
-          port: peer.port,
-          code,
-          hosts: peer.addresses,
-          ...(peer.fp !== null ? { fp: peer.fp } : {}),
-        })
-        .then(finishDial)
-        .catch(failDial);
-    },
-    [nearbyPeers, dialing, finishDial, failDial],
-          );
-  // The typed join — desktop's counterpart to the mobile PairForm:
-  // code + host + port dial, no camera anywhere in the path.
-  const onPairCode = useCallback(
-    (input: { code: string; host: string; port: number | null }) => {
-      if (input.port === null || dialing) {
-        return;
-      }
-      setDialing(true);
-      setDialError(null);
-      void window.auqw.sync
-        .dial({ host: input.host, port: input.port, code: input.code })
-        .then(finishDial)
-        .catch(failDial);
-    },
-    [dialing, finishDial, failDial],
-  );
-  const onPastePayload = useCallback(
-    (payload: string) => {
+  const runDial = useCallback(
+    (attempt: () => Promise<unknown>) => {
       if (dialing) {
         return;
       }
       setDialing(true);
       setDialError(null);
-      void window.auqw.sync
-        .dialPayload({ payload })
-        .then(finishDial)
-        .catch(failDial);
+      void attempt().then(finishDial).catch(failDial);
     },
     [dialing, finishDial, failDial],
+  );
+  const onDialNearby = useCallback(
+    (key: string, code: string) => {
+      const peer = nearbyPeers.find((entry) => entry.key === key);
+      if (peer !== undefined) {
+        runDial(() =>
+          window.auqw.sync.dial({
+            host: peer.host,
+            port: peer.port,
+            code,
+            hosts: peer.addresses,
+            ...(peer.fp !== null ? { fp: peer.fp } : {}),
+          }),
+        );
+      }
+    },
+    [nearbyPeers, runDial],
+  );
+  // The typed join — desktop's counterpart to the mobile PairForm:
+  // code + host + port dial, no camera anywhere in the path.
+  const onPairCode = useCallback(
+    (input: { code: string; host: string; port: number | null }) => {
+      const { code, host, port } = input;
+      if (port !== null) {
+        runDial(() => window.auqw.sync.dial({ host, port, code }));
+      }
+    },
+    [runDial],
+  );
+  const onPastePayload = useCallback(
+    (payload: string) =>
+      runDial(() => window.auqw.sync.dialPayload({ payload })),
+    [runDial],
   );
   // The sheet's 'expires in Nm' label is a render-time read — tick
   // while an offer is open so the countdown doesn't freeze between
@@ -569,32 +579,9 @@ function Main({
     ) {
       return;
     }
-    const gen = pairSheetGen.current;
-    const attempt = ++pairMintRef.current;
-    pairMintInFlight.current = true;
-    void window.auqw.sync
-      .pairing()
-      .then((offer) => {
-        pairMintInFlight.current = false;
-        if (
-          gen === pairSheetGen.current &&
-          attempt === pairMintRef.current
-        ) {
-          setPairing(offer);
-        }
-      })
-      .catch(() => {
-        pairMintInFlight.current = false;
-        if (
-          gen === pairSheetGen.current &&
-          attempt === pairMintRef.current
-        ) {
-          setPairing(null);
-        }
-      });
+    mintOffer(pairSheetGen.current, { inFlight: true });
     // pairingTick drives the re-check; pairing.expiresAt is the gate.
-  }, [pairSheetOpen, pairing, pairingTick]);
-
+  }, [pairSheetOpen, pairing, pairingTick, mintOffer]);
 
   // Real waveform peaks for the Stage seek — the port borrows the
   // live stream handle; it never owns or closes it.
@@ -805,6 +792,19 @@ function Main({
     onCreatePlaylist,
   } = shell;
 
+  // Metadata-targeted sheet openers — search rows and entity rows
+  // share the {kind:'metadata'} target shape.
+  const metaPick = (meta: TrackMetadata | undefined) => {
+    if (meta !== undefined) {
+      setPickerFor({ kind: 'metadata', meta });
+    }
+  };
+  const metaActions = (meta: TrackMetadata | undefined) => {
+    if (meta !== undefined) {
+      setActionsFor({ kind: 'metadata', meta });
+    }
+  };
+
   useEffect(() => {
     if (tab !== 'settings') {
       // Reset the anchor tick: leaving the tab unmounts the section
@@ -964,18 +964,8 @@ function Main({
             onCancel={cancelSearch}
             onRetry={retrySearch}
             onResultPress={onResultPress}
-            onAddToPlaylist={(row) => {
-              const meta = resultMetaFor(row.key);
-              if (meta !== undefined) {
-                setPickerFor({ kind: 'metadata', meta });
-              }
-            }}
-            onContext={(row) => {
-              const meta = resultMetaFor(row.key);
-              if (meta !== undefined) {
-                setActionsFor({ kind: 'metadata', meta });
-              }
-            }}
+            onAddToPlaylist={(row) => metaPick(resultMetaFor(row.key))}
+            onContext={(row) => metaActions(resultMetaFor(row.key))}
             recents={searchRecents}
             onRecentPress={applySearchText}
             suggestions={suggestions}
@@ -1059,15 +1049,14 @@ function Main({
       }
       case 'playlist': {
         const playlistModel = playlistModelFor(current.playlistId);
+        const downloadAll = playlistDownloadFor(playlistModel);
         return (
           <PlaylistScreen
             model={playlistModel}
             onBack={closeOverlay}
             onPlayAll={() => playPlaylist(playlistModel)}
-            onDownloadAll={() =>
-              onPlaylistDownloadAll(playlistDownloadFor(playlistModel).requests)
-            }
-            downloadAllState={playlistDownloadFor(playlistModel).state}
+            onDownloadAll={() => onPlaylistDownloadAll(downloadAll.requests)}
+            downloadAllState={downloadAll.state}
             onRename={(name) => renamePlaylist(current.playlistId, name)}
             onDelete={() => {
               deletePlaylist(current.playlistId);
@@ -1115,18 +1104,8 @@ function Main({
                     void session.toggleEntityLike(current.ref.kind, entityId)
             }
             onPressItem={(row) => onEntityRowPress(entry.key, row)}
-            onAddToPlaylist={(row) => {
-              const meta = metaFor(row);
-              if (meta !== undefined) {
-                setPickerFor({ kind: 'metadata', meta });
-              }
-            }}
-            onContext={(row) => {
-              const meta = metaFor(row);
-              if (meta !== undefined) {
-                setActionsFor({ kind: 'metadata', meta });
-              }
-            }}
+            onAddToPlaylist={(row) => metaPick(metaFor(row))}
+            onContext={(row) => metaActions(metaFor(row))}
             onLoadMore={onLoadMore}
             onRetry={() => loadEntityPage(current.ref)}
           />
@@ -1171,15 +1150,7 @@ function Main({
   // rendering is correct) shows until the effect above has landed.
   if (!localeApplied) {
     return (
-      <div
-        style={{
-          height: '100vh',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          backgroundColor: 'var(--canvas)',
-        }}
-      >
+      <div style={gateStyle}>
         <LoadingState title={t('boot.restoring')} />
       </div>
     );
@@ -1187,7 +1158,6 @@ function Main({
 
   return (
     <div
-      className="uw-app"
       style={{
         height: '100vh',
         display: 'flex',
@@ -1317,142 +1287,105 @@ function Main({
             </div>
           )}
         </StackItem>
-        {rowActions !== null && (
-          <SheetScreen
-            stackKey="sheet-actions"
-            onDismissed={closeRowActions}
-          >
+        {sheet('sheet-actions', closeRowActions, rowActions !== null, () =>
+          rowActions === null ? null : (
             <RowActionsSheet
               title={rowActions.title}
               actions={rowActions.actions}
               onAction={onRowAction}
               onDismiss={closeRowActions}
             />
-          </SheetScreen>
+          ),
         )}
-        {pickerFor !== null && (
-          <SheetScreen
-            stackKey="sheet-add-playlist"
-            onDismissed={closePlaylistPicker}
-          >
+        {sheet(
+          'sheet-add-playlist',
+          closePlaylistPicker,
+          pickerFor !== null,
+          () => (
             <AddToPlaylistSheet
               playlists={pickerItems}
               onPick={onPickPlaylist}
               onCreate={onCreateAndPick}
               onDismiss={closePlaylistPicker}
             />
-          </SheetScreen>
+          ),
         )}
-        {providerPicker !== null && (
-          <SheetScreen
-            stackKey="sheet-provider"
-            onDismissed={closeProviderPicker}
-          >
-            <ProviderPickerSheet
-              title={providerPicker.title}
-              options={providerPicker.options}
-              selectedKey={providerPicker.selectedKey}
-              onPick={onPickProvider}
-              onDismiss={closeProviderPicker}
-            />
-          </SheetScreen>
+        {sheet(
+          'sheet-provider',
+          closeProviderPicker,
+          providerPicker !== null,
+          () =>
+            providerPicker === null ? null : (
+              <ProviderPickerSheet
+                title={providerPicker.title}
+                options={providerPicker.options}
+                selectedKey={providerPicker.selectedKey}
+                onPick={onPickProvider}
+                onDismiss={closeProviderPicker}
+              />
+            ),
         )}
-        {storefrontSheetOpen && (
-          <SheetScreen
-            stackKey="sheet-storefront"
-            onDismissed={closeStorefront}
-          >
-            <ValueFieldSheet
-              title={t('settings.storefront')}
-              initial={storefrontDraft}
-              placeholder={t('sheets.countryCodePlaceholder')}
-              submitLabel={t('common.save')}
-              clearLabel={t('sheets.autoClear')}
-              onSubmit={onSubmitStorefront}
-              onClear={onClearStorefront}
-              onDismiss={closeStorefront}
-            />
-          </SheetScreen>
-        )}
-        {qualityPickerOpen && (
-          <SheetScreen
-            stackKey="sheet-quality"
-            onDismissed={closeQualityPicker}
-          >
-            <ProviderPickerSheet
-              title={t('settings.quality')}
-              options={qualityOptions()}
-              selectedKey={`${state.settings.qualityKbps}`}
-              onPick={onPickQuality}
-              onDismiss={closeQualityPicker}
-            />
-          </SheetScreen>
-        )}
-        {pairSheetOpen && (
-          <SheetScreen
-            stackKey="sheet-pairing"
-            onDismissed={() => {
-              pairSheetGen.current += 1;
-              setPairing(null);
-              setPairSheetOpen(false);
-            }}
-          >
-            <PairingSheet
-              pairing={syncModel.pairing}
-              nearbyPeers={nearbyPeers.map((peer) => ({
-                key: peer.key,
-                name: peer.name,
-                address: `${peer.host}:${peer.port}`,
-                pinned: peer.fp !== null,
-              }))}
-              onPairNearby={onDialNearby}
-              onPairCode={onPairCode}
-              onPastePayload={onPastePayload}
-              dialing={dialing}
-              dialError={dialError ?? pairingError}
-              onCopyPayload={
-                pairing === null
-                  ? undefined
-                  : () => {
-                      void navigator.clipboard.writeText(pairing.payload);
-                    }
-              }
-              onDismiss={() => {
-                pairSheetGen.current += 1;
-                setPairing(null);
-                setPairSheetOpen(false);
-              }}
-            />
-          </SheetScreen>
-        )}
-        {themePickerOpen && (
-          <SheetScreen
-            stackKey="sheet-theme"
-            onDismissed={closeThemePicker}
-          >
-            <ProviderPickerSheet
-              title={t('settings.theme')}
-              options={themeOptions()}
-              selectedKey={state.settings.theme}
-              onPick={onPickTheme}
-              onDismiss={closeThemePicker}
-            />
-          </SheetScreen>
-        )}
-        {languagePickerOpen && (
-          <SheetScreen
-            stackKey="sheet-language"
-            onDismissed={closeLanguagePicker}
-          >
-            <ProviderPickerSheet
-              title={t('sheets.languageTitle')}
-              options={languageOptions()}
-              selectedKey={languageOptionKey(state.settings.language)}
-              onPick={onPickLanguage}
-              onDismiss={closeLanguagePicker}
-            />
-          </SheetScreen>
-        )}
+        {sheet('sheet-storefront', closeStorefront, storefrontSheetOpen, () => (
+          <ValueFieldSheet
+            title={t('settings.storefront')}
+            initial={storefrontDraft}
+            placeholder={t('sheets.countryCodePlaceholder')}
+            submitLabel={t('common.save')}
+            clearLabel={t('sheets.autoClear')}
+            onSubmit={onSubmitStorefront}
+            onClear={onClearStorefront}
+            onDismiss={closeStorefront}
+          />
+        ))}
+        {sheet('sheet-quality', closeQualityPicker, qualityPickerOpen, () => (
+          <ProviderPickerSheet
+            title={t('settings.quality')}
+            options={qualityOptions()}
+            selectedKey={`${state.settings.qualityKbps}`}
+            onPick={onPickQuality}
+            onDismiss={closeQualityPicker}
+          />
+        ))}
+        {sheet('sheet-pairing', closePairSheet, pairSheetOpen, () => (
+          <PairingSheet
+            pairing={syncModel.pairing}
+            nearbyPeers={nearbyPeers.map((peer) => ({
+              key: peer.key,
+              name: peer.name,
+              address: `${peer.host}:${peer.port}`,
+              pinned: peer.fp !== null,
+            }))}
+            onPairNearby={onDialNearby}
+            onPairCode={onPairCode}
+            onPastePayload={onPastePayload}
+            dialing={dialing}
+            dialError={dialError ?? pairingError}
+            onCopyPayload={
+              pairing === null
+                ? undefined
+                : () => void navigator.clipboard.writeText(pairing.payload)
+            }
+            onDismiss={closePairSheet}
+          />
+        ))}
+        {sheet('sheet-theme', closeThemePicker, themePickerOpen, () => (
+          <ProviderPickerSheet
+            title={t('settings.theme')}
+            options={themeOptions()}
+            selectedKey={state.settings.theme}
+            onPick={onPickTheme}
+            onDismiss={closeThemePicker}
+          />
+        ))}
+        {sheet('sheet-language', closeLanguagePicker, languagePickerOpen, () => (
+          <ProviderPickerSheet
+            title={t('sheets.languageTitle')}
+            options={languageOptions()}
+            selectedKey={languageOptionKey(state.settings.language)}
+            onPick={onPickLanguage}
+            onDismiss={closeLanguagePicker}
+          />
+        ))}
       </AppStack>
     </div>
   );
