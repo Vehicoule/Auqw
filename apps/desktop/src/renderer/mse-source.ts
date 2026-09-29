@@ -73,18 +73,14 @@ export class MseAborted extends Error {
 export interface MseSource {
   readonly url: string;
   seekTo(positionMs: number): void;
-  /**
-   * The element's playback position — quota eviction keeps a window
+  /** The element's playback position — quota eviction keeps a window
    * around the playhead. Without it a download that outruns playback
-   * would evict the media about to play.
-   */
+   * would evict the media about to play. */
   notePosition(positionMs: number): void;
-  /**
-   * Terminal failure after the attach resolved — pump or SourceBuffer
-   * death. The element keeps the (dead) blob URL with no error event of
-   * its own, so the player uses this to mark the attempt failed instead
-   * of buffering forever.
-   */
+  /** Terminal failure after the attach resolved — pump or
+   * SourceBuffer death. The element keeps the (dead) blob URL with no
+   * error event of its own, so the player marks the attempt failed
+   * here instead of buffering forever. */
   onFail(listener: (error: Error) => void): void;
   destroy(): void;
 }
@@ -99,12 +95,9 @@ export interface MseSource {
 export interface MseAttach {
   readonly url: string;
   readonly ready: Promise<MseSource>;
-  /**
-   * Abandon the attach before its URL reaches an element: closes the
+  /** Abandon the attach before its URL reaches an element: closes the
    * pump/port, revokes the object URL, and rejects `ready` with
-   * `MseAborted` — callers on a stale op must not let it fall through
-   * to the serve-url arm and mint a stream for a dead playback.
-   */
+   * `MseAborted`. */
   abort(): void;
 }
 
@@ -167,6 +160,7 @@ const RESYNC_LIMIT = 2 * 1024 * 1024;
  * a segment up to this size still flows; anything larger is not a
  * shape this path can append. (Matches resyncScan's moof sanity bound.) */
 const MAX_UNIT_BYTES = 64 * 1024 * 1024;
+const MAX_UNIT_MSG = `media segment exceeds ${MAX_UNIT_BYTES} bytes`;
 
 export function attachMseSource(deps: {
   readonly handle: string;
@@ -277,9 +271,33 @@ function runSession(
   // accumulate past the ceiling. The pump zeroes its credit on seek;
   // the counter mirrors that (see `seek`).
   let outstandingCredit = 0;
+  // Eviction is itself an asynchronous SourceBuffer operation —
+  // remove() sets `updating` until its own updateend, so appends and
+  // further removes wait behind it, one range at a time.
+  let evicting = false;
+  /** Reported element position in seconds — the eviction anchor;
+   * `-1` until the player reports one (pre-play attaches fall back
+   * to the append frontier). */
+  let playheadS = -1;
+  // One eviction retry per appended unit — a later quota hit on a new
+  // unit is fresh pressure worth evicting for, not a retry loop.
+  let retriedUnit: PendingUnit | null = null;
+  const evictQueue: Array<readonly [number, number]> = [];
+  // `buffered` snapshot taken right before appendBuffer — the journal
+  // pairs a unit's bytes only with the media interval it ADDED. A
+  // merged range's earlier span belongs to the units that produced it;
+  // crediting the whole range double-counts durations and misplaces
+  // the bitrate estimate.
+  let preAppendRanges: Array<readonly [number, number]> = [];
+  const failListeners: Array<(error: Error) => void> = [];
+  let terminalError: Error | null = null;
+
   /** Re-grant whatever head-room the byte window freed — consumed
    * ingest drops off the window at trimIngest, so a unit larger than
-   * the initial grant still pulls bytes until it closes. */
+   * the initial grant still pulls bytes until it closes. The ingest
+   * tail is the OPEN unit — its bytes can't release the window until
+   * its terminating boundary arrives upstream, so counting them
+   * deadlocks any segment bigger than the window. */
   function maybeGrant(): void {
     if (destroyed || eof) {
       return;
@@ -288,21 +306,12 @@ function runSession(
     for (const unit of pending) {
       pendingBytes += unit.bytes.byteLength;
     }
-    // The ingest tail is the OPEN unit — its bytes can't release the
-    // window until its terminating boundary arrives upstream, so
-    // counting them deadlocks any segment bigger than the window. Only
-    // emitted (pending) and in-flight (credit) work counts; the open
-    // unit is bounded separately by MAX_UNIT_BYTES.
-    const head =
-      HIGH_WATER_BYTES - pendingBytes - outstandingCredit;
+    const head = HIGH_WATER_BYTES - pendingBytes - outstandingCredit;
     if (head > 0) {
       outstandingCredit += head;
       port.send({ kind: 'grant', bytes: head });
     }
   }
-
-  const failListeners: Array<(error: Error) => void> = [];
-  let terminalError: Error | null = null;
 
   function fail(error: Error): void {
     if (!resolved) {
@@ -331,14 +340,6 @@ function runSession(
     revoke();
   }
 
-  function sniffContainer(): 'webm' | 'mp4' | null {
-    const result = carve(ingest);
-    if (result.kind === 'unsupported') {
-      return null;
-    }
-    return result.kind === 'ok' ? result.container : null;
-  }
-
   function enqueue(startOff: number, endOff: number): void {
     if (endOff <= startOff) {
       return;
@@ -349,10 +350,8 @@ function runSession(
     });
   }
 
-  /**
-   * Drop consumed bytes off the ingest head once the emit cursor has
-   * moved past them — keeps the buffer O(window), not O(filesize).
-   */
+  /** Drop consumed bytes off the ingest head once the emit cursor has
+   * moved past them — keeps the buffer O(window), not O(filesize). */
   function trimIngest(): void {
     const consumed = emitCursor - ingestBase;
     if (consumed > 0 && consumed <= ingest.length) {
@@ -373,22 +372,20 @@ function runSession(
     }
     if (resync) {
       if (container === null) {
-        const found = sniffContainer();
-        if (found === null) {
+        const found = carve(ingest);
+        if (found.kind !== 'ok') {
           if (ingest.length > SNIFF_LIMIT || atEof) {
             fail(new MseUnsupported('unrecognised stream head'));
           }
           return;
         }
-        container = found;
+        container = found.container;
       }
       const off = resyncScan(ingest, container);
       if (off < 0) {
         if (ingest.length > RESYNC_LIMIT || atEof) {
           fail(
-            new MseUnsupported(
-              'no segment boundary in resync window',
-            ),
+            new MseUnsupported('no segment boundary in resync window'),
           );
         }
         return;
@@ -454,11 +451,7 @@ function runSession(
         continue;
       }
       if (end - (emitCursor - ingestBase) > MAX_UNIT_BYTES) {
-        fail(
-          new MseUnsupported(
-            `media segment exceeds ${MAX_UNIT_BYTES} bytes`,
-          ),
-        );
+        fail(new MseUnsupported(MAX_UNIT_MSG));
         return;
       }
       enqueue(emitCursor - ingestBase, end);
@@ -466,11 +459,7 @@ function runSession(
     }
     if (atEof && emitCursor - ingestBase < ingest.length) {
       if (ingest.length - (emitCursor - ingestBase) > MAX_UNIT_BYTES) {
-        fail(
-          new MseUnsupported(
-            `media segment exceeds ${MAX_UNIT_BYTES} bytes`,
-          ),
-        );
+        fail(new MseUnsupported(MAX_UNIT_MSG));
         return;
       }
       enqueue(emitCursor - ingestBase, ingest.length);
@@ -480,11 +469,7 @@ function runSession(
     // The still-open tail is exempt from the credit window but not
     // unbounded — a segment past the cap is one this path can't append.
     if (ingest.length > MAX_UNIT_BYTES) {
-      fail(
-        new MseUnsupported(
-          `media segment exceeds ${MAX_UNIT_BYTES} bytes`,
-        ),
-      );
+      fail(new MseUnsupported(MAX_UNIT_MSG));
       return;
     }
     drain();
@@ -494,43 +479,16 @@ function runSession(
     maybeGrant();
   }
 
-  function isQuotaError(thrown: unknown): boolean {
-    return (
-      thrown instanceof Error &&
-      thrown.name === 'QuotaExceededError'
-    );
-  }
-
-  // Eviction is itself an asynchronous SourceBuffer operation — remove()
-  // sets `updating` until its own updateend, so appends and further
-  // removes must wait behind it. The queue drains one range at a time;
-  // the final updateend hands back to `drain` for the queued retry.
-  let evicting = false;
-  /** Reported element position in seconds — the eviction anchor;
-   * `-1` until the player reports one (pre-play attaches fall back
-   * to the append frontier). */
-  let playheadS = -1;
-  // One eviction retry per appended unit — a later quota hit on a new
-  // unit is fresh pressure worth evicting for, not a retry loop.
-  let retriedUnit: PendingUnit | null = null;
-  const evictQueue: Array<readonly [number, number]> = [];
-  // `buffered` snapshot taken right before appendBuffer — the journal
-  // pairs a unit's bytes only with the media interval it ADDED. A
-  // merged range's earlier span belongs to the units that produced it;
-  // crediting the whole range double-counts durations and misplaces
-  // the bitrate estimate.
-  let preAppendRanges: Array<readonly [number, number]> = [];
-
   function startEviction(): void {
     const ranges = buffer?.buffered;
     if (ranges === undefined) {
       drain();
       return;
     }
-    // Anchor on the playhead — eviction protects the media the
-    // element is about to play. Anchoring on the append frontier would
-    // evict the playhead itself whenever the download outruns playback
-    // by more than KEEP_BEHIND_S. Before a report lands, the frontier
+    // Anchor on the playhead — eviction protects the media the element
+    // is about to play. Anchoring on the append frontier would evict
+    // the playhead itself whenever the download outruns playback by
+    // more than KEEP_BEHIND_S. Before a report lands, the frontier
     // stands in (a pre-play attach is all there is to keep).
     const last = journal[journal.length - 1];
     const anchorS =
@@ -539,8 +497,7 @@ function runSession(
       const start = ranges.start(i);
       const end = ranges.end(i);
       // Clamp to the out-of-window part — adjacent appends surface as
-      // one merged range, and its stale prefix/suffix is evictable even
-      // while the range as a whole overlaps the keep window.
+      // one merged range whose stale prefix/suffix is still evictable.
       const behindEnd = Math.min(end, anchorS - KEEP_BEHIND_S);
       if (behindEnd > start) {
         evictQueue.push([start, behindEnd]);
@@ -600,38 +557,34 @@ function runSession(
     try {
       buffer.appendBuffer(unit.bytes);
     } catch (thrown) {
-      if (isQuotaError(thrown) && retriedUnit !== unit) {
+      const quota =
+        thrown instanceof Error && thrown.name === 'QuotaExceededError';
+      if (quota && retriedUnit !== unit) {
         retriedUnit = unit;
         pending.unshift(unit);
         lastAppended = null;
         startEviction();
         return;
       }
-      fail(
-        thrown instanceof Error
-          ? thrown
-          : new Error('append failed'),
-      );
+      fail(thrown instanceof Error ? thrown : new Error('append failed'));
     }
   }
 
-  /**
-   * Terminal bookkeeping once the pump reports EOF. `pending` drains
+  /** Terminal bookkeeping once the pump reports EOF. `pending` drains
    * before `lastAppended`'s `updateend` fires, so an in-flight append
    * counts as occupied — checking only `pending.length` would call a
-   * resolved-in-flight attach 'never landed' and reject it.
-   */
+   * resolved-in-flight attach 'never landed' and reject it. */
   function checkEnd(): void {
-    if (!eof || destroyed || pending.length > 0) {
-      return;
-    }
-    if (buffer !== null && buffer.updating) {
+    if (
+      !eof ||
+      destroyed ||
+      pending.length > 0 ||
+      (buffer !== null && buffer.updating)
+    ) {
       return;
     }
     if (!resolved) {
-      fail(
-        new MseUnsupported('stream ended before a segment landed'),
-      );
+      fail(new MseUnsupported('stream ended before a segment landed'));
       return;
     }
     if (!ended) {
@@ -657,8 +610,8 @@ function runSession(
     const unit = lastAppended;
     if (unit !== null && buffer !== null) {
       const ranges = buffer.buffered;
-      // Pair the appended byte span with the media it ADDED —
-      // the byte↔time index for seeks, independent of container Cues.
+      // Pair the appended byte span with the media it ADDED — the
+      // byte↔time index for seeks, independent of container Cues.
       const duplicated = journal.some(
         (j) => j.byteStart === unit.byteStart,
       );
@@ -748,13 +701,13 @@ function runSession(
     if (destroyed) {
       return;
     }
-    // Journal coverage first — bytes already appended map exactly.
+    // Journal coverage first — bytes already appended map exactly. A
+    // target still buffered needs no pump work: re-anchoring would
+    // refetch media the buffer already holds — and past EOF the append
+    // on the ended source would fail.
     const hit = journal.find(
       (j) => mediaMs >= j.mediaStart && mediaMs < j.mediaEnd,
     );
-    // A target still buffered needs no pump work — the element plays
-    // it directly. Re-anchoring would refetch media the buffer already
-    // holds — and past EOF the append on the ended source would fail.
     if (
       hit !== undefined &&
       buffer !== null &&
@@ -854,8 +807,7 @@ function runSession(
         // Epoch gate matches EOF — a queued read error from before a
         // seek must not kill the re-anchored session — except 'closed':
         // the bridge synthesizes it (at epoch 0) when the port itself
-        // dies, which is transport-terminal regardless of epoch. The
-        // pump only ever codes errors 'io-error'/'unavailable'.
+        // dies, which is transport-terminal regardless of epoch.
         if (raw.epoch === epoch || raw.code === 'closed') {
           fail(new Error(`pump ${raw.code}: ${raw.message}`));
         }
