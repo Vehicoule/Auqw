@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ImageSourcePropType, Keyboard, Platform, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import TabView, { useBottomTabBarHeight } from 'react-native-bottom-tabs';
 import type { AppleIcon } from 'react-native-bottom-tabs';
 import { useTheme } from './theme.tsx';
@@ -142,6 +143,7 @@ export function PlatformTabs({
   // top edge instead; the reported height drops to 0 when the bar hides
   // for the keyboard, keeping the dock just above the IME.
   const [tabBarHeight, setTabBarHeight] = useState<number | null>(null);
+  const insets = useSafeAreaInsets();
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
       <TabView
@@ -155,6 +157,21 @@ export function PlatformTabs({
             }}
           >
             {renderTab(route.key)}
+            {/* Scenes draw edge-to-edge — scrolled content passes
+                under the status bar mid-scroll and collides with the
+                clock/icons. An opaque canvas band over the inset area
+                masks it: reads as a solid inset, not chrome. */}
+            <View
+              pointerEvents="none"
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                height: insets.top,
+                backgroundColor: theme.colors.canvas,
+              }}
+            />
             <TabBarHeightProbe onHeight={setTabBarHeight} />
           </View>
         )}

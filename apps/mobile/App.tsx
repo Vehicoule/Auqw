@@ -3,6 +3,7 @@ import {
   AppState,
   BackHandler,
   Clipboard,
+  Keyboard,
   Linking,
   Platform,
   View,
@@ -17,8 +18,8 @@ import {
 } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
-import { NavigationBar } from 'expo-navigation-bar';
-import { File, Paths } from 'expo-file-system';
+import { requireOptionalNativeModule } from 'expo';
+import { Directory, File, Paths } from 'expo-file-system';
 import {
   useFonts,
   Inter_400Regular,
@@ -124,6 +125,7 @@ import type {
   DiagnosticsModel,
   LyricsModel,
   MessageId,
+  PlayerModel,
   ProviderPickerOption,
   StageMode,
   ThemeSource,
@@ -186,6 +188,26 @@ setLocale(resolveLocale(undefined, systemLocaleTag()));
 const POT_PROVIDER_URL = process.env.EXPO_PUBLIC_POT_PROVIDER_URL || undefined;
 
 /**
+ * expo-navigation-bar's <NavigationBar> component calls the native
+ * setHidden/setStyle through an unawaited stack helper — a call
+ * landing while the activity is gone (relaunch) rejects 'no longer
+ * available' and toasts a LogBox. The app's only writes are style
+ * flips, so the native module is driven directly here with the
+ * rejection swallowed at the seam.
+ */
+const expoNavigationBar =
+  Platform.OS === 'android'
+    ? requireOptionalNativeModule<{
+        setStyle: (style: 'light' | 'dark') => Promise<void>;
+      }>('ExpoNavigationBar')
+    : null;
+
+// Bounds the held-sheet release: long enough for the settle spring
+// (stage-sheet STAGE_SETTLE_SPRING, critically damped at 200/28) to
+// land before unmount.
+const STAGE_RELEASE_MS = 450;
+
+/**
  * The sync screen's QR scanner — expo-camera lives in the app (not
  * ui-native), so the camera mounts here and the screen receives it
  * through its renderScanner seam. Permission is requested lazily on
@@ -240,6 +262,17 @@ function artworkCacheOptions(): readonly ProviderPickerOption[] {
     { key: '512', label: '512 mb' },
     { key: '1024', label: '1024 mb', detail: t('optionDetail.maximum') },
   ];
+}
+
+// A SAF file URI (content://…/document/<encoded docId>) reads as a
+// path the user can find — "Download/auqw-library-….json" — rather
+// than a provider-internal tree id.
+function exportDestinationLabel(uri: string): string {
+  if (!uri.startsWith('content://')) {
+    return uri;
+  }
+  const docId = decodeURIComponent(uri.split('/document/').pop() ?? uri);
+  return docId.replace(/^[a-zA-Z0-9_-]+:/, '');
 }
 
 export function App() {
@@ -1083,6 +1116,9 @@ function Main({
 
   const runSearch = useCallback(
     (q: string) => {
+      // A committed search replaces the draft surface with results —
+      // the IME has no work left and would just cover the list.
+      Keyboard.dismiss();
       const trimmed = q.trim();
       // A committed search supersedes the suggest stream — the draft
       // pane closes and in-flight completions are dropped.
@@ -1269,18 +1305,48 @@ function Main({
       Platform.OS === 'android' ? createExpoPeaksPort(AuqwExpo) : null,
     [],
   );
-  // Both morph consumers unmount with the player — a settle cut off
-  // mid-flight would leave stageProgress parked at a mid value and
-  // the next mount would render the pill at ~0 alpha. Re-seed on
-  // teardown so a fresh player starts collapsed, not mid-morph.
+  // Queue end drops `player` to null (playback → idle) — ripping the
+  // mount out from under an expanded sheet would vanish it mid-view.
+  // While expanded the mount is held on the last model until the user
+  // collapses; release then waits out the settle spring so the slide
+  // lands before unmount, and the morph re-seed happens at rest so a
+  // fresh player starts collapsed, not mid-morph. The snapshot sits
+  // in a ref — mirroring the live model into state would double the
+  // per-tick render.
+  const lastPlayerRef = useRef<PlayerModel | null>(null);
+  const [endHold, setEndHold] = useState(false);
   useEffect(() => {
-    if (player === null) {
+    if (player !== null) {
+      lastPlayerRef.current = player;
+      setEndHold(false);
+      return;
+    }
+    if (expanded && lastPlayerRef.current !== null) {
+      setEndHold(true);
+      return;
+    }
+    const release = setTimeout(() => {
       stageProgress.value = 0;
       stageTravel.value = 0;
-      setExpanded(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [player === null]);
+      lastPlayerRef.current = null;
+      setEndHold(false);
+    }, STAGE_RELEASE_MS);
+    return () => clearTimeout(release);
+  }, [player, expanded, stageProgress, stageTravel]);
+  // A held mount renders the ended pose — paused at the last
+  // published position — not a frozen 'playing' snapshot. `expanded`
+  // covers the transition render itself (endHold lands an effect
+  // later); `endHold` then carries the mount through the collapse
+  // slide's settle window.
+  const sheetPlayer =
+    player ??
+    ((expanded || endHold) && lastPlayerRef.current !== null
+      ? {
+          ...lastPlayerRef.current,
+          status: 'paused' as const,
+          intentPlaying: false,
+        }
+      : null);
   const queueModel = useMemo(() => {
     // Same honesty rule as the library rows: offline + unowned marks
     // 'unavailable' so a dead press isn't a surprise.
@@ -2641,7 +2707,7 @@ function Main({
     [session],
   );
   const lyricsPositionMs = useSmoothedPosition(
-    player?.positionMs ?? 0,
+    sheetPlayer?.positionMs ?? 0,
     playing,
     expanded && stageMode === 'lyrics',
     seekGeneration,
@@ -2770,7 +2836,7 @@ function Main({
       exportPhase: 'working',
       exportDetail: null,
     }));
-    void session.exportLibrary().then((result) => {
+    void session.exportLibrary().then(async (result) => {
       if (!result.ok) {
         setTransfer((prev) => ({
           ...prev,
@@ -2781,20 +2847,34 @@ function Main({
       }
       try {
         const name = `auqw-library-${new Date().toISOString().slice(0, 10)}.json`;
-        const file = new File(Paths.document, name);
-        if (file.exists) {
-          file.delete();
+        let file: File;
+        if (Platform.OS === 'android') {
+          // SAF folder pick — the export lands where the user can
+          // reach it (Downloads and friends), not app-private storage.
+          const dir = await Directory.pickDirectoryAsync();
+          file = dir.createFile(name, 'application/json');
+        } else {
+          file = new File(Paths.document, name);
+          if (file.exists) {
+            file.delete();
+          }
+          file.create();
         }
-        file.create();
         file.write(result.value.json);
-        // expo-sharing is not a dependency: the document-directory URI
-        // is the honest destination and renders as the detail line.
         setTransfer((prev) => ({
           ...prev,
           exportPhase: 'done',
-          exportDetail: file.uri,
+          exportDetail: exportDestinationLabel(file.uri),
         }));
-      } catch {
+      } catch (thrown) {
+        if (
+          thrown instanceof Error &&
+          'code' in thrown &&
+          thrown.code === 'ERR_PICKER_CANCELLED'
+        ) {
+          setTransfer((prev) => ({ ...prev, exportPhase: 'idle' }));
+          return;
+        }
         setTransfer((prev) => ({
           ...prev,
           exportPhase: 'error',
@@ -3821,14 +3901,32 @@ function Main({
   const searchStateRef = useRef(searchState);
   searchStateRef.current = searchState;
 
+  // The immersive player (open sheet, player mode, artwork present)
+  // renders dark regardless of scheme — its system-bar styles flip.
+  // A pushed overlay is an opaque screen over the player, so it owns
+  // the bars while it is the visible surface; action sheets only dim
+  // it and keep the light treatment.
+  const galleryActive = __DEV__ && showGallery;
+  const immersiveStage =
+    !galleryActive &&
+    expanded &&
+    stageMode === 'player' &&
+    sheetPlayer !== null &&
+    sheetPlayer.artworkUrl !== null &&
+    overlay === null;
+  const navBarStyle =
+    theme.scheme === 'light' && !immersiveStage ? 'dark' : 'light';
+  useEffect(() => {
+    // setStyle rejects while the activity is gone — cosmetic and
+    // unactionable, so it never reaches a rejection toast.
+    void expoNavigationBar?.setStyle(navBarStyle)?.catch(() => {});
+  }, [navBarStyle]);
+
   const topInset = insets.top;
-  if (__DEV__ && showGallery) {
+  if (galleryActive) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
         <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
-        <NavigationBar
-          style={theme.scheme === 'light' ? 'dark' : 'light'}
-        />
         <GalleryScreen />
       </View>
     );
@@ -4204,18 +4302,6 @@ function Main({
     }
   };
 
-  // The immersive player (open sheet, player mode, artwork present)
-  // renders dark regardless of scheme — its system-bar styles flip.
-  // A pushed overlay is an opaque screen over the player, so it owns
-  // the bars while it is the visible surface; action sheets only dim
-  // it and keep the light treatment.
-  const immersiveStage =
-    expanded &&
-    stageMode === 'player' &&
-    player !== null &&
-    player.artworkUrl !== null &&
-    overlay === null;
-
   // Gate frame: the ready UI must not render before the persisted
   // language has been applied — only gate copy (whose system-language
   // rendering is correct) shows until the effect above has landed.
@@ -4239,12 +4325,6 @@ function Main({
       {/* Immersive player (art-backed sheet in player mode) is dark
           under any scheme — system bars must read light over it. */}
       <StatusBar
-        style={theme.scheme === 'light' && !immersiveStage ? 'dark' : 'light'}
-      />
-      {/* Android button nav: keep system buttons readable on any
-          canvas — 'dark' style = dark buttons (for light canvases);
-          the config plugin value is a startup default. */}
-      <NavigationBar
         style={theme.scheme === 'light' && !immersiveStage ? 'dark' : 'light'}
       />
       <AppStack>
@@ -4283,9 +4363,9 @@ function Main({
               ) : undefined
             }
           />
-          {player !== null ? (
+          {sheetPlayer !== null ? (
             <StageSheet
-              player={player}
+              player={sheetPlayer}
               expanded={expanded}
               progress={stageProgress}
               travel={stageTravel}
@@ -4397,6 +4477,20 @@ function Main({
               onDismissed={() => dismissOverlay(entry.key)}
             >
               {content}
+              {/* Same solid-inset band as the tab scenes — pushed
+                  overlays scroll edge-to-edge under the status bar
+                  too. */}
+              <View
+                pointerEvents="none"
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  height: topInset,
+                  backgroundColor: theme.colors.canvas,
+                }}
+              />
             </PushScreen>
           );
         })}

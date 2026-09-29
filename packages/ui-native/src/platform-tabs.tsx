@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppNavbar } from './navbar.tsx';
 import { useTheme } from './theme.tsx';
 import type { NavItemModel } from '@auqw/ui-shared';
@@ -26,9 +27,26 @@ export function PlatformTabs({
   tabBarHidden = false,
 }: PlatformTabsProps) {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
-      <View style={{ flex: 1 }}>{renderTab(activeKey)}</View>
+      <View style={{ flex: 1 }}>
+        {renderTab(activeKey)}
+        {/* Same solid-inset band as the native scenes — covers the
+            status bar area so scrolled content can't collide with
+            the clock/icons (0-height where there is no inset). */}
+        <View
+          pointerEvents="none"
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: insets.top,
+            backgroundColor: theme.colors.canvas,
+          }}
+        />
+      </View>
       {tabBarHidden ? null : accessory}
       {tabBarHidden ? null : (
       <AppNavbar items={items} activeKey={activeKey} onSelect={onSelect} />

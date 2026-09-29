@@ -14,6 +14,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionResult
@@ -199,6 +200,14 @@ class AuqwMediaSessionService : MediaSessionService() {
 
   override fun onCreate() {
     super.onCreate()
+    // The default provider falls back to the launcher icon — a raster
+    // square the status bar masks into a solid block. The alpha-only
+    // glyph keeps the collapsed notification and shade tile readable.
+    setMediaNotificationProvider(
+      DefaultMediaNotificationProvider(this).apply {
+        setSmallIcon(R.drawable.ic_notification)
+      }
+    )
     val loadControl = DefaultLoadControl.Builder()
       // ~50–100 ms to start/resume: the ≤200 ms budget leaves almost
       // nothing for a buffer gate, and the seam's head fill is bounded

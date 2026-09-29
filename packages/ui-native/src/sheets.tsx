@@ -352,7 +352,7 @@ export function ProviderPickerSheet({
                   {option.label}
                 </Text>
                 {option.detail != null && (
-                  <Text variant="metadata" color="secondary" numberOfLines={1}>
+                  <Text variant="metadata" color="secondary">
                     {option.detail}
                   </Text>
                 )}
