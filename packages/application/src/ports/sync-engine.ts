@@ -27,11 +27,14 @@ export interface SyncEnginePort {
   /**
    * Fold a peer's delta document into local state on behalf of
    * `deviceId` — the registry id from pairing, so the engine can scope
-   * change-log attribution per device.
+   * change-log attribution per device. Present, it is the
+   * authenticated sender identity the doc's stamp must equal; absent
+   * (local imports, unauthenticated sources) the doc's claim folds
+   * as-is.
    */
   applyDelta(
     delta: unknown,
-    deviceId: string,
+    deviceId?: string,
     signal?: CancellationSignal,
   ): Promise<Result<unknown>>;
   /**

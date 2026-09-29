@@ -120,7 +120,7 @@ export async function run(): Promise<void> {
     }
   }
 
-  // —— applyDelta forwards the doc; the transport's deviceId is ignored ——
+  // —— applyDelta binds the doc's sender stamp to the session's ——
   {
     const source = await engineAt('dsk-source');
     await source.localChanges([writeName('pl-9', 'shared')], undefined);
@@ -130,11 +130,22 @@ export async function run(): Promise<void> {
       return;
     }
     const sink = await engineAt('dsk-sink');
-    // The entry itself carries 'dsk-source'; the transport-supplied id
-    // must not rewrite it.
-    const applied = await sink.port.applyDelta(
+    // A doc stamped by a device other than the authenticated session
+    // id is a forged sender claim — rejected before any fold.
+    const forged = await sink.port.applyDelta(
       JSON.parse(JSON.stringify(exported.value)),
       'dsk-transport',
+      undefined,
+    );
+    assert(!forged.ok, 'forged senderDeviceId must fail');
+    if (!forged.ok) {
+      assertEqual(forged.error.kind, 'invalid-message');
+    }
+    // The session's own id admits the same doc; the entry keeps its
+    // own device stamp.
+    const applied = await sink.port.applyDelta(
+      JSON.parse(JSON.stringify(exported.value)),
+      'dsk-source',
       undefined,
     );
     assert(applied.ok, `apply failed: ${JSON.stringify(applied)}`);
@@ -228,7 +239,7 @@ export async function run(): Promise<void> {
       // page — that cursor is what it re-requests with.
       const applied = await sink.port.applyDelta(
         JSON.parse(JSON.stringify(exported.value)),
-        'dsk-wire',
+        'dsk-page',
         undefined,
       );
       assert(applied.ok, `apply failed: ${JSON.stringify(applied)}`);

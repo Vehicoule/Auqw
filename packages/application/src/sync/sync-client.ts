@@ -953,6 +953,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         }
         const applied: Result<ApplyResult> = await deps.engine.applyDelta(
           delta,
+          current.deviceId,
           joined.signal,
         );
         if (!applied.ok) {

@@ -68,13 +68,13 @@ export function createSyncEnginePort(engine: SyncEngine): SyncEnginePort {
     },
     async applyDelta(
       delta: unknown,
-      _deviceId: string,
+      deviceId?: string,
       signal?: CancellationSignal,
     ): Promise<Result<unknown>> {
       if (!isSyncDelta(delta)) {
         return err(appError('invalid-message', 'sync: malformed delta'));
       }
-      const applied = await engine.applyDelta(delta, signal);
+      const applied = await engine.applyDelta(delta, deviceId, signal);
       if (!applied.ok) {
         return applied;
       }
