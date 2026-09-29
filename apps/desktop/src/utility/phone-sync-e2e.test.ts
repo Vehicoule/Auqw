@@ -42,14 +42,12 @@ import {
   createNobleSyncCrypto,
 } from '../../../mobile/src/adapters/noble-sync-crypto.ts';
 import { createMemoryKeys } from './sync-keys.ts';
-import {
-  createNoiseV1Cipher,
-  fingerprintOf,
-  generateIdentity,
-  isClientHello,
-} from './sync-crypto.ts';
+import { nodeNoise } from './noise-node.ts';
 import { createSyncService, type SyncService } from './sync-server.ts';
 import { isRecord } from '../shared/check.ts';
+
+const { fingerprintOf, isClientHello } = nodeNoise;
+const generateIdentity = () => nodeNoise.createIdentity();
 
 /**
  * The phone leg's loopback proof: the REAL mobile client
@@ -336,7 +334,7 @@ async function cryptoVectors(): Promise<void> {
 
   const serverIdentity = generateIdentity();
   const clientIdentity = generateIdentity();
-  const cipher = createNoiseV1Cipher(serverIdentity);
+  const cipher = nodeNoise.responderCrypto(serverIdentity);
   const crypto = createNobleSyncCrypto({
     identity: clientIdentity,
     randomBytes: random,
@@ -353,7 +351,9 @@ async function cryptoVectors(): Promise<void> {
   // Real server accepts + answers; we complete its challenge and both
   // codecs open each other's frames byte-exact.
   const accepted = cipher.accept(hello, { registered: false });
-  const challenge = JSON.parse(accepted.challenge.toString('utf8'));
+  const challenge = JSON.parse(
+    Buffer.from(accepted.challenge).toString('utf8'),
+  );
   const completed = handshake.complete(challenge, {
     pinnedFp: fingerprintOf(serverIdentity.pub),
   });
@@ -389,7 +389,7 @@ async function cryptoVectors(): Promise<void> {
   // Pinned-fingerprint mismatch → permission-denied, typed.
   const hs2 = crypto.begin({ deviceId: 'phone-e2e-1', name: 'p' });
   const acc2 = cipher.accept(hs2.hello(), { registered: true });
-  const ch2 = JSON.parse(acc2.challenge.toString('utf8'));
+  const ch2 = JSON.parse(Buffer.from(acc2.challenge).toString('utf8'));
   const miss = hs2.complete(ch2, { pinnedFp: 'f'.repeat(64) });
   assert(!miss.ok && miss.error.kind === 'permission-denied');
 

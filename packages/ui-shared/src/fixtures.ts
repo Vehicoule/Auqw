@@ -881,6 +881,7 @@ const fixtureSyncStatusPaired: SyncClientStatus = {
   peers: [
     {
       peer: {
+        role: 'responder',
         fp: fixtureSyncFp,
         name: 'workstation',
         endpoints: ['192.168.1.20:48715'],
@@ -894,6 +895,7 @@ const fixtureSyncStatusPaired: SyncClientStatus = {
     },
     {
       peer: {
+        role: 'responder',
         fp: 'b4e2d01c6f58a91702bd5e3f9e1c7d64a82f10e39d5c6b7a4f3e2d1c0b9a8f7e6',
         name: 'laptop',
         endpoints: ['192.168.1.44:48715'],

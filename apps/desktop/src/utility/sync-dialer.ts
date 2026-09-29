@@ -17,10 +17,8 @@ import {
 } from '@auqw/application';
 import { isShellError } from '../shared/errors.ts';
 import { createClock, createIds, createLog } from '@auqw/application';
-import {
-  createNoiseV1ClientCrypto,
-  type SyncIdentity,
-} from './sync-crypto.ts';
+import { nodeNoise } from './noise-node.ts';
+import type { SyncIdentity } from '@auqw/application';
 import type { SyncKeys } from './sync-keys.ts';
 
 /**
@@ -214,6 +212,7 @@ function createDesktopSyncDialerKeys(deps: {
         return ok(
           devices.map(
             (record): SyncPeer => ({
+              role: 'responder',
               fp: record.fp,
               name: record.name,
               endpoints: [],
@@ -243,6 +242,7 @@ function createDesktopSyncDialerKeys(deps: {
       }
       try {
         await deps.keys.devicePut({
+          role: 'caller',
           id: peer.deviceId,
           name: peer.name,
           pub: peer.pub,
@@ -279,6 +279,7 @@ function createDesktopSyncDialerKeys(deps: {
         // service — an unpair racing this update can't be undone by
         // a stale put landing after the delete.
         const updated = await deps.keys.deviceTouch({
+          role: 'caller',
           id: peer.deviceId,
           name: peer.name,
           pub: peer.pub,
@@ -375,7 +376,7 @@ export function createSyncDialer(deps: {
     const sockets = createNodeSyncSockets();
     const client = createSyncClient({
       sockets,
-      crypto: createNoiseV1ClientCrypto(identity),
+      crypto: nodeNoise.clientCrypto(identity),
       keys: createDesktopSyncDialerKeys({
         keys: deps.keys,
         ownDeviceId: deps.ownDeviceId,

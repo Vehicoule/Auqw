@@ -12,11 +12,12 @@ import { join } from 'node:path';
 import { errorCode, hasOnlyKeys, isRecord } from '../shared/check.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
 import type { SecureStore } from './secure-store.ts';
-import { isSyncIdentity, type SyncIdentity } from '../utility/sync-crypto.ts';
+import { isSyncIdentity, type SyncIdentity } from '@auqw/application';
 import {
   isSyncDeviceRecord,
   isSyncKeysOp,
   MAX_SYNC_DEVICES,
+  readSyncDeviceRecord,
   type SyncDeviceRecord,
   type SyncKeysOp,
 } from '../utility/sync-keys.ts';
@@ -300,16 +301,19 @@ export function createSyncKeysHandler(deps: {
     }
     const out: SyncDeviceRecord[] = [];
     for (const d of devices) {
-      if (!isSyncDeviceRecord(d)) {
+      // Reads normalize to the tagged record — legacy untagged rows
+      // re-persist with their `role` on the next write.
+      const row = readSyncDeviceRecord(d);
+      if (row === null) {
         continue;
       }
-      if (out.some((o) => o.id === d.id || o.fp === d.fp)) {
+      if (out.some((o) => o.id === row.id || o.fp === row.fp)) {
         continue;
       }
       if (out.length >= MAX_SYNC_DEVICES) {
         break;
       }
-      out.push(d);
+      out.push(row);
     }
     return out;
   }
@@ -409,10 +413,11 @@ export function createSyncKeysHandler(deps: {
           state.identity = record;
         }
         consumed.push(key);
-      } else if (isSyncDeviceRecord(record)) {
-        if (
-          state.devices.some((d) => d.id === record.id || d.fp === record.fp)
-        ) {
+        continue;
+      }
+      const row = readSyncDeviceRecord(record);
+      if (row !== null) {
+        if (state.devices.some((d) => d.id === row.id || d.fp === row.fp)) {
           // Blob wins — a stale same-id/same-fp duplicate retires.
           consumed.push(key);
         } else if (state.devices.length >= MAX_SYNC_DEVICES) {
@@ -420,7 +425,7 @@ export function createSyncKeysHandler(deps: {
           // where there's room rather than seal an over-cap blob.
           pendingLegacy += 1;
         } else {
-          state.devices.push(record);
+          state.devices.push(row);
           consumed.push(key);
         }
       } else {
@@ -446,7 +451,11 @@ export function createSyncKeysHandler(deps: {
         throw shellError('corrupt-state', 'sync store failed validation');
       }
       prev.identity = parsed.identity;
-      prev.devices = parsed.devices;
+      // Reads normalize legacy untagged rows to the tagged record —
+      // the next persist re-emits them in the unified shape.
+      prev.devices = parsed.devices
+        .map((d) => readSyncDeviceRecord(d))
+        .filter((d): d is SyncDeviceRecord => d !== null);
     }
     const state: SyncStoreState = {
       identity: prev.identity,
@@ -569,9 +578,12 @@ export function createSyncKeysHandler(deps: {
       case 'device-put':
         return serialized(async () => {
           const s = await load();
-          const isNew = !s.devices.some((d) => d.id === op.record.id);
+          // Normalized — writes always persist the tagged shape even
+          // if a caller delivered a legacy row.
+          const record = readSyncDeviceRecord(op.record) ?? op.record;
+          const isNew = !s.devices.some((d) => d.id === record.id);
           const replacesFp = s.devices.some(
-            (d) => d.fp === op.record.fp && d.id !== op.record.id,
+            (d) => d.fp === record.fp && d.id !== record.id,
           );
           if (isNew && !replacesFp && s.devices.length >= MAX_SYNC_DEVICES) {
             throw shellError(
@@ -584,9 +596,9 @@ export function createSyncKeysHandler(deps: {
           // the cap can never be transiently exceeded on disk and a
           // failed write leaves the old registry fully intact.
           const devices = s.devices.filter(
-            (d) => d.id !== op.record.id && d.fp !== op.record.fp,
+            (d) => d.id !== record.id && d.fp !== record.fp,
           );
-          devices.push(op.record);
+          devices.push(record);
           await persist(s, { identity: s.identity, devices });
           return null;
         });
@@ -596,14 +608,15 @@ export function createSyncKeysHandler(deps: {
         // guard against a concurrent unpair.
         return serialized(async () => {
           const s = await load();
-          const existing = s.devices.find((d) => d.id === op.record.id);
-          if (existing === undefined || existing.fp !== op.record.fp) {
+          const record = readSyncDeviceRecord(op.record) ?? op.record;
+          const existing = s.devices.find((d) => d.id === record.id);
+          if (existing === undefined || existing.fp !== record.fp) {
             return { updated: false };
           }
           await persist(s, {
             identity: s.identity,
             devices: s.devices.map((d) =>
-              d.id === op.record.id ? op.record : d,
+              d.id === record.id ? record : d,
             ),
           });
           return { updated: true };

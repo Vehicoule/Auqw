@@ -21,11 +21,12 @@ import {
   migrateSyncCustody,
   syncHasPairedDevices,
 } from './sync-keys.ts';
-import {
-  fingerprintOf,
-  generateIdentity,
-} from '../utility/sync-crypto.ts';
+import { nodeNoise } from '../utility/noise-node.ts';
 import type { SyncDeviceRecord } from '../utility/sync-keys.ts';
+
+const { fingerprintOf } = nodeNoise;
+const generateIdentity = (): { pub: string; priv: string } =>
+  nodeNoise.createIdentity();
 
 const WORKING: SafeStorageLike = {
   isEncryptionAvailable: () => true,
@@ -71,6 +72,7 @@ function device(
   // fp is bound to pub by the validator — fixtures need real keys.
   const pub = opts.pub ?? generateIdentity().pub;
   return {
+    role: 'caller',
     id,
     name: opts.name ?? 'phone',
     pub,
@@ -78,6 +80,15 @@ function device(
     pairedAt: 1,
     lastSeenAt: 1,
   };
+}
+
+/** The pre-unification stored shape — no `role` tag. Rows written by
+ * shipped builds deserialize through custody's legacy reader. */
+function legacyShape(
+  record: SyncDeviceRecord,
+): Record<string, unknown> {
+  const { role: _tag, ...row } = record;
+  return row;
 }
 
 async function assertThrowsKind(
@@ -240,7 +251,10 @@ export async function run(): Promise<void> {
     const legacyIdentity = generateIdentity();
     await oldStore.set('auqw.sync.identity', JSON.stringify(legacyIdentity));
     const phone = device('dev-legacy01');
-    await oldStore.set(`auqw.sync.device.${phone.id}`, JSON.stringify(phone));
+    await oldStore.set(
+      `auqw.sync.device.${phone.id}`,
+      JSON.stringify(legacyShape(phone)),
+    );
     await oldStore.set('session.token', 'renderer-owned');
     mkdirSync(newDir, { recursive: true });
     const keptNew = device('dev-newer001');
@@ -307,7 +321,7 @@ export async function run(): Promise<void> {
     const late = device('dev-late0001');
     await oldStore.set(
       `auqw.sync.device.${late.id}`,
-      JSON.stringify(late),
+      JSON.stringify(legacyShape(late)),
     );
     const freshDir = join(root, 'custody-fresh');
     await migrateSyncCustody(oldDir, freshDir);
@@ -341,7 +355,7 @@ export async function run(): Promise<void> {
     );
     await gStore.set(
       'auqw.sync.device.dev-gate0001',
-      JSON.stringify(device('dev-gate0001')),
+      JSON.stringify(legacyShape(device('dev-gate0001'))),
     );
     assert(
       syncHasPairedDevices(gDir),
@@ -438,11 +452,11 @@ export async function run(): Promise<void> {
     const md2 = device('dev-merge002');
     await mStore.set(
       `auqw.sync.device.${md1.id}`,
-      JSON.stringify(md1),
+      JSON.stringify(legacyShape(md1)),
     );
     await mStore.set(
       `auqw.sync.device.${md2.id}`,
-      JSON.stringify(md2),
+      JSON.stringify(legacyShape(md2)),
     );
     writeFileSync(
       join(mDir, 'auqw.sync.device.dev-badjson.b64'),

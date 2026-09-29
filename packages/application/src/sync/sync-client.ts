@@ -1107,6 +1107,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     const storedPot = rebasePot(welcome.pot ?? pot, endpoint.host);
     const existing = peers.get(session.peerFp);
     const stored: SyncPeer = {
+      role: 'responder',
       fp: session.peerFp,
       name: welcome.name,
       endpoints: endpoints.filter((ep) => parseEndpoint(ep) !== null),

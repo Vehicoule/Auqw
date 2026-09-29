@@ -1,7 +1,17 @@
 import { assert, assertEqual } from '@auqw/application/testing';
+import {
+  attachSyncPump,
+  type SyncWirePump,
+} from '@auqw/application';
 import { createServer, createConnection } from 'node:net';
 import type { Socket } from 'node:net';
-import { attachWirePump, type WirePump } from './sync-wire.ts';
+
+/**
+ * The shared u32le frame pump (packages/application sync-wire.ts)
+ * exercised against real node:net sockets — the desktop's substrate
+ * proves `SyncSocket` covers net.Socket and the framing/cap/teardown
+ * semantics hold on the wire the app actually runs.
+ */
 
 function once(emitter: { once(e: string, l: () => void): unknown }, ev: string) {
   return new Promise<void>((resolve) => emitter.once(ev, resolve));
@@ -43,10 +53,10 @@ export async function run(): Promise<void> {
   {
     const { a, b, close } = await socketPair();
     const got: string[] = [];
-    attachWirePump({
+    attachSyncPump({
       socket: a,
       maxPayload: 1024,
-      onFrame: (f) => got.push(f.toString('utf8')),
+      onFrame: (f) => got.push(Buffer.from(f).toString('utf8')),
       onClose: () => undefined,
     });
     const payload = Buffer.from('{"t":"ping"}', 'utf8');
@@ -66,17 +76,17 @@ export async function run(): Promise<void> {
   {
     const { a, b, close } = await socketPair();
     const got: string[] = [];
-    const pump = attachWirePump({
+    const pump = attachSyncPump({
       socket: a,
       maxPayload: 1024,
-      onFrame: (f) => got.push(f.toString('utf8')),
+      onFrame: (f) => got.push(Buffer.from(f).toString('utf8')),
       onClose: () => undefined,
     });
     pump.send(Buffer.from('one'));
-    const two = attachWirePump({
+    const two = attachSyncPump({
       socket: b,
       maxPayload: 1024,
-      onFrame: (f) => got.push(`b:${f.toString('utf8')}`),
+      onFrame: (f) => got.push(`b:${Buffer.from(f).toString('utf8')}`),
       onClose: () => undefined,
     });
     two.send(Buffer.from('two'));
@@ -92,7 +102,7 @@ export async function run(): Promise<void> {
   {
     const { a, b, close } = await socketPair();
     const reason = await new Promise<string>((resolve) => {
-      attachWirePump({
+      attachSyncPump({
         socket: a,
         maxPayload: 64,
         onFrame: () => undefined,
@@ -111,7 +121,7 @@ export async function run(): Promise<void> {
   {
     const { a, b, close } = await socketPair();
     const reason = await new Promise<string>((resolve) => {
-      attachWirePump({
+      attachSyncPump({
         socket: a,
         maxPayload: 1024,
         onFrame: () => assert(false, 'empty frame must not deliver'),
@@ -127,7 +137,7 @@ export async function run(): Promise<void> {
   {
     const { a, b, close } = await socketPair();
     const got: number[] = [];
-    const pump = attachWirePump({
+    const pump = attachSyncPump({
       socket: a,
       maxPayload: 64,
       onFrame: (f) => got.push(f.length),
@@ -148,7 +158,7 @@ export async function run(): Promise<void> {
   {
     const { a, b, close } = await socketPair();
     const closes: string[] = [];
-    const pump: WirePump = attachWirePump({
+    const pump: SyncWirePump = attachSyncPump({
       socket: a,
       maxPayload: 1024,
       onFrame: () => undefined,
