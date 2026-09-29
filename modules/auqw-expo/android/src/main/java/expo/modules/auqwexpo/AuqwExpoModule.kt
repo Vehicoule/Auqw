@@ -392,9 +392,7 @@ class AuqwExpoModule : Module() {
    * the attach is live and playing. */
   private fun kickPositionTicker() {
     val p = player ?: return
-    if (tickerPosted || attached == null || !p.isPlaying) {
-      return
-    }
+    if (tickerPosted || attached == null || !p.isPlaying) return
     tickerPosted = true
     Handler(p.applicationLooper).post(positionTicker)
   }
@@ -798,25 +796,23 @@ class AuqwExpoModule : Module() {
         throw CodedException("ERR_INVALID_ARGUMENT", "bad play arguments", null)
       }
       val local = localHandles[handle]
-      if (local !== null) {
-        val ctx = appContext.reactContext
-          ?: throw CodedException("ERR_RUNTIME", "no react context", null)
-        attachNow(
+      when {
+        local !== null -> attachNow(
           handle, attemptId, queueRev, positionMs, localUri(local.path),
-          DefaultDataSource.Factory(ctx),
+          DefaultDataSource.Factory(
+            appContext.reactContext
+              ?: throw CodedException("ERR_RUNTIME", "no react context", null)
+          ),
           OccurrenceBind.CURSOR, null, local.mime
         )
-        maybeRequestNotificationPermission()
-        return@Coroutine null
+        streamRegistry.hostFor(handle) == null ->
+          throw CodedException("not-found", "unknown stream handle", null)
+        else -> attachNow(
+          handle, attemptId, queueRev, positionMs,
+          Uri.parse("auqw-stream://$handle"), streamDataSourceFactory,
+          OccurrenceBind.CURSOR, null, null
+        )
       }
-      if (streamRegistry.hostFor(handle) == null) {
-        throw CodedException("not-found", "unknown stream handle", null)
-      }
-      attachNow(
-        handle, attemptId, queueRev, positionMs,
-        Uri.parse("auqw-stream://$handle"), streamDataSourceFactory,
-        OccurrenceBind.CURSOR, null, null
-      )
       // After the attach post so a first-play permission prompt can't
       // queue ahead of it on the main looper.
       maybeRequestNotificationPermission()
@@ -843,13 +839,11 @@ class AuqwExpoModule : Module() {
     AsyncFunction("stop") Coroutine { ->
       val p = awaitPlayer()
       onPlayerThread(p) {
-        clearAttach()
+        detachPlayer(p)
         // A stop kills any pending service move: cancel its prepare
         // so the resolve/mint stops burning budget, and mark the
         // latch dropped for its (still-arriving) outcome.
         dropArmedMove()
-        p.stop()
-        p.clearMediaItems()
       }
       null
     }
@@ -1229,9 +1223,8 @@ class AuqwExpoModule : Module() {
     // evicted) is dead: attaching could only fail, but silently
     // skipping leaves the app waiting on a status that never comes —
     // report the attach as failed under its own identity.
-    if (dataSourceFactory === streamDataSourceFactory &&
-      streamRegistry.hostFor(a.handle) == null
-    ) {
+    val isStream = dataSourceFactory === streamDataSourceFactory
+    if (isStream && streamRegistry.hostFor(a.handle) == null) {
       // A stream that never reached the player reports position 0 —
       // echoing the outgoing item's position would lie about progress.
       emitStatusFor(
@@ -1272,7 +1265,7 @@ class AuqwExpoModule : Module() {
           .build()
       )
       .build()
-    val source = (if (dataSourceFactory === streamDataSourceFactory) {
+    val source = (if (isStream) {
       streamMediaSourceFactory
     } else {
       ProgressiveMediaSource.Factory(dataSourceFactory)
@@ -1281,7 +1274,8 @@ class AuqwExpoModule : Module() {
     // IDLE→BUFFERING states setMediaSource/prepare fire synchronously
     // would otherwise echo the replaced attach's identity.
     clearAttach()
-    p.setMediaSource(source, positionMs?.toLong() ?: 0L)
+    val startMs = positionMs?.toLong() ?: 0L
+    p.setMediaSource(source, startMs)
     p.prepare()
     // Service-initiated attaches (remote next/previous, ended advance)
     // honor the transport's playWhenReady — a paused lock-screen press
@@ -1300,7 +1294,7 @@ class AuqwExpoModule : Module() {
     attached = a
     attachedByService = bind == OccurrenceBind.FIXED
     attachedForOccurrence = occId
-    armFirstOutputPoll(p, a, positionMs?.toLong() ?: 0L)
+    armFirstOutputPoll(p, a, startMs)
   }
 
   private fun stateOf(p: ExoPlayer): String = when (p.playbackState) {
@@ -1314,15 +1308,13 @@ class AuqwExpoModule : Module() {
     }
   }
 
-  private fun emitStatus(state: String, error: Bundle? = null) {
+  private fun emitStatus(state: String, error: Bundle? = null) =
     emitStatusFor(attached, state, error)
-  }
 
   /** Status emit for the live attach — a no-op with no player/join. */
   private fun emitLiveStatus() {
     val p = player ?: return
-    if (attached == null) return
-    emitStatus(stateOf(p))
+    if (attached != null) emitStatus(stateOf(p))
   }
 
   /** Status under an explicit attachment — an attach that fails
@@ -1335,9 +1327,7 @@ class AuqwExpoModule : Module() {
     error: Bundle? = null,
     positionMs: Double? = null
   ) {
-    if (a == null) {
-      return
-    }
+    if (a == null) return
     val p = player ?: return
     sendEvent(
       EVENT_PLAYBACK_STATUS,
@@ -1388,28 +1378,14 @@ class AuqwExpoModule : Module() {
   private fun validateProjection(p: QueueProjectionInput) {
     fun bad(msg: String): Nothing =
       throw CodedException("ERR_INVALID_PROJECTION", msg, null)
-    if (p.projectionId.isEmpty()) {
-      bad("projectionId required")
-    }
-    if (!isSafeNonNegative(p.queueRev)) {
-      bad("queueRev must be a safe non-negative integer")
-    }
-    if (!isSafeNonNegative(p.positionMs)) {
-      bad("positionMs must be a safe non-negative integer")
-    }
-    if (p.mode != "stopped" && p.mode != "paused" && p.mode != "playing") {
-      bad("unknown projection mode")
-    }
-    if (p.repeat != "off" && p.repeat != "all" && p.repeat != "one") {
-      bad("unknown repeat mode")
-    }
-    if (p.items.size > 500) {
-      bad("projection exceeds item bound")
-    }
+    if (p.projectionId.isEmpty()) bad("projectionId required")
+    if (!isSafeNonNegative(p.queueRev)) bad("queueRev must be a safe non-negative integer")
+    if (!isSafeNonNegative(p.positionMs)) bad("positionMs must be a safe non-negative integer")
+    if (p.mode !in setOf("stopped", "paused", "playing")) bad("unknown projection mode")
+    if (p.repeat !in setOf("off", "all", "one")) bad("unknown repeat mode")
+    if (p.items.size > 500) bad("projection exceeds item bound")
     for (item in p.items) {
-      if (item.occurrenceId.isEmpty()) {
-        bad("occurrenceId required")
-      }
+      if (item.occurrenceId.isEmpty()) bad("occurrenceId required")
       if ((item.provider == null) != (item.sourceRef == null)) {
         bad("provider/sourceRef must be null together")
       }
@@ -1419,9 +1395,8 @@ class AuqwExpoModule : Module() {
     }
     // The walk is a unique subsequence — failed rows legitimately
     // drop out of it while `items` keeps every occurrence.
-    if (p.order.isNotEmpty() &&
-      (p.order.any { it < 0 || it >= p.items.size } ||
-        p.order.toSet().size != p.order.size)
+    if (p.order.any { it < 0 || it >= p.items.size } ||
+      p.order.toSet().size != p.order.size
     ) {
       bad("order must be a unique subsequence of item indices")
     }
@@ -1442,10 +1417,7 @@ class AuqwExpoModule : Module() {
     installedProjection = proj
     val att = attached
     when {
-      att == null -> {
-        attachedForOccurrence = null
-        attachedByService = false
-      }
+      att == null -> clearAttach()
       attachedForOccurrence != proj.currentOccurrenceId -> {
         // The attached stream serves an occurrence the new revision
         // no longer has as cursor — a service move the app superseded,
@@ -1453,10 +1425,8 @@ class AuqwExpoModule : Module() {
         // belongs to the old occurrence either way: stop it and free
         // the session, or a stale attach leaks until expiry while
         // claiming the new cursor.
-        clearAttach()
+        detachPlayer(p)
         releaseAbandonedAttach(att)
-        p.stop()
-        p.clearMediaItems()
       }
     }
     // The application re-keys its active identity's queueRev to the
@@ -1491,14 +1461,10 @@ class AuqwExpoModule : Module() {
     if (transitionInFlight != null) {
       return
     }
-    val idx = proj.items.indexOfFirst { it.occurrenceId == from }
-    if (idx < 0) {
-      return
-    }
     // The cursor walks `order` positions — the dealt play order under
     // shuffle; an absent list (older JS bundles) reads as identity.
     val order = if (proj.order.isEmpty()) proj.items.indices.toList() else proj.order
-    val pos = order.indexOf(idx)
+    val pos = order.indexOf(proj.items.indexOfFirst { it.occurrenceId == from })
     if (pos < 0) {
       return
     }
@@ -1799,24 +1765,19 @@ class AuqwExpoModule : Module() {
     }
   }
 
-  private fun errorKind(error: PlaybackException): String {
-    var cause: Throwable? = error
-    while (cause != null) {
-      if (cause is AuqwStreamException) {
-        return cause.kind
+  private fun errorKind(error: PlaybackException): String =
+    generateSequence<Throwable>(error) { it.cause }
+      .filterIsInstance<AuqwStreamException>()
+      .firstOrNull()?.kind
+      ?: when (error.errorCode) {
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+        PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE,
+        PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+        PlaybackException.ERROR_CODE_TIMEOUT -> "transient"
+        PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "not-found"
+        else -> "internal"
       }
-      cause = cause.cause
-    }
-    return when (error.errorCode) {
-      PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
-      PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
-      PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE,
-      PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
-      PlaybackException.ERROR_CODE_TIMEOUT -> "transient"
-      PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "not-found"
-      else -> "internal"
-    }
-  }
 
   private val playerListener = object : Player.Listener {
     override fun onPlaybackStateChanged(playbackState: Int) {
@@ -1827,9 +1788,7 @@ class AuqwExpoModule : Module() {
         a.readyMarked = true
         emitPhaseMark(a, "state-ready")
       }
-      if (a != null) {
-        emitStatus(stateOf(p))
-      }
+      if (a != null) emitStatus(stateOf(p))
       if (p.isPlaying) {
         kickPositionTicker()
       }
@@ -1875,9 +1834,7 @@ class AuqwExpoModule : Module() {
    * attach by [Attachment.firstFrameMarked].
    */
   private fun markFirstAudioOutput(a: Attachment) {
-    if (a.firstFrameMarked) {
-      return
-    }
+    if (a.firstFrameMarked) return
     a.firstFrameMarked = true
     emitPhaseMark(a, "rendered-first-frame")
     Log.i(TAG, "attach ${a.handle} rendered-first-frame " +
@@ -1898,11 +1855,8 @@ class AuqwExpoModule : Module() {
     val baseline = p.currentPosition.coerceAtLeast(startPositionMs)
     val poll = object : Runnable {
       override fun run() {
-        if (attached !== a || a.firstFrameMarked) {
-          return
-        }
-        if (SystemClock.elapsedRealtime() - a.attachElapsedMs >
-          FIRST_OUTPUT_POLL_DEADLINE_MS
+        if (attached !== a || a.firstFrameMarked ||
+          SystemClock.elapsedRealtime() - a.attachElapsedMs > FIRST_OUTPUT_POLL_DEADLINE_MS
         ) {
           return
         }
@@ -1975,13 +1929,17 @@ class AuqwExpoModule : Module() {
       putString("resultJson", outcome.resultJson)
       putBundle("attempt", attemptBundle(outcome.attempt))
     }
-    is RequestOutcome.Failed -> Bundle().apply {
-      putString("type", "failed")
-      putString("kind", outcome.kind)
-      putString("message", outcome.message)
-      putBundle("attempt", attemptBundle(outcome.attempt))
-    }
+    is RequestOutcome.Failed ->
+      failedBundle(outcome.kind, outcome.message, outcome.attempt)
   }
+
+  private fun failedBundle(kind: String, message: String?, attempt: AttemptSummary) =
+    Bundle().apply {
+      putString("type", "failed")
+      putString("kind", kind)
+      putString("message", message)
+      putBundle("attempt", attemptBundle(attempt))
+    }
 
   // onPrepareOutcome stream payload: the JS contract shape —
   // {handle, mime, itag?, contentLength?, expiresAtMs?, bitrateKbps?} —
@@ -2002,12 +1960,8 @@ class AuqwExpoModule : Module() {
       )
       putBundle("attempt", attemptBundle(outcome.attempt))
     }
-    is PrepareOutcome.Failed -> Bundle().apply {
-      putString("type", "failed")
-      putString("kind", outcome.kind)
-      putString("message", outcome.message)
-      putBundle("attempt", attemptBundle(outcome.attempt))
-    }
+    is PrepareOutcome.Failed ->
+      failedBundle(outcome.kind, outcome.message, outcome.attempt)
   }
 
   private fun coded(e: HostException): CodedException = when (e) {
