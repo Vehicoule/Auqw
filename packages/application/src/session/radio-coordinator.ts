@@ -456,7 +456,7 @@ export class RadioCoordinator {
       now,
     );
     const recordingsChanged = plan.recordings !== r.recordings;
-    const draft = new QueueEngine(r.queue.snapshot());
+    const draft = r.queue.fork();
     try {
       for (const occurrence of plan.occurrences) {
         draft.enqueue(occurrence);
@@ -765,7 +765,7 @@ export class RadioCoordinator {
         this.#host.emitSync(emissionWrites(syncEmitInput(r), revertBatch));
         // The mirror keeps its live content and adopts the fresh
         // revision so queued commands stay on the durable lineage.
-        r.queue = new QueueEngine(revertedQueue);
+        r.queue = new QueueEngine(revertedQueue, r.queue.unplayableIds);
         // The engine was swapped wholesale — projections and the
         // tail hooks still reference the pre-swap instance.
         this.#host.derived();

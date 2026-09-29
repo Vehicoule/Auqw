@@ -174,7 +174,7 @@ export class QueueEngine {
   /** Last snapshot — (revision, positionMs) fully determines it. */
   #snapshotCache: QueueSnapshot | undefined;
 
-  constructor(initial?: QueueSnapshot) {
+  constructor(initial?: QueueSnapshot, unplayable?: ReadonlySet<string>) {
     const occurrences = initial?.occurrences ?? [];
     const revision = initial?.revision ?? 0;
     const currentId = initial?.currentOccurrenceId ?? null;
@@ -228,6 +228,35 @@ export class QueueEngine {
     this.#positionMs = positionMs;
     this.#mode = mode;
     this.#blockedError = cloneError(blockedError);
+    // Carried marks are pruned to live members — a mark for an id the
+    // snapshot doesn't hold would never get removed() to clean it up.
+    for (const id of unplayable ?? []) {
+      if (ids.has(id)) {
+        this.#unplayable.add(id);
+      }
+    }
+  }
+
+  /**
+   * Session-scoped failed marks — queue edits draft on `fork()` (or
+   * pass the ids through) so a snapshot rebuild can't erase them;
+   * a restore intentionally constructs without them.
+   */
+  get unplayableIds(): ReadonlySet<string> {
+    return this.#unplayable;
+  }
+
+  isUnplayable(occurrenceId: string): boolean {
+    return this.#unplayable.has(occurrenceId);
+  }
+
+  /**
+   * A mutable copy carrying the transient failed set — the snapshot
+   * round-trip drops it, so draft-replacing queue edits go through
+   * here rather than `new QueueEngine(snapshot())`.
+   */
+  fork(): QueueEngine {
+    return new QueueEngine(this.snapshot(), this.#unplayable);
   }
 
   /** Observed playback position — the snapshot field without a clone. */

@@ -1199,7 +1199,7 @@ export class Session {
         );
         if (!committed.ok) {
           r.queueEpoch += 1;
-          r.queue = new QueueEngine(before);
+          r.queue = new QueueEngine(before, r.queue.unplayableIds);
           // Restore the pre-edit deal only when shuffle intent hasn't
           // moved — a toggle during this pending commit already dealt
           // against the (then-current) queue and must survive; the
@@ -1440,7 +1440,7 @@ export class Session {
         this.#ids.next('rec'),
       );
       const occurrenceId = this.#ids.next('occ');
-      const draft = new QueueEngine(r.queue.snapshot());
+      const draft = r.queue.fork();
       draft.enqueue({
         occurrenceId,
         recordingId: up.recording.id,
@@ -1587,7 +1587,7 @@ export class Session {
         return err(appError('not-found', 'unknown recording'));
       }
       const occurrenceId = this.#ids.next('occ');
-      const draft = new QueueEngine(cur.queue.snapshot());
+      const draft = cur.queue.fork();
       draft.enqueue({
         occurrenceId,
         recordingId,
@@ -1689,7 +1689,7 @@ export class Session {
       resolved.push({ recordingId: recording.id, ref: item.selectedRef });
     }
     const staged = await this.#commitStaged((r) => {
-      const draft = new QueueEngine(r.queue.snapshot());
+      const draft = r.queue.fork();
       const occurrenceIds: string[] = [];
       for (const item of resolved) {
         const occurrenceId = this.#ids.next('occ');
@@ -1749,7 +1749,7 @@ export class Session {
         : items;
     const staged = await this.#commitStaged((r) => {
       let recordings = r.recordings;
-      const draft = new QueueEngine(r.queue.snapshot());
+      const draft = r.queue.fork();
       const occurrenceIds: string[] = [];
       for (const metadata of ordered) {
         const up = upsertRecordingIn(

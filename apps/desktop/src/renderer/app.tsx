@@ -1265,12 +1265,14 @@ function Main({
           : undefined,
       failedOccurrenceIds:
         failedQueueIds.current.size === 0 ? undefined : failedQueueIds.current,
+      dealtOrder: state.shuffleOrder ?? undefined,
     });
   }, [
     state.queue,
     state.recordings,
     state.likes,
     state.playback,
+    state.shuffleOrder,
     online,
     controller,
     downloads,
@@ -1755,7 +1757,7 @@ function Main({
       // instead of minting a repeat — 'add to queue' stays additive.
       const queued = queuedOccurrenceFor(state.queue, recordingId);
       if (queued !== null) {
-        await session.playOccurrence(queued);
+        await dispatchPlay('common.play', session.playOccurrence(queued));
         return;
       }
       const enqueued = await session.enqueueRecording(recordingId);

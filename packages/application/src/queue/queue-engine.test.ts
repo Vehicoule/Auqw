@@ -227,6 +227,34 @@ function directTests(): void {
     assertEqual(e.snapshot().blockedError, undefined);
   }
 
+  // fork() carries the session-scoped failed marks a snapshot
+  // rebuild would drop; an explicit carry prunes non-members; a
+  // bare snapshot rebuild (restore) intentionally starts clean.
+  {
+    const e = engineWith(['a', 'b', 'c']);
+    e.select('a', true);
+    e.markUnplayable(appError('expired-resource', 'gone'));
+    e.next(); // a stays marked after the cursor moves on
+    const draft = e.fork();
+    assertEqual(draft.isUnplayable('a'), true, 'fork carries failed marks');
+    draft.enqueue(occ('d'));
+    assertEqual(draft.isUnplayable('a'), true, 'marks survive a draft edit');
+    const bare = new QueueEngine(e.snapshot());
+    assertEqual(
+      bare.isUnplayable('a'),
+      false,
+      'snapshot round-trip starts unmarked',
+    );
+    const pruned = new QueueEngine(e.snapshot(), new Set(['a', 'ghost']));
+    assertEqual(pruned.isUnplayable('a'), true);
+    assertEqual(
+      pruned.isUnplayable('ghost'),
+      false,
+      'carry prunes non-member ids',
+    );
+    assertEqual(pruned.unplayableIds.size, 1);
+  }
+
   // observePosition never ticks; no current or identical position
   // is a no-op.
   {

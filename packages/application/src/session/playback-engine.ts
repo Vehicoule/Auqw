@@ -658,13 +658,17 @@ export class PlaybackEngine {
           // Under shuffle the walk is the dealt order: `next` steps to
           // the dealt successor, wraps dealt tail→head under repeat=all,
           // or runs off the dealt end into the same stopped state a
-          // canonical tail move produces.
+          // canonical tail move produces. Failed rows are skipped the
+          // same way the canonical next() walks past unplayable marks.
           const pos = dealt.indexOf(before.currentOccurrenceId);
-          const nextId = pos >= 0 ? dealt[pos + 1] : undefined;
+          const nextId =
+            pos >= 0
+              ? dealt.slice(pos + 1).find((id) => !r.queue.isUnplayable(id))
+              : undefined;
           if (nextId !== undefined) {
             r.queue.select(nextId, before.mode === 'playing');
           } else if (r.repeat === 'all' && dealt.length > 0) {
-            const head = dealt[0];
+            const head = dealt.find((id) => !r.queue.isUnplayable(id));
             if (head !== undefined) {
               // A lone dealt item wraps onto itself — select() no-ops on
               // a same-id zero-position pick, so run off the end first:
@@ -1433,7 +1437,7 @@ export class PlaybackEngine {
           ? current.sourceRefs
           : [...current.sourceRefs, ref],
       };
-      const draft = new QueueEngine(ready.queue.snapshot());
+      const draft = ready.queue.fork();
       try {
         draft.setSelectedRef(occurrenceId, ref);
       } catch (thrown) {
@@ -2829,7 +2833,7 @@ export class PlaybackEngine {
           return err(internalError());
         }
         const adopted = adoptAutomaticMapping(current, ref, automatic);
-        const draft = new QueueEngine(ready3.queue.snapshot());
+        const draft = ready3.queue.fork();
         try {
           draft.setSelectedRef(occurrenceId, ref);
         } catch {
@@ -3365,7 +3369,7 @@ export class PlaybackEngine {
         occurrence.recordingId === adopted.id &&
         occurrence.selectedRef === null &&
         ready3.settings.playbackProvider === provider.id;
-      const draft = shouldPin ? new QueueEngine(snapNow) : null;
+      const draft = shouldPin ? ready3.queue.fork() : null;
       if (draft !== null) {
         try {
           draft.setSelectedRef(occurrenceId ?? '', ref);

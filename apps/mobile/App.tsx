@@ -1397,6 +1397,7 @@ function Main({
       unavailableRecordingIds: unavailable,
       failedOccurrenceIds:
         failedQueueIds.current.size === 0 ? undefined : failedQueueIds.current,
+      dealtOrder: state.shuffleOrder ?? undefined,
     });
     // isOwned re-reads downloads/local after their mutations.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1405,6 +1406,7 @@ function Main({
     state.recordings,
     state.likes,
     state.playback,
+    state.shuffleOrder,
     online,
     isOwned,
     downloads,

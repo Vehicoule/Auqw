@@ -975,6 +975,15 @@ type QueueModelInput = {
    * already steps over the blocked current; the row makes it visible).
    */
   readonly failedOccurrenceIds?: ReadonlySet<string> | undefined;
+  /**
+   * The playback walk under shuffle — the dealt order the service
+   * cursor follows. Section membership and ordering follow it (the
+   * next row after current really is "up next"); occurrences absent
+   * from the deal — enqueued after it — trail the up-next tail in
+   * canonical order. Omitted or a deal that lost the current id falls
+   * back to canonical partitioning.
+   */
+  readonly dealtOrder?: readonly string[] | undefined;
 };
 
 export function toQueueModel(input: QueueModelInput): QueueModel {
@@ -985,6 +994,27 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
   const currentIndex = queue.occurrences.findIndex(
     (o) => o.occurrenceId === queue.currentOccurrenceId,
   );
+  const dealt = input.dealtOrder;
+  const dealIndex = new Map<string, number>();
+  dealt?.forEach((id, i) => {
+    if (!dealIndex.has(id)) {
+      dealIndex.set(id, i);
+    }
+  });
+  const useWalk =
+    dealt !== undefined &&
+    queue.currentOccurrenceId !== null &&
+    dealIndex.has(queue.currentOccurrenceId);
+  // Position in the playback walk; undealt rows sit past the dealt
+  // tail in canonical order so a fresh enqueue can't land in history.
+  const walkPos = (occurrenceId: string, canonicalIndex: number): number =>
+    useWalk
+      ? (dealIndex.get(occurrenceId) ?? dealt.length + canonicalIndex)
+      : canonicalIndex;
+  const currentWalk =
+    queue.currentOccurrenceId === null
+      ? -1
+      : walkPos(queue.currentOccurrenceId, currentIndex);
   const failed = new Set(input.failedOccurrenceIds ?? []);
   // A blocked current is a failed current — mark it even when the
   // caller didn't pass the playback state through.
@@ -1001,12 +1031,13 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
       const recording = byId.get(occurrence.recordingId);
       const current = occurrence.occurrenceId === queue.currentOccurrenceId;
       const isFailed = failed.has(occurrence.occurrenceId);
+      const pos = walkPos(occurrence.occurrenceId, index);
       const section: QueueSectionKey =
         currentIndex === -1
           ? 'upNext'
-          : index === currentIndex
+          : current
             ? 'nowPlaying'
-            : index > currentIndex
+            : pos > currentWalk
               ? 'upNext'
               : 'history';
       const row: TrackRowModel =
@@ -1063,7 +1094,14 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
   const sections: QueueSection[] = (
     ['nowPlaying', 'upNext', 'history'] as const
   ).flatMap((key) => {
-    const sectionItems = items.filter((item) => item.section === key);
+    // Within a section rows follow the playback walk — under shuffle
+    // the dealt order, otherwise canonical.
+    const sectionItems = items
+      .filter((item) => item.section === key)
+      .sort(
+        (a, b) =>
+          walkPos(a.occurrenceId, a.index) - walkPos(b.occurrenceId, b.index),
+      );
     return sectionItems.length === 0 ? [] : [{ key, items: sectionItems }];
   });
   return {

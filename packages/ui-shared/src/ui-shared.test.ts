@@ -217,6 +217,47 @@ assertEqual(
 assertEqual(queueSectionLabel('upNext'), t('queue.upNext'));
 assertEqual(queueSectionLabel('history'), t('queue.history'));
 
+// Under shuffle sections follow the dealt walk, not canonical order:
+// rows after the current deal position are up next even when they
+// sit earlier in the queue array, and each section lists its rows in
+// walk order.
+const shuffledQueue = toQueueModel({
+  queue: {
+    ...fixtureQueue,
+    currentOccurrenceId: 'occ-4',
+    mode: 'paused',
+    positionMs: 0,
+  },
+  recordings: fixtureRecordings,
+  dealtOrder: ['occ-2', 'occ-4', 'occ-7', 'occ-1', 'occ-8'],
+});
+assertEqual(
+  shuffledQueue.sections
+    .flatMap((section) => section.items.map((item) => item.occurrenceId))
+    .join(','),
+  'occ-4,occ-7,occ-1,occ-8,occ-3,occ-5,occ-6,occ-2',
+  'dealt order drives sections: undealt rows trail up next',
+);
+assertEqual(
+  shuffledQueue.sections.find((s) => s.key === 'history')?.items.length,
+  1,
+  'deal positions before current are history',
+);
+
+// A deal that lost the current id falls back to canonical order.
+const staleDeal = toQueueModel({
+  queue: fixtureQueue,
+  recordings: fixtureRecordings,
+  dealtOrder: ['occ-5', 'occ-6'],
+});
+assertEqual(
+  staleDeal.sections
+    .flatMap((s) => s.items.map((i) => i.occurrenceId))
+    .join(','),
+  'occ-1,occ-2,occ-3,occ-4,occ-5,occ-6,occ-7,occ-8',
+  'current missing from the deal: canonical partitioning',
+);
+
 const settings = toSettingsModel(fixtureSettings, fixtureDiagnostics, {});
 assertEqual(settings.rows.length, fixtureSettingsModel.rows.length);
 
