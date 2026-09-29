@@ -34,10 +34,7 @@ export type HttpTraceSummary = {
   elapsedMs: number;
 };
 
-export type GuestLogSummary = {
-  level: string;
-  message: string;
-};
+export type GuestLogSummary = { level: string; message: string };
 
 export type AttemptSummary = {
   requestId: string;
@@ -55,10 +52,7 @@ export type RequestOutcome =
   | { type: 'succeeded'; resultJson: string; attempt: AttemptSummary }
   | { type: 'failed'; kind: string; message: string; attempt: AttemptSummary };
 
-export type RequestOutcomeEvent = {
-  requestId: string;
-  outcome: RequestOutcome;
-};
+export type RequestOutcomeEvent = { requestId: string; outcome: RequestOutcome };
 
 // ---------------------------------------------------------------------------
 // Player surface — the transport side of PlayerPort (docs/specs/playback.md
@@ -69,31 +63,12 @@ export type RequestOutcomeEvent = {
  * mirrors `packages/application/src/errors.ts` (wire kinds surface
  * verbatim from the host, so the union must cover the whole set). */
 export type ErrorKind =
-  | 'no-result'
-  | 'not-applicable'
-  | 'unsupported'
-  | 'auth-required'
-  | 'auth-expired'
-  | 'rate-limit'
-  | 'transient'
-  | 'expired-resource'
-  | 'permission-denied'
-  | 'invalid-response'
-  | 'timeout'
-  | 'cancelled'
-  | 'budget-exceeded'
-  | 'guest-trap'
-  | 'invalid-message'
-  | 'artifact-rejected'
-  | 'streams-capped'
-  | 'released'
-  | 'superseded'
-  | 'evicted'
-  | 'expired'
-  | 'not-found'
-  | 'unavailable'
-  | 'storage-full'
-  | 'internal';
+  | 'no-result' | 'not-applicable' | 'unsupported' | 'auth-required'
+  | 'auth-expired' | 'rate-limit' | 'transient' | 'expired-resource'
+  | 'permission-denied' | 'invalid-response' | 'timeout' | 'cancelled'
+  | 'budget-exceeded' | 'guest-trap' | 'invalid-message' | 'artifact-rejected'
+  | 'streams-capped' | 'released' | 'superseded' | 'evicted'
+  | 'expired' | 'not-found' | 'unavailable' | 'storage-full' | 'internal';
 
 /** A stream whose head bytes are staged for attach. Opaque: prepared → attached → released. */
 export type PreparedStream = {
@@ -117,13 +92,7 @@ export type PrepareOutcomeEvent = {
 };
 
 export type PlaybackState =
-  | 'idle'
-  | 'buffering'
-  | 'ready'
-  | 'playing'
-  | 'paused'
-  | 'ended'
-  | 'failed';
+  'idle' | 'buffering' | 'ready' | 'playing' | 'paused' | 'ended' | 'failed';
 
 export type PlaybackStatusEvent = {
   handle: string;
@@ -143,11 +112,7 @@ export type PhaseMark = {
   sinceStartMs: number;
 };
 
-export type PhaseMarkEvent = PhaseMark & {
-  handle: string;
-  attemptId: string;
-  queueRev: number;
-};
+export type PhaseMarkEvent = PhaseMark & { handle: string; attemptId: string; queueRev: number };
 
 /**
  * The seam's flat lifecycle record for one handle — epochs in ms
@@ -230,10 +195,7 @@ export type TagReaderEntry = {
   modifiedMs?: number | null;
 };
 
-export type TagReaderFingerprint = {
-  docId: string;
-  fingerprint: string;
-};
+export type TagReaderFingerprint = { docId: string; fingerprint: string };
 
 export type TagReaderTags = {
   docId: string;
@@ -359,9 +321,11 @@ function seamUnavailable<T>(name: string): Promise<T> {
   return Promise.reject(seamError(name));
 }
 
-export function createHost(config: HostConfig): Promise<void> {
-  return native.createHost(config);
+function seamThrow(name: string): never {
+  throw seamError(name);
 }
+
+export function createHost(config: HostConfig): Promise<void> { return native.createHost(config); }
 
 /**
  * Set or clear the OAuth access token merged as `access_token` into
@@ -370,9 +334,7 @@ export function createHost(config: HostConfig): Promise<void> {
  * source on InnerTube calls. Prepared sessions read the same slot at
  * re-mint, so a refreshed token reaches mid-stream recovery.
  */
-export function setAuthToken(token: string | null): void {
-  native.setAuthToken(token);
-}
+export function setAuthToken(token: string | null): void { native.setAuthToken(token); }
 
 /**
  * Set or clear the bgutil-compatible PO-token provider URL on the
@@ -381,9 +343,7 @@ export function setAuthToken(token: string | null): void {
  * endpoint refresh reaches the host without a recreate, and `null`
  * restores the anonymous ladder. Never logged.
  */
-export function setPotProvider(url: string | null): void {
-  native.setPotProvider(url);
-}
+export function setPotProvider(url: string | null): void { native.setPotProvider(url); }
 
 export function loadPlugin(wasmBase64: string, manifestJson: string): Promise<string> {
   return native.loadPlugin(wasmBase64, manifestJson);
@@ -398,23 +358,15 @@ export function startRequest(pluginId: string, capability: string, payload: Reco
   return native.startRequest(pluginId, capability, JSON.stringify(payload));
 }
 
-export function cancel(requestId: string): void {
-  native.cancel(requestId);
-}
+export function cancel(requestId: string): void { native.cancel(requestId); }
 
 /**
  * Speculative prepare: resolve + mint + bounded head fill, cancelable.
  * Resolves with the request id; the outcome arrives via
  * `onPrepareOutcome` and carries the stream handle for `play`.
  */
-export function prepare(
-  provider: string,
-  sourceRef: string,
-  attemptId: string,
-  queueRev: number,
-): Promise<string> {
-  return seam.prepare?.(provider, sourceRef, attemptId, queueRev) ??
-    seamUnavailable('prepare');
+export function prepare(provider: string, sourceRef: string, attemptId: string, queueRev: number): Promise<string> {
+  return seam.prepare?.(provider, sourceRef, attemptId, queueRev) ?? seamUnavailable('prepare');
 }
 
 /**
@@ -428,28 +380,18 @@ export function prepareLocal(path: string, mime?: string | null): Promise<string
 }
 
 /** Attach a prepared handle to the warm player and start playback. */
-export function play(
-  handle: string,
-  attemptId: string,
-  queueRev: number,
-  positionMs?: number,
-): Promise<void> {
-  return seam.play?.(handle, attemptId, queueRev, positionMs) ??
-    seamUnavailable('play');
+export function play(handle: string, attemptId: string, queueRev: number, positionMs?: number): Promise<void> {
+  return seam.play?.(handle, attemptId, queueRev, positionMs) ?? seamUnavailable('play');
 }
 
-export function pause(): Promise<void> {
-  return seam.pause?.() ?? seamUnavailable('pause');
-}
+export function pause(): Promise<void> { return seam.pause?.() ?? seamUnavailable('pause'); }
 
 /** Seek in milliseconds; may target unfetched offsets (fetch-through). */
 export function seekTo(positionMs: number): Promise<void> {
   return seam.seekTo?.(positionMs) ?? seamUnavailable('seekTo');
 }
 
-export function stop(): Promise<void> {
-  return seam.stop?.() ?? seamUnavailable('stop');
-}
+export function stop(): Promise<void> { return seam.stop?.() ?? seamUnavailable('stop'); }
 
 export function cancelPrepare(requestId: string): Promise<void> {
   return seam.cancelPrepare?.(requestId) ?? seamUnavailable('cancelPrepare');
@@ -474,25 +416,14 @@ export function phaseMarks(handle: string): Promise<StreamPhaseMarks> {
  * extraction only ever issues positional `streamRead`s.
  */
 export function waveformPeaks(
-  requestId: string,
-  handle: string,
-  count: number,
-  maxBytes: number,
-  provisionalCap: boolean,
+  requestId: string, handle: string, count: number, maxBytes: number, provisionalCap: boolean,
 ): Promise<readonly number[]> {
-  return seam.waveformPeaks?.(
-    requestId,
-    handle,
-    count,
-    maxBytes,
-    provisionalCap,
-  ) ?? seamUnavailable('waveformPeaks');
+  return seam.waveformPeaks?.(requestId, handle, count, maxBytes, provisionalCap) ??
+    seamUnavailable('waveformPeaks');
 }
 
 /** Cancels a running `waveformPeaks` sweep — its promise rejects 'cancelled'. */
-export function waveformPeaksCancel(requestId: string): void {
-  seam.waveformPeaksCancel?.(requestId);
-}
+export function waveformPeaksCancel(requestId: string): void { seam.waveformPeaksCancel?.(requestId); }
 
 /**
  * Install one immutable identified queue revision for background
@@ -500,8 +431,7 @@ export function waveformPeaksCancel(requestId: string): void {
  * `onQueueTransition` events.
  */
 export function setQueueProjection(projection: QueueProjection): Promise<void> {
-  return seam.setQueueProjection?.(projection) ??
-    seamUnavailable('setQueueProjection');
+  return seam.setQueueProjection?.(projection) ?? seamUnavailable('setQueueProjection');
 }
 
 /** Material You stops for 'adaptive' — Android-only seam; resolves
@@ -536,14 +466,8 @@ export function devAttachFile(path: string): Promise<string> {
  * through the sparse store, pump, and fetch-through. Resolves with
  * the stream handle for `play`. Dev instrumentation.
  */
-export function devPrepareUrl(
-  url: string,
-  mime: string,
-  contentLength?: number,
-  remintable?: boolean,
-): Promise<string> {
-  return seam.devPrepareUrl?.(url, mime, contentLength, remintable) ??
-    seamUnavailable('devPrepareUrl');
+export function devPrepareUrl(url: string, mime: string, contentLength?: number, remintable?: boolean): Promise<string> {
+  return seam.devPrepareUrl?.(url, mime, contentLength, remintable) ?? seamUnavailable('devPrepareUrl');
 }
 
 export function addRequestOutcomeListener(listener: (event: RequestOutcomeEvent) => void): EventSubscription {
@@ -567,23 +491,16 @@ export function addQueueTransitionListener(listener: (event: QueueTransitionEven
 }
 
 /** {online, metered} — snapshot read and the change-edge payload. */
-export type ConnectivityChangedEvent = {
-  online: boolean;
-  metered: boolean;
-};
+export type ConnectivityChangedEvent = { online: boolean; metered: boolean };
 
 export function connectivitySnapshot(): Promise<ConnectivityChangedEvent> {
   return native.connectivitySnapshot();
 }
 
 /** Start the NetworkCallback — emits a baseline edge immediately. */
-export function connectivityWatch(): void {
-  native.connectivityWatch();
-}
+export function connectivityWatch(): void { native.connectivityWatch(); }
 
-export function connectivityUnwatch(): void {
-  native.connectivityUnwatch();
-}
+export function connectivityUnwatch(): void { native.connectivityUnwatch(); }
 
 export function addConnectivityChangedListener(listener: (event: ConnectivityChangedEvent) => void): EventSubscription {
   return native.addListener('onConnectivityChanged', listener);
@@ -603,23 +520,15 @@ export function tagEnumerate(treeUri: string): Promise<readonly TagReaderEntry[]
   return native.tagEnumerate(treeUri);
 }
 
-export function tagFingerprint(
-  treeUri: string,
-  docIds: readonly string[],
-): Promise<readonly (TagReaderFingerprint | null)[]> {
+export function tagFingerprint(treeUri: string, docIds: readonly string[]): Promise<readonly (TagReaderFingerprint | null)[]> {
   return native.tagFingerprint(treeUri, docIds);
 }
 
-export function tagRead(
-  treeUri: string,
-  docIds: readonly string[],
-): Promise<readonly (TagReaderTags | null)[]> {
+export function tagRead(treeUri: string, docIds: readonly string[]): Promise<readonly (TagReaderTags | null)[]> {
   return native.tagRead(treeUri, docIds);
 }
 
-export function docUri(treeUri: string, docId: string): string {
-  return native.docUri(treeUri, docId);
-}
+export function docUri(treeUri: string, docId: string): string { return native.docUri(treeUri, docId); }
 
 /**
  * Whether the platform's native module actually exposes the tag
@@ -628,34 +537,19 @@ export function docUri(treeUri: string, docId: string): string {
  * actions where they'd fail silently.
  */
 export function hasTagReader(): boolean {
-  return (
-    typeof seam.tagPickFolder === 'function' &&
-    typeof seam.tagEnumerate === 'function'
-  );
+  return typeof seam.tagPickFolder === 'function' && typeof seam.tagEnumerate === 'function';
 }
 
 // ---- Sync-socket wrappers (LAN sync client, docs/specs/sync.md) ----
 
 /** Frame bytes cross the bridge as base64 — never raw binary JSON. */
-export type SyncSocketDataEvent = {
-  socketId: string;
-  data: string;
-};
+export type SyncSocketDataEvent = { socketId: string; data: string };
 
 /** reason: 'peer' = remote FIN, 'error' = socket fault, 'local' = destroyed. */
-export type SyncSocketClosedEvent = {
-  socketId: string;
-  reason: string;
-};
+export type SyncSocketClosedEvent = { socketId: string; reason: string };
 
-export function syncConnect(
-  socketId: string,
-  host: string,
-  port: number,
-  timeoutMs: number,
-): Promise<{ remoteAddress: string | null }> {
-  return seam.syncConnect?.(socketId, host, port, timeoutMs) ??
-    seamUnavailable('syncConnect');
+export function syncConnect(socketId: string, host: string, port: number, timeoutMs: number): Promise<{ remoteAddress: string | null }> {
+  return seam.syncConnect?.(socketId, host, port, timeoutMs) ?? seamUnavailable('syncConnect');
 }
 
 export function syncSend(socketId: string, data: string): Promise<void> {
@@ -675,10 +569,7 @@ export function syncDestroy(socketId: string): Promise<void> {
 /** SecureRandom bytes as base64 — the sync crypto's CSPRNG source.
  * Synchronous like the noble calls that consume it. */
 export function syncRandomBytes(length: number): string {
-  if (seam.syncRandomBytes === undefined) {
-    throw seamError('syncRandomBytes');
-  }
-  return seam.syncRandomBytes(length);
+  return seam.syncRandomBytes?.(length) ?? seamThrow('syncRandomBytes');
 }
 
 export function addSyncSocketDataListener(listener: (event: SyncSocketDataEvent) => void): EventSubscription {
@@ -695,8 +586,5 @@ export function addSyncSocketClosedListener(listener: (event: SyncSocketClosedEv
  * UI should report sync as off rather than offering a dead dial.
  */
 export function hasSyncSocket(): boolean {
-  return (
-    typeof seam.syncConnect === 'function' &&
-    typeof seam.syncRandomBytes === 'function'
-  );
+  return typeof seam.syncConnect === 'function' && typeof seam.syncRandomBytes === 'function';
 }
