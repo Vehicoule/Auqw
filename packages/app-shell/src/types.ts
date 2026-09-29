@@ -25,14 +25,13 @@ import type {
   Session,
   SourceRef,
   StoragePort,
-  TrackMetadata,
 } from '@auqw/application';
 import {
   nextQueueDestination,
   reportResult,
   t,
 } from '@auqw/ui-shared';
-import type { DownloadChip } from '@auqw/ui-shared';
+import type { ActionTarget, DownloadChip } from '@auqw/ui-shared';
 
 /** The overlay variants the factory can push itself. Apps extend the
     union with their own routes (mobile adds `{ type: 'sync' }`). */
@@ -316,9 +315,7 @@ export type ShellSheetAction = {
     | 'library';
 };
 
-export type ActionTargetLike =
-  | { readonly kind: 'recording'; readonly recordingId: string }
-  | { readonly kind: 'metadata'; readonly meta: TrackMetadata };
+export type ActionTargetLike = ActionTarget;
 
 /**
  * The row-actions sheet model — identical list on both platforms.

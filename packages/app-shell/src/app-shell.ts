@@ -18,12 +18,9 @@ import {
   CancellationSource,
   ProviderRouter,
   SearchSession,
-  appError,
-  appErrorKind,
   createClock,
   createIds,
   effectiveMapping,
-  err,
   isMatchGate,
   isRefRejected,
   previewImport,
@@ -336,10 +333,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // null = unknown (no baseline yet) — the offline banner renders
   // only on an explicit false.
   const [online, setOnline] = useState<boolean | null>(null);
-  useEffect(
-    () => ports.subscribeOnline(setOnline),
-    [ports.subscribeOnline],
-  );
+  useEffect(() => ports.subscribeOnline(setOnline), [ports.subscribeOnline]);
 
   // ---- toast bus ---------------------------------------------------
   // reportResult routes its text through the module sink; the pill
@@ -565,8 +559,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     reviews: null,
     error: null,
   });
-  const [reviewFilter, setReviewFilter] =
-    useState<CorrectionsFilter>('pending');
+  const [reviewFilter, setReviewFilter] = useState<CorrectionsFilter>('pending');
   const [transfer, setTransfer] = useState<TransferModel>(IDLE_TRANSFER);
   const importText = useRef<string | null>(null);
   // Localized transfer strings freeze into state at write time —
@@ -2067,12 +2060,21 @@ export function useAppShell<E extends { readonly type: string } = never>(
           ?.sourceRefs[0] ?? null);
   }, [actionsFor, state.recordings]);
 
-  const onStartRadio = useCallback(() => {
-    const ref = radioSeedRef;
-    if (ref !== null && radioSeedable(ref)) {
-      void session.startRadio(ref).then(reporter('stage.radio.start'));
-    }
-  }, [session, radioSeedRef, radioSeedable]);
+  // The seed must still resolve through its own provider — guard the
+  // op too, not just the affordance, since state may shift in between.
+  const startRadioSeed = useCallback(
+    (ref: SourceRef | null) => {
+      if (ref !== null && radioSeedable(ref)) {
+        void session.startRadio(ref).then(reporter('stage.radio.start'));
+      }
+    },
+    [session, radioSeedable],
+  );
+
+  const onStartRadio = useCallback(
+    () => startRadioSeed(radioSeedRef),
+    [startRadioSeed, radioSeedRef],
+  );
 
   const onStopRadio = useCallback(() => {
     reportResult('action.stopRadio', session.stopRadio());
@@ -2221,19 +2223,16 @@ export function useAppShell<E extends { readonly type: string } = never>(
         return;
       }
       importText.current = null;
-      const counts = result.value.counts;
-      importSummaryCounts.current = {
-        tracks: counts.recordings,
-        likes: counts.likes,
-        playlists: counts.playlists,
+      const c = result.value.counts;
+      const counts = {
+        tracks: c.recordings,
+        likes: c.likes,
+        playlists: c.playlists,
       };
+      importSummaryCounts.current = counts;
       patchTransfer({
         importPhase: 'done',
-        importDetail: t('transfer.importSummary', {
-          tracks: counts.recordings,
-          likes: counts.likes,
-          playlists: counts.playlists,
-        }),
+        importDetail: t('transfer.importSummary', counts),
       });
     });
   }, [controller, patchTransfer]);
@@ -2602,14 +2601,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
           break;
         case 'radio':
           // Track-seeded at this release: a metadata row seeds its own
-          // ref; a library row seeds its first source ref. The action
-          // only renders when the seed's provider declares radio.seed,
-          // but guard the op too — state may shift between the two.
-          if (actionRadioRef !== null && radioSeedable(actionRadioRef)) {
-            void session
-              .startRadio(actionRadioRef)
-              .then(reporter('stage.radio.start'));
-          }
+          // ref; a library row seeds its first source ref.
+          startRadioSeed(actionRadioRef);
           break;
         case 'album':
           if (target.kind === 'metadata' && target.meta.albumRef) {
@@ -2628,7 +2621,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       session,
       openEntity,
       actionRadioRef,
-      radioSeedable,
+      startRadioSeed,
       onDownloadAction,
       controller,
       removeDownload,
