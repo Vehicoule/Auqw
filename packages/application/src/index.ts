@@ -35,6 +35,8 @@ export * from './sync/hlc.ts';
 export * from './sync/lan.ts';
 export * from './sync/sync-engine.ts';
 export * from './sync/sync-wire.ts';
+export * from './sync/noise.ts';
+export * from './sync/custody.ts';
 export * from './sync/engine-port.ts';
 export * from './sync/sync-client.ts';
 export * from './sync/sync-scheduler.ts';

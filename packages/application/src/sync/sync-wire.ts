@@ -656,7 +656,7 @@ export type SyncWirePump = {
 const HEADER_BYTES = 4;
 
 /**
- * The `attachWirePump` port — identical semantics, Buffer-free:
+ * The one wire pump — identical semantics on every platform:
  * u32le head, strict phase cap (0 or >cap destroys the socket before
  * a byte of payload is allocated), concat-on-chunk receive path.
  */

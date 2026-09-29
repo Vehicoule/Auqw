@@ -1,15 +1,16 @@
 import {
   hasOnlyKeys,
-  isBoundedString,
   isRecord,
   isSafeNonNegativeInt,
 } from '../shared/check.ts';
 import { shellError } from '../shared/errors.ts';
 import {
-  fingerprintOf,
   isSyncIdentity,
+  readSyncCallerPeer,
+  type SyncCallerPeer,
   type SyncIdentity,
-} from './sync-crypto.ts';
+} from '@auqw/application';
+import { nodeNoise } from './noise-node.ts';
 
 /**
  * `sync:keys` — the utility→main custody channel. Electron's
@@ -25,17 +26,13 @@ const SYNC_KEYS_CHANNEL = 'sync:keys';
 /** Cap on the registry — pairing spam can't grow the store unbounded. */
 export const MAX_SYNC_DEVICES = 64;
 
-export type SyncDeviceRecord = {
-  /** Client-minted id — `^[a-z0-9][a-z0-9._-]{7,63}$`; feeds the file key. */
-  readonly id: string;
-  readonly name: string;
-  /** Device long-lived X25519 public key, SPKI base64. */
-  readonly pub: string;
-  /** sha256(pub-DER) hex — the auth identity the session binds to. */
-  readonly fp: string;
-  readonly pairedAt: number;
-  readonly lastSeenAt: number;
-};
+/**
+ * A paired caller's custody record — the unified `role:'caller'`
+ * SyncPeerRecord the application package owns. Rows written before
+ * the unification carry no `role` tag (and no `endpoints`); the
+ * reader below accepts them and normalizes to the tagged shape.
+ */
+export type SyncDeviceRecord = SyncCallerPeer;
 
 export function isDeviceId(value: unknown): value is string {
   return (
@@ -43,30 +40,27 @@ export function isDeviceId(value: unknown): value is string {
   );
 }
 
+/**
+ * Read a stored device record — tagged rows pass through, legacy
+ * untagged rows normalize to `role:'caller'`. The fp↔pub binding is
+ * still enforced cryptographically: a record whose fp isn't
+ * sha256(its own pub) misbinds resume identity and fp-dedupe, so it
+ * reads as no record at all.
+ */
+export function readSyncDeviceRecord(
+  value: unknown,
+): SyncDeviceRecord | null {
+  const row = readSyncCallerPeer(value);
+  if (row === null) {
+    return null;
+  }
+  return nodeNoise.fingerprintOf(row.pub) === row.fp ? row : null;
+}
+
 export function isSyncDeviceRecord(
   value: unknown,
 ): value is SyncDeviceRecord {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, [
-      'id',
-      'name',
-      'pub',
-      'fp',
-      'pairedAt',
-      'lastSeenAt',
-    ]) &&
-    isDeviceId(value['id']) &&
-    isBoundedString(value['name'], 128) &&
-    isBoundedString(value['pub'], 128) &&
-    /^[0-9a-f]{64}$/.test(String(value['fp'])) &&
-    // The fingerprint must be the hash of THIS record's key — a
-    // custody record with an unrelated fp would misbind resume
-    // identity and fp-dedupe, so tampered rows fail validation.
-    fingerprintOf(String(value['pub'])) === value['fp'] &&
-    isSafeNonNegativeInt(value['pairedAt']) &&
-    isSafeNonNegativeInt(value['lastSeenAt'])
-  );
+  return readSyncDeviceRecord(value) !== null;
 }
 
 export type SyncKeysOp =

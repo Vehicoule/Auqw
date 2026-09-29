@@ -23,6 +23,7 @@ import {
   isClientHello,
   parseEndpoint,
 } from './sync-wire.ts';
+import type { SyncCallerPeer } from './custody.ts';
 import { isPairableLanHost } from './lan.ts';
 import {
   createSyncResponder,
@@ -56,35 +57,25 @@ export {
  * device a dialable endpoint for the peer (stored on the peer record).
  */
 
-/** The host's custody record of one paired caller. */
-export type SyncHostPeer = {
-  /** The caller's claimed deviceId — registry names it, not the wire. */
-  readonly id: string;
-  readonly name: string;
-  /** Caller's device X25519 SPKI, base64 — audit/display only. */
-  readonly pub: string;
-  readonly fp: string;
-  readonly pairedAt: number;
-  readonly lastSeenAt: number;
-  /** Dialable `host:port`s, learned from hello.port — may be empty. */
-  readonly endpoints: readonly string[];
-};
+/** The host's custody record of one paired caller — the unified
+ * `role:'caller'` SyncPeerRecord. */
+export type SyncHostPeer = SyncCallerPeer;
 
 /** Device custody for the host role — the platform's secure store. */
 export interface SyncHostRegistry {
   /** By device fingerprint — hello-time `registered` answer. */
-  find(fp: string, signal?: CancellationSignal): Promise<Result<SyncHostPeer | null>>;
+  find(fp: string, signal?: CancellationSignal): Promise<Result<SyncCallerPeer | null>>;
   /**
    * Insert-or-replace keyed on fp — a re-pair under a new device id
    * rewrites the row (one key pair, one record).
    */
-  put(peer: SyncHostPeer, signal?: CancellationSignal): Promise<Result<void>>;
+  put(peer: SyncCallerPeer, signal?: CancellationSignal): Promise<Result<void>>;
   /**
    * Refresh name/lastSeenAt/endpoints only when fp is still present —
    * a resume racing an unpair must not resurrect the row. False = the
    * record vanished between hello and auth; the dialer re-pairs.
    */
-  touch(peer: SyncHostPeer, signal?: CancellationSignal): Promise<Result<boolean>>;
+  touch(peer: SyncCallerPeer, signal?: CancellationSignal): Promise<Result<boolean>>;
 }
 
 export type SyncPairHostDeps = {
@@ -242,7 +233,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
     return list;
   }
 
-  const responder = createSyncResponder<SyncHostPeer>({
+  const responder = createSyncResponder<SyncCallerPeer>({
     crypto: () => deps.crypto,
     attach: attachSyncPump,
     name: deps.name,
@@ -282,6 +273,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
       },
     },
     buildPeer: (session, kind, now) => ({
+      role: 'caller',
       // 'pair' keeps the caller's claimed id; 'resume' is pinned to the
       // id custody already binds to this key.
       id:

@@ -284,6 +284,7 @@ function fakeKeys(): SyncClientKeys & { peers: Map<string, SyncPeer> } {
 
 function hostPeer(fp: string, overrides: Partial<SyncHostPeer> = {}): SyncHostPeer {
   return {
+    role: 'caller',
     id: DESK_ID,
     name: 'auqw-desk',
     pub: DESK_PUB,
@@ -297,6 +298,7 @@ function hostPeer(fp: string, overrides: Partial<SyncHostPeer> = {}): SyncHostPe
 
 function deskPeer(fp: string, endpoints: readonly string[]): SyncPeer {
   return {
+    role: 'responder',
     fp,
     name: HOST_NAME,
     endpoints,

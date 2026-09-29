@@ -6,7 +6,13 @@ import type {
   SyncIdentity,
   SyncPeer,
 } from '@auqw/application';
-import { appError, err, isRecord, ok } from '@auqw/application';
+import {
+  appError,
+  err,
+  isRecord,
+  ok,
+  readSyncPeer,
+} from '@auqw/application';
 import { nativeError } from './auqw-expo-surface.ts';
 
 /**
@@ -74,31 +80,14 @@ function isFpList(value: unknown): value is string[] {
   );
 }
 
-function isSyncPeerRecord(value: unknown): value is SyncPeer {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const cursor = value['peerCursor'];
-  return (
-    typeof value['fp'] === 'string' &&
-    /^[0-9a-f]{64}$/.test(value['fp']) &&
-    typeof value['name'] === 'string' &&
-    Array.isArray(value['endpoints']) &&
-    value['endpoints'].every((e) => typeof e === 'string') &&
-    typeof value['pairedAt'] === 'number' &&
-    typeof value['lastSeenAt'] === 'number' &&
-    isRecord(cursor) &&
-    Object.values(cursor).every((m) => typeof m === 'number') &&
-    (value['lastSyncAt'] === undefined ||
-      typeof value['lastSyncAt'] === 'number') &&
-    (value['deviceId'] === undefined ||
-      (typeof value['deviceId'] === 'string' &&
-        value['deviceId'].length <= 64)) &&
-    (value['pub'] === undefined ||
-      (typeof value['pub'] === 'string' && value['pub'].length <= 128)) &&
-    (value['pot'] === undefined ||
-      (typeof value['pot'] === 'string' && value['pot'].length <= 320))
-  );
+/**
+ * Stored peer rows read through the shared custody reader — it accepts
+ * the pre-unification untagged shape (same bounds this file shipped)
+ * and normalizes to the tagged `role:'responder'` record, so records
+ * minted by older builds still load.
+ */
+function readPeerRecord(value: unknown): SyncPeer | null {
+  return readSyncPeer(value);
 }
 
 function cancelled(signal?: CancellationSignal): Result<never> | null {
@@ -206,12 +195,13 @@ export function createSecureSyncKeys(): SyncClientKeys {
         if (read.value === null) {
           continue; // stale index entry — prune on next write
         }
-        if (!isSyncPeerRecord(read.value)) {
+        const peer = readPeerRecord(read.value);
+        if (peer === null) {
           return err(
             appError('invalid-response', 'sync: corrupt peer record'),
           );
         }
-        peers.push(read.value);
+        peers.push(peer);
       }
       return ok(peers);
     },
@@ -246,13 +236,10 @@ export function createSecureSyncKeys(): SyncClientKeys {
         if (!existingRead.ok) {
           return existingRead;
         }
-        if (
-          existingRead.value === null ||
-          !isSyncPeerRecord(existingRead.value)
-        ) {
+        const existing = readPeerRecord(existingRead.value);
+        if (existing === null) {
           return ok(false);
         }
-        const existing = existingRead.value;
         const merged: SyncPeer = {
           ...existing,
           name: peer.name,
@@ -294,11 +281,8 @@ export function createSecureSyncKeys(): SyncClientKeys {
           if (!existingRead.ok) {
             return existingRead;
           }
-          if (
-            existingRead.value !== null &&
-            isSyncPeerRecord(existingRead.value)
-          ) {
-            const existing = existingRead.value;
+          const existing = readPeerRecord(existingRead.value);
+          if (existing !== null) {
             merged = {
               ...peer,
               pairedAt: existing.pairedAt,

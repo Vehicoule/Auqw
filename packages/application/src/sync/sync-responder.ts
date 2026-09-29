@@ -359,7 +359,7 @@ export type SyncResponderDeps<TRecord extends ResponderDeviceRecord> = {
    * inside its own start() before the first session exists.
    */
   readonly crypto: () => SyncResponderCrypto;
-  /** The wire-pump factory — desktop's attachWirePump fits the shape. */
+  /** The wire-pump factory — the shared `attachSyncPump` is the default. */
   readonly attach: (opts: {
     socket: ResponderSocket;
     maxPayload: number;

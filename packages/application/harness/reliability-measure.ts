@@ -450,13 +450,14 @@ async function scenarioSync() {
   }
   const clock = new FakeClock(0);
   const peer = {
+    role: 'responder',
     fp: 'fp-1',
     name: 'phone',
     endpoints: ['10.0.0.2:4123'],
     pairedAt: 1,
     lastSeenAt: 1,
     peerCursor: {},
-  };
+  } as const;
   let syncing = false;
   let listeners: ((s: unknown) => void)[] = [];
   const views = new Map<string, { state: string; lastError?: AppError }>();
