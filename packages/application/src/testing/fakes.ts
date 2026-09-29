@@ -273,13 +273,9 @@ export const ALL_CAPABILITIES: readonly ProviderCapability[] = [
 ];
 
 function unsupportedCall(capability: ProviderCapability) {
-  return {
-    ok: false as const,
-    error: appError(
-      'unsupported',
-      `provider does not declare ${capability}`,
-    ),
-  };
+  return err(
+    appError('unsupported', `provider does not declare ${capability}`),
+  );
 }
 
 export class FakeProvider implements ProviderPort {
@@ -410,10 +406,6 @@ export class FakeProvider implements ProviderPort {
     return this.#settle('resolve', 0, result);
   }
 
-  settleResolveAt(index: number, result: Result<PlayableResource>): boolean {
-    return this.#settle('resolve', index, result);
-  }
-
   getDetails(
     refs: readonly SourceRef[],
     context: OperationContext,
@@ -425,13 +417,6 @@ export class FakeProvider implements ProviderPort {
     return this.#settle('details', 0, result);
   }
 
-  settleDetailsAt(
-    index: number,
-    result: Result<readonly TrackMetadata[]>,
-  ): boolean {
-    return this.#settle('details', index, result);
-  }
-
   getEntity(
     ref: EntityRef,
     context: OperationContext,
@@ -441,10 +426,6 @@ export class FakeProvider implements ProviderPort {
 
   settleEntity(result: Result<EntityPage>): boolean {
     return this.#settle('entity', 0, result);
-  }
-
-  settleEntityAt(index: number, result: Result<EntityPage>): boolean {
-    return this.#settle('entity', index, result);
   }
 
   artwork(
@@ -463,13 +444,6 @@ export class FakeProvider implements ProviderPort {
 
   settleArtwork(result: Result<readonly ArtworkRef[]>): boolean {
     return this.#settle('artwork', 0, result);
-  }
-
-  settleArtworkAt(
-    index: number,
-    result: Result<readonly ArtworkRef[]>,
-  ): boolean {
-    return this.#settle('artwork', index, result);
   }
 
   /** The wire capability the prefer hint maps to under declared caps. */
@@ -501,10 +475,6 @@ export class FakeProvider implements ProviderPort {
     return this.#settle('lyrics', 0, result);
   }
 
-  settleLyricsAt(index: number, result: Result<LyricsResult>): boolean {
-    return this.#settle('lyrics', index, result);
-  }
-
   radioSeed(
     input: RadioSeed,
     context: OperationContext,
@@ -516,10 +486,6 @@ export class FakeProvider implements ProviderPort {
     return this.#settle('radio', 0, result);
   }
 
-  settleRadioAt(index: number, result: Result<RadioPage>): boolean {
-    return this.#settle('radio', index, result);
-  }
-
   suggest(
     input: { input: string; limit?: number },
     context: OperationContext,
@@ -529,10 +495,6 @@ export class FakeProvider implements ProviderPort {
 
   settleSuggest(result: Result<readonly string[]>): boolean {
     return this.#settle('suggest', 0, result);
-  }
-
-  settleSuggestAt(index: number, result: Result<readonly string[]>): boolean {
-    return this.#settle('suggest', index, result);
   }
 
   pendingCount(method: ProviderMethod): number {
@@ -558,11 +520,6 @@ export class FakePlayer implements PlayerPort {
     return settleQueue(this.#prepareDeferreds, 0, result);
   }
 
-  /** Settles the pending prepare at queue index. */
-  settlePrepareAt(index: number, result: Result<string>): boolean {
-    return settleQueue(this.#prepareDeferreds, index, result);
-  }
-
   get pendingPrepares(): number {
     return this.#prepareDeferreds.length;
   }
@@ -570,10 +527,6 @@ export class FakePlayer implements PlayerPort {
   /** Settles the oldest pending prewarm; false when none pending. */
   settlePrewarm(result: Result<string>): boolean {
     return settleQueue(this.#prewarmDeferreds, 0, result);
-  }
-
-  get pendingPrewarms(): number {
-    return this.#prewarmDeferreds.length;
   }
 
   /** Resolves every pending prepare as cancelled. */
@@ -611,7 +564,7 @@ export class FakePlayer implements PlayerPort {
     if (result.ok) {
       return Promise.resolve(ok(value));
     }
-    return Promise.resolve({ ok: false, error: result.error });
+    return Promise.resolve(err(result.error));
   }
 
   prepare(input: {
@@ -729,7 +682,7 @@ export class FakePlayer implements PlayerPort {
     if (this.#nextProjectionError !== null) {
       const error = this.#nextProjectionError;
       this.#nextProjectionError = null;
-      return Promise.resolve({ ok: false, error });
+      return Promise.resolve(err(error));
     }
     if (this.#deferProjections) {
       return this.#deferInto(this.#projectionDeferreds);
@@ -739,8 +692,6 @@ export class FakePlayer implements PlayerPort {
 }
 
 export class FakeStorage implements StoragePort {
-  static readonly MAX_ATTEMPTS = 500;
-
   #state: PersistedState;
   #attempts: AttemptTrace[] = [];
   #failWith: AppError | null = null;
@@ -778,18 +729,17 @@ export class FakeStorage implements StoragePort {
 
   load(context: OperationContext): Promise<Result<PersistedState>> {
     this.loads.push(context);
-    const deferred = new Deferred<Result<PersistedState>>();
-    this.#loadDeferreds.push(deferred);
-    context.signal.subscribe(() => {
-      deferred.resolve(cancelled());
-    });
     if (this.#deferNextLoad) {
       this.#deferNextLoad = false;
+      const deferred = new Deferred<Result<PersistedState>>();
+      this.#loadDeferreds.push(deferred);
+      context.signal.subscribe(() => {
+        deferred.resolve(cancelled());
+      });
       return deferred.promise;
     }
     // Clone-on-read: callers cannot mutate the stored snapshot.
-    deferred.resolve(ok(clone(this.#state)));
-    return deferred.promise;
+    return Promise.resolve(ok(clone(this.#state)));
   }
 
   commit(
@@ -799,7 +749,7 @@ export class FakeStorage implements StoragePort {
     if (this.#failWith !== null) {
       const error = this.#failWith;
       this.#failWith = null;
-      return Promise.resolve({ ok: false, error });
+      return Promise.resolve(err(error));
     }
     if (
       batch.recordings !== undefined &&
@@ -857,9 +807,7 @@ export class FakeStorage implements StoragePort {
     }
     this.#state = merged;
     if (stagedAttempts !== undefined) {
-      this.#attempts = [...this.#attempts, ...stagedAttempts].slice(
-        -FakeStorage.MAX_ATTEMPTS,
-      );
+      this.#attempts = [...this.#attempts, ...stagedAttempts].slice(-500);
     }
     return ok(undefined);
   }
@@ -933,7 +881,7 @@ export class FakeStorage implements StoragePort {
     if (this.#failWith !== null) {
       const error = this.#failWith;
       this.#failWith = null;
-      return Promise.resolve({ ok: false, error });
+      return Promise.resolve(err(error));
     }
     if (context.signal.cancelled) {
       return Promise.resolve(cancelled());
@@ -1012,8 +960,6 @@ class FakeTransferSink implements TransferSink {
   #writes = 0;
   #committed = 0;
   #closed = false;
-  readonly writesLog: number[] = [];
-  readonly commitsLog: number[] = [];
   finalizedWith: string | null = null;
   abortedKeep: boolean | null = null;
 
@@ -1057,7 +1003,6 @@ class FakeTransferSink implements TransferSink {
       return err(this.#script.writeError);
     }
     this.#bytes += bytes.length;
-    this.writesLog.push(bytes.length);
     return ok(undefined);
   }
 
@@ -1072,7 +1017,6 @@ class FakeTransferSink implements TransferSink {
       return err(error);
     }
     this.#committed = this.#bytes;
-    this.commitsLog.push(this.#committed);
     return ok(this.#committed);
   }
 
@@ -1105,7 +1049,6 @@ export class FakeTransfer implements MediaTransferPort {
   readonly sinks: FakeTransferSink[] = [];
   readonly beginCalls: { destPath: string; resumeAtBytes: number }[] = [];
   readonly removedFiles: string[] = [];
-  dirReady = false;
   usageBytes = 0;
   free = Number.MAX_SAFE_INTEGER;
   /** stat() overrides keyed by file name. */
@@ -1113,7 +1056,6 @@ export class FakeTransfer implements MediaTransferPort {
     string,
     { exists: boolean; bytes: number | null }
   >();
-  sweptPartials = 0;
   sweepCalls: string[][] = [];
 
   /** Queue a sink script for the next begin(). */
@@ -1126,7 +1068,6 @@ export class FakeTransfer implements MediaTransferPort {
   }
 
   async ensureDir(_signal: CancellationSignal): Promise<Result<void>> {
-    this.dirReady = true;
     return ok(undefined);
   }
 
@@ -1153,7 +1094,7 @@ export class FakeTransfer implements MediaTransferPort {
     _signal: CancellationSignal,
   ): Promise<Result<number>> {
     this.sweepCalls.push([...keepPaths]);
-    return ok(this.sweptPartials);
+    return ok(0);
   }
 
   async usage(_signal: CancellationSignal): Promise<Result<number>> {
@@ -1187,24 +1128,19 @@ export class FakeTagReader implements TagReaderPort {
   pickResult: Result<PickedFolder> = err(
     appError('no-result', 'folder pick cancelled'),
   );
-  pickCalls = 0;
-  enumerateCalls: string[] = [];
   fingerprintCalls: string[][] = [];
-  readTagsCalls: string[][] = [];
 
   async pickFolder(
     _signal: CancellationSignal,
   ): Promise<Result<PickedFolder>> {
-    this.pickCalls += 1;
     return this.pickResult;
   }
 
   async enumerate(
-    treeUri: string,
+    _treeUri: string,
     _signal: CancellationSignal,
   ): Promise<Result<readonly LocalEntry[]>> {
-    this.enumerateCalls.push(treeUri);
-    return ok(this.entries.get(treeUri) ?? []);
+    return ok(this.entries.get(_treeUri) ?? []);
   }
 
   async fingerprint(
@@ -1221,7 +1157,6 @@ export class FakeTagReader implements TagReaderPort {
     docIds: readonly string[],
     _signal: CancellationSignal,
   ): Promise<Result<readonly (LocalTags | null)[]>> {
-    this.readTagsCalls.push([...docIds]);
     return ok(docIds.map((id) => this.tags.get(id) ?? null));
   }
 
@@ -1232,13 +1167,11 @@ export class FakeTagReader implements TagReaderPort {
 
 export class FakeConnectivity implements ConnectivityPort {
   state: ConnectivitySnapshot = { online: true, metered: false };
-  snapshotCalls = 0;
   readonly listeners = new Set<
     (snapshot: ConnectivitySnapshot) => void
   >();
 
   async snapshot(): Promise<Result<ConnectivitySnapshot>> {
-    this.snapshotCalls += 1;
     return ok({ ...this.state });
   }
 
@@ -1335,14 +1268,6 @@ export class FakeSyncLogStore implements SyncLogStore {
     return clone(Object.fromEntries(this.#peerMarks));
   }
 
-  get storedDivergenceFloor(): number {
-    return this.#divergenceFloor;
-  }
-
-  get storedDivergenceReplayOffset(): number {
-    return this.#divergenceReplayOffset;
-  }
-
   get storedDivergenceDroppedEmissions(): readonly number[] {
     return [...this.#divergenceDroppedEmissions].sort((a, b) => a - b);
   }
@@ -1379,7 +1304,7 @@ export class FakeSyncLogStore implements SyncLogStore {
     if (this.#failNextAppend !== null) {
       const error = this.#failNextAppend;
       this.#failNextAppend = null;
-      return Promise.resolve({ ok: false, error });
+      return Promise.resolve(err(error));
     }
     if (this.#deferNextAppend) {
       this.#deferNextAppend = false;
@@ -1437,44 +1362,30 @@ export class FakeSyncLogStore implements SyncLogStore {
         (entry) => !dropped.has(`${entry.deviceId}${entry.seq}`),
       );
     }
-    if (write.divergenceReplayOffset !== undefined) {
-      this.#divergenceReplayOffset = Math.max(
-        this.#divergenceReplayOffset,
-        write.divergenceReplayOffset,
+    this.#divergenceReplayOffset = Math.max(
+      this.#divergenceReplayOffset,
+      write.divergenceReplayOffset ?? 0,
+    );
+    for (const ordinal of write.divergenceDroppedEmissions ?? []) {
+      this.#divergenceDroppedEmissions.add(ordinal);
+    }
+    this.#entries.push(...clone(write.entries ?? []));
+    this.#divergence.push(...clone(write.divergence ?? []));
+    for (const [device, mark] of Object.entries(write.watermarks ?? {})) {
+      this.#watermarks[device] = Math.max(
+        mark,
+        this.#watermarks[device] ?? Number.NEGATIVE_INFINITY,
       );
     }
-    if (write.divergenceDroppedEmissions !== undefined) {
-      for (const ordinal of write.divergenceDroppedEmissions) {
-        this.#divergenceDroppedEmissions.add(ordinal);
-      }
-    }
-    if (write.entries !== undefined) {
-      this.#entries.push(...clone(write.entries));
-    }
-    if (write.divergence !== undefined) {
-      this.#divergence.push(...clone(write.divergence));
-    }
-    if (write.watermarks !== undefined) {
-      for (const [device, mark] of Object.entries(write.watermarks)) {
-        const current = this.#watermarks[device];
-        if (current === undefined || mark > current) {
-          this.#watermarks[device] = mark;
-        }
-      }
-    }
-    if (write.peerMarks !== undefined) {
-      for (const [sender, marks] of Object.entries(write.peerMarks)) {
-        this.#peerMarks.set(sender, clone(marks));
-      }
+    for (const [sender, marks] of Object.entries(write.peerMarks ?? {})) {
+      this.#peerMarks.set(sender, clone(marks));
     }
     if (write.dropDivergenceBefore !== undefined) {
       const floor = write.dropDivergenceBefore;
       this.#divergence = this.#divergence.filter(
         (row) => row.seq >= floor,
       );
-      if (floor > this.#divergenceFloor) {
-        this.#divergenceFloor = floor;
-      }
+      this.#divergenceFloor = Math.max(this.#divergenceFloor, floor);
     }
     return ok(undefined);
   }
