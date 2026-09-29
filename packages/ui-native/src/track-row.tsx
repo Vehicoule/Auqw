@@ -197,7 +197,7 @@ export function TrackRow({
           >
             {row.title}
           </Text>
-        {sub !== '' && (
+          {sub !== '' && (
             <Text
               variant="metadata"
               color="secondary"
