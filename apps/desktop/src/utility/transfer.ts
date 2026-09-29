@@ -31,10 +31,11 @@ import {
   isTransferSinkArgs,
   isTransferSweepArgs,
   isTransferWriteArgs,
+  isUndefinedResult,
 } from '../shared/contract.ts';
 import { errorCode } from '../shared/check.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
-import type { UtilityHandler } from './router.ts';
+import { guarded, type UtilityHandler } from './router.ts';
 
 /**
  * `transfer:*` — the `MediaTransferPort` file plane over node:fs.
@@ -769,29 +770,11 @@ export function createTransferService(
     return { bytes, files, partials, freeBytes };
   }
 
-  function guarded<A>(
-    name: string,
-    validate: (value: unknown) => value is A,
-    run: (args: A) => Promise<unknown> | unknown,
-  ): UtilityHandler {
-    return async (args) => {
-      if (!validate(args)) {
-        throw shellError(
-          'invalid-request',
-          `invalid arguments for ${name}`,
-        );
-      }
-      return run(args);
-    };
-  }
-
-  const noArgs = (value: unknown) => value === undefined;
-
   return {
     handlers: {
       [CHANNELS.transferEnsureDir]: guarded(
         CHANNELS.transferEnsureDir,
-        noArgs,
+        isUndefinedResult,
         ensureDir,
       ),
       [CHANNELS.transferBegin]: guarded(
@@ -836,7 +819,7 @@ export function createTransferService(
       ),
       [CHANNELS.transferList]: guarded(
         CHANNELS.transferList,
-        noArgs,
+        isUndefinedResult,
         list,
       ),
       [CHANNELS.transferStatus]: guarded(
@@ -846,7 +829,7 @@ export function createTransferService(
       ),
       [CHANNELS.transferStats]: guarded(
         CHANNELS.transferStats,
-        noArgs,
+        isUndefinedResult,
         stats,
       ),
     },

@@ -32,7 +32,7 @@ import {
   parseTree,
   pathConfined,
 } from '../shared/local-paths.ts';
-import type { UtilityHandler } from './router.ts';
+import { guarded, type UtilityHandler } from './router.ts';
 
 /**
  * `tagread:*` — the `TagReaderPort` read plane for the desktop. The
@@ -411,22 +411,6 @@ export function createTagService(options: TagServiceOptions): TagService {
       tags.push(abs === null ? null : await readTags(abs, docId));
     }
     return { tags };
-  }
-
-  function guarded<A>(
-    name: string,
-    validate: (value: unknown) => value is A,
-    run: (args: A) => Promise<unknown>,
-  ): UtilityHandler {
-    return async (args) => {
-      if (!validate(args)) {
-        throw shellError(
-          'invalid-request',
-          `invalid arguments for ${name}`,
-        );
-      }
-      return run(args);
-    };
   }
 
   return {

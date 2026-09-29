@@ -19,7 +19,7 @@ import {
 } from '../shared/contract.ts';
 import type { ShellError } from '../shared/errors.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
-import type { UtilityHandler } from './router.ts';
+import { guarded, type UtilityHandler } from './router.ts';
 
 type StorageServiceOptions = {
   /**
@@ -413,22 +413,6 @@ export function createStorageService(
       rethrowStorage('storage dropBackup failed', thrown);
     }
     return undefined;
-  }
-
-  function guarded<A>(
-    name: string,
-    validate: (value: unknown) => value is A,
-    run: (args: A) => unknown,
-  ): UtilityHandler {
-    return async (args) => {
-      if (!validate(args)) {
-        throw shellError(
-          'invalid-request',
-          `invalid arguments for ${name}`,
-        );
-      }
-      return run(args);
-    };
   }
 
   return {

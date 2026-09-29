@@ -15,6 +15,7 @@ import {
   isLocalProbeArgs,
   isLocalReadArgs,
   isLocalResolveArgs,
+  isUndefinedResult,
 } from '../shared/contract.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
 import {
@@ -27,7 +28,7 @@ import {
   pickedFileTreeUri,
   toFileUri,
 } from '../shared/local-paths.ts';
-import type { UtilityHandler } from './router.ts';
+import { guarded, type UtilityHandler } from './router.ts';
 import { mimeForPath } from '../shared/audio-mime.ts';
 import { isBareName } from './transfer.ts';
 
@@ -734,24 +735,6 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
     return { missing, sources };
   }
 
-  function guarded<A>(
-    name: string,
-    validate: (value: unknown) => value is A,
-    run: (args: A) => Promise<unknown>,
-  ): UtilityHandler {
-    return async (args) => {
-      if (!validate(args)) {
-        throw shellError(
-          'invalid-request',
-          `invalid arguments for ${name}`,
-        );
-      }
-      return run(args);
-    };
-  }
-
-  const noArgs = (value: unknown) => value === undefined;
-
   return {
     handlers: {
       [CHANNELS.localAdd]: guarded(
@@ -774,13 +757,21 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         isLocalReadArgs,
         read,
       ),
-      [CHANNELS.localList]: guarded(CHANNELS.localList, noArgs, list),
+      [CHANNELS.localList]: guarded(
+        CHANNELS.localList,
+        isUndefinedResult,
+        list,
+      ),
       [CHANNELS.localPlayback]: guarded(
         CHANNELS.localPlayback,
-        noArgs,
+        isUndefinedResult,
         playback,
       ),
-      [CHANNELS.localSweep]: guarded(CHANNELS.localSweep, noArgs, sweep),
+      [CHANNELS.localSweep]: guarded(
+        CHANNELS.localSweep,
+        isUndefinedResult,
+        sweep,
+      ),
     },
     close() {
       // Stateless — the shared index db is owned by its creator.
