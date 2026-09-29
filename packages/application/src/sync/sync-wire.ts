@@ -5,7 +5,12 @@ import {
   isSafeNonNegative,
   isString,
 } from '../domain.ts';
-import { appError, type AppError, type ErrorKind } from '../errors.ts';
+import {
+  appError,
+  ERROR_KIND_BY_SLUG,
+  type AppError,
+  type ErrorKind,
+} from '../errors.ts';
 import type { SyncSocket } from '../ports/sync-transport.ts';
 import { isSyncCursor, type SyncCursor } from './sync-engine.ts';
 
@@ -139,7 +144,7 @@ export type SyncDeviceSummary = {
 
 export type DeltaMsg = { readonly t: 'delta'; readonly delta: unknown };
 
-export type ServerMsg =
+type ServerMsg =
   | WelcomeMsg
   | RejectMsg
   | PongMsg
@@ -174,8 +179,20 @@ export type SyncEndpoint = {
 
 /* ---------------------------- validators -------------------------- */
 
-function isFp(value: unknown): value is string {
+export function isFp(value: unknown): value is string {
   return typeof value === 'string' && FINGERPRINT_PATTERN.test(value);
+}
+
+/** A `host:port` string the endpoint parser accepts — the wire bound. */
+function isEndpoint(value: unknown): boolean {
+  return isString(value, 320) && parseEndpoint(value) !== null;
+}
+
+/** The endpoints list bound — ≤16 parseable `host:port`s. */
+function isEndpointList(value: unknown): boolean {
+  return (
+    Array.isArray(value) && value.length <= 16 && value.every(isEndpoint)
+  );
 }
 
 /**
@@ -204,11 +221,7 @@ export function isClientHello(value: unknown): value is ClientHello {
         (value['port'] as number) >= 1 &&
         (value['port'] as number) <= 65_535)) &&
     (value['endpoints'] === undefined ||
-      (Array.isArray(value['endpoints']) &&
-        (value['endpoints'] as unknown[]).length <= 16 &&
-        (value['endpoints'] as unknown[]).every(
-          (ep) => isString(ep, 320) && parseEndpoint(ep) !== null,
-        )))
+      isEndpointList(value['endpoints']))
   );
 }
 
@@ -258,8 +271,7 @@ export function isWelcomeMsg(value: unknown): value is WelcomeMsg {
     value['t'] === 'welcome' &&
     isSyncDeviceRecord(value['device']) &&
     isString(value['name'], DEVICE_NAME_MAX) &&
-    (value['pot'] === undefined ||
-      (isString(value['pot'], 320) && parseEndpoint(value['pot']) !== null)) &&
+    (value['pot'] === undefined || isEndpoint(value['pot'])) &&
     (host === undefined ||
       (isRecord(host) &&
         hasKeys(host, ['id', 'name'], ['pub']) &&
@@ -313,19 +325,14 @@ export function isDeltaMsg(value: unknown): value is DeltaMsg {
   );
 }
 
-export function isPongMsg(value: unknown): value is PongMsg {
-  return isRecord(value) && hasExactKeys(value, ['t']) && value['t'] === 'pong';
-}
+const isTagged =
+  <T extends string>(tag: T) =>
+  (value: unknown): value is { readonly t: T } =>
+    isRecord(value) && hasExactKeys(value, ['t']) && value['t'] === tag;
 
-export function isSyncRequestMsg(
-  value: unknown,
-): value is SyncRequestMsg {
-  return (
-    isRecord(value) &&
-    hasExactKeys(value, ['t']) &&
-    value['t'] === 'sync-request'
-  );
-}
+export const isPongMsg = isTagged('pong');
+
+export const isSyncRequestMsg = isTagged('sync-request');
 
 export function isErrorMsg(value: unknown): value is ErrorMsg {
   return (
@@ -356,13 +363,8 @@ export function isPairingPayload(
     PAIR_CODE_PATTERN.test(String(value['code'])) &&
     isFp(value['fp']) &&
     (value['endpoints'] === undefined ||
-      (Array.isArray(value['endpoints']) &&
-        value['endpoints'].length <= 16 &&
-        (value['endpoints'] as unknown[]).every(
-          (ep) => isString(ep, 320) && parseEndpoint(ep) !== null,
-        ))) &&
-    (value['pot'] === undefined ||
-      (isString(value['pot'], 320) && parseEndpoint(value['pot']) !== null))
+      isEndpointList(value['endpoints'])) &&
+    (value['pot'] === undefined || isEndpoint(value['pot']))
   );
 }
 
@@ -527,15 +529,12 @@ export function parseEndpoint(raw: string): SyncEndpoint | null {
  * never lossy.
  */
 export function cursorToSince(cursor: SyncCursor): string {
-  const entries = Object.entries(cursor);
-  if (entries.length === 0) {
-    return '';
-  }
-  const kept: [string, number][] = [...entries].sort((a, b) => b[1] - a[1]);
-  let out = JSON.stringify(Object.fromEntries(kept));
-  while (kept.length > 0 && out.length > MAX_SINCE_CHARS) {
-    kept.pop();
-    out = JSON.stringify(Object.fromEntries(kept));
+  const entries = Object.entries(cursor).sort((a, b) => b[1] - a[1]);
+  let out =
+    entries.length === 0 ? '' : JSON.stringify(Object.fromEntries(entries));
+  while (entries.length > 0 && out.length > MAX_SINCE_CHARS) {
+    entries.pop();
+    out = JSON.stringify(Object.fromEntries(entries));
   }
   return out.length <= MAX_SINCE_CHARS ? out : '';
 }
@@ -557,33 +556,9 @@ export function sinceToCursor(since: string): SyncCursor | null {
 
 /* --------------------------- error maps --------------------------- */
 
-const ERROR_KINDS: ReadonlySet<string> = new Set<ErrorKind>([
-  'no-result',
-  'not-applicable',
-  'unsupported',
-  'auth-required',
-  'auth-expired',
-  'rate-limit',
-  'transient',
-  'expired-resource',
-  'permission-denied',
-  'invalid-response',
-  'timeout',
-  'cancelled',
-  'budget-exceeded',
-  'guest-trap',
-  'invalid-message',
-  'artifact-rejected',
-  'streams-capped',
-  'released',
-  'superseded',
-  'evicted',
-  'expired',
-  'not-found',
-  'unavailable',
-  'storage-full',
-  'internal',
-]);
+const ERROR_KINDS: ReadonlySet<string> = new Set<ErrorKind>(
+  Object.values(ERROR_KIND_BY_SLUG),
+);
 
 /**
  * `{t:'error',code}` — wire-reserved codes map to their domain kind;
@@ -680,12 +655,10 @@ export function attachSyncPump(opts: {
   }
 
   function declaredAt(bytes: Uint8Array, offset: number): number {
-    return (
-      (bytes[offset] ?? 0) |
-      ((bytes[offset + 1] ?? 0) << 8) |
-      ((bytes[offset + 2] ?? 0) << 16) |
-      ((bytes[offset + 3] ?? 0) << 24)
-    ) >>> 0;
+    return new DataView(
+      bytes.buffer,
+      bytes.byteOffset + offset,
+    ).getUint32(0, true);
   }
 
   function drain(): void {
@@ -728,13 +701,8 @@ export function attachSyncPump(opts: {
       if (closed || payload.length > maxPayload) {
         return false;
       }
-      const head = new Uint8Array(HEADER_BYTES);
-      head[0] = payload.length & 0xff;
-      head[1] = (payload.length >>> 8) & 0xff;
-      head[2] = (payload.length >>> 16) & 0xff;
-      head[3] = (payload.length >>> 24) & 0xff;
       const frame = new Uint8Array(HEADER_BYTES + payload.length);
-      frame.set(head, 0);
+      new DataView(frame.buffer).setUint32(0, payload.length, true);
       frame.set(payload, HEADER_BYTES);
       try {
         socket.write(frame);

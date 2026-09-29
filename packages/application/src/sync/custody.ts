@@ -8,7 +8,7 @@ import { isSyncCursor, type SyncCursor } from './sync-engine.ts';
 import {
   DEVICE_ID_PATTERN,
   DEVICE_NAME_MAX,
-  FINGERPRINT_PATTERN,
+  isFp,
 } from './sync-wire.ts';
 
 /**
@@ -81,9 +81,9 @@ export type SyncPeer = {
 
 export type SyncPeerRecord = SyncPeer | SyncCallerPeer;
 
-function isFp(value: unknown): value is string {
-  return typeof value === 'string' && FINGERPRINT_PATTERN.test(value);
-}
+/** Loose-read endpoints: any string list a shipped build could store. */
+const isStringList = (value: unknown): value is readonly string[] =>
+  Array.isArray(value) && value.every((ep) => typeof ep === 'string');
 
 /**
  * The responder row's fields, minus the role tag — the READ bounds
@@ -97,8 +97,7 @@ function readResponderRow(value: Record<string, unknown>): SyncPeer | null {
   const cursor = value['peerCursor'];
   return isFp(value['fp']) &&
     typeof value['name'] === 'string' &&
-    Array.isArray(endpoints) &&
-    endpoints.every((ep) => typeof ep === 'string') &&
+    isStringList(endpoints) &&
     typeof value['pairedAt'] === 'number' &&
     typeof value['lastSeenAt'] === 'number' &&
     isRecord(cursor) &&
@@ -149,9 +148,7 @@ function readCallerRow(value: Record<string, unknown>): SyncCallerPeer | null {
     isFp(value['fp']) &&
     isSafeNonNegative(value['pairedAt']) &&
     isSafeNonNegative(value['lastSeenAt']) &&
-    (endpoints === undefined ||
-      (Array.isArray(endpoints) &&
-        endpoints.every((ep) => typeof ep === 'string')))
+    (endpoints === undefined || isStringList(endpoints))
     ? {
         role: 'caller',
         id: value['id'],

@@ -49,9 +49,13 @@ import {
 import type { PersistedState, StorageBatch } from '../ports/storage.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import { QueueEngine } from '../queue/queue-engine.ts';
-import { compareStamp } from './hlc.ts';
+import {
+  KEY_SEP,
+  compareEntryTs,
+  entryKey,
+  jsonEquals,
+} from './entry-order.ts';
 import type {
-  ChangeEntry,
   LocalWrite,
   MaterializedRecord,
   MergeOutcome,
@@ -140,8 +144,6 @@ type SyncProjection = {
   readonly changedKinds: readonly SyncRecordKind[];
 };
 
-const KEY_SEP = '\u001f';
-
 function decodeParts(
   recordId: string,
   count: number,
@@ -159,35 +161,6 @@ function sameMapping(a: SourceMapping, b: SourceMapping): boolean {
     sameRef(a.ref, b.ref) &&
     a.status === b.status &&
     a.matchedAtMs === b.matchedAtMs
-  );
-}
-
-function jsonEqual(a: unknown, b: unknown): boolean {
-  if (Object.is(a, b)) {
-    return true;
-  }
-  if (
-    typeof a !== 'object' ||
-    typeof b !== 'object' ||
-    a === null ||
-    b === null
-  ) {
-    return false;
-  }
-  if (Array.isArray(a) !== Array.isArray(b)) {
-    return false;
-  }
-  if (Array.isArray(a) && Array.isArray(b)) {
-    return (
-      a.length === b.length && a.every((v, i) => jsonEqual(v, b[i]))
-    );
-  }
-  const aObj = a as Record<string, unknown>;
-  const bObj = b as Record<string, unknown>;
-  const aKeys = Object.keys(aObj);
-  return (
-    aKeys.length === Object.keys(bObj).length &&
-    aKeys.every((k) => Object.hasOwn(bObj, k) && jsonEqual(aObj[k], bObj[k]))
   );
 }
 
@@ -416,7 +389,7 @@ export function entityUpsertWrites(
     // Same-provider row with a changed ref value is still an upsert —
     // provider-key presence alone would silently absorb the edit.
     const prior = prev.find((p) => p.provider === ref.provider);
-    if (prior === undefined || !jsonEqual(prior.ref, ref.ref)) {
+    if (prior === undefined || !jsonEquals(prior.ref, ref.ref)) {
       writes.push({
         kind: 'entitySourceRef',
         recordId: entitySourceRefRecordId(entity.entityId, ref.provider),
@@ -474,7 +447,7 @@ export function settingsWrites(
 ): LocalWrite[] {
   const writes: LocalWrite[] = [];
   for (const field of SETTINGS_SYNC_FIELDS) {
-    if (!jsonEqual(prev[field], next[field])) {
+    if (!jsonEquals(prev[field], next[field])) {
       writes.push(
         fieldWrite('settings', SETTINGS_RECORD_ID, field, next[field]),
       );
@@ -499,58 +472,72 @@ export function emissionWrites(
   const writes: LocalWrite[] = [];
   const matchReviews = prev.matchReviews ?? [];
 
-  if (batch.recordings !== undefined) {
-    const prevById = new Map(prev.recordings.map((rec) => [rec.id, rec]));
-    const nextIds = new Set(batch.recordings.map((rec) => rec.id));
-    for (const rec of batch.recordings) {
-      const before = prevById.get(rec.id);
-      if (before !== rec) {
-        writes.push(...recordingUpsertWrites(rec, before));
+  // Per-section diff: upsert writes for every next row that changed
+  // (identity, or `same` when the presence record's value is what
+  // must move), then tombstones for every prev row that vanished.
+  // `between` runs the entity ref-presence pass between those two.
+  const diffRows = <T>(
+    prevRows: readonly T[],
+    nextRows: readonly T[] | undefined,
+    key: (row: T) => string,
+    upsert: (row: T, before: T | undefined) => readonly LocalWrite[],
+    removed: (row: T) => readonly LocalWrite[],
+    opts?: {
+      same?: (before: T, row: T) => boolean;
+      between?: () => void;
+    },
+  ): void => {
+    if (nextRows === undefined) {
+      return;
+    }
+    const same = opts?.same ?? ((a: T, b: T): boolean => a === b);
+    const prevById = new Map(prevRows.map((row) => [key(row), row]));
+    const nextIds = new Set(nextRows.map(key));
+    for (const row of nextRows) {
+      const before = prevById.get(key(row));
+      if (before === undefined || !same(before, row)) {
+        writes.push(...upsert(row, before));
       }
     }
-    for (const rec of prev.recordings) {
-      if (!nextIds.has(rec.id)) {
-        writes.push(
-          ...recordingDeleteWrites(rec, {
-            playlistEntries: prev.playlistEntries,
-            playHistory: prev.playHistory,
-            matchReviews,
-          }),
-        );
+    opts?.between?.();
+    for (const row of prevRows) {
+      if (!nextIds.has(key(row))) {
+        writes.push(...removed(row));
       }
     }
-  }
+  };
 
-  if (batch.likes !== undefined) {
-    const keyOf = (like: Like): string =>
-      `${like.entityKind}${KEY_SEP}${like.targetId}`;
-    const prevKeys = new Map(prev.likes.map((like) => [keyOf(like), like]));
-    const nextKeys = new Set(batch.likes.map(keyOf));
-    for (const like of batch.likes) {
-      if (prevKeys.get(keyOf(like)) !== like) {
-        writes.push({
-          kind: 'like',
-          recordId: likeRecordId(like.entityKind, like.targetId),
-          field: 'like',
-          value: like,
-        });
-      }
-    }
-    for (const like of prev.likes) {
-      if (!nextKeys.has(keyOf(like))) {
-        writes.push(
-          tombstoneWrite(
-            'like',
-            likeRecordId(like.entityKind, like.targetId),
-          ),
-        );
-      }
-    }
-  }
+  diffRows(
+    prev.recordings,
+    batch.recordings,
+    (rec) => rec.id,
+    (rec, before) => recordingUpsertWrites(rec, before),
+    (rec) =>
+      recordingDeleteWrites(rec, {
+        playlistEntries: prev.playlistEntries,
+        playHistory: prev.playHistory,
+        matchReviews,
+      }),
+  );
+
+  diffRows(
+    prev.likes,
+    batch.likes,
+    (like) => `${like.entityKind}${KEY_SEP}${like.targetId}`,
+    (like) => [
+      {
+        kind: 'like',
+        recordId: likeRecordId(like.entityKind, like.targetId),
+        field: 'like',
+        value: like,
+      },
+    ],
+    (like) => [
+      tombstoneWrite('like', likeRecordId(like.entityKind, like.targetId)),
+    ],
+  );
 
   if (batch.entities !== undefined) {
-    const prevById = new Map(prev.entities.map((e) => [e.entityId, e]));
-    const nextIds = new Set(batch.entities.map((e) => e.entityId));
     const refsOf = (
       rows: readonly EntitySourceRef[],
     ): Map<string, EntitySourceRef[]> => {
@@ -564,195 +551,151 @@ export function emissionWrites(
     };
     const prevRefs = refsOf(prev.entitySourceRefs);
     const nextRefs = refsOf(batch.entitySourceRefs ?? prev.entitySourceRefs);
-    for (const entity of batch.entities) {
-      if (prevById.get(entity.entityId) !== entity) {
-        writes.push(
-          ...entityUpsertWrites(
-            entity,
-            nextRefs.get(entity.entityId) ?? [],
-            prevRefs.get(entity.entityId) ?? [],
-          ),
-        );
-      }
-    }
-    // An unchanged entity whose ref set still moved (a late-arriving
-    // ref rides the same commit's entitySourceRefs section) emits
-    // just the presence diff.
     const nextById = new Map(batch.entities.map((e) => [e.entityId, e]));
-    for (const entityId of new Set([...prevRefs.keys(), ...nextRefs.keys()])) {
-      if (prevById.get(entityId) !== nextById.get(entityId)) {
-        continue; // entity itself changed or vanished — covered above
-      }
-      // Keyed by provider, compared by value: a same-provider ref
-      // rewrite still emits an upsert.
-      const prevMap = new Map(
-        (prevRefs.get(entityId) ?? []).map((ref) => [ref.provider, ref.ref]),
-      );
-      const nextMap = new Map(
-        (nextRefs.get(entityId) ?? []).map((ref) => [ref.provider, ref.ref]),
-      );
-      for (const [provider, refValue] of nextMap) {
-        const prior = prevMap.get(provider);
-        if (prior === undefined || !jsonEqual(prior, refValue)) {
-          writes.push({
-            kind: 'entitySourceRef',
-            recordId: entitySourceRefRecordId(entityId, provider),
-            field: 'ref',
-            value: refValue,
-          });
-        }
-      }
-      for (const provider of prevMap.keys()) {
-        if (!nextMap.has(provider)) {
-          writes.push(
-            tombstoneWrite(
-              'entitySourceRef',
-              entitySourceRefRecordId(entityId, provider),
-            ),
-          );
-        }
-      }
-    }
-    for (const entity of prev.entities) {
-      if (!nextIds.has(entity.entityId)) {
-        writes.push(
-          ...entityDeleteWrites(
-            entity,
-            prevRefs.get(entity.entityId) ?? [],
-          ),
-        );
-      }
-    }
-  }
-
-  if (
-    batch.entitySourceRefs !== undefined &&
-    batch.entities === undefined
-  ) {
-    // Ref-only commits (no entity section write): diff the presence
-    // records alone so a standalone ref change still emits.
-    const keyOf = (ref: EntitySourceRef): string =>
-      `${ref.entityId}${KEY_SEP}${ref.provider}`;
-    const prevKeys = new Map(
-      prev.entitySourceRefs.map((ref) => [keyOf(ref), ref]),
-    );
-    const nextKeys = new Set(batch.entitySourceRefs.map(keyOf));
-    for (const ref of batch.entitySourceRefs) {
-      // Value compare, not identity — a same-provider row whose ref
-      // changed emits the upsert; a rebuilt identical ref does not.
-      const priorRef = prevKeys.get(keyOf(ref));
-      if (priorRef === undefined || !jsonEqual(priorRef.ref, ref.ref)) {
-        writes.push({
-          kind: 'entitySourceRef',
-          recordId: entitySourceRefRecordId(ref.entityId, ref.provider),
-          field: 'ref',
-          value: ref.ref,
-        });
-      }
-    }
-    for (const ref of prev.entitySourceRefs) {
-      if (!nextKeys.has(keyOf(ref))) {
-        writes.push(
-          tombstoneWrite(
-            'entitySourceRef',
-            entitySourceRefRecordId(ref.entityId, ref.provider),
-          ),
-        );
-      }
-    }
-  }
-
-  if (batch.playlists !== undefined) {
-    const prevById = new Map(prev.playlists.map((p) => [p.playlistId, p]));
-    const nextIds = new Set(batch.playlists.map((p) => p.playlistId));
-    for (const playlist of batch.playlists) {
-      if (prevById.get(playlist.playlistId) !== playlist) {
-        writes.push(
-          ...PLAYLIST_SYNC_FIELDS.map((field) =>
-            fieldWrite('playlist', playlist.playlistId, field, playlist[field]),
-          ),
-        );
-      }
-    }
-    for (const playlist of prev.playlists) {
-      if (!nextIds.has(playlist.playlistId)) {
-        writes.push(tombstoneWrite('playlist', playlist.playlistId));
-        for (const entry of prev.playlistEntries) {
-          if (entry.playlistId === playlist.playlistId) {
-            writes.push(tombstoneWrite('playlistEntry', entry.entryId));
+    diffRows(
+      prev.entities,
+      batch.entities,
+      (e) => e.entityId,
+      (entity) =>
+        entityUpsertWrites(
+          entity,
+          nextRefs.get(entity.entityId) ?? [],
+          prevRefs.get(entity.entityId) ?? [],
+        ),
+      (entity) =>
+        entityDeleteWrites(entity, prevRefs.get(entity.entityId) ?? []),
+      {
+        // An unchanged entity whose ref set still moved (a late-
+        // arriving ref rides the same commit's entitySourceRefs
+        // section) emits just the presence diff.
+        between: () => {
+          const prevById = new Map(prev.entities.map((e) => [e.entityId, e]));
+          for (const entityId of new Set([
+            ...prevRefs.keys(),
+            ...nextRefs.keys(),
+          ])) {
+            if (prevById.get(entityId) !== nextById.get(entityId)) {
+              continue; // entity changed or vanished — covered by diffRows
+            }
+            // Keyed by provider, compared by value: a same-provider
+            // ref rewrite still emits an upsert.
+            const prevMap = new Map(
+              (prevRefs.get(entityId) ?? []).map((ref) => [
+                ref.provider,
+                ref.ref,
+              ]),
+            );
+            const nextMap = new Map(
+              (nextRefs.get(entityId) ?? []).map((ref) => [
+                ref.provider,
+                ref.ref,
+              ]),
+            );
+            for (const [provider, refValue] of nextMap) {
+              const prior = prevMap.get(provider);
+              if (prior === undefined || !jsonEquals(prior, refValue)) {
+                writes.push({
+                  kind: 'entitySourceRef',
+                  recordId: entitySourceRefRecordId(entityId, provider),
+                  field: 'ref',
+                  value: refValue,
+                });
+              }
+            }
+            for (const provider of prevMap.keys()) {
+              if (!nextMap.has(provider)) {
+                writes.push(
+                  tombstoneWrite(
+                    'entitySourceRef',
+                    entitySourceRefRecordId(entityId, provider),
+                  ),
+                );
+              }
+            }
           }
-        }
-      }
-    }
+        },
+      },
+    );
   }
 
-  if (batch.playlistEntries !== undefined) {
-    const prevById = new Map(prev.playlistEntries.map((e) => [e.entryId, e]));
-    const nextIds = new Set(batch.playlistEntries.map((e) => e.entryId));
-    for (const entry of batch.playlistEntries) {
-      if (prevById.get(entry.entryId) !== entry) {
-        writes.push(
-          ...PLAYLIST_ENTRY_SYNC_FIELDS.map((field) =>
-            fieldWrite('playlistEntry', entry.entryId, field, entry[field]),
-          ),
-        );
-      }
-    }
-    for (const entry of prev.playlistEntries) {
-      if (!nextIds.has(entry.entryId)) {
-        writes.push(tombstoneWrite('playlistEntry', entry.entryId));
-      }
-    }
-  }
+  // Ref-only commits (no entity section write): diff the presence
+  // records alone so a standalone ref change still emits.
+  diffRows(
+    prev.entitySourceRefs,
+    batch.entities === undefined ? batch.entitySourceRefs : undefined,
+    (ref) => `${ref.entityId}${KEY_SEP}${ref.provider}`,
+    (ref) => [
+      {
+        kind: 'entitySourceRef',
+        recordId: entitySourceRefRecordId(ref.entityId, ref.provider),
+        field: 'ref',
+        value: ref.ref,
+      },
+    ],
+    (ref) => [
+      tombstoneWrite(
+        'entitySourceRef',
+        entitySourceRefRecordId(ref.entityId, ref.provider),
+      ),
+    ],
+    // Value compare, not identity — a same-provider row whose ref
+    // changed emits the upsert; a rebuilt identical ref does not.
+    { same: (a, b) => jsonEquals(a.ref, b.ref) },
+  );
 
-  if (batch.playHistory !== undefined) {
-    const prevById = new Map(prev.playHistory.map((e) => [e.eventId, e]));
-    const nextIds = new Set(batch.playHistory.map((e) => e.eventId));
-    for (const event of batch.playHistory) {
-      if (prevById.get(event.eventId) !== event) {
-        writes.push(fieldWrite('playEvent', event.eventId, 'event', event));
-      }
-    }
-    for (const event of prev.playHistory) {
-      if (!nextIds.has(event.eventId)) {
-        writes.push(tombstoneWrite('playEvent', event.eventId));
-      }
-    }
-  }
+  diffRows(
+    prev.playlists,
+    batch.playlists,
+    (p) => p.playlistId,
+    (p) =>
+      PLAYLIST_SYNC_FIELDS.map((field) =>
+        fieldWrite('playlist', p.playlistId, field, p[field]),
+      ),
+    (p) => [
+      tombstoneWrite('playlist', p.playlistId),
+      ...prev.playlistEntries
+        .filter((e) => e.playlistId === p.playlistId)
+        .map((e) => tombstoneWrite('playlistEntry', e.entryId)),
+    ],
+  );
 
-  if (batch.playCounts !== undefined) {
-    const prevById = new Map(prev.playCounts.map((c) => [c.recordingId, c]));
-    const nextIds = new Set(batch.playCounts.map((c) => c.recordingId));
-    for (const count of batch.playCounts) {
-      if (prevById.get(count.recordingId) !== count) {
-        for (const field of PLAY_COUNT_SYNC_FIELDS) {
-          writes.push(
-            fieldWrite('playCount', count.recordingId, field, count[field]),
-          );
-        }
-      }
-    }
-    for (const count of prev.playCounts) {
-      if (!nextIds.has(count.recordingId)) {
-        writes.push(tombstoneWrite('playCount', count.recordingId));
-      }
-    }
-  }
+  diffRows(
+    prev.playlistEntries,
+    batch.playlistEntries,
+    (e) => e.entryId,
+    (e) =>
+      PLAYLIST_ENTRY_SYNC_FIELDS.map((field) =>
+        fieldWrite('playlistEntry', e.entryId, field, e[field]),
+      ),
+    (e) => [tombstoneWrite('playlistEntry', e.entryId)],
+  );
 
-  if (batch.matchReviews !== undefined) {
-    const prevById = new Map(matchReviews.map((r) => [r.reviewId, r]));
-    const nextIds = new Set(batch.matchReviews.map((r) => r.reviewId));
-    for (const review of batch.matchReviews) {
-      if (prevById.get(review.reviewId) !== review) {
-        writes.push(...reviewSyncWrites(review));
-      }
-    }
-    for (const review of matchReviews) {
-      if (!nextIds.has(review.reviewId)) {
-        writes.push(tombstoneWrite('matchReview', review.reviewId));
-      }
-    }
-  }
+  diffRows(
+    prev.playHistory,
+    batch.playHistory,
+    (e) => e.eventId,
+    (e) => [fieldWrite('playEvent', e.eventId, 'event', e)],
+    (e) => [tombstoneWrite('playEvent', e.eventId)],
+  );
+
+  diffRows(
+    prev.playCounts,
+    batch.playCounts,
+    (c) => c.recordingId,
+    (c) =>
+      PLAY_COUNT_SYNC_FIELDS.map((field) =>
+        fieldWrite('playCount', c.recordingId, field, c[field]),
+      ),
+    (c) => [tombstoneWrite('playCount', c.recordingId)],
+  );
+
+  diffRows(
+    matchReviews,
+    batch.matchReviews,
+    (r) => r.reviewId,
+    (r) => reviewSyncWrites(r),
+    (r) => [tombstoneWrite('matchReview', r.reviewId)],
+  );
 
   if (batch.settings !== undefined) {
     writes.push(...settingsWrites(prev.settings, batch.settings));
@@ -812,7 +755,7 @@ export function unsyncedWrites(
     ) {
       return typeof syncedValue === 'number' && syncedValue >= write.value;
     }
-    return jsonEqual(syncedValue, write.value);
+    return jsonEquals(syncedValue, write.value);
   };
   const batch: StorageBatch = {
     recordings: [...input.recordings],
@@ -915,18 +858,6 @@ export function importEmissionWrites(
 
 type AppliedOutcome = Extract<MergeOutcome, { type: 'applied' }>;
 
-function entryKey(entry: ChangeEntry): string {
-  return `${entry.deviceId}${KEY_SEP}${entry.hlc.l}${KEY_SEP}${entry.hlc.c}`;
-}
-
-function compareEntries(a: ChangeEntry, b: ChangeEntry): number {
-  const byStamp = compareStamp(a.hlc, b.hlc);
-  if (byStamp !== 0) {
-    return byStamp;
-  }
-  return a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0;
-}
-
 /**
  * Per-record fold of applied outcomes, mirroring the engine's merge
  * read: a tombstone kills every canonically-earlier field fold and
@@ -999,15 +930,18 @@ function foldOutcome(fold: RecordFold, outcome: AppliedOutcome): void {
 }
 
 function numField(
-  fields: Map<string, unknown>,
+  fields: Map<string, unknown> | undefined,
   field: string,
 ): number | null {
-  const v = fields.get(field);
+  const v = fields?.get(field);
   return typeof v === 'number' && Number.isSafeInteger(v) ? v : null;
 }
 
-function strField(fields: Map<string, unknown>, field: string): string | null {
-  const v = fields.get(field);
+function strField(
+  fields: Map<string, unknown> | undefined,
+  field: string,
+): string | null {
+  const v = fields?.get(field);
   return typeof v === 'string' ? v : null;
 }
 
@@ -1063,7 +997,7 @@ export function projectAppliedEntries(
   // Folds replay canonically (hlc, then deviceId) — the merge is
   // deterministic no matter the order a drain delivered outcomes in.
   const ordered = [...applied].sort((a, b) =>
-    compareEntries(a.entry, b.entry),
+    compareEntryTs(a.entry, b.entry),
   );
 
   const folds = new Map<string, RecordFold>();
@@ -1369,8 +1303,7 @@ function finishProjection(
     plan: RecordingPlan,
     id: string,
   ): Recording | null => {
-    const title =
-      fields !== undefined ? strField(fields, 'title') : null;
+    const title = strField(fields, 'title');
     if (title === null) {
       return null;
     }
@@ -1378,17 +1311,17 @@ function finishProjection(
     const rec: Recording = {
       id,
       title,
-      artist: strField(fields ?? new Map(), 'artist'),
-      album: strField(fields ?? new Map(), 'album'),
-      durationMs: numField(fields ?? new Map(), 'durationMs'),
-      releaseYear: numField(fields ?? new Map(), 'releaseYear'),
+      artist: strField(fields, 'artist'),
+      album: strField(fields, 'album'),
+      durationMs: numField(fields, 'durationMs'),
+      releaseYear: numField(fields, 'releaseYear'),
       artwork: (get('artwork') as Recording['artwork']) ?? [],
       explicit:
         typeof get('explicit') === 'boolean'
           ? (get('explicit') as boolean)
           : null,
-      genre: strField(fields ?? new Map(), 'genre'),
-      isrc: strField(fields ?? new Map(), 'isrc'),
+      genre: strField(fields, 'genre'),
+      isrc: strField(fields, 'isrc'),
       versionLabels:
         (get('versionLabels') as Recording['versionLabels']) ?? [],
       sourceRefs: applyRefOps([], plan),
@@ -1434,12 +1367,13 @@ function finishProjection(
 
   const applyRecordingPlans = (
     rows: readonly Recording[],
+    plans: ReadonlyMap<string, RecordingPlan> = recordingPlans,
   ): { next: Recording[]; dead: Set<string> } => {
     const next: Recording[] = [];
     const dead = new Set<string>();
     const seen = new Set<string>();
     for (const rec of rows) {
-      const plan = recordingPlans.get(rec.id);
+      const plan = plans.get(rec.id);
       seen.add(rec.id);
       if (plan === undefined) {
         next.push(rec);
@@ -1460,7 +1394,7 @@ function finishProjection(
       };
       next.push(isRecording(candidate) ? candidate : rec);
     }
-    for (const [id, plan] of recordingPlans) {
+    for (const [id, plan] of plans) {
       if (seen.has(id) || plan.action !== 'upsert') {
         continue;
       }
@@ -1479,7 +1413,6 @@ function finishProjection(
   // ---- scalar sections ------------------------------------------------------
 
   const nextEntities: Entity[] = [];
-  const tombstonedEntityIds = new Set<string>();
   {
     for (const entity of current.entities) {
       const fold = foldOf('entity', entity.entityId);
@@ -1488,7 +1421,6 @@ function finishProjection(
         continue;
       }
       if (fold.tombstoned) {
-        tombstonedEntityIds.add(entity.entityId);
         changedKinds.add('entity');
         continue;
       }
@@ -1542,7 +1474,6 @@ function finishProjection(
     }
     for (const fold of folds.values()) {
       if (fold.kind === 'entity' && fold.tombstoned) {
-        tombstonedEntityIds.add(fold.recordId);
         changedKinds.add('entity');
       }
     }
@@ -1666,7 +1597,6 @@ function finishProjection(
     }
   }
 
-  const tombstonedPlaylistIds = new Set<string>();
   const nextPlaylists: Playlist[] = [];
   {
     for (const playlist of current.playlists) {
@@ -1676,7 +1606,6 @@ function finishProjection(
         continue;
       }
       if (fold.tombstoned) {
-        tombstonedPlaylistIds.add(playlist.playlistId);
         changedKinds.add('playlist');
         continue;
       }
@@ -1704,7 +1633,6 @@ function finishProjection(
         continue;
       }
       if (fold.tombstoned) {
-        tombstonedPlaylistIds.add(fold.recordId);
         changedKinds.add('playlist');
         continue;
       }
@@ -1869,7 +1797,6 @@ function finishProjection(
     }
   }
 
-  const tombstonedCountIds = new Set<string>();
   const nextCounts: PlayCount[] = [];
   const countFoldIds = new Set<string>();
   {
@@ -1882,7 +1809,6 @@ function finishProjection(
         continue;
       }
       if (fold.tombstoned || !liveRecordingIds.has(count.recordingId)) {
-        tombstonedCountIds.add(count.recordingId);
         changedKinds.add('playCount');
         continue;
       }
@@ -1917,7 +1843,6 @@ function finishProjection(
         continue;
       }
       if (fold.tombstoned) {
-        tombstonedCountIds.add(fold.recordId);
         changedKinds.add('playCount');
         continue;
       }
@@ -1950,7 +1875,6 @@ function finishProjection(
     }
   }
 
-  const tombstonedReviewIds = new Set<string>();
   const nextReviews: MatchReview[] = [];
   {
     const touched = new Set(
@@ -1961,7 +1885,6 @@ function finishProjection(
     for (const review of current.matchReviews) {
       const fold = foldOf('matchReview', review.reviewId);
       if (fold !== undefined && fold.tombstoned) {
-        tombstonedReviewIds.add(review.reviewId);
         changedKinds.add('matchReview');
         continue;
       }
@@ -2038,7 +1961,6 @@ function finishProjection(
     }
     for (const fold of folds.values()) {
       if (fold.kind === 'matchReview' && fold.tombstoned) {
-        tombstonedReviewIds.add(fold.recordId);
         changedKinds.add('matchReview');
       }
     }
@@ -2111,37 +2033,8 @@ function finishProjection(
     [...recordingPlans].filter(([, plan]) => plan.action !== 'pending'),
   );
   if (batchablePlans.size > 0) {
-    batch.recordingsMerge = (fresh: readonly Recording[]) => {
-      const next: Recording[] = [];
-      const seen = new Set<string>();
-      for (const rec of fresh) {
-        const plan = batchablePlans.get(rec.id);
-        seen.add(rec.id);
-        if (plan === undefined || plan.action === 'pending') {
-          next.push(rec);
-          continue;
-        }
-        if (plan.action === 'delete') {
-          continue;
-        }
-        const candidate: Recording = {
-          ...overlayRecording(rec, plan.fields),
-          sourceRefs: applyRefOps(rec.sourceRefs, plan),
-          mappings: applyMapOps(rec.mappings, plan),
-        };
-        next.push(isRecording(candidate) ? candidate : rec);
-      }
-      for (const [id, plan] of batchablePlans) {
-        if (seen.has(id) || plan.action !== 'upsert') {
-          continue;
-        }
-        const built = buildRecording(plan.fields, plan, id);
-        if (built !== null) {
-          next.push(built);
-        }
-      }
-      return next;
-    };
+    batch.recordingsMerge = (fresh) =>
+      applyRecordingPlans(fresh, batchablePlans).next;
   }
   if (!sameArray(nextLikes, current.likes)) {
     batch.likes = nextLikes;

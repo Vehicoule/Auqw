@@ -12,6 +12,7 @@ import type {
   SyncResponderCrypto,
 } from '../ports/sync-transport.ts';
 import {
+  encodeJson,
   isClientHello,
   isServerChallenge,
   type ClientHello,
@@ -85,7 +86,7 @@ export type NoisePrimitives = {
   randomBytes(n: number): Uint8Array;
 };
 
-export const NOISE_SUITE_NAME = 'noise-v1';
+const NOISE_SUITE_NAME = 'noise-v1';
 const HKDF_INFO = ascii('auqw-sync-v1');
 const WIRE_VERSION = 1;
 
@@ -171,11 +172,7 @@ function hexToBytes(hex: string): Uint8Array {
 }
 
 function concatBytes(...parts: readonly Uint8Array[]): Uint8Array {
-  let length = 0;
-  for (let part of parts) {
-    length += part.length;
-  }
-  const out = new Uint8Array(length);
+  const out = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
   let at = 0;
   for (const part of parts) {
     out.set(part, at);
@@ -190,34 +187,28 @@ function startsWith(bytes: Uint8Array, prefix: Uint8Array): boolean {
   );
 }
 
-export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((b0, i) => b[i] === b0);
+}
+
+/** DER b64 → raw 32-byte X25519 key after `prefix`; null when not ours. */
+function derUnwrap(b64: string, prefix: Uint8Array): Uint8Array | null {
+  const der = base64Decode(b64);
+  return der !== null &&
+    der.length === prefix.length + X25519_KEY_BYTES &&
+    startsWith(der, prefix)
+    ? der.subarray(prefix.length)
+    : null;
 }
 
 /** SPKI DER b64 → raw 32-byte X25519 public key; null when not ours. */
 export function noiseRawPublic(spkiB64: string): Uint8Array | null {
-  const der = base64Decode(spkiB64);
-  if (
-    der === null ||
-    der.length !== SPKI_PREFIX.length + X25519_KEY_BYTES ||
-    !startsWith(der, SPKI_PREFIX)
-  ) {
-    return null;
-  }
-  return der.subarray(SPKI_PREFIX.length);
+  return derUnwrap(spkiB64, SPKI_PREFIX);
 }
 
 /** PKCS8 DER b64 → raw 32-byte X25519 private key; null when not ours. */
 export function noiseRawPrivate(pkcs8B64: string): Uint8Array | null {
-  const der = base64Decode(pkcs8B64);
-  if (
-    der === null ||
-    der.length !== PKCS8_PREFIX.length + X25519_KEY_BYTES ||
-    !startsWith(der, PKCS8_PREFIX)
-  ) {
-    return null;
-  }
-  return der.subarray(PKCS8_PREFIX.length);
+  return derUnwrap(pkcs8B64, PKCS8_PREFIX);
 }
 
 export function noiseSpkiB64(rawPub: Uint8Array): string {
@@ -251,18 +242,14 @@ const TAG_BYTES = 16;
 
 function seqIv(seq: bigint): Uint8Array {
   const iv = new Uint8Array(IV_BYTES);
-  new DataView(iv.buffer, iv.byteOffset, IV_BYTES).setBigUint64(
-    IV_BYTES - 8,
-    seq,
-    true,
-  );
+  new DataView(iv.buffer).setBigUint64(IV_BYTES - 8, seq, true);
   return iv;
 }
 
 /** Directional AEAD codec — per-direction sequence counters bind each
  * frame to its position. Throws on a short, out-of-sequence, or
  * tampered frame. */
-export function createNoiseCodec(
+function createNoiseCodec(
   primitives: NoisePrimitives,
   opts: { sendKey: Uint8Array; recvKey: Uint8Array },
 ): SyncFrameCodec {
@@ -348,6 +335,16 @@ export type NoiseSuite = {
 };
 
 export function createNoiseSuite(primitives: NoisePrimitives): NoiseSuite {
+  /** HKDF-SHA256 over the three DHs → 64 bytes of directional key. */
+  function sessionKeys(
+    dh1: Uint8Array,
+    dh2: Uint8Array,
+    dh3: Uint8Array,
+    salt: Uint8Array,
+  ): Uint8Array {
+    return primitives.hkdf(concatBytes(dh1, dh2, dh3), salt, HKDF_INFO, 64);
+  }
+
   function fingerprintOf(pubSpkiB64: string): string {
     const der = base64Decode(pubSpkiB64);
     return der === null ? '' : hexOf(primitives.sha256(der));
@@ -441,12 +438,7 @@ export function createNoiseSuite(primitives: NoisePrimitives): NoiseSuite {
               const dh1 = primitives.x25519(eph.privateKey, ephPubRaw);
               const dh2 = primitives.x25519(devPrivRaw, ephPubRaw);
               const dh3 = primitives.x25519(eph.privateKey, spubRaw);
-              const keys = primitives.hkdf(
-                concatBytes(dh1, dh2, dh3),
-                salt,
-                HKDF_INFO,
-                64,
-              );
+              const keys = sessionKeys(dh1, dh2, dh3, salt);
               const codec = createNoiseCodec(primitives, {
                 sendKey: keys.subarray(0, 32),
                 recvKey: keys.subarray(32, 64),
@@ -495,26 +487,19 @@ export function createNoiseSuite(primitives: NoisePrimitives): NoiseSuite {
         const dh1 = primitives.x25519(eph.privateKey, ephPubRaw);
         const dh2 = primitives.x25519(eph.privateKey, devPubRaw);
         const dh3 = primitives.x25519(devPrivRaw, ephPubRaw);
-        const keys = primitives.hkdf(
-          concatBytes(dh1, dh2, dh3),
-          salt,
-          HKDF_INFO,
-          64,
-        );
+        const keys = sessionKeys(dh1, dh2, dh3, salt);
         const codec = createNoiseCodec(primitives, {
           sendKey: keys.subarray(32, 64),
           recvKey: keys.subarray(0, 32),
         });
-        const challenge = ascii(
-          JSON.stringify({
-            v: WIRE_VERSION,
-            kind: 'challenge',
-            eph: noiseSpkiB64(eph.publicKey),
-            salt: base64Encode(salt),
-            spub: identity.pub,
-            registered,
-          }),
-        );
+        const challenge = encodeJson({
+          v: WIRE_VERSION,
+          kind: 'challenge',
+          eph: noiseSpkiB64(eph.publicKey),
+          salt: base64Encode(salt),
+          spub: identity.pub,
+          registered,
+        });
         return {
           challenge,
           codec,

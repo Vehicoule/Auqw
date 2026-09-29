@@ -124,14 +124,31 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
 
   function own(work: Promise<unknown>): void {
     owned.add(work);
-    void work.then(
-      () => {
-        owned.delete(work);
-      },
-      () => {
-        owned.delete(work);
-      },
-    );
+    const drop = (): void => {
+      owned.delete(work);
+    };
+    void work.then(drop, drop);
+  }
+
+  /**
+   * A fresh rate-limit verdict floors the peer's next wake at the
+   * absolute epoch-ms it asked for. `now` is the caller's own read —
+   * each verdict site takes exactly one clock sample.
+   */
+  function floorAt(
+    track: PeerTrack,
+    hint: number | undefined,
+    now: number | null,
+  ): void {
+    if (hint !== undefined && isSafeNonNegative(hint) && now !== null) {
+      track.notBeforeMs = now + hint;
+    }
+  }
+
+  /** The reconnect ladder's advance — this round's wait, next doubled. */
+  function armBackoff(fp: string, track: PeerTrack, waitMs: number): void {
+    track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
+    schedule(fp, waitMs, 'stand');
   }
 
   /** Bounded, nonfatal, sanitized logging: never peer endpoints. */
@@ -300,14 +317,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
             hint !== undefined && isSafeNonNegative(hint)
               ? Math.max(track.backoffMs, hint)
               : track.backoffMs;
-          const hintedAt = safeNow();
-          if (
-            hint !== undefined &&
-            isSafeNonNegative(hint) &&
-            hintedAt !== null
-          ) {
-            track.notBeforeMs = hintedAt + hint;
-          }
+          floorAt(track, hint, safeNow());
           track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
         } else if (
           result.error.kind === 'budget-exceeded' &&
@@ -413,15 +423,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
             // The landed round FAILED — its verdict may carry a
             // rate-limit. It landed once (consumed above), so a
             // republished status cannot slide the floor it sets.
-            const hint = view.lastError.retryAfterMs;
-            const now = safeNow();
-            if (
-              hint !== undefined &&
-              isSafeNonNegative(hint) &&
-              now !== null
-            ) {
-              track.notBeforeMs = now + hint;
-            }
+            floorAt(track, view.lastError.retryAfterMs, safeNow());
             // A page-capped landing that still moved entries has
             // more to exchange. Scheduler-owned rounds chain the
             // continuation in runRound; a kicked or manual one
@@ -466,14 +468,11 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
             : undefined;
         const now = safeNow();
         if (
-          hint !== undefined &&
-          isSafeNonNegative(hint) &&
-          now !== null &&
-          (prevOffline === undefined ||
-            prevOffline.kind !== view.lastError.kind ||
-            prevOffline.retryAfterMs !== hint)
+          prevOffline === undefined ||
+          prevOffline.kind !== view.lastError.kind ||
+          prevOffline.retryAfterMs !== hint
         ) {
-          track.notBeforeMs = now + hint;
+          floorAt(track, hint, now);
         }
         if (track.timer === null) {
           const floorWait =
@@ -482,9 +481,11 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
               track.notBeforeMs > now
               ? track.notBeforeMs - now
               : 0;
-          const wait = Math.max(track.backoffMs, floorWait);
-          track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
-          schedule(view.peer.fp, wait, 'stand');
+          armBackoff(
+            view.peer.fp,
+            track,
+            Math.max(track.backoffMs, floorWait),
+          );
         }
       } else if (
         view.state === 'offline' &&
@@ -498,9 +499,7 @@ export function createSyncScheduler(deps: SyncSchedulerDeps): SyncScheduler {
         // all — the peer was live a moment ago, so it earns the same
         // bounded ladder instead of waiting silently for the next
         // local write or connectivity flap.
-        const wait = track.backoffMs;
-        track.backoffMs = Math.min(track.backoffMs * 2, reconnectMaxMs);
-        schedule(view.peer.fp, wait, 'stand');
+        armBackoff(view.peer.fp, track, track.backoffMs);
       }
     }
     // An unpaired peer drops its track — pending timers and any

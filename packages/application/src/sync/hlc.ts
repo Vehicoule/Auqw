@@ -28,13 +28,7 @@ export function isHlcStamp(value: unknown): value is HlcStamp {
  * as the final tie-break (see sync-engine.ts).
  */
 export function compareStamp(a: HlcStamp, b: HlcStamp): number {
-  if (a.l !== b.l) {
-    return a.l < b.l ? -1 : 1;
-  }
-  if (a.c !== b.c) {
-    return a.c < b.c ? -1 : 1;
-  }
-  return 0;
+  return a.l - b.l || a.c - b.c;
 }
 
 /**

@@ -40,7 +40,7 @@ import {
  */
 
 /** The custody record's wire-visible fields — the welcome's `device`. */
-export type ResponderDeviceRecord = {
+type ResponderDeviceRecord = {
   readonly id: string;
   readonly name: string;
   readonly pub: string;
@@ -50,7 +50,7 @@ export type ResponderDeviceRecord = {
 };
 
 /** One row of a 'devices' reply — the caller's own custody view. */
-export type ResponderDeviceRow = {
+type ResponderDeviceRow = {
   readonly id: string;
   readonly name: string;
   readonly pairedAt: number;
@@ -58,12 +58,12 @@ export type ResponderDeviceRow = {
 };
 
 /** What custody already knows about a caller's key at hello time. */
-export type ResponderPrior = {
+type ResponderPrior = {
   readonly id: string;
   readonly pairedAt: number;
 };
 
-export type ResponderRead<T> =
+type ResponderRead<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false };
 
@@ -71,16 +71,16 @@ export type ResponderRead<T> =
  * A custody write's verdict — `reason` lands verbatim in the wire
  * reject so the caller sees the store's own failure kind.
  */
-export type ResponderWrite =
+type ResponderWrite =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: string };
 
-export type ResponderTouch =
+type ResponderTouch =
   | { readonly ok: true; readonly updated: boolean }
   | { readonly ok: false };
 
 /** Device custody for the responder role — the platform secure store. */
-export interface SyncResponderCustody<
+interface SyncResponderCustody<
   TRecord extends ResponderDeviceRecord,
 > {
   /** By device fingerprint — the hello-time `registered` answer. */
@@ -107,10 +107,10 @@ export interface SyncResponderCustody<
   ): Promise<ResponderTouch>;
 }
 
-export type ResponderPhase = 'hello' | 'auth' | 'open';
+type ResponderPhase = 'hello' | 'auth' | 'open';
 
 /** A cancellable one-shot timer — CancellationSource or a setTimeout wrap. */
-export type ResponderTimer = { cancel(): void };
+type ResponderTimer = { cancel(): void };
 
 /**
  * The socket shape handed to the pump factory — assignable INTO both
@@ -120,7 +120,7 @@ export type ResponderTimer = { cancel(): void };
  * unsatisfiable in either direction, so the seam spells the wider
  * one; the pump attaches listeners and never invents a value for it.
  */
-export type ResponderSocket = {
+type ResponderSocket = {
   /** Peer address when the underlying transport knows one. */
   readonly remoteAddress?: string | undefined;
   write(data: Uint8Array): unknown;
@@ -322,29 +322,22 @@ function createPairingStore(opts: {
 
 type WireMsg = { readonly t: string };
 
-function isWireMsg(value: unknown): value is WireMsg {
-  return isRecord(value) && isString(value['t'], 32);
-}
+const isWireMsg = (value: unknown): value is WireMsg =>
+  isRecord(value) && isString(value['t'], 32);
 
-function isPairMsg(
+const isPairMsg = (
   value: unknown,
-): value is { t: 'pair'; code: string } {
-  return (
-    isRecord(value) &&
-    hasExactKeys(value, ['t', 'code']) &&
-    value['t'] === 'pair' &&
-    typeof value['code'] === 'string' &&
-    PAIR_CODE_PATTERN.test(value['code'])
-  );
-}
+): value is { t: 'pair'; code: string } =>
+  isRecord(value) &&
+  hasExactKeys(value, ['t', 'code']) &&
+  value['t'] === 'pair' &&
+  typeof value['code'] === 'string' &&
+  PAIR_CODE_PATTERN.test(value['code']);
 
-function isResumeMsg(value: unknown): value is { t: 'resume' } {
-  return (
-    isRecord(value) &&
-    hasExactKeys(value, ['t']) &&
-    value['t'] === 'resume'
-  );
-}
+const isResumeMsg = (value: unknown): value is { t: 'resume' } =>
+  isRecord(value) &&
+  hasExactKeys(value, ['t']) &&
+  value['t'] === 'resume';
 
 /** Remote-IP the attempt budgets key on — IPv6-wrapped v4 unwrapped. */
 export function normalizeSyncIp(ip: string): string {
@@ -889,12 +882,8 @@ export function createSyncResponder<
       );
       sessions.add(session);
     },
-    mintOffer() {
-      return pairing.offer();
-    },
-    expireOffer() {
-      pairing.expire();
-    },
+    mintOffer: () => pairing.offer(),
+    expireOffer: () => pairing.expire(),
     get sessions() {
       return sessions;
     },
