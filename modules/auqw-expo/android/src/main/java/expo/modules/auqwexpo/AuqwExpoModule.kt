@@ -269,7 +269,6 @@ class AuqwExpoModule : Module() {
   @Volatile
   private var boundService: AuqwMediaSessionService? = null
 
-
   /** Lazily created on the first connectivity observer. */
   private var connectivityMonitor: AuqwConnectivityMonitor? = null
 
