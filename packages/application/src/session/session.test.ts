@@ -2140,6 +2140,79 @@ async function repeatAllTailTransitionWraps(): Promise<void> {
   );
 }
 
+async function repeatAllWrapSkipsMarkedHead(): Promise<void> {
+  const r = repeatRig();
+  await restoreOk(r);
+  await pump();
+  // oA fails: every later projection flags it skipsForward.
+  await playThrough(r, 'oA');
+  r.player.emit(
+    statusEvent(
+      lastPrepareIdentity(r),
+      'h-oA',
+      'failed',
+      0,
+      appError('unavailable', 'not playable'),
+    ),
+  );
+  await pump();
+  assert((await r.session.setRepeatMode('all')).ok);
+  await pump();
+  const identity = (id: string): PlaybackIdentity => ({
+    attemptId: `svc-${id}`,
+    queueRev: r.player.projections.at(-1)!.queueRev,
+  });
+  // Walk the service cursor to the tail through remote presses.
+  for (const [from, to] of [['oA', 'oB'], ['oB', 'oC']] as const) {
+    r.player.emit(
+      transitionEvent(r, {
+        from,
+        to,
+        reason: 'remote-next',
+        positionMs: 0,
+        identity: identity(to),
+        handle: `h-${to}`,
+      }),
+    );
+    await pump();
+  }
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oC', 'at the tail');
+  // The wrap must step over the marked head — an edge onto oA is
+  // illegal; the legal wrap lands on the first unflagged row.
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oC',
+      to: 'oA',
+      reason: 'ended',
+      positionMs: 0,
+      identity: identity('oA'),
+      handle: 'h-oA',
+    }),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oC',
+    'wrapping onto the marked head is rejected',
+  );
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oC',
+      to: 'oB',
+      reason: 'ended',
+      positionMs: 0,
+      identity: identity('oB'),
+      handle: 'h-oB',
+    }),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oB',
+    'repeat=all wraps to the first unmarked row',
+  );
+}
+
 async function repeatAllHeadPrevWraps(): Promise<void> {
   const r = repeatRig();
   await restoreOk(r);
@@ -5917,6 +5990,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['repeatCycle', repeatCycle],
   ['repeatOneEndedTransition', repeatOneEndedTransition],
   ['repeatAllTailTransitionWraps', repeatAllTailTransitionWraps],
+  ['repeatAllWrapSkipsMarkedHead', repeatAllWrapSkipsMarkedHead],
   ['repeatAllHeadPrevWraps', repeatAllHeadPrevWraps],
   ['repeatOffSameIdRejected', repeatOffSameIdRejected],
   ['repeatAllManualWraps', repeatAllManualWraps],
