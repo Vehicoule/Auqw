@@ -6661,6 +6661,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['streamWarmDropOnStop', streamWarmDropOnStop],
   ['streamWarmStaleAdoptionRepairs', streamWarmStaleAdoptionRepairs],
   ['streamWarmDenyCapEvicts', streamWarmDenyCapEvicts],
+  ['streamWarmSurfaceOutranksFailed', streamWarmSurfaceOutranksFailed],
 ] as const;
 
 // The materialized rebuild: the durable log's surviving records
@@ -8630,6 +8631,31 @@ async function streamWarmDenyCapEvicts(): Promise<void> {
     (c) => (c.input as { sourceRef: string }).sourceRef === 'y0',
   );
   assertEqual(y0.length, 2, 'evicted deny re-fires the warm');
+}
+
+/** A failed attempt doesn't blind the surface want — a fresh hand
+ *  still mints its warm (the failed attempt owned only its own slot;
+ *  same surface precedence 'idle'/'playing' already had). */
+async function streamWarmSurfaceOutranksFailed(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('rA', [ref('youtube-music', 'yA')])],
+      queue: stoppedQueue([occurrence('oA', 'rA')]),
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  const playback = readyOf(r).playback;
+  const idA = 'identity' in playback ? playback.identity : undefined;
+  assert(idA !== undefined);
+  r.player.emit(
+    statusEvent(idA, 'h-oA', 'failed', 0, appError('no-result', 'gone')),
+  );
+  await pump();
+  assertEqual(readyOf(r).playback.type, 'failed');
+  r.session.prewarm({ sourceRefs: [ref('youtube-music', 'yB')] });
+  await pump();
+  assertEqual(warmInput(r).sourceRef, 'yB', 'surface hand warms under failed');
 }
 
 export async function run(): Promise<void> {
