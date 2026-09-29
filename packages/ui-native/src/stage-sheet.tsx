@@ -557,7 +557,11 @@ export function StageSheet({
   style,
 }: StageSheetProps) {
   const theme = useTheme();
-  const { width: windowWidth } = useWindowDimensions();
+  const { width: windowWidth, height: windowHeight, fontScale } =
+    useWindowDimensions();
+  // Window geometry that invalidates hidden-pane measurements —
+  // rotation and font-scale moves every row's frame.
+  const lyricGeom = `${windowWidth}x${windowHeight}:${fontScale}`;
   const [height, setHeight] = useState(0);
   const internalProgress = useSharedValue(expanded ? 1 : 0);
   // One progress drives the morph: the pill's rise drag writes it from
@@ -900,6 +904,10 @@ export function StageSheet({
     [],
   );
   const lyricScrolledKey = useRef<string | null>(null);
+  // The geometry the stored lyric measurements belong to — the
+  // scroller's layout event stamps it so a hidden relayout
+  // (rotation, font scale) is detected on re-entry.
+  const lyricMeasuredGeom = useRef<string | null>(null);
   // Layouts live in refs — a counter re-runs the owed-scroll effect
   // when the active row or the scroller itself first measures in.
   const [lyricLayoutTick, bumpLyricLayout] = useState(0);
@@ -934,6 +942,15 @@ export function StageSheet({
     [theme.reducedMotion],
   );
   useEffect(() => {
+    if (activeMode === 'lyrics' && lyricMeasuredGeom.current !== lyricGeom) {
+      // The pane was hidden while geometry moved — mounted rows
+      // still hold pre-change frames until the next layout pass
+      // refires them, so their stored offsets must not settle the
+      // owed scroll. The scroller height self-corrects on its own
+      // refire when its frame changed.
+      lyricMeasuredGeom.current = lyricGeom;
+      lyricLayouts.current = [];
+    }
     if (lyricScrollKey === null || activeMode !== 'lyrics') {
       // Re-entry owes the active line a scroll — the kept-alive
       // measurements are still valid (mounted rows only refire
@@ -955,6 +972,7 @@ export function StageSheet({
     lyricScrollKey,
     scrollToLyricLine,
     lyricLayoutTick,
+    lyricGeom,
   ]);
 
   // The lyrics-mode header rides the pane chrome — the same element
@@ -1293,6 +1311,7 @@ export function StageSheet({
               ref={lyricsScrollRef}
               onLayout={(e) => {
                 lyricsScrollH.current = e.nativeEvent.layout.height;
+                lyricMeasuredGeom.current = lyricGeom;
                 bumpLyricLayout((tick) => tick + 1);
               }}
               style={{ flex: 1, marginTop: theme.spacing.sm }}
