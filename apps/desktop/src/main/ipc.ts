@@ -1,27 +1,8 @@
 import { CHANNELS } from '../shared/channels.ts';
 import type {
   AppMeta,
-  HostCancelArgs,
-  HostRequestArgs,
   PickFilesArgs,
   PickFolderArgs,
-  SecureDeleteArgs,
-  SecureGetArgs,
-  SecureSetArgs,
-  StreamCancelArgs,
-  StreamDevPrepareArgs,
-  StreamHandleArgs,
-  StreamOpenArgs,
-  StreamPortArgs,
-  StreamPrepareArgs,
-  StreamReadArgs,
-  SyncDeltasArgs,
-  SyncImportDeltaArgs,
-  SyncLocalChangesArgs,
-  SyncDialArgs,
-  SyncDialPayloadArgs,
-  SyncUnpairArgs,
-  UtilityPingArgs,
 } from '../shared/contract.ts';
 import {
   isLocalAddArgs,
@@ -182,6 +163,18 @@ function noArgs(value: unknown): value is undefined {
   return value === undefined;
 }
 
+/** Same-name relay: validate, then forward args to the utility. */
+const fwd = (
+  name: string,
+  is: (value: unknown) => boolean,
+): readonly [string, Handler] => [
+  name,
+  {
+    validate: is,
+    run: (args, deps) => deps.utility.request(name, args),
+  },
+];
+
 const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
   [
     CHANNELS.appMeta,
@@ -207,106 +200,39 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
   ],
   [
     CHANNELS.secureGet,
-    channel(isSecureGetArgs, (args: SecureGetArgs, deps) =>
-      deps.secure.get(args.key),
-    ),
+    channel(isSecureGetArgs, (args, deps) => deps.secure.get(args.key)),
   ],
   [
     CHANNELS.secureSet,
-    channel(isSecureSetArgs, (args: SecureSetArgs, deps) =>
+    channel(isSecureSetArgs, (args, deps) =>
       deps.secure.set(args.key, args.value),
     ),
   ],
   [
     CHANNELS.secureDelete,
-    channel(isSecureDeleteArgs, (args: SecureDeleteArgs, deps) =>
+    channel(isSecureDeleteArgs, (args, deps) =>
       deps.secure.delete(args.key),
     ),
   ],
-  [
-    CHANNELS.utilityPing,
-    channel(isUtilityPingArgs, (args: UtilityPingArgs, deps) =>
-      deps.utility.request(CHANNELS.utilityPing, args),
-    ),
-  ],
-  [
-    CHANNELS.hostPlugins,
-    channel(noArgs, (_args, deps) =>
-      deps.utility.request(CHANNELS.hostPlugins, undefined),
-    ),
-  ],
-  [
-    CHANNELS.hostRequest,
-    channel(isHostRequestArgs, (args: HostRequestArgs, deps) =>
-      deps.utility.request(CHANNELS.hostRequest, args),
-    ),
-  ],
-  [
-    CHANNELS.hostCancel,
-    channel(isHostCancelArgs, (args: HostCancelArgs, deps) =>
-      deps.utility.request(CHANNELS.hostCancel, args),
-    ),
-  ],
-  [
-    CHANNELS.streamPrepare,
-    channel(isStreamPrepareArgs, (args: StreamPrepareArgs, deps) =>
-      deps.utility.request(CHANNELS.streamPrepare, args),
-    ),
-  ],
-  [
-    CHANNELS.streamDevPrepare,
-    channel(isStreamDevPrepareArgs, (args: StreamDevPrepareArgs, deps) =>
-      deps.utility.request(CHANNELS.streamDevPrepare, args),
-    ),
-  ],
-  [
-    CHANNELS.streamServeUrl,
-    channel(isStreamHandleArgs, (args: StreamHandleArgs, deps) =>
-      deps.utility.request(CHANNELS.streamServeUrl, args),
-    ),
-  ],
-  [
-    CHANNELS.streamOpen,
-    channel(isStreamOpenArgs, (args: StreamOpenArgs, deps) =>
-      deps.utility.request(CHANNELS.streamOpen, args),
-    ),
-  ],
-  [
-    CHANNELS.streamRead,
-    channel(isStreamReadArgs, (args: StreamReadArgs, deps) =>
-      deps.utility.request(CHANNELS.streamRead, args),
-    ),
-  ],
-  [
-    CHANNELS.streamClose,
-    channel(isStreamHandleArgs, (args: StreamHandleArgs, deps) =>
-      deps.utility.request(CHANNELS.streamClose, args),
-    ),
-  ],
-  [
-    CHANNELS.streamRelease,
-    channel(isStreamHandleArgs, (args: StreamHandleArgs, deps) =>
-      deps.utility.request(CHANNELS.streamRelease, args),
-    ),
-  ],
-  [
-    CHANNELS.streamMarks,
-    channel(isStreamHandleArgs, (args: StreamHandleArgs, deps) =>
-      deps.utility.request(CHANNELS.streamMarks, args),
-    ),
-  ],
-  [
-    CHANNELS.streamCancel,
-    channel(isStreamCancelArgs, (args: StreamCancelArgs, deps) =>
-      deps.utility.request(CHANNELS.streamCancel, args),
-    ),
-  ],
+  fwd(CHANNELS.utilityPing, isUtilityPingArgs),
+  fwd(CHANNELS.hostPlugins, noArgs),
+  fwd(CHANNELS.hostRequest, isHostRequestArgs),
+  fwd(CHANNELS.hostCancel, isHostCancelArgs),
+  fwd(CHANNELS.streamPrepare, isStreamPrepareArgs),
+  fwd(CHANNELS.streamDevPrepare, isStreamDevPrepareArgs),
+  fwd(CHANNELS.streamServeUrl, isStreamHandleArgs),
+  fwd(CHANNELS.streamOpen, isStreamOpenArgs),
+  fwd(CHANNELS.streamRead, isStreamReadArgs),
+  fwd(CHANNELS.streamClose, isStreamHandleArgs),
+  fwd(CHANNELS.streamRelease, isStreamHandleArgs),
+  fwd(CHANNELS.streamMarks, isStreamHandleArgs),
+  fwd(CHANNELS.streamCancel, isStreamCancelArgs),
   // The MSE byte path: broker a MessageChannel — one end rides to the
   // utility's pump attach (with the transfer), the other to the
   // renderer (posted on `stream-bytes`, correlated by requestId).
   [
     CHANNELS.streamPort,
-    channel(isStreamPortArgs, (args: StreamPortArgs, deps, sender) => {
+    channel(isStreamPortArgs, (args, deps, sender) => {
       const target = sender as PortSender;
       if (target.postMessage === undefined) {
         return Promise.reject(
@@ -356,290 +282,60 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
   ],
   // Storage channels forward verbatim to the utility process — it
   // re-validates args against the same contract before touching the db.
-  [
-    CHANNELS.storageBegin,
-    channel(isStorageBeginArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.storageBegin, args),
-    ),
-  ],
-  [
-    CHANNELS.storageCommit,
-    channel(isStorageTxArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.storageCommit, args),
-    ),
-  ],
-  [
-    CHANNELS.storageRollback,
-    channel(isStorageTxArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.storageRollback, args),
-    ),
-  ],
-  [
-    CHANNELS.storageCancel,
-    channel(isStorageTxArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.storageCancel, args),
-    ),
-  ],
-  [
-    CHANNELS.storageExecute,
-    channel(isStorageExecuteArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.storageExecute, args),
-    ),
-  ],
-  [
-    CHANNELS.storageExecMany,
-    channel(isStorageExecManyArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.storageExecMany, args),
-    ),
-  ],
-  [
-    CHANNELS.storageQuery,
-    channel(isStorageQueryArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.storageQuery, args),
-    ),
-  ],
-  [
-    CHANNELS.storageBackup,
-    channel(isStorageBackupArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.storageBackup, args),
-    ),
-  ],
-  [
-    CHANNELS.storageDropBackup,
-    channel(isStorageBackupArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.storageDropBackup, args),
-    ),
-  ],
+  fwd(CHANNELS.storageBegin, isStorageBeginArgs),
+  fwd(CHANNELS.storageCommit, isStorageTxArgs),
+  fwd(CHANNELS.storageRollback, isStorageTxArgs),
+  fwd(CHANNELS.storageCancel, isStorageTxArgs),
+  fwd(CHANNELS.storageExecute, isStorageExecuteArgs),
+  fwd(CHANNELS.storageExecMany, isStorageExecManyArgs),
+  fwd(CHANNELS.storageQuery, isStorageQueryArgs),
+  fwd(CHANNELS.storageBackup, isStorageBackupArgs),
+  fwd(CHANNELS.storageDropBackup, isStorageBackupArgs),
   // Sync channels forward to the utility's LAN service — status,
   // pairing, the device registry, and the engine seam. They are
   // plugin-independent: zero plugins still syncs.
-  [
-    CHANNELS.syncStatus,
-    channel(noArgs, (_args, deps) =>
-      deps.utility.request(CHANNELS.syncStatus, undefined),
-    ),
-  ],
-  [
-    CHANNELS.syncPairing,
-    channel(noArgs, (_args, deps) =>
-      deps.utility.request(CHANNELS.syncPairing, undefined),
-    ),
-  ],
-  [
-    CHANNELS.syncDevices,
-    channel(noArgs, (_args, deps) =>
-      deps.utility.request(CHANNELS.syncDevices, undefined),
-    ),
-  ],
-  [
-    CHANNELS.syncUnpair,
-    channel(isSyncUnpairArgs, (args: SyncUnpairArgs, deps) =>
-      deps.utility.request(CHANNELS.syncUnpair, args),
-    ),
-  ],
-  [
-    CHANNELS.syncDeltas,
-    channel(isSyncDeltasArgs, (args: SyncDeltasArgs, deps) =>
-      deps.utility.request(CHANNELS.syncDeltas, args),
-    ),
-  ],
-  [
-    CHANNELS.syncImportDelta,
-    channel(isSyncImportDeltaArgs, (args: SyncImportDeltaArgs, deps) =>
-      deps.utility.request(CHANNELS.syncImportDelta, args),
-    ),
-  ],
-  [
-    CHANNELS.syncLocalChanges,
-    channel(isSyncLocalChangesArgs, (args: SyncLocalChangesArgs, deps) =>
-      deps.utility.request(CHANNELS.syncLocalChanges, args),
-    ),
-  ],
-  [
-    CHANNELS.syncTrigger,
-    channel(noArgs, (_args, deps) =>
-      deps.utility.request(CHANNELS.syncTrigger, undefined),
-    ),
-  ],
-  [
-    CHANNELS.syncDrainApplied,
-    channel(noArgs, (_args, deps) =>
-      deps.utility.request(CHANNELS.syncDrainApplied, undefined),
-    ),
-  ],
-  [
-    CHANNELS.syncAckApplied,
-    channel(noArgs, (_args, deps) =>
-      deps.utility.request(CHANNELS.syncAckApplied, undefined),
-    ),
-  ],
+  fwd(CHANNELS.syncStatus, noArgs),
+  fwd(CHANNELS.syncPairing, noArgs),
+  fwd(CHANNELS.syncDevices, noArgs),
+  fwd(CHANNELS.syncUnpair, isSyncUnpairArgs),
+  fwd(CHANNELS.syncDeltas, isSyncDeltasArgs),
+  fwd(CHANNELS.syncImportDelta, isSyncImportDeltaArgs),
+  fwd(CHANNELS.syncLocalChanges, isSyncLocalChangesArgs),
+  fwd(CHANNELS.syncTrigger, noArgs),
+  fwd(CHANNELS.syncDrainApplied, noArgs),
+  fwd(CHANNELS.syncAckApplied, noArgs),
   // Symmetric pairing: outbound dial + mDNS browse of other pair
   // hosts. `nearby` browse needs no custody — it must not wake
   // safeStorage just to show the list.
-  [
-    CHANNELS.syncNearbyStart,
-    channel(noArgs, (_args, deps) =>
-      deps.utility.request(CHANNELS.syncNearbyStart, undefined),
-    ),
-  ],
-  [
-    CHANNELS.syncNearbyStop,
-    channel(noArgs, (_args, deps) =>
-      deps.utility.request(CHANNELS.syncNearbyStop, undefined),
-    ),
-  ],
-  [
-    CHANNELS.syncDial,
-    channel(isSyncDialArgs, (args: SyncDialArgs, deps) =>
-      deps.utility.request(CHANNELS.syncDial, args),
-    ),
-  ],
-  [
-    CHANNELS.syncDialPayload,
-    channel(isSyncDialPayloadArgs, (args: SyncDialPayloadArgs, deps) =>
-      deps.utility.request(CHANNELS.syncDialPayload, args),
-    ),
-  ],
-  [
-    CHANNELS.syncMaterialized,
-    channel(isSyncMaterializedArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.syncMaterialized, args),
-    ),
-  ],
+  fwd(CHANNELS.syncNearbyStart, noArgs),
+  fwd(CHANNELS.syncNearbyStop, noArgs),
+  fwd(CHANNELS.syncDial, isSyncDialArgs),
+  fwd(CHANNELS.syncDialPayload, isSyncDialPayloadArgs),
+  fwd(CHANNELS.syncMaterialized, isSyncMaterializedArgs),
   // The offline file plane — the utility re-validates each payload
   // against the same contract before touching disk or db.
-  [
-    CHANNELS.transferEnsureDir,
-    channel(noArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.transferEnsureDir, args),
-    ),
-  ],
-  [
-    CHANNELS.transferBegin,
-    channel(isTransferBeginArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.transferBegin, args),
-    ),
-  ],
-  [
-    CHANNELS.transferWrite,
-    channel(isTransferWriteArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.transferWrite, args),
-    ),
-  ],
-  [
-    CHANNELS.transferCommit,
-    channel(isTransferSinkArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.transferCommit, args),
-    ),
-  ],
-  [
-    CHANNELS.transferFinalize,
-    channel(isTransferFinalizeArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.transferFinalize, args),
-    ),
-  ],
-  [
-    CHANNELS.transferAbort,
-    channel(isTransferAbortArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.transferAbort, args),
-    ),
-  ],
-  [
-    CHANNELS.transferStat,
-    channel(isTransferNameArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.transferStat, args),
-    ),
-  ],
-  [
-    CHANNELS.transferRemove,
-    channel(isTransferNameArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.transferRemove, args),
-    ),
-  ],
-  [
-    CHANNELS.transferSweepPartials,
-    channel(isTransferSweepArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.transferSweepPartials, args),
-    ),
-  ],
-  [
-    CHANNELS.transferList,
-    channel(noArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.transferList, args),
-    ),
-  ],
-  [
-    CHANNELS.transferStatus,
-    channel(isTransferSinkArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.transferStatus, args),
-    ),
-  ],
-  [
-    CHANNELS.transferStats,
-    channel(noArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.transferStats, args),
-    ),
-  ],
-  [
-    CHANNELS.tagreadEnumerate,
-    channel(isTagreadEnumerateArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.tagreadEnumerate, args),
-    ),
-  ],
-  [
-    CHANNELS.tagreadFingerprint,
-    channel(isTagreadBatchArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.tagreadFingerprint, args),
-    ),
-  ],
-  [
-    CHANNELS.tagreadRead,
-    channel(isTagreadBatchArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.tagreadRead, args),
-    ),
-  ],
-  [
-    CHANNELS.localAdd,
-    channel(isLocalAddArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.localAdd, args),
-    ),
-  ],
-  [
-    CHANNELS.localProbe,
-    channel(isLocalProbeArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.localProbe, args),
-    ),
-  ],
-  [
-    CHANNELS.localResolve,
-    channel(isLocalResolveArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.localResolve, args),
-    ),
-  ],
-  [
-    CHANNELS.localRead,
-    channel(isLocalReadArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.localRead, args),
-    ),
-  ],
-  [
-    CHANNELS.localList,
-    channel(noArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.localList, args),
-    ),
-  ],
-  [
-    CHANNELS.localPlayback,
-    channel(noArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.localPlayback, args),
-    ),
-  ],
-  [
-    CHANNELS.localSweep,
-    channel(noArgs, (args, deps) =>
-      deps.utility.request(CHANNELS.localSweep, args),
-    ),
-  ],
+  fwd(CHANNELS.transferEnsureDir, noArgs),
+  fwd(CHANNELS.transferBegin, isTransferBeginArgs),
+  fwd(CHANNELS.transferWrite, isTransferWriteArgs),
+  fwd(CHANNELS.transferCommit, isTransferSinkArgs),
+  fwd(CHANNELS.transferFinalize, isTransferFinalizeArgs),
+  fwd(CHANNELS.transferAbort, isTransferAbortArgs),
+  fwd(CHANNELS.transferStat, isTransferNameArgs),
+  fwd(CHANNELS.transferRemove, isTransferNameArgs),
+  fwd(CHANNELS.transferSweepPartials, isTransferSweepArgs),
+  fwd(CHANNELS.transferList, noArgs),
+  fwd(CHANNELS.transferStatus, isTransferSinkArgs),
+  fwd(CHANNELS.transferStats, noArgs),
+  fwd(CHANNELS.tagreadEnumerate, isTagreadEnumerateArgs),
+  fwd(CHANNELS.tagreadFingerprint, isTagreadBatchArgs),
+  fwd(CHANNELS.tagreadRead, isTagreadBatchArgs),
+  fwd(CHANNELS.localAdd, isLocalAddArgs),
+  fwd(CHANNELS.localProbe, isLocalProbeArgs),
+  fwd(CHANNELS.localResolve, isLocalResolveArgs),
+  fwd(CHANNELS.localRead, isLocalReadArgs),
+  fwd(CHANNELS.localList, noArgs),
+  fwd(CHANNELS.localPlayback, noArgs),
+  fwd(CHANNELS.localSweep, noArgs),
 ];
 
 /**
@@ -857,29 +553,31 @@ export function registerChannels(
       }
     });
   }
-  ipcMain.on(CHANNELS.netSubscribe, (event) => {
-    deps.net.attach(event.sender);
-  });
-  ipcMain.on(CHANNELS.netUnsubscribe, (event) => {
-    deps.net.detach(event.sender);
-  });
-  ipcMain.on(CHANNELS.themeSubscribe, (event) => {
-    deps.theme.attach(event.sender);
-  });
-  ipcMain.on(CHANNELS.themeUnsubscribe, (event) => {
-    deps.theme.detach(event.sender);
-  });
-  ipcMain.on(CHANNELS.syncAppliedSubscribe, (event) => {
-    deps.syncApplied.attach(event.sender);
-  });
-  ipcMain.on(CHANNELS.syncAppliedUnsubscribe, (event) => {
-    deps.syncApplied.detach(event.sender);
-  });
-
-  ipcMain.on(CHANNELS.syncNearbySubscribe, (event) => {
-    deps.syncNearby.attach(event.sender);
-  });
-  ipcMain.on(CHANNELS.syncNearbyUnsubscribe, (event) => {
-    deps.syncNearby.detach(event.sender);
-  });
+  const subscriptions: ReadonlyArray<
+    readonly [
+      string,
+      string,
+      {
+        attach(sender: NetSender): void;
+        detach(sender: NetSender): void;
+      },
+    ]
+  > = [
+    [CHANNELS.netSubscribe, CHANNELS.netUnsubscribe, deps.net],
+    [CHANNELS.themeSubscribe, CHANNELS.themeUnsubscribe, deps.theme],
+    [
+      CHANNELS.syncAppliedSubscribe,
+      CHANNELS.syncAppliedUnsubscribe,
+      deps.syncApplied,
+    ],
+    [
+      CHANNELS.syncNearbySubscribe,
+      CHANNELS.syncNearbyUnsubscribe,
+      deps.syncNearby,
+    ],
+  ];
+  for (const [sub, unsub, registry] of subscriptions) {
+    ipcMain.on(sub, (event) => registry.attach(event.sender));
+    ipcMain.on(unsub, (event) => registry.detach(event.sender));
+  }
 }
