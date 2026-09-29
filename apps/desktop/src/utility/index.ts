@@ -163,12 +163,18 @@ if (port === null) {
     },
   });
   // Warm the plugin directory scan + wasm load at boot — otherwise the
-  // laziness rides the user's first `stream.prepare`. Fire-and-forget:
+  // laziness rides the user's first `stream.prepare`. The warm waits for
+  // the startup bind to settle first: constructing while it pends reads
+  // a null provider URL, and a failed bind + shared-pending retry could
+  // leave the warm's host providerless with nothing left to re-kick the
+  // read. After settlement the construction read behaves exactly like a
+  // first click — success hands the URL over, failure kicks `potRetry`,
+  // whose success pushes the port into the live host. Fire-and-forget:
   // a rejection clears the memoized promise (`ready` resets on
   // failure), so the real prepare retries and surfaces its own typed
   // failure; only the log line lands here, and raw rejections can
   // carry fs paths, so only the ShellError's safe text is printed.
-  void runtime.pluginsReady().catch((thrown: unknown) => {
+  void potBound.then(() => runtime.pluginsReady()).catch((thrown: unknown) => {
     console.warn(
       `[auqw] plugin warm failed: ${
         isShellError(thrown)
