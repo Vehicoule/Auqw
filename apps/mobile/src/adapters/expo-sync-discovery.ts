@@ -94,8 +94,8 @@ export function createExpoSyncDiscovery(
       };
       const validFp = (v: unknown): string | null =>
         typeof v === 'string' && /^[0-9a-f]{64}$/.test(v) ? v : null;
-      const intPort = (v: number | undefined): number | undefined =>
-        Number.isSafeInteger(v) ? v : undefined;
+      const intPort = (v: number | null | undefined): number | undefined =>
+        typeof v === 'number' && Number.isSafeInteger(v) ? v : undefined;
       // Retract rows of one generation: an fp mismatch disqualifies
       // outright, then a known port scopes the match to that
       // generation — a stale goodbye for a dead generation must not

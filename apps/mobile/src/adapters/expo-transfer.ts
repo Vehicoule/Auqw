@@ -357,13 +357,16 @@ export function createExpoTransfer(deps: ExpoTransferDeps = {}): {
       }),
 
     stat: (name, signal) =>
-      guardFs(signal, async () => {
-        const file = fileFor(name);
-        if (!file.exists) {
-          return ok({ exists: false, bytes: null });
-        }
-        return ok({ exists: true, bytes: file.info().size ?? null });
-      }),
+      guardFs<{ exists: boolean; bytes: number | null }>(
+        signal,
+        async () => {
+          const file = fileFor(name);
+          if (!file.exists) {
+            return ok({ exists: false, bytes: null });
+          }
+          return ok({ exists: true, bytes: file.info().size ?? null });
+        },
+      ),
   };
 
   return {

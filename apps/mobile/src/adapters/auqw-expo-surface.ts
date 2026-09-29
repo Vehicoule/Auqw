@@ -77,24 +77,6 @@ export type AuqwPeaksNative = {
   waveformPeaksCancel?(requestId: string): void;
 };
 
-/** The whole module: host + player + lifecycle. */
-export type AuqwExpoLike = AuqwExpoHostLike &
-  AuqwExpoPlayerLike &
-  AuqwPeaksNative &
-  Pick<
-    Module,
-    | 'createHost'
-    | 'setAuthToken'
-    /**
-     * Live PO-token provider update — resolves read the host's slot
-     * at invocation spawn, so a pairing or unpairing that lands after
-     * `createHost` applies without recreating the host. `null`
-     * restores the anonymous resolve ladder.
-     */
-    | 'setPotProvider'
-    | 'loadPlugin'
-  >;
-
 /**
  * The host half plus lifecycle — satisfied by the `auqw-expo` module
  * (which absorbed the retired slice-0 `auqw-plugin-host-expo` surface).

@@ -155,6 +155,9 @@ function defaultSettings(
   return {
     catalogProvider: catalog,
     playbackProvider: playback,
+    // qualityKbps 128 is the spec's target-bitrate default
+    // (docs/specs/providers.md); storefront null defers to the
+    // system-locale → API-default resolution order.
     storefront: null,
     qualityKbps: 128,
     theme: 'system',
@@ -379,15 +382,14 @@ export async function createSessionController(
     surface: () => syncSurface?.engine ?? null,
   });
   const providerMap = new Map(providers.map((p) => [p.id, p]));
-  const player = (
-    options.player ??
-    ((map) =>
-      createExpoAudioPlayer({
-        providers: map,
-        ids: createIds(),
-        qualityKbps: defaults.qualityKbps,
-      }))
-  )(providerMap);
+  const player =
+    options.player === undefined
+      ? createExpoAudioPlayer({
+          providers: providerMap,
+          ids: createIds(),
+          qualityKbps: defaults.qualityKbps,
+        })
+      : options.player(providerMap);
   const ids = createIds();
   const clock = createClock();
   // The Kotlin NetworkCallback monitor is Android-only; iOS gets the
@@ -492,15 +494,12 @@ export async function createSessionController(
         () => unsub(),
       );
     },
-    resolvePlayback: (ref, input, context) => {
+    resolvePlayback: async (ref, input, context) => {
       // Mint + re-mint route through the row's own sourceRef provider —
       // it alone can serve the same encoding at the durable offset.
       const provider = providerMap.get(ref.provider);
       if (provider === undefined) {
-        return Promise.resolve({
-          ok: false as const,
-          error: appError('unavailable', 'download provider not loaded'),
-        });
+        return err(appError('unavailable', 'download provider not loaded'));
       }
       return provider.resolvePlayback(
         ref,

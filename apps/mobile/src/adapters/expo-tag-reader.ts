@@ -9,9 +9,9 @@ import type {
   TagReaderPort,
 } from '@auqw/application';
 import { nativeError } from './auqw-expo-surface.ts';
+import type { AuqwTagReaderNative } from './auqw-expo-surface.ts';
 
 const appCancelled = () => appError('cancelled', 'cancelled');
-import type { AuqwTagReaderNative } from './auqw-expo-surface.ts';
 
 /**
  * TagReaderPort over the auqw-expo Kotlin TagReader: SAF picker +
@@ -22,34 +22,41 @@ import type { AuqwTagReaderNative } from './auqw-expo-surface.ts';
  * through `nativeError`'s taxonomy.
  */
 export function createExpoTagReader(native: AuqwTagReaderNative): TagReaderPort {
+  const call = async <T>(
+    signal: CancellationSignal,
+    fn: () => Promise<Result<T>>,
+  ): Promise<Result<T>> => {
+    if (signal.cancelled) {
+      return err(appCancelled());
+    }
+    try {
+      return await fn();
+    } catch (thrown) {
+      return err(nativeError(thrown));
+    }
+  };
   return {
-    async pickFolder(signal: CancellationSignal) {
-      if (signal.cancelled) {
-        return err(appCancelled());
-      }
+    pickFolder: (signal: CancellationSignal) =>
       // Platforms without the tag-reader surface (iOS) fail honestly
       // rather than throwing a TypeError through the module wrapper.
-      if (typeof native.tagPickFolder !== 'function') {
-        return err(
-          appError('unsupported', 'no local-files surface on this platform'),
-        );
-      }
-      try {
+      call(signal, async () => {
+        if (typeof native.tagPickFolder !== 'function') {
+          return err(
+            appError(
+              'unsupported',
+              'no local-files surface on this platform',
+            ),
+          );
+        }
         const picked = await native.tagPickFolder();
         return ok<PickedFolder>({
           treeUri: picked.treeUri,
           label: picked.label,
         });
-      } catch (thrown) {
-        return err(nativeError(thrown));
-      }
-    },
+      }),
 
-    async enumerate(treeUri: string, signal: CancellationSignal) {
-      if (signal.cancelled) {
-        return err(appCancelled());
-      }
-      try {
+    enumerate: (treeUri: string, signal: CancellationSignal) =>
+      call(signal, async () => {
         const entries = await native.tagEnumerate(treeUri);
         if (signal.cancelled) {
           return err(appCancelled());
@@ -65,20 +72,14 @@ export function createExpoTagReader(native: AuqwTagReaderNative): TagReaderPort 
             modifiedMs: e.modifiedMs ?? null,
           })),
         );
-      } catch (thrown) {
-        return err(nativeError(thrown));
-      }
-    },
+      }),
 
-    async fingerprint(
+    fingerprint: (
       treeUri: string,
       docIds: readonly string[],
       signal: CancellationSignal,
-    ) {
-      if (signal.cancelled) {
-        return err(appCancelled());
-      }
-      try {
+    ) =>
+      call(signal, async () => {
         const rows = await native.tagFingerprint(treeUri, docIds);
         if (signal.cancelled) {
           return err(appCancelled());
@@ -90,20 +91,14 @@ export function createExpoTagReader(native: AuqwTagReaderNative): TagReaderPort 
               : { docId: r.docId, fingerprint: r.fingerprint },
           ),
         );
-      } catch (thrown) {
-        return err(nativeError(thrown));
-      }
-    },
+      }),
 
-    async readTags(
+    readTags: (
       treeUri: string,
       docIds: readonly string[],
       signal: CancellationSignal,
-    ) {
-      if (signal.cancelled) {
-        return err(appCancelled());
-      }
-      try {
+    ) =>
+      call(signal, async () => {
         const rows = await native.tagRead(treeUri, docIds);
         if (signal.cancelled) {
           return err(appCancelled());
@@ -122,13 +117,9 @@ export function createExpoTagReader(native: AuqwTagReaderNative): TagReaderPort 
                 },
           ),
         );
-      } catch (thrown) {
-        return err(nativeError(thrown));
-      }
-    },
+      }),
 
-    docUri(treeUri: string, docId: string): string {
-      return native.docUri(treeUri, docId);
-    },
+    docUri: (treeUri: string, docId: string): string =>
+      native.docUri(treeUri, docId),
   };
 }

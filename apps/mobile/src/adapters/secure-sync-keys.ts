@@ -103,7 +103,7 @@ export function createSecureSyncKeys(): SyncClientKeys {
     );
     return next;
   };
-  const gated = <T>(
+  const gated = async <T>(
     signal: CancellationSignal | undefined,
     fn: () => Promise<Result<T>>,
   ): Promise<Result<T>> => cancelled(signal) ?? fn();

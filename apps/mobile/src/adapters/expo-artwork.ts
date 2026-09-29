@@ -83,6 +83,27 @@ function thrownName(thrown: unknown): string {
   return thrown instanceof Error ? thrown.name : 'unknown';
 }
 
+const cancelledErr = (): Result<never> =>
+  err(appError('cancelled', 'cancelled'));
+
+/** Signal gate + fs-throw mapping shared by the paths ops. */
+const guardIo = async <T>(
+  signal: CancellationSignal,
+  label: string,
+  fn: () => Result<T>,
+): Promise<Result<T>> => {
+  if (signal.cancelled) {
+    return cancelledErr();
+  }
+  try {
+    return fn();
+  } catch (thrown) {
+    return err(
+      appError('internal', `artwork ${label} failed: ${thrownName(thrown)}`),
+    );
+  }
+};
+
 export type ExpoArtworkDeps = {
   readonly storage: StoragePort;
   readonly clock: ClockPort;
@@ -102,49 +123,23 @@ export function createExpoArtwork(deps: ExpoArtworkDeps): {
 
   const paths: ArtworkPathsPort = {
     dir: directory.uri,
-    destFor(url: string): string {
-      return `${directory.uri}/${artworkKey(url)}.img`;
-    },
-    async exists(
-      filePath: string,
-      signal: CancellationSignal,
-    ): Promise<Result<boolean>> {
-      if (signal.cancelled) {
-        return err(appError('cancelled', 'cancelled'));
-      }
-      try {
-        return ok(new File(filePath).exists);
-      } catch (thrown) {
-        return err(
-          appError('internal', `artwork stat failed: ${thrownName(thrown)}`),
-        );
-      }
-    },
-    async remove(
-      filePath: string,
-      signal: CancellationSignal,
-    ): Promise<Result<void>> {
-      if (signal.cancelled) {
-        return err(appError('cancelled', 'cancelled'));
-      }
-      try {
+    destFor: (url) => `${directory.uri}/${artworkKey(url)}.img`,
+    exists: (filePath, signal) =>
+      guardIo(signal, 'stat', () => ok(new File(filePath).exists)),
+    remove: (filePath, signal) =>
+      guardIo(signal, 'remove', () => {
         const file = new File(filePath);
         if (file.exists) {
           file.delete();
         }
         return ok(undefined);
-      } catch (thrown) {
-        return err(
-          appError('internal', `artwork remove failed: ${thrownName(thrown)}`),
-        );
-      }
-    },
+      }),
   };
 
   const fetchPort: ArtworkFetchPort = {
     async download(url, destPath, signal) {
       if (signal.cancelled) {
-        return err(appError('cancelled', 'cancelled'));
+        return cancelledErr();
       }
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), DEFAULT_TIMEOUT_MS);
@@ -169,7 +164,7 @@ export function createExpoArtwork(deps: ExpoArtworkDeps): {
           );
         }
         if (signal.cancelled) {
-          return err(appError('cancelled', 'cancelled'));
+          return cancelledErr();
         }
         if (temp.exists) {
           temp.delete();
