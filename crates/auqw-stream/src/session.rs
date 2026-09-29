@@ -43,11 +43,10 @@ pub(crate) struct Shared {
     /// before its consumer can attach; teardown belongs to the owning
     /// request's `cancel`/`release` — or, for a claimed session
     /// abandoned forever, the `detached_since` reaper, which ignores
-    /// this flag. Once set it never clears: `close` re-arms
-    /// `detached_since` but the session still has an owner. Drops
-    /// only when the session detaches while ownerless — `abandon`
-    /// marked it on the last slot's cancel, so `close` releases the
-    /// claim and the session is supersede/reaper/attachable again.
+    /// this flag. Clears only when the session detaches while
+    /// ownerless — `abandon` marked it on the last slot's cancel,
+    /// so `close` releases the claim and the session is
+    /// supersede/reaper/attachable again.
     pub claimed: bool,
     /// The last ownership slot was cancelled while a consumer was
     /// attached — no request owns this handle anymore. Set only by

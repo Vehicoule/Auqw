@@ -49,7 +49,10 @@ and the consumer's attach, because every teardown keyed on
   `claimed_session_survives_unattached_teardowns_and_attaches`).
 - `detached_since`/`attach_ms`/pump priority/`stale_prepare` semantics
   untouched; `claimed` does not gate the detached reaper — a claimed
-  but abandoned session still reaps at `prepare_ttl` (120 s bound).
+  session still reaps at `prepare_ttl` (120 s bound). An ownerless
+  attach is handled by `abandon` instead: the session is marked, and
+  its `close` drops `claimed` so supersede/reaper can retire the
+  detach — never a kill on a playing stream.
 - `reusable()` still ignores `claimed` — a claimed warm is still
   adoptable by a real attempt (co-ownership; decision-log warm-adopt
   row). The tombstone and `was_cancelled`/`dead` abandoned paths in
