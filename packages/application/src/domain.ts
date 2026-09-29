@@ -170,6 +170,9 @@ const SOURCE_REF_KINDS: ReadonlySet<string> = new Set(['track', 'album', 'artist
 const ENTITY_KINDS: ReadonlySet<string> = new Set(['album', 'artist']);
 const RECORDING_PROVENANCES: ReadonlySet<string> = new Set(['provider', 'local']);
 const LIKE_ENTITY_KINDS: ReadonlySet<string> = SOURCE_REF_KINDS;
+const THEMES: ReadonlySet<string> = new Set([
+  'dark', 'light', 'oled', 'system', 'adaptive',
+]);
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return (
@@ -375,13 +378,6 @@ export function isSourceMapping(value: unknown): value is SourceMapping {
   );
 }
 
-function isReleaseYear(value: unknown): value is number | null {
-  return (
-    value === null ||
-    (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
-  );
-}
-
 function isArtworkList(value: unknown): value is readonly ArtworkRef[] {
   return Array.isArray(value) && value.length <= 8 && value.every(isArtworkRef);
 }
@@ -393,7 +389,7 @@ function hasAudioFields(value: Record<string, unknown>): boolean {
     isOptString(value['artist'], 512) &&
     isOptString(value['album'], 512) &&
     isOptSafeNonNegative(value['durationMs']) &&
-    isReleaseYear(value['releaseYear']) &&
+    isOptSafeNonNegative(value['releaseYear']) &&
     isArtworkList(value['artwork']) &&
     (value['explicit'] === null || typeof value['explicit'] === 'boolean') &&
     isOptString(value['genre'], 512)
@@ -434,15 +430,10 @@ export function isTrackMetadata(value: unknown): value is TrackMetadata {
 
 /** (provider, kind, id) keys must be unique within a recording. */
 function hasUniqueSourceRefs(refs: readonly SourceRef[]): boolean {
-  const seen = new Set<string>();
-  for (const ref of refs) {
-    const key = `${ref.provider} ${ref.kind} ${ref.id}`;
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-  }
-  return true;
+  return (
+    new Set(refs.map((r) => `${r.provider} ${r.kind} ${r.id}`)).size ===
+    refs.length
+  );
 }
 
 export function isRecording(value: unknown): value is Recording {
@@ -505,11 +496,8 @@ export function isSettings(value: unknown): value is Settings {
     Number.isSafeInteger(value['qualityKbps']) &&
     value['qualityKbps'] >= 1 &&
     value['qualityKbps'] <= 512 &&
-    (value['theme'] === 'dark' ||
-      value['theme'] === 'light' ||
-      value['theme'] === 'oled' ||
-      value['theme'] === 'system' ||
-      value['theme'] === 'adaptive') &&
+    typeof value['theme'] === 'string' &&
+    THEMES.has(value['theme']) &&
     typeof value['prefetch'] === 'boolean' &&
     (value['lyricsProvider'] === undefined ||
       isOptString(value['lyricsProvider'], 64)) &&
@@ -568,11 +556,7 @@ export function isQueueSnapshot(value: unknown): value is QueueSnapshot {
     'positionMs',
     'mode',
   ];
-  if (
-    !isRecord(value) ||
-    !(hasExactKeys(value, required) ||
-      hasExactKeys(value, [...required, 'blockedError']))
-  ) {
+  if (!isRecord(value) || !hasKeys(value, required, ['blockedError'])) {
     return false;
   }
   const {
