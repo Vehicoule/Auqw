@@ -249,9 +249,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // `stageOpen` is the desktop Stage column collapse flag AND the
   // mobile sheet's expanded flag — ports.stageInitiallyOpen picks
   // the mount-time pose.
-  const [stageOpen, setStageOpen] = useState(
-    ports.stageInitiallyOpen === true,
-  );
+  const [stageOpen, setStageOpen] = useState(ports.stageInitiallyOpen === true);
   const [stageMode, setStageMode] = useState<StageMode>('player');
   const [reordering, setReordering] = useState(false);
   const [query, setQuery] = useState('');
@@ -260,13 +258,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const [searchFocusTick, setSearchFocusTick] = useState(0);
   // Session-scoped, newest first — persisting them would be a
   // storage-schema decision, so they die with the app.
-  const [searchRecents, setSearchRecents] = useState<readonly string[]>(
-    [],
-  );
+  const [searchRecents, setSearchRecents] = useState<readonly string[]>([]);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
   const [languagePickerOpen, setLanguagePickerOpen] = useState(false);
-  const [artworkCachePickerOpen, setArtworkCachePickerOpen] =
-    useState(false);
+  const [artworkCachePickerOpen, setArtworkCachePickerOpen] = useState(false);
   const [storefrontSheetOpen, setStorefrontSheetOpen] = useState(false);
   const [qualityPickerOpen, setQualityPickerOpen] = useState(false);
   const [storefrontDraft, setStorefrontDraft] = useState('');
@@ -333,13 +328,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
     setEntityFetches({});
   }, [clearOverlayStack]);
   const entityMeta = useRef(new Map<string, TrackMetadata>());
-  const [actionsFor, setActionsFor] = useState<ActionTarget | null>(
-    null,
-  );
+  const [actionsFor, setActionsFor] = useState<ActionTarget | null>(null);
   const [pickerFor, setPickerFor] = useState<ActionTarget | null>(null);
-  const [providerSlot, setProviderSlot] = useState<ProviderSlot | null>(
-    null,
-  );
+  const [providerSlot, setProviderSlot] = useState<ProviderSlot | null>(null);
 
   // ---- connectivity -----------------------------------------------
   // null = unknown (no baseline yet) — the offline banner renders
@@ -371,13 +362,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // ---- downloads ledger + usage probes -----------------------------
   // Live ledger — chips, the downloads collection, and the stage
   // action all read it.
-  const [downloads, setDownloads] = useState(
-    () => controller.downloads.list(),
-  );
-  const downloadsThrottle = useRef<ThrottleState>({
-    last: 0,
-    timer: null,
-  });
+  const [downloads, setDownloads] = useState(() => controller.downloads.list());
+  const downloadsThrottle = useRef<ThrottleState>({ last: 0, timer: null });
   const refreshDownloads = useCallback(() => {
     trailing(downloadsThrottle.current, () =>
       setDownloads(controller.downloads.list()),
@@ -398,10 +384,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // lands, so a stale in-flight success can't knock out a newer one.
   const usageSeq = useRef(0);
   const usageApplied = useRef(0);
-  const usageThrottle = useRef<ThrottleState>({
-    last: 0,
-    timer: null,
-  });
+  const usageThrottle = useRef<ThrottleState>({ last: 0, timer: null });
   const refreshUsage = useCallback(() => {
     trailing(usageThrottle.current, () => {
       const seq = (usageSeq.current += 1);
@@ -520,6 +503,21 @@ export function useAppShell<E extends { readonly type: string } = never>(
     ],
   );
 
+  // The 'removing' transition fires before the file is gone — refresh
+  // usage again once removal settles so Settings doesn't display the
+  // freed bytes until the next event.
+  const removeDownload = useCallback(
+    (downloadId: string) => {
+      void controller.downloads
+        .remove(downloadId, freshSignal())
+        .then((r) => {
+          reportResult('action.removeDownload', r);
+          refreshUsage();
+        });
+    },
+    [controller, refreshUsage],
+  );
+
   // Single download affordance: absent → request; queued/downloading
   // → cancel; failed → retry; stored → remove.
   const onDownloadAction = useCallback(
@@ -551,29 +549,17 @@ export function useAppShell<E extends { readonly type: string } = never>(
             .then(reporter('action.retryDownload'));
           return;
         case 'available':
-          // The 'removing' transition fires before the file is gone —
-          // refresh usage again once removal settles so Settings
-          // doesn't display the freed bytes until the next event.
-          void controller.downloads
-            .remove(existing.downloadId, freshSignal())
-            .then((r) => {
-              reportResult('action.removeDownload', r);
-              refreshUsage();
-            });
-          return;
-        default:
+          removeDownload(existing.downloadId);
           return;
       }
     },
-    [controller, downloadRefFor, refreshUsage],
+    [controller, downloadRefFor, removeDownload],
   );
 
   // ---- lyrics / reviews / transfer bookkeeping ---------------------
   // Live reads off their surfaces, not session state — each fetch is
   // keyed to its target and canceled when superseded.
-  const [lyricsFetch, setLyricsFetch] = useState<LyricsFetch | null>(
-    null,
-  );
+  const [lyricsFetch, setLyricsFetch] = useState<LyricsFetch | null>(null);
   const lyricsSource = useRef<CancellationSource | null>(null);
   const [reviewFetch, setReviewFetch] = useState<ReviewFetch>({
     reviews: null,
@@ -641,10 +627,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
   }, [session]);
 
   // ---- search -------------------------------------------------------
-  const catalogProvider =
-    controller.providers.find(
-      (p) => p.id === state.settings.catalogProvider,
-    ) ?? controller.providers[0];
+  const catalogProvider = controller.providers.find(
+    (p) => p.id === state.settings.catalogProvider,
+  ) ?? controller.providers[0];
 
   const search = useMemo(
     () =>
@@ -679,16 +664,21 @@ export function useAppShell<E extends { readonly type: string } = never>(
     source: CancellationSource | null;
     seq: number;
   }>({ source: null, seq: 0 });
+  // A commit or a fresh keystroke supersedes the in-flight burst — a
+  // completion landing after the bump belongs to stale text and must
+  // never paint.
+  const cancelSuggest = useCallback(() => {
+    suggest.current.source?.cancel();
+    suggest.current = { source: null, seq: suggest.current.seq + 1 };
+  }, []);
 
   const runSearch = useCallback(
     (q: string) => {
       // The platform gets the first move on commit (mobile dismisses
-      // the IME). A commit also supersedes the suggest stream — the
-      // draft pane closes and in-flight completions are dropped.
+      // the IME).
       ports.onSearchCommit?.();
       const trimmed = q.trim();
-      suggest.current.source?.cancel();
-      suggest.current = { source: null, seq: suggest.current.seq + 1 };
+      cancelSuggest();
       setSuggestions([]);
       if (trimmed === '') {
         search?.cancel();
@@ -700,7 +690,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         storefront: state.settings.storefront,
       });
     },
-    [search, state.settings.storefront, ports.onSearchCommit],
+    [search, state.settings.storefront, ports.onSearchCommit, cancelSuggest],
   );
 
   const recordRecentSearch = useCallback((q: string) => {
@@ -754,10 +744,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // commit (Enter or a row tap) runs catalog.search.
   useEffect(() => {
     const trimmed = query.trim();
-    // An edit invalidates the prior burst at once — a completion that
-    // lands mid-debounce belongs to old text and must never paint.
-    suggest.current.source?.cancel();
-    suggest.current = { source: null, seq: suggest.current.seq + 1 };
+    cancelSuggest();
     if (trimmed === '') {
       setSuggestions([]);
       search?.cancel();
@@ -786,7 +773,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
         });
     }, 150);
     return () => clearTimeout(timer);
-  }, [query, committedQuery, search, providerRouter, suggestSelection]);
+  }, [
+    query,
+    committedQuery,
+    search,
+    providerRouter,
+    suggestSelection,
+    cancelSuggest,
+  ]);
 
   // Keep the row→metadata map in sync so a tap can recover the
   // TrackMetadata the session needs for addAndPlay; the first rows
@@ -806,9 +800,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     }
   }, [searchState, session]);
 
-  const [pendingReviews, setPendingReviews] = useState<number | null>(
-    null,
-  );
+  const [pendingReviews, setPendingReviews] = useState<number | null>(null);
 
   // Diagnostics + pending-review count load on each settings-tab
   // visit — persisted traces and live rows, never session snapshots.
@@ -991,18 +983,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
     // tags than restore loaded. Without the port the session rows
     // render as-is.
     const local = controller.local();
-    const recordings = (() => {
-      if (ports.localCatalog !== true || local === null) {
-        return state.recordings;
-      }
-      const byId = new Map(state.recordings.map((r) => [r.id, r]));
+    let recordings = state.recordings;
+    if (ports.localCatalog === true && local !== null) {
+      const byId = new Map(recordings.map((r) => [r.id, r]));
       for (const r of local.recordings()) {
-        if (r.provenance === 'local') {
-          byId.set(r.id, r);
-        }
+        byId.set(r.id, r);
       }
-      return [...byId.values()];
-    })();
+      recordings = [...byId.values()];
+    }
     const model = toLibraryModel({
       recordings,
       likes: state.likes,
@@ -1031,18 +1019,16 @@ export function useAppShell<E extends { readonly type: string } = never>(
         ? { ...base, state: 'unavailable', note: t('note.offline') }
         : base;
     };
-    const mark = (
-      row: CollectionRowModel,
-    ): CollectionRowModel => ({
+    const mark = (row: CollectionRowModel): CollectionRowModel => ({
       ...row,
       row: decorate(row.row, row.recordingId),
     });
+    const decorateRows = (rows: readonly TrackRowModel[]) =>
+      rows.map((row) => decorate(row, row.key));
     return {
       ...model,
-      items: model.items.map((row) => decorate(row, row.key)),
-      recentlyAdded: model.recentlyAdded.map((row) =>
-        decorate(row, row.key),
-      ),
+      items: decorateRows(model.items),
+      recentlyAdded: decorateRows(model.recentlyAdded),
       collectionRows: {
         liked: model.collectionRows.liked.map(mark),
         top50: model.collectionRows.top50.map(mark),
@@ -1204,8 +1190,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     if (ports.localCatalog !== true) {
       return [];
     }
-    const query = searchState.type === 'idle' ? '' : searchState.query;
-    const terms = query
+    const terms = committedQuery
       .trim()
       .toLowerCase()
       .split(/\s+/)
@@ -1250,7 +1235,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     // removed folder's recordings persist but must stop matching.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    searchState,
+    committedQuery,
     state.recordings,
     state.likes,
     activeRecordingId,
@@ -1345,7 +1330,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   const settingsModel = useMemo(() => {
     const extras = ports.settingsExtras();
-    const local = controller.local();
+    const localSources = controller.local()?.list();
     const model = toSettingsModel(state.settings, diagnostics, {
       storageText:
         storageUsage === null
@@ -1354,10 +1339,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
       // `localSupported` itself is the app's call: desktop probes the
       // live source, mobile asks its tag-reader module.
       localSupported: extras.localSupported,
-      localFolderCount: local?.list().length,
-      localSources: local
-        ?.list()
-        .map((s) => ({ sourceId: s.sourceId, label: s.label })),
+      localFolderCount: localSources?.length,
+      localSources: localSources?.map((s) => ({
+        sourceId: s.sourceId,
+        label: s.label,
+      })),
       // Kept ledger rows — same rule as the downloads collection:
       // failed-but-kept counts, mid-delete 'removing' doesn't.
       downloadCount: downloadLedgerCount(downloads),
@@ -1570,14 +1556,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
         const target = occurrences.find(
           (o) => o.occurrenceId === targetId,
         );
-        if (ports.gateAdvanceAlways === true) {
-          if (target === undefined || !canPlay(target.recordingId)) {
-            return;
-          }
-        } else if (
-          target !== undefined &&
-          !localPlayable(target.recordingId)
-        ) {
+        const blocked =
+          ports.gateAdvanceAlways === true
+            ? target === undefined || !canPlay(target.recordingId)
+            : target !== undefined && !localPlayable(target.recordingId);
+        if (blocked) {
           return;
         }
       }
@@ -1644,6 +1627,21 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [canPlayMeta, dispatchPlay, playMeta],
   );
 
+  // Tap on a meta-carrying row: gate, optionally record the query that
+  // surfaced it, then play.
+  const playMetaRow = useCallback(
+    (meta: TrackMetadata | undefined, recentQuery: string | null) => {
+      if (meta === undefined || !canPlayMeta(meta)) {
+        return;
+      }
+      if (recentQuery !== null) {
+        recordRecentSearch(recentQuery);
+      }
+      playCheckedMeta(meta);
+    },
+    [canPlayMeta, recordRecentSearch, playCheckedMeta],
+  );
+
   const onResultPress = useCallback(
     (row: TrackRowModel) => {
       // Local merged rows are existing recordings — play through the
@@ -1657,20 +1655,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
         void playRecording(row.key.slice('local:'.length));
         return;
       }
-      const meta = resultMeta.current.get(row.key);
-      if (meta !== undefined && canPlayMeta(meta)) {
-        recordRecentSearch(query);
-        playCheckedMeta(meta);
-      }
+      playMetaRow(resultMeta.current.get(row.key), query);
     },
-    [
-      canPlayMeta,
-      playCheckedMeta,
-      playRecording,
-      query,
-      recordRecentSearch,
-      ports.localCatalog,
-    ],
+    [playMetaRow, playRecording, query, ports.localCatalog],
   );
 
   // A home card carries either a materialized recording id (recents /
@@ -1694,13 +1681,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       }
       const meta = suggestionMeta.get(card.key);
       if (meta !== undefined) {
-        if (!canPlayMeta(meta)) {
-          return;
-        }
-        if (searchState.type === 'content') {
-          recordRecentSearch(searchState.query);
-        }
-        playCheckedMeta(meta);
+        playMetaRow(
+          meta,
+          searchState.type === 'content' ? searchState.query : null,
+        );
         return;
       }
       if (ports.strictHomeCardKeys === true) {
@@ -1710,11 +1694,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
     },
     [
       suggestionMeta,
-      canPlayMeta,
-      playCheckedMeta,
+      playMetaRow,
       playRecording,
       searchState,
-      recordRecentSearch,
       homeModel,
       ports.strictHomeCardKeys,
     ],
@@ -2181,18 +2163,25 @@ export function useAppShell<E extends { readonly type: string } = never>(
     });
   }, [patchTransfer]);
 
+  const failImport = useCallback(
+    (detail: string) => {
+      importPreviewRaw.current = null;
+      patchTransfer({
+        importPhase: 'error',
+        importDetail: detail,
+        preview: null,
+      });
+    },
+    [patchTransfer],
+  );
+
   const onImportText = useCallback(
     (text: string, sourceLabel: string) => {
       // Preview validates without mutating — a typed error here is
       // the honest reject; nothing was applied.
       const preview = previewImport(text);
       if (!preview.ok) {
-        importPreviewRaw.current = null;
-        patchTransfer({
-          importPhase: 'error',
-          importDetail: t('error.importInvalid'),
-          preview: null,
-        });
+        failImport(t('error.importInvalid'));
         return;
       }
       importText.current = text;
@@ -2202,21 +2191,17 @@ export function useAppShell<E extends { readonly type: string } = never>(
         preview: toImportPreviewModel(preview.value, sourceLabel),
       });
     },
-    [patchTransfer],
+    [patchTransfer, failImport],
   );
 
   const cancelImportRead = useCallback(() => {
     patchTransfer({ importPhase: 'idle' });
   }, [patchTransfer]);
 
-  const failImportRead = useCallback(() => {
-    importPreviewRaw.current = null;
-    patchTransfer({
-      importPhase: 'error',
-      importDetail: t('transfer.readFailed'),
-      preview: null,
-    });
-  }, [patchTransfer]);
+  const failImportRead = useCallback(
+    () => failImport(t('transfer.readFailed')),
+    [failImport],
+  );
 
   const onApplyImport = useCallback(() => {
     const text = importText.current;
@@ -2299,6 +2284,19 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   // ---- library world: entity fetch ----------------------------------
 
+  // Entity-page resolutions update their fetch entry only when the
+  // entry is still present and still the same ref — a superseded or
+  // cleared fetch keeps its state.
+  const updateEntityFetch = useCallback(
+    (key: string, fn: (cur: EntityFetch) => EntityFetch | null) =>
+      setEntityFetches((prev) => {
+        const cur = prev[key];
+        const next = cur === undefined ? null : fn(cur);
+        return next === null ? prev : { ...prev, [key]: next };
+      }),
+    [],
+  );
+
   const loadEntityPage = useCallback(
     (ref: EntityRef) => {
       const key = entityRefKey(ref);
@@ -2313,24 +2311,19 @@ export function useAppShell<E extends { readonly type: string } = never>(
         },
       }));
       void session.getEntityPage(ref).then((result) => {
-        setEntityFetches((prev) => {
-          const cur = prev[key];
-          if (cur === undefined || cur.ref !== ref) {
-            return prev;
-          }
-          return {
-            ...prev,
-            [key]: {
-              ...cur,
-              page: result.ok ? result.value : null,
-              error: result.ok ? null : result.error,
-              loading: false,
-            },
-          };
-        });
+        updateEntityFetch(key, (cur) =>
+          cur.ref !== ref
+            ? null
+            : {
+                ...cur,
+                page: result.ok ? result.value : null,
+                error: result.ok ? null : result.error,
+                loading: false,
+              },
+        );
       });
     },
-    [session],
+    [session, updateEntityFetch],
   );
 
   const openEntity = useCallback(
@@ -2378,20 +2371,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
       [key]: { ...cur, loadingMore: true },
     }));
     void session.getEntityPage(more).then((result) => {
-      setEntityFetches((prev) => {
-        const latest = prev[key];
-        if (
-          latest === undefined ||
-          latest.ref !== cur.ref ||
-          latest.page === null
-        ) {
-          return prev;
+      updateEntityFetch(key, (latest) => {
+        if (latest.ref !== cur.ref || latest.page === null) {
+          return null;
         }
         if (!result.ok) {
-          return {
-            ...prev,
-            [key]: { ...latest, error: result.error, loadingMore: false },
-          };
+          return { ...latest, error: result.error, loadingMore: false };
         }
         const seen = new Set(
           latest.page.items.map((m) => refKey(m.sourceRef)),
@@ -2400,40 +2385,49 @@ export function useAppShell<E extends { readonly type: string } = never>(
           (m) => !seen.has(refKey(m.sourceRef)),
         );
         return {
-          ...prev,
-          [key]: {
-            ...latest,
-            page: {
-              ...result.value,
-              items: [...latest.page.items, ...fresh],
-            },
-            error: null,
-            loadingMore: false,
+          ...latest,
+          page: {
+            ...result.value,
+            items: [...latest.page.items, ...fresh],
           },
+          error: null,
+          loadingMore: false,
         };
       });
     });
-  }, [session, overlay, entityFetches]);
+  }, [session, overlay, entityFetches, updateEntityFetch]);
 
   // ---- collection / playlist play + download -----------------------
 
-  const playCollectionRows = useCallback(
-    (rows: readonly { recordingId: string }[]) => {
+  // The shared play-list funnel: filter to attachable rows, then play
+  // under the caller's action label.
+  const playRows = useCallback(
+    (
+      action: MessageId,
+      rows: readonly {
+        readonly recordingId: string;
+        readonly selectedRef: SourceRef | null;
+      }[],
+    ) => {
       const playable = rows.filter((row) => canPlay(row.recordingId));
       if (playable.length === 0) {
         return;
       }
-      void dispatchPlay(
-        'action.playCollection',
-        session.playRecordings(
-          playable.map((row) => ({
-            recordingId: row.recordingId,
-            selectedRef: null,
-          })),
-        ),
-      );
+      void dispatchPlay(action, session.playRecordings(playable));
     },
     [session, canPlay, dispatchPlay],
+  );
+
+  const playCollectionRows = useCallback(
+    (rows: readonly { recordingId: string }[]) =>
+      playRows(
+        'action.playCollection',
+        rows.map((row) => ({
+          recordingId: row.recordingId,
+          selectedRef: null,
+        })),
+      ),
+    [playRows],
   );
 
   // ports.preferOwnedRef: a provider pin beats owned bytes in
@@ -2448,46 +2442,29 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
 
   const playPlaylist = useCallback(
-    (model: ReturnType<typeof playlistModelFor>) => {
-      const playable =
-        model === null
-          ? []
-          : model.entries.filter((entry) => canPlay(entry.recordingId));
-      if (playable.length === 0) {
-        return;
-      }
-      void dispatchPlay(
+    (model: ReturnType<typeof playlistModelFor>) =>
+      playRows(
         'action.playPlaylist',
-        session.playRecordings(
-          playable.map((entry) => ({
-            recordingId: entry.recordingId,
-            selectedRef: playRefFor(entry.recordingId, entry.selectedRef),
-          })),
-        ),
-      );
-    },
-    [session, canPlay, dispatchPlay, playRefFor],
+        (model?.entries ?? []).map((entry) => ({
+          recordingId: entry.recordingId,
+          selectedRef: playRefFor(entry.recordingId, entry.selectedRef),
+        })),
+      ),
+    [playRows, playRefFor],
   );
 
   const playPlaylistEntry = useCallback(
     (entry: {
       readonly recordingId: string;
       readonly selectedRef: SourceRef | null;
-    }) => {
-      if (!canPlay(entry.recordingId)) {
-        return;
-      }
-      void dispatchPlay(
-        'action.playPlaylistEntry',
-        session.playRecordings([
-          {
-            recordingId: entry.recordingId,
-            selectedRef: playRefFor(entry.recordingId, entry.selectedRef),
-          },
-        ]),
-      );
-    },
-    [session, canPlay, playRefFor, dispatchPlay],
+    }) =>
+      playRows('action.playPlaylistEntry', [
+        {
+          recordingId: entry.recordingId,
+          selectedRef: playRefFor(entry.recordingId, entry.selectedRef),
+        },
+      ]),
+    [playRows, playRefFor],
   );
 
   const playlistDownloadFor = useCallback(
@@ -2501,10 +2478,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
         downloadRefFor,
         recordFor: (id) => controller.downloads.recordFor(id),
       });
-      // downloads/localTick bump re-derives ownership; downloadRefFor
-      // and isOwned already capture the pieces they read.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     },
+    // downloads/localTick bump re-derives ownership; downloadRefFor
+    // and isOwned already capture the pieces they read.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [downloads, localTick, controller, downloadRefFor, isOwned],
   );
@@ -2551,6 +2527,18 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [session],
   );
 
+  const createPlaylistThen = useCallback(
+    (name: string, onCreated: (playlistId: string) => void) =>
+      void session.createPlaylist(name).then((created) => {
+        if (created.ok) {
+          onCreated(created.value);
+        } else {
+          reportResult('action.createPlaylist', created);
+        }
+      }),
+    [session],
+  );
+
   const onPickPlaylist = useCallback(
     (playlistId: string) => {
       const target = pickerFor;
@@ -2565,18 +2553,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const onCreateAndPick = useCallback(
     (name: string) => {
       const target = pickerFor;
-      void session.createPlaylist(name).then((created) => {
-        if (created.ok) {
-          if (target !== null) {
-            void addToPlaylist(created.value, target);
-          }
-        } else {
-          reportResult('action.createPlaylist', created);
+      createPlaylistThen(name, (playlistId) => {
+        if (target !== null) {
+          void addToPlaylist(playlistId, target);
         }
       });
       setPickerFor(null);
     },
-    [session, pickerFor, addToPlaylist],
+    [createPlaylistThen, pickerFor, addToPlaylist],
   );
 
   const onRowAction = useCallback(
@@ -2610,16 +2594,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
           break;
         case 'removeDownload':
           if (target.kind === 'recording') {
-            const row = controller.downloads.recordFor(
-              target.recordingId,
-            );
+            const row = controller.downloads.recordFor(target.recordingId);
             if (row !== null) {
-              void controller.downloads
-                .remove(row.downloadId, freshSignal())
-                .then((r) => {
-                  reportResult('action.removeDownload', r);
-                  refreshUsage();
-                });
+              removeDownload(row.downloadId);
             }
           }
           break;
@@ -2644,8 +2621,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
             openEntity(target.meta.artistRef);
           }
           break;
-        default:
-          break;
       }
     },
     [
@@ -2656,7 +2631,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       radioSeedable,
       onDownloadAction,
       controller,
-      refreshUsage,
+      removeDownload,
     ],
   );
 
@@ -2715,16 +2690,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
 
   const onCreatePlaylist = useCallback(
-    (name: string) => {
-      void session.createPlaylist(name).then((created) => {
-        if (created.ok) {
-          pushOverlay({ type: 'playlist', playlistId: created.value });
-        } else {
-          reportResult('action.createPlaylist', created);
-        }
-      });
-    },
-    [session, pushOverlay],
+    (name: string) =>
+      createPlaylistThen(name, (playlistId) =>
+        pushOverlay({ type: 'playlist', playlistId }),
+      ),
+    [createPlaylistThen, pushOverlay],
   );
 
   // Playlist overlay mutations — identical session calls modulo the
@@ -2827,13 +2797,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
 
   const onEntityRowPress = useCallback(
-    (entryKey: string, row: TrackRowModel) => {
-      const meta = entityMeta.current.get(`${entryKey}:${row.key}`);
-      if (meta !== undefined) {
-        playCheckedMeta(meta);
-      }
-    },
-    [playCheckedMeta],
+    (entryKey: string, row: TrackRowModel) =>
+      playMetaRow(entityRowMeta(entryKey, row), null),
+    [entityRowMeta, playMetaRow],
   );
 
   // ---- shell chrome helpers ----------------------------------------

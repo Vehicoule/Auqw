@@ -430,13 +430,12 @@ export function stageDownloadChip(input: {
 export function reportStoredDownloadError(
   error: { readonly kind: string; readonly message: string } | null,
 ): void {
-  if (error === null) {
-    return;
+  if (error !== null) {
+    reportResult(
+      'action.download',
+      err(appError(appErrorKind(error.kind), error.message)),
+    );
   }
-  reportResult(
-    'action.download',
-    err(appError(appErrorKind(error.kind), error.message)),
-  );
 }
 
 /**
