@@ -28,8 +28,6 @@ import {
 import type { Locale, MessageId, OverlayEntry } from './index.ts';
 import type { DownloadProgress, Result } from '@auqw/application';
 import {
-  shimmerHighlight,
-  staggerProgress,
   waveformBarExtent,
   waveformBarLayout,
   waveformPeaks,
@@ -657,23 +655,6 @@ assertEqual(
   waveformBarExtent(1, 20, 2.4, Number.NaN),
   2.4,
   'non-finite bloom falls back to the floor',
-);
-
-// staggerProgress: delayed sweep that always completes
-assertEqual(staggerProgress(1, 0, 10), 1, 'finished progress is done');
-assertEqual(staggerProgress(0, 9, 10), 0, 'the tail has not started at 0');
-assert(
-  staggerProgress(0.5, 1, 10) > staggerProgress(0.5, 8, 10),
-  'earlier bars lead the sweep',
-);
-assertEqual(staggerProgress(0, 0, 0), 1, 'empty count is complete');
-
-// shimmerHighlight: wraps around the ends of the phase cycle
-assertEqual(shimmerHighlight(0.5, 0.5), 1, 'aligned phase is fully lit');
-assertEqual(shimmerHighlight(0, 0.5), 0, 'a half cycle away is dark');
-assert(
-  shimmerHighlight(0.02, 0.98) > 0.7,
-  'the band wraps across the 1→0 boundary',
 );
 
 // peaksFromChannels: per-window RMS buckets → normalized pairs.

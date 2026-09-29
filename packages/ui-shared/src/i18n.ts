@@ -163,16 +163,11 @@ function lookup(
   id: MessageId,
   category: PluralCategory,
 ): string | undefined {
-  const catalog: Readonly<Record<string, Message>> | undefined =
-    Object.hasOwn(catalogs, locale) ? catalogs[locale] : undefined;
-  const message: Message | undefined = catalog?.[id];
-  if (message === undefined) {
-    return undefined;
-  }
+  const message = catalogs[locale]?.[id];
   if (typeof message === 'string') {
     return message;
   }
-  return message[category] ?? message['other'];
+  return message?.[category] ?? message?.['other'];
 }
 
 function interpolate(
@@ -199,12 +194,10 @@ export function t(
   id: MessageId,
   params?: Readonly<Record<string, string | number>>,
 ): string {
-  const count = params === undefined ? undefined : params['count'];
+  const count = params?.['count'];
   const category: PluralCategory =
     typeof count === 'number' ? pluralCategory(current, count) : 'other';
   const template =
-    lookup(current, id, category) ??
-    lookup(SYSTEM_LOCALE, id, category) ??
-    id;
+    lookup(current, id, category) ?? lookup(SYSTEM_LOCALE, id, category) ?? id;
   return interpolate(template, params);
 }

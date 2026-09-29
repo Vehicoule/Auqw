@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createClock, createPeaksTracker } from '@auqw/application';
-import type { PeaksPort, WaveformPeak } from '@auqw/application';
-import type { PeaksTarget } from '@auqw/application';
+import type { PeaksPort, PeaksTarget, WaveformPeak } from '@auqw/application';
 
 export type { PeaksTarget } from '@auqw/application';
 
