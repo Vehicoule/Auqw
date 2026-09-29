@@ -140,7 +140,7 @@ export interface SyncClient {
   close(): Promise<void>;
 }
 
-export type SyncPeerState = 'offline' | 'connecting' | 'open';
+type SyncPeerState = 'offline' | 'connecting' | 'open';
 
 export type SyncPeerView = {
   readonly peer: SyncPeer;
@@ -591,33 +591,29 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       // parked next. Cancel/timeout/send-fail therefore kill the
       // session too; the next op redials clean. The caller still
       // gets the original error.
+      const fail = (failure: AppError): void => {
+        finish(err(failure));
+        killSession(session, failure);
+      };
       unsubscribe =
         signal?.subscribe(() => {
-          if (settled) {
-            return;
+          if (!settled) {
+            fail(appError('cancelled', 'cancelled'));
           }
-          const failure = appError('cancelled', 'cancelled');
-          finish(err(failure));
-          killSession(session, failure);
         }) ?? (() => {});
       void deps.clock.sleep(ms, session.cancel.signal).then((slept) => {
         // The sleeper outlives a settled waiter — only kill when this
         // request is actually the one timing out.
-        if (!slept.ok || settled) {
-          return;
+        if (slept.ok && !settled) {
+          fail(appError('timeout', 'sync: reply deadline passed'));
         }
-        const failure = appError('timeout', 'sync: reply deadline passed');
-        finish(err(failure));
-        killSession(session, failure);
       });
       const sent =
         session.codec === null
           ? session.pump.send(encodeJson(msg))
           : sendSealed(session, msg);
       if (!sent && !settled) {
-        const failure = appError('transient', 'sync: send failed — socket dead');
-        finish(err(failure));
-        killSession(session, failure);
+        fail(appError('transient', 'sync: send failed — socket dead'));
       }
     });
   }
@@ -718,13 +714,9 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       endpoint: SyncEndpoint;
     }>
   > {
-    const parsed: SyncEndpoint[] = [];
-    for (const raw of opts.endpoints) {
-      const ep = parseEndpoint(raw);
-      if (ep !== null) {
-        parsed.push(ep);
-      }
-    }
+    const parsed = opts.endpoints
+      .map(parseEndpoint)
+      .filter((ep): ep is SyncEndpoint => ep !== null);
     if (parsed.length === 0) {
       return err(
         appError('invalid-message', 'sync: no usable endpoint in pair spec'),
@@ -852,6 +844,19 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
   }
 
   /* ---------------------------- the round -------------------------- */
+
+  /** Custody drop on a peer the desktop disowned or rebound. */
+  function dropPeer(fp: string, signal?: CancellationSignal): void {
+    peers.delete(fp);
+    lastRounds.delete(fp);
+    void deps.keys.peerDelete(fp, signal);
+  }
+
+  /** Polite teardown — `bye` in flight, then the local kill. */
+  function endSession(session: ClientSession): void {
+    sendSealed(session, { t: 'bye' });
+    killSession(session, null);
+  }
 
   function drainKick(session: ClientSession): void {
     if (
@@ -1267,9 +1272,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           setView(fp, { state: 'offline', lastError: opened.error });
           if (opened.error.kind === 'auth-required') {
             // The desktop forgot us — local custody is stale too.
-            peers.delete(fp);
-            lastRounds.delete(fp);
-            void deps.keys.peerDelete(fp, signal);
+            dropPeer(fp, signal);
           }
           return err(opened.error);
         }
@@ -1326,9 +1329,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
               session,
               appError('auth-required', 'sync: device re-bound remotely'),
             );
-            peers.delete(fp);
-            lastRounds.delete(fp);
-            void deps.keys.peerDelete(fp, signal);
+            dropPeer(fp, signal);
             return err(
               appError('auth-required', 'sync: device re-bound remotely'),
             );
@@ -1366,7 +1367,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
           }
         }
       }
-      const outcome = await enqueue(session, async () => {
+      return enqueue(session, async () => {
         const round = await syncRound(session, peer, signal);
         // The verdict stages on the session — the op's drain
         // publishes it atomically with the counters, so a bare
@@ -1377,7 +1378,6 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
         }
         return round;
       });
-      return outcome;
     },
 
     async refreshPeer(fp, signal) {
@@ -1415,8 +1415,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     dropSession(fp) {
       const session = sessions.get(fp);
       if (session !== undefined && !session.closed) {
-        sendSealed(session, { t: 'bye' });
-        killSession(session, null);
+        endSession(session);
       }
     },
 
@@ -1427,8 +1426,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
       }
       const session = sessions.get(fp);
       if (session !== undefined && !session.closed) {
-        sendSealed(session, { t: 'bye' });
-        killSession(session, null);
+        endSession(session);
       }
       peers.delete(fp);
       views.delete(fp);
@@ -1445,8 +1443,7 @@ export function createSyncClient(deps: SyncClientDeps): SyncClient {
     async close() {
       closing = true;
       for (const session of sessions.values()) {
-        sendSealed(session, { t: 'bye' });
-        killSession(session, null);
+        endSession(session);
       }
       sessions.clear();
       deps.sockets.close?.();
