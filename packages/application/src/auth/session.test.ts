@@ -618,6 +618,87 @@ async function testRenewTransientBackoff(): Promise<void> {
   assertEqual(applied.at(-1), 'access-c');
 }
 
+async function testSignOutDuringRenew(): Promise<void> {
+  // A refresh mint that resolves AFTER sign-out cleared the slot
+  // must not resurrect the bearer.
+  const { custody, record } = fakeCustody({
+    v: 1,
+    refreshToken: 'stored-refresh',
+    clientId: null,
+  });
+  const { oauth, refreshes } = fakeOAuth();
+  refreshes.push(ok(tokenGrant({ accessToken: 'access-a' })));
+  const applied: (string | null)[] = [];
+  const clock = fakeClock();
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: clock.clock,
+  });
+  await session.restore();
+  await flush();
+  assertDeepEqual(applied, ['access-a']);
+  // Park the next refresh in flight, then sign out while it is.
+  const late = deferred<Result<TokenGrant>>();
+  oauth.refreshAccessToken = () => late.promise;
+  clock.setNow(3_550_000);
+  clock.fireNext();
+  await flush();
+  const out = session.signOut();
+  await out;
+  assertDeepEqual(applied, ['access-a', null]);
+  // The late mint resolves — the stale grant identity drops it.
+  late.resolve(ok(tokenGrant({ accessToken: 'access-late' })));
+  await flush();
+  assertDeepEqual(applied, ['access-a', null]);
+  assertEqual(session.snapshot().status.state, 'signed-out');
+  assertEqual(record.current?.refreshToken, null);
+}
+
+async function testSignOutDuringGrantPersist(): Promise<void> {
+  // Sign-out inside the sign-in custody-persist window: the granted
+  // write lands first (serialized), sign-out's null write ends the
+  // chain, and the parked sign-in never applies its mint.
+  const gate = deferred<Result<void>>();
+  const { custody, record } = fakeCustody(null);
+  const origWrite = custody.write;
+  let gated = true;
+  custody.write = (next) => {
+    if (gated) {
+      gated = false;
+      return gate.promise;
+    }
+    return origWrite(next);
+  };
+  const { oauth, begins, polls } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  polls.push(ok({ type: 'granted', grant: tokenGrant() }));
+  const applied: (string | null)[] = [];
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: fakeClock().clock,
+  });
+  await session.restore();
+  session.beginSignIn();
+  await flush();
+  // The grant is parked inside its (deferred) custody write.
+  const out = session.signOut();
+  await flush();
+  gate.resolve(ok(undefined));
+  await out;
+  await flush();
+  assertDeepEqual(applied, [null]);
+  assertEqual(session.snapshot().status.state, 'signed-out');
+  assertEqual(record.current?.refreshToken, null);
+}
+
 async function testDuplicateBegin(): Promise<void> {
   const { custody } = fakeCustody(null);
   const { oauth, begins, pollDeferreds } = fakeOAuth();
@@ -654,5 +735,7 @@ export async function run(): Promise<void> {
   await testClientOverride();
   await testRenewLane();
   await testRenewTransientBackoff();
+  await testSignOutDuringRenew();
+  await testSignOutDuringGrantPersist();
   await testDuplicateBegin();
 }

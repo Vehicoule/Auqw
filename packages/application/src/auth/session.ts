@@ -200,6 +200,10 @@ const RENEW_MIN_DELAY_MS = 5_000;
 const RENEW_RETRY_BASE_MS = 30_000;
 const RENEW_RETRY_MAX_MS = 600_000;
 const SLOWDOWN_STEP_MS = 5_000;
+/** UI/wire bound on a published failure message — verbose provider
+ *  bodies are truncated at publish, not at each producer, so the
+ *  `auth:state` contract's 1024-char bound can never drop a snapshot. */
+const SNAPSHOT_MESSAGE_MAX = 512;
 
 export function createAuthSession(deps: AuthSessionDeps): AuthSession {
   const clock = deps.clock ?? realAuthClock();
@@ -227,7 +231,18 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
   let current: AuthSnapshot = { status, clientId: null };
 
   function publish(): void {
-    current = { status, clientId: clientIdOverride };
+    const wire =
+      status.state === 'failed' &&
+      status.error.message.length > SNAPSHOT_MESSAGE_MAX
+        ? {
+            state: 'failed' as const,
+            error: {
+              ...status.error,
+              message: `${status.error.message.slice(0, SNAPSHOT_MESSAGE_MAX)}…`,
+            },
+          }
+        : status;
+    current = { status: wire, clientId: clientIdOverride };
     for (const listener of [...listeners]) {
       try {
         listener();
@@ -377,6 +392,12 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       return;
     }
     const res = await oauth.refreshAccessToken(creds(), token);
+    if (refreshToken !== token) {
+      // The grant changed while the exchange was in flight — sign-out
+      // or a newer grant owns the slot now; applying this late mint
+      // would resurrect a cleared bearer.
+      return;
+    }
     if (res.ok) {
       try {
         await applyAccess(res.value);
@@ -513,6 +534,12 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         refreshToken = null;
         status = { state: 'failed', error: wrote.error };
         publish();
+        return;
+      }
+      if (refreshToken !== token.refreshToken) {
+        // A sign-out landed mid-persist — custody's serialized writes
+        // already ended on the cleared record; do not resurrect the
+        // bearer or the signed-in state it belonged to.
         return;
       }
       try {
