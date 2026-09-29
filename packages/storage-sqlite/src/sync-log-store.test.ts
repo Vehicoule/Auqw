@@ -350,6 +350,38 @@ async function peerMarksReplace(): Promise<void> {
   driver.close();
 }
 
+// 12. A malformed dropEntries element — or a non-array container —
+// fails typed; the predicate's field dereference must never let a
+// raw TypeError escape the port.
+async function malformedDropEntryRejected(): Promise<void> {
+  const { driver, storage, syncLog } = rig();
+  assert((await storage.initialize(ctx().context)).ok);
+  assert(
+    (await syncLog.append({ entries: [entry('phone-1', 1)] }, ctx().context))
+      .ok,
+    'seed append',
+  );
+  const nullDrop = await syncLog.append(
+    { dropEntries: [null] as never },
+    ctx().context,
+  );
+  assert(
+    !nullDrop.ok && nullDrop.error.kind === 'invalid-response',
+    'null drop rejects typed',
+  );
+  const nonArray = await syncLog.append(
+    { dropEntries: {} as never },
+    ctx().context,
+  );
+  assert(
+    !nonArray.ok && nonArray.error.kind === 'invalid-response',
+    'non-array container rejects typed',
+  );
+  const loaded = await syncLog.load(ctx().context);
+  assert(loaded.ok && loaded.value.entries.length === 1, 'seed survives');
+  driver.close();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['emptyLoad', emptyLoad],
   ['appendLoadRoundtrip', appendLoadRoundtrip],
@@ -362,6 +394,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['sharedDriverStores', sharedDriverStores],
   ['droppedEmissionsUnionFold', droppedEmissionsUnionFold],
   ['peerMarksReplace', peerMarksReplace],
+  ['malformedDropEntryRejected', malformedDropEntryRejected],
 ];
 
 for (const [name, fn] of TESTS) {
