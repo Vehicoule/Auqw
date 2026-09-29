@@ -1,7 +1,15 @@
-import { readdirSync } from 'node:fs';
-import { access, mkdir, readdir, rename, writeFile } from 'node:fs/promises';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  access,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { join } from 'node:path';
-import { errorCode } from '../shared/check.ts';
+import { errorCode, hasOnlyKeys, isRecord } from '../shared/check.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
 import type { SecureStore } from './secure-store.ts';
 import { isSyncIdentity, type SyncIdentity } from '../utility/sync-crypto.ts';
@@ -17,15 +25,26 @@ import {
  * The `sync:keys` service — the main-process half of the pairing key
  * custody channel. The utility process owns the listener and the
  * handshake but cannot reach Electron's `safeStorage`, so all key
- * material lives here as SecureStore entries: the desktop identity
- * under `auqw.sync.identity`, each paired device under
- * `auqw.sync.device.<id>` as a JSON record. When safeStorage has no OS
- * backend every op fails `unavailable` — pairing never falls back to
- * plaintext keys.
+ * material lives here as ONE SecureStore entry: `auqw.sync.store`
+ * holds `{v, identity, devices[]}` as a single encrypted JSON blob.
+ * Every decryptString on macOS can fire a Keychain ACL prompt, so
+ * consolidating N+1 records into one bounds a boot to a single prompt;
+ * the handler then serves every op from the decrypted in-memory state.
+ *
+ * Device records' public fields also mirror to plaintext
+ * `auqw.sync.devices.json` so the armed-boot gate (and nothing else)
+ * answers without decrypting — custody reads always come from the
+ * sealed blob, since a plaintext-served registry would let a bare file
+ * write implant a pairing. When safeStorage has no OS backend every op
+ * fails `unavailable` — pairing never falls back to plaintext keys.
  */
 
+const STORE_KEY = 'auqw.sync.store';
+const MIRROR_FILE = 'auqw.sync.devices.json';
+// Pre-consolidation layout — read once by the upgrade merge.
 const IDENTITY_KEY = 'auqw.sync.identity';
 const DEVICE_PREFIX = 'auqw.sync.device.';
+
 /**
  * Paired-device records mark an install that actually synced — a
  * generated identity alone does not (the utility mints one the first
@@ -33,17 +52,61 @@ const DEVICE_PREFIX = 'auqw.sync.device.';
  * settings once"). main forks the utility with AUQW_SYNC_ARMED from
  * this so a never-paired install stays dormant — no listener bind,
  * no safeStorage/keychain touch — until an explicit sync action.
+ *
+ * The consolidated store's sealed blob can't be inspected without
+ * decrypting, so the gate reads the plaintext mirror instead; a
+ * missing mirror falls through to the pre-consolidation file scan, and
+ * an unparseable one arms conservatively — wrongly dormant strands
+ * pairings, wrongly armed only costs custody's typed error.
  */
 export function syncHasPairedDevices(dir: string): boolean {
   try {
+    const path = join(dir, MIRROR_FILE);
+    const stat = statSync(path);
+    // The mirror is a bounded write (≤64 small records) — a giant or
+    // non-regular file can't be ours to parse, and a sync read in main
+    // must never stall on one. Arm and let custody answer typed.
+    if (!stat.isFile() || stat.size > 256 * 1024) {
+      return true;
+    }
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    const devices = isRecord(parsed) ? parsed['devices'] : undefined;
+    if (!Array.isArray(devices) || devices.length > 0) {
+      return true;
+    }
+    // A valid EMPTY mirror is authoritative: the blob it mirrors can
+    // hold an identity-only store (the utility mints one on first
+    // start, pairing or not), so it must not arm on its own. Only a
+    // legacy record orphaned mid-merge (or by a refused Keychain
+    // prompt) still counts — that scan gets the last word here.
+    try {
+      return readdirSync(dir).some(
+        (file) => file.startsWith(DEVICE_PREFIX) && file.endsWith('.b64'),
+      );
+    } catch {
+      return false;
+    }
+  } catch (thrown) {
+    if (errorCode(thrown) !== 'ENOENT') {
+      return true;
+    }
+  }
+  try {
+    // No mirror at all: a live sealed blob could hold pairings the
+    // deleted mirror can no longer show, so arm and let loadOnce heal
+    // the mirror back — identity-only stores wrongly armed just cost
+    // custody's typed error.
     return readdirSync(dir).some(
-      (file) => file.startsWith(DEVICE_PREFIX) && file.endsWith('.b64'),
+      (file) =>
+        file === `${STORE_KEY}.b64` ||
+        (file.startsWith(DEVICE_PREFIX) && file.endsWith('.b64')),
     );
   } catch {
     // Missing/unreadable dir means nothing to migrate or arm.
     return false;
   }
 }
+
 const SYNC_KEY_PREFIX = 'auqw.sync.';
 /**
  * Marks a completed custody migration inside `sync-secure`. Without it
@@ -120,92 +183,322 @@ export async function migrateSyncCustody(
   );
 }
 
-function deviceKey(id: string): string {
-  return `${DEVICE_PREFIX}${id}`;
-}
+/** The sealed blob's plaintext shape — one record per install. */
+type SyncStoreState = {
+  identity: SyncIdentity | null;
+  devices: SyncDeviceRecord[];
+};
 
-function idFromKey(key: string): string | null {
-  return key.startsWith(DEVICE_PREFIX) ? key.slice(DEVICE_PREFIX.length) : null;
+function isSyncStoreBlob(value: unknown): value is SyncStoreState {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['v', 'identity', 'devices']) &&
+    value['v'] === 1 &&
+    (value['identity'] === null || isSyncIdentity(value['identity'])) &&
+    Array.isArray(value['devices']) &&
+    // An over-cap blob can never be served — the device-list result
+    // validator bounds it — so the whole record fails validation
+    // rather than wedging every list call.
+    value['devices'].length <= MAX_SYNC_DEVICES &&
+    value['devices'].every(isSyncDeviceRecord)
+  );
 }
 
 export function createSyncKeysHandler(deps: {
   secure: SecureStore;
-  /** The SecureStore directory — device listing enumerates its files. */
+  /** The SecureStore directory — the plaintext mirror lives beside it. */
   dir: string;
 }): (args: unknown) => Promise<unknown> {
   const { secure, dir } = deps;
 
-  async function identityGet(): Promise<SyncIdentity | null> {
-    const text = await secure.get(IDENTITY_KEY);
-    if (text === null) {
-      return null;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      throw shellError('corrupt-state', 'sync identity is not json');
-    }
-    if (!isSyncIdentity(parsed)) {
-      throw shellError('corrupt-state', 'sync identity failed validation');
-    }
-    return parsed;
+  // Decrypted once per process: custody ops serve this snapshot and
+  // mutations publish a fresh one only after the blob + mirror land.
+  let current: SyncStoreState | null = null;
+  let loading: Promise<SyncStoreState> | null = null;
+  // Pre-consolidation files that failed to decrypt at load — reported
+  // as `skipped`, kept on disk, retried on the next boot.
+  let pendingLegacy = 0;
+  let mirrorSeq = 0;
+  // Set when a mirror write fails after the sealed blob is durable —
+  // the next custody op retries the heal rather than reporting a
+  // committed mutation as failed.
+  let mirrorDirty = false;
+
+  function mirrorContent(devices: readonly SyncDeviceRecord[]): string {
+    return JSON.stringify({ v: 1, devices });
   }
 
-  async function deviceList(): Promise<{
-    devices: SyncDeviceRecord[];
-    skipped: number;
-  }> {
+  /**
+   * The plaintext device mirror — tmp + rename publish, same as the
+   * store's own staging. Written on every persist and healed on load
+   * so the armed-boot gate can never drift from the sealed registry.
+   */
+  async function writeMirror(
+    devices: readonly SyncDeviceRecord[],
+  ): Promise<void> {
+    const target = join(dir, MIRROR_FILE);
+    mirrorSeq += 1;
+    const staging = `${target}.${process.pid}.${mirrorSeq}.tmp`;
+    try {
+      await mkdir(dir, { recursive: true });
+      await writeFile(staging, mirrorContent(devices), 'utf8');
+      await rename(staging, target);
+    } catch {
+      await unlink(staging).catch(() => undefined);
+      throw shellError(
+        'io-error',
+        'sync device mirror could not be written',
+      );
+    }
+  }
+
+  /**
+   * Best-effort mirror maintenance: skip the write entirely when the
+   * file on disk already matches the sealed registry, swallow a failed
+   * write into `mirrorDirty` for the next op to retry. Custody reads
+   * must never fail just because this derived file can't be written.
+   */
+  async function healMirror(
+    devices: readonly SyncDeviceRecord[],
+  ): Promise<void> {
+    try {
+      if (!mirrorDirty) {
+        const onDisk = await readFile(join(dir, MIRROR_FILE), 'utf8').catch(
+          () => null,
+        );
+        if (onDisk === mirrorContent(devices)) {
+          return;
+        }
+      }
+      await writeMirror(devices);
+      mirrorDirty = false;
+    } catch {
+      mirrorDirty = true;
+    }
+  }
+
+  /**
+   * Device records salvaged from the plaintext mirror — reached only
+   * when the sealed blob is corrupt and `identity-replace` must not
+   * orphan every pairing. The mirror carries public fields only (the
+   * devices' own keys stay sealed on the phones), so restoring from it
+   * leaks no material; a forged record still has to complete the
+   * device's own handshake. Anything that doesn't read as a valid,
+   * deduped, in-cap registry degrades to the empty fallback the op
+   * already had.
+   */
+  async function mirrorDevices(): Promise<SyncDeviceRecord[]> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(join(dir, MIRROR_FILE), 'utf8'));
+    } catch {
+      return [];
+    }
+    const devices = isRecord(parsed) ? parsed['devices'] : undefined;
+    if (!Array.isArray(devices)) {
+      return [];
+    }
+    const out: SyncDeviceRecord[] = [];
+    for (const d of devices) {
+      if (!isSyncDeviceRecord(d)) {
+        continue;
+      }
+      if (out.some((o) => o.id === d.id || o.fp === d.fp)) {
+        continue;
+      }
+      if (out.length >= MAX_SYNC_DEVICES) {
+        break;
+      }
+      out.push(d);
+    }
+    return out;
+  }
+
+  /**
+   * Commit a new registry state — sealed blob + plaintext mirror, then
+   * publish to memory. Write order picks the harmless failure: gaining
+   * the first device writes the mirror FIRST, so a dead blob write
+   * arms one extra boot (the next load heals the mirror back) instead
+   * of stranding a committed pairing behind a dormant gate; every
+   * other transition writes the blob first, where a stale mirror at
+   * worst does the same.
+   */
+  async function persist(
+    prev: SyncStoreState,
+    next: SyncStoreState,
+  ): Promise<void> {
+    const gaining =
+      prev.devices.length === 0 && next.devices.length > 0;
+    if (gaining) {
+      await writeMirror(next.devices);
+    }
+    await secure.set(
+      STORE_KEY,
+      JSON.stringify({
+        v: 1,
+        identity: next.identity,
+        devices: next.devices,
+      }),
+    );
+    // The sealed registry is durable — publish before the mirror write
+    // so a mirror failure can't leave memory disagreeing with disk.
+    current = next;
+    if (!gaining) {
+      // The mutation is already committed — a failed mirror write is
+      // marked dirty for the next op to heal, never reported as a
+      // failed mutation.
+      await healMirror(next.devices);
+    }
+  }
+
+  /**
+   * Fold pre-consolidation entries into the state: the identity under
+   * `auqw.sync.identity`, one device record per `auqw.sync.device.<id>`
+   * file. A record that fails to decrypt keeps its file and retries on
+   * the next boot — a refused macOS Keychain prompt reads the same as
+   * torn ciphertext, and neither may quietly drop a pairing. Records
+   * that decrypt but don't validate are dead weight: consumed so they
+   * stop re-prompting. The blob stays authoritative — a legacy entry
+   * colliding with a sealed id/fp retires, never overwrites.
+   * Returns the keys whose entries merged or were unusable; the caller
+   * deletes them only after the state is durable.
+   */
+  async function mergeLegacy(state: SyncStoreState): Promise<string[]> {
     let files: string[];
     try {
       files = await readdir(dir);
     } catch (thrown) {
       if (errorCode(thrown) === 'ENOENT') {
-        return { devices: [], skipped: 0 };
+        return [];
       }
       throw shellError('io-error', 'secure dir could not be listed');
     }
-    const devices: SyncDeviceRecord[] = [];
-    let skipped = 0;
+    const consumed: string[] = [];
+    pendingLegacy = 0;
     for (const file of files) {
-      if (!file.startsWith(DEVICE_PREFIX) || !file.endsWith('.b64')) {
+      const isIdentity = file === `${IDENTITY_KEY}.b64`;
+      const isDevice =
+        file.startsWith(DEVICE_PREFIX) && file.endsWith('.b64');
+      if (!isIdentity && !isDevice) {
         continue;
       }
-      const id = idFromKey(file.slice(0, -'.b64'.length));
-      if (id === null) {
-        skipped += 1;
-        continue;
-      }
+      const key = file.slice(0, -'.b64'.length);
+      let raw: string | null;
       try {
-        const text = await secure.get(deviceKey(id));
-        if (text === null) {
-          skipped += 1;
-          continue;
-        }
-        const parsed: unknown = JSON.parse(text);
-        if (isSyncDeviceRecord(parsed)) {
-          devices.push(parsed);
-        } else {
-          skipped += 1;
-        }
+        raw = await secure.get(key);
       } catch (thrown) {
-        // A corrupt entry is counted, not fatal — the device it
-        // described just looks unpaired and must re-pair. A dead
-        // encryption backend is systemic: surface it, don't hide it.
+        // A dead encryption backend is systemic — surface it rather
+        // than merge a partial registry over unreadable entries.
         if (isShellError(thrown) && thrown.kind === 'unavailable') {
           throw thrown;
         }
-        skipped += 1;
+        pendingLegacy += 1;
+        continue;
+      }
+      if (raw === null) {
+        continue; // vanished between readdir and get — nothing to merge
+      }
+      let record: unknown = null;
+      try {
+        record = JSON.parse(raw);
+      } catch {
+        // falls to the unusable-record branch below
+      }
+      if (isIdentity) {
+        if (isSyncIdentity(record) && state.identity === null) {
+          state.identity = record;
+        }
+        consumed.push(key);
+      } else if (isSyncDeviceRecord(record)) {
+        if (
+          state.devices.some((d) => d.id === record.id || d.fp === record.fp)
+        ) {
+          // Blob wins — a stale same-id/same-fp duplicate retires.
+          consumed.push(key);
+        } else if (state.devices.length >= MAX_SYNC_DEVICES) {
+          // A full registry can't take it — keep the file for a boot
+          // where there's room rather than seal an over-cap blob.
+          pendingLegacy += 1;
+        } else {
+          state.devices.push(record);
+          consumed.push(key);
+        }
+      } else {
+        consumed.push(key);
       }
     }
-    return { devices, skipped };
+    return consumed;
+  }
+
+  async function loadOnce(): Promise<SyncStoreState> {
+    // The ONE decrypt an armed boot needs — every later custody op
+    // serves the in-memory snapshot.
+    const text = await secure.get(STORE_KEY);
+    const prev: SyncStoreState = { identity: null, devices: [] };
+    if (text !== null) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        throw shellError('corrupt-state', 'sync store is not json');
+      }
+      if (!isSyncStoreBlob(parsed)) {
+        throw shellError('corrupt-state', 'sync store failed validation');
+      }
+      prev.identity = parsed.identity;
+      prev.devices = parsed.devices;
+    }
+    const state: SyncStoreState = {
+      identity: prev.identity,
+      devices: [...prev.devices],
+    };
+    const consumed = await mergeLegacy(state);
+    const changed =
+      consumed.length > 0 &&
+      (state.identity !== prev.identity ||
+        state.devices.length !== prev.devices.length);
+    if (changed) {
+      // Seal before consuming the legacy files — a crash between blob
+      // write and cleanup just re-merges the same records (deduped).
+      await persist(prev, state);
+    } else {
+      // Nothing merged — heal the mirror only if it's missing or
+      // stale, so a pure read never needs the directory to be writable.
+      await healMirror(state.devices);
+    }
+    for (const key of consumed) {
+      await secure.delete(key).catch(() => undefined);
+    }
+    return state;
+  }
+
+  async function load(): Promise<SyncStoreState> {
+    if (current === null) {
+      // Failed loads aren't memoized — a recoverable failure (backend
+      // hiccup, transient io) retries on the next op instead of being
+      // sticky for the process's life.
+      loading ??= loadOnce().then(
+        (state) => {
+          current = state;
+          loading = null;
+          return state;
+        },
+        (thrown: unknown) => {
+          loading = null;
+          throw thrown;
+        },
+      );
+      await loading;
+    }
+    const state = current as SyncStoreState;
+    await healMirror(state.devices);
+    return state;
   }
 
   // Registry mutations serialize behind one promise chain: the
-  // cap-check → fp-dedupe → write sequence is a single logical
+  // cap-check → fp-dedupe → persist sequence is a single logical
   // transaction, and two concurrent puts must not both observe room
-  // for a 65th record (an oversized list then fails its own boundary
-  // validator and breaks every deviceList call).
+  // for a 65th record or overwrite each other's committed state.
   let registryChain: Promise<void> = Promise.resolve();
   function serialized<T>(fn: () => Promise<T>): Promise<T> {
     const next = registryChain.then(fn);
@@ -216,43 +509,6 @@ export function createSyncKeysHandler(deps: {
     return next;
   }
 
-  async function devicePut(record: SyncDeviceRecord): Promise<void> {
-    const existing = await secure.get(deviceKey(record.id));
-    const { devices } = await deviceList();
-    if (existing === null) {
-      const isNewFp = !devices.some((d) => d.fp === record.fp);
-      if (devices.length >= MAX_SYNC_DEVICES) {
-        if (isNewFp) {
-          throw shellError(
-            'unavailable',
-            'paired device registry is full',
-          );
-        }
-        // At capacity a same-fp migration must evict BEFORE writing —
-        // a transient 65th file would trip the device-list bound and
-        // wedge the registry. A failed write after the evict leaves the
-        // phone needing a re-pair, which is recoverable; a wedged
-        // registry is not.
-        for (const d of devices) {
-          if (d.fp === record.fp && d.id !== record.id) {
-            await secure.delete(deviceKey(d.id));
-          }
-        }
-      }
-    }
-    // Below capacity, write BEFORE evicting stale-fp ids: a failed
-    // write must not delete the only valid registration. And dedupe
-    // runs on EVERY put — including update-path retries — so a failed
-    // cleanup converges on the next call instead of leaving same-fp
-    // duplicates forever.
-    await secure.set(deviceKey(record.id), JSON.stringify(record));
-    for (const d of devices) {
-      if (d.fp === record.fp && d.id !== record.id) {
-        await secure.delete(deviceKey(d.id));
-      }
-    }
-  }
-
   return async (args: unknown) => {
     if (!isSyncKeysOp(args)) {
       throw shellError('invalid-request', 'sync:keys bad op');
@@ -260,32 +516,78 @@ export function createSyncKeysHandler(deps: {
     const op: SyncKeysOp = args;
     switch (op.op) {
       case 'identity-get':
-        return { identity: await identityGet() };
-      case 'identity-set': {
-        const existing = await identityGet();
-        if (existing !== null) {
-          // Rotation orphans every pairing — refuse silently swapping.
-          throw shellError(
-            'invalid-request',
-            'sync identity already installed',
-          );
-        }
-        await secure.set(IDENTITY_KEY, JSON.stringify(op.identity));
-        return null;
-      }
+        return { identity: (await load()).identity };
+      case 'identity-set':
+        return serialized(async () => {
+          const s = await load();
+          if (s.identity !== null) {
+            // Rotation orphans every pairing — refuse silently swapping.
+            throw shellError(
+              'invalid-request',
+              'sync identity already installed',
+            );
+          }
+          await persist(s, {
+            identity: op.identity,
+            devices: s.devices,
+          });
+          return null;
+        });
       case 'identity-replace':
-        // Recovery/rotation path — deliberately bypasses the
-        // create-once preflight (which would itself trip on the broken
-        // record it's replacing). Device pairings hold the devices'
-        // own keys, so they survive a desktop-identity rotation; a
-        // phone that pinned our old fingerprint re-pairs.
-        await secure.set(IDENTITY_KEY, JSON.stringify(op.identity));
-        return null;
-      case 'device-list':
-        return deviceList();
+        return serialized(async () => {
+          let s: SyncStoreState;
+          try {
+            s = await load();
+          } catch (thrown) {
+            // Recovery/rotation over a corrupt blob is exactly what
+            // this op exists for — unwedge rather than fail on the
+            // broken record it's replacing. The plaintext mirror keeps
+            // the registry's public fields, so salvaged pairings are
+            // restored from it; a mirror that's also unreadable falls
+            // back to the empty registry (the last resort this op is
+            // for). Leftover pre-consolidation files still merge on the
+            // next load. A dead backend stays fatal: the write would
+            // fail anyway.
+            if (!isShellError(thrown) || thrown.kind !== 'corrupt-state') {
+              throw thrown;
+            }
+            s = { identity: null, devices: await mirrorDevices() };
+          }
+          // Device pairings hold the devices' own keys, so they survive
+          // a desktop-identity rotation; a phone that pinned our old
+          // fingerprint re-pairs.
+          await persist(s, {
+            identity: op.identity,
+            devices: s.devices,
+          });
+          return null;
+        });
+      case 'device-list': {
+        const s = await load();
+        return { devices: [...s.devices], skipped: pendingLegacy };
+      }
       case 'device-put':
         return serialized(async () => {
-          await devicePut(op.record);
+          const s = await load();
+          const isNew = !s.devices.some((d) => d.id === op.record.id);
+          const replacesFp = s.devices.some(
+            (d) => d.fp === op.record.fp && d.id !== op.record.id,
+          );
+          if (isNew && !replacesFp && s.devices.length >= MAX_SYNC_DEVICES) {
+            throw shellError(
+              'unavailable',
+              'paired device registry is full',
+            );
+          }
+          // Dedupe-by-fp and replace-by-id collapse into the same
+          // publish: the blob carries the whole registry at once, so
+          // the cap can never be transiently exceeded on disk and a
+          // failed write leaves the old registry fully intact.
+          const devices = s.devices.filter(
+            (d) => d.id !== op.record.id && d.fp !== op.record.fp,
+          );
+          devices.push(op.record);
+          await persist(s, { identity: s.identity, devices });
           return null;
         });
       case 'device-touch':
@@ -293,31 +595,29 @@ export function createSyncKeysHandler(deps: {
         // check-and-write inside the serialized section is the atomic
         // guard against a concurrent unpair.
         return serialized(async () => {
-          const text = await secure.get(deviceKey(op.record.id));
-          if (text === null) {
+          const s = await load();
+          const existing = s.devices.find((d) => d.id === op.record.id);
+          if (existing === undefined || existing.fp !== op.record.fp) {
             return { updated: false };
           }
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(text);
-          } catch {
-            return { updated: false };
-          }
-          if (
-            !isSyncDeviceRecord(parsed) ||
-            parsed.fp !== op.record.fp
-          ) {
-            return { updated: false };
-          }
-          await secure.set(
-            deviceKey(op.record.id),
-            JSON.stringify(op.record),
-          );
+          await persist(s, {
+            identity: s.identity,
+            devices: s.devices.map((d) =>
+              d.id === op.record.id ? op.record : d,
+            ),
+          });
           return { updated: true };
         });
       case 'device-delete':
         return serialized(async () => {
-          await secure.delete(deviceKey(op.id));
+          const s = await load();
+          if (!s.devices.some((d) => d.id === op.id)) {
+            return null;
+          }
+          await persist(s, {
+            identity: s.identity,
+            devices: s.devices.filter((d) => d.id !== op.id),
+          });
           return null;
         });
     }

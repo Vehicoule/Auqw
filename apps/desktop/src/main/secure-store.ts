@@ -30,6 +30,18 @@ export function createSecureStore(opts: {
 }): SecureStore {
   const { dir, safeStorage } = opts;
   let stagingSeq = 0;
+  // One decrypt per key per process: every safeStorage.decryptString
+  // touches the OS secret backend, and on macOS an entry whose Keychain
+  // ACL doesn't yet trust the app prompts PER CALL — caching the
+  // resolved value bounds the prompt count to the number of records,
+  // once, instead of once per read. These files only change through
+  // this store, so the cache can't diverge from disk in-process.
+  // The map holds the READ PROMISE, not the settled value — two
+  // concurrent gets would each see a settled-value cache as empty and
+  // both decrypt (two Keychain prompts for one key). Sharing the
+  // in-flight promise coalesces them; failures evict so a recoverable
+  // read retries instead of memoizing the error.
+  const cache = new Map<string, Promise<string | null>>();
 
   function fileFor(key: string): string {
     return join(dir, `${key}.b64`);
@@ -44,29 +56,72 @@ export function createSecureStore(opts: {
     }
   }
 
+  async function readStored(key: string): Promise<string | null> {
+    let text: string;
+    try {
+      text = await readFile(fileFor(key), 'utf8');
+    } catch (thrown) {
+      if (errorCode(thrown) === 'ENOENT') {
+        return null;
+      }
+      throw shellError('io-error', 'secure entry could not be read');
+    }
+    let decoded: Uint8Array;
+    try {
+      decoded = Buffer.from(text, 'base64');
+    } catch {
+      throw shellError('corrupt-state', 'secure entry is not base64');
+    }
+    try {
+      return safeStorage.decryptString(decoded);
+    } catch {
+      // Corrupt entries stay uncached — a backend that recovers
+      // (or a file a rewrite repairs) is retried, not memoized.
+      throw shellError('corrupt-state', 'secure entry failed to decrypt');
+    }
+  }
+
+  // Same-key mutations serialize through this chain — an overlapping
+  // set/delete otherwise races unlink-vs-rename, and the LAST cache
+  // write could belong to the operation the filesystem discarded,
+  // leaving reads stale for the life of the store. The fs work and the
+  // cache publish travel inside one chained step so they can't split.
+  const mutations = new Map<string, Promise<void>>();
+
+  function serialize(key: string, work: () => Promise<void>): Promise<void> {
+    const prior = mutations.get(key) ?? Promise.resolve();
+    // Run even when the prior op rejected — a failed delete must not
+    // wedge the key's queue.
+    const next = prior.then(work, work);
+    mutations.set(key, next);
+    const cleanup = () => {
+      if (mutations.get(key) === next) {
+        mutations.delete(key);
+      }
+    };
+    // Both branches handled — a rejected op still runs eviction without
+    // an unhandled rejection.
+    void next.then(cleanup, cleanup);
+    return next;
+  }
+
   return {
     async get(key) {
       requireEncryption();
-      let text: string;
-      try {
-        text = await readFile(fileFor(key), 'utf8');
-      } catch (thrown) {
-        if (errorCode(thrown) === 'ENOENT') {
-          return null;
+      const hit = cache.get(key);
+      if (hit !== undefined) {
+        return hit;
+      }
+      const inflight = readStored(key);
+      cache.set(key, inflight);
+      // Identity check: a stale rejection must not evict a value a
+      // concurrent set() wrote after this read started.
+      inflight.catch(() => {
+        if (cache.get(key) === inflight) {
+          cache.delete(key);
         }
-        throw shellError('io-error', 'secure entry could not be read');
-      }
-      let decoded: Uint8Array;
-      try {
-        decoded = Buffer.from(text, 'base64');
-      } catch {
-        throw shellError('corrupt-state', 'secure entry is not base64');
-      }
-      try {
-        return safeStorage.decryptString(decoded);
-      } catch {
-        throw shellError('corrupt-state', 'secure entry failed to decrypt');
-      }
+      });
+      return inflight;
     },
 
     async set(key, value) {
@@ -80,25 +135,31 @@ export function createSecureStore(opts: {
       // half-written bytes.
       stagingSeq += 1;
       const staging = `${target}.${process.pid}.${stagingSeq}.tmp`;
-      try {
-        await mkdir(dir, { recursive: true });
-        await writeFile(staging, encrypted.toString('base64'), 'utf8');
-        await rename(staging, target);
-      } catch {
-        await unlink(staging).catch(() => undefined);
-        throw shellError('io-error', 'secure entry could not be written');
-      }
+      await serialize(key, async () => {
+        try {
+          await mkdir(dir, { recursive: true });
+          await writeFile(staging, encrypted.toString('base64'), 'utf8');
+          await rename(staging, target);
+        } catch {
+          await unlink(staging).catch(() => undefined);
+          throw shellError('io-error', 'secure entry could not be written');
+        }
+        cache.set(key, Promise.resolve(value));
+      });
     },
 
     async delete(key) {
       requireEncryption();
-      try {
-        await unlink(fileFor(key));
-      } catch (thrown) {
-        if (errorCode(thrown) !== 'ENOENT') {
-          throw shellError('io-error', 'secure entry could not be removed');
+      await serialize(key, async () => {
+        try {
+          await unlink(fileFor(key));
+        } catch (thrown) {
+          if (errorCode(thrown) !== 'ENOENT') {
+            throw shellError('io-error', 'secure entry could not be removed');
+          }
         }
-      }
+        cache.set(key, Promise.resolve(null));
+      });
     },
   };
 }

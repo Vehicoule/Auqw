@@ -2,6 +2,8 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -17,6 +19,7 @@ import { createSecureStore, type SafeStorageLike } from './secure-store.ts';
 import {
   createSyncKeysHandler,
   migrateSyncCustody,
+  syncHasPairedDevices,
 } from './sync-keys.ts';
 import {
   fingerprintOf,
@@ -40,6 +43,26 @@ const UNAVAILABLE: SafeStorageLike = {
   ...WORKING,
   isEncryptionAvailable: () => false,
 };
+
+/** WORKING, plus a decrypt counter — the Keychain-prompt proxy. */
+function counting(): { storage: SafeStorageLike; decrypts: () => number } {
+  let decrypts = 0;
+  return {
+    decrypts: () => decrypts,
+    storage: {
+      isEncryptionAvailable: () => true,
+      encryptString: (plain) => Buffer.from(`enc:${plain}`),
+      decryptString: (encrypted) => {
+        decrypts += 1;
+        const text = Buffer.from(encrypted).toString('utf8');
+        if (!text.startsWith('enc:')) {
+          throw new Error('decrypt failed');
+        }
+        return text.slice(4);
+      },
+    },
+  };
+}
 
 function device(
   id: string,
@@ -254,6 +277,27 @@ export async function run(): Promise<void> {
       ['dev-legacy01', 'dev-newer001'].sort(),
       'migrated + pre-existing devices both readable',
     );
+    // The first custody touch consolidates: legacy per-record files are
+    // consumed into the single sealed blob + plaintext mirror.
+    assert(
+      existsSync(join(newDir, 'auqw.sync.store.b64')),
+      'consolidated blob written on first custody op',
+    );
+    assert(
+      existsSync(join(newDir, 'auqw.sync.devices.json')),
+      'plaintext device mirror written',
+    );
+    assert(
+      !existsSync(join(newDir, 'auqw.sync.identity.b64')) &&
+        readdirSync(newDir).every(
+          (f) => !f.startsWith('auqw.sync.device.'),
+        ),
+      'legacy custody files consumed',
+    );
+    assert(
+      syncHasPairedDevices(newDir),
+      'consolidated install stays armed',
+    );
     // Re-running is idempotent — an upgrade that raced a first boot
     // doesn't clobber the destination.
     await migrateSyncCustody(oldDir, newDir);
@@ -271,6 +315,228 @@ export async function run(): Promise<void> {
       existsSync(join(freshDir, `auqw.sync.device.${late.id}.b64`)),
       'migration creates the custody dir it moves into',
     );
+
+    // The armed-boot gate: mirror first, pre-consolidation fallback.
+    const gDir = join(root, 'gate');
+    assertEqual(
+      syncHasPairedDevices(gDir),
+      false,
+      'missing dir is dormant',
+    );
+    mkdirSync(gDir, { recursive: true });
+    assertEqual(
+      syncHasPairedDevices(gDir),
+      false,
+      'empty dir is dormant',
+    );
+    const gStore = createSecureStore({ dir: gDir, safeStorage: WORKING });
+    await gStore.set(
+      'auqw.sync.identity',
+      JSON.stringify(generateIdentity()),
+    );
+    assertEqual(
+      syncHasPairedDevices(gDir),
+      false,
+      'a minted identity alone never paired',
+    );
+    await gStore.set(
+      'auqw.sync.device.dev-gate0001',
+      JSON.stringify(device('dev-gate0001')),
+    );
+    assert(
+      syncHasPairedDevices(gDir),
+      'a pre-consolidation device record arms',
+    );
+    // An empty consolidated mirror does not mask an orphaned legacy
+    // record — a mid-merge crash or refused prompt still means paired.
+    writeFileSync(
+      join(gDir, 'auqw.sync.devices.json'),
+      JSON.stringify({ v: 1, devices: [] }),
+    );
+    assert(
+      syncHasPairedDevices(gDir),
+      'orphaned legacy record still arms under an empty mirror',
+    );
+    const g2 = join(root, 'gate2');
+    mkdirSync(g2, { recursive: true });
+    writeFileSync(
+      join(g2, 'auqw.sync.devices.json'),
+      JSON.stringify({ v: 1, devices: [device('dev-gate0002')] }),
+    );
+    assert(syncHasPairedDevices(g2), 'a non-empty mirror arms');
+    writeFileSync(join(g2, 'auqw.sync.devices.json'), '{not json');
+    assert(
+      syncHasPairedDevices(g2),
+      'an unparseable mirror arms conservatively',
+    );
+    writeFileSync(
+      join(g2, 'auqw.sync.devices.json'),
+      JSON.stringify({ v: 1, devices: [] }),
+    );
+    assertEqual(
+      syncHasPairedDevices(g2),
+      false,
+      'a verified-empty mirror stays dormant',
+    );
+
+    // Consolidated custody: one sealed record, one decrypt per boot.
+    const c = counting();
+    const cDir = join(root, 'consolidated');
+    const h1 = createSyncKeysHandler({
+      secure: createSecureStore({ dir: cDir, safeStorage: c.storage }),
+      dir: cDir,
+    });
+    const cId = generateIdentity();
+    await h1({ op: 'identity-set', identity: cId });
+    await h1({ op: 'device-put', record: device('dev-cons0001') });
+    await h1({ op: 'device-put', record: device('dev-cons0002') });
+    await h1({ op: 'device-list' });
+    assertEqual(
+      c.decrypts(),
+      0,
+      'fresh writes never touch the decrypt path',
+    );
+    // The next process: a single blob decrypt serves every op.
+    const h2 = createSyncKeysHandler({
+      secure: createSecureStore({ dir: cDir, safeStorage: c.storage }),
+      dir: cDir,
+    });
+    await h2({ op: 'identity-get' });
+    await h2({ op: 'device-list' });
+    await h2({ op: 'device-put', record: device('dev-cons0003') });
+    await h2({ op: 'device-delete', id: 'dev-cons0001' });
+    const cList = (await h2({ op: 'device-list' })) as {
+      devices: SyncDeviceRecord[];
+    };
+    assertEqual(
+      c.decrypts(),
+      1,
+      'one decryptString per boot regardless of ops',
+    );
+    assertEqual(cList.devices.length, 2, 'registry survived restart');
+    // A deleted mirror heals on the next custody touch.
+    rmSync(join(cDir, 'auqw.sync.devices.json'));
+    const h3 = createSyncKeysHandler({
+      secure: createSecureStore({ dir: cDir, safeStorage: c.storage }),
+      dir: cDir,
+    });
+    await h3({ op: 'device-list' });
+    assert(
+      syncHasPairedDevices(cDir),
+      'healed mirror re-arms the gate',
+    );
+
+    // The legacy → consolidated merge: each old record decrypts once,
+    // joined under the blob; unusable records are consumed, an
+    // undecryptable one is kept and reported skipped.
+    const m = counting();
+    const mDir = join(root, 'merge');
+    const mStore = createSecureStore({ dir: mDir, safeStorage: m.storage });
+    const mIdentity = generateIdentity();
+    await mStore.set('auqw.sync.identity', JSON.stringify(mIdentity));
+    const md1 = device('dev-merge001');
+    const md2 = device('dev-merge002');
+    await mStore.set(
+      `auqw.sync.device.${md1.id}`,
+      JSON.stringify(md1),
+    );
+    await mStore.set(
+      `auqw.sync.device.${md2.id}`,
+      JSON.stringify(md2),
+    );
+    writeFileSync(
+      join(mDir, 'auqw.sync.device.dev-badjson.b64'),
+      Buffer.from('enc:not json').toString('base64'),
+      'utf8',
+    );
+    writeFileSync(
+      join(mDir, 'auqw.sync.device.dev-garbage0.b64'),
+      Buffer.from('garbage').toString('base64'),
+      'utf8',
+    );
+    const mHandler = createSyncKeysHandler({
+      secure: createSecureStore({ dir: mDir, safeStorage: m.storage }),
+      dir: mDir,
+    });
+    const mList = (await mHandler({ op: 'device-list' })) as {
+      devices: SyncDeviceRecord[];
+      skipped: number;
+    };
+    assertDeepEqual(
+      mList.devices.map((d) => d.id).sort(),
+      [md1.id, md2.id].sort(),
+      'legacy devices merged into the blob',
+    );
+    assertEqual(
+      mList.skipped,
+      1,
+      'the undecryptable record reports as skipped',
+    );
+    const mGot = (await mHandler({ op: 'identity-get' })) as {
+      identity: { pub: string } | null;
+    };
+    assertEqual(mGot.identity?.pub, mIdentity.pub, 'legacy identity merged');
+    assert(existsSync(join(mDir, 'auqw.sync.store.b64')));
+    assert(existsSync(join(mDir, 'auqw.sync.devices.json')));
+    assert(!existsSync(join(mDir, 'auqw.sync.identity.b64')));
+    assert(!existsSync(join(mDir, `auqw.sync.device.${md1.id}.b64`)));
+    assert(
+      !existsSync(join(mDir, 'auqw.sync.device.dev-badjson.b64')),
+      'invalid records are consumed',
+    );
+    assert(
+      existsSync(join(mDir, 'auqw.sync.device.dev-garbage0.b64')),
+      'an undecryptable record is kept for retry',
+    );
+    assert(syncHasPairedDevices(mDir), 'post-merge install stays armed');
+    const mirror = JSON.parse(
+      readFileSync(join(mDir, 'auqw.sync.devices.json'), 'utf8'),
+    ) as { devices: Array<{ id: string }> };
+    assertDeepEqual(
+      mirror.devices.map((d) => d.id).sort(),
+      [md1.id, md2.id].sort(),
+      'the mirror carries the public device records',
+    );
+    // First-boot cost: identity + 2 devices + invalid + orphan = 5
+    // decrypts, once ever; the consolidated boot reads one blob plus
+    // the orphan's retry.
+    assertEqual(m.decrypts(), 5, 'each legacy record decrypts once');
+    const m2 = createSyncKeysHandler({
+      secure: createSecureStore({ dir: mDir, safeStorage: m.storage }),
+      dir: mDir,
+    });
+    await m2({ op: 'device-list' });
+    await m2({ op: 'identity-get' });
+    assertEqual(
+      m.decrypts(),
+      7,
+      'post-merge boot: one blob decrypt + one orphan retry',
+    );
+
+    // A torn/foreign blob fails typed; identity-replace unwedges it.
+    const wDir = join(root, 'wedged');
+    mkdirSync(wDir, { recursive: true });
+    writeFileSync(
+      join(wDir, 'auqw.sync.store.b64'),
+      Buffer.from('garbage').toString('base64'),
+      'utf8',
+    );
+    const wHandler = createSyncKeysHandler({
+      secure: createSecureStore({ dir: wDir, safeStorage: WORKING }),
+      dir: wDir,
+    });
+    await assertThrowsKind(wHandler({ op: 'identity-get' }), 'corrupt-state');
+    await assertThrowsKind(wHandler({ op: 'device-list' }), 'corrupt-state');
+    const freshIdentity = generateIdentity();
+    assertEqual(
+      await wHandler({ op: 'identity-replace', identity: freshIdentity }),
+      null,
+      'replace unwedges a corrupt blob',
+    );
+    const wGot = (await wHandler({ op: 'identity-get' })) as {
+      identity: { pub: string } | null;
+    };
+    assertEqual(wGot.identity?.pub, freshIdentity.pub, 'replaced identity serves');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
