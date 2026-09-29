@@ -6,6 +6,9 @@
 import { assert, assertEqual } from '@auqw/application/testing';
 import {
   createSerializedWrite,
+  downloadChip,
+  downloadChipsByRecording,
+  downloadLedgerCount,
   formatAgo,
   getLocale,
   languageOptionKey,
@@ -15,12 +18,13 @@ import {
   settingsGroups,
   t,
   toHomeModel,
+  toLibraryModel,
   toQueueModel,
   toSettingsModel,
   toSyncPanel,
 } from './index.ts';
 import type { Locale, MessageId, OverlayEntry } from './index.ts';
-import type { Result } from '@auqw/application';
+import type { DownloadProgress, Result } from '@auqw/application';
 import {
   shimmerHighlight,
   staggerProgress,
@@ -46,6 +50,12 @@ import {
   fixtureQueue,
   fixtureQueueModel,
   fixtureRecordings,
+  fixtureEntities,
+  fixtureEntitySourceRefs,
+  fixturePlayCounts,
+  fixturePlayHistory,
+  fixturePlaylistEntries,
+  fixturePlaylists,
   fixtureSearchResults,
   fixtureSettings,
   fixtureSettingsModel,
@@ -1040,6 +1050,84 @@ const tap = (s: string) => {
   assertEqual(dl.icon, 'warn');
   assertEqual(downloadButtonView('queued', undefined).busy, true);
   assertEqual(downloadButtonView('stored', undefined).a11yLabel, t('stage.download.storedA11y'));
+
+  // Downloads ledger: one count/chip rule for every surface.
+  const removingView = downloadButtonView('removing', () => tap('dl'));
+  assertEqual(removingView.busy, true, 'removing reads busy');
+  assertEqual(
+    removingView.onPress,
+    undefined,
+    'removing disables the affordance — mid-delete is not actionable',
+  );
+  assertEqual(
+    removingView.a11yLabel,
+    t('stage.download.busyA11y'),
+    'removing announces as busy',
+  );
+
+  const progress = (
+    downloadId: string,
+    recordingId: string,
+    state: DownloadProgress['state'],
+  ): DownloadProgress => ({
+    downloadId,
+    recordingId,
+    state,
+    transferredBytes: 0,
+    totalBytes: null,
+  });
+  const ledger = [
+    progress('dl-a', 'rec-self-aware', 'available'),
+    progress('dl-b', 'rec-petit', 'failed_with_retry'),
+    progress('dl-c', 'rec-dracula', 'requested'),
+    progress('dl-d', 'rec-maladie', 'removing'),
+  ];
+  assertEqual(downloadChip('requested'), 'queued');
+  assertEqual(downloadChip('transferring'), 'downloading');
+  assertEqual(downloadChip('available'), 'stored');
+  assertEqual(downloadChip('failed_with_retry'), 'failed');
+  assertEqual(
+    downloadChip('removing'),
+    'removing',
+    'mid-delete gets its own chip — never a fake failed',
+  );
+  assertEqual(
+    downloadLedgerCount(ledger),
+    3,
+    'ledger count keeps failed rows, drops mid-delete ones',
+  );
+  const chips = downloadChipsByRecording(ledger);
+  assertEqual(chips.get('rec-maladie'), 'removing');
+  assertEqual(chips.get('rec-petit'), 'failed');
+  assertEqual(chips.size, 4, 'list()-driven map keeps every row');
+
+  const lib = toLibraryModel({
+    recordings: fixtureRecordings,
+    likes: fixtureLikes,
+    playlists: fixturePlaylists,
+    playlistEntries: fixturePlaylistEntries,
+    playHistory: fixturePlayHistory,
+    playCounts: fixturePlayCounts,
+    entities: fixtureEntities,
+    entitySourceRefs: fixtureEntitySourceRefs,
+    downloads: ledger,
+  });
+  assertEqual(
+    lib.collections.find((c) => c.key === 'downloads')?.count,
+    lib.collectionRows.downloads.length,
+    'tile count equals page rows — one rule',
+  );
+  assertEqual(
+    lib.collectionRows.downloads.length,
+    3,
+    'failed-but-kept counts; removing does not',
+  );
+  assert(
+    lib.collectionRows.downloads.some(
+      (r) => r.row.download === 'failed' && r.recordingId === 'rec-petit',
+    ),
+    'failed rows render the failed chip on the downloads page',
+  );
 
   assertEqual(
     radioRowView(fixtureRadioModels[0], undefined, undefined),

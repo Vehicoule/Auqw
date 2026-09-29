@@ -34,6 +34,7 @@ import {
   ProviderRouter,
   SearchSession,
   appError,
+  appErrorKind,
   collectSyncDeltaDocs,
   effectiveMapping,
   err,
@@ -138,6 +139,8 @@ import {
   SEARCH_LIMIT,
   THEME_ORDER,
   attemptLabel,
+  downloadChipsByRecording,
+  downloadLedgerCount,
   entityRefKey,
   errorText,
   formatBytes,
@@ -835,21 +838,16 @@ function Main({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controller]);
 
+  // One chip map for every row surface — off `list()` so a
+  // mid-delete 'removing' row reads busy, not failed-or-hidden.
+  const chipsByRecording = useMemo(
+    () => downloadChipsByRecording(downloads),
+    [downloads],
+  );
   const downloadChipFor = useCallback(
-    (recordingId: string): DownloadChip | null => {
-      const row = controller.downloads.recordFor(recordingId);
-      if (row === null) {
-        return null;
-      }
-      return row.state === 'requested'
-        ? 'queued'
-        : row.state === 'transferring'
-          ? 'downloading'
-          : row.state === 'available'
-            ? 'stored'
-            : 'failed';
-    },
-    [controller],
+    (recordingId: string): DownloadChip | null =>
+      chipsByRecording.get(recordingId) ?? null,
+    [chipsByRecording],
   );
 
   // A download needs a playable provider ref — recordings carrying
@@ -919,16 +917,35 @@ function Main({
         if (sourceRef === null) {
           return;
         }
-        void controller.downloads.request({ recordingId, sourceRef }, signal);
+        void controller.downloads
+          .request({ recordingId, sourceRef }, signal)
+          .then((r) => reportResult('action.download', r));
         return;
       }
       switch (existing.state) {
         case 'requested':
         case 'transferring':
-          void controller.downloads.cancel(existing.downloadId, signal);
+          void controller.downloads
+            .cancel(existing.downloadId, signal)
+            .then((r) => reportResult('action.cancelDownload', r));
           return;
         case 'failed_with_retry':
-          void controller.downloads.retry(existing.downloadId);
+          // The row kept why it failed — toast that kind before the
+          // retry so the tap is never a silent ↓→⚠→↓ loop.
+          if (existing.error !== null) {
+            reportResult(
+              'action.download',
+              err(
+                appError(
+                  appErrorKind(existing.error.kind),
+                  existing.error.message,
+                ),
+              ),
+            );
+          }
+          void controller.downloads
+            .retry(existing.downloadId)
+            .then((r) => reportResult('action.retryDownload', r));
           return;
         case 'available':
           // The 'removing' transition fires before the file is gone —
@@ -936,7 +953,10 @@ function Main({
           // doesn't display the freed bytes until the next event.
           void controller.downloads
             .remove(existing.downloadId, signal)
-            .then(refreshUsage);
+            .then((r) => {
+              reportResult('action.removeDownload', r);
+              refreshUsage();
+            });
           return;
         default:
           return;
@@ -1423,20 +1443,7 @@ function Main({
       state.playback.type === 'failed'
         ? null
         : state.playback.recordingId;
-    const chipByRecording = new Map<string, DownloadChip>(
-      downloads
-        .filter((d) => d.state !== 'removing')
-        .map((d) => [
-          d.recordingId,
-          d.state === 'requested'
-            ? 'queued'
-            : d.state === 'transferring'
-              ? 'downloading'
-              : d.state === 'available'
-                ? 'stored'
-                : 'failed',
-        ]),
-    );
+    const chipByRecording = chipsByRecording;
     const localUris = local?.uriMap();
     // Honest-offline: with connectivity explicitly down, a row plays
     // only from owned bytes (stored download or local file) — remote
@@ -1490,6 +1497,7 @@ function Main({
     state.entitySourceRefs,
     state.playback,
     downloads,
+    chipsByRecording,
     online,
     controller,
     localTick,
@@ -1764,7 +1772,9 @@ function Main({
           .local()
           ?.list()
           .map((s) => ({ sourceId: s.sourceId, label: s.label })),
-        downloadCount: downloads.length,
+        // Kept ledger rows — same rule as the downloads collection:
+        // failed-but-kept counts, mid-delete 'removing' doesn't.
+        downloadCount: downloadLedgerCount(downloads),
         syncSupported: syncSurface !== null,
         syncLabel: syncModel.statusLabel,
       }),
@@ -3291,10 +3301,9 @@ function Main({
       if (requests.length === 0) {
         return;
       }
-      void controller.downloads.requestAll(
-        requests,
-        new CancellationSource().signal,
-      );
+      void controller.downloads
+        .requestAll(requests, new CancellationSource().signal)
+        .then((r) => reportResult('action.download', r));
     },
     [controller],
   );
@@ -3384,6 +3393,19 @@ function Main({
             onDownloadAction(target.recordingId);
           }
           break;
+        case 'removeDownload':
+          if (target.kind === 'recording') {
+            const row = controller.downloads.recordFor(target.recordingId);
+            if (row !== null) {
+              void controller.downloads
+                .remove(row.downloadId, new CancellationSource().signal)
+                .then((r) => {
+                  reportResult('action.removeDownload', r);
+                  refreshUsage();
+                });
+            }
+          }
+          break;
         case 'radio': {
           // Track-seeded at this release: a metadata row seeds its own
           // ref; a library row seeds its first source ref. The action
@@ -3415,7 +3437,7 @@ function Main({
           break;
       }
     },
-    [actionsFor, session, openEntity, state.recordings, downloadRefFor, onDownloadAction, radioSeedable],
+    [actionsFor, session, openEntity, state.recordings, downloadRefFor, onDownloadAction, radioSeedable, controller, refreshUsage],
   );
 
   const onOpenCard = useCallback(
@@ -4620,6 +4642,19 @@ function Main({
                         })(),
                         icon: 'download' as const,
                       },
+                      // A failed row needs an out that isn't retry —
+                      // keep vs. delete are both honest offers.
+                      ...(controller.downloads.recordFor(
+                        actionsFor.recordingId,
+                      )?.state === 'failed_with_retry'
+                        ? [
+                            {
+                              key: 'removeDownload',
+                              label: t('action.removeDownload'),
+                              icon: 'close' as const,
+                            },
+                          ]
+                        : []),
                     ]
                   : []),
                 // Only offer the seed affordance when the seed's own
