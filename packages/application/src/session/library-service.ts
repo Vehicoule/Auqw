@@ -1,4 +1,3 @@
-import { CancellationSource } from '../cancellation.ts';
 import type {
   CancellationSignal,
   OperationContext,
@@ -42,10 +41,7 @@ import {
 import type { EntryMove, PlaylistState } from '../library/playlists.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { IdPort } from '../ports/runtime.ts';
-import type {
-  PersistedState,
-  StoragePort,
-} from '../ports/storage.ts';
+import type { StoragePort } from '../ports/storage.ts';
 import type { LocalWrite } from '../sync/sync-engine.ts';
 import {
   importEmissionWrites,
@@ -55,7 +51,13 @@ import {
 import type { Ready, SessionHostCore } from './ready.ts';
 import { syncEmitInput } from './ready.ts';
 import { Serializer } from './serializer.ts';
-import { boundedLoad, internalError, supersededError } from './util.ts';
+import {
+  boundedLoad,
+  boundedOp,
+  internalError,
+  supersededError,
+  withSource,
+} from './util.ts';
 
 export type LibraryHost = SessionHostCore & {
   /**
@@ -502,20 +504,15 @@ export class LibraryService {
       // The reload is bounded like every storage call — a hanging
       // load fails the segment instead of wedging the lane — and the
       // bound and the operation context share a single deadline.
-      const reloadSource = new CancellationSource();
-      const untrack = this.#host.trackSource(reloadSource);
-      let reloaded: Result<PersistedState>;
-      try {
-        reloaded = await boundedLoad(
+      const reloaded = await withSource(this.#host, (reloadSource) =>
+        boundedLoad(
           this.#host,
           this.#storage,
           reloadSource,
           'reload',
           context?.signal,
-        );
-      } finally {
-        untrack();
-      }
+        ),
+      );
       const affectedId = result.value.recordingId;
       const prevRec = r.recordings.find((rec) => rec.id === affectedId);
       if (reloaded.ok && isPersistedState(reloaded.value)) {
@@ -574,23 +571,11 @@ export class LibraryService {
 
   /** Serialize the owned library to export-document JSON text. */
   async exportLibrary(): Promise<Result<ExportResult>> {
-    const source = new CancellationSource();
-    const untrack = this.#host.trackSource(source);
-    try {
-      const deadlineMs = this.#host.deadline();
-      const context = this.#host.newContext(
-        'export',
-        deadlineMs,
-        source.signal,
-      );
-      return await this.#host.withDeadline(
-        () => exportLibrary(this.#storage, this.#clock, context),
-        deadlineMs,
-        source,
-      );
-    } finally {
-      untrack();
-    }
+    return withSource(this.#host, (source) =>
+      boundedOp(this.#host, source, 'export', (ctx) =>
+        exportLibrary(this.#storage, this.#clock, ctx),
+      ),
+    );
   }
 
   /**
@@ -604,9 +589,7 @@ export class LibraryService {
     if (!preview.ok) {
       return preview;
     }
-    const source = new CancellationSource();
-    const untrack = this.#host.trackSource(source);
-    try {
+    return withSource(this.#host, async (source) => {
       await this.#host.prepareImport();
       const deadlineMs = this.#host.deadline();
       const context = this.#host.newContext(
@@ -655,8 +638,6 @@ export class LibraryService {
       }
       this.#host.emitSync(importWrites);
       return ok(preview.value);
-    } finally {
-      untrack();
-    }
+    });
   }
 }

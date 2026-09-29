@@ -1,7 +1,7 @@
 import { CancellationSource } from '../cancellation.ts';
 import type { CancellationSignal } from '../cancellation.ts';
 import type { Recording } from '../domain.ts';
-import type { Result } from '../errors.ts';
+import type { AppError, Result } from '../errors.ts';
 import { appError, err, ok } from '../errors.ts';
 import { isPersistedState } from '../library/library.ts';
 import { QueueEngine } from '../queue/queue-engine.ts';
@@ -15,6 +15,7 @@ import {
   projectMaterialized,
   unsyncedWrites,
 } from '../sync/sync-projection.ts';
+import type { SyncProjectionInput } from '../sync/sync-projection.ts';
 import { utf8ByteLength } from '../sync/sync-wire.ts';
 import type { ProviderCapability } from '../ports/provider.ts';
 import type { StorageBatch, StoragePort } from '../ports/storage.ts';
@@ -22,9 +23,11 @@ import { Serializer } from './serializer.ts';
 import type { Ready, SessionHostCore } from './ready.ts';
 import { syncEmitInput } from './ready.ts';
 import {
+  boundedCall,
   boundedCommit,
   boundedLoad,
   supersededError,
+  withSource,
 } from './util.ts';
 import type {
   SyncApplyReport,
@@ -150,6 +153,63 @@ function retainMaterializedPending(
   return retained;
 }
 
+type SyncProjection = ReturnType<typeof projectAppliedEntries>;
+
+/**
+ * One sync-apply lane's differing bits: which Ready field holds the
+ * retained union, which projection field hands it back, the bound /
+ * retain policy, and the entry point the union projects through.
+ */
+type SyncApplyLane<T> = {
+  readonly pending: (r: Ready) => readonly T[];
+  readonly setPending: (r: Ready, pending: T[]) => void;
+  readonly pendingOf: (projection: SyncProjection) => readonly T[];
+  readonly bound: (pending: readonly T[]) => T[];
+  readonly retain: (
+    union: readonly T[],
+    warn: (message: string) => void,
+  ) => T[];
+  readonly project: (
+    union: readonly T[],
+    input: SyncProjectionInput,
+  ) => SyncProjection;
+  /** Page-level bookkeeping between load and projection. */
+  readonly onUnion?: (
+    fresh: readonly T[],
+    warn: (message: string) => void,
+  ) => void;
+};
+
+const APPLIED_LANE: SyncApplyLane<MergeOutcome> = {
+  pending: (r) => r.syncPending,
+  setPending: (r, pending) => {
+    r.syncPending = pending;
+  },
+  pendingOf: (p) => p.pending,
+  bound: (pending) => boundSyncPending(pending),
+  retain: retainSyncPending,
+  project: (union, input) => projectAppliedEntries(union, input),
+  onUnion: (fresh, warn) => {
+    const superseded = fresh.filter((o) => o.type !== 'applied').length;
+    if (superseded > 0) {
+      // Losing entries keep the domain row — divergence history
+      // owns them; the log notes the drop without record ids.
+      warn(`sync projection dropped ${superseded} non-applied outcomes`);
+    }
+  },
+};
+
+const MATERIALIZED_LANE: SyncApplyLane<MaterializedRecord> = {
+  pending: (r) => r.materializedPending,
+  setPending: (r, pending) => {
+    r.materializedPending = pending;
+  },
+  pendingOf: (p) => p.pendingRecords,
+  bound: (pending) => boundMaterializedPending(pending),
+  retain: retainMaterializedPending,
+  project: (union, input) => projectMaterialized(union, input),
+};
+
 export type SyncHost = SessionHostCore & {
   /** Whether an injected provider is installed under this id. */
   readonly hasProvider: (id: string) => boolean;
@@ -237,19 +297,11 @@ export class SyncIngress {
       if (chunk.length === 0) {
         continue;
       }
-      const source = new CancellationSource();
-      const untrack = this.#host.trackSource(source);
-      let sent: Result<unknown>;
-      try {
-        const deadlineMs = this.#host.deadline();
-        sent = await this.#host.withDeadline(
-          () => sync.localChanges(chunk, source.signal),
-          deadlineMs,
-          source,
-        );
-      } finally {
-        untrack();
-      }
+      const sent = await withSource(this.#host, (source) =>
+        boundedCall(this.#host, source, () =>
+          sync.localChanges(chunk, source.signal),
+        ),
+      );
       if (!sent.ok) {
         // Retained: put the chunk back at the head so the next
         // emission retries it. The backlog bound applies HERE only —
@@ -371,141 +423,7 @@ export class SyncIngress {
     outcomes: readonly MergeOutcome[],
     signal?: CancellationSignal,
   ): Promise<Result<SyncApplyReport>> {
-    const ready = this.#host.requireReady();
-    if (!ready.ok) {
-      return ready;
-    }
-    const generation = ready.value;
-    const source = new CancellationSource();
-    const unlink = signal?.subscribe(() => {
-      source.cancel();
-    });
-    const untrack = this.#host.trackSource(source);
-    try {
-      return await this.#host.enqueueStorage(async () => {
-        const r = this.#host.ready();
-        if (r === null || r !== generation) {
-          return err(supersededError());
-        }
-        const deadlineMs = this.#host.deadline();
-        // One load seeds the whole drain — later pages reuse the
-        // cached sections. `reused` marks an input older than this
-        // segment: its download/local-file rows may have moved under
-        // their off-tail owners, checked again below.
-        const reused = r.syncApplyCache !== null;
-        const loaded = await this.#syncApplySections(
-          r,
-          source,
-          deadlineMs,
-        );
-        // The transport already consumed these outcomes — every one
-        // feeds projection; the bound applies only to post-projection
-        // pending, never to a fresh drain (Review #46).
-        const union = [...r.syncPending, ...outcomes];
-        const warn = (m: string): void => this.#host.logWarn(m);
-        if (!loaded.ok) {
-          // Retain the union for the next drain exactly like a commit
-          // failure — consumed outcomes can't be re-fetched.
-          r.syncPending = retainSyncPending(union, warn);
-          r.persistenceError = loaded.error;
-          this.#host.publish();
-          return err(loaded.error);
-        }
-        // Refold earlier pending outcomes with the new ones — a
-        // parent row landing this drain unblocks a held insert.
-        const superseded = outcomes.filter(
-          (o) => o.type !== 'applied',
-        ).length;
-        if (superseded > 0) {
-          // Losing entries keep the domain row — divergence history
-          // owns them; the log notes the drop without record ids.
-          this.#host.logWarn(
-            `sync projection dropped ${superseded} non-applied outcomes`,
-          );
-        }
-        const project = (input: SyncApplySections) =>
-          projectAppliedEntries(union, {
-            recordings: r.recordings,
-            likes: r.likes,
-            entities: r.entities,
-            entitySourceRefs: r.entitySourceRefs,
-            playlists: r.playlists,
-            playlistEntries: r.playlistEntries,
-            playHistory: r.playHistory,
-            playCounts: r.playCounts,
-            matchReviews: input.matchReviews,
-            lyricsCache: input.lyricsCache,
-            downloads: input.downloads,
-            localFiles: input.localFiles,
-            queue: r.queue.snapshot(),
-            settings: r.settings,
-          });
-        let projection = project(loaded.value);
-        // Spread lifts the readonly section map — the settings
-        // reconcile below may rewrite the projected row.
-        let batch = { ...projection.batch };
-        if (
-          reused &&
-          (batch.recordings !== undefined ||
-            batch.recordingsMerge !== undefined ||
-            batch.downloads !== undefined ||
-            batch.localFiles !== undefined ||
-            batch.matchReviews !== undefined ||
-            batch.lyricsCache !== undefined)
-        ) {
-          // DownloadManager, LocalFileSource, and the matchReview /
-          // lyrics lanes commit on their own lanes — rows cached
-          // from an earlier page may be stale, so a batch that
-          // rewrites either section re-loads and re-projects
-          // against fresh truth before committing it. A recordings
-          // write must reload too even when no media section
-          // projected: a fresh off-tail row referencing a deleted
-          // recording is invisible to the cached projection, but
-          // the commit's in-transaction merge still validates it.
-          r.syncApplyCache = null;
-          const fresh = await this.#syncApplySections(
-            r,
-            source,
-            deadlineMs,
-          );
-          if (!fresh.ok) {
-            r.syncPending = retainSyncPending(union, warn);
-            r.persistenceError = fresh.error;
-            this.#host.publish();
-            return err(fresh.error);
-          }
-          projection = project(fresh.value);
-          batch = { ...projection.batch };
-        }
-        for (const skip of projection.skipped) {
-          this.#host.logWarn(`sync projection skipped ${skip.kind} record`);
-        }
-        if (Object.keys(batch).length === 0) {
-          r.syncPending = boundSyncPending(projection.pending);
-          // A clean projection clears the surface it shares with
-          // persist failures — the failure that set it is resolved.
-          r.persistenceError = undefined;
-          this.#host.publish();
-          return ok(SYNC_APPLY_STABLE);
-        }
-        const applied = await this.#commitSyncProjection(
-          r,
-          batch,
-          source,
-          deadlineMs,
-        );
-        if (!applied.ok) {
-          // Nothing landed — refold the whole union next drain.
-          r.syncPending = retainSyncPending(union, warn);
-          return applied;
-        }
-        r.syncPending = boundSyncPending(projection.pending);
-        return applied;
-      }, { syncApply: true });
-    } finally {
-      unlink?.();
-      untrack();
-    }
+    return this.#runSyncApply(outcomes, APPLIED_LANE, signal);
   }
 
   /**
@@ -520,128 +438,139 @@ export class SyncIngress {
     records: readonly MaterializedRecord[],
     signal?: CancellationSignal,
   ): Promise<Result<SyncApplyReport>> {
+    return this.#runSyncApply(records, MATERIALIZED_LANE, signal);
+  }
+
+  /**
+   * Shared sync-apply skeleton: a storage segment that loads the
+   * off-mirror sections (one seeded load serves the drain's apply
+   * segments), unions the lane's retained tail with the fresh page,
+   * projects, and commits — retaining the union for the next call on
+   * any failure (Review #46).
+   */
+  async #runSyncApply<T>(
+    fresh: readonly T[],
+    lane: SyncApplyLane<T>,
+    signal?: CancellationSignal,
+  ): Promise<Result<SyncApplyReport>> {
     const ready = this.#host.requireReady();
     if (!ready.ok) {
       return ready;
     }
     const generation = ready.value;
-    const source = new CancellationSource();
-    const unlink = signal?.subscribe(() => {
-      source.cancel();
-    });
-    const untrack = this.#host.trackSource(source);
-    try {
-      return await this.#host.enqueueStorage(async () => {
-        const r = this.#host.ready();
-        if (r === null || r !== generation) {
-          return err(supersededError());
-        }
-        const deadlineMs = this.#host.deadline();
-        // Same drain reuse as applySyncedEntries — one seeded load
-        // serves the whole rebuild; `reused` re-checks the off-tail
-        // sections before a cached batch rewrites them.
-        const reused = r.syncApplyCache !== null;
-        const loaded = await this.#syncApplySections(
-          r,
-          source,
-          deadlineMs,
-        );
-        const warn = (m: string): void => this.#host.logWarn(m);
-        // Union retained pending with the fresh page — a dependent
-        // that pended on an earlier page folds again here and lands
-        // once its parent arrives (same key, fresher record wins).
-        const union = [...r.materializedPending, ...records];
-        if (!loaded.ok) {
-          // Served-but-unprojected records are as consumed as drained
-          // outcomes — retain the union for the next call exactly like
-          // a commit failure (Review #46).
-          r.materializedPending = retainMaterializedPending(union, warn);
-          r.persistenceError = loaded.error;
-          this.#host.publish();
-          return err(loaded.error);
-        }
-        const project = (input: SyncApplySections) =>
-          projectMaterialized(union, {
-            recordings: r.recordings,
-            likes: r.likes,
-            entities: r.entities,
-            entitySourceRefs: r.entitySourceRefs,
-            playlists: r.playlists,
-            playlistEntries: r.playlistEntries,
-            playHistory: r.playHistory,
-            playCounts: r.playCounts,
-            matchReviews: input.matchReviews,
-            lyricsCache: input.lyricsCache,
-            downloads: input.downloads,
-            localFiles: input.localFiles,
-            queue: r.queue.snapshot(),
-            settings: r.settings,
-          });
-        let projection = project(loaded.value);
-        let batch = { ...projection.batch };
-        if (
-          reused &&
-          (batch.recordings !== undefined ||
-            batch.recordingsMerge !== undefined ||
-            batch.downloads !== undefined ||
-            batch.localFiles !== undefined ||
-            batch.matchReviews !== undefined ||
-            batch.lyricsCache !== undefined)
-        ) {
-          // Off-lane owners (downloads, local files, match reviews,
-          // lyrics cache) may have moved the cached rows — reload
-          // and re-project before a rewrite, and before a recording
-          // write: the commit re-validates fresh dependent rows a
-          // cached projection never saw.
-          r.syncApplyCache = null;
-          const fresh = await this.#syncApplySections(
+    return withSource(this.#host, async (source) => {
+      const unlink = signal?.subscribe(() => {
+        source.cancel();
+      });
+      try {
+        return await this.#host.enqueueStorage(async () => {
+          const r = this.#host.ready();
+          if (r === null || r !== generation) {
+            return err(supersededError());
+          }
+          const deadlineMs = this.#host.deadline();
+          // One load seeds the whole drain — later pages reuse the
+          // cached sections. `reused` marks an input older than this
+          // segment: its off-tail rows may have moved under their own
+          // lanes, checked again below.
+          const reused = r.syncApplyCache !== null;
+          const loaded = await this.#syncApplySections(
             r,
             source,
             deadlineMs,
           );
-          if (!fresh.ok) {
-            r.materializedPending = retainMaterializedPending(
-              union,
-              warn,
-            );
-            r.persistenceError = fresh.error;
+          const union = [...lane.pending(r), ...fresh];
+          const warn = (m: string): void => this.#host.logWarn(m);
+          // Retain the union for the next call exactly like a commit
+          // failure — consumed items can't be re-fetched.
+          const retainFail = (error: AppError): Result<never> => {
+            lane.setPending(r, lane.retain(union, warn));
+            r.persistenceError = error;
             this.#host.publish();
-            return err(fresh.error);
+            return err(error);
+          };
+          if (!loaded.ok) {
+            return retainFail(loaded.error);
           }
-          projection = project(fresh.value);
-          batch = { ...projection.batch };
-        }
-        for (const skip of projection.skipped) {
-          this.#host.logWarn(`sync projection skipped ${skip.kind} record`);
-        }
-        if (Object.keys(batch).length === 0) {
-          r.materializedPending = boundMaterializedPending(
-            projection.pendingRecords,
+          lane.onUnion?.(fresh, warn);
+          const project = (input: SyncApplySections) =>
+            lane.project(union, {
+              recordings: r.recordings,
+              likes: r.likes,
+              entities: r.entities,
+              entitySourceRefs: r.entitySourceRefs,
+              playlists: r.playlists,
+              playlistEntries: r.playlistEntries,
+              playHistory: r.playHistory,
+              playCounts: r.playCounts,
+              matchReviews: input.matchReviews,
+              lyricsCache: input.lyricsCache,
+              downloads: input.downloads,
+              localFiles: input.localFiles,
+              queue: r.queue.snapshot(),
+              settings: r.settings,
+            });
+          let projection = project(loaded.value);
+          // Spread lifts the readonly section map — the settings
+          // reconcile below may rewrite the projected row.
+          let batch = { ...projection.batch };
+          if (
+            reused &&
+            (batch.recordings !== undefined ||
+              batch.recordingsMerge !== undefined ||
+              batch.downloads !== undefined ||
+              batch.localFiles !== undefined ||
+              batch.matchReviews !== undefined ||
+              batch.lyricsCache !== undefined)
+          ) {
+            // Off-lane owners (downloads, local files, match reviews,
+            // lyrics cache) may have moved the cached rows — reload
+            // and re-project before a rewrite, and before a recording
+            // write: the commit re-validates fresh dependent rows a
+            // cached projection never saw.
+            r.syncApplyCache = null;
+            const freshSections = await this.#syncApplySections(
+              r,
+              source,
+              deadlineMs,
+            );
+            if (!freshSections.ok) {
+              return retainFail(freshSections.error);
+            }
+            projection = project(freshSections.value);
+            batch = { ...projection.batch };
+          }
+          for (const skip of projection.skipped) {
+            this.#host.logWarn(
+              `sync projection skipped ${skip.kind} record`,
+            );
+          }
+          if (Object.keys(batch).length === 0) {
+            lane.setPending(r, lane.bound(lane.pendingOf(projection)));
+            // A clean projection clears the surface it shares with
+            // persist failures — the failure that set it is resolved.
+            r.persistenceError = undefined;
+            this.#host.publish();
+            return ok(SYNC_APPLY_STABLE);
+          }
+          const applied = await this.#commitSyncProjection(
+            r,
+            batch,
+            source,
+            deadlineMs,
           );
-          r.persistenceError = undefined;
-          this.#host.publish();
-          return ok(SYNC_APPLY_STABLE);
-        }
-        const applied = await this.#commitSyncProjection(
-          r,
-          batch,
-          source,
-          deadlineMs,
-        );
-        if (!applied.ok) {
-          // Nothing landed — the union refolds on the next call.
-          r.materializedPending = retainMaterializedPending(union, warn);
+          if (!applied.ok) {
+            // Nothing landed — refold the whole union next drain.
+            lane.setPending(r, lane.retain(union, warn));
+            return applied;
+          }
+          lane.setPending(r, lane.bound(lane.pendingOf(projection)));
           return applied;
-        }
-        r.materializedPending = boundMaterializedPending(
-          projection.pendingRecords,
-        );
-        return applied;
-      }, { syncApply: true });
-    } finally {
-      unlink?.();
-      untrack();
-    }
+        }, { syncApply: true });
+      } finally {
+        unlink?.();
+      }
+    });
   }
 
   /**
@@ -661,9 +590,7 @@ export class SyncIngress {
     if (r === null || this.#sync === undefined) {
       return;
     }
-    const source = new CancellationSource();
-    const untrack = this.#host.trackSource(source);
-    try {
+    await withSource(this.#host, async (source) => {
       const loaded = await boundedLoad(
         this.#host,
         this.#storage,
@@ -688,9 +615,7 @@ export class SyncIngress {
       if (this.#reviewTombstoneIds.size > 0) {
         this.#host.own(this.emitMatchReviewTombstones([]));
       }
-    } finally {
-      untrack();
-    }
+    });
   }
 
   /**
@@ -713,9 +638,7 @@ export class SyncIngress {
     ) {
       return;
     }
-    const source = new CancellationSource();
-    const untrack = this.#host.trackSource(source);
-    try {
+    await withSource(this.#host, async (source) => {
       const deadlineMs = this.#host.deadline();
       // The liveness read must sit on the storage lane: a re-add whose
       // commit is still queued behind this load would otherwise slip
@@ -764,9 +687,7 @@ export class SyncIngress {
         );
         return ok(undefined);
       });
-    } finally {
-      untrack();
-    }
+    });
   }
 
   /**

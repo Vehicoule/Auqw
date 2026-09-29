@@ -35,7 +35,7 @@ import type {
   QueueProjection,
   QueueProjectionItem,
 } from '../ports/player.ts';
-import type { RecordingQuery } from '../ports/provider.ts';
+import type { ProviderPort, RecordingQuery } from '../ports/provider.ts';
 import type { ProviderRouter } from '../providers/provider-router.ts';
 import { selectionFromSettings } from '../providers/provider-router.ts';
 import type { StorageBatch } from '../ports/storage.ts';
@@ -46,6 +46,7 @@ import { Serializer } from './serializer.ts';
 import type { Ready, SessionHostCore } from './ready.ts';
 import type { SessionPlayback } from './session.ts';
 import {
+  boundedCall,
   boundedOp,
   internalError,
   sameRef,
@@ -695,17 +696,7 @@ export class PlaybackEngine {
           // unmarked head — wrapping onto a known-dead row just retries
           // it, so all-failed ends the same as the dealt branch.
           if (r.repeat === 'all') {
-            const tail = r.queue.snapshot();
-            const head =
-              tail.currentOccurrenceId === null
-                ? tail.occurrences.find(
-                    (o) => !r.queue.isUnplayable(o.occurrenceId),
-                  )
-                : undefined;
-            if (head !== undefined) {
-              r.queue.select(head.occurrenceId, before.mode === 'playing');
-              bumpListenCycle(r, head.occurrenceId);
-            }
+            this.#wrapToHead(r, before.mode === 'playing');
           }
         } else {
           // Under shuffle the walk is the dealt order: `next` steps to
@@ -881,6 +872,21 @@ export class PlaybackEngine {
       this.#host.publish();
     }
     return ok(undefined);
+  }
+
+  /** A move off the tail under repeat=all wraps to the first unmarked row. */
+  #wrapToHead(r: Ready, playing: boolean): void {
+    const tail = r.queue.snapshot();
+    const head =
+      tail.currentOccurrenceId === null
+        ? tail.occurrences.find(
+            (o) => !r.queue.isUnplayable(o.occurrenceId),
+          )
+        : undefined;
+    if (head !== undefined) {
+      r.queue.select(head.occurrenceId, playing);
+      bumpListenCycle(r, head.occurrenceId);
+    }
   }
 
   async pause(): Promise<Result<void>> {
@@ -1279,7 +1285,11 @@ export class PlaybackEngine {
       ),
       call: () => {
         attempt.preparesUsed += 1;
-        return this.#host.withDeadline(
+        // Every call shares the attempt's source — a supersede
+        // aborts whichever prepare is in flight.
+        return boundedCall(
+          this.#host,
+          attempt.source,
           () =>
             this.#player.prepare({
               provider: ref.provider,
@@ -1287,9 +1297,6 @@ export class PlaybackEngine {
               identity: attempt.identity,
             }),
           deadlineMs,
-          // Every call shares the attempt's source — a supersede
-          // aborts whichever prepare is in flight.
-          attempt.source,
         );
       },
     });
@@ -1983,17 +1990,7 @@ export class PlaybackEngine {
         } else if (dealt === null) {
           r.queue.next();
           if (r.repeat === 'all') {
-            const tail = r.queue.snapshot();
-            const head =
-              tail.currentOccurrenceId === null
-                ? tail.occurrences.find(
-                    (o) => !r.queue.isUnplayable(o.occurrenceId),
-                  )
-                : undefined;
-            if (head !== undefined) {
-              r.queue.select(head.occurrenceId, true);
-              bumpListenCycle(r, head.occurrenceId);
-            }
+            this.#wrapToHead(r, true);
           }
         } else {
           // Under shuffle the fallback walks the dealt order with the
@@ -2738,7 +2735,6 @@ export class PlaybackEngine {
    * unavailable) and a fixed diagnostic.
    */
   maybeMapSuccessor(): void {
-    // eslint-disable-next-line no-console
     const r = this.#host.ready();
     if (
       r === null ||
@@ -2750,15 +2746,9 @@ export class PlaybackEngine {
     ) {
       return;
     }
-    const snap = r.queue.snapshot();
     // The cursor's real successor is the dealt one under shuffle —
     // prefetch what the service will actually attach next.
-    const dealt = this.#host.dealtOrder(r);
-    const walk = dealt ?? snap.occurrences.map((o) => o.occurrenceId);
-    const pos =
-      snap.currentOccurrenceId === null
-        ? -1
-        : walk.indexOf(snap.currentOccurrenceId);
+    const { snap, walk, pos } = this.#dealtWalk(r);
     const successorId = pos >= 0 ? walk[pos + 1] : undefined;
     const successor = snap.occurrences.find(
       (o) => o.occurrenceId === successorId,
@@ -3199,6 +3189,22 @@ export class PlaybackEngine {
     }
   }
 
+  /** The dealt walk + cursor position — canonical order when shuffle is off. */
+  #dealtWalk(r: Ready): {
+    snap: QueueSnapshot;
+    walk: readonly string[];
+    pos: number;
+  } {
+    const snap = r.queue.snapshot();
+    const walk =
+      this.#host.dealtOrder(r) ?? snap.occurrences.map((o) => o.occurrenceId);
+    const pos =
+      snap.currentOccurrenceId === null
+        ? -1
+        : walk.indexOf(snap.currentOccurrenceId);
+    return { snap, walk, pos };
+  }
+
   /**
    * The next row still needing a ref: surface-handed ids first (the
    * viewport is the freshest intent), then the dealt window past the
@@ -3247,15 +3253,12 @@ export class PlaybackEngine {
     if (ptype === 'idle' || ptype === 'preparing') {
       return null;
     }
-    const snap = r.queue.snapshot();
+    const { snap, walk, pos } = this.#dealtWalk(r);
     if (snap.currentOccurrenceId === null) {
       // No cursor: 'beyond the cursor' is empty — a queue with nothing
       // selected warms only what surfaces hand in via prewarm().
       return null;
     }
-    const dealt = this.#host.dealtOrder(r);
-    const walk = dealt ?? snap.occurrences.map((o) => o.occurrenceId);
-    const pos = walk.indexOf(snap.currentOccurrenceId);
     for (let i = pos + 1; i < walk.length && i <= pos + WARM_WINDOW; i++) {
       const occurrence = snap.occurrences.find(
         (o) => o.occurrenceId === walk[i],
@@ -3282,6 +3285,65 @@ export class PlaybackEngine {
   }
 
   /**
+   * The shared head of a warm-batch row: seen-mark, route, bounded
+   * candidates call, stale check. `queryFor` runs against the same
+   * Ready the mark was taken under — null bails the pass. `onStale`
+   * runs the caller's own requeue when the pass was superseded.
+   */
+  async #warmCandidates(
+    key: string,
+    source: CancellationSource,
+    queryFor: (r: Ready) => RecordingQuery | null,
+    onStale: () => void,
+  ): Promise<{
+    readonly provider: ProviderPort;
+    readonly candidates: readonly MatchCandidate[];
+  } | null> {
+    const r = this.#host.ready();
+    if (r === null) {
+      return null;
+    }
+    this.#noteWarmSeen(key);
+    const query = queryFor(r);
+    if (query === null) {
+      return null;
+    }
+    const routed = this.#router.providerFor(
+      'playback.candidates',
+      selectionFromSettings(r.settings),
+    );
+    if (!routed.ok) {
+      return null;
+    }
+    const provider = routed.value;
+    if (this.#warmBatchTarget === key) {
+      this.#warmBatchProvider = provider.id;
+    }
+    const result = await boundedOp(
+      this.#host,
+      source,
+      'warm',
+      (ctx) =>
+        provider.candidates({ query, limit: CANDIDATE_LIMIT }, ctx),
+      undefined,
+      this.#host.deadline(),
+    );
+    if (
+      source.signal.cancelled ||
+      this.#host.disposed() ||
+      this.#warmBatchSource !== source
+    ) {
+      onStale();
+      return null;
+    }
+    if (!result.ok) {
+      this.#host.logWarn('row warm failed');
+      return null;
+    }
+    return { provider, candidates: result.value };
+  }
+
+  /**
    * Candidates-resolve one window row: identical contract to
    * `#maybeMapSuccessor` — a matched ref commits as an `automatic`
    * mapping and pins the occurrence when it is still unmapped;
@@ -3292,48 +3354,19 @@ export class PlaybackEngine {
     target: { recordingId: string; occurrenceId: string | null },
     source: CancellationSource,
   ): Promise<void> {
-    const r = this.#host.ready();
-    if (r === null) {
-      return;
-    }
-    this.#noteWarmSeen(target.recordingId);
-    const recording = r.recordings.find((x) => x.id === target.recordingId);
-    if (recording === undefined) {
-      return;
-    }
-    const routed = this.#router.providerFor(
-      'playback.candidates',
-      selectionFromSettings(r.settings),
-    );
-    if (!routed.ok) {
-      return;
-    }
-    const provider = routed.value;
-    if (this.#warmBatchTarget === target.recordingId) {
-      this.#warmBatchProvider = provider.id;
-    }
-    const deadlineMs = this.#host.deadline();
-    const query = recordingQuery(recording);
-    const result = await boundedOp(
-      this.#host,
+    const warmed = await this.#warmCandidates(
+      target.recordingId,
       source,
-      'warm',
-      (ctx) => provider.candidates({ query, limit: CANDIDATE_LIMIT }, ctx),
-      undefined,
-      deadlineMs,
+      (r) => {
+        const rec = r.recordings.find((x) => x.id === target.recordingId);
+        return rec === undefined ? null : recordingQuery(rec);
+      },
+      () => this.#unseeWarmTarget(target),
     );
-    if (
-      source.signal.cancelled ||
-      this.#host.disposed() ||
-      this.#warmBatchSource !== source
-    ) {
-      this.#unseeWarmTarget(target);
+    if (warmed === null) {
       return;
     }
-    if (!result.ok) {
-      this.#host.logWarn('row warm failed');
-      return;
-    }
+    const { provider, candidates } = warmed;
     const ready2 = this.#host.ready();
     if (ready2 === null || this.#host.disposed() || this.#warmBatchSource !== source) {
       this.#unseeWarmTarget(target);
@@ -3347,7 +3380,7 @@ export class PlaybackEngine {
     // resolve produces the review honestly.
     const automatic = this.#warmMatch(
       rec,
-      result.value,
+      candidates,
       'row warm threw on malformed candidates',
       null,
     );
@@ -3446,46 +3479,19 @@ export class PlaybackEngine {
     target: { query: RecordingQuery; key: string },
     source: CancellationSource,
   ): Promise<void> {
-    const r = this.#host.ready();
-    if (r === null) {
-      return;
-    }
-    this.#noteWarmSeen(target.key);
-    const routed = this.#router.providerFor(
-      'playback.candidates',
-      selectionFromSettings(r.settings),
-    );
-    if (!routed.ok) {
-      return;
-    }
-    const provider = routed.value;
-    if (this.#warmBatchTarget === target.key) {
-      this.#warmBatchProvider = provider.id;
-    }
-    const deadlineMs = this.#host.deadline();
-    const context = this.#host.newContext('warm', deadlineMs, source.signal);
-    const result = await this.#host.withDeadline(
-      () =>
-        provider.candidates(
-          { query: target.query, limit: CANDIDATE_LIMIT },
-          context,
-        ),
-      deadlineMs,
+    const warmed = await this.#warmCandidates(
+      target.key,
       source,
+      () => target.query,
+      () => {
+        this.#warmSeen.delete(target.key);
+        this.#warmPendingQueries.unshift(target);
+      },
     );
-    if (
-      source.signal.cancelled ||
-      this.#host.disposed() ||
-      this.#warmBatchSource !== source
-    ) {
-      this.#warmSeen.delete(target.key);
-      this.#warmPendingQueries.unshift(target);
+    if (warmed === null) {
       return;
     }
-    if (!result.ok) {
-      this.#host.logWarn('row warm failed');
-      return;
-    }
+    const { provider, candidates } = warmed;
     // The match needs a recording's fields — the query itself is the
     // probe; nothing here persists.
     const probe: Recording = {
@@ -3506,7 +3512,7 @@ export class PlaybackEngine {
     };
     let outcome: MatchOutcome;
     try {
-      outcome = MatchingEngine.match(probe, result.value, []);
+      outcome = MatchingEngine.match(probe, candidates, []);
     } catch {
       this.#host.logWarn('row warm threw on malformed candidates');
       return;
@@ -3642,13 +3648,7 @@ export class PlaybackEngine {
       if (surface !== null) {
         return { ...surface, origin: 'surface' };
       }
-      const snap = r.queue.snapshot();
-      const dealt = this.#host.dealtOrder(r);
-      const walk = dealt ?? snap.occurrences.map((o) => o.occurrenceId);
-      const pos =
-        snap.currentOccurrenceId === null
-          ? -1
-          : walk.indexOf(snap.currentOccurrenceId);
+      const { snap, walk, pos } = this.#dealtWalk(r);
       const successorId = pos >= 0 ? walk[pos + 1] : undefined;
       const successor = snap.occurrences.find(
         (o) => o.occurrenceId === successorId,
@@ -3805,15 +3805,12 @@ export class PlaybackEngine {
     this.#streamWarm = record;
     const issueSource = new CancellationSource();
     const work = (async () => {
-      const issued = await this.#host.withDeadline(
-        () =>
-          this.#player.prewarm({
-            provider: want.provider,
-            sourceRef: want.sourceRef,
-            identity: warmIdentity(record),
-          }),
-        this.#host.deadline(),
-        issueSource,
+      const issued = await boundedCall(this.#host, issueSource, () =>
+        this.#player.prewarm({
+          provider: want.provider,
+          sourceRef: want.sourceRef,
+          identity: warmIdentity(record),
+        }),
       );
       if (this.#streamWarm !== record) {
         // The record was dropped while the port request was in

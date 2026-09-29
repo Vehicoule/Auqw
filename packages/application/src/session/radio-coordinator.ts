@@ -1,4 +1,3 @@
-import { CancellationSource } from '../cancellation.ts';
 import type { Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type {
@@ -33,7 +32,13 @@ import { emissionWrites } from '../sync/sync-projection.ts';
 import { Serializer } from './serializer.ts';
 import type { Ready, SessionHostCore } from './ready.ts';
 import { syncEmitInput } from './ready.ts';
-import { internalError, supersededError } from './util.ts';
+import {
+  boundedCommit,
+  boundedOp,
+  withSource,
+  internalError,
+  supersededError,
+} from './util.ts';
 
 /** The radio coordinator's per-service seams over SessionHostCore. */
 export type RadioHost = SessionHostCore & {
@@ -368,23 +373,18 @@ export class RadioCoordinator {
     input: RadioSeed,
     record: RadioTailRecord,
   ): Promise<Result<RadioPage>> {
-    const source = new CancellationSource();
-    record.source = source;
-    const untrack = this.#host.trackSource(source);
-    try {
-      const deadlineMs = this.#host.deadline();
-      const context = this.#host.newContext('radio', deadlineMs, source.signal);
-      return await this.#host.withDeadline(
-        () => provider.radioSeed(input, context),
-        deadlineMs,
-        source,
-      );
-    } finally {
-      untrack();
-      if (record.source === source) {
-        record.source = null;
+    return withSource(this.#host, async (source) => {
+      record.source = source;
+      try {
+        return await boundedOp(this.#host, source, 'radio', (ctx) =>
+          provider.radioSeed(input, ctx),
+        );
+      } finally {
+        if (record.source === source) {
+          record.source = null;
+        }
       }
-    }
+    });
   }
 
   /**
@@ -634,10 +634,8 @@ export class RadioCoordinator {
     Result<{ changed: boolean; firstAppended: string | undefined }>
   > {
     const generation = this.#host.ready();
-    const source = new CancellationSource();
-    const untrack = this.#host.trackSource(source);
-    try {
-      return await this.#host.enqueueStorage(async () => {
+    return withSource(this.#host, async (source) => {
+      return this.#host.enqueueStorage(async () => {
         const r = this.#host.ready();
         if (generation === null || r !== generation) {
           return err(supersededError());
@@ -656,11 +654,10 @@ export class RadioCoordinator {
           return ok(outcome);
         }
         const batch = inner.batch;
-        const deadlineMs = this.#host.deadline();
-        const context = this.#host.newContext('persist', deadlineMs, source.signal);
-        const committed = await this.#host.withDeadline(
-          () => this.#storage.commit(batch, context),
-          deadlineMs,
+        const committed = await boundedCommit(
+          this.#host,
+          this.#storage,
+          batch,
           source,
         );
         if (!committed.ok) {
@@ -699,15 +696,10 @@ export class RadioCoordinator {
           queue: revertedQueue,
           recordings: [...r.recordings],
         };
-        const revertDeadlineMs = this.#host.deadline();
-        const revertContext = this.#host.newContext(
-          'persist',
-          revertDeadlineMs,
-          source.signal,
-        );
-        const reverted = await this.#host.withDeadline(
-          () => this.#storage.commit(revertBatch, revertContext),
-          revertDeadlineMs,
+        const reverted = await boundedCommit(
+          this.#host,
+          this.#storage,
+          revertBatch,
           source,
         );
         if (!reverted.ok) {
@@ -727,9 +719,7 @@ export class RadioCoordinator {
         this.#host.publish();
         return ok({ changed: false, firstAppended: undefined });
       });
-    } finally {
-      untrack();
-    }
+    });
   }
 
   /**

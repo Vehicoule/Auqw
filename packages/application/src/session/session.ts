@@ -1330,31 +1330,21 @@ export class Session {
       this.#opSources.delete(source);
     }
     if (!loaded.ok) {
-      this.#state = { type: 'restore-failed', error: loaded.error };
-      this.#publish();
-      return err(loaded.error);
+      return this.#restoreFailed(loaded.error);
     }
     if (!isPersistedState(loaded.value)) {
-      const error = appError(
-        'invalid-response',
-        'persisted state failed validation',
+      return this.#restoreFailed(
+        appError('invalid-response', 'persisted state failed validation'),
       );
-      this.#state = { type: 'restore-failed', error };
-      this.#publish();
-      return err(error);
     }
     const data = loaded.value;
     let queue: QueueEngine;
     try {
       queue = new QueueEngine(data.queue);
     } catch {
-      const error = appError(
-        'invalid-response',
-        'persisted queue failed validation',
+      return this.#restoreFailed(
+        appError('invalid-response', 'persisted queue failed validation'),
       );
-      this.#state = { type: 'restore-failed', error };
-      this.#publish();
-      return err(error);
     }
     this.#ready = {
       recordings: [...data.recordings],
@@ -1392,6 +1382,12 @@ export class Session {
     }
     this.#derived();
     return ok(undefined);
+  }
+
+  #restoreFailed(error: AppError): Result<never> {
+    this.#state = { type: 'restore-failed', error };
+    this.#publish();
+    return err(error);
   }
 
   // ---- library ----------------------------------------------------
@@ -2658,27 +2654,17 @@ export class Session {
   // ---- lifecycle ----------------------------------------------------
 
   async drain(): Promise<void> {
-    for (; ;) {
-      await this.#playback.eventsIdle();
-      const pending = [
-        ...this.#ownedWork,
-        ...this.#playback.releaseWork(),
-      ];
-      if (pending.length === 0) {
-        return;
-      }
-      await Promise.allSettled(pending);
-    }
+    return this.#drainAll(false);
   }
 
   /** Full drain including armed deadline work; used by dispose. */
-  async #drainAll(): Promise<void> {
+  async #drainAll(includeDeadlineWork = true): Promise<void> {
     for (; ;) {
       await this.#playback.eventsIdle();
       const pending = [
         ...this.#ownedWork,
         ...this.#playback.releaseWork(),
-        ...this.#deadlineWork,
+        ...(includeDeadlineWork ? this.#deadlineWork : []),
       ];
       if (pending.length === 0) {
         return;
