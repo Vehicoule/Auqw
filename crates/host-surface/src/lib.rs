@@ -733,9 +733,10 @@ impl PluginHost {
     /// tombstones. A `cancelPrepare` landing after `prepared`
     /// abandons the produced session outright: removing the request's
     /// ownership slot leaves the handle ownerless, so the last owner
-    /// `release`s it by handle — the delivered session is claimed, so
-    /// the unattached-only predicate could never fire, and attached
-    /// teardown is the player's `releaseStream`, not request cancel.
+    /// releases it — unattached-only (`release_if_unattached`): a
+    /// claimed session is invisible to `cancel_if_unattached`, but a
+    /// bookkeeping cancel must still never end an attached, playing
+    /// stream (its consumer's `releaseStream` is the exit).
     /// Only once the `prepared` outcome is on the wire — a slot still
     /// mid-delivery is consumed but its handle left live, or the
     /// listener would get a `Prepared` naming a released session.
@@ -804,12 +805,15 @@ impl PluginHost {
         // unattached — and this kill would then end the session the
         // new request just received. `prepared_handles` outermost
         // matches the admission path's lock order, so the
-        // serialization introduces no cycle. Released by handle, not
-        // `cancel_if_unattached`: the delivered session is claimed, so
-        // the conditional predicate would never fire — its only owner
-        // is gone.
+        // serialization introduces no cycle. `release_if_unattached`,
+        // not `release`: a bookkeeping cancel (e.g. a warm request's
+        // slot freed after its session was adopted and attached) must
+        // never end a playing stream — the attached consumer's own
+        // release is the exit. And not `cancel_if_unattached` either:
+        // the delivered session is claimed, so that predicate would
+        // never fire — its only owner is gone.
         if let (Some(stream), Some(handle)) = (&self.stream, handle) {
-            let _ = stream.release(&handle);
+            let _ = stream.release_if_unattached(&handle);
         }
         drop(m);
         // Tombstone when no delivered handle was found AND a race
@@ -2126,6 +2130,42 @@ mod tests {
             !reg.is_live(&warm.handle),
             "the last owner's cancel must release the session"
         );
+    }
+
+    /// The bot-check wall the claim fix must not open: a bookkeeping
+    /// cancel on an ATTACHED session — the last owner's slot dropped
+    /// after its handle was adopted and attached — must not end the
+    /// playing stream; the consumer's own release is the exit.
+    #[test]
+    fn last_owner_cancel_never_kills_an_attached_session() {
+        let (host, reg, _dir) = stream_host("attached-cancel");
+        let id = load_echo(&host);
+        let warm = mint_warm(&reg, &id, "vid");
+        match host.prepared_handles.lock() {
+            Ok(mut m) => {
+                m.insert(
+                    "req-warm".to_string(),
+                    PreparedSlot {
+                        handle: warm.handle.clone(),
+                        delivered: true,
+                        generation: 0,
+                    },
+                );
+            }
+            Err(e) => panic!("handles: {e}"),
+        }
+        reg.claim(&warm.handle)
+            .unwrap_or_else(|e| panic!("claim: {e}"));
+        reg.attach(&warm.handle, 0)
+            .unwrap_or_else(|e| panic!("attach: {e}"));
+        host.cancel("req-warm".to_string());
+        assert!(
+            reg.is_live(&warm.handle),
+            "a bookkeeping cancel ended an attached stream"
+        );
+        reg.release(&warm.handle)
+            .unwrap_or_else(|e| panic!("release: {e}"));
+        assert!(!reg.is_live(&warm.handle));
     }
 
     /// The adoption's commit→wire gap: the adopted session stays
