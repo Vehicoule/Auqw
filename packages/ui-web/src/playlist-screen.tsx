@@ -6,7 +6,7 @@ import {
   Pressable,
   Text,
 } from './primitives.tsx';
-import { TrackRow, useTrackList } from './track-row.tsx';
+import { TrackRow, bindTo, indexAdapter, useTrackList } from './track-row.tsx';
 import { EmptyState, UnavailableState } from './states.tsx';
 import { NameField } from './sheets.tsx';
 import { t } from '@auqw/ui-shared';
@@ -85,24 +85,8 @@ export function PlaylistScreen({
   const entries = model?.entries ?? [];
   const list = useTrackList({
     count: entries.length,
-    onActivate:
-      onPressEntry === undefined
-        ? undefined
-        : (index) => {
-            const entry = entries[index];
-            if (entry !== undefined) {
-              onPressEntry(entry);
-            }
-          },
-    onContext:
-      onContext === undefined
-        ? undefined
-        : (index) => {
-            const entry = entries[index];
-            if (entry !== undefined) {
-              onContext(entry);
-            }
-          },
+    onActivate: indexAdapter(entries, onPressEntry),
+    onContext: indexAdapter(entries, onContext),
   });
   if (model === null) {
     return (
@@ -239,51 +223,33 @@ export function PlaylistScreen({
           role="list"
           aria-label={model.name}
           className="uw-list"
-          onKeyDown={list.listProps.onKeyDown}
+          onKeyDown={list.onKeyDown}
         >
-          {model.entries.map((entry, index) => (
-            <TrackRow
-              key={entry.entryId}
-              row={entry.row}
-              badge={entry.duplicate ? t('queue.badge.repeat') : null}
-              reorderControls="buttons"
-              tabIndex={list.rowTabIndex(index)}
-              onFocusRow={() => list.onRowFocus(index)}
-              onMoveUp={
-                index > 0 && onMoveEntry !== undefined
-                  ? () => onMoveEntry(entry, -1)
-                  : undefined
-              }
-              onMoveDown={
-                index < model.entries.length - 1 && onMoveEntry !== undefined
-                  ? () => onMoveEntry(entry, 1)
-                  : undefined
-              }
-              onPress={
-                onPressEntry === undefined
-                  ? undefined
-                  : () => onPressEntry(entry)
-              }
-              onToggleLike={
-                onToggleLike === undefined
-                  ? undefined
-                  : () => onToggleLike(entry)
-              }
-              onAddToPlaylist={
-                onAddToPlaylist === undefined
-                  ? undefined
-                  : () => onAddToPlaylist(entry)
-              }
-              onContext={
-                onContext === undefined ? undefined : () => onContext(entry)
-              }
-              onRemove={
-                onRemoveEntry === undefined
-                  ? undefined
-                  : () => onRemoveEntry(entry)
-              }
-            />
-          ))}
+          {model.entries.map((entry, index) => {
+            const moveCtl = (dir: -1 | 1) =>
+              onMoveEntry === undefined ||
+              index + dir < 0 ||
+              index + dir >= model.entries.length
+                ? undefined
+                : () => onMoveEntry(entry, dir);
+            return (
+              <TrackRow
+                key={entry.entryId}
+                row={entry.row}
+                badge={entry.duplicate ? t('queue.badge.repeat') : null}
+                reorderControls="buttons"
+                tabIndex={list.rowTabIndex(index)}
+                onFocusRow={() => list.onRowFocus(index)}
+                onMoveUp={moveCtl(-1)}
+                onMoveDown={moveCtl(1)}
+                onPress={bindTo(onPressEntry, entry)}
+                onToggleLike={bindTo(onToggleLike, entry)}
+                onAddToPlaylist={bindTo(onAddToPlaylist, entry)}
+                onContext={bindTo(onContext, entry)}
+                onRemove={bindTo(onRemoveEntry, entry)}
+              />
+            );
+          })}
         </div>
       )}
     </div>

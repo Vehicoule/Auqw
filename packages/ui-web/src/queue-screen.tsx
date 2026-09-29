@@ -19,10 +19,7 @@ export function QueueScreen({
   reordering = false,
   scrollEnabled = true,
   onToggleReorder,
-  onPressItem,
-  onRemoveItem,
-  onMoveItem,
-  onMoveItemTo,
+  ...listHandlers
 }: QueueScreenProps) {
   const view = useQueueScreenController({
     queue,
@@ -80,10 +77,7 @@ export function QueueScreen({
         queue={queue}
         reordering={reordering}
         scrollEnabled={scrollEnabled}
-        onPressItem={onPressItem}
-        onRemoveItem={onRemoveItem}
-        onMoveItem={onMoveItem}
-        onMoveItemTo={onMoveItemTo}
+        {...listHandlers}
       />
     </div>
   );

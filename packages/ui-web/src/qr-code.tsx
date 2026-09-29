@@ -17,19 +17,12 @@ export function QrCode({
 }) {
   const { d, modules } = useMemo(() => {
     const { data: matrix } = encode(data, { ecc: 'M' });
-    const parts: string[] = [];
-    for (let y = 0; y < matrix.length; y += 1) {
-      const row = matrix[y];
-      if (row === undefined) {
-        continue;
-      }
-      for (let x = 0; x < row.length; x += 1) {
-        if (row[x] === true) {
-          parts.push(`M${x} ${y}h1v1h-1z`);
-        }
-      }
-    }
-    return { d: parts.join(''), modules: matrix.length };
+    const d = matrix
+      .flatMap((row, y) =>
+        row.flatMap((cell, x) => (cell ? [`M${x} ${y}h1v1h-1z`] : [])),
+      )
+      .join('');
+    return { d, modules: matrix.length };
   }, [data]);
   return (
     <svg

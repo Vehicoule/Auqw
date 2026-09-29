@@ -3,8 +3,9 @@ import type { ReactNode } from 'react';
 import type { PairingModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
 import type { ProviderPickerOption } from '@auqw/ui-shared';
-import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
+import { Artwork, DiagPressRow, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
+import { bindTo } from './track-row.tsx';
 import { useOverlayDismiss, useOverlayFocus } from './stack.tsx';
 import { sheetKeyAction } from './keyboard.ts';
 import { QrCode } from './qr-code.tsx';
@@ -25,7 +26,7 @@ export type SheetAction = {
   readonly destructive?: boolean | undefined;
 };
 
-export function SheetScaffold({
+function SheetScaffold({
   title,
   onDismiss,
   children,
@@ -112,6 +113,92 @@ function SheetDialog({
     </div>
   );
 }
+
+// The sheet forms' rounded field — `digits` clamps to a numeric keypad
+// (pairing code/port); a plain text input otherwise.
+function Field(p: {
+  readonly value: string;
+  readonly set: (value: string) => void;
+  readonly ariaLabel: string;
+  readonly placeholder: string;
+  readonly digits?: number | undefined;
+  readonly className?: string | undefined;
+}) {
+  return (
+    <input
+      className={`uw-namefield__input${p.className ? ` ${p.className}` : ''}`}
+      aria-label={p.ariaLabel}
+      placeholder={p.placeholder}
+      autoComplete="off"
+      spellCheck={p.digits === undefined ? false : undefined}
+      inputMode={p.digits === undefined ? undefined : 'numeric'}
+      maxLength={p.digits}
+      value={p.value}
+      onChange={(event) =>
+        p.set(
+          p.digits === undefined
+            ? event.currentTarget.value
+            : event.currentTarget.value
+                .replace(/[^0-9]/g, '')
+                .slice(0, p.digits),
+        )
+      }
+    />
+  );
+}
+
+// One `uw-sheet-row` pressable — every sheet list row shares the shell.
+function SheetRow({
+  onPress,
+  ariaLabel,
+  ariaSelected,
+  dashed = false,
+  children,
+}: {
+  readonly onPress?: (() => void) | undefined;
+  readonly ariaLabel: string;
+  readonly ariaSelected?: boolean | undefined;
+  readonly dashed?: boolean | undefined;
+  readonly children: ReactNode;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      ariaLabel={ariaLabel}
+      ariaSelected={ariaSelected}
+      className={`uw-sheet-row${dashed ? ' uw-sheet-row--dashed' : ''}`}
+    >
+      {children}
+    </Pressable>
+  );
+}
+
+// Accent pill submit — the pair/connect/apply affordance.
+function PillAction(p: {
+  readonly label: string;
+  readonly onPress?: (() => void) | undefined;
+  readonly disabled?: boolean | undefined;
+}) {
+  return (
+    <Pressable
+      onPress={p.onPress}
+      disabled={p.disabled}
+      ariaLabel={p.label}
+      className="uw-pill uw-pill--accent"
+    >
+      <Text variant="metadata" color="bright">
+        {p.label}
+      </Text>
+    </Pressable>
+  );
+}
+
+type PairCodeInput = {
+  readonly code: string;
+  readonly host: string;
+  readonly port: number | null;
+};
+type OnPairCode = ((input: PairCodeInput) => void) | undefined;
 
 /**
  * Field + confirm/cancel row — the same rounded-field treatment the
@@ -231,16 +318,12 @@ export function ValueFieldSheet({
         onCancel={onDismiss}
       />
       {clearLabel !== undefined && onClear !== undefined && (
-        <Pressable
-          onPress={onClear}
-          ariaLabel={clearLabel}
-          className="uw-sheet-row uw-sheet-row--dashed"
-        >
+        <SheetRow onPress={onClear} ariaLabel={clearLabel} dashed>
           <Icon name="close" size={15} color="var(--text-secondary)" />
           <Text variant="body" color="secondary">
             {clearLabel}
           </Text>
-        </Pressable>
+        </SheetRow>
       )}
     </SheetScaffold>
   );
@@ -261,13 +344,10 @@ export function RowActionsSheet({
     <SheetScaffold title={title} onDismiss={onDismiss}>
       <div role="menu" aria-label={title}>
         {actions.map((action) => (
-          <Pressable
+          <SheetRow
             key={action.key}
-            onPress={
-              onAction === undefined ? undefined : () => onAction(action.key)
-            }
+            onPress={bindTo(onAction, action.key)}
             ariaLabel={action.label}
-            className="uw-sheet-row"
           >
             <Icon
               name={action.icon}
@@ -284,14 +364,12 @@ export function RowActionsSheet({
             >
               {action.label}
             </Text>
-          </Pressable>
+          </SheetRow>
         ))}
       </div>
     </SheetScaffold>
   );
 }
-
-export type { ProviderPickerOption };
 
 /**
  * One settings slot's provider choices — only providers that
@@ -324,14 +402,11 @@ export function ProviderPickerSheet({
         options.map((option) => {
           const selected = option.key === selectedKey;
           return (
-            <Pressable
+            <SheetRow
               key={option.key}
-              onPress={
-                onPick === undefined ? undefined : () => onPick(option.key)
-              }
+              onPress={bindTo(onPick, option.key)}
               ariaLabel={option.label}
               ariaSelected={selected}
-              className="uw-sheet-row"
             >
               <span className="uw-sheet-row__text">
                 <Text
@@ -350,7 +425,7 @@ export function ProviderPickerSheet({
               {selected && (
                 <Icon name="check" size={14} color="var(--accent)" />
               )}
-            </Pressable>
+            </SheetRow>
           );
         })
       )}
@@ -383,15 +458,10 @@ export function AddToPlaylistSheet({
   return (
     <SheetScaffold title={title} onDismiss={onDismiss}>
       {playlists.map((playlist) => (
-        <Pressable
+        <SheetRow
           key={playlist.playlistId}
-          onPress={
-            onPick === undefined
-              ? undefined
-              : () => onPick(playlist.playlistId)
-          }
+          onPress={bindTo(onPick, playlist.playlistId)}
           ariaLabel={t('sheets.itemA11y', { name: playlist.name, count: playlist.count })}
-          className="uw-sheet-row"
         >
           <Artwork url={playlist.artworkUrl} size={40} />
           <span className="uw-sheet-row__text">
@@ -402,7 +472,7 @@ export function AddToPlaylistSheet({
               {t('common.trackCount', { count: playlist.count })}
             </Text>
           </span>
-        </Pressable>
+        </SheetRow>
       ))}
       {creating ? (
         <NameField
@@ -425,22 +495,22 @@ export function AddToPlaylistSheet({
           }}
         />
       ) : (
-        <Pressable
+        <SheetRow
           onPress={onCreate === undefined ? undefined : () => setCreating(true)}
           ariaLabel={t('common.newPlaylist')}
-          className="uw-sheet-row uw-sheet-row--dashed"
+          dashed
         >
           <Icon name="list-plus" size={15} color="var(--text-secondary)" />
           <Text variant="body" color="secondary">
             {t('common.newPlaylist')}
           </Text>
-        </Pressable>
+        </SheetRow>
       )}
     </SheetScaffold>
   );
 }
 
-export type NearbyPeerModel = {
+type NearbyPeerModel = {
   readonly key: string;
   readonly name: string;
   readonly address: string;
@@ -462,47 +532,35 @@ function NearbyRow({
   const ready = /^[0-9]{6}$/.test(code);
   return (
     <div className="uw-nearby__row">
-      <Pressable
+      <DiagPressRow
+        label={peer.name}
+        ariaLabel={t('sync.nearby.codeFor', { name: peer.name })}
+        kColor="primary"
         onPress={() => setOpen((v) => !v)}
         disabled={onPair === undefined}
-        ariaLabel={t('sync.nearby.codeFor', { name: peer.name })}
-        className="uw-diag-row uw-diag-row--action"
       >
-        <Text variant="metadata" color="primary" className="uw-diag-row__k">
-          {peer.name}
-        </Text>
         <Text variant="metadata" color="secondary">
           {peer.address}
         </Text>
-      </Pressable>
+      </DiagPressRow>
       {open && (
         <div className="uw-nearby__dial">
-          <input
-            className="uw-namefield__input"
-            aria-label={t('sync.form.codeA11y')}
-            placeholder={t('sync.nearby.codeFor', { name: peer.name })}
-            autoComplete="off"
-            inputMode="numeric"
-            maxLength={6}
+          <Field
             value={code}
-            onChange={(event) =>
-              setCode(event.currentTarget.value.replace(/[^0-9]/g, '').slice(0, 6))
-            }
+            set={setCode}
+            ariaLabel={t('sync.form.codeA11y')}
+            placeholder={t('sync.nearby.codeFor', { name: peer.name })}
+            digits={6}
           />
-          <Pressable
+          <PillAction
+            label={t('sync.nearby.connect')}
             onPress={
               !ready || onPair === undefined
                 ? undefined
                 : () => onPair(peer.key, code)
             }
             disabled={!ready || onPair === undefined || disabled}
-            ariaLabel={t('sync.nearby.connect')}
-            className="uw-pill uw-pill--accent"
-          >
-            <Text variant="metadata" color="bright">
-              {t('sync.nearby.connect')}
-            </Text>
-          </Pressable>
+          />
         </div>
       )}
     </div>
@@ -520,13 +578,7 @@ function ManualPairForm({
   onPairCode,
 }: {
   readonly disabled: boolean;
-  readonly onPairCode?:
-    | ((input: {
-        code: string;
-        host: string;
-        port: number | null;
-      }) => void)
-    | undefined;
+  readonly onPairCode?: OnPairCode;
 }) {
   const [code, setCode] = useState('');
   const [host, setHost] = useState('');
@@ -546,62 +598,41 @@ function ManualPairForm({
         {t('sync.form.help')}
       </Text>
       <div className="uw-nearby__dial">
-        <input
-          className="uw-namefield__input"
-          aria-label={t('sync.form.codeA11y')}
-          placeholder="123456"
-          autoComplete="off"
-          inputMode="numeric"
-          maxLength={6}
+        <Field
           value={code}
-          onChange={(event) =>
-            setCode(event.currentTarget.value.replace(/[^0-9]/g, '').slice(0, 6))
-          }
+          set={setCode}
+          ariaLabel={t('sync.form.codeA11y')}
+          placeholder="123456"
+          digits={6}
         />
       </div>
       <div className="uw-nearby__dial">
-        <input
-          className="uw-namefield__input"
-          aria-label={t('sync.form.host')}
-          placeholder={t('sync.form.host')}
-          autoComplete="off"
-          spellCheck={false}
+        <Field
           value={host}
-          onChange={(event) => setHost(event.currentTarget.value)}
+          set={setHost}
+          ariaLabel={t('sync.form.host')}
+          placeholder={t('sync.form.host')}
         />
-        <input
-          className="uw-namefield__input uw-manual-pair__port"
-          aria-label={t('sync.form.portA11y')}
-          placeholder={t('sync.form.port')}
-          autoComplete="off"
-          inputMode="numeric"
-          maxLength={5}
+        <Field
           value={port}
-          onChange={(event) =>
-            setPort(event.currentTarget.value.replace(/[^0-9]/g, '').slice(0, 5))
-          }
+          set={setPort}
+          ariaLabel={t('sync.form.portA11y')}
+          placeholder={t('sync.form.port')}
+          digits={5}
+          className="uw-manual-pair__port"
         />
       </div>
       <div className="uw-nearby__dial">
-        <Pressable
+        <PillAction
+          label={disabled ? t('sync.form.pairing') : t('sync.form.pair')}
           onPress={
             !ready || onPairCode === undefined
               ? undefined
               : () =>
-                onPairCode({
-                  code,
-                  host: host.trim(),
-                  port: parsedPort,
-                })
+                onPairCode({ code, host: host.trim(), port: parsedPort })
           }
           disabled={!ready || onPairCode === undefined}
-          ariaLabel={disabled ? t('sync.form.pairing') : t('sync.form.pair')}
-          className="uw-pill uw-pill--accent"
-        >
-          <Text variant="metadata" color="bright">
-            {disabled ? t('sync.form.pairing') : t('sync.form.pair')}
-          </Text>
-        </Pressable>
+        />
       </div>
     </div>
   );
@@ -636,13 +667,7 @@ export function PairingSheet({
    * Typed join: code + host + port — the desktop's join-by-address
    * path (it has no camera; the QR scanner is a mobile surface).
    */
-  readonly onPairCode?:
-    | ((input: {
-        code: string;
-        host: string;
-        port: number | null;
-      }) => void)
-    | undefined;
+  readonly onPairCode?: OnPairCode;
   readonly onPastePayload?: ((payload: string) => void) | undefined;
   readonly dialing?: boolean | undefined;
   readonly dialError?: string | null | undefined;
@@ -678,21 +703,13 @@ export function PairingSheet({
               </Text>{' '}
               · {pairing.expiresLabel}
             </Text>
-            <Pressable
-              onPress={onCopyPayload}
-              disabled={onCopyPayload === undefined}
+            <DiagPressRow
+              label={t('pairing.copyPayload')}
               ariaLabel={t('pairing.copyPayloadA11y')}
-              className="uw-diag-row uw-diag-row--action"
+              onPress={onCopyPayload}
             >
-              <Text
-                variant="metadata"
-                color="secondary"
-                className="uw-diag-row__k"
-              >
-                {t('pairing.copyPayload')}
-              </Text>
               <Icon name="check" size={12} color="var(--text-secondary)" />
-            </Pressable>
+            </DiagPressRow>
           </>
         )}
         {nearbyPeers !== undefined && onPairNearby !== undefined && (
@@ -717,29 +734,21 @@ export function PairingSheet({
         )}
         {onPastePayload !== undefined && (
           <div className="uw-nearby__dial">
-            <input
-              className="uw-namefield__input"
-              aria-label={t('sync.form.payloadA11y')}
-              placeholder={t('sync.form.payload')}
-              autoComplete="off"
-              spellCheck={false}
+            <Field
               value={payloadDraft}
-              onChange={(event) => setPayloadDraft(event.currentTarget.value)}
+              set={setPayloadDraft}
+              ariaLabel={t('sync.form.payloadA11y')}
+              placeholder={t('sync.form.payload')}
             />
-            <Pressable
+            <PillAction
+              label={t('sync.form.usePayload')}
               onPress={
                 payloadDraft.trim() === ''
                   ? undefined
                   : () => onPastePayload(payloadDraft.trim())
               }
               disabled={payloadDraft.trim() === '' || dialing}
-              ariaLabel={t('sync.form.usePayload')}
-              className="uw-pill uw-pill--accent"
-            >
-              <Text variant="metadata" color="bright">
-                {t('sync.form.usePayload')}
-              </Text>
-            </Pressable>
+            />
           </div>
         )}
         {dialError !== null && (

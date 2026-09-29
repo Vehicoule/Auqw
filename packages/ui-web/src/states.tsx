@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
-import { Icon, Spinner, Text } from './primitives.tsx';
+import { Icon, Pressable, Spinner, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
-import { Pressable } from './primitives.tsx';
 import { t } from '@auqw/ui-shared';
 
 export type StateViewProps = {
@@ -10,25 +9,42 @@ export type StateViewProps = {
   readonly icon?: IconName | undefined;
 };
 
+const TONE_PAINT = {
+  secondary: 'var(--text-secondary)',
+  warn: 'var(--warn)',
+  accent: 'var(--accent)',
+} as const;
+
 function StateShell({
   icon,
   title,
   hint = null,
-  tone = 'secondary',
+  tone,
   role = 'status',
+  live = false,
   children,
 }: {
-  readonly icon: IconName;
+  readonly icon?: IconName | undefined;
   readonly title: string;
   readonly hint?: string | null | undefined;
   readonly tone?: 'secondary' | 'warn' | 'accent' | undefined;
   readonly role?: 'status' | 'alert' | undefined;
+  readonly live?: boolean | undefined;
   readonly children?: ReactNode;
 }) {
   return (
-    <div className="uw-state" role={role} data-state={tone}>
+    <div
+      className="uw-state"
+      role={role}
+      data-state={tone}
+      aria-live={live ? 'polite' : undefined}
+    >
       <span className="uw-state__icon">
-        <Icon name={icon} size={22} color={`var(--${tone === 'secondary' ? 'text-secondary' : tone})`} />
+        {icon === undefined ? (
+          <Spinner size={22} />
+        ) : (
+          <Icon name={icon} size={22} color={TONE_PAINT[tone ?? 'secondary']} />
+        )}
       </span>
       <Text variant="title" color="primary">
         {title}
@@ -44,27 +60,11 @@ function StateShell({
 }
 
 export function LoadingState({ title = t('state.loading'), hint = null }: StateViewProps) {
-  return (
-    <div className="uw-state" role="status" aria-live="polite">
-      <span className="uw-state__icon">
-        <Spinner size={22} />
-      </span>
-      <Text variant="title" color="primary">
-        {title}
-      </Text>
-      {hint !== null && (
-        <Text variant="metadata" color="secondary">
-          {hint}
-        </Text>
-      )}
-    </div>
-  );
+  return <StateShell title={title} hint={hint} live />;
 }
 
 export function EmptyState({ title, hint = null, icon = 'note' }: StateViewProps) {
-  return (
-    <StateShell icon={icon} title={title} hint={hint} />
-  );
+  return <StateShell icon={icon} title={title} hint={hint} tone="secondary" />;
 }
 
 export function ErrorState({

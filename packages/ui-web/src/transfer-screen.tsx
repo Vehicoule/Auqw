@@ -1,8 +1,9 @@
-import { Icon, Pressable, Text } from './primitives.tsx';
+import { CapsLabel, Icon, Pressable, ScreenHead, Text } from './primitives.tsx';
 import { ErrorState } from './states.tsx';
 import type { TransferModel } from '@auqw/ui-shared';
 import {
   useTransferScreenController,
+  type TransferImportFooterView,
   type TransferImportView,
   type TransferRowView,
   type TransferScreenHandlers,
@@ -25,59 +26,31 @@ export function TransferScreen({
   model,
   scrollEnabled = true,
   onBack,
-  onExport,
-  onPickImportFile,
-  onApplyImport,
-  onResetImport,
+  ...handlers
 }: TransferScreenProps) {
-  const view = useTransferScreenController({
-    model,
-    onExport,
-    onPickImportFile,
-    onApplyImport,
-    onResetImport,
-  });
+  const view = useTransferScreenController({ model, ...handlers });
+  const sections = [
+    { label: view.exportSectionLabel, row: view.exportRow, body: null },
+    { label: view.importSectionLabel, row: view.importRow, body: view.importBody },
+  ];
   return (
     <div
       className="uw-screen uw-transfer"
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
-      <div className="uw-collection__head">
-        <Pressable
-          onPress={onBack}
-          ariaLabel={view.backA11yLabel}
-          className="uw-back"
-        >
-          <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
-        </Pressable>
-        <Text variant="display" color="bright" className="uw-collection__title">
-          {view.title}
-        </Text>
-      </div>
+      <ScreenHead
+        a11yLabel={view.backA11yLabel}
+        title={view.title}
+        onBack={onBack}
+      />
       <div className="uw-transfer__sections">
-        <section>
-          <Text
-            variant="label"
-            color="secondary"
-            uppercase
-            className="uw-section-label"
-          >
-            {view.exportSectionLabel}
-          </Text>
-          <TransferRow view={view.exportRow} />
-        </section>
-        <section>
-          <Text
-            variant="label"
-            color="secondary"
-            uppercase
-            className="uw-section-label"
-          >
-            {view.importSectionLabel}
-          </Text>
-          <TransferRow view={view.importRow} />
-          <ImportBody body={view.importBody} />
-        </section>
+        {sections.map((section) => (
+          <section key={section.label}>
+            <CapsLabel className="uw-section-label">{section.label}</CapsLabel>
+            <TransferRow view={section.row} />
+            <ImportBody body={section.body} />
+          </section>
+        ))}
       </div>
     </div>
   );
@@ -96,13 +69,34 @@ function TransferRow({ view }: { readonly view: TransferRowView }) {
         <Text variant="body" color="primary" numberOfLines={1}>
           {view.label}
         </Text>
-        {view.detail === null ? null : (
+        {view.detail !== null && (
           <Text variant="metadata" color={view.detailTone} numberOfLines={2}>
             {view.detail}
           </Text>
         )}
       </span>
       <Icon name="chevron-right" size={12} color="var(--text-secondary)" />
+    </Pressable>
+  );
+}
+
+function ResetButton({
+  footer,
+}: {
+  readonly footer: Extract<
+    TransferImportFooterView,
+    { readonly kind: 'done' | 'error' }
+  >;
+}) {
+  return (
+    <Pressable
+      onPress={footer.onReset}
+      ariaLabel={footer.resetA11yLabel}
+      className="uw-review__action"
+    >
+      <Text variant="metadata" color="primary">
+        {footer.resetLabel}
+      </Text>
     </Pressable>
   );
 }
@@ -146,28 +140,12 @@ function ImportBody({
           <Text variant="metadata" color="accent" className="uw-diag-row__k">
             {footer.detail}
           </Text>
-          <Pressable
-            onPress={footer.onReset}
-            ariaLabel={footer.resetA11yLabel}
-            className="uw-review__action"
-          >
-            <Text variant="metadata" color="primary">
-              {footer.resetLabel}
-            </Text>
-          </Pressable>
+          <ResetButton footer={footer} />
         </div>
       ) : footer.kind === 'error' ? (
         <div className="uw-import-preview__error">
           <ErrorState title={footer.title} hint={footer.hint} />
-          <Pressable
-            onPress={footer.onReset}
-            ariaLabel={footer.resetA11yLabel}
-            className="uw-review__action"
-          >
-            <Text variant="metadata" color="primary">
-              {footer.resetLabel}
-            </Text>
-          </Pressable>
+          <ResetButton footer={footer} />
         </div>
       ) : (
         <div className="uw-import-preview__actions">

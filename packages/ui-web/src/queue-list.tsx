@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { Text } from './primitives.tsx';
-import { TrackRow } from './track-row.tsx';
+import { TrackRow, useTrackList } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
-import { useTrackList } from './track-row.tsx';
 import { t } from '@auqw/ui-shared';
 import { queueSectionLabel } from '@auqw/ui-shared/controllers';
 import type { QueueItemModel, QueueModel } from '@auqw/ui-shared';
@@ -37,13 +36,10 @@ export function applyPendingMove(
   return next;
 }
 
-function applyMoves(ids: readonly string[], ops: readonly PendingMove[]): readonly string[] {
-  let order = ids;
-  for (const op of ops) {
-    order = applyPendingMove(order, op);
-  }
-  return order;
-}
+const applyMoves = (
+  ids: readonly string[],
+  ops: readonly PendingMove[],
+): readonly string[] => ops.reduce(applyPendingMove, ids);
 
 /**
  * Reconcile a newly published queue order against the dispatched-but-
@@ -138,31 +134,31 @@ export function QueueList({
               onPressItem(item.occurrenceId);
             }
           },
-    onContext: undefined,
   });
-  const authIds = displayIds;
   const useAbsolute = onMoveItemTo !== undefined;
   const stale =
     pendingIds.current !== null && Date.now() - pendingSince.current > PENDING_TTL_MS;
   if (lastItems.current !== queue.items) {
     const prevAuth = lastAuthIds.current;
     lastItems.current = queue.items;
-    lastAuthIds.current = authIds;
-    if (prevAuth !== null && pendingIds.current !== null) {
-      if (idsEqual(prevAuth, authIds)) {
-        // Unchanged order — not proof of rejection, keep pending
-        // (the TTL bounds how long an unacked op can linger).
+    lastAuthIds.current = displayIds;
+    // An unchanged order is not proof of rejection — keep pending (the
+    // TTL bounds how long an unacked op can linger); otherwise reconcile.
+    if (
+      prevAuth !== null &&
+      pendingIds.current !== null &&
+      !idsEqual(prevAuth, displayIds)
+    ) {
+      const res = reconcilePendingOps(prevAuth, pendingOps.current, displayIds);
+      if (res === null) {
+        pendingOps.current = [];
+        queuedOps.current = [];
+        pendingIds.current = null;
       } else {
-        const res = reconcilePendingOps(prevAuth, pendingOps.current, authIds);
-        if (res === null) {
-          pendingOps.current = [];
-          queuedOps.current = [];
-          pendingIds.current = null;
-        } else {
-          pendingOps.current = res.ops;
-          const tail = [...res.ops, ...queuedOps.current];
-          pendingIds.current = tail.length === 0 ? null : applyMoves(authIds, tail);
-        }
+        pendingOps.current = res.ops;
+        const tail = [...res.ops, ...queuedOps.current];
+        pendingIds.current =
+          tail.length === 0 ? null : applyMoves(displayIds, tail);
       }
     }
   }
@@ -229,14 +225,11 @@ export function QueueList({
     return <EmptyState title={t('queue.empty')} icon="queue" />;
   }
   const canReorder = onMoveItem !== undefined || onMoveItemTo !== undefined;
-  const orderedIds = pendingIds.current ?? authIds;
+  const orderedIds = pendingIds.current ?? displayIds;
   // Rows render in the optimistic order too, so the roving index and
   // DOM focus never index into different sequences mid-persist.
   const itemById = new Map(queue.items.map((item) => [item.occurrenceId, item]));
-  const orderedItems = orderedIds.flatMap((id) => {
-    const item = itemById.get(id);
-    return item === undefined ? [] : [item];
-  });
+  const orderedItems = orderedIds.flatMap((id) => itemById.get(id) ?? []);
   const moveItem = (occurrenceId: string, direction: -1 | 1) => {
     const from = orderedIds.indexOf(occurrenceId);
     const to = from + direction;
@@ -295,7 +288,7 @@ export function QueueList({
         return;
       }
     }
-    list.listProps.onKeyDown(event);
+    list.onKeyDown(event);
   };
   return (
     <div
@@ -305,7 +298,14 @@ export function QueueList({
       data-scroll={scrollEnabled ? 'true' : 'false'}
       onKeyDown={onKeyDown}
     >
-      {orderedItems.map((item, index) => (
+      {orderedItems.map((item, index) => {
+        const canMoveTo = (dir: -1 | 1) =>
+          reordering &&
+          canReorder &&
+          item.section === 'upNext' &&
+          orderedItems[index + dir]?.section === 'upNext';
+        const moveCtl = (dir: -1 | 1) => () => moveItem(item.occurrenceId, dir);
+        return (
         <div key={item.occurrenceId}>
           {orderedItems[index - 1]?.section !== item.section && (
             <Text
@@ -318,21 +318,7 @@ export function QueueList({
             </Text>
           )}
           {item.duplicate && (
-            <span
-              style={{
-                display: 'inline-block',
-                margin: 'var(--spacing-xs) var(--spacing-sm) 0',
-                padding: '0 7px',
-                borderRadius: 'var(--radius-pill)',
-                border: 'var(--stroke-hairline) solid var(--hairline)',
-                color: 'var(--text-secondary)',
-                fontSize: 'calc(var(--font-metadata) * 0.92)',
-                letterSpacing: '0.05em',
-                textTransform: 'uppercase',
-              }}
-            >
-              {t('queue.badge.repeat')}
-            </span>
+            <span className="uw-dup-badge">{t('queue.badge.repeat')}</span>
           )}
           <TrackRow
             row={item.row}
@@ -356,23 +342,12 @@ export function QueueList({
                 ? undefined
                 : () => onRemoveItem(item.occurrenceId)
             }
-            onMoveUp={
-              reordering && canReorder &&
-              item.section === 'upNext' &&
-              orderedItems[index - 1]?.section === 'upNext'
-                ? () => moveItem(item.occurrenceId, -1)
-                : undefined
-            }
-            onMoveDown={
-              reordering && canReorder &&
-              item.section === 'upNext' &&
-              orderedItems[index + 1]?.section === 'upNext'
-                ? () => moveItem(item.occurrenceId, 1)
-                : undefined
-            }
+            onMoveUp={canMoveTo(-1) ? moveCtl(-1) : undefined}
+            onMoveDown={canMoveTo(1) ? moveCtl(1) : undefined}
           />
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

@@ -6,7 +6,7 @@ import {
   Spinner,
   Text,
 } from './primitives.tsx';
-import { TrackRow, useTrackList } from './track-row.tsx';
+import { TrackRow, indexAdapter, useTrackList } from './track-row.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import type { EntityScreenModel } from '@auqw/ui-shared';
 import {
@@ -71,47 +71,14 @@ export function EntityScreen({
   model,
   scrollEnabled = true,
   onBack,
-  onPlayAll,
-  onShuffleAll,
-  onToggleLike,
-  onPressItem,
-  onAddToPlaylist,
-  onContext,
-  onLoadMore,
-  onRetry,
+  ...handlers
 }: EntityScreenProps) {
-  const view = useEntityScreenController({
-    model,
-    onPlayAll,
-    onShuffleAll,
-    onToggleLike,
-    onPressItem,
-    onAddToPlaylist,
-    onContext,
-    onLoadMore,
-    onRetry,
-  });
+  const view = useEntityScreenController({ model, ...handlers });
   const items = model.phase === 'ready' ? model.items : [];
   const list = useTrackList({
     count: items.length,
-    onActivate:
-      onPressItem === undefined
-        ? undefined
-        : (index) => {
-            const row = items[index];
-            if (row !== undefined) {
-              onPressItem(row);
-            }
-          },
-    onContext:
-      onContext === undefined
-        ? undefined
-        : (index) => {
-            const row = items[index];
-            if (row !== undefined) {
-              onContext(row);
-            }
-          },
+    onActivate: indexAdapter(items, handlers.onPressItem),
+    onContext: indexAdapter(items, handlers.onContext),
   });
   if (view.kind === 'loading') {
     return (
@@ -200,7 +167,7 @@ export function EntityScreen({
           role="list"
           aria-label={view.body.listA11yLabel}
           className="uw-list"
-          onKeyDown={list.listProps.onKeyDown}
+          onKeyDown={list.onKeyDown}
         >
           {view.body.rows.map((item, index) => (
             <TrackRow

@@ -132,13 +132,13 @@ export function StackItem({ stackKey, children }: StackItemProps) {
   );
 }
 
-export type PushScreenProps = {
+export type OverlayScreenProps = {
   readonly stackKey: string;
   readonly onDismissed?: (() => void) | undefined;
   readonly children: ReactNode;
 };
 
-export function PushScreen({ stackKey, onDismissed, children }: PushScreenProps) {
+export function PushScreen({ stackKey, onDismissed, children }: OverlayScreenProps) {
   useOverlayDismiss(onDismissed);
   return (
     <div className="uw-push" data-stack={stackKey} role="presentation">
@@ -147,13 +147,7 @@ export function PushScreen({ stackKey, onDismissed, children }: PushScreenProps)
   );
 }
 
-export type SheetScreenProps = {
-  readonly stackKey: string;
-  readonly onDismissed?: (() => void) | undefined;
-  readonly children: ReactNode;
-};
-
-export function SheetScreen({ stackKey, onDismissed, children }: SheetScreenProps) {
+export function SheetScreen({ stackKey, onDismissed, children }: OverlayScreenProps) {
   useOverlayDismiss(onDismissed);
   const dialogRef = useOverlayFocus<HTMLDivElement>();
   return (

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Hairline, Icon, Pressable, Text } from './primitives.tsx';
+import type { ReactNode } from 'react';
+import { CapsLabel, DiagPressRow, Hairline, Icon, Pressable, Text } from './primitives.tsx';
 import { focusTargetAfterRemoval } from './settings-focus.ts';
 import { settingsGroups, t } from '@auqw/ui-shared';
 import type {
@@ -28,6 +29,94 @@ export type SettingsScreenProps = {
   readonly onExportDelta?: (() => void) | undefined;
   readonly onImportDelta?: (() => void) | undefined;
 };
+
+function DiagRow({
+  k,
+  kColor = 'secondary',
+  placeholder = false,
+  children,
+}: {
+  readonly k: ReactNode;
+  readonly kColor?: 'secondary' | 'warn' | undefined;
+  readonly placeholder?: boolean | undefined;
+  readonly children?: ReactNode;
+}) {
+  return (
+    <div className="uw-diag-row" data-state={placeholder ? 'placeholder' : undefined}>
+      <Text variant="metadata" color={kColor} className="uw-diag-row__k">
+        {k}
+      </Text>
+      {children}
+    </div>
+  );
+}
+
+// A diag row's value cell — always metadata text, primary by default.
+function DiagV({
+  color = 'primary',
+  numeric = false,
+  numberOfLines,
+  children,
+}: {
+  readonly color?: 'primary' | 'secondary' | 'warn' | 'accent' | undefined;
+  readonly numeric?: boolean | undefined;
+  readonly numberOfLines?: number | undefined;
+  readonly children: ReactNode;
+}) {
+  return (
+    <Text
+      variant="metadata"
+      color={color}
+      numeric={numeric}
+      numberOfLines={numberOfLines}
+    >
+      {children}
+    </Text>
+  );
+}
+
+// The inline `uw-diag-row--action` button inside a DiagRow.
+function DiagBtn({
+  label,
+  ariaLabel = label,
+  color = 'primary',
+  onPress,
+}: {
+  readonly label: string;
+  readonly ariaLabel?: string | undefined;
+  readonly color?: 'primary' | 'warn' | undefined;
+  readonly onPress?: (() => void) | undefined;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={onPress === undefined}
+      ariaLabel={ariaLabel}
+      className="uw-diag-row--action"
+    >
+      <Text variant="metadata" color={color}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+function DiagAction({
+  label,
+  onPress,
+  children,
+}: {
+  readonly label: string;
+  readonly onPress?: (() => void) | undefined;
+  readonly children?: ReactNode;
+}) {
+  return (
+    <DiagPressRow label={label} onPress={onPress}>
+      {children}
+      <Icon name="chevron-right" size={12} color="var(--text-secondary)" />
+    </DiagPressRow>
+  );
+}
 
 // Visual-only track+thumb — the row itself is the `switch` element;
 // a nested control inside it duplicates (and on AT hides) the control.
@@ -276,8 +365,22 @@ export function SettingsScreen({
     node.scrollIntoView({ block: 'start' });
     node.focus({ preventScroll: true });
   }, [syncFocusTick]);
-  const persistenceColor =
-    diagnostics.persistence === 'ok' ? 'secondary' : 'warn';
+  const listenerKey = (
+    <>
+      <Icon name="monitor" size={12} color="var(--text-secondary)" />{' '}
+      {t('sync.panel.listener')}
+    </>
+  );
+  const onConfirmed = (key: string) => {
+    pendingFocus.current = { key, before: rowOrderRef.current };
+  };
+  const registerRowEl = (key: string, el: HTMLButtonElement | null) => {
+    if (el === null) {
+      rowEls.current.delete(key);
+    } else {
+      rowEls.current.set(key, el);
+    }
+  };
   return (
     <div
       ref={screenRef}
@@ -290,14 +393,7 @@ export function SettingsScreen({
       </Text>
       {groups.map((group) => (
         <section key={group.key} className="uw-settings__group">
-          <Text
-            variant="label"
-            color="secondary"
-            uppercase
-            className="uw-section-label"
-          >
-            {group.label}
-          </Text>
+          <CapsLabel className="uw-section-label">{group.label}</CapsLabel>
           <div className="uw-card">
             {group.rows.map((row, i) => (
               <div key={row.key}>
@@ -306,19 +402,8 @@ export function SettingsScreen({
                   row={row}
                   onSelectRow={onSelectRow}
                   onToggleRow={onToggleRow}
-                  onConfirmed={(key) => {
-                    pendingFocus.current = {
-                      key,
-                      before: rowOrderRef.current,
-                    };
-                  }}
-                  registerRowEl={(key, el) => {
-                    if (el === null) {
-                      rowEls.current.delete(key);
-                    } else {
-                      rowEls.current.set(key, el);
-                    }
-                  }}
+                  onConfirmed={onConfirmed}
+                  registerRowEl={registerRowEl}
                 />
               </div>
             ))}
@@ -326,72 +411,52 @@ export function SettingsScreen({
         </section>
       ))}
       <section className="uw-settings__group">
-      <Text
-        variant="label"
-        color="secondary"
-        uppercase
-        className="uw-section-label"
-      >
-        {t('settings.heading.diagnostics')}
-      </Text>
-      <div className="uw-card uw-card--padded">
-        <div className="uw-diag-row">
-          <Text variant="metadata" color="secondary" className="uw-diag-row__k">
-            {t('settings.diag.providers')}
-          </Text>
-          <Text variant="metadata" color="primary">
-            {diagnostics.providerIds.length === 0
-              ? t('settings.diag.none')
-              : diagnostics.providerIds.join(', ')}
-          </Text>
+        <CapsLabel className="uw-section-label">
+          {t('settings.heading.diagnostics')}
+        </CapsLabel>
+        <div className="uw-card uw-card--padded">
+          <DiagRow k={t('settings.diag.providers')}>
+            <DiagV>
+              {diagnostics.providerIds.length === 0
+                ? t('settings.diag.none')
+                : diagnostics.providerIds.join(', ')}
+            </DiagV>
+          </DiagRow>
+          <Hairline />
+          <DiagRow k={t('settings.diag.attemptTrace')}>
+            <DiagV numeric>
+              {t('settings.diag.attempts', { count: diagnostics.attemptCount })}
+              {diagnostics.lastAttemptLabel === null
+                ? ''
+                : ` · ${t('settings.diag.last', { value: diagnostics.lastAttemptLabel })}`}
+            </DiagV>
+          </DiagRow>
+          <Hairline />
+          <DiagRow k={t('settings.diag.persistence')}>
+            <DiagV color={diagnostics.persistence === 'ok' ? 'secondary' : 'warn'}>
+              {t(`settings.diag.persistenceValue.${diagnostics.persistence}`)}
+              {diagnostics.persistenceDetail === null
+                ? ''
+                : ` · ${diagnostics.persistenceDetail}`}
+            </DiagV>
+          </DiagRow>
+          <Hairline />
+          {/*
+           * The corrections queue entry — management-oriented: a count
+           * when the caller has loaded reviews, the chevron always. Row
+           * is inert without the callback (gallery).
+           */}
+          <DiagAction
+            label={t('settings.diag.matchReviews')}
+            onPress={onOpenCorrections}
+          >
+            {diagnostics.pendingReviews !== null && (
+              <DiagV numeric>
+                {t('settings.diag.pending', { count: diagnostics.pendingReviews })}
+              </DiagV>
+            )}
+          </DiagAction>
         </div>
-        <Hairline />
-        <div className="uw-diag-row">
-          <Text variant="metadata" color="secondary" className="uw-diag-row__k">
-            {t('settings.diag.attemptTrace')}
-          </Text>
-          <Text variant="metadata" color="primary" numeric>
-            {t('settings.diag.attempts', { count: diagnostics.attemptCount })}
-            {diagnostics.lastAttemptLabel === null
-              ? ''
-              : ` · ${t('settings.diag.last', { value: diagnostics.lastAttemptLabel })}`}
-          </Text>
-        </div>
-        <Hairline />
-        <div className="uw-diag-row">
-          <Text variant="metadata" color="secondary" className="uw-diag-row__k">
-            {t('settings.diag.persistence')}
-          </Text>
-          <Text variant="metadata" color={persistenceColor}>
-            {t(`settings.diag.persistenceValue.${diagnostics.persistence}`)}
-            {diagnostics.persistenceDetail === null
-              ? ''
-              : ` · ${diagnostics.persistenceDetail}`}
-          </Text>
-        </div>
-        <Hairline />
-        {/*
-         * The corrections queue entry — management-oriented: a count
-         * when the caller has loaded reviews, the chevron always. Row
-         * is inert without the callback (gallery).
-         */}
-        <Pressable
-          onPress={onOpenCorrections}
-          disabled={onOpenCorrections === undefined}
-          ariaLabel={t('settings.diag.matchReviews')}
-          className="uw-diag-row uw-diag-row--action"
-        >
-          <Text variant="metadata" color="secondary" className="uw-diag-row__k">
-            {t('settings.diag.matchReviews')}
-          </Text>
-          {diagnostics.pendingReviews !== null && (
-            <Text variant="metadata" color="primary" numeric>
-              {t('settings.diag.pending', { count: diagnostics.pendingReviews })}
-            </Text>
-          )}
-          <Icon name="chevron-right" size={12} color="var(--text-secondary)" />
-        </Pressable>
-      </div>
       </section>
       {sync !== undefined && (
         <section
@@ -400,247 +465,105 @@ export function SettingsScreen({
           aria-label={t('settings.heading.sync')}
           className="uw-settings__group"
         >
-          <Text
-            variant="label"
-            color="secondary"
-            uppercase
-            className="uw-section-label"
-          >
+          <CapsLabel className="uw-section-label">
             {t('settings.heading.sync')}
-          </Text>
+          </CapsLabel>
           <div className="uw-card uw-card--padded">
             {sync.status === null ? (
-              <div className="uw-diag-row" data-state="placeholder">
-                <Text
-                  variant="metadata"
-                  color="secondary"
-                  className="uw-diag-row__k"
-                >
-                  <Icon
-                    name="monitor"
-                    size={12}
-                    color="var(--text-secondary)"
-                  />{' '}
-                  {t('sync.panel.listener')}
-                </Text>
-                <Text variant="metadata" color="secondary">
-                  {t('common.unavailable')}
-                </Text>
-              </div>
+              <DiagRow k={listenerKey} placeholder>
+                <DiagV color="secondary">{t('common.unavailable')}</DiagV>
+              </DiagRow>
             ) : (
               <>
-                <div className="uw-diag-row">
-                  <Text
-                    variant="metadata"
-                    color="secondary"
-                    className="uw-diag-row__k"
-                  >
-                    <Icon
-                      name="monitor"
-                      size={12}
-                      color="var(--text-secondary)"
-                    />{' '}
-                    {t('sync.panel.listener')}
-                  </Text>
-                  <Text variant="metadata" color="primary">
+                <DiagRow k={listenerKey}>
+                  <DiagV>
                     {sync.status.listenerLabel}
                     {t('sync.engineSuffix', { label: sync.status.engineLabel })}
-                  </Text>
-                </div>
+                  </DiagV>
+                </DiagRow>
                 <Hairline />
-                <div className="uw-diag-row">
-                  <Text
-                    variant="metadata"
-                    color="secondary"
-                    className="uw-diag-row__k"
-                  >
-                    {t('sync.panel.thisDevice')}
-                  </Text>
-                  <Text variant="metadata" color="primary">
+                <DiagRow k={t('sync.panel.thisDevice')}>
+                  <DiagV>
                     {sync.status.nameLabel}
                     {sync.status.addressLabel === null
                       ? ''
                       : ` · ${sync.status.addressLabel}`}
-                  </Text>
-                </div>
+                  </DiagV>
+                </DiagRow>
                 <Hairline />
-                <div className="uw-diag-row">
-                  <Text
-                    variant="metadata"
-                    color="secondary"
-                    className="uw-diag-row__k"
-                  >
-                    {t('sync.panel.advertise')}
-                  </Text>
-                  <Text variant="metadata" color="primary">
+                <DiagRow k={t('sync.panel.advertise')}>
+                  <DiagV>
                     {sync.status.advertiseLabel}
                     {t('sync.sessionsSuffix', { label: sync.status.sessionsLabel })}
-                  </Text>
-                </div>
+                  </DiagV>
+                </DiagRow>
                 <Hairline />
-                <div className="uw-diag-row">
-                  <Text
-                    variant="metadata"
-                    color="secondary"
-                    className="uw-diag-row__k"
-                  >
-                    {t('sync.panel.lastSync')}
-                  </Text>
-                  <Text variant="metadata" color="primary">
-                    {sync.status.lastSyncLabel}
-                  </Text>
-                </div>
+                <DiagRow k={t('sync.panel.lastSync')}>
+                  <DiagV>{sync.status.lastSyncLabel}</DiagV>
+                </DiagRow>
                 {sync.status.fingerprintLabel !== null && (
                   <>
                     <Hairline />
-                    <div className="uw-diag-row">
-                      <Text
-                        variant="metadata"
-                        color="secondary"
-                        className="uw-diag-row__k"
-                      >
-                        {t('sync.panel.fingerprint')}
-                      </Text>
-                      <Text variant="metadata" color="primary" numeric>
-                        {sync.status.fingerprintLabel}
-                      </Text>
-                    </div>
+                    <DiagRow k={t('sync.panel.fingerprint')}>
+                      <DiagV numeric>{sync.status.fingerprintLabel}</DiagV>
+                    </DiagRow>
                   </>
                 )}
                 <Hairline />
               </>
             )}
-            <Pressable
-              onPress={onPairDevice}
-              disabled={onPairDevice === undefined}
-              ariaLabel={t('sync.pairDevice')}
-              className="uw-diag-row uw-diag-row--action"
-            >
-              <Text
-                variant="metadata"
-                color="secondary"
-                className="uw-diag-row__k"
-              >
-                {t('sync.pairDevice')}
-              </Text>
-              <Icon
-                name="chevron-right"
-                size={12}
-                color="var(--text-secondary)"
-              />
-            </Pressable>
+            <DiagAction label={t('sync.pairDevice')} onPress={onPairDevice} />
             {sync.pairErrorLabel !== null && (
-              <div className="uw-diag-row">
-                <Text
-                  variant="metadata"
-                  color="warn"
-                  className="uw-diag-row__k"
-                >
-                  {sync.pairErrorLabel}
-                </Text>
-              </div>
+              <DiagRow k={sync.pairErrorLabel} kColor="warn" />
             )}
             <Hairline />
-            <Pressable
-              onPress={onSyncNow}
-              disabled={onSyncNow === undefined}
-              ariaLabel={t('sync.syncNow')}
-              className="uw-diag-row uw-diag-row--action"
-            >
-              <Text
-                variant="metadata"
-                color="secondary"
-                className="uw-diag-row__k"
-              >
-                {t('sync.syncNow')}
-              </Text>
-              <Icon
-                name="chevron-right"
-                size={12}
-                color="var(--text-secondary)"
-              />
-            </Pressable>
+            <DiagAction label={t('sync.syncNow')} onPress={onSyncNow} />
             <Hairline />
-            <div className="uw-diag-row">
-              <Text
-                variant="metadata"
-                color="secondary"
-                className="uw-diag-row__k"
-              >
-                {t('sync.panel.pairedDevices')}
-              </Text>
-              <Text variant="metadata" color="primary">
+            <DiagRow k={t('sync.panel.pairedDevices')}>
+              <DiagV>
                 {sync.devices.length === 0
                   ? t('settings.diag.none')
                   : `${sync.devices.length}`}
-              </Text>
-            </div>
+              </DiagV>
+            </DiagRow>
             {sync.devices.map((device) => (
               <div key={device.id}>
                 <Hairline />
-                <div className="uw-diag-row">
-                  <Text
-                    variant="metadata"
-                    color="secondary"
-                    className="uw-diag-row__k"
-                  >
-                    {device.name}
-                  </Text>
-                  <Text variant="metadata" color="primary" numberOfLines={1}>
+                <DiagRow k={device.name}>
+                  <DiagV numberOfLines={1}>
                     {device.pairedLabel} · {device.lastSeenLabel}
-                  </Text>
-                  <Pressable
+                  </DiagV>
+                  <DiagBtn
+                    label={t('sync.unpair')}
+                    ariaLabel={t('sync.unpairA11y', { name: device.name })}
+                    color="warn"
                     onPress={
                       onUnpairDevice === undefined
                         ? undefined
                         : () => onUnpairDevice(device.id)
                     }
-                    disabled={onUnpairDevice === undefined}
-                    ariaLabel={t('sync.unpairA11y', { name: device.name })}
-                    className="uw-diag-row--action"
-                  >
-                    <Text variant="metadata" color="warn">
-                      {t('sync.unpair')}
-                    </Text>
-                  </Pressable>
-                </div>
+                  />
+                </DiagRow>
               </div>
             ))}
             {(onExportDelta !== undefined ||
               onImportDelta !== undefined) && (
               <>
                 <Hairline />
-                <div className="uw-diag-row">
-                  <Text
-                    variant="metadata"
-                    color="secondary"
-                    className="uw-diag-row__k"
-                  >
-                    {t('sync.panel.deltaExchange')}
-                  </Text>
+                <DiagRow k={t('sync.panel.deltaExchange')}>
                   {onExportDelta !== undefined && (
-                    <Pressable
+                    <DiagBtn
+                      label={t('sync.panel.copyDelta')}
                       onPress={onExportDelta}
-                      ariaLabel={t('sync.panel.copyDelta')}
-                      className="uw-diag-row--action"
-                    >
-                      <Text variant="metadata" color="primary">
-                        {t('sync.panel.copyDelta')}
-                      </Text>
-                    </Pressable>
+                    />
                   )}
                   {onImportDelta !== undefined && (
-                    <Pressable
+                    <DiagBtn
+                      label={t('sync.panel.pasteDelta')}
                       onPress={onImportDelta}
-                      ariaLabel={t('sync.panel.pasteDelta')}
-                      className="uw-diag-row--action"
-                    >
-                      <Text variant="metadata" color="primary">
-                        {t('sync.panel.pasteDelta')}
-                      </Text>
-                    </Pressable>
+                    />
                   )}
-                </div>
+                </DiagRow>
               </>
             )}
           </div>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Icon, IconButton, Pressable, Text } from './primitives.tsx';
+import { Icon, IconButton, Pressable, SegmentItem, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { globalKeyAction } from './keyboard.ts';
 import { useOverlayDismiss } from './stack.tsx';
@@ -15,12 +15,6 @@ import type { NavItemModel } from '@auqw/ui-shared';
  * styles.css) and the traffic lights sit over the stage column on
  * macOS.
  */
-
-export type WorldTabsProps = {
-  readonly tabs: readonly NavItemModel[];
-  readonly activeKey: string;
-  readonly onSelect: (key: string) => void;
-};
 
 /** Same key→glyph map the native navbar resolves items with. */
 const NAV_ICONS: Record<string, IconName> = {
@@ -37,47 +31,37 @@ const NAV_ICONS: Record<string, IconName> = {
  * the stage's mode segment (accentSoft tonal fill, accent glyph +
  * label), just sized down for the strip and carrying larger text.
  */
-export function WorldTabs({ tabs, activeKey, onSelect }: WorldTabsProps) {
+function WorldTabs({
+  tabs,
+  activeKey,
+  onSelect,
+}: {
+  readonly tabs: readonly NavItemModel[];
+  readonly activeKey: string;
+  readonly onSelect: (key: string) => void;
+}) {
   return (
     <nav className="uw-tabs" aria-label={t('nav.primaryA11y')}>
       <div className="uw-segment uw-segment--tabs">
-        {tabs.map((item) => {
-          const active = item.key === activeKey;
-          return (
-            <Pressable
-              key={item.key}
-              onPress={() => onSelect(item.key)}
-              ariaLabel={item.label}
-              ariaSelected={active}
-              className={`uw-segment__item${active ? ' uw-segment__item--on' : ''}`}
-            >
-              <Icon
-                name={NAV_ICONS[item.key] ?? 'note'}
-                size={13}
-                color={active ? 'var(--accent)' : 'var(--text-secondary)'}
-              />
-              <Text
-                variant="body"
-                color={active ? 'accent' : 'secondary'}
-                numberOfLines={1}
-                className={active ? 'uw-text--bold' : undefined}
-              >
-                {item.label}
-              </Text>
-            </Pressable>
-          );
-        })}
+        {tabs.map((item) => (
+          <SegmentItem
+            key={item.key}
+            icon={NAV_ICONS[item.key] ?? 'note'}
+            label={item.label}
+            active={item.key === activeKey}
+            onPress={() => onSelect(item.key)}
+            iconSize={13}
+            textVariant="body"
+            numberOfLines={1}
+          />
+        ))}
       </div>
     </nav>
   );
 }
 
-export type WorldMenuProps = {
-  readonly onOpenSettings: () => void;
-};
-
 /** The primary menu — today it only carries settings, GTK-parity. */
-export function WorldMenu({ onOpenSettings }: WorldMenuProps) {
+function WorldMenu({ onOpenSettings }: { readonly onOpenSettings: () => void }) {
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
   useOverlayDismiss(open ? close : undefined);

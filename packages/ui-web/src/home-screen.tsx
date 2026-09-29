@@ -1,5 +1,7 @@
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import { EmptyState } from './states.tsx';
+import { bindTo } from './track-row.tsx';
+import { progressOf } from './progress.tsx';
 import { formatClock, t } from '@auqw/ui-shared';
 import type { HomeModel, RailCardModel, ResumeModel } from '@auqw/ui-shared';
 
@@ -18,10 +20,7 @@ function ResumeCard({
   readonly resume: ResumeModel;
   readonly onResume?: (() => void) | undefined;
 }) {
-  const fraction =
-    resume.durationMs === null || resume.durationMs <= 0
-      ? 0
-      : Math.min(1, Math.max(0, resume.positionMs / resume.durationMs));
+  const fraction = progressOf(resume.positionMs, resume.durationMs);
   return (
     <Pressable
       onPress={onResume}
@@ -96,14 +95,15 @@ function Rail({
           {cards.map((card) => (
             <Pressable
               key={card.key}
-              onPress={
-                onPressCard === undefined ? undefined : () => onPressCard(card)
-              }
+              onPress={bindTo(onPressCard, card)}
               ariaLabel={
-              card.subtitle === null
-                ? card.title
-                : t('common.cardA11y', { title: card.title, subtitle: card.subtitle })
-            }
+                card.subtitle === null
+                  ? card.title
+                  : t('common.cardA11y', {
+                      title: card.title,
+                      subtitle: card.subtitle,
+                    })
+              }
               className="uw-rail__card"
             >
               <Artwork url={card.artworkUrl} size={136} />

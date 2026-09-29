@@ -117,8 +117,5 @@ export function globalKeyAction(
   key: string,
   target: EventTarget | null,
 ): GlobalKeyAction {
-  if (key === '/' && !isEditableTarget(target)) {
-    return 'focus-search';
-  }
-  return null;
+  return key === '/' && !isEditableTarget(target) ? 'focus-search' : null;
 }
