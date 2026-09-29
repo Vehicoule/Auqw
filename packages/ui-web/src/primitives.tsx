@@ -64,17 +64,13 @@ export function Text({
   ]
     .filter(Boolean)
     .join(' ');
-  const clampStyle: CSSProperties | undefined =
-    numberOfLines !== undefined && numberOfLines > 1
-      ? { WebkitLineClamp: numberOfLines }
-      : undefined;
   return (
     <Tag
       className={classes}
       style={
-        style === undefined && clampStyle === undefined
-          ? undefined
-          : { ...clampStyle, ...style }
+        numberOfLines !== undefined && numberOfLines > 1
+          ? { WebkitLineClamp: numberOfLines, ...style }
+          : style
       }
       title={title}
     >
@@ -141,7 +137,7 @@ export function Pressable({
       aria-selected={ariaSelected}
       aria-label={ariaLabel}
       style={style}
-      title={title ?? undefined}
+      title={title}
       tabIndex={off ? -1 : tabIndex}
       onFocus={onFocus}
       ref={ref}
@@ -253,42 +249,6 @@ export function Artwork({
   );
 }
 
-export type IconName =
-  | 'play'
-  | 'pause'
-  | 'next'
-  | 'previous'
-  | 'search'
-  | 'heart'
-  | 'heart-filled'
-  | 'queue'
-  | 'podium'
-  | 'settings'
-  | 'close'
-  | 'drag-handle'
-  | 'spinner'
-  | 'warn'
-  | 'download'
-  | 'list-plus'
-  | 'home'
-  | 'compass'
-  | 'library'
-  | 'note'
-  | 'repeat'
-  | 'repeat-one'
-  | 'shuffle'
-  | 'clock'
-  | 'lyrics'
-  | 'chevron-left'
-  | 'chevron-right'
-  | 'chevron-up'
-  | 'chevron-down'
-  | 'radio'
-  | 'check'
-  | 'menu'
-  | 'monitor'
-  | 'sidebar';
-
 type GlyphShape =
   | { readonly kind: 'path'; readonly d: string }
   | { readonly kind: 'circle'; readonly cx: number; readonly cy: number; readonly r: number }
@@ -329,7 +289,7 @@ function rr(
 // The shared icon vocabulary — same glyph table the native renderer
 // draws; 'monitor' is the desktop-only addition for the chrome's
 // paired-devices row.
-const GLYPHS: Record<IconName, Glyph> = {
+const GLYPHS = {
   play: { filled: true, shapes: [p('M7 4.5v15l13-7.5z')] },
   pause: {
     filled: true,
@@ -466,7 +426,9 @@ const GLYPHS: Record<IconName, Glyph> = {
     filled: false,
     shapes: [rr(3, 5, 18, 14, 1.5), p('M10 5v14')],
   },
-};
+} satisfies Record<string, Glyph>;
+
+export type IconName = keyof typeof GLYPHS;
 
 export type IconProps = {
   readonly name: IconName;
@@ -499,43 +461,34 @@ export function Icon({
       className={`uw-icon${className ? ` ${className}` : ''}`}
     >
       {glyph.shapes.map((shape, i) => {
+        const paintProps = {
+          stroke: useFill ? 'none' : paint,
+          strokeWidth: strokeWidth ?? 2,
+          fill: useFill ? paint : 'none',
+        };
         switch (shape.kind) {
           case 'path':
             return (
               <path
                 key={i}
+                {...paintProps}
                 d={shape.d}
-                stroke={useFill ? 'none' : paint}
-                strokeWidth={strokeWidth ?? 2}
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                fill={useFill ? paint : 'none'}
               />
             );
           case 'circle':
-            return (
-              <circle
-                key={i}
-                cx={shape.cx}
-                cy={shape.cy}
-                r={shape.r}
-                stroke={useFill ? 'none' : paint}
-                strokeWidth={strokeWidth ?? 2}
-                fill={useFill ? paint : 'none'}
-              />
-            );
+            return <circle key={i} {...paintProps} cx={shape.cx} cy={shape.cy} r={shape.r} />;
           case 'rect':
             return (
               <rect
                 key={i}
+                {...paintProps}
                 x={shape.x}
                 y={shape.y}
                 width={shape.w}
                 height={shape.h}
                 rx={shape.rx ?? 0}
-                stroke={useFill ? 'none' : paint}
-                strokeWidth={strokeWidth ?? 2}
-                fill={useFill ? paint : 'none'}
               />
             );
         }
