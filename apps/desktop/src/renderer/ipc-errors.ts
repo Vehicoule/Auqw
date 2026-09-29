@@ -1,5 +1,10 @@
-import type { AppError, ErrorKind } from '@auqw/application';
-import { appError, fromUnknown } from '@auqw/application';
+import type {
+  AppError,
+  CancellationSignal,
+  ErrorKind,
+  Result,
+} from '@auqw/application';
+import { appError, err, fromUnknown, ok, raced } from '@auqw/application';
 import type { ShellErrorKind } from '../shared/errors.ts';
 import { isShellError } from '../shared/errors.ts';
 
@@ -32,4 +37,29 @@ export function shellToAppError(thrown: unknown): AppError {
     return appError(SHELL_TO_APP[thrown.kind], thrown.message);
   }
   return fromUnknown(thrown);
+}
+
+/** The cancelled pre-check every observed IPC op starts with. */
+export function ifCancelled(
+  signal: CancellationSignal,
+): Result<never> | null {
+  return signal.cancelled
+    ? err(appError('cancelled', 'cancelled'))
+    : null;
+}
+
+/** Race a read-only IPC call against the caller's signal, settling
+ * typed — `cancelled` on the race loss, the shell map on rejection. */
+export async function settleIpc<T>(
+  call: Promise<T>,
+  signal: CancellationSignal,
+): Promise<Result<T>> {
+  const outcome = await raced(call, signal);
+  if (outcome.t === 'cancelled') {
+    return err(appError('cancelled', 'cancelled'));
+  }
+  if (outcome.t === 'failed') {
+    return err(shellToAppError(outcome.thrown));
+  }
+  return ok(outcome.value);
 }
