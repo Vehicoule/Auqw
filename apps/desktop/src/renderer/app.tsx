@@ -598,6 +598,20 @@ function Main({
     [online, controller],
   );
 
+  // Bytes on disk — a stored download or a scanned local file.
+  // Ownership is NOT the local-playback probe: the probe answers
+  // whether the web player can attach the bytes (today it cannot),
+  // while ownership answers whether 'download missing' may skip the
+  // row — asking the first question with the second probe would
+  // re-request stored tracks and delete their files on a changed
+  // mapping.
+  const isOwned = useCallback(
+    (recordingId: string): boolean =>
+      controller.downloads.fileFor(recordingId) !== null ||
+      (controller.local()?.uriMap().has(recordingId) ?? false),
+    [controller],
+  );
+
   // One chip map for every row surface — off `list()` so a
   // mid-delete 'removing' row reads busy, not failed-or-hidden.
   const chipsByRecording = useMemo(
@@ -2682,10 +2696,7 @@ function Main({
       // with a changed mapping would delete its stored file first —
       // 'download missing' must never cost offline playback.
       const requests = model.entries
-        .filter(
-          (entry) =>
-            controller.localPlaybackFor(entry.recordingId) === null,
-        )
+        .filter((entry) => !isOwned(entry.recordingId))
         .flatMap((entry) => {
           const sourceRef = downloadRefFor(entry.recordingId);
           return sourceRef === null
@@ -2696,14 +2707,11 @@ function Main({
       // local file both count; only-downloadable entries gate it.
       const allStored =
         model.entries.length > 0 &&
-        model.entries.every(
-          (entry) =>
-            controller.localPlaybackFor(entry.recordingId) !== null,
-        );
+        model.entries.every((entry) => isOwned(entry.recordingId));
       const anyTracked = model.entries.some(
         (entry) =>
           controller.downloads.recordFor(entry.recordingId) !== null ||
-          controller.localPlaybackFor(entry.recordingId) !== null,
+          isOwned(entry.recordingId),
       );
       return {
         state: allStored
