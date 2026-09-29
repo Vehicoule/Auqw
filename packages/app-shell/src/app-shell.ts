@@ -341,9 +341,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const [toast, setToast] = useState<string | null>(null);
   useEffect(() => {
     setToastSink(setToast);
-    return () => {
-      setToastSink(null);
-    };
+    return () => setToastSink(null);
   }, []);
   useEffect(() => {
     if (toast === null) {
@@ -408,9 +406,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     };
   }, [controller, refreshUsage, refreshDownloads]);
 
-  const refreshLocal = useCallback(() => {
-    setLocalTick((t) => t + 1);
-  }, []);
+  const refreshLocal = useCallback(() => setLocalTick((t) => t + 1), []);
 
   // ---- playability gates -------------------------------------------
   // Bytes on disk — a stored download or a scanned local file.
@@ -501,14 +497,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // usage again once removal settles so Settings doesn't display the
   // freed bytes until the next event.
   const removeDownload = useCallback(
-    (downloadId: string) => {
+    (downloadId: string) =>
       void controller.downloads
         .remove(downloadId, freshSignal())
         .then((r) => {
           reportResult('action.removeDownload', r);
           refreshUsage();
-        });
-    },
+        }),
     [controller, refreshUsage],
   );
 
@@ -2693,11 +2688,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // Playlist overlay mutations — identical session calls modulo the
   // platform's haptic on delete (ports.haptic 'warning' pre-fires).
   const renamePlaylist = useCallback(
-    (playlistId: string, name: string) => {
+    (playlistId: string, name: string) =>
       void session
         .renamePlaylist(playlistId, name)
-        .then(reporter('action.renamePlaylist'));
-    },
+        .then(reporter('action.renamePlaylist')),
     [session],
   );
   const deletePlaylist = useCallback(
@@ -2710,11 +2704,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [session, ports.haptic],
   );
   const removePlaylistEntry = useCallback(
-    (entryId: string) => {
+    (entryId: string) =>
       void session
         .removePlaylistEntry(entryId)
-        .then(reporter('action.removeTrack'));
-    },
+        .then(reporter('action.removeTrack')),
     [session],
   );
   const movePlaylistEntry = useCallback(
