@@ -3,7 +3,7 @@ import type { QueueSnapshot } from './queue/queue-engine.ts';
 
 export type EntityKind = 'album' | 'artist';
 
-export type SourceRefKind = 'track' | EntityKind;
+type SourceRefKind = 'track' | EntityKind;
 
 export type SourceRef = { provider: string; kind: SourceRefKind; id: string };
 
@@ -87,7 +87,7 @@ export type Recording = {
   provenance: RecordingProvenance;
 };
 
-export type RecordingProvenance = 'provider' | 'local';
+type RecordingProvenance = 'provider' | 'local';
 
 /** The built-in local-files provider id — never routed to a plugin. */
 export const LOCAL_PROVIDER = 'local';
@@ -161,41 +161,20 @@ export type Settings = {
 };
 
 const VERSION_LABELS: ReadonlySet<string> = new Set([
-  'live',
-  'remix',
-  'remaster',
-  'clean',
-  'explicit',
-  'alternate',
+  'live', 'remix', 'remaster', 'clean', 'explicit', 'alternate',
 ]);
-
 const MAPPING_STATUSES: ReadonlySet<string> = new Set([
-  'automatic',
-  'user-confirmed',
-  'rejected',
+  'automatic', 'user-confirmed', 'rejected',
 ]);
-
-const SOURCE_REF_KINDS: ReadonlySet<string> = new Set([
-  'track',
-  'album',
-  'artist',
-]);
-
+const SOURCE_REF_KINDS: ReadonlySet<string> = new Set(['track', 'album', 'artist']);
 const ENTITY_KINDS: ReadonlySet<string> = new Set(['album', 'artist']);
-
-const RECORDING_PROVENANCES: ReadonlySet<string> = new Set([
-  'provider',
-  'local',
-]);
-
-const LIKE_ENTITY_KINDS: ReadonlySet<string> = new Set([
-  'track',
-  'album',
-  'artist',
-]);
+const RECORDING_PROVENANCES: ReadonlySet<string> = new Set(['provider', 'local']);
+const LIKE_ENTITY_KINDS: ReadonlySet<string> = SOURCE_REF_KINDS;
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return (
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+  );
 }
 
 export function hasExactKeys(
@@ -203,7 +182,9 @@ export function hasExactKeys(
   keys: readonly string[],
 ) {
   const own = Object.keys(value);
-  return own.length === keys.length && keys.every((k) => Object.hasOwn(value, k));
+  return (
+    own.length === keys.length && keys.every((k) => Object.hasOwn(value, k))
+  );
 }
 
 /**
@@ -235,9 +216,7 @@ export function isOptString(
 
 export function isSafeNonNegative(value: unknown): value is number {
   return (
-    typeof value === 'number' &&
-    Number.isSafeInteger(value) &&
-    value >= 0
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
   );
 }
 
@@ -396,6 +375,31 @@ export function isSourceMapping(value: unknown): value is SourceMapping {
   );
 }
 
+function isReleaseYear(value: unknown): value is number | null {
+  return (
+    value === null ||
+    (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+  );
+}
+
+function isArtworkList(value: unknown): value is readonly ArtworkRef[] {
+  return Array.isArray(value) && value.length <= 8 && value.every(isArtworkRef);
+}
+
+/** The audio-metadata fields TrackMetadata and Recording agree on. */
+function hasAudioFields(value: Record<string, unknown>): boolean {
+  return (
+    isString(value['title'], 512) &&
+    isOptString(value['artist'], 512) &&
+    isOptString(value['album'], 512) &&
+    isOptSafeNonNegative(value['durationMs']) &&
+    isReleaseYear(value['releaseYear']) &&
+    isArtworkList(value['artwork']) &&
+    (value['explicit'] === null || typeof value['explicit'] === 'boolean') &&
+    isOptString(value['genre'], 512)
+  );
+}
+
 export function isTrackMetadata(value: unknown): value is TrackMetadata {
   return (
     isRecord(value) &&
@@ -416,19 +420,7 @@ export function isTrackMetadata(value: unknown): value is TrackMetadata {
       ['artistRef', 'albumRef', 'isrc'],
     ) &&
     isTrackRef(value['sourceRef']) &&
-    isString(value['title'], 512) &&
-    isOptString(value['artist'], 512) &&
-    isOptString(value['album'], 512) &&
-    isOptSafeNonNegative(value['durationMs']) &&
-    (value['releaseYear'] === null ||
-      (typeof value['releaseYear'] === 'number' &&
-        Number.isSafeInteger(value['releaseYear']) &&
-        value['releaseYear'] >= 0)) &&
-    Array.isArray(value['artwork']) &&
-    value['artwork'].length <= 8 &&
-    value['artwork'].every(isArtworkRef) &&
-    (value['explicit'] === null || typeof value['explicit'] === 'boolean') &&
-    isOptString(value['genre'], 512) &&
+    hasAudioFields(value) &&
     isStorefront(value['storefront']) &&
     (value['artistRef'] === undefined ||
       value['artistRef'] === null ||
@@ -473,19 +465,7 @@ export function isRecording(value: unknown): value is Recording {
       'provenance',
     ]) &&
     isString(value['id'], 64) &&
-    isString(value['title'], 512) &&
-    isOptString(value['artist'], 512) &&
-    isOptString(value['album'], 512) &&
-    isOptSafeNonNegative(value['durationMs']) &&
-    (value['releaseYear'] === null ||
-      (typeof value['releaseYear'] === 'number' &&
-        Number.isSafeInteger(value['releaseYear']) &&
-        value['releaseYear'] >= 0)) &&
-    Array.isArray(value['artwork']) &&
-    value['artwork'].length <= 8 &&
-    value['artwork'].every(isArtworkRef) &&
-    (value['explicit'] === null || typeof value['explicit'] === 'boolean') &&
-    isOptString(value['genre'], 512) &&
+    hasAudioFields(value) &&
     isOptString(value['isrc'], 64) &&
     isVersionLabelArray(value['versionLabels']) &&
     Array.isArray(value['sourceRefs']) &&
@@ -623,16 +603,11 @@ export function isQueueSnapshot(value: unknown): value is QueueSnapshot {
       positionMs === 0 && mode === 'stopped' && blockedError === undefined
     );
   }
-  if (!ids.has(currentOccurrenceId)) {
-    return false;
-  }
-  if (mode === 'stopped') {
-    return false;
-  }
-  if (blockedError !== undefined && mode !== 'paused') {
-    return false;
-  }
-  return true;
+  return (
+    ids.has(currentOccurrenceId) &&
+    mode !== 'stopped' &&
+    (blockedError === undefined || mode === 'paused')
+  );
 }
 
 export function recordingFromMetadata(
@@ -791,7 +766,7 @@ const DOWNLOAD_STATES: ReadonlySet<string> = new Set([
   'removing',
 ]);
 
-export function isDownloadState(value: unknown): value is DownloadState {
+function isDownloadState(value: unknown): value is DownloadState {
   return typeof value === 'string' && DOWNLOAD_STATES.has(value);
 }
 
