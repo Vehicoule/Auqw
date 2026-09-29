@@ -87,6 +87,13 @@ export function createExpoSyncDiscovery(
       >();
       const validFp = (v: unknown): string | null =>
         typeof v === 'string' && /^[0-9a-f]{64}$/.test(v) ? v : null;
+      const validPort = (v: unknown): number | undefined =>
+        typeof v === 'number' &&
+        Number.isSafeInteger(v) &&
+        v >= 1 &&
+        v <= 65_535
+          ? v
+          : undefined;
       // Retract rows of one generation: an fp mismatch disqualifies
       // outright, then a known port scopes the match to that
       // generation — a stale goodbye for a dead generation must not
@@ -130,12 +137,7 @@ export function createExpoSyncDiscovery(
               (typeof event.host === 'string' ? [event.host] : []),
           );
           const host = candidates[0] ?? null;
-          const port =
-            Number.isSafeInteger(event.port) &&
-            (event.port ?? 0) >= 1 &&
-            (event.port ?? 0) <= 65_535
-              ? (event.port as number)
-              : undefined;
+          const port = validPort(event.port);
           // A PRESENT-but-malformed `fp` poisons the pin the pair
           // would dial with — drop the advert rather than serve an
           // unpinned tap-target. NSD reports `fp: null` for a
@@ -152,13 +154,13 @@ export function createExpoSyncDiscovery(
             event.name.length > 128 ||
             malformedFp
           ) {
-            retract(
-              event.name,
-              fp,
-              Number.isSafeInteger(event.port)
-                ? (event.port as number)
-                : undefined,
-            );
+            // Retract by generation identity: a pinned advert matches
+            // its rows by fp alone — a failing port (0, out-of-range,
+            // or just a different listener port) must not scope the
+            // retract or the emitted row stays dialable as a ghost.
+            // An unpinned advert's identity IS its port, so the
+            // validated port still scopes that match.
+            retract(event.name, fp, fp === null ? port : undefined);
             return;
           }
           // The port belongs in the key — a re-announced service on
@@ -198,13 +200,9 @@ export function createExpoSyncDiscovery(
           // so a goodbye retracts just that generation — a name-only
           // record still retracts every row under the name (a surviving
           // same-named neighbor re-announces on its next PTR refresh).
-          retract(
-            event.name,
-            validFp(event.fp),
-            Number.isSafeInteger(event.port)
-              ? (event.port as number)
-              : undefined,
-          );
+          // A junk port reports no usable generation, so the fp (or
+          // the name alone) still carries the match.
+          retract(event.name, validFp(event.fp), validPort(event.port));
         } else if (event.type === 'stopped') {
           for (const entries of emitted.values()) {
             for (const key of entries.keys()) {

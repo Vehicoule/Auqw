@@ -192,8 +192,12 @@ export async function createExpoSync(
         ? engine.value
         : {
             ...engine.value,
-            applyDelta: async (doc, signal) => {
-              const applied = await engine.value.applyDelta(doc, signal);
+            applyDelta: async (doc, senderDeviceId, signal) => {
+              const applied = await engine.value.applyDelta(
+                doc,
+                senderDeviceId,
+                signal,
+              );
               if (applied.ok) {
                 deps.onApplied?.(applied.value);
               }

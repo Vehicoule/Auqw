@@ -94,6 +94,18 @@ export async function run(): Promise<void> {
     const pointer = (input: InputEl, type: string): void => {
       input.dispatchEvent(new win.MouseEvent(type, { bubbles: true }));
     };
+    // jsdom has no PointerEvent — pointerId rides along on the
+    // dispatched MouseEvent so multi-pointer cases can tell the
+    // contacts apart.
+    const pointerId = (
+      input: InputEl,
+      type: string,
+      id: number,
+    ): void => {
+      const event = new win.MouseEvent(type, { bubbles: true });
+      Object.defineProperty(event, 'pointerId', { value: id });
+      input.dispatchEvent(event);
+    };
     const key = (input: InputEl, key: string): void => {
       input.dispatchEvent(
         new win.KeyboardEvent('keydown', { key, bubbles: true }),
@@ -546,6 +558,244 @@ export async function run(): Promise<void> {
       });
       assertEqual(seeks.length, 1, 'a fractional drag still commits once');
       assertEqual(seeks[0], 90_001, 'the committed ms is an integer');
+      await act(async () => {
+        root.unmount();
+      });
+    }
+
+    // A second contact landing mid-drag never takes over: the
+    // owning pointer's release commits once, and the second
+    // pointer's earlier release seeks nothing — either lift order.
+    {
+      const container = win.document.createElement('div');
+      win.document.body.appendChild(container);
+      const root = createRoot(container);
+      const seeks: number[] = [];
+      await act(async () => {
+        root.render(
+          createElement(WaveformSeek, {
+            positionMs: 10_000,
+            durationMs: 180_000,
+            labels: false,
+            onSeek: (ms) => seeks.push(ms),
+          }),
+        );
+      });
+      const input = container.querySelector('input');
+      assert(input !== null, 'the range input rendered');
+      await act(async () => {
+        pointerId(input, 'pointerdown', 1);
+      });
+      await act(async () => {
+        slide(input, 60_000);
+      });
+      // A second finger lands on the bar while the first drags.
+      await act(async () => {
+        pointerId(input, 'pointerdown', 2);
+      });
+      await act(async () => {
+        slide(input, 90_000);
+      });
+      // The second contact releases first — a dead pointer's
+      // release drains, it must not commit mid-gesture.
+      await act(async () => {
+        pointerId(input, 'pointerup', 2);
+      });
+      assertEqual(
+        seeks.length,
+        0,
+        'the second pointer’s release commits nothing',
+      );
+      // The owner keeps the gesture — its release commits once at
+      // the release point, exactly like a one-finger drag.
+      await act(async () => {
+        slide(input, 120_000);
+      });
+      await act(async () => {
+        pointerId(input, 'pointerup', 1);
+      });
+      assertEqual(seeks.length, 1, 'the owning release commits once');
+      assertEqual(seeks[0], 120_000, 'the commit lands at release');
+      await act(async () => {
+        root.unmount();
+      });
+    }
+
+    // Lift order reversed: the owner commits on release and the
+    // still-held second pointer — already dead — can't turn its
+    // stray `input` events into a seek storm before it lifts.
+    {
+      const container = win.document.createElement('div');
+      win.document.body.appendChild(container);
+      const root = createRoot(container);
+      const seeks: number[] = [];
+      await act(async () => {
+        root.render(
+          createElement(WaveformSeek, {
+            positionMs: 10_000,
+            durationMs: 180_000,
+            labels: false,
+            onSeek: (ms) => seeks.push(ms),
+          }),
+        );
+      });
+      const input = container.querySelector('input');
+      assert(input !== null, 'the range input rendered');
+      await act(async () => {
+        pointerId(input, 'pointerdown', 1);
+      });
+      await act(async () => {
+        slide(input, 90_000);
+      });
+      await act(async () => {
+        pointerId(input, 'pointerdown', 2);
+      });
+      // The owner releases first — one commit at its point.
+      await act(async () => {
+        pointerId(input, 'pointerup', 1);
+      });
+      assertEqual(seeks.length, 1, 'the owning release commits once');
+      assertEqual(seeks[0], 90_000, 'the commit lands at release');
+      // The dead second pointer is still held: its `input` events
+      // must stay ignored — not re-commit as fake keyboard seeks.
+      await act(async () => {
+        slide(input, 30_000);
+      });
+      await act(async () => {
+        slide(input, 45_000);
+      });
+      assertEqual(
+        seeks.length,
+        1,
+        'a held dead pointer’s stray input commits nothing',
+      );
+      await act(async () => {
+        pointerId(input, 'pointerup', 2);
+      });
+      assertEqual(
+        seeks.length,
+        1,
+        'the dead pointer’s release drains without a seek',
+      );
+      // Freed: a plain commit works again.
+      await act(async () => {
+        slide(input, 55_000);
+      });
+      assertEqual(
+        seeks.length,
+        2,
+        'input commits once the dead pointer released',
+      );
+      await act(async () => {
+        root.unmount();
+      });
+    }
+
+    // A dead-pointer tombstone whose release never reached the
+    // document drains when the id comes back live: a missed
+    // pointerup (stopped propagation mid-bubble) must not swallow
+    // the next gesture's release or gate keyboard input forever.
+    {
+      const container = win.document.createElement('div');
+      win.document.body.appendChild(container);
+      const root = createRoot(container);
+      const seeks: number[] = [];
+      const render = (durationMs: number | null) =>
+        createElement(WaveformSeek, {
+          positionMs: 10_000,
+          durationMs,
+          labels: false,
+          onSeek: (ms) => seeks.push(ms),
+        });
+      await act(async () => {
+        root.render(render(180_000));
+      });
+      const input = container.querySelector('input');
+      assert(input !== null, 'the range input rendered');
+      await act(async () => {
+        pointerId(input, 'pointerdown', 1);
+      });
+      await act(async () => {
+        slide(input, 90_000);
+      });
+      // The disable kills the gesture and tombstones the pointer —
+      // and its release never arrives (as if stopped before
+      // document). The id lingers as a dead pointer.
+      await act(async () => {
+        root.render(render(null));
+      });
+      await act(async () => {
+        root.render(render(180_000));
+      });
+      // A fresh pointerdown reusing the tombstoned id — the browser
+      // recycles ids — must drain it and own a normal gesture:
+      // down, drag, release, commit.
+      await act(async () => {
+        pointerId(input, 'pointerdown', 1);
+      });
+      await act(async () => {
+        slide(input, 45_000);
+      });
+      await act(async () => {
+        pointerId(input, 'pointerup', 1);
+      });
+      assertEqual(
+        seeks.length,
+        1,
+        'a recycled id’s release still commits — the stale tombstone drained',
+      );
+      assertEqual(seeks[0], 45_000, 'the commit lands at release');
+      await act(async () => {
+        root.unmount();
+      });
+    }
+
+    // The off-control path: a pointerdown anywhere else in the page
+    // on the tombstoned id drains it too — freeing keyboard input
+    // even when the missed release left the set gated.
+    {
+      const container = win.document.createElement('div');
+      win.document.body.appendChild(container);
+      const root = createRoot(container);
+      const seeks: number[] = [];
+      const render = (durationMs: number | null) =>
+        createElement(WaveformSeek, {
+          positionMs: 10_000,
+          durationMs,
+          labels: false,
+          onSeek: (ms) => seeks.push(ms),
+        });
+      await act(async () => {
+        root.render(render(180_000));
+      });
+      const input = container.querySelector('input');
+      assert(input !== null, 'the range input rendered');
+      await act(async () => {
+        pointerId(input, 'pointerdown', 1);
+      });
+      await act(async () => {
+        root.render(render(null));
+      });
+      await act(async () => {
+        root.render(render(180_000));
+      });
+      // The dead pointer's release was swallowed; a recycled-id
+      // pointerdown landing OFF the control still proves the id is
+      // a fresh gesture — keyboard commits free again.
+      const down = new win.MouseEvent('pointerdown', { bubbles: true });
+      Object.defineProperty(down, 'pointerId', { value: 1 });
+      await act(async () => {
+        win.document.body.dispatchEvent(down);
+      });
+      await act(async () => {
+        key(input, 'ArrowRight');
+      });
+      assertEqual(
+        seeks.length,
+        1,
+        'an off-control down drains the tombstone — keys commit again',
+      );
+      assertEqual(seeks[0], 20_000, 'ArrowRight steps forward ten seconds');
       await act(async () => {
         root.unmount();
       });

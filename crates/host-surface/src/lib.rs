@@ -292,10 +292,15 @@ struct LiveRequest {
 /// once the `Prepared` outcome is on the wire: `cancel` releases a
 /// delivered handle (the app cancelled an unattached session) but
 /// waits out a mid-delivery one — the `Prepared` never names a
-/// session that died before it arrived.
+/// session that died before it arrived. `generation` mirrors
+/// `LiveRequest`'s: a dead slot can be pruned and the id re-admitted
+/// while a stale delivery is still unwinding, so post-delivery
+/// bookkeeping (the `delivered` flip, the adopt path's liveness
+/// removal) touches only the slot its own request committed.
 struct PreparedSlot {
     handle: String,
     delivered: bool,
+    generation: u64,
 }
 
 /// The held result of `begin_admission`: the duplicate checks ran and
@@ -1947,6 +1952,7 @@ mod tests {
                         PreparedSlot {
                             handle: warm.handle.clone(),
                             delivered: true,
+                            generation: 0,
                         },
                     );
                 }
@@ -2000,5 +2006,185 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The adoption's commit→wire gap: the adopted session stays
+    /// unattached until the listener opens it, so a release landing
+    /// after the slot commit but before the spawned delivery must not
+    /// hand out a dead handle. The delivery re-checks `is_live`
+    /// under the `prepared_handles` lock — the same `dead` guard the
+    /// invoke path runs — and reports `not-found` instead.
+    #[test]
+    fn prepare_adoption_dead_before_delivery_reports_not_found() {
+        let (host, reg, _dir) = stream_host("dead-gap");
+        let id = load_echo(&host);
+        let warm = mint_warm(&reg, &id, "vid");
+        // Park both runtime workers so the delivery spawn queues —
+        // the release below then lands deterministically inside the
+        // commit→wire gap the re-check exists for.
+        let occupied = Arc::new(std::sync::Barrier::new(3));
+        let (gate1_tx, gate1_rx) = std::sync::mpsc::channel::<()>();
+        let (gate2_tx, gate2_rx) = std::sync::mpsc::channel::<()>();
+        {
+            let occupied = Arc::clone(&occupied);
+            host.runtime.spawn(async move {
+                occupied.wait();
+                let _ = gate1_rx.recv();
+            });
+        }
+        {
+            let occupied = Arc::clone(&occupied);
+            host.runtime.spawn(async move {
+                occupied.wait();
+                let _ = gate2_rx.recv();
+            });
+        }
+        occupied.wait();
+        let (tx, rx) = deliver_chan();
+        match host.start_prepare(id, "vid".into(), "req-gap".into(), move |rid, o| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send((rid, o));
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start: {e}"),
+        }
+        // Still unattached, so `release` ends it inside the gap.
+        match reg.release(&warm.handle) {
+            Ok(()) => {}
+            Err(e) => panic!("release: {e}"),
+        }
+        drop(gate1_tx);
+        drop(gate2_tx);
+        let (_rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        match outcome {
+            PrepareOutcome::Failed { kind, .. } => {
+                assert_eq!(
+                    kind, "not-found",
+                    "a dead-on-arrival session must not deliver Prepared"
+                );
+            }
+            PrepareOutcome::Prepared { stream, .. } => {
+                panic!("delivered a dead handle: {}", stream.handle)
+            }
+        }
+        assert!(
+            host.prepared_handles
+                .lock()
+                .map(|m| !m.contains_key("req-gap"))
+                .unwrap_or(false),
+            "the dead session's ownership slot is removed"
+        );
+    }
+
+    /// A stale delivery's post-wire flip must touch only the slot its
+    /// own request committed: once a dead slot is pruned and the id
+    /// re-admitted, the new generation's `delivered` is flipped by ITS
+    /// delivery — a stale flip would let a cancel tear down a session
+    /// whose `Prepared` is still on the wire.
+    #[test]
+    fn stale_delivery_flip_cannot_mark_a_new_generation_slot() {
+        let (host, reg, _dir) = stream_host("gen-flip");
+        let id = load_echo(&host);
+        let warm1 = mint_warm(&reg, &id, "vid");
+        // Gen A adopts and parks inside `deliver` — its flip is still
+        // pending while the slot is pruned and re-committed.
+        let (tx_a, rx_a) = deliver_chan();
+        let (gate_a_tx, gate_a_rx) = std::sync::mpsc::channel::<()>();
+        let (done_a_tx, done_a_rx) = std::sync::mpsc::channel::<()>();
+        match host.start_prepare(id.clone(), "vid".into(), "req".into(), move |rid, o| {
+            let tx = tx_a.clone();
+            async move {
+                let _ = tx.send((rid, o));
+                let _ = gate_a_rx.recv();
+                let _ = done_a_tx.send(());
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start A: {e}"),
+        }
+        let (_, outcome_a) = match rx_a.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("outcome A: {e}"),
+        };
+        match outcome_a {
+            PrepareOutcome::Prepared { stream, .. } => {
+                assert_eq!(stream.handle, warm1.handle)
+            }
+            PrepareOutcome::Failed { kind, .. } => {
+                panic!("gen A must adopt the live warm: {kind}")
+            }
+        }
+        // Kill the adopted session, then re-admit the same
+        // caller-minted id: admission prunes A's dead slot and commits
+        // generation B's against a fresh warm.
+        match reg.release(&warm1.handle) {
+            Ok(()) => {}
+            Err(e) => panic!("release: {e}"),
+        }
+        let warm2 = mint_warm(&reg, &id, "vid");
+        let (tx_b, rx_b) = deliver_chan();
+        let (gate_b_tx, gate_b_rx) = std::sync::mpsc::channel::<()>();
+        match host.start_prepare(id.clone(), "vid".into(), "req".into(), move |rid, o| {
+            let tx = tx_b.clone();
+            async move {
+                let _ = tx.send((rid, o));
+                let _ = gate_b_rx.recv();
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start B: {e}"),
+        }
+        let (_, outcome_b) = match rx_b.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("outcome B: {e}"),
+        };
+        match outcome_b {
+            PrepareOutcome::Prepared { stream, .. } => {
+                assert_eq!(stream.handle, warm2.handle)
+            }
+            PrepareOutcome::Failed { kind, .. } => {
+                panic!("gen B must adopt the fresh warm: {kind}")
+            }
+        }
+        // Let gen A's stale delivery finish — its flip must not mark
+        // B's slot delivered.
+        drop(gate_a_tx);
+        match done_a_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(()) => {}
+            Err(e) => panic!("gen A delivery: {e}"),
+        }
+        // A's ticket may still be unwinding past the flip — wait for
+        // it to leave the window so the observed state is final.
+        let mut guard = 0;
+        while host
+            .prepared_delivery
+            .in_flight
+            .lock()
+            .map(|m| m.get("req").copied().unwrap_or(0))
+            .unwrap_or(0)
+            > 1
+        {
+            guard += 1;
+            if guard > 200 {
+                panic!("gen A's delivery ticket never dropped");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let slot = host
+            .prepared_handles
+            .lock()
+            .ok()
+            .and_then(|m| m.get("req").map(|s| (s.handle.clone(), s.delivered)));
+        match slot {
+            Some((h, false)) => assert_eq!(h, warm2.handle),
+            Some((_, true)) => panic!("stale delivery flipped the new generation's slot"),
+            None => panic!("the new generation's slot is gone"),
+        }
+        drop(gate_b_tx);
     }
 }

@@ -1418,6 +1418,7 @@ function Main({
         for (const doc of docs) {
           const applied = await engine.applyDelta(
             doc,
+            undefined,
             new CancellationSource().signal,
           );
           if (!applied.ok) {

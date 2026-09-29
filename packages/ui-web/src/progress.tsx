@@ -154,10 +154,12 @@ function useScrubCommit(
   const [heldMs, setHeldMs] = useState<number | null>(null);
   // Pointer identity tracking: `activePointer` is the pointer id
   // driving the drag; `deadPointers` are ids whose gesture died
-  // mid-press (track flip, disable) — their `input` events stay
-  // ignored until their real release, observed at the document
-  // where pointerup always bubbles, so they can never commit as a
-  // fake keyboard seek.
+  // mid-press (track flip, disable, a second contact that never
+  // owned one) — their `input` events stay ignored until their
+  // real release, observed at the document where pointerup always
+  // bubbles, so they can never commit as a fake keyboard seek. A
+  // tombstone also drains when a live pointerdown arrives with the
+  // same id: a recycled id proves the missed release.
   const pointerPhase = useRef<'none' | 'drag'>('none');
   const activePointer = useRef<number | null>(null);
   const deadPointers = useRef<Set<number>>(new Set());
@@ -251,9 +253,21 @@ function useScrubCommit(
         clearDrag();
       }
     };
+    // Capture phase so it runs before the control's own down
+    // handler: a pointerdown on a tombstoned id — anywhere in the
+    // page — means that id's release never reached the document
+    // (a stopped propagation mid-bubble) and the browser recycled
+    // it for a fresh gesture. Draining here keeps the tombstone
+    // from swallowing the new gesture's release or gating
+    // keyboard input until the id happens to be reused.
+    const down = (event: PointerEvent) => {
+      deadPointers.current.delete(event.pointerId);
+    };
+    document.addEventListener('pointerdown', down, true);
     document.addEventListener('pointerup', release);
     document.addEventListener('pointercancel', release);
     return () => {
+      document.removeEventListener('pointerdown', down, true);
       document.removeEventListener('pointerup', release);
       document.removeEventListener('pointercancel', release);
     };
@@ -291,12 +305,25 @@ function useScrubCommit(
 
   const onScrubStart = useCallback(
     (pointerId: number) => {
-      if (enabled) {
-        pointerPhase.current = 'drag';
-        activePointer.current = pointerId;
-        scrubRef.current = null;
-        gestureKey.current = trackKeyRef.current;
+      if (!enabled) {
+        return;
       }
+      deadPointers.current.delete(pointerId);
+      if (
+        pointerPhase.current === 'drag' &&
+        activePointer.current !== pointerId
+      ) {
+        // A second contact never takes over a live drag — mark it
+        // dead so its release drains instead of committing
+        // mid-gesture, and so a still-held second finger can't
+        // commit per `input` event after the owner releases.
+        deadPointers.current.add(pointerId);
+        return;
+      }
+      pointerPhase.current = 'drag';
+      activePointer.current = pointerId;
+      scrubRef.current = null;
+      gestureKey.current = trackKeyRef.current;
     },
     [enabled],
   );

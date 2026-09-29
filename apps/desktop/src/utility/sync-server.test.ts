@@ -224,9 +224,10 @@ function writeName(recordId: string, value: string) {
 
 /** Engine double: echoes since and records applied deltas. */
 function createEchoEngine(): SyncEnginePort & {
-  applied: { delta: unknown; deviceId: string }[];
+  applied: { delta: unknown; deviceId: string | undefined }[];
 } {
-  const applied: { delta: unknown; deviceId: string }[] = [];
+  const applied: { delta: unknown; deviceId: string | undefined }[] =
+    [];
   return {
     applied,
     exportDelta(since: string): Promise<Result<unknown>> {
@@ -234,7 +235,7 @@ function createEchoEngine(): SyncEnginePort & {
     },
     applyDelta(
       delta: unknown,
-      deviceId: string,
+      deviceId?: string,
     ): Promise<Result<unknown>> {
       applied.push({ delta, deviceId });
       return Promise.resolve(ok({ applied: true }));

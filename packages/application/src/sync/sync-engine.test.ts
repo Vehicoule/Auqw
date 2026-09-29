@@ -70,9 +70,11 @@ async function mustWrite(
 async function mustApply(
   engine: SyncEngine,
   doc: SyncDelta,
+  senderDeviceId?: string,
 ): Promise<ApplyResult> {
   const applied = await engine.applyDelta(
     JSON.parse(JSON.stringify(doc)) as unknown,
+    senderDeviceId,
   );
   assert(applied.ok, `applyDelta failed: ${JSON.stringify(doc).slice(0, 200)}`);
   return applied.value;
@@ -2723,6 +2725,29 @@ async function peerMarkSenderNamedProto(): Promise<void> {
   assertDeepEqual(a.store.storedPeerMarks['__proto__'], { a: 1 });
 }
 
+async function forgedSenderDeviceIdRejected(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  // The doc's sender stamp is the sender's claim; the transport id
+  // is what it authenticated as. A claim naming another device is a
+  // forgery — the whole doc fails before any mark row folds, so an
+  // inflated cursor can never reach the compaction floor.
+  const claim = { ...delta([], 'b'), cursor: { a: 999 } };
+  const forged = await a.engine.applyDelta(
+    JSON.parse(JSON.stringify(claim)) as unknown,
+    'mallory',
+  );
+  assert(!forged.ok, 'a stamped id ≠ the session id must fail');
+  if (!forged.ok) {
+    assertEqual(forged.error.kind, 'invalid-message');
+  }
+  assert(a.store.storedPeerMarks['b'] === undefined);
+  assert(a.store.storedPeerMarks['mallory'] === undefined);
+  // The same doc under its own id folds — peer marks key on the
+  // authenticated sender.
+  await mustApply(a.engine, claim, 'b');
+  assertDeepEqual(a.store.storedPeerMarks['b'], { a: 999 });
+}
+
 async function logCompaction(): Promise<void> {
   const a = await makeEngine('a', 1_000);
   const b = await makeEngine('b', 1_000);
@@ -2964,5 +2989,6 @@ export async function run(): Promise<void> {
   await livePeerRegressionReplacesRow();
   await peerMarkClaimOnlyDeltaNoops();
   await peerMarkSenderNamedProto();
+  await forgedSenderDeviceIdRejected();
   await propertyHarness();
 }

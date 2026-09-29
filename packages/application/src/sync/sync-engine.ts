@@ -591,10 +591,16 @@ export interface SyncEngine {
    * Validates a remote delta, appends its new entries, and merges.
    * Entries apply in canonical stamp order, so the merge — including
    * the divergence rows it writes — is identical on every device that
-   * receives the same entry set.
+   * receives the same entry set. `senderDeviceId` is the
+   * transport-authenticated id of the peer that delivered the doc:
+   * when present the doc's own sender stamp must equal it — the stamp
+   * keys the peer-mark fold, so a mismatched claim is a forgery and
+   * the whole doc fails 'invalid-message'. Unauthenticated sources
+   * (local imports) leave it unset and fold the doc's claim as-is.
    */
   applyDelta(
     doc: unknown,
+    senderDeviceId?: string,
     signal?: CancellationSignal,
   ): Promise<Result<ApplyResult>>;
   /** Newest-first loser history for diagnostics. */
@@ -2664,10 +2670,24 @@ export async function createSyncEngine(
 
   async function applyDelta(
     doc: unknown,
+    senderDeviceId?: string,
     signal?: CancellationSignal,
   ): Promise<Result<ApplyResult>> {
     if (!isSyncDelta(doc)) {
       return err(appError('invalid-message', 'malformed sync delta'));
+    }
+    // The doc's sender stamp is a claim, not an identity — it keys
+    // peerMarks/stalePeers and the durable mark row, so a stamp that
+    // does not match the authenticated session id is a forgery that
+    // must never fold. An absent id means an unauthenticated source
+    // and the claim folds as-is.
+    if (
+      senderDeviceId !== undefined &&
+      doc.senderDeviceId !== senderDeviceId
+    ) {
+      return err(
+        appError('invalid-message', 'sync: forged senderDeviceId'),
+      );
     }
     const { signal: sig } = resolveSignal(signal);
     if (sig.cancelled) {

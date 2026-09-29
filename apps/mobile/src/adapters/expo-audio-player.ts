@@ -469,11 +469,14 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
           now() + ATTACH_EXPIRY_MARGIN_MS < record.expiresAtMs)
       ) {
         record.owners.set(requestId, input.identity);
-        pending.set(requestId, record);
         supersedeUnattached(record);
         if (record.stream !== null) {
           // The minted session predates the adopt — answer it with the
-          // same prepared payload its first owner got.
+          // same prepared payload its first owner got. The answered
+          // request stays out of `pending`: like a minted owner past
+          // unpend, a late cancelPrepare is a no-op — it must not
+          // emit a second terminal outcome or tear the live record
+          // down on a last-owner check.
           emit({
             type: 'prepare',
             requestId,
@@ -484,6 +487,10 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
               attempt: zeroTrace(requestId, 0),
             },
           });
+        } else {
+          // Still resolving — the adopter waits in `pending`, where
+          // cancelPrepare can reach it until the shared outcome lands.
+          pending.set(requestId, record);
         }
         return Promise.resolve(ok(requestId));
       }

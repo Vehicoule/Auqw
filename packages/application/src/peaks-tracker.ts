@@ -2,6 +2,8 @@ import { CancellationSource } from './cancellation.ts';
 import { PEAKS_MAX_DECODE_MS } from './ports/peaks.ts';
 import type { PeaksPort, WaveformPeak } from './ports/peaks.ts';
 import type { ClockPort } from './ports/clock.ts';
+import type { IdPort } from './ports/runtime.ts';
+import { createIds } from './runtime-impls.ts';
 import { appError, err } from './errors.ts';
 import type { Result } from './errors.ts';
 
@@ -29,6 +31,15 @@ const PEAK_DEADLINE_MS = 30_000;
  */
 const PEAK_RETRY_LIMIT = 3;
 const PEAK_RETRY_DELAY_MS = 4_000;
+/**
+ * Process-wide request-id generator — request ids must be unique
+ * across generations AND tracker instances: a re-pull after cancel
+ * can overlap the abandoned extraction still winding down natively,
+ * and a remounted tracker minting the same sequence would collide
+ * with the still-registered job whose teardown would then unregister
+ * the replacement's cancel slot.
+ */
+const processIds = createIds();
 
 type Inflight = {
   readonly source: CancellationSource;
@@ -40,6 +51,11 @@ export type PeaksTrackerDeps = {
   readonly port: PeaksPort;
   /** Deadlines and retry sleeps — the injected system clock. */
   readonly clock: ClockPort;
+  /**
+   * Request-id entropy — defaults to a process-wide generator so ids
+   * stay unique across tracker instances, remounts, and reloads.
+   */
+  readonly ids?: IdPort;
   /** Fires when a settled result may have changed `get` — re-render. */
   readonly onChange?: (() => void) | undefined;
   readonly cacheLimit?: number;
@@ -72,6 +88,7 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
   const retryDelayMs = deps.retryDelayMs ?? PEAK_RETRY_DELAY_MS;
   const maxDurationMs = deps.maxDurationMs ?? PEAKS_MAX_DECODE_MS;
   const clock = deps.clock;
+  const ids = deps.ids ?? processIds;
   const cache = new Map<string, readonly WaveformPeak[] | null>();
   // Terminal nulls judged under a declared over-cap duration are
   // duration-dependent (the port's declared-length gate, unlike the
@@ -79,11 +96,6 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
   // the cap must re-issue rather than serve the stale refusal.
   const gatedNullMs = new Map<string, number>();
   const inflight = new Map<string, Inflight>();
-  // Request ids must be unique across generations: a re-pull after
-  // cancel can overlap the abandoned extraction still winding down,
-  // and a colliding id lets its teardown unregister the replacement's
-  // native cancel slot.
-  let requestSeq = 0;
 
   function evict(): void {
     while (cache.size > cacheLimit) {
@@ -222,7 +234,7 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
         .peaks(
           { handle: entry.target.handle, durationMs: sentMs },
           {
-            requestId: `peaks-${id}-${n}-${++requestSeq}`,
+            requestId: ids.next(`peaks-${id}-${n}`),
             deadlineMs: clock.nowMs() + deadlineMs,
             signal: entry.source.signal,
           },

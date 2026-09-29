@@ -1062,14 +1062,16 @@ export async function planCommit(
   // ---------------- per-section shape checks -------------------------
   // Element validators + uniqueness, mirroring `isPersistedState` on
   // the merged document — scoped to the sections the batch carries.
-  if (mergedRecordings !== undefined) {
-    if (
-      !Array.isArray(mergedRecordings) ||
+  // `recordingsTouched` guards here, not `mergedRecordings`: a merge
+  // that returns undefined must still land on the `!Array.isArray`
+  // rejection instead of skipping validation as a silent no-op.
+  if (
+    recordingsTouched &&
+    (!Array.isArray(mergedRecordings) ||
       !mergedRecordings.every(isRecording) ||
-      !allUnique(mergedRecordings, (r) => r.id)
-    ) {
-      return err(invalidBatch());
-    }
+      !allUnique(mergedRecordings, (r) => r.id))
+  ) {
+    return err(invalidBatch());
   }
   const likes = batch.likes;
   if (

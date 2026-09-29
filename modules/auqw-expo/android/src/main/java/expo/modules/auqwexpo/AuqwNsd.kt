@@ -148,14 +148,18 @@ class AuqwNsd(
 
         override fun onServiceLost(info: NsdServiceInfo) {
           if (gen == browseGeneration) {
-            // Attach the lost record's last-resolved generation — the
-            // JS adapter retracts just that generation instead of
-            // wiping every row sharing the (non-unique) service name.
+            // Attach the lost record's resolved generation only when
+            // exactly one is live under the name — the JS adapter
+            // retracts just that generation instead of wiping every
+            // row sharing the (non-unique) service name. Coexisting
+            // generations can't be told apart by a name-only goodbye,
+            // so those keep the name-only lost: the JS wipe-all
+            // clears every row and the survivor re-announces.
             val last =
               synchronized(resolveLock) {
                 lostNames.add(info.serviceName)
                 resolveQueue.removeAll { it.first.serviceName == info.serviceName }
-                lastResolved.remove(info.serviceName)
+                resolvedGens.remove(info.serviceName)?.singleOrNull()
               }
             emitDiscovery(
               mapOf(
@@ -208,7 +212,7 @@ class AuqwNsd(
       resolveQueue.clear()
       resolveInFlight = false
       lostNames.clear()
-      lastResolved.clear()
+      resolvedGens.clear()
     }
     // No early return: a start that failed after taking the lock but
     // before registering `discovery` still owes the release.
@@ -245,10 +249,14 @@ class AuqwNsd(
   // in-flight resolve must not emit a zombie 'found' afterwards. A
   // fresh onServiceFound for the name clears the mark.
   private val lostNames = mutableSetOf<String>()
-  // Last-resolved (port, fp) per service name — populated on each
-  // emitted 'found', consumed by onServiceLost. Guarded by
-  // `resolveLock` like the queue/lost marks above.
-  private val lastResolved = mutableMapOf<String, Pair<Int, String?>>()
+  // Resolved (port, fp) generations per service name, oldest first —
+  // pushed on each emitted 'found', consumed by onServiceLost. More
+  // than one live generation makes a name-only lost unanswerable, so
+  // the map is dropped wholesale then: the emitted wipe-all covers
+  // every generation the deque tracked. Guarded by `resolveLock`
+  // like the queue/lost marks above.
+  private val resolvedGens =
+    mutableMapOf<String, ArrayDeque<Pair<Int, String?>>>()
 
   private fun drainResolves(gen: Int) {
     val next =
@@ -305,7 +313,15 @@ class AuqwNsd(
             val fp = resolved.attributes["dev"]?.let { String(it) }
             if (hosts.isNotEmpty()) {
               synchronized(resolveLock) {
-                lastResolved[resolved.serviceName] = resolved.port to fp
+                val gens =
+                  resolvedGens.getOrPut(resolved.serviceName) { ArrayDeque() }
+                // A re-resolve of the same record is not a new
+                // generation — recording it twice would poison the
+                // count a lost attributes on.
+                val record = resolved.port to fp
+                if (gens.lastOrNull() != record) {
+                  gens.addLast(record)
+                }
               }
               emitDiscovery(
                 mapOf(

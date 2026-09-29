@@ -177,6 +177,31 @@ export async function run(): Promise<void> {
     );
   }
 
+  // The same uniqueness must hold across tracker instances: a
+  // remounted tracker restarting its own sequence would mint an id
+  // already held by the previous instance's still-winding-down
+  // native job.
+  {
+    const { calls: callsA, port: portA } = fakePort();
+    const trackerA = createPeaksTracker({
+      port: portA,
+      clock: new FakeClock(),
+    });
+    const { calls: callsB, port: portB } = fakePort();
+    const trackerB = createPeaksTracker({
+      port: portB,
+      clock: new FakeClock(),
+    });
+    trackerA.pull(target('r-shared', 'h1'));
+    trackerB.pull(target('r-shared', 'h2'));
+    assertEqual(callsA.length, 1, 'first tracker pulls');
+    assertEqual(callsB.length, 1, 'second tracker pulls');
+    assert(
+      callsA[0]?.context.requestId !== callsB[0]?.context.requestId,
+      'request ids stay unique across tracker instances',
+    );
+  }
+
   // LRU eviction follows recency of pull, not insertion.
   {
     const { port } = fakePort(() => ok(PEAKS));

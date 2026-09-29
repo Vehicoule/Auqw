@@ -20,6 +20,7 @@ import java.nio.channels.FileChannel
 import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 import kotlin.math.sqrt
 import kotlinx.coroutines.CancellationException
@@ -100,7 +101,17 @@ internal class AuqwWaveformPeaks(
   private val localFor: (String) -> LocalSource?,
   private val cacheDirFor: () -> File,
 ) {
+  /** Request ids with an extraction in flight — JS mints one id per
+   *  request, and a duplicate that sneaks through (e.g. a replayed
+   *  dev-client call) is refused at registration rather than letting
+   *  a second job's cleanup delete the first job's spill file or
+   *  steal its cancel tombstone. */
   private val jobs = ConcurrentHashMap<String, Job>()
+  /** Job-local serial that names each extraction's spill file.
+   *  Request ids identify the caller, not the run — a retried or
+   *  replayed id must never point at another job's decoded PCM, so
+   *  the filename carries this counter next to the id. */
+  private val jobSeq = AtomicLong(0L)
   /** Request ids cancelled before their coroutine registered — the
    *  tombstone makes an early cancel sticky so the late-starting
    *  extract dies at entry instead of decoding on. Access-ordered
@@ -155,15 +166,26 @@ internal class AuqwWaveformPeaks(
     // alongside the player.
     val pcmFile = File(
       cacheDirFor(),
-      "auqw-peaks-" + requestId.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".pcm"
+      "auqw-peaks-" +
+        requestId.replace(Regex("[^A-Za-z0-9._-]"), "_") +
+        "-" + jobSeq.incrementAndGet() + ".pcm"
     )
+    // Reject before `try`: a refused job owns nothing, so no cleanup
+    // may run on its behalf — its `finally` would otherwise consume
+    // the live job's cancel tombstone or delete its decoded PCM
+    // mid-read.
+    if (job !== null && jobs.putIfAbsent(requestId, job) !== null) {
+      throw CodedException(
+        "invalid-request",
+        "peak extraction already in flight for request id",
+        null
+      )
+    }
     try {
-      if (job !== null) {
-        jobs[requestId] = job
-      }
       // A cancel that beat coroutine start lands on the tombstone —
       // consume it and die rather than decode a track the caller
-      // already walked away from.
+      // already walked away from. Registration happened above, so a
+      // cancel can't be lost between the two reads.
       if (cancels.remove(requestId)) {
         throw CancellationException("cancelled before extraction started")
       }
@@ -197,9 +219,21 @@ internal class AuqwWaveformPeaks(
           pcmFile,
         )
       }
-      return bucket(
-        pcmFile, decoded.bytes, decoded.channels, decoded.floatPcm, count, job
-      )
+      return try {
+        bucket(
+          pcmFile, decoded.bytes, decoded.channels, decoded.floatPcm, count, job
+        )
+      } catch (e: CodedException) {
+        throw e
+      } catch (e: CancellationException) {
+        throw e
+      } catch (e: Exception) {
+        // Nothing untyped crosses the Expo boundary — the same catch
+        // order decodePcm applies below.
+        throw CodedException(
+          "invalid-response", e.message ?: "peak bucketing failed", e
+        )
+      }
     } catch (_: CancellationException) {
       throw CodedException("cancelled", "peak extraction cancelled", null)
     } finally {
@@ -464,10 +498,12 @@ internal class AuqwWaveformPeaks(
     count: Int,
     job: Job?,
   ): List<Double> {
-    val out = ArrayList<Double>(count * 2)
+    // Reject before the eager allocation — the seam validates
+    // `count`, but a bogus direct call must not size the list from it.
     if (count <= 0 || channels <= 0 || pcmBytes <= 0) {
-      return out
+      return emptyList()
     }
+    val out = ArrayList<Double>(count * 2)
     FileInputStream(pcmFile).channel.use { ch ->
       val buf = ch.map(FileChannel.MapMode.READ_ONLY, 0, pcmBytes)
         .order(ByteOrder.LITTLE_ENDIAN)

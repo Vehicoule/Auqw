@@ -468,7 +468,7 @@ export function createSyncHandlers(input: {
       }
       const applied = await engine.applyDelta(
         args.delta,
-        args.deviceId ?? 'local-import',
+        args.deviceId,
         service.cancel,
       );
       if (!applied.ok) {
