@@ -165,6 +165,13 @@ function provider(
   return createPluginProvider(host, 'plugin-x', 'provider-x', capabilities);
 }
 
+function rig(
+  capabilities: readonly ProviderCapability[] = ALL_CAPS,
+): { host: FakeHost; p: ReturnType<typeof provider> } {
+  const host = new FakeHost();
+  return { host, p: provider(host, capabilities) };
+}
+
 async function flush(): Promise<void> {
   // Double-tap: let the async request() wrapper reach host.request
   // registration before the outcome lands.
@@ -174,8 +181,7 @@ async function flush(): Promise<void> {
 
 // 1. Wire payloads match the ABI's exact snake_case key sets.
 async function payloadShapes(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
 
   const search = p.search(
     { query: 'roads', limit: 5, storefront: 'US' },
@@ -305,8 +311,7 @@ async function payloadShapes(): Promise<void> {
 
 // 2. Concurrent ops settle on their own minted requestId.
 async function concurrentCorrelation(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
   const a = p.search(
     { query: 'a', limit: 1, storefront: null },
     ctx().context,
@@ -337,8 +342,7 @@ async function concurrentCorrelation(): Promise<void> {
 
 // 3. Malformed resultJson and validation failures → invalid-response.
 async function malformedResults(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
   const badJson = p.search(
     { query: 'x', limit: 1, storefront: null },
     ctx().context,
@@ -378,8 +382,7 @@ async function malformedResults(): Promise<void> {
 
 // 4. failed outcomes map to typed appError by kind.
 async function failedOutcomeKinds(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
   const rate = p.search(
     { query: 'x', limit: 1, storefront: null },
     ctx().context,
@@ -413,8 +416,7 @@ async function failedOutcomeKinds(): Promise<void> {
 // 5. Signal cancellation aborts the host request and settles cancelled;
 // a late success must not clobber the cancelled settle.
 async function cancellation(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
   const { context, source } = ctx();
   const call = p.search(
     { query: 'x', limit: 1, storefront: null },
@@ -448,8 +450,7 @@ async function cancellation(): Promise<void> {
 // 6. A signal already cancelled pre-op never issues a host request —
 // and no stray cancelRequest lands for a request that never existed.
 async function preCancelled(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
   const source = new CancellationSource();
   source.cancel();
   const { context } = ctx(source);
@@ -465,8 +466,7 @@ async function preCancelled(): Promise<void> {
 // 7. dispose settles in-flight ops cancelled and turns later ops
 // unavailable — the host gets the abort for what it still holds.
 async function dispose(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
   const inFlight = p.search(
     { query: 'x', limit: 1, storefront: null },
     ctx().context,
@@ -490,8 +490,7 @@ async function dispose(): Promise<void> {
 // 8. A host.request rejection (ShellError-shaped IPC failure) maps to
 // the matching typed error.
 async function requestRejection(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
   host.nextFailure = { kind: 'unavailable', message: 'plugin crashed' };
   const crashed = await p.search(
     { query: 'x', limit: 1, storefront: null },
@@ -512,8 +511,7 @@ async function requestRejection(): Promise<void> {
 // cancels it: expiry aborts the request utility-side and settles
 // typed `timeout`; a deadline already spent never issues at all.
 async function deadlineBoundsRequest(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
   const call = p.search(
     { query: 'x', limit: 1, storefront: null },
     { ...ctx().context, deadlineMs: Date.now() + 15 },
@@ -538,8 +536,7 @@ async function deadlineBoundsRequest(): Promise<void> {
 
 // 10. catalog.entity decodes entity + items + continuation honestly.
 async function entityOp(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
   const call = p.getEntity(
     { provider: 'deezer', kind: 'album', id: 'a1' },
     ctx().context,
@@ -575,8 +572,7 @@ async function entityOp(): Promise<void> {
 // 11. A mismatched artwork source_ref is a protocol violation, not
 // a different track's artwork.
 async function artworkRefMismatch(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
   const call = p.artwork(ref('itunes', '123'), { size: 600 }, ctx().context);
   await flush();
   host.succeed(host.requests[0]!.requestId, {
@@ -589,8 +585,7 @@ async function artworkRefMismatch(): Promise<void> {
 
 // 12. An op outside the declared set is unsupported without a host call.
 async function undeclaredCapability(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host, ['catalog.search']);
+  const { host, p } = rig(['catalog.search']);
   const entity = await p.getEntity(
     { provider: 'deezer', kind: 'album', id: 'a1' },
     ctx().context,
@@ -631,8 +626,7 @@ async function undeclaredCapability(): Promise<void> {
 
 // 13. radio.seed dual payload and continuation=null honest end.
 async function radioOps(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
   const seed = p.radioSeed(
     { sourceRef: { provider: 'youtube-music', kind: 'track', id: 'v1' } },
     ctx().context,
@@ -672,8 +666,7 @@ async function radioOps(): Promise<void> {
 // 14. Lyrics prefer routing: synced when declared, plain otherwise;
 // honesty states decode (plain never presents as synced).
 async function lyricsOps(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
   const query = {
     title: 'Song',
     artist: 'Artist',
@@ -712,8 +705,7 @@ async function lyricsOps(): Promise<void> {
 // suggestion list strictly — extra keys or empty entries fail closed,
 // an undeclared capability never reaches the host.
 async function suggestOps(): Promise<void> {
-  const host = new FakeHost();
-  const p = provider(host);
+  const { host, p } = rig();
   const call = p.suggest({ input: 'awa', limit: 7 }, ctx().context);
   await flush();
   assertDeepEqual(host.requests[0], {
