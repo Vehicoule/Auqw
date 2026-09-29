@@ -20,6 +20,7 @@ import type { PlayableResource } from '../ports/provider.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import type { StoragePort } from '../ports/storage.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
+import { sameRef } from '../session/util.ts';
 import { createSha256 } from './sha256.ts';
 import type { ChunkHasher, RangeFetch } from './transfer-policy.ts';
 import { runTransfer } from './transfer-policy.ts';
@@ -382,11 +383,7 @@ export class DownloadManager {
   ): Promise<Result<DownloadRecord>> {
     const existing = this.recordFor(input.recordingId);
     if (existing !== null) {
-      const sameMapping =
-        existing.sourceRef.provider === input.sourceRef.provider &&
-        existing.sourceRef.kind === input.sourceRef.kind &&
-        existing.sourceRef.id === input.sourceRef.id;
-      if (sameMapping) {
+      if (sameRef(existing.sourceRef, input.sourceRef)) {
         if (existing.state === 'failed_with_retry') {
           const retried = await this.retry(existing.downloadId);
           if (!retried.ok) {

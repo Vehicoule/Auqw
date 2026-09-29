@@ -4,6 +4,7 @@ import { CancellationSource } from './cancellation.ts';
 import type { CancellationSignal } from './cancellation.ts';
 import type { ClockPort } from './ports/clock.ts';
 import { isSafeNonNegative } from './domain.ts';
+import { internalError, timeoutError } from './session/util.ts';
 
 /**
  * Bounded retry for port calls that already carry an absolute
@@ -44,14 +45,6 @@ export type RetryOptions = {
 const DEFAULT_MAX_ATTEMPTS = 2;
 const DEFAULT_BACKOFF_MS = 300;
 const MAX_BACKOFF_MS = 5_000;
-
-function timeoutError(): AppError {
-  return appError('timeout', 'operation deadline exceeded');
-}
-
-function internalError(): AppError {
-  return appError('internal', 'an internal error occurred');
-}
 
 /**
  * Runs `call` up to `maxAttempts` times while failures stay
