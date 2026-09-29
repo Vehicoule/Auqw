@@ -34,7 +34,7 @@ and `auth-required` → `io-error` read as transport death.
 | `released`/`evicted`/`expired`/`superseded` | `released` | `released` |
 | `cancelled` | `cancelled` | `cancelled` |
 | `unavailable` | `unavailable` | `unavailable` |
-| `streams-capped` | `unavailable` | `unavailable` (unchanged — see below) |
+| **`streams-capped`** | `unavailable` | **`streams-capped`** |
 | **`rate-limit`** | `unavailable` | **`rate-limit`** |
 | **`transient`** | `io-error` | **`transient`** |
 | **`auth-required`** | `io-error` | **`auth-required`** |
@@ -64,6 +64,7 @@ taxonomy.
 | `transient` | `internal` (settleIpc leg) / `transient` (rawToAppError leg) | `transient` |
 | `rate-limit` | `unavailable` — **non-retryable** | `rate-limit` — retryable |
 | `auth-required` | `internal` / `transient` | `auth-required` — terminal, `error.auth` copy |
+| `streams-capped` | `unavailable` — **non-retryable** | `streams-capped` — retryable, agrees with the outcome leg |
 
 Side effect of `io-error` → `transient`: shell-local IO failures
 (storage, tags, transfer, secure-store, service timeouts, supervisor
@@ -118,14 +119,18 @@ void runtime.pluginsReady().catch((thrown) => console.warn(...));
   (`io-error`→`transient` both legs, `rate-limit` retryable,
   `auth-required` terminal, message/fallback rules).
 
+## Boot warm rides the bind settle
+
+`pluginsReady()` chains after `potBound`: constructing while the
+startup bind pends reads a null provider URL, and a failed bind +
+shared-pending retry could strand a providerless host with nothing to
+re-kick the read. After settlement the construction read matches a
+first click exactly — success supplies the URL, failure kicks
+`potRetry` (whose success pushes the port via `setPotProvider`).
+
 ## Known remaining divergences (flagged, not changed — outside the
 named slugs)
 
-- `streams-capped` slug → `unavailable` on the rejection leg, but the
-  prepare-**outcome** leg (`appErrorKind(outcome.kind)`) already reports
-  `streams-capped` verbatim — same dual-map defect class, and
-  `unavailable` drops the retryability `streams-capped` carries.
-  Worth a follow-up decision before widening the shell taxonomy again.
 - `invalid-request`: `invalid-message` (SHELL_TO_APP) vs
   `invalid-response` (`appErrorKind`) — deliberate per the map's
   comment; both non-retryable, only reachable on arg-validation bugs.
