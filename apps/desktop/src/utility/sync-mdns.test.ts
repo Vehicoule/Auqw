@@ -1,6 +1,7 @@
 import { assert, assertEqual } from '@auqw/application/testing';
 import type { Service } from 'bonjour-service';
 import type { SyncDiscoveredPeer } from '@auqw/application';
+import { isSyncNearbyEvent } from '../shared/contract.ts';
 import { createPeerTracker } from './sync-mdns.ts';
 
 function service(fields: {
@@ -313,6 +314,68 @@ function sameHostDifferentPortsCoexist(): void {
   assertEqual(r.lost[0], 'Phone|10.0.0.4|41000', 'dead port retracted');
 }
 
+function overcapAddressesClampToContract(): void {
+  const r = recorder();
+  const t = createPeerTracker(r.onFound, r.onLost);
+  // A multi-homed host resolving more pairable LAN addresses than
+  // the `sync:nearby` contract's 16 — the ranked best-first list is
+  // clipped at the producer or the `found` event dies at the
+  // preload boundary and the row never appears.
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone.local',
+      port: 41000,
+      addresses: Array.from({ length: 20 }, (_, i) => `10.0.0.${i + 1}`),
+    }),
+  );
+  assertEqual(r.found.length, 1, 'over-cap up still emits');
+  const peer = r.found[0]!;
+  assertEqual(peer.addresses.length, 16, 'addresses clipped to the cap');
+  assertEqual(peer.host, peer.addresses[0], 'host is the best-ranked pick');
+  assert(
+    isSyncNearbyEvent({ type: 'found', peer }),
+    'the emitted peer passes the contract',
+  );
+}
+
+function overcapNameDropsAdvert(): void {
+  const r = recorder();
+  const t = createPeerTracker(r.onFound, r.onLost);
+  // A service name over the contract's 128 chars could push both
+  // `name` and the composed `name|host|port` key past their caps —
+  // dropped at the producer rather than emitted invalid.
+  const longName = `Phone-${'x'.repeat(200)}`;
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone.local',
+      port: 41000,
+      addresses: ['10.0.0.4'],
+    }),
+  );
+  assertEqual(r.found.length, 1, 'the good generation emits');
+  t.up(
+    service({
+      name: longName,
+      host: 'phone.local',
+      port: 41000,
+      addresses: ['10.0.0.4'],
+    }),
+  );
+  assertEqual(r.found.length, 1, 'over-cap name emits nothing');
+  assertEqual(r.lost.length, 0, 'no row for the dropped advert');
+  t.up(
+    service({
+      name: 'Phone',
+      host: 'phone.local',
+      port: 41000,
+      addresses: ['10.0.0.4'],
+    }),
+  );
+  assertEqual(r.found.length, 2, 'a valid re-announce still emits');
+}
+
 export function run(): void {
   rerankRetractsOldKey();
   sameKeyReannounceKeepsRow();
@@ -324,4 +387,6 @@ export function run(): void {
   sameNameServicesCoexist();
   sameHostDifferentPortsCoexist();
   fpSurvivesSrvMove();
+  overcapAddressesClampToContract();
+  overcapNameDropsAdvert();
 }

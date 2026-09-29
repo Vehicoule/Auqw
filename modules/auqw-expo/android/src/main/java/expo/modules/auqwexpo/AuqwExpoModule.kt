@@ -75,6 +75,11 @@ private const val FIRST_OUTPUT_POLL_DEADLINE_MS = 5_000L
  * queued-attach window, so a few hundred is far past any real case. */
 private const val RELEASED_HANDLES_CAP = 512
 
+/** Sane bound on `waveformPeaks` window count — a seek-bar decoration
+ * asks for hundreds, not millions, and the value sizes an eager
+ * allocation, so a bogus Double never reaches the bucketer. */
+private const val MAX_PEAK_WINDOWS = 16_384
+
 class HostConfigInput : Record {
   @Field var fuelPerEntry: Double = 0.0
   @Field var fuelTotal: Double = 0.0
@@ -931,6 +936,17 @@ class AuqwExpoModule : Module() {
      * budget-exceeded/not-applicable/invalid-response/cancelled).
      */
     AsyncFunction("waveformPeaks") Coroutine { requestId: String, handle: String, count: Double, maxBytes: Double, provisionalCap: Boolean ->
+      // The boundary takes `count` as a Double — reject non-integral,
+      // non-positive, and absurd values (NaN and ±inf included: NaN
+      // fails the %1 check) instead of letting toInt() saturate or
+      // truncate into a size the bucketer allocates on.
+      if (count <= 0 || count % 1 != 0.0 || count > MAX_PEAK_WINDOWS) {
+        throw CodedException(
+          "invalid-request",
+          "waveformPeaks count must be an integer in 1..$MAX_PEAK_WINDOWS",
+          null
+        )
+      }
       waveformPeaks.extract(
         requestId,
         handle,

@@ -70,9 +70,14 @@ async function mustWrite(
 async function mustApply(
   engine: SyncEngine,
   doc: SyncDelta,
+  senderDeviceId?: string,
 ): Promise<ApplyResult> {
   const applied = await engine.applyDelta(
     JSON.parse(JSON.stringify(doc)) as unknown,
+    // A bare mustApply models an authenticated wire round — the
+    // doc's own id; pass an explicit sender (or omit it from the
+    // doc) to exercise the unauthenticated path.
+    senderDeviceId ?? doc.senderDeviceId,
   );
   assert(applied.ok, `applyDelta failed: ${JSON.stringify(doc).slice(0, 200)}`);
   return applied.value;
@@ -2398,6 +2403,7 @@ async function failedCompactionKeepsLanes(): Promise<void> {
   a.store.holdNextAppend();
   const pending = a.engine.applyDelta(
     JSON.parse(JSON.stringify(docB.value)) as unknown,
+    docB.value.senderDeviceId,
   );
   for (let i = 0; i < 200 && a.store.pendingAppends === 0; i += 1) {
     await Promise.resolve();
@@ -2417,6 +2423,7 @@ async function failedCompactionKeepsLanes(): Promise<void> {
   // retired emission ordinal lands durably with it.
   const retried = await a.engine.applyDelta(
     JSON.parse(JSON.stringify(docB.value)) as unknown,
+    docB.value.senderDeviceId,
   );
   assert(retried.ok);
   const docA3 = await a.engine.exportDelta();
@@ -2581,10 +2588,13 @@ async function peerMarkWriteRetriesUntilDurable(): Promise<void> {
   // presence still only in memory — after a restart the table would
   // remember nothing about 'b' and compaction could drop entries it
   // still needed to catch up.
-  const refused = await a.engine.applyDelta({
-    ...delta([], 'b'),
-    cursor: { a: 1 },
-  });
+  const refused = await a.engine.applyDelta(
+    {
+      ...delta([], 'b'),
+      cursor: { a: 1 },
+    },
+    'b',
+  );
   assert(!refused.ok, 'apply fails when the mark cannot commit');
   assert(a.store.storedPeerMarks['b'] === undefined);
   await mustApply(a.engine, { ...delta([], 'b'), cursor: { a: 1 } });
@@ -2600,10 +2610,13 @@ async function peerMarkWriteRetriesUntilDurable(): Promise<void> {
   // A mark update that fails to persist stays flagged and re-issues
   // on any later write — even another sender's divergence append.
   armed = true;
-  const refused2 = await a.engine.applyDelta({
-    ...delta([], 'b'),
-    cursor: { a: 2 },
-  });
+  const refused2 = await a.engine.applyDelta(
+    {
+      ...delta([], 'b'),
+      cursor: { a: 2 },
+    },
+    'b',
+  );
   assert(!refused2.ok);
   assertDeepEqual(a.store.storedPeerMarks['b'], { a: 1 });
   await mustApply(a.engine, { ...delta([], 'c'), cursor: { a: 1 } });
@@ -2721,6 +2734,29 @@ async function peerMarkSenderNamedProto(): Promise<void> {
     cursor: { a: 1 },
   });
   assertDeepEqual(a.store.storedPeerMarks['__proto__'], { a: 1 });
+}
+
+async function forgedSenderDeviceIdRejected(): Promise<void> {
+  const a = await makeEngine('a', 1_000);
+  // The doc's sender stamp is the sender's claim; the transport id
+  // is what it authenticated as. A claim naming another device is a
+  // forgery — the whole doc fails before any mark row folds, so an
+  // inflated cursor can never reach the compaction floor.
+  const claim = { ...delta([], 'b'), cursor: { a: 999 } };
+  const forged = await a.engine.applyDelta(
+    JSON.parse(JSON.stringify(claim)) as unknown,
+    'mallory',
+  );
+  assert(!forged.ok, 'a stamped id ≠ the session id must fail');
+  if (!forged.ok) {
+    assertEqual(forged.error.kind, 'invalid-message');
+  }
+  assert(a.store.storedPeerMarks['b'] === undefined);
+  assert(a.store.storedPeerMarks['mallory'] === undefined);
+  // The same doc under its own id folds — peer marks key on the
+  // authenticated sender.
+  await mustApply(a.engine, claim, 'b');
+  assertDeepEqual(a.store.storedPeerMarks['b'], { a: 999 });
 }
 
 async function logCompaction(): Promise<void> {
@@ -2964,5 +3000,6 @@ export async function run(): Promise<void> {
   await livePeerRegressionReplacesRow();
   await peerMarkClaimOnlyDeltaNoops();
   await peerMarkSenderNamedProto();
+  await forgedSenderDeviceIdRejected();
   await propertyHarness();
 }

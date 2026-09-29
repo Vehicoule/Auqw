@@ -1923,6 +1923,31 @@ async function recordingsMergeCommit(): Promise<void> {
   driver.close();
 }
 
+// A `recordingsMerge` that returns undefined breaches its contract —
+// the commit must reject typed, not report a silent no-op as ok.
+async function recordingsMergeUndefined(): Promise<void> {
+  const { driver, storage } = rig();
+  const r1 = recording('r1', [ref('itunes', 'i1')]);
+  assert(
+    (await storage.commit({ recordings: [r1] }, ctx().context)).ok,
+    'seed commit',
+  );
+  const result = await storage.commit(
+    { recordingsMerge: (() => undefined) as never },
+    ctx().context,
+  );
+  assert(
+    !result.ok && result.error.kind === 'invalid-response',
+    'undefined merge result rejects',
+  );
+  assertDeepEqual(
+    (await loadOk(storage)).recordings.map((r) => r.id),
+    ['r1'],
+    'stored recordings untouched',
+  );
+  driver.close();
+}
+
 // 25. Settings.language round-trips: an explicit BCP-47 tag persists
 // and reads back, while a NULL column leaves the property absent.
 async function languageRoundtrip(): Promise<void> {
@@ -2257,6 +2282,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['artworkCacheEviction', artworkCacheEviction],
   ['largeRemovalCommits', largeRemovalCommits],
   ['duplicateLyricsRejected', duplicateLyricsRejected],
+  ['recordingsMergeUndefined', recordingsMergeUndefined],
 ];
 
 for (const [name, fn] of TESTS) {

@@ -13,6 +13,7 @@ import {
   isChangeEntry,
   isDivergenceEntry,
   isPeerMarks,
+  isRecord,
   isSyncCursor,
   ok,
 } from '@auqw/application';
@@ -261,9 +262,13 @@ export class SqliteSyncLogStore implements SyncLogStore {
       (write.dropDivergenceBefore !== undefined &&
         !isSafeInt(write.dropDivergenceBefore)) ||
       (write.dropEntries !== undefined &&
-        !write.dropEntries.every(
-          (drop) => typeof drop.deviceId === 'string' && isSafeInt(drop.seq),
-        )) ||
+        (!Array.isArray(write.dropEntries) ||
+          !write.dropEntries.every(
+            (drop) =>
+              isRecord(drop) &&
+              typeof drop.deviceId === 'string' &&
+              isSafeInt(drop.seq),
+          ))) ||
       (write.divergenceReplayOffset !== undefined &&
         !isSafeInt(write.divergenceReplayOffset)) ||
       (write.divergenceDroppedEmissions !== undefined &&

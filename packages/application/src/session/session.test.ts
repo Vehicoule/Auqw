@@ -1007,6 +1007,70 @@ async function deadHandleFailedStatusRePrepares(): Promise<void> {
   );
 }
 
+// A dead-stream re-prepare draws on the intent's shared deadline +
+// prepare budget — a fresh attempt per hop would let a seam that
+// only mints dead sessions storm prepares forever.
+async function deadPlayReprepareSharesIntentBudget(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  assert((await r.session.pause()).ok, 'pause failed');
+  const deadStatus = (identity: PlaybackIdentity, handle: string): void => {
+    r.player.emit(
+      statusEvent(
+        identity,
+        handle,
+        'failed',
+        4_500,
+        appError('released', 'host call failed: not-found'),
+      ),
+    );
+  };
+  // Hop 1: the stream dies async on the live handle → re-prepare.
+  // The reprepare's startAttempt awaits the fresh prepare() promise,
+  // so each hop's prepared event only adopts once that deferred is
+  // settled.
+  const idA = lastPrepareIdentity(r);
+  deadStatus(idA, 'h-o1');
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 2, 'dead stream re-prepares');
+  const idB = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(idB, 'h-dead-1'));
+  assert(r.player.settlePrepare(ok('req-h-dead-1')), 'hop prepare pending');
+  await pump();
+  // Advance inside the original intent window, then repeat — the
+  // next hop must carry the SAME deadline, not re-mint a fresh 15s
+  // window.
+  r.clock.advance(10_000);
+  deadStatus(idB, 'h-dead-1');
+  await pump();
+  // The shared intent budget (2 calls) is spent — the second dead
+  // stream fails the item outright instead of minting a third
+  // prepare behind the maxAttempts floor.
+  assertEqual(
+    calls(r, 'prepare').length,
+    2,
+    'spent budget mints no third prepare',
+  );
+  const snap = readyOf(r);
+  assertEqual(snap.playback.type, 'failed', 'storm fails honestly');
+  assertEqual(snap.queue.mode, 'paused', 'blocked item pauses');
+  assert(snap.queue.blockedError !== undefined, 'marked unplayable');
+}
+
 // A failed queue commit rolls the engine back: the caller gets the
 // error, the published queue stays on storage's truth, and the
 // native transport call is never issued (commit precedes transport).
@@ -5749,6 +5813,56 @@ async function applySyncedEntriesTombstoneRemoves(): Promise<void> {
   );
 }
 
+// A drain commits each page as it lands; the projection cache
+// fronting the NEXT segment must carry that commit's gated
+// sections, or a later tombstone folds against the pre-drain
+// snapshot — an element-identical output suppresses
+// batch.matchReviews and the remote delete never lands.
+async function applySyncedEntriesTombstoneAfterCommittedPage(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('itunes', 'i1')])],
+    }),
+  );
+  await restoreOk(r);
+  // Page 1: a remote review upsert commits to durable.
+  const upsert = await r.session.applySyncedEntries([
+    appliedOutcome(syncEntry('matchReview', 'rev1', 'recordingId', 'r1')),
+    appliedOutcome(syncEntry('matchReview', 'rev1', 'createdMs', 1)),
+    appliedOutcome(syncEntry('matchReview', 'rev1', 'status', 'pending')),
+    appliedOutcome(
+      syncEntry('matchReview', 'rev1', 'candidates', [
+        {
+          metadata: meta(
+            'youtube-music',
+            'y9',
+            'Song r1',
+            'Artist',
+            300_000,
+          ),
+          ref: ref('youtube-music', 'y9'),
+        },
+      ]),
+    ),
+  ]);
+  assert(upsert.ok, 'review upsert page failed');
+  // Page 2 on the same Ready: a remote tombstone for that review.
+  const tombstone = await r.session.applySyncedEntries([
+    appliedOutcome(syncTombstone('matchReview', 'rev1')),
+  ]);
+  assert(tombstone.ok, 'tombstone page failed');
+  const stored = await r.storage.load({
+    requestId: 'verify',
+    deadlineMs: Number.MAX_SAFE_INTEGER,
+    signal: new CancellationSource().signal,
+  });
+  assert(
+    stored.ok &&
+      !stored.value.matchReviews.some((rev) => rev.reviewId === 'rev1'),
+    'remote tombstone deletes the committed review',
+  );
+}
+
 async function applySyncedEntriesSupersededKeepsRow(): Promise<void> {
   const r = rig(
     persisted({ recordings: [recording('r1', [ref('itunes', 'i1')])] }),
@@ -5972,6 +6086,10 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['seekKeepsPublishedDuration', seekKeepsPublishedDuration],
   ['resumeDeadHandleRePrepares', resumeDeadHandleRePrepares],
   ['deadHandleFailedStatusRePrepares', deadHandleFailedStatusRePrepares],
+  [
+    'deadPlayReprepareSharesIntentBudget',
+    deadPlayReprepareSharesIntentBudget,
+  ],
   ['queueCommitRollback', queueCommitRollback],
   ['queueCommitCascade', queueCommitCascade],
   ['queueCommitIsolatesRacingMutations', queueCommitIsolatesRacingMutations],
@@ -6062,6 +6180,10 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['syncEmitFailureKeepsDomainWrite', syncEmitFailureKeepsDomainWrite],
   ['applySyncedEntriesRemoteInsert', applySyncedEntriesRemoteInsert],
   ['applySyncedEntriesTombstoneRemoves', applySyncedEntriesTombstoneRemoves],
+  [
+    'applySyncedEntriesTombstoneAfterCommittedPage',
+    applySyncedEntriesTombstoneAfterCommittedPage,
+  ],
   [
     'applySyncedEntriesSupersededKeepsRow',
     applySyncedEntriesSupersededKeepsRow,

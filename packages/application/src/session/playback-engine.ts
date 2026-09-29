@@ -1273,6 +1273,14 @@ export class PlaybackEngine {
       }
       return this.#adoptPrepared(attempt, stream, warm.attempt, true);
     }
+    // A spent intent budget fails outright — the maxAttempts floor
+    // would otherwise grant one more call per hop.
+    if (attempt.preparesUsed >= PREPARE_CALL_BUDGET) {
+      return this.#failWith(
+        attempt,
+        appError('budget-exceeded', 'prepare call budget exhausted'),
+      );
+    }
     const prepared = await retryBounded({
       deadlineMs,
       signal: attempt.source.signal,
@@ -1941,8 +1949,14 @@ export class PlaybackEngine {
         // The stream's death can arrive async too — a paused seek
         // past the registry TTL makes the element refetch a dead
         // URL, which surfaces here, not on a transport call. The
-        // queue holds the committed position; re-prepare.
-        await this.startAttempt(active.occurrenceId);
+        // queue holds the committed position; re-prepare. The hop
+        // draws on the same intent budget — a fresh attempt would
+        // stack ceilings.
+        await this.startAttempt(active.occurrenceId, {
+          deadlineMs: active.deadlineMs,
+          listenedMsAccum: active.listenedMsAccum,
+          preparesUsed: active.preparesUsed,
+        });
         return;
       }
       await this.#failOrRetryAttempt(active, error);
@@ -2226,7 +2240,13 @@ export class PlaybackEngine {
       ) {
         // Same recovery as a dead-handle 'failed' status: the queue
         // still holds the intent — a fresh prepare resolves honestly.
-        return this.startAttempt(active.occurrenceId);
+        // The hop draws on the same deadline + prepare budget, so a
+        // dead-stream storm terminates inside the intent window.
+        return this.startAttempt(active.occurrenceId, {
+          deadlineMs: active.deadlineMs,
+          listenedMsAccum: active.listenedMsAccum,
+          preparesUsed: active.preparesUsed,
+        });
       }
       await this.#failOrRetryAttempt(active, playResult.error);
       // The trace survives the transport failure, same contract as
@@ -2800,14 +2820,18 @@ export class PlaybackEngine {
         undefined,
         deadlineMs,
       );
-      if (
-        source.signal.cancelled ||
-        this.#mappingSource !== source ||
-        !result.ok
-      ) {
-        if (!source.signal.cancelled && result.ok === false) {
-          this.#host.logWarn('successor mapping failed');
-        }
+      if (source.signal.cancelled || this.#mappingSource !== source) {
+        // A cancelled or superseded map never ran its course — the
+        // row was only suppressed for the in-flight call, so unsee
+        // it like the warm cancel paths do and let a later warm
+        // retry instead of sitting out WARM_ROW_TTL_MS.
+        this.#unseeWarmTarget({ recordingId, occurrenceId });
+        return;
+      }
+      if (!result.ok) {
+        // A genuine failure keeps the suppression — same contract
+        // as the warm lane: don't re-charge a flaky provider.
+        this.#host.logWarn('successor mapping failed');
         return;
       }
       const ready2 = this.#host.ready();

@@ -793,6 +793,24 @@ export class SyncIngress {
       // this queue.
       r.queueEpoch += 1;
     }
+    // The committed sections are now the durable truth this drain's
+    // projection cache fronts — fold them in so the next apply
+    // segment projects against this drain's own writes, not the
+    // pre-drain snapshot.
+    if (r.syncApplyCache !== null) {
+      if (batch.matchReviews !== undefined) {
+        r.syncApplyCache.matchReviews = batch.matchReviews;
+      }
+      if (batch.lyricsCache !== undefined) {
+        r.syncApplyCache.lyricsCache = batch.lyricsCache;
+      }
+      if (batch.downloads !== undefined) {
+        r.syncApplyCache.downloads = batch.downloads;
+      }
+      if (batch.localFiles !== undefined) {
+        r.syncApplyCache.localFiles = batch.localFiles;
+      }
+    }
     r.persistenceError = undefined;
     this.#host.derived();
     this.#host.publish();

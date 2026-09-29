@@ -8,6 +8,7 @@
 //! outcomes carry handles and metadata only.
 
 use std::pin::Pin;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use auqw_plugin_host::{
@@ -378,6 +379,12 @@ impl PluginHost {
         // simply dropped unused.
         let ticket = prepared_delivery.track(request_id.clone());
         let mut admission = self.begin_admission(&request_id)?;
+        // One admission ⇒ one generation, whichever reservation
+        // commits: `PreparedSlot` records it so post-delivery
+        // bookkeeping touches only the slot this request committed —
+        // the `cancels` `LiveRequest` cleanup is guarded the same way
+        // against a next generation claiming the id mid-delivery.
+        let prepared_generation = self.request_generation.fetch_add(1, Ordering::Relaxed);
         enum Prep {
             Owned(auqw_stream::PrepareInfo),
             Cancelled,
@@ -397,6 +404,7 @@ impl PluginHost {
                         PreparedSlot {
                             handle: info.handle.clone(),
                             delivered: false,
+                            generation: prepared_generation,
                         },
                     );
                     Prep::Owned(info)
@@ -573,6 +581,7 @@ impl PluginHost {
                                             PreparedSlot {
                                                 handle: prepared.handle.clone(),
                                                 delivered: false,
+                                                generation: prepared_generation,
                                             },
                                         );
                                     }
@@ -608,8 +617,16 @@ impl PluginHost {
                             // own teardown.
                             if delivery_ticket.is_some() {
                                 if let Ok(mut m) = prepared_handles.lock() {
+                                    // Only the slot this delivery
+                                    // committed may flip — the id can
+                                    // have been pruned and re-admitted
+                                    // mid-delivery, and a stale flip
+                                    // must not mark the new
+                                    // generation's slot.
                                     if let Some(slot) = m.get_mut(&request_id) {
-                                        slot.delivered = true;
+                                        if slot.generation == prepared_generation {
+                                            slot.delivered = true;
+                                        }
                                     }
                                 }
                                 drop(delivery_ticket);
@@ -635,19 +652,69 @@ impl PluginHost {
         };
         match prep {
             Prep::Owned(info) => {
+                let cancelled_requests = Arc::clone(&self.cancelled_requests);
                 self.runtime.spawn(async move {
-                    deliver(
-                        request_id.clone(),
-                        PrepareOutcome::Prepared {
-                            superseded: info.superseded.clone(),
-                            stream: PreparedStream::from(info),
-                            attempt: summary,
-                        },
-                    )
-                    .await;
-                    if let Ok(mut m) = prepared_handles.lock() {
-                        if let Some(slot) = m.get_mut(&request_id) {
-                            slot.delivered = true;
+                    // The adopted session stays unattached until the
+                    // listener opens it — a supersede scan, the
+                    // abandoned-session reaper, cap eviction, or a
+                    // co-owner's `stream_release` can end it inside
+                    // the commit→wire gap. Re-check liveness under
+                    // `prepared_handles`, the same discipline as the
+                    // invoke path's `dead` guard, so a `Prepared`
+                    // never names a session that already died.
+                    let dead = match prepared_handles.lock() {
+                        Ok(mut m) => {
+                            let dead = !stream.is_live(&info.handle);
+                            if dead {
+                                // A tombstone a racing `cancel` parked
+                                // for this id is spent — the Failed
+                                // below is this request's own outcome.
+                                // Remove only this generation's slot:
+                                // a re-admitted request may already
+                                // own the id.
+                                if let Ok(mut t) = cancelled_requests.lock() {
+                                    t.remove(&request_id);
+                                }
+                                if m.get(&request_id)
+                                    .is_some_and(|s| s.generation == prepared_generation)
+                                {
+                                    m.remove(&request_id);
+                                }
+                            }
+                            dead
+                        }
+                        Err(_) => !stream.is_live(&info.handle),
+                    };
+                    if dead {
+                        deliver(
+                            request_id.clone(),
+                            PrepareOutcome::Failed {
+                                kind: "not-found".to_string(),
+                                message: "stream session ended before delivery".to_string(),
+                                attempt: summary,
+                            },
+                        )
+                        .await;
+                    } else {
+                        deliver(
+                            request_id.clone(),
+                            PrepareOutcome::Prepared {
+                                superseded: info.superseded.clone(),
+                                stream: PreparedStream::from(info),
+                                attempt: summary,
+                            },
+                        )
+                        .await;
+                        // The flip is generation-guarded like the
+                        // invoke path's: the dead-slot prune lets a
+                        // next generation own the id already, and a
+                        // stale delivery must not mark ITS slot.
+                        if let Ok(mut m) = prepared_handles.lock() {
+                            if let Some(slot) = m.get_mut(&request_id) {
+                                if slot.generation == prepared_generation {
+                                    slot.delivered = true;
+                                }
+                            }
                         }
                     }
                     drop(ticket);
