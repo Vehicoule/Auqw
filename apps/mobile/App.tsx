@@ -80,6 +80,7 @@ import {
   AddToPlaylistSheet,
   AppStack,
   ArtworkResolverProvider,
+  AuthSheet,
   CollectionScreen,
   CorrectionsScreen,
   EntityScreen,
@@ -132,12 +133,14 @@ import {
   qualityOptions,
   reportResult,
   themeOptions,
+  toAuthSheetModel,
 } from '@auqw/ui-shared';
 import type { Boot, OverlayEntry } from '@auqw/ui-shared';
 import { createSessionController } from './src/session/controller.ts';
 import type { SessionController } from './src/session/controller.ts';
 import { useAppShell } from '@auqw/app-shell';
 import type { AppShellPorts } from '@auqw/app-shell';
+import { createMobileAuth } from './src/adapters/auth.ts';
 import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
 import { createExpoPeaksPort } from './src/adapters/expo-peaks.ts';
 import { discoveredPotProviderUrl } from './src/adapters/pot-provider-discovery.ts';
@@ -640,6 +643,10 @@ function Main({
       Platform.OS === 'android' ? createExpoPeaksPort(AuqwExpo) : null,
     [],
   );
+  // OAuth session trust — secure-store custody + the host's in-memory
+  // token slot; construction kicks the memoized boot restore, so a
+  // stored grant refreshes before the first sign-in UI ever reads.
+  const authPort = useMemo(() => createMobileAuth(controller), [controller]);
   const ports = useMemo<AppShellPorts<Overlay>>(
     () => ({
       // Mobile's connectivity port is edge+snapshot: subscribe first
@@ -677,6 +684,9 @@ function Main({
       // stored download there could never play — hide every create
       // affordance; existing rows still surface for removal.
       downloadsEnabled: Platform.OS !== 'ios',
+      // OAuth session trust — refresh custody lives in secure storage;
+      // only status + the device pair cross this surface.
+      auth: authPort,
       // Mobile's playlist-entry play resolves owned bytes first —
       // selectedRef drops to null so the session picks the local
       // file over the pinned provider ref.
@@ -799,7 +809,7 @@ function Main({
         }
       },
     }),
-    [controller, session, peaksPort, syncSurface, syncStatus],
+    [controller, session, peaksPort, authPort, syncSurface, syncStatus],
   );
 
   // The shared shell composition — every state/callback surface the
@@ -904,6 +914,17 @@ function Main({
     onSubmitStorefront,
     onClearStorefront,
     closeStorefront,
+    authSnapshot,
+    authSheetOpen,
+    openAuthSheet,
+    closeAuthSheet,
+    retryAuthFlow,
+    onAuthSignOut,
+    authClientSheetOpen,
+    authClientDraft,
+    onSubmitAuthClient,
+    onClearAuthClient,
+    closeAuthClient,
     qualityPickerOpen,
     onPickQuality,
     closeQualityPicker,
@@ -2291,6 +2312,7 @@ function Main({
               download={stageDownload}
               onDownload={onStageDownload}
               onAddToPlaylist={onStageAddToPlaylist}
+              onRecovery={openAuthSheet}
               onSeek={
                 heldOccurrenceId !== null
                   ? (ms) => {
@@ -2504,6 +2526,40 @@ function Main({
               )}`}
               onPick={onPickArtworkCache}
               onDismiss={closeArtworkCache}
+            />
+          </SheetScreen>
+        )}
+        {authSheetOpen && (
+          <SheetScreen
+            stackKey="sheet-auth"
+            onDismissed={closeAuthSheet}
+          >
+            <AuthSheet
+              model={toAuthSheetModel(
+                authSnapshot?.status ?? { state: 'signed-out' },
+              )}
+              onCopyCode={authPort.copyText}
+              onOpenLink={authPort.openUrl}
+              onRetry={retryAuthFlow}
+              onSignOut={onAuthSignOut}
+              onDismiss={closeAuthSheet}
+            />
+          </SheetScreen>
+        )}
+        {authClientSheetOpen && (
+          <SheetScreen
+            stackKey="sheet-auth-client"
+            onDismissed={closeAuthClient}
+          >
+            <ValueFieldSheet
+              title={t('auth.clientId.title')}
+              initial={authClientDraft}
+              placeholder={t('auth.clientId.placeholder')}
+              submitLabel={t('common.save')}
+              clearLabel={t('auth.clientId.clear')}
+              onSubmit={onSubmitAuthClient}
+              onClear={onClearAuthClient}
+              onDismiss={closeAuthClient}
             />
           </SheetScreen>
         )}
