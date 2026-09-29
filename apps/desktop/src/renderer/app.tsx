@@ -104,6 +104,7 @@ import {
   THEME_ORDER,
   attemptLabel,
   entityRefKey,
+  errorText,
   formatBytes,
   greeting,
   navItems,
@@ -134,7 +135,6 @@ import type {
   SyncStatusResult,
 } from '../shared/contract.ts';
 import type { ThemeSource } from '@auqw/design-tokens/adaptive';
-import { isShellError } from '../shared/errors.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { createClock, createIds } from '@auqw/application';
@@ -172,12 +172,14 @@ function App() {
         setBoot({ type: 'ready', controller: created });
       } catch (thrown) {
         if (!disposed) {
+          // Log the typed kind only — a bridge exception can embed a
+          // signed URL or token that has no business in renderer logs.
+          console.warn('[ui] boot failed:', shellToAppError(thrown).kind);
           setBoot({
             type: 'failed',
             message:
-              thrown instanceof Error
-                ? thrown.message
-                : t('boot.failedMessage'),
+              errorText(shellToAppError(thrown)) ??
+              t('boot.failedMessage'),
           });
         }
       }
@@ -338,7 +340,7 @@ function SessionGate({
       {state.type === 'restore-failed' ? (
         <ErrorState
           title={t('boot.restoreFailed')}
-          hint={state.error.message}
+          hint={errorText(state.error)}
           onRetry={() => void controller.session.restore()}
         />
       ) : (
@@ -860,13 +862,7 @@ function Main({
           return;
         }
         setPairing(null);
-        setPairingError(
-          isShellError(thrown)
-            ? thrown.message
-            : thrown instanceof Error
-              ? thrown.message
-              : 'could not mint a pairing offer',
-        );
+        setPairingError(errorText(shellToAppError(thrown)));
       });
   }, []);
   const syncRefresh = useCallback(() => {
@@ -902,13 +898,7 @@ function Main({
   }, [syncRefresh]);
   const failDial = useCallback((thrown: unknown) => {
     setDialing(false);
-    setDialError(
-      isShellError(thrown)
-        ? thrown.message
-        : thrown instanceof Error
-          ? thrown.message
-          : 'pairing failed',
-    );
+    setDialError(errorText(shellToAppError(thrown)));
   }, []);
   const onDialNearby = useCallback(
     (key: string, code: string) => {
@@ -1398,7 +1388,7 @@ function Main({
         entitySourceRefs: state.entitySourceRefs,
         loadingMore: fetch?.loadingMore ?? false,
       }),
-    [state.likes, state.entitySourceRefs],
+    [state.likes, state.entitySourceRefs, localeTick],
   );
   // Row-key → TrackMetadata map for entity items, same contract as
   // resultMeta for search results — namespaced per stack entry so two
@@ -1432,7 +1422,10 @@ function Main({
         })),
     [libraryModel],
   );
-  const searchModel = useMemo(() => toSearchModel(searchState), [searchState]);
+  const searchModel = useMemo(
+    () => toSearchModel(searchState),
+    [searchState, localeTick],
+  );
   const homeModel = useMemo(
     () =>
       toHomeModel({
@@ -2272,7 +2265,7 @@ function Main({
         setTransfer((prev) => ({
           ...prev,
           exportPhase: 'error',
-          exportDetail: result.error.message,
+          exportDetail: errorText(result.error),
         }));
         return;
       }
@@ -2294,14 +2287,11 @@ function Main({
           exportPhase: 'done',
           exportDetail: t('transfer.savedToDownloads', { name }),
         }));
-      } catch (thrown) {
+      } catch {
         setTransfer((prev) => ({
           ...prev,
           exportPhase: 'error',
-          exportDetail:
-            thrown instanceof Error
-              ? thrown.message
-              : t('transfer.exportWriteFailed'),
+          exportDetail: t('transfer.exportWriteFailed'),
         }));
       }
     });
@@ -2323,7 +2313,7 @@ function Main({
             setTransfer((prev) => ({
               ...prev,
               importPhase: 'error',
-              importDetail: preview.error.message,
+              importDetail: t('error.importInvalid'),
               preview: null,
             }));
             return;
@@ -2339,15 +2329,12 @@ function Main({
             preview: toImportPreviewModel(preview.value, file.name),
           }));
         },
-        (thrown) => {
+        () => {
           importPreviewRaw.current = null;
           setTransfer((prev) => ({
             ...prev,
             importPhase: 'error',
-            importDetail:
-              thrown instanceof Error
-                ? thrown.message
-                : t('transfer.readFailed'),
+            importDetail: t('transfer.readFailed'),
             preview: null,
           }));
         },
@@ -2434,7 +2421,7 @@ function Main({
           setTransfer((prev) => ({
             ...prev,
             importPhase: 'error',
-            importDetail: result.error.message,
+            importDetail: errorText(result.error),
           }));
           return;
         }

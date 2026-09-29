@@ -38,6 +38,7 @@ import {
   err,
   exportFittedDeltaDoc,
   formatEndpoint,
+  fromUnknown,
   isMatchGate,
   isRefRejected,
   parseSyncDeltaDocs,
@@ -46,6 +47,7 @@ import {
   serializeSyncDeltaDocs,
 } from '@auqw/application';
 import type {
+  AppError,
   AttemptTrace,
   EntityRef,
   ImportPreview,
@@ -135,6 +137,7 @@ import {
   THEME_ORDER,
   attemptLabel,
   entityRefKey,
+  errorText,
   formatBytes,
   greeting,
   navItems,
@@ -504,7 +507,7 @@ function SessionGate({
       {state.type === 'restore-failed' ? (
         <ErrorState
           title={t('boot.restoreFailed')}
-          hint={state.error.message}
+          hint={errorText(state.error)}
           onRetry={() => void controller.session.restore()}
         />
       ) : (
@@ -968,7 +971,15 @@ function Main({
     () => syncSurface?.client.status() ?? null,
   );
   const [pairing, setPairing] = useState(false);
-  const [pairError, setPairError] = useState<string | null>(null);
+  const [pairError, setPairError] = useState<AppError | null>(null);
+  // Informational pair-surface notices that aren't errors: localized
+  // message ids rendered in the same banner slot as pairError.
+  // pairNotice = one-shot share-attempt messages; advertNotice = the
+  // ongoing condition flag from onAdvertiseError — cleared only when
+  // sharing stops or a fresh share retries the advert, never by a
+  // pair attempt (the dead advert stays dead through pairing).
+  const [pairNotice, setPairNotice] = useState<MessageId | null>(null);
+  const [advertNotice, setAdvertNotice] = useState<MessageId | null>(null);
   // Symmetric pairing: `share` = this device hosting a QR/code offer;
   // `nearbyPeers` = mDNS-discovered devices we can dial into. Both
   // live only while the sync screen is open — the listener is
@@ -1499,7 +1510,7 @@ function Main({
         loadingMore: fetch?.loadingMore ?? false,
         playingRef,
       }),
-    [state.likes, state.entitySourceRefs, playingRef],
+    [state.likes, state.entitySourceRefs, playingRef, localeTick],
   );
   // Row-key → TrackMetadata map for entity items, same contract as
   // resultMeta for search results — namespaced per stack entry so two
@@ -1607,7 +1618,7 @@ function Main({
     // rows still play (owned bytes), so surface them instead of the
     // bare failure.
     return { ...base, phase: 'ready' as const, results };
-  }, [searchState, localResults, playingRef]);
+  }, [searchState, localResults, playingRef, localeTick]);
   const homeModel = useMemo(() => {
     return toHomeModel({
       recordings: state.recordings,
@@ -2030,18 +2041,19 @@ function Main({
       }
       setPairing(true);
       setPairError(null);
+      setPairNotice(null);
       void client
         .pair(request, new CancellationSource().signal)
         .then((result) => {
           setPairing(false);
-          setPairError(result.ok ? null : result.error.message);
+          setPairError(result.ok ? null : result.error);
         })
         // A thrown pair (adapter crash) must still clear the latch —
         // otherwise `pairing` stays true and every later attempt is
         // dropped on the guard above.
-        .catch(() => {
+        .catch((thrown: unknown) => {
           setPairing(false);
-          setPairError('pairing failed');
+          setPairError(fromUnknown(thrown));
         });
     },
     // syncSurface is stable per controller.
@@ -2146,6 +2158,7 @@ function Main({
       endpoint: null,
       expiresAt: null,
     });
+    setAdvertNotice(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [syncOpen]);
 
@@ -2184,7 +2197,7 @@ function Main({
           return;
         }
         if (!offer.ok) {
-          setPairError(offer.error.message);
+          setPairError(offer.error);
           mintFailed();
           return;
         }
@@ -2229,11 +2242,15 @@ function Main({
     const unPair = host.onPaired(remintShareOffer);
     // A dead advert leaves the offer code-valid but undiscoverable —
     // tell the user rather than imply nearby visibility.
-    const unAdvert = host.onAdvertiseError(() =>
-      setPairError(
-        'nearby discovery unavailable — share the code instead',
-      ),
-    );
+    const unAdvert = host.onAdvertiseError(() => {
+      setAdvertNotice('sync.advertiseUnavailable');
+      // The advert condition is live NOW — it displaces the retained
+      // (stale) pair-attempt surfaces; a pair attempt that fails
+      // AFTER this still sets pairError fresh and trumps the notice
+      // until the next attempt clears it.
+      setPairError(null);
+      setPairNotice(null);
+    });
     return () => {
       unPair();
       unAdvert();
@@ -2269,9 +2286,19 @@ function Main({
         endpoint: null,
         expiresAt: null,
       });
+      // Sharing stopped — advertise/pair notices are moot while
+      // nothing is advertised.
+      setPairNotice(null);
+      setAdvertNotice(null);
       return;
     }
     setShare((prev) => ({ ...prev, busy: true }));
+    // A fresh share re-subscribes onAdvertiseError — drop the last
+    // share's notices AND the retained pair error so they can't
+    // linger under the new code or mask a start failure.
+    setPairError(null);
+    setPairNotice(null);
+    setAdvertNotice(null);
     // Mark wanted BEFORE the async work: the screen-close cleanup reads
     // shareGenRef to decide whether a stop is owed — a start() that
     // lands after dismissal would otherwise leave a live listener. The
@@ -2295,7 +2322,7 @@ function Main({
           endpoint: null,
           expiresAt: null,
         });
-        setPairError(started.error.message);
+        setPairError(started.error);
         return;
       }
       const offer = await host.mintOffer();
@@ -2313,7 +2340,7 @@ function Main({
           endpoint: null,
           expiresAt: null,
         });
-        setPairError(offer.error.message);
+        setPairError(offer.error);
         return;
       }
       setShare({
@@ -2341,7 +2368,7 @@ function Main({
         endpoint: null,
         expiresAt: null,
       });
-      setPairError('pairing failed');
+      setPairNotice('sync.pairFailed');
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controller, share.active, share.busy]);
@@ -2748,7 +2775,7 @@ function Main({
         setTransfer((prev) => ({
           ...prev,
           exportPhase: 'error',
-          exportDetail: result.error.message,
+          exportDetail: errorText(result.error),
         }));
         return;
       }
@@ -2767,14 +2794,11 @@ function Main({
           exportPhase: 'done',
           exportDetail: file.uri,
         }));
-      } catch (thrown) {
+      } catch {
         setTransfer((prev) => ({
           ...prev,
           exportPhase: 'error',
-          exportDetail:
-            thrown instanceof Error
-              ? thrown.message
-              : t('transfer.exportWriteFailed'),
+          exportDetail: t('transfer.exportWriteFailed'),
         }));
       }
     });
@@ -2807,7 +2831,7 @@ function Main({
           setTransfer((prev) => ({
             ...prev,
             importPhase: 'error',
-            importDetail: preview.error.message,
+            importDetail: t('error.importInvalid'),
             preview: null,
           }));
           return;
@@ -2820,15 +2844,12 @@ function Main({
           importPhase: 'preview',
           preview: toImportPreviewModel(preview.value, sourceLabel),
         }));
-      } catch (thrown) {
+      } catch {
         importPreviewRaw.current = null;
         setTransfer((prev) => ({
           ...prev,
           importPhase: 'error',
-          importDetail:
-            thrown instanceof Error
-              ? thrown.message
-              : t('transfer.readFailed'),
+          importDetail: t('transfer.readFailed'),
           preview: null,
         }));
       }
@@ -2852,7 +2873,7 @@ function Main({
           setTransfer((prev) => ({
             ...prev,
             importPhase: 'error',
-            importDetail: result.error.message,
+            importDetail: errorText(result.error),
           }));
           return;
         }
@@ -3744,7 +3765,7 @@ function Main({
                   setTransfer((prev) => ({
                     ...prev,
                     importPhase: 'error',
-                    importDetail: preview.error.message,
+                    importDetail: t('error.importInvalid'),
                     preview: null,
                   }));
                   return;
@@ -3757,15 +3778,12 @@ function Main({
                   importPhase: 'preview',
                   preview: toImportPreviewModel(preview.value, sourceLabel),
                 }));
-              } catch (thrown) {
+              } catch {
                 importPreviewRaw.current = null;
                 setTransfer((prev) => ({
                   ...prev,
                   importPhase: 'error',
-                  importDetail:
-                    thrown instanceof Error
-                      ? thrown.message
-                      : 'could not read the import file',
+                  importDetail: t('transfer.readFailed'),
                   preview: null,
                 }));
               }
@@ -4120,7 +4138,11 @@ function Main({
             onSyncNow={onSyncNow}
             onUnpair={onUnpair}
             pairing={pairing}
-            pairError={pairError}
+            pairError={
+              errorText(pairError) ??
+              (advertNotice === null ? null : t(advertNotice)) ??
+              (pairNotice === null ? null : t(pairNotice))
+            }
             share={
               syncSurface?.host === undefined || syncSurface?.host === null
                 ? undefined

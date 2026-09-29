@@ -25,6 +25,7 @@ import type {
   TrackMetadata,
 } from '@auqw/application';
 import { t, type MessageId } from './i18n.ts';
+import { errorText } from './error-text.ts';
 import { formatClock, toSearchRowModel } from './view-models.ts';
 import type {
   NavItemModel,
@@ -153,7 +154,7 @@ export function toSearchModel(
           toSearchRowModel(meta, index, playingRef),
         ),
         providerId: null,
-        message: state.refreshError?.message ?? null,
+        message: errorText(state.refreshError),
         retryable: false,
       };
     case 'error': {
@@ -165,7 +166,7 @@ export function toSearchModel(
         query: state.query,
         results: [],
         providerId: null,
-        message: state.error.message,
+        message: errorText(state.error),
         retryable: true,
       };
     }
@@ -326,8 +327,9 @@ export const IDLE_TRANSFER: TransferModel = {
 /**
  * Session ops resolve typed errors rather than throwing — a dropped
  * Result is a silent no-op. Keep failures observable: the console
- * keeps the `kind — message` taxonomy text (no secrets), and a
- * transient toast carries it to the operator. `toastSink` is
+ * logs the taxonomy `kind` (messages can carry signed URLs, so they
+ * stay out of logs too), and a transient toast carries the humanized
+ * reason. `toastSink` is
  * installed once by Main — reportResult is called from callbacks all
  * over the shell, so a sink avoids threading the setter through
  * every dependency list.
@@ -345,19 +347,29 @@ export function reportResult(
   result: Result<unknown>,
 ): void {
   if (!result.ok) {
-    console.warn(
-      `[ui] ${action} failed: ${result.error.kind} — ${result.error.message}`,
-    );
-    // The toast carries the taxonomy kind, never the message: an error
-    // surfaced from a native bridge can embed raw exception text (a
-    // signed request URL inside a fetch failure, say) that has no
-    // business on a user-facing surface.
-    toastSink?.(
-      t('toast.failed', {
-        action: t(action),
-        kind: result.error.kind,
-      }),
-    );
+    // Log the typed kind only — an error message crossing a bridge can
+    // embed a signed URL or token that has no business in renderer logs.
+    console.warn(`[ui] ${action} failed: ${result.error.kind}`);
+    // Teardown suppression lives at this ops-level funnel — 'cancelled'
+    // can also be a provider's real verdict, so surfaces don't silence
+    // it, but an op torn down by a newer intent never toasts.
+    if (
+      result.error.kind === 'cancelled' ||
+      result.error.kind === 'superseded'
+    ) {
+      return;
+    }
+    // The toast carries the humanized reason, never the raw kind or
+    // message; silent (disposal) outcomes don't toast at all.
+    const detail = errorText(result.error);
+    if (detail !== null) {
+      toastSink?.(
+        t('toast.failed', {
+          action: t(action),
+          detail,
+        }),
+      );
+    }
   }
 }
 

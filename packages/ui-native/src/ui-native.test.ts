@@ -1022,7 +1022,7 @@ function testLyricsModel(): void {
     positionMs: 0,
   });
   assertEqual(errored.state, 'error');
-  assertEqual(errored.message, 'rate limited');
+  assertEqual(errored.message, 'the provider is rate-limiting right now');
   // No sheet and no error is the honest absence, not an error.
   const absent = toLyricsModel({
     sheet: null,
@@ -1060,8 +1060,8 @@ function testRadioModel(): void {
   const failed = toRadioModel(fixtureRadioTailFailed);
   assertEqual(failed.status, 'failed');
   assert(
-    failed.detail !== null && failed.detail.includes('timed out'),
-    'failed tail carries the typed error message',
+    failed.detail !== null && !failed.detail.includes('timed out'),
+    'failed tail carries the humanized reason, not the raw message',
   );
   const statuses = new Set(
     fixtureRadioModels.filter((m) => m.armed).map((m) => m.status),

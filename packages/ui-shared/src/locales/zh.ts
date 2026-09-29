@@ -351,6 +351,8 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'sync.expires.minutes': '{minutes} 分钟后过期',
   'sync.cameraNeeded': '需要相机权限以扫描配对二维码',
   'sync.cameraGrantA11y': '授予相机权限',
+  'sync.pairFailed': '配对失败',
+  'sync.advertiseUnavailable': '附近设备发现不可用 — 请改为分享配对码',
   // Desktop sync panel rows + pairing sheet (ui-web surfaces).
   'sync.engineSuffix': ' · 引擎 {label}',
   'sync.sessionsSuffix': ' · 会话 {label}',
@@ -462,8 +464,32 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'nav.primaryA11y': '主导航',
 
   // ---- toasts ------------------------------------------------------------
-  'toast.failed': '{action} 失败 — {kind}',
+  'toast.failed': '{action} 失败 — {detail}',
   'toast.storefrontCode': '商店必须是两位字母国家代码',
+
+  // ---- error reasons -----------------------------------------------------
+  'error.noResult': '没有结果 — 重试',
+  'error.unsupported': '此处不支持',
+  'error.auth': '需要先在提供方登录',
+  'error.authExpired': '提供方登录已过期 — 重新连接',
+  'error.rateLimited': '提供方正在限制请求',
+  'error.expiredLink': '链接已过期 — 重试',
+  'error.permission': '访问被拒绝 — 请检查后重试',
+  'error.unexpected': '收到了意外的回复 — 重试',
+  'error.timeout': '仍在加载 — 重试',
+  'error.limit': '超出限制 — 缩小请求或稍后重试',
+  'error.transient': '操作被中断 — 请重试',
+  'error.plugin': '提供方插件行为异常',
+  'error.rejected': '下载未通过校验 — 重试',
+  'error.capped': '打开的流过多 — 稍等片刻',
+  'error.evicted': '已为腾出空间而移除 — 重试',
+  'error.expired': '已过期 — 重试',
+  'error.notFound': '已不存在 — 刷新后重试',
+  'error.unavailable': '不可用 — 重试',
+  'error.storageFull': '存储已满 — 释放一些空间',
+  'error.generic': '出错了 — 重试',
+  'error.matchGate': '无法匹配此曲目 — 查看审核',
+  'error.importInvalid': '该文件不是有效的曲库导出',
 
   // ---- reported operation names ------------------------------------------
   'action.playResult': '播放结果',

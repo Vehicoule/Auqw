@@ -353,6 +353,9 @@ export const en = {
   'sync.expires.minutes': 'expires in {minutes}m',
   'sync.cameraNeeded': 'camera access is needed to scan the pairing QR',
   'sync.cameraGrantA11y': 'grant camera access',
+  'sync.pairFailed': 'pairing failed',
+  'sync.advertiseUnavailable':
+    'nearby discovery unavailable — share the code instead',
   // Desktop sync panel rows + pairing sheet (ui-web surfaces).
   'sync.engineSuffix': ' · engine {label}',
   'sync.sessionsSuffix': ' · sessions {label}',
@@ -464,8 +467,33 @@ export const en = {
   'nav.primaryA11y': 'primary',
 
   // ---- toasts ------------------------------------------------------------
-  'toast.failed': '{action} failed — {kind}',
+  'toast.failed': '{action} failed — {detail}',
   'toast.storefrontCode': 'storefront must be a two-letter country code',
+
+  // ---- error reasons (errorText — reason line next to each surface's
+  // own title, or after "{action} failed —" on the toast) ---------------
+  'error.noResult': 'nothing came back — try again',
+  'error.unsupported': 'not supported here',
+  'error.auth': 'the provider needs sign-in first',
+  'error.authExpired': 'provider sign-in expired — reconnect it',
+  'error.rateLimited': 'the provider is rate-limiting right now',
+  'error.expiredLink': 'the link expired — try again',
+  'error.permission': 'access was denied — double-check and try again',
+  'error.unexpected': 'got an unexpected reply — try again',
+  'error.timeout': 'still loading — try again',
+  'error.limit': 'over a limit — slim it down or try later',
+  'error.transient': 'something interrupted that — try again',
+  'error.plugin': 'a provider plugin misbehaved',
+  'error.rejected': 'the download failed its checks — try again',
+  'error.capped': 'too many streams open — wait a moment',
+  'error.evicted': 'removed to make room — try again',
+  'error.expired': 'that expired — try again',
+  'error.notFound': "it's gone — refresh and try again",
+  'error.unavailable': 'unavailable — try again',
+  'error.storageFull': 'storage is full — free some space',
+  'error.generic': 'something went wrong — try again',
+  'error.matchGate': "couldn't match this track — check review",
+  'error.importInvalid': "that file isn't a valid library export",
 
   // ---- reported operation names ------------------------------------------
   'action.playResult': 'play result',
