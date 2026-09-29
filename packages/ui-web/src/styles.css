@@ -1895,6 +1895,19 @@
   bottom: var(--spacing-lg);
 }
 
+/* The band spans the stage's full width but only its buttons are
+   real targets — queue/lyrics rows gliding beneath it must stay
+   tappable. Same box-none cascade the native shell marks on the
+   wrapper: pass through everything, re-arm the items. */
+.uw-stage__segment,
+.uw-stage__segment .uw-segment {
+  pointer-events: none;
+}
+
+.uw-stage__segment .uw-segment__item {
+  pointer-events: auto;
+}
+
 /* Stop/dismiss floats over the stage's top-right — the loaded
    track's only clear affordance (the queue keeps its items); the
    world toolbar's stage toggle only hides the column. */
@@ -1907,8 +1920,11 @@
 }
 
 /* The queue tools row's reorder button shares the top-right corner —
-   reserve the stop's footprint when it exists. */
-.uw-stage:has(> .uw-stage__stop) .uw-stage__queue-tools {
+   reserve the stop's footprint when it exists. The centered radio
+   pill takes the same reserve: a long status can stretch its
+   trailing action under the stop on a narrow stage. */
+.uw-stage:has(> .uw-stage__stop) .uw-stage__queue-tools,
+.uw-stage:has(> .uw-stage__stop) .uw-stage__radio {
   padding-right: 44px;
 }
 

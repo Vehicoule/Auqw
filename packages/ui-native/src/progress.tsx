@@ -545,7 +545,6 @@ export function WaveformSeek({
   const theme = useTheme();
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
   const { width, onLayout } = useMeasuredWidth(0);
-  const onAccessibilityAction = useSeekA11y(positionMs, durationMs, onSeek);
 
   const isLoading = loading || durationMs === null;
   const progress = progressOf(positionMs, durationMs);
@@ -581,6 +580,38 @@ export function WaveformSeek({
   const latestProgress = useRef(progress);
   latestProgress.current = progress;
   const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const trackKeyRef = useRef(trackKey);
+  trackKeyRef.current = trackKey;
+  const gestureKey = useRef<string | null | undefined>(undefined);
+  // A pan whose track flipped mid-gesture: its remaining updates
+  // and finalize are dead — previews must not restart a gesture on
+  // the new track or let the release seek it. `gestureDead` guards
+  // the JS side; `dead` stops the worklet from moving the fill.
+  const gestureDead = useRef(false);
+  const dead = useSharedValue(0);
+  // Post-commit hold — the same optimistic base LinearScrubber
+  // gives its a11y steps: the committed target stays the step
+  // base until the publish round-trip lands (or the settle timer
+  // lapses), so an AT increment inside the window advances what
+  // was just committed instead of stepping the stale position.
+  const [heldMs, setHeldMs] = useState<number | null>(null);
+  const heldBaseline = useRef(0);
+  const heldKey = useRef(trackKey);
+  const heldTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const positionRef = useRef(positionMs);
+  positionRef.current = positionMs;
+  const hold = useCallback((ms: number) => {
+    heldBaseline.current = positionRef.current;
+    heldKey.current = trackKeyRef.current;
+    setHeldMs(ms);
+    if (heldTimer.current !== null) {
+      clearTimeout(heldTimer.current);
+    }
+    heldTimer.current = setTimeout(() => {
+      heldTimer.current = null;
+      setHeldMs(null);
+    }, 800);
+  }, []);
   useEffect(() => {
     const delta = Math.abs(progress - previousProgress.current);
     previousProgress.current = progress;
@@ -595,7 +626,13 @@ export function WaveformSeek({
       ? progress
       : withTiming(progress, { duration });
   }, [fill, progress, theme.motion.state, theme.reducedMotion]);
-  useEffect(() => () => clearTimer(settleTimer), []);
+  useEffect(
+    () => () => {
+      clearTimer(settleTimer);
+      clearTimer(heldTimer);
+    },
+    [],
+  );
   useEffect(() => {
     bloom.value = 0;
     bloom.value = theme.reducedMotion ? 1 : withTiming(1, { duration: 320 });
@@ -616,15 +653,6 @@ export function WaveformSeek({
     }
   }, [isLoading, shimmer, theme.reducedMotion, visible]);
 
-  const trackKeyRef = useRef(trackKey);
-  trackKeyRef.current = trackKey;
-  const gestureKey = useRef<string | null | undefined>(undefined);
-  // A pan whose track flipped mid-gesture: its remaining updates
-  // and finalize are dead — previews must not restart a gesture on
-  // the new track or let the release seek it. `gestureDead` guards
-  // the JS side; `dead` stops the worklet from moving the fill.
-  const gestureDead = useRef(false);
-  const dead = useSharedValue(0);
   const preview = useCallback(
     (fraction: number) => {
       if (gestureDead.current) {
@@ -684,7 +712,9 @@ export function WaveformSeek({
       scrubSec.current = -1;
       setScrubMs(null);
       if (durationMs !== null && durationMs > 0) {
-        onSeek?.(Math.round(fraction * durationMs));
+        const ms = Math.round(fraction * durationMs);
+        hold(ms);
+        onSeek?.(ms);
       }
       // Optimistic fill: when no position tick confirms the seek
       // (paused playback, noop onSeek) fall back to the real
@@ -702,12 +732,21 @@ export function WaveformSeek({
             });
       }, 400);
     },
-    [cancelScrub, durationMs, fill, onSeek, theme.motion.state, theme.reducedMotion],
+    [cancelScrub, durationMs, fill, hold, onSeek, theme.motion.state, theme.reducedMotion],
   );
   // A track change mid-pan kills the gesture the way a cancelled
   // pan does — and marks it dead so the still-running pan's later
   // updates and finalize can't restart it or seek the new track.
+  // A committed hold dies with its track too: the new track must
+  // never render (or step off) the previous track's position.
   useEffect(() => {
+    if (heldMs !== null && heldKey.current !== trackKey) {
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+        heldTimer.current = null;
+      }
+      setHeldMs(null);
+    }
     if (
       scrubActive.current &&
       gestureKey.current !== undefined &&
@@ -717,7 +756,19 @@ export function WaveformSeek({
       gestureDead.current = true;
       dead.value = 1;
     }
-  }, [cancelScrub, dead, trackKey]);
+  }, [cancelScrub, dead, trackKey, heldMs]);
+  // The publish lands as a `positionMs` change: once it does, the
+  // real value is authoritative again and the hold releases. A
+  // paused/noop seek that never republishes releases on the timer.
+  useEffect(() => {
+    if (heldMs !== null && positionMs !== heldBaseline.current) {
+      if (heldTimer.current !== null) {
+        clearTimeout(heldTimer.current);
+        heldTimer.current = null;
+      }
+      setHeldMs(null);
+    }
+  }, [positionMs, heldMs]);
   const enabled =
     durationMs !== null && durationMs > 0 && onSeek !== undefined;
   // Stable gesture object — a fresh Pan() per render would cancel a
@@ -782,12 +833,30 @@ export function WaveformSeek({
     x: shimmer.value * (width + width * 0.16) - width * 0.16,
   }));
 
-  const shownMs =
-    (scrubMs !== null &&
+  const shownScrub =
+    scrubMs !== null &&
     scrubActive.current &&
     gestureKey.current === trackKey
       ? scrubMs
-      : null) ?? positionMs;
+      : null;
+  const shownHeld =
+    heldMs !== null && heldKey.current === trackKey ? heldMs : null;
+  const shownMs = shownScrub ?? positionMs;
+  // AT steps seek through `hold` too — the next increment advances
+  // the target it just set while the publish is still pending,
+  // the same rule keyboard arrows follow on the web port.
+  const a11ySeek = useCallback(
+    (ms: number) => {
+      hold(ms);
+      onSeek?.(ms);
+    },
+    [hold, onSeek],
+  );
+  const { onAccessibilityAction } = useSeekA11y(
+    shownScrub ?? shownHeld ?? positionMs,
+    durationMs,
+    onSeek === undefined ? undefined : a11ySeek,
+  );
   const skeletonBars = layout.xs.map((x, i) => (
     <Rect
       key={i}

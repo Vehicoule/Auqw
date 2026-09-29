@@ -82,10 +82,19 @@ function peerOf(service: Service): SyncDiscoveredPeer | null {
   // private v4 and is undialable, so rank by dialability. The full
   // ranked list goes out on `addresses` so the dial falls through to
   // a reachable sibling when the pick sits behind a dead route.
-  const addresses = dialableHostsRanked(service.addresses ?? []);
+  // The `sync:nearby` contract caps the peer: 16 addresses (the
+  // ranker's literals already fit their 64-char bound), name 128 —
+  // `name|host|port` then always fits the key's 320. A `found`
+  // that violates it dies silently at the preload boundary, so
+  // bound and drop at the producer instead.
+  const addresses = dialableHostsRanked(service.addresses ?? []).slice(
+    0,
+    16,
+  );
   const host = addresses[0] ?? null;
   if (
     typeof service.name !== 'string' ||
+    service.name.length > 128 ||
     host === null ||
     typeof service.port !== 'number'
   ) {
