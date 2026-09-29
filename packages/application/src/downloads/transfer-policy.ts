@@ -191,6 +191,11 @@ function checkSignal(signal: CancellationSignal): void {
   }
 }
 
+/** A failed port Result rethrows as a typed DownloadFailure. */
+function raise(error: AppError): never {
+  throw new DownloadFailure(error.kind, error.message);
+}
+
 /** Incremental sha-256 over committed bytes, for the publish checksum. */
 export interface ChunkHasher {
   update(bytes: Uint8Array): void;
@@ -331,10 +336,7 @@ export async function runTransfer(options: {
         signal,
       );
       if (!opened.ok) {
-        throw new DownloadFailure(
-          opened.error.kind,
-          opened.error.message,
-        );
+        raise(opened.error);
       }
       sink = opened.value;
       return sink;
@@ -381,7 +383,7 @@ export async function runTransfer(options: {
           const fresh = await remint(start, current.itag);
           checkSignal(signal);
           if (!fresh.ok) {
-            throw new DownloadFailure(fresh.error.kind, fresh.error.message);
+            raise(fresh.error);
           }
           const sameEncoding =
             fresh.value.mime === current.mime &&
@@ -455,15 +457,12 @@ export async function runTransfer(options: {
         }
         const written = await sink.write(chunk.bytes);
         if (!written.ok) {
-          throw new DownloadFailure(written.error.kind, written.error.message);
+          raise(written.error);
         }
         hasher.update(chunk.bytes);
         const committed = await sink.commit();
         if (!committed.ok) {
-          throw new DownloadFailure(
-            committed.error.kind,
-            committed.error.message,
-          );
+          raise(committed.error);
         }
         start = committed.value;
         checkSignal(signal);
