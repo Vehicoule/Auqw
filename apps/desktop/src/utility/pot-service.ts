@@ -141,7 +141,7 @@ export type PotSession = {
   readonly dispose?: () => void;
 };
 
-export type PotServiceDeps = {
+type PotServiceDeps = {
   readonly fetchImpl?: FetchLike;
   readonly nowMs?: () => number;
   /**
@@ -162,7 +162,7 @@ export type PotServiceDeps = {
   readonly clientKey?: (req: IncomingMessage) => string;
 };
 
-export type PotService = {
+type PotService = {
   /**
    * Binds the listener once (0.0.0.0:ephemeral) and resolves the
    * bound port, or null when the bind failed — callers degrade to

@@ -19,9 +19,9 @@ import {
 } from '../shared/contract.ts';
 import type { ShellError } from '../shared/errors.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
-import type { UtilityHandler } from './router.ts';
+import { guarded, type UtilityHandler } from './router.ts';
 
-export type StorageServiceOptions = {
+type StorageServiceOptions = {
   /**
    * File path of the main database — main resolves it under userData
    * and hands it to the fork through `AUQW_DB_PATH`. Undefined degrades
@@ -30,7 +30,7 @@ export type StorageServiceOptions = {
   readonly dbPath: string | undefined;
 };
 
-export type StorageService = {
+type StorageService = {
   readonly handlers: Readonly<Record<string, UtilityHandler>>;
   /** Rolls back any open transaction and closes the database. */
   readonly close: () => void;
@@ -413,22 +413,6 @@ export function createStorageService(
       rethrowStorage('storage dropBackup failed', thrown);
     }
     return undefined;
-  }
-
-  function guarded<A>(
-    name: string,
-    validate: (value: unknown) => value is A,
-    run: (args: A) => unknown,
-  ): UtilityHandler {
-    return async (args) => {
-      if (!validate(args)) {
-        throw shellError(
-          'invalid-request',
-          `invalid arguments for ${name}`,
-        );
-      }
-      return run(args);
-    };
   }
 
   return {

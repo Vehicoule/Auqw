@@ -52,40 +52,10 @@ import {
   isUtilityPingResult,
 } from '../shared/contract.ts';
 import type {
-  AppMeta,
   AuqwApi,
-  ChromeSchemePayload,
-  NetEvent,
-  NetSnapshot,
-  ThemeSourceEvent,
-  StorageBeginResult,
-  StorageExecuteResult,
-  StorageQueryResult,
-  StorageStatement,
   StreamPortLike,
-  SyncAppliedEvent,
-  SyncDialArgs,
-  SyncDialPayloadArgs,
-  SyncDialResult,
-  SyncNearbyEvent,
-  SyncDeltasArgs,
-  SyncDeltasResult,
-  SyncDevicesResult,
-  SyncDrainAppliedResult,
-  SyncImportDeltaArgs,
-  SyncImportDeltaResult,
-  SyncLocalChangesArgs,
-  SyncLocalChangesResult,
-  SyncMaterializedArgs,
-  SyncMaterializedResult,
-  SyncPairingResult,
-  SyncStatusResult,
-  SyncTriggerResult,
-  SyncUnpairArgs,
-  UtilityPingResult,
 } from '../shared/contract.ts';
 import { isPumpServerMessage } from '../shared/pump-protocol.ts';
-import type { SqlValue } from '@auqw/storage-sqlite';
 import { isResultEnvelope } from '../shared/envelope.ts';
 import { shellError } from '../shared/errors.ts';
 
@@ -214,220 +184,171 @@ async function invoke<T>(
   return raw.result;
 }
 
+/** Refcounted push channel: validate each payload, fan out to the listener. */
+function subscribeTo<E>(
+  events: string,
+  sub: string,
+  unsub: string,
+  is: (payload: unknown) => payload is E,
+): (listener: (event: E) => void) => () => void {
+  return (listener) => {
+    const wrapped = (_event: IpcRendererEvent, payload: unknown): void => {
+      if (is(payload)) {
+        listener(payload);
+      }
+    };
+    ipcRenderer.on(events, wrapped);
+    ipcRenderer.send(sub);
+    return () => {
+      ipcRenderer.removeListener(events, wrapped);
+      ipcRenderer.send(unsub);
+    };
+  };
+}
+
 const api: AuqwApi = {
   app: {
-    meta: (): Promise<AppMeta> =>
-      invoke(CHANNELS.appMeta, undefined, isAppMeta),
+    meta: () => invoke(CHANNELS.appMeta, undefined, isAppMeta),
   },
   chrome: {
     platform: process.platform,
-    setScheme: (scheme: ChromeSchemePayload): void => {
+    setScheme: (scheme) => {
       ipcRenderer.send(CHANNELS.chromeScheme, scheme);
     },
   },
   dialog: {
-    pickFolder: (title?: string): Promise<string | null> =>
+    pickFolder: (title) =>
       invoke(
         CHANNELS.dialogPickFolder,
         title === undefined ? {} : { title },
         isStringOrNull,
       ),
-    pickFiles: (title?: string, multiple?: boolean): Promise<readonly string[]> => {
-      const args: { title?: string; multiple?: boolean } = {};
-      if (title !== undefined) {
-        args.title = title;
-      }
-      if (multiple !== undefined) {
-        args.multiple = multiple;
-      }
-      return invoke(CHANNELS.dialogPickFiles, args, isStringArray);
-    },
+    pickFiles: (title, multiple) =>
+      invoke(
+        CHANNELS.dialogPickFiles,
+        {
+          ...(title !== undefined ? { title } : {}),
+          ...(multiple !== undefined ? { multiple } : {}),
+        },
+        isStringArray,
+      ),
   },
   net: {
-    snapshot: (): Promise<NetSnapshot> =>
-      invoke(CHANNELS.netSnapshot, undefined, isNetEvent),
-    subscribe: (listener: (event: NetEvent) => void): (() => void) => {
-      const wrapped = (
-        _event: IpcRendererEvent,
-        payload: unknown,
-      ): void => {
-        if (isNetEvent(payload)) {
-          listener(payload);
-        }
-      };
-      ipcRenderer.on(CHANNELS.netEvents, wrapped);
-      ipcRenderer.send(CHANNELS.netSubscribe);
-      return () => {
-        ipcRenderer.removeListener(CHANNELS.netEvents, wrapped);
-        ipcRenderer.send(CHANNELS.netUnsubscribe);
-      };
-    },
+    snapshot: () => invoke(CHANNELS.netSnapshot, undefined, isNetEvent),
+    subscribe: subscribeTo(
+      CHANNELS.netEvents,
+      CHANNELS.netSubscribe,
+      CHANNELS.netUnsubscribe,
+      isNetEvent,
+    ),
   },
   theme: {
-    subscribe: (
-      listener: (event: ThemeSourceEvent) => void,
-    ): (() => void) => {
-      const wrapped = (
-        _event: IpcRendererEvent,
-        payload: unknown,
-      ): void => {
-        if (isThemeSourceEvent(payload)) {
-          listener(payload);
-        }
-      };
-      ipcRenderer.on(CHANNELS.themeEvents, wrapped);
-      ipcRenderer.send(CHANNELS.themeSubscribe);
-      return () => {
-        ipcRenderer.removeListener(CHANNELS.themeEvents, wrapped);
-        ipcRenderer.send(CHANNELS.themeUnsubscribe);
-      };
-    },
+    subscribe: subscribeTo(
+      CHANNELS.themeEvents,
+      CHANNELS.themeSubscribe,
+      CHANNELS.themeUnsubscribe,
+      isThemeSourceEvent,
+    ),
   },
   secure: {
-    get: (key: string): Promise<string | null> =>
-      invoke(CHANNELS.secureGet, { key }, isStringOrNull),
-    set: (key: string, value: string): Promise<void> =>
+    get: (key) => invoke(CHANNELS.secureGet, { key }, isStringOrNull),
+    set: (key, value) =>
       invoke(CHANNELS.secureSet, { key, value }, isUndefinedResult),
-    delete: (key: string): Promise<void> =>
+    delete: (key) =>
       invoke(CHANNELS.secureDelete, { key }, isUndefinedResult),
   },
   storage: {
-    begin: (): Promise<StorageBeginResult> =>
+    begin: () =>
       invoke(CHANNELS.storageBegin, undefined, isStorageBeginResult),
-    commit: (txId: string): Promise<void> =>
+    commit: (txId) =>
       invoke(CHANNELS.storageCommit, { txId }, isUndefinedResult),
-    rollback: (txId: string): Promise<void> =>
+    rollback: (txId) =>
       invoke(CHANNELS.storageRollback, { txId }, isUndefinedResult),
-    cancel: (txId: string): Promise<void> =>
+    cancel: (txId) =>
       invoke(CHANNELS.storageCancel, { txId }, isUndefinedResult),
-    execute: (
-      txId: string,
-      sql: string,
-      params: readonly SqlValue[] = [],
-    ): Promise<StorageExecuteResult> =>
+    execute: (txId, sql, params = []) =>
       invoke(
         CHANNELS.storageExecute,
         { txId, sql, params },
         isStorageExecuteResult,
       ),
-    execMany: (
-      txId: string,
-      statements: readonly StorageStatement[],
-    ): Promise<void> =>
+    execMany: (txId, statements) =>
       invoke(
         CHANNELS.storageExecMany,
         { txId, statements },
         isUndefinedResult,
       ),
-    query: (
-      txId: string,
-      sql: string,
-      params: readonly SqlValue[] = [],
-    ): Promise<StorageQueryResult> =>
+    query: (txId, sql, params = []) =>
       invoke(
         CHANNELS.storageQuery,
         { txId, sql, params },
         isStorageQueryResult,
       ),
-    backup: (tag: string): Promise<void> =>
+    backup: (tag) =>
       invoke(CHANNELS.storageBackup, { tag }, isUndefinedResult),
-    dropBackup: (tag: string): Promise<void> =>
+    dropBackup: (tag) =>
       invoke(CHANNELS.storageDropBackup, { tag }, isUndefinedResult),
   },
   sync: {
-    status: (): Promise<SyncStatusResult> =>
-      invoke(CHANNELS.syncStatus, undefined, isSyncStatusResult),
-    pairing: (): Promise<SyncPairingResult> =>
+    status: () => invoke(CHANNELS.syncStatus, undefined, isSyncStatusResult),
+    pairing: () =>
       invoke(CHANNELS.syncPairing, undefined, isSyncPairingResult),
-    devices: (): Promise<SyncDevicesResult> =>
+    devices: () =>
       invoke(CHANNELS.syncDevices, undefined, isSyncDevicesResult),
-    unpair: (args: SyncUnpairArgs): Promise<void> =>
+    unpair: (args) =>
       invoke(CHANNELS.syncUnpair, args, isUndefinedResult),
-    deltas: (args: SyncDeltasArgs): Promise<SyncDeltasResult> =>
+    deltas: (args) =>
       invoke(CHANNELS.syncDeltas, args, isSyncDeltasResult),
-    importDelta: (
-      args: SyncImportDeltaArgs,
-    ): Promise<SyncImportDeltaResult> =>
+    importDelta: (args) =>
       invoke(
         CHANNELS.syncImportDelta,
         args,
         isSyncImportDeltaResult,
       ),
-    trigger: (): Promise<SyncTriggerResult> =>
+    trigger: () =>
       invoke(CHANNELS.syncTrigger, undefined, isSyncTriggerResult),
-    localChanges: (
-      args: SyncLocalChangesArgs,
-    ): Promise<SyncLocalChangesResult> =>
+    localChanges: (args) =>
       invoke(
         CHANNELS.syncLocalChanges,
         args,
         isSyncLocalChangesResult,
       ),
-    drainApplied: (): Promise<SyncDrainAppliedResult> =>
+    drainApplied: () =>
       invoke(
         CHANNELS.syncDrainApplied,
         undefined,
         isSyncDrainAppliedResult,
       ),
-    ackApplied: (): Promise<void> =>
+    ackApplied: () =>
       invoke(CHANNELS.syncAckApplied, undefined, isUndefinedResult),
-    materialized: (
-      args: SyncMaterializedArgs,
-    ): Promise<SyncMaterializedResult> =>
+    materialized: (args) =>
       invoke(
         CHANNELS.syncMaterialized,
         args,
         isSyncMaterializedResult,
       ),
-    onApplied: (
-      listener: (event: SyncAppliedEvent) => void,
-    ): (() => void) => {
-      const wrapped = (
-        _event: IpcRendererEvent,
-        payload: unknown,
-      ): void => {
-        if (isSyncAppliedEvent(payload)) {
-          listener(payload);
-        }
-      };
-      ipcRenderer.on(CHANNELS.syncApplied, wrapped);
-      ipcRenderer.send(CHANNELS.syncAppliedSubscribe);
-      return () => {
-        ipcRenderer.removeListener(CHANNELS.syncApplied, wrapped);
-        ipcRenderer.send(CHANNELS.syncAppliedUnsubscribe);
-      };
-    },
-    nearbyStart: (): Promise<void> =>
+    onApplied: subscribeTo(
+      CHANNELS.syncApplied,
+      CHANNELS.syncAppliedSubscribe,
+      CHANNELS.syncAppliedUnsubscribe,
+      isSyncAppliedEvent,
+    ),
+    nearbyStart: () =>
       invoke(CHANNELS.syncNearbyStart, undefined, isUndefinedResult),
-    nearbyStop: (): Promise<void> =>
+    nearbyStop: () =>
       invoke(CHANNELS.syncNearbyStop, undefined, isUndefinedResult),
-    onNearby: (
-      listener: (event: SyncNearbyEvent) => void,
-    ): (() => void) => {
-      const wrapped = (
-        _event: IpcRendererEvent,
-        payload: unknown,
-      ): void => {
-        if (isSyncNearbyEvent(payload)) {
-          listener(payload);
-        }
-      };
-      ipcRenderer.on(CHANNELS.syncNearby, wrapped);
-      ipcRenderer.send(CHANNELS.syncNearbySubscribe);
-      return () => {
-        ipcRenderer.removeListener(CHANNELS.syncNearby, wrapped);
-        ipcRenderer.send(CHANNELS.syncNearbyUnsubscribe);
-      };
-    },
-    dial: (args: SyncDialArgs): Promise<SyncDialResult> =>
-      invoke(CHANNELS.syncDial, args, isSyncDialResult),
-    dialPayload: (
-      args: SyncDialPayloadArgs,
-    ): Promise<SyncDialResult> =>
+    onNearby: subscribeTo(
+      CHANNELS.syncNearby,
+      CHANNELS.syncNearbySubscribe,
+      CHANNELS.syncNearbyUnsubscribe,
+      isSyncNearbyEvent,
+    ),
+    dial: (args) => invoke(CHANNELS.syncDial, args, isSyncDialResult),
+    dialPayload: (args) =>
       invoke(CHANNELS.syncDialPayload, args, isSyncDialResult),
   },
   utility: {
-    ping: (message: string): Promise<UtilityPingResult> =>
+    ping: (message) =>
       invoke(CHANNELS.utilityPing, { message }, isUtilityPingResult),
   },
   host: {

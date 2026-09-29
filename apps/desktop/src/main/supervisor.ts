@@ -22,7 +22,7 @@ export interface UtilityChildLike {
   kill(): void;
 }
 
-export type SupervisorOptions = {
+type SupervisorOptions = {
   readonly fork: () => UtilityChildLike;
   /** First respawn delay after a crash; doubles per consecutive crash. */
   readonly baseBackoffMs?: number;
@@ -70,7 +70,7 @@ export type SupervisorOptions = {
   readonly queueDeadlineMs?: number;
 };
 
-export interface UtilitySupervisor {
+interface UtilitySupervisor {
   request(channel: string, args: unknown): Promise<unknown>;
   /**
    * A one-shot non-envelope message (pump attach) — sent only when a
@@ -313,8 +313,7 @@ export function createSupervisor(
           ),
         );
       }
-      const id = nextId;
-      nextId += 1;
+      const id = nextId++;
       return new Promise<unknown>((resolve, reject) => {
         if (live) {
           pending.set(id, { resolve, reject });

@@ -132,10 +132,7 @@ export function bindingsCandidates(
   repoRoot: string | undefined,
 ): string[] {
   const out: string[] = [];
-  if (
-    env.AUQW_NODE_BINDINGS !== undefined &&
-    env.AUQW_NODE_BINDINGS !== ''
-  ) {
+  if (env.AUQW_NODE_BINDINGS) {
     out.push(env.AUQW_NODE_BINDINGS);
   }
   if (resourcesPath !== undefined) {
@@ -187,30 +184,26 @@ function manifestFields(
   try {
     raw = JSON.parse(manifestJson);
   } catch {
-    return { providerId: stem, capabilities: [], version: null };
+    raw = null;
   }
-  if (typeof raw !== 'object' || raw === null) {
-    return { providerId: stem, capabilities: [], version: null };
-  }
-  const record = raw as Record<string, unknown>;
-  const providerId =
-    typeof record['id'] === 'string' &&
-    record['id'].length > 0 &&
-    record['id'].length <= 128
-      ? record['id']
-      : stem;
+  const str = (value: unknown, max: number): string | null =>
+    typeof value === 'string' && value.length > 0 && value.length <= max
+      ? value
+      : null;
+  const record =
+    typeof raw === 'object' && raw !== null
+      ? (raw as Record<string, unknown>)
+      : {};
   const capabilities = Array.isArray(record['capabilities'])
     ? (record['capabilities'] as unknown[]).filter(
         (c): c is string => typeof c === 'string' && c.length <= 64,
       )
     : [];
-  const version =
-    typeof record['version'] === 'string' &&
-    record['version'].length > 0 &&
-    record['version'].length <= 64
-      ? record['version']
-      : null;
-  return { providerId, capabilities, version };
+  return {
+    providerId: str(record['id'], 128) ?? stem,
+    capabilities,
+    version: str(record['version'], 64),
+  };
 }
 
 export function createHostRuntime(opts: {
@@ -325,7 +318,7 @@ export function createHostRuntime(opts: {
     h: PluginHostLike,
   ): Promise<readonly LoadedPlugin[]> {
     const dir = opts.env.AUQW_PLUGIN_DIR;
-    if (dir === undefined || dir === '') {
+    if (!dir) {
       return [];
     }
     const manifests = fs

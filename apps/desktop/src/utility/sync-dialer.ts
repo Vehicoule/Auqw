@@ -19,7 +19,7 @@ import { isShellError } from '../shared/errors.ts';
 import { createClock, createIds, createLog } from '@auqw/application';
 import { nodeNoise } from './noise-node.ts';
 import type { SyncIdentity } from '@auqw/application';
-import type { SyncKeys } from './sync-keys.ts';
+import type { SyncDeviceRecord, SyncKeys } from './sync-keys.ts';
 
 /**
  * The desktop's caller half — node:net dial + custody adapter + the
@@ -173,12 +173,39 @@ function createDesktopSyncDialerKeys(deps: {
           `sync: custody — ${thrown.message}`,
         )
       : appError('internal', 'sync: custody failed');
+  // Cancel-check, then the body, then custody-error mapping — every
+  // method shares this frame.
+  const guard = async <T>(
+    signal: CancellationSignal | undefined,
+    run: () => Promise<Result<T>>,
+  ): Promise<Result<T>> => {
+    if (signal?.cancelled === true) {
+      return err(appError('cancelled', 'sync: cancelled'));
+    }
+    try {
+      return await run();
+    } catch (thrown) {
+      return err(toError(thrown));
+    }
+  };
+  const disclosed = (
+    peer: SyncPeer,
+  ): peer is SyncPeer & { deviceId: string; pub: string } =>
+    peer.deviceId !== undefined && peer.pub !== undefined;
+  const peerRecord = (
+    peer: SyncPeer & { deviceId: string; pub: string },
+  ): SyncDeviceRecord => ({
+    role: 'caller',
+    id: peer.deviceId,
+    name: peer.name,
+    pub: peer.pub,
+    fp: peer.fp,
+    pairedAt: peer.pairedAt,
+    lastSeenAt: peer.lastSeenAt,
+  });
   return {
-    async identityGet(signal) {
-      if (signal?.cancelled === true) {
-        return err(appError('cancelled', 'sync: cancelled'));
-      }
-      try {
+    identityGet(signal) {
+      return guard(signal, async () => {
         const identity = await deps.keys.identityGet();
         if (identity === null) {
           return ok(null);
@@ -188,26 +215,16 @@ function createDesktopSyncDialerKeys(deps: {
           return ok(null);
         }
         return ok({ deviceId, identity });
-      } catch (thrown) {
-        return err(toError(thrown));
-      }
+      });
     },
-    async identitySet(record, signal) {
-      if (signal?.cancelled === true) {
-        return err(appError('cancelled', 'sync: cancelled'));
-      }
-      try {
+    identitySet(record, signal) {
+      return guard(signal, async () => {
         await deps.keys.identitySet(record.identity);
         return ok(undefined);
-      } catch (thrown) {
-        return err(toError(thrown));
-      }
+      });
     },
-    async peerList(signal) {
-      if (signal?.cancelled === true) {
-        return err(appError('cancelled', 'sync: cancelled'));
-      }
-      try {
+    peerList(signal) {
+      return guard(signal, async () => {
         const { devices } = await deps.keys.deviceList();
         return ok(
           devices.map(
@@ -224,15 +241,13 @@ function createDesktopSyncDialerKeys(deps: {
             }),
           ),
         );
-      } catch (thrown) {
-        return err(toError(thrown));
-      }
+      });
     },
     async peerPut(peer, signal) {
       if (signal?.cancelled === true) {
         return err(appError('cancelled', 'sync: cancelled'));
       }
-      if (peer.deviceId === undefined || peer.pub === undefined) {
+      if (!disclosed(peer)) {
         return err(
           appError(
             'invalid-message',
@@ -241,21 +256,13 @@ function createDesktopSyncDialerKeys(deps: {
         );
       }
       try {
-        await deps.keys.devicePut({
-          role: 'caller',
-          id: peer.deviceId,
-          name: peer.name,
-          pub: peer.pub,
-          fp: peer.fp,
-          pairedAt: peer.pairedAt,
-          lastSeenAt: peer.lastSeenAt,
-        });
+        await deps.keys.devicePut(peerRecord(peer));
         return ok(undefined);
       } catch (thrown) {
         return err(toError(thrown));
       }
     },
-    async peerMerge(peer, signal) {
+    peerMerge(peer, signal) {
       // Desktop custody carries no sync cursors — `peerCursor`/`pot`
       // live in the sync-log DB, not the device record — so the merge
       // contract's preserved fields don't exist here and a put IS the
@@ -266,7 +273,7 @@ function createDesktopSyncDialerKeys(deps: {
       if (signal?.cancelled === true) {
         return err(appError('cancelled', 'sync: cancelled'));
       }
-      if (peer.deviceId === undefined || peer.pub === undefined) {
+      if (!disclosed(peer)) {
         return err(
           appError(
             'invalid-message',
@@ -278,34 +285,21 @@ function createDesktopSyncDialerKeys(deps: {
         // device-touch serializes the existence check + write in the
         // service — an unpair racing this update can't be undone by
         // a stale put landing after the delete.
-        const updated = await deps.keys.deviceTouch({
-          role: 'caller',
-          id: peer.deviceId,
-          name: peer.name,
-          pub: peer.pub,
-          fp: peer.fp,
-          pairedAt: peer.pairedAt,
-          lastSeenAt: peer.lastSeenAt,
-        });
+        const updated = await deps.keys.deviceTouch(peerRecord(peer));
         return ok(updated);
       } catch (thrown) {
         return err(toError(thrown));
       }
     },
-    async peerDelete(fp, signal) {
-      if (signal?.cancelled === true) {
-        return err(appError('cancelled', 'sync: cancelled'));
-      }
-      try {
+    peerDelete(fp, signal) {
+      return guard(signal, async () => {
         const { devices } = await deps.keys.deviceList();
         const record = devices.find((d) => d.fp === fp);
         if (record !== undefined) {
           await deps.keys.deviceDelete(record.id);
         }
         return ok(undefined);
-      } catch (thrown) {
-        return err(toError(thrown));
-      }
+      });
     },
   };
 }

@@ -4,7 +4,7 @@
  * and the renderer's local-playback attach leg — one table so a type
  * the scanner admits is a type the player names honestly.
  */
-export const AUDIO_MIME: Readonly<Record<string, string>> = {
+const AUDIO_MIME: Readonly<Record<string, string>> = {
   mp3: 'audio/mpeg',
   mp2: 'audio/mpeg',
   flac: 'audio/flac',

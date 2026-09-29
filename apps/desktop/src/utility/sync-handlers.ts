@@ -50,7 +50,7 @@ import type { UtilityHandler } from './router.ts';
  */
 
 /** Live state the handlers read off the service — closures, not copies. */
-export type SyncServiceView = {
+type SyncServiceView = {
   /** The resolved engine (a promise dep settles inside start()). */
   readonly engine: () => SyncEnginePort | undefined;
   readonly engineReady: Promise<void>;
@@ -90,13 +90,13 @@ export type SyncServiceView = {
  * The mDNS browse refcount — every `sync:nearbyStart` owns one share,
  * a stop while browse() is pending makes the late session self-close.
  */
-export interface NearbyBrowse {
+interface NearbyBrowse {
   start(): Promise<void>;
   stop(): void;
   close(): void;
 }
 
-export function createNearbyBrowse(opts: {
+function createNearbyBrowse(opts: {
   discovery: SyncDiscoveryPort | null | undefined;
   notifyNearby?: ((event: SyncNearbyEvent) => unknown) | undefined;
   mapError: (error: AppError) => ShellError;
@@ -240,6 +240,15 @@ export function createSyncHandlers(input: {
       return value;
     };
   };
+
+  async function engine(): Promise<SyncEnginePort> {
+    await service.engineReady;
+    const engine = service.engine();
+    if (engine === undefined) {
+      throw shellError('unavailable', 'sync engine not installed');
+    }
+    return engine;
+  }
 
   const browse = createNearbyBrowse({
     discovery: deps.discovery,
@@ -437,12 +446,7 @@ export function createSyncHandlers(input: {
       if (!isSyncDeltasArgs(args)) {
         throw shellError('invalid-request', 'sync:deltas expects {since}');
       }
-      await service.engineReady;
-      const engine = service.engine();
-      if (engine === undefined) {
-        throw shellError('unavailable', 'sync engine not installed');
-      }
-      const result = await engine.exportDelta(
+      const result = await (await engine()).exportDelta(
         args.since,
         service.cancel,
       );
@@ -461,12 +465,7 @@ export function createSyncHandlers(input: {
           'sync:importDelta expects {delta}',
         );
       }
-      await service.engineReady;
-      const engine = service.engine();
-      if (engine === undefined) {
-        throw shellError('unavailable', 'sync engine not installed');
-      }
-      const applied = await engine.applyDelta(
+      const applied = await (await engine()).applyDelta(
         args.delta,
         args.deviceId ?? 'local-import',
         service.cancel,

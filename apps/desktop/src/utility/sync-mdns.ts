@@ -67,6 +67,14 @@ export const createBonjourAdvertise = (): SyncAdvertise => {
   };
 };
 
+/** Raw TXT `dev` value from a service, or undefined when absent. */
+const txtFp = (service: Service): unknown => {
+  const txt = service.txt;
+  return txt !== null && typeof txt === 'object' && TXT_FP in txt
+    ? txt[TXT_FP]
+    : undefined;
+};
+
 /** One discovered service → the port's peer shape, or null when unusable. */
 function peerOf(service: Service): SyncDiscoveredPeer | null {
   // The resolved address list arrives in resolver order — a bare
@@ -84,11 +92,7 @@ function peerOf(service: Service): SyncDiscoveredPeer | null {
     // A non-LAN advert is undialable — never a nearby row.
     return null;
   }
-  const txt = service.txt;
-  const rawFp =
-    txt !== null && typeof txt === 'object' && TXT_FP in txt
-      ? txt[TXT_FP]
-      : undefined;
+  const rawFp = txtFp(service);
   // A PRESENT-but-malformed `dev` TXT can't be downgraded to an
   // unpinned tap target — drop the whole advert. Absent stays a
   // valid unpinned candidate.
@@ -114,11 +118,7 @@ function peerOf(service: Service): SyncDiscoveredPeer | null {
 
 /** TXT `dev` (device fingerprint) from a service, or null/undefined. */
 const fpOf = (service: Service): string | null => {
-  const txt = service.txt;
-  const raw =
-    txt !== null && typeof txt === 'object' && TXT_FP in txt
-      ? txt[TXT_FP]
-      : undefined;
+  const raw = txtFp(service);
   return typeof raw === 'string' && /^[0-9a-f]{64}$/.test(raw)
     ? raw
     : null;

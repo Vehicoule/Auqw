@@ -16,7 +16,7 @@ import { shellError } from '../shared/errors.ts';
  * readers wait rather than fail); enabling WAL on the writer side is a
  * separate decision and not required for correctness here.
  */
-export type IndexDb = {
+type IndexDb = {
   /**
    * The open connection, or null when the database file does not exist
    * yet (fresh install before the renderer's first write — callers map

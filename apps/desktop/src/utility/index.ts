@@ -75,31 +75,24 @@ function parentPort(): ParentPort | null {
 /**
  * Defer `new Bonjour()` to first use — a constructor failure lands
  * inside the sync service's typed `unavailable` path instead of
- * crashing the child at module init.
+ * crashing the child at module init. Same lazy posture for browse.
  */
 function lazyBonjour(): SyncAdvertise {
   let factory: SyncAdvertise | null = null;
-  return (opts) => {
-    factory ??= createBonjourAdvertise();
-    return factory(opts);
-  };
+  return (opts) => (factory ??= createBonjourAdvertise())(opts);
 }
 
-/** Same lazy posture for the browse side — defer Bonjour to first use. */
-function lazyBrowse() {
-  let port: ReturnType<typeof createBonjourBrowse> | null = null;
+function lazyBrowse(): SyncDiscoveryPort {
+  let port: SyncDiscoveryPort | null = null;
   return {
-    browse: (opts: Parameters<SyncDiscoveryPort['browse']>[0]) => {
-      port ??= createBonjourBrowse();
-      return port.browse(opts);
-    },
+    browse: (opts) => (port ??= createBonjourBrowse()).browse(opts),
   };
 }
 
 /** AUQW_SYNC_PORT — an explicit port when set, else ephemeral. */
 function syncPortEnv(): number | undefined {
   const raw = process.env['AUQW_SYNC_PORT'];
-  if (raw === undefined || raw === '') {
+  if (!raw) {
     return undefined;
   }
   const parsed = Number.parseInt(raw, 10);
@@ -183,6 +176,13 @@ if (port === null) {
   const serviceClient = createServiceClient({
     post: (message) => port.postMessage(message),
   });
+  // Fire-and-forget pushes into main — the service call's reply is
+  // never read, and a dead client must not reject upward.
+  const push = (channel: string, args: unknown): Promise<void> =>
+    serviceClient.request(channel, args).then(
+      () => undefined,
+      () => undefined,
+    );
   // The merge engine: a JSONL change log under userData plus the
   // app's DOM-free runtime ports (clock/ids/log are shared with the
   // renderer — one clock, one id source, one log voice). The store
@@ -264,13 +264,7 @@ if (port === null) {
       }),
     discovery:
       process.env['AUQW_SYNC_NO_MDNS'] === '1' ? null : lazyBrowse(),
-    notifyNearby: (event) =>
-      serviceClient
-        .request('sync:nearby', event)
-        .then(
-          () => undefined,
-          () => undefined,
-        ),
+    notifyNearby: (event) => push('sync:nearby', event),
     ...(syncLogOpened === null
       ? {}
       : {
@@ -299,13 +293,7 @@ if (port === null) {
           // Renderer-facing push: the applied-outcome outbox depth
           // rides the whitelisted `sync:applied` service call into
           // main, which broadcasts to subscribed renderers.
-          notifyApplied: (pending) =>
-            serviceClient
-              .request('sync:applied', { pending })
-              .then(
-                () => undefined,
-                () => undefined,
-              ),
+          notifyApplied: (pending) => push('sync:applied', { pending }),
           // Outbox overflow spills beside the durable log — renderer-
           // side projection survives the queue's memory bound.
           appliedSpillPath: `${userData}/sync-applied.jsonl`,

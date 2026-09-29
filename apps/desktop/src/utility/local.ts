@@ -15,6 +15,7 @@ import {
   isLocalProbeArgs,
   isLocalReadArgs,
   isLocalResolveArgs,
+  isUndefinedResult,
 } from '../shared/contract.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
 import {
@@ -27,7 +28,7 @@ import {
   pickedFileTreeUri,
   toFileUri,
 } from '../shared/local-paths.ts';
-import type { UtilityHandler } from './router.ts';
+import { guarded, type UtilityHandler } from './router.ts';
 import { mimeForPath } from '../shared/audio-mime.ts';
 import { isBareName } from './transfer.ts';
 
@@ -46,14 +47,14 @@ import { isBareName } from './transfer.ts';
  * integrity sweep (`local:sweep` — index rows whose files vanished).
  */
 
-export type LocalServiceOptions = {
+type LocalServiceOptions = {
   /** Shared read accessor over the domain database file. */
   readonly database: () => DatabaseSync | null;
   /** Managed media dir — for probing `downloads.file_path` rows. */
   readonly mediaDir: string | undefined;
 };
 
-export type LocalService = {
+type LocalService = {
   readonly handlers: Readonly<Record<string, UtilityHandler>>;
   readonly close: () => void;
 };
@@ -330,7 +331,6 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         return { uri: null };
       }
       asIo('local probe failed', thrown);
-      return { uri: null };
     }
   }
 
@@ -453,7 +453,6 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
           rows = [];
         } else {
           asIo('local resolve failed', thrown);
-          return null;
         }
       }
       const mediaReal = await realpathChecked(options.mediaDir);
@@ -618,7 +617,6 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         return { sources: [] };
       }
       asIo('local list failed', thrown);
-      return { sources: [] };
     }
   }
 
@@ -696,7 +694,6 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         return { entries: [] };
       }
       asIo('local playback failed', thrown);
-      return { entries: [] };
     }
   }
 
@@ -738,24 +735,6 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
     return { missing, sources };
   }
 
-  function guarded<A>(
-    name: string,
-    validate: (value: unknown) => value is A,
-    run: (args: A) => Promise<unknown>,
-  ): UtilityHandler {
-    return async (args) => {
-      if (!validate(args)) {
-        throw shellError(
-          'invalid-request',
-          `invalid arguments for ${name}`,
-        );
-      }
-      return run(args);
-    };
-  }
-
-  const noArgs = (value: unknown) => value === undefined;
-
   return {
     handlers: {
       [CHANNELS.localAdd]: guarded(
@@ -778,13 +757,21 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         isLocalReadArgs,
         read,
       ),
-      [CHANNELS.localList]: guarded(CHANNELS.localList, noArgs, list),
+      [CHANNELS.localList]: guarded(
+        CHANNELS.localList,
+        isUndefinedResult,
+        list,
+      ),
       [CHANNELS.localPlayback]: guarded(
         CHANNELS.localPlayback,
-        noArgs,
+        isUndefinedResult,
         playback,
       ),
-      [CHANNELS.localSweep]: guarded(CHANNELS.localSweep, noArgs, sweep),
+      [CHANNELS.localSweep]: guarded(
+        CHANNELS.localSweep,
+        isUndefinedResult,
+        sweep,
+      ),
     },
     close() {
       // Stateless — the shared index db is owned by its creator.

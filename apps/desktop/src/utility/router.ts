@@ -8,6 +8,23 @@ import type { UtilityRequest, UtilityResponse } from './envelope.ts';
 
 export type UtilityHandler = (args: unknown) => Promise<unknown>;
 
+/** validate-then-run handler — the utility-side arg boundary. */
+export function guarded<A>(
+  name: string,
+  validate: (value: unknown) => value is A,
+  run: (args: A) => Promise<unknown> | unknown,
+): UtilityHandler {
+  return async (args) => {
+    if (!validate(args)) {
+      throw shellError(
+        'invalid-request',
+        `invalid arguments for ${name}`,
+      );
+    }
+    return run(args);
+  };
+}
+
 function handlePing(args: unknown): Promise<unknown> {
   if (!isUtilityPingArgs(args)) {
     return Promise.reject(

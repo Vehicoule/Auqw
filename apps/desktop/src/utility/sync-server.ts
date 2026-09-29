@@ -414,22 +414,21 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   }
 
   async function status(): Promise<SyncStatusResult> {
+    // Disabled is a stable answer, not a custody question — an
+    // explicit AUQW_SYNC_DISABLED must never depend on safeStorage.
+    const pairedDevices =
+      listener === 'disabled' ? 0 : await deviceCount();
+    // idleStatus reads lastSyncAt — sample it after the await so a
+    // sync completing during the wait isn't reported stale.
     return {
-      listener,
+      ...idleStatus(listener),
       endpoint: endpoint(),
       boundPort,
       advertise: advertiseState,
-      // Disabled is a stable answer, not a custody question — an
-      // explicit AUQW_SYNC_DISABLED must never depend on safeStorage.
-      pairedDevices:
-        listener === 'disabled' ? 0 : await deviceCount(),
+      pairedDevices,
       sessions: [...responder.sessions].filter(
         (s) => s.phase === 'open',
       ).length,
-      lastSyncAt,
-      engine: engine === undefined ? 'absent' : 'ready',
-      name: deviceName,
-      fingerprint,
     };
   }
 
@@ -741,13 +740,9 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
     ownDeviceId = deps.ownDeviceId === undefined
       ? null
       : await deps.ownDeviceId.catch(() => null);
-    server = createServer((socket) => responder.accept(socket));
+    const srv = createServer((socket) => responder.accept(socket));
+    server = srv;
     const bound = await new Promise<number | null>((resolve) => {
-      const srv = server;
-      if (srv === null) {
-        resolve(null);
-        return;
-      }
       srv.once('error', () => resolve(null));
       srv.listen(
         { host, port: deps.port ?? 0 },

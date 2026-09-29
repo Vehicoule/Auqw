@@ -40,7 +40,7 @@ export function fileUrlPath(uri: string): string | null {
 }
 
 /** OS path inside a picked-file treeUri, else null. */
-export function pickedFilePath(treeUri: string): string | null {
+function pickedFilePath(treeUri: string): string | null {
   if (!treeUri.startsWith(PICKED_FILE_PREFIX)) {
     return null;
   }

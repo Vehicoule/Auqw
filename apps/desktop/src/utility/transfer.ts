@@ -31,10 +31,11 @@ import {
   isTransferSinkArgs,
   isTransferSweepArgs,
   isTransferWriteArgs,
+  isUndefinedResult,
 } from '../shared/contract.ts';
 import { errorCode } from '../shared/check.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
-import type { UtilityHandler } from './router.ts';
+import { guarded, type UtilityHandler } from './router.ts';
 
 /**
  * `transfer:*` — the `MediaTransferPort` file plane over node:fs.
@@ -52,7 +53,7 @@ import type { UtilityHandler } from './router.ts';
  * escape the managed dir or collide with another sink's partial.
  */
 
-export type TransferServiceOptions = {
+type TransferServiceOptions = {
   /**
    * Managed media dir (`AUQW_USER_DATA/media`). Undefined degrades
    * every channel to `unavailable` instead of a crash.
@@ -70,7 +71,7 @@ export type TransferServiceOptions = {
   readonly maxWaiters?: number | undefined;
 };
 
-export type TransferService = {
+type TransferService = {
   readonly handlers: Readonly<Record<string, UtilityHandler>>;
   /** Startup orphan sweep — bounded, ledger-aware, best-effort. */
   readonly sweepOrphans: () => Promise<number>;
@@ -572,14 +573,8 @@ export function createTransferService(
     }
   }
 
-  async function sweepPartials(
-    args: TransferSweepArgs,
-  ): Promise<unknown> {
-    return sweep(args.keepPaths);
-  }
-
-  async function sweep(keepPaths: readonly string[]): Promise<unknown> {
-    const keep = new Set<string>([...keepPaths, ...livePartNames()]);
+  async function sweep(args: TransferSweepArgs): Promise<unknown> {
+    const keep = new Set<string>([...args.keepPaths, ...livePartNames()]);
     let entries;
     try {
       entries = await readdir(dir());
@@ -592,7 +587,6 @@ export function createTransferService(
         return { swept: 0 };
       }
       asIo('transfer sweep failed', thrown);
-      return { swept: 0 };
     }
     let swept = 0;
     for (const name of entries) {
@@ -776,29 +770,11 @@ export function createTransferService(
     return { bytes, files, partials, freeBytes };
   }
 
-  function guarded<A>(
-    name: string,
-    validate: (value: unknown) => value is A,
-    run: (args: A) => Promise<unknown> | unknown,
-  ): UtilityHandler {
-    return async (args) => {
-      if (!validate(args)) {
-        throw shellError(
-          'invalid-request',
-          `invalid arguments for ${name}`,
-        );
-      }
-      return run(args);
-    };
-  }
-
-  const noArgs = (value: unknown) => value === undefined;
-
   return {
     handlers: {
       [CHANNELS.transferEnsureDir]: guarded(
         CHANNELS.transferEnsureDir,
-        noArgs,
+        isUndefinedResult,
         ensureDir,
       ),
       [CHANNELS.transferBegin]: guarded(
@@ -839,11 +815,11 @@ export function createTransferService(
       [CHANNELS.transferSweepPartials]: guarded(
         CHANNELS.transferSweepPartials,
         isTransferSweepArgs,
-        sweepPartials,
+        sweep,
       ),
       [CHANNELS.transferList]: guarded(
         CHANNELS.transferList,
-        noArgs,
+        isUndefinedResult,
         list,
       ),
       [CHANNELS.transferStatus]: guarded(
@@ -853,7 +829,7 @@ export function createTransferService(
       ),
       [CHANNELS.transferStats]: guarded(
         CHANNELS.transferStats,
-        noArgs,
+        isUndefinedResult,
         stats,
       ),
     },

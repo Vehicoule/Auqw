@@ -138,6 +138,30 @@ export function createStreamHandlers(deps: {
   status(): Promise<unknown>;
   devGateEnabled?: boolean;
 }): Readonly<Record<string, UtilityHandler>> {
+  /** The mapped region: run()'s throw/rejection becomes mapErr(). */
+  const napiRun = async <R>(
+    mapErr: (thrown: unknown) => ShellError,
+    run: () => R | Promise<R>,
+  ): Promise<R> => {
+    try {
+      return await run();
+    } catch (thrown) {
+      throw mapErr(thrown);
+    }
+  };
+
+  /** validate + mapped host call — the plain `stream:*` shape. */
+  const napiCall = <A>(
+    isArgs: (value: unknown) => value is A,
+    label: string,
+    mapErr: (thrown: unknown) => ShellError,
+    run: (host: PluginHostLike, args: A) => unknown | Promise<unknown>,
+  ): UtilityHandler =>
+    async (args) => {
+      const a = validated(isArgs, label)(args);
+      return napiRun(mapErr, () => run(deps.host(), a));
+    };
+
   return {
     [CHANNELS.hostPlugins]: () => deps.status(),
 
@@ -146,24 +170,16 @@ export function createStreamHandlers(deps: {
       // Same lazy-load gate as prepare — the plugin directory must
       // be scanned before a capability can reach a guest.
       await deps.pluginsReady();
-      const outcome = await deps
-        .host()
-        .startRequest(a.pluginId, a.capability, a.payloadJson, a.requestId)
-        .catch((thrown: unknown) => {
-          throw napiError(thrown);
-        });
+      const outcome = await napiRun(napiError, () =>
+        deps
+          .host()
+          .startRequest(a.pluginId, a.capability, a.payloadJson, a.requestId),
+      );
       return checked(isRequestOutcomePayload, 'host:request')(outcome);
     },
 
-    [CHANNELS.hostCancel]: async (args) => {
-      const a = validated(isHostCancelArgs, 'host:cancel')(args);
-      try {
-        deps.host().cancel(a.requestId);
-        return undefined;
-      } catch (thrown) {
-        throw napiError(thrown);
-      }
-    },
+    [CHANNELS.hostCancel]: napiCall(isHostCancelArgs, 'host:cancel', napiError,
+      (h, a) => void h.cancel(a.requestId)),
 
     [CHANNELS.streamPrepare]: async (args) => {
       const a = validated(isStreamPrepareArgs, 'stream:prepare')(args);
@@ -171,12 +187,9 @@ export function createStreamHandlers(deps: {
       // bindings — pluginsReady memoizes, so a concurrent first prepare
       // shares the one directory scan.
       await deps.pluginsReady();
-      const outcome = await deps
-        .host()
-        .startPrepare(a.pluginId, a.sourceRef, a.requestId)
-        .catch((thrown: unknown) => {
-          throw napiError(thrown);
-        });
+      const outcome = await napiRun(napiError, () =>
+        deps.host().startPrepare(a.pluginId, a.sourceRef, a.requestId),
+      );
       return checked(isPrepareOutcomePayload, 'stream:prepare')(outcome);
     },
 
@@ -188,83 +201,39 @@ export function createStreamHandlers(deps: {
           'stream:dev-prepare is a dev-gate — packaged builds refuse it',
         );
       }
-      try {
-        const stream = deps
-          .host()
-          .devPrepareUrl(a.url, a.mime, a.contentLength, a.remintable ?? false);
-        return checked(isPreparedStreamPayload, 'stream:dev-prepare')(stream);
-      } catch (thrown) {
-        throw napiError(thrown);
-      }
+      return napiRun(napiError, () =>
+        checked(isPreparedStreamPayload, 'stream:dev-prepare')(
+          deps
+            .host()
+            .devPrepareUrl(a.url, a.mime, a.contentLength, a.remintable ?? false),
+        ),
+      );
     },
 
-    [CHANNELS.streamServeUrl]: async (args) => {
-      const a = validated(isStreamHandleArgs, 'stream:serve-url')(args);
-      try {
-        return { url: deps.host().streamServeUrl(a.handle) };
-      } catch (thrown) {
-        throw napiStreamError(thrown);
-      }
-    },
+    [CHANNELS.streamServeUrl]: napiCall(isStreamHandleArgs, 'stream:serve-url',
+      napiStreamError, (h, a) => ({ url: h.streamServeUrl(a.handle) })),
 
-    [CHANNELS.streamOpen]: async (args) => {
-      const a = validated(isStreamOpenArgs, 'stream:open')(args);
-      try {
-        return { remaining: deps.host().streamOpen(a.handle, a.position) };
-      } catch (thrown) {
-        throw napiStreamError(thrown);
-      }
-    },
+    [CHANNELS.streamOpen]: napiCall(isStreamOpenArgs, 'stream:open',
+      napiStreamError, (h, a) => ({ remaining: h.streamOpen(a.handle, a.position) })),
 
-    [CHANNELS.streamRead]: async (args) => {
-      const a = validated(isStreamReadArgs, 'stream:read')(args);
-      const data = await deps
-        .host()
-        .streamRead(a.handle, a.position, a.maxLen)
-        .catch((thrown: unknown) => {
-          throw napiStreamError(thrown);
-        });
-      return { data: data.toString('base64') };
-    },
+    [CHANNELS.streamRead]: napiCall(isStreamReadArgs, 'stream:read',
+      napiStreamError, async (h, a) => ({
+        data: (await h.streamRead(a.handle, a.position, a.maxLen)).toString(
+          'base64',
+        ),
+      })),
 
-    [CHANNELS.streamClose]: async (args) => {
-      const a = validated(isStreamHandleArgs, 'stream:close')(args);
-      try {
-        deps.host().streamClose(a.handle);
-        return undefined;
-      } catch (thrown) {
-        throw napiStreamError(thrown);
-      }
-    },
+    [CHANNELS.streamClose]: napiCall(isStreamHandleArgs, 'stream:close',
+      napiStreamError, (h, a) => void h.streamClose(a.handle)),
 
-    [CHANNELS.streamRelease]: async (args) => {
-      const a = validated(isStreamHandleArgs, 'stream:release')(args);
-      try {
-        deps.host().streamRelease(a.handle);
-        return undefined;
-      } catch (thrown) {
-        throw napiStreamError(thrown);
-      }
-    },
+    [CHANNELS.streamRelease]: napiCall(isStreamHandleArgs, 'stream:release',
+      napiStreamError, (h, a) => void h.streamRelease(a.handle)),
 
-    [CHANNELS.streamMarks]: async (args) => {
-      const a = validated(isStreamHandleArgs, 'stream:marks')(args);
-      try {
-        const marks = deps.host().streamPhaseMarks(a.handle);
-        return checked(isStreamMarksResult, 'stream:marks')(marks);
-      } catch (thrown) {
-        throw napiStreamError(thrown);
-      }
-    },
+    [CHANNELS.streamMarks]: napiCall(isStreamHandleArgs, 'stream:marks',
+      napiStreamError, (h, a) =>
+        checked(isStreamMarksResult, 'stream:marks')(h.streamPhaseMarks(a.handle))),
 
-    [CHANNELS.streamCancel]: async (args) => {
-      const a = validated(isStreamCancelArgs, 'stream:cancel')(args);
-      try {
-        deps.host().cancel(a.requestId);
-        return undefined;
-      } catch (thrown) {
-        throw napiError(thrown);
-      }
-    },
+    [CHANNELS.streamCancel]: napiCall(isStreamCancelArgs, 'stream:cancel', napiError,
+      (h, a) => void h.cancel(a.requestId)),
   };
 }
