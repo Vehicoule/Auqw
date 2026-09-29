@@ -185,11 +185,48 @@ export async function run(): Promise<void> {
     }
 
     // The connectivity seam still drives state: a landed edge flips
-    // `online` and re-renders the surface.
+    // `online` and re-renders the surface. State-derived callbacks
+    // legitimately re-identify here (their deps DID change — e.g.
+    // playlistModelFor's localTick), so the post-update check covers
+    // only the callbacks whose dep lists are all-stable — the set the
+    // fix hoisted for the downstream BackHandler/onDismiss consumers.
+    const STABLE_CALLBACKS = [
+      'closeArtworkCache',
+      'closeLanguagePicker',
+      'closePlaylistPicker',
+      'closeProviderPicker',
+      'closeQualityPicker',
+      'closeRowActions',
+      'closeStorefront',
+      'closeThemePicker',
+      'localPlayable',
+      'onClearStorefront',
+      'onPickArtworkCache',
+      'onPickLanguage',
+      'onPickQuality',
+      'onPickTheme',
+      'onSubmitStorefront',
+      'openLanguagePicker',
+      'openQualityPicker',
+      'openStorefront',
+      'openThemePicker',
+    ] as const;
     await act(async () => {
       setOnline?.(false);
     });
-    assertEqual(latest?.['online'], false, 'the online edge landed');
+    const third = latest;
+    assertEqual(third?.['online'], false, 'the online edge landed');
+    for (const key of STABLE_CALLBACKS) {
+      const a = first[key];
+      const c = third?.[key];
+      if (typeof a !== 'function' || typeof c !== 'function') {
+        continue;
+      }
+      assert(
+        c === a,
+        `${key} must keep identity across a state update — its deps are all stable`,
+      );
+    }
 
     // And the close callbacks still work: open + close round-trips the
     // row-actions sheet through the returned surface.

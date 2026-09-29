@@ -492,6 +492,27 @@ export function reportStoredDownloadError(
 }
 
 /**
+ * Suggestion-card lookup. A provider page may repeat a source
+ * reference under different titles — which copy a card press resolves
+ * is platform behavior: mobile's activateHomeCard scanned the page in
+ * order (first match wins), desktop's Map.set overwrote (last wins).
+ */
+export function suggestionMetaMap(
+  items: readonly TrackMetadata[],
+  collisionOrder: 'firstWins' | 'lastWins',
+): Map<string, TrackMetadata> {
+  const map = new Map<string, TrackMetadata>();
+  for (const meta of items) {
+    const key = `${meta.sourceRef.provider}:${meta.sourceRef.id}`;
+    if (collisionOrder === 'firstWins' && map.has(key)) {
+      continue;
+    }
+    map.set(key, meta);
+  }
+  return map;
+}
+
+/**
  * Playlist download-all state + the missing-only request list.
  * Requesting an already-owned recording with a changed mapping would
  * delete its stored file first — 'download missing' must never cost

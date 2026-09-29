@@ -13,13 +13,14 @@ import {
   fixtureEntityItems,
   fixtureQueue,
 } from '@auqw/ui-shared/fixtures';
-import type { DownloadRecord } from '@auqw/application';
+import type { DownloadRecord, TrackMetadata } from '@auqw/application';
 import {
   advanceTargetId,
   playlistDownloadPlan,
   reportStoredDownloadError,
   rowActionsModel,
   stageDownloadChip,
+  suggestionMetaMap,
 } from './types.ts';
 import type { SourceRef } from '@auqw/application';
 
@@ -347,6 +348,44 @@ const entry = (recordingId: string) => ({ recordingId, selectedRef: null });
   });
   assertEqual(plan.state, 'all');
   assertEqual(plan.requests.length, 0);
+}
+
+// ---- suggestionMetaMap ----------------------------------------------
+// A provider page may repeat a sourceRef under different titles.
+// Mobile's old activateHomeCard used page-order find() (first wins);
+// desktop's Map.set overwrote (last wins) — both stay parameterized.
+{
+  const meta = (title: string, id: string): TrackMetadata => ({
+    sourceRef: { provider: 'ytm', kind: 'track', id },
+    title,
+    artist: 'a',
+    album: null,
+    durationMs: 60_000,
+    releaseYear: null,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    storefront: null,
+  });
+  const page: readonly TrackMetadata[] = [
+    meta('live', 'dup'),
+    meta('only', 'solo'),
+    meta('studio', 'dup'),
+  ];
+  const first = suggestionMetaMap(page, 'firstWins');
+  assertEqual(
+    first.get('ytm:dup')?.title,
+    'live',
+    'firstWins keeps the page-order card mobile would find',
+  );
+  const last = suggestionMetaMap(page, 'lastWins');
+  assertEqual(
+    last.get('ytm:dup')?.title,
+    'studio',
+    'lastWins keeps the overwrite desktop always had',
+  );
+  assertEqual(first.get('ytm:solo')?.title, 'only');
+  assertEqual(first.size, 2);
 }
 
 // ---- reportStoredDownloadError --------------------------------------

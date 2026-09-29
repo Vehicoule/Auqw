@@ -113,6 +113,7 @@ import {
   reportStoredDownloadError,
   rowActionsModel,
   stageDownloadChip,
+  suggestionMetaMap,
 } from './types.ts';
 import type {
   AppShellDeps,
@@ -405,9 +406,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [controller],
   );
   // The capability probe is the platform's: desktop asks the
-  // controller's (gated) localPlaybackFor — always null until the
-  // web player gains a `provider:'local'` route; mobile's owned-bytes
-  // check IS its attachable set, so it defaults to isOwned.
+  // controller's localPlaybackFor — gated to ledger+index-owned bytes
+  // with a verdict cache; mobile's owned-bytes check IS its
+  // attachable set, so it defaults to isOwned.
   const localPlayable = useCallback(
     (recordingId: string): boolean =>
       ports.localPlayable !== undefined
@@ -1304,8 +1305,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // Suggestion cards key by `${provider}:${id}` — provider refs, not
   // materialized recording ids — so a press needs the TrackMetadata
   // back (same contract as the search-result and entity maps).
-  const suggestionMeta = useMemo(() => {
-    const map = new Map<string, TrackMetadata>();
+  const suggestionMeta = useMemo((): Map<string, TrackMetadata> => {
     if (searchState.type === 'content') {
       // Divergence: desktop bounded the card-activation lookup to the
       // first 12 results; mobile searched the whole page. Parameterized
@@ -1314,12 +1314,15 @@ export function useAppShell<E extends { readonly type: string } = never>(
         ports.homeSuggestionLimit === undefined
           ? searchState.page.items
           : searchState.page.items.slice(0, ports.homeSuggestionLimit);
-      for (const meta of items) {
-        map.set(`${meta.sourceRef.provider}:${meta.sourceRef.id}`, meta);
-      }
+      // Mobile's lookup used page-order find() — first duplicate wins;
+      // desktop's map overwrote — last wins.
+      return suggestionMetaMap(
+        items,
+        ports.strictHomeCardKeys === true ? 'firstWins' : 'lastWins',
+      );
     }
-    return map;
-  }, [searchState, ports.homeSuggestionLimit]);
+    return new Map();
+  }, [searchState, ports.homeSuggestionLimit, ports.strictHomeCardKeys]);
 
   const diagnostics: DiagnosticsModel = useMemo(
     () => ({
