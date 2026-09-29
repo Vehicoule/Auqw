@@ -236,6 +236,16 @@ export function SettingsScreen({
       }
       return;
     }
+    // Recover only when focus actually died with the row (fell back to
+    // the document, or sits on the now-disabled element). A user who
+    // moved to another control while the removal ran keeps their spot.
+    const deadEl = rowEls.current.get(pending.key);
+    const active = document.activeElement;
+    const focusLost =
+      active === null ||
+      active === document.body ||
+      active === document.documentElement ||
+      (deadEl !== undefined && active === deadEl && deadEl.disabled);
     const focusable = new Set(
       model.rows.filter((row) => row.enabled).map((row) => row.key),
     );
@@ -245,6 +255,9 @@ export function SettingsScreen({
       pending.key,
     );
     pendingFocus.current = null;
+    if (!focusLost) {
+      return;
+    }
     const el =
       (target === null ? undefined : rowEls.current.get(target)) ??
       screenRef.current;
