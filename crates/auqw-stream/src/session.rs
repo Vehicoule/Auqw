@@ -44,8 +44,18 @@ pub(crate) struct Shared {
     /// request's `cancel`/`release` — or, for a claimed session
     /// abandoned forever, the `detached_since` reaper, which ignores
     /// this flag. Once set it never clears: `close` re-arms
-    /// `detached_since` but the session still has an owner.
+    /// `detached_since` but the session still has an owner. Drops
+    /// only when the session detaches while ownerless — `abandon`
+    /// marked it on the last slot's cancel, so `close` releases the
+    /// claim and the session is supersede/reaper/attachable again.
     pub claimed: bool,
+    /// The last ownership slot was cancelled while a consumer was
+    /// attached — no request owns this handle anymore. Set only by
+    /// `abandon`; consumed by `close`, which drops `claimed` so the
+    /// freshly-detached session can be superseded or reaped instead
+    /// of sitting ownerless to the TTL. Cleared by `claim` (a new
+    /// ownership slot means a live owner again).
+    pub abandoned: bool,
     /// Consumer read frontier — drives the read-ahead window.
     pub read_pos: u64,
     /// Demand-read positions awaiting fetch-through, refcounted: each
@@ -240,6 +250,7 @@ impl SessionInner {
                 terminal: None,
                 attached: false,
                 claimed: false,
+                abandoned: false,
                 read_pos: 0,
                 fetch_through: BTreeMap::new(),
                 eof_below: None,
@@ -303,6 +314,33 @@ impl SessionInner {
     pub(crate) fn claim(&self) {
         let mut sh = self.shared.lock().unwrap_or_else(|p| p.into_inner());
         sh.claimed = true;
+        sh.abandoned = false;
+    }
+
+    /// The handle's last ownership slot was cancelled. Attached, the
+    /// session is only marked — a bookkeeping cancel must never end a
+    /// playing stream, and `close` will drop `claimed` on the way out
+    /// so the detached session is supersede/reaper-reachable again.
+    /// Unattached it ends `Cancelled` now — nobody is left to attach
+    /// for. The retry loop closes the mark-vs-attach race: a failed
+    /// `terminate_if` means the session attached under the predicate,
+    /// so the next pass records `abandoned` under the same lock the
+    /// attach took.
+    pub(crate) fn abandon(&self) {
+        loop {
+            if let Ok(mut sh) = lock(&self.shared) {
+                if sh.terminal.is_some() {
+                    return;
+                }
+                if sh.attached {
+                    sh.abandoned = true;
+                    return;
+                }
+            }
+            if self.terminate_if(StreamError::Cancelled, |sh| !sh.attached) {
+                return;
+            }
+        }
     }
 
     /// How long the session has sat detached — `None` while attached.
@@ -793,7 +831,9 @@ impl SessionInner {
     /// `close` detaches the consumer; the session stays live for
     /// re-attach and — if no ownership slot ever claimed it — becomes
     /// supersedable again (a claimed session keeps its owner through
-    /// the detach). Idempotent — a close on an already-detached
+    /// the detach — unless `abandon` marked it ownerless, in which
+    /// case the claim drops here so supersede/reaper can retire it).
+    /// Idempotent — a close on an already-detached
     /// session is a no-op, and a real detach bumps `detach_epoch` so
     /// readers parked across it wake `Cancelled` instead of waiting
     /// out the deadline.
@@ -803,6 +843,14 @@ impl SessionInner {
                 sh.attached = false;
                 sh.detached_since = Some(Instant::now());
                 sh.detach_epoch += 1;
+                if sh.abandoned {
+                    // Ownerless detach: no slot holds this session
+                    // open — release the claim so a later prepare's
+                    // supersede or the reaper can retire it (a re-
+                    // attach, e.g. a seek, still finds it live).
+                    sh.claimed = false;
+                    sh.abandoned = false;
+                }
                 true
             } else {
                 false

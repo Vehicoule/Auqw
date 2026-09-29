@@ -436,20 +436,21 @@ impl StreamRegistry {
         Ok(())
     }
 
-    /// Owner-abandonment release: kills the session `Cancelled`
-    /// unless a consumer already attached — a bookkeeping cancel
-    /// (the last prepared_handles slot dropped) must never end a
-    /// playing stream; the attached consumer's own `release`/`close`
-    /// teardown is its exit. Unlike `cancel_if_unattached` this
-    /// ignores `claimed`: the claim only guards OTHER owners'
-    /// teardowns — when its last owner abandons, the session has no
-    /// one left to attach for. No-op on unknown handles.
+    /// Owner abandonment: the last `PreparedSlot` owner cancelled.
+    /// Attached, the session is only marked — a bookkeeping cancel
+    /// must never end a playing stream; the mark makes its `close`
+    /// drop `claimed`, so the detached session is supersede/reaper-
+    /// reachable instead of sitting ownerless to the TTL. Unattached
+    /// it ends `Cancelled` now — nobody is left to attach for.
+    /// Unlike `cancel_if_unattached` this ignores `claimed`: the
+    /// claim guards OTHER owners' teardowns — its last owner is gone.
+    /// No-op on unknown handles.
     ///
     /// # Errors
     /// [`StreamError::Internal`] on lock poisoning.
-    pub fn release_if_unattached(&self, handle: &str) -> Result<(), StreamError> {
+    pub fn abandon(&self, handle: &str) -> Result<(), StreamError> {
         if let Some(s) = self.lookup(handle)? {
-            s.terminate_if(StreamError::Cancelled, |sh| !sh.attached);
+            s.abandon();
         }
         Ok(())
     }

@@ -733,10 +733,11 @@ impl PluginHost {
     /// tombstones. A `cancelPrepare` landing after `prepared`
     /// abandons the produced session outright: removing the request's
     /// ownership slot leaves the handle ownerless, so the last owner
-    /// releases it — unattached-only (`release_if_unattached`): a
-    /// claimed session is invisible to `cancel_if_unattached`, but a
-    /// bookkeeping cancel must still never end an attached, playing
-    /// stream (its consumer's `releaseStream` is the exit).
+    /// `abandon`s it — `Cancelled` when unattached (a claimed session
+    /// is invisible to `cancel_if_unattached`), only marked when
+    /// attached: a bookkeeping cancel never kills a playing stream,
+    /// and the mark makes its `close` drop `claimed` so the detached
+    /// session is supersede/reaper-reachable again.
     /// Only once the `prepared` outcome is on the wire — a slot still
     /// mid-delivery is consumed but its handle left live, or the
     /// listener would get a `Prepared` naming a released session.
@@ -805,15 +806,17 @@ impl PluginHost {
         // unattached — and this kill would then end the session the
         // new request just received. `prepared_handles` outermost
         // matches the admission path's lock order, so the
-        // serialization introduces no cycle. `release_if_unattached`,
-        // not `release`: a bookkeeping cancel (e.g. a warm request's
-        // slot freed after its session was adopted and attached) must
-        // never end a playing stream — the attached consumer's own
-        // release is the exit. And not `cancel_if_unattached` either:
-        // the delivered session is claimed, so that predicate would
-        // never fire — its only owner is gone.
+        // serialization introduces no cycle. `abandon`, not
+        // `release`: a bookkeeping cancel (e.g. a warm request's slot
+        // freed after its session was adopted and attached) must
+        // never end a playing stream — attached, the session is only
+        // marked ownerless and its `close` drops the claim so
+        // supersede/reaper can retire the detach instead of it
+        // sitting claimed to the TTL. And not `cancel_if_unattached`
+        // either: the delivered session is claimed, so that predicate
+        // would never fire — its only owner is gone.
         if let (Some(stream), Some(handle)) = (&self.stream, handle) {
-            let _ = stream.release_if_unattached(&handle);
+            let _ = stream.abandon(&handle);
         }
         drop(m);
         // Tombstone when no delivered handle was found AND a race
@@ -2163,8 +2166,24 @@ mod tests {
             reg.is_live(&warm.handle),
             "a bookkeeping cancel ended an attached stream"
         );
-        reg.release(&warm.handle)
-            .unwrap_or_else(|e| panic!("release: {e}"));
+        // The ownerless detach drops the claim: the session stays
+        // live for re-attach (e.g. a seek), but a newer prepare's
+        // supersede scan can retire it — no claimed-limbo to the
+        // reaper TTL.
+        reg.close(&warm.handle)
+            .unwrap_or_else(|e| panic!("close: {e}"));
+        assert!(
+            reg.is_live(&warm.handle),
+            "detach must not kill the session"
+        );
+        let info = match reg.prepare(warm_source("coown", "other"), Arc::new(HangRemint)) {
+            Ok(i) => i,
+            Err(e) => panic!("prepare: {e}"),
+        };
+        assert!(
+            info.superseded.iter().any(|h| h == &warm.handle),
+            "an ownerless detach stayed claimed against supersede"
+        );
         assert!(!reg.is_live(&warm.handle));
     }
 
