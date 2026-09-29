@@ -58,10 +58,11 @@ export async function exportFittedDeltaDoc(
   exportDelta: (
     since: SyncCursor | undefined,
     limit: number,
-    signal: CancellationSignal,
+    signal: CancellationSignal | undefined,
   ) => Promise<Result<SyncDelta>>,
   cursor: SyncCursor,
-  signal: CancellationSignal,
+  signal: CancellationSignal | undefined,
+  oversizeMessage = 'single sync entry exceeds the wire bound',
 ): Promise<Result<SyncDelta>> {
   let limit = MAX_EXPORT_PAGE;
   for (;;) {
@@ -74,12 +75,7 @@ export async function exportFittedDeltaDoc(
       return delta;
     }
     if (limit === 1) {
-      return err(
-        appError(
-          'invalid-response',
-          'single sync entry exceeds the wire bound',
-        ),
-      );
+      return err(appError('invalid-response', oversizeMessage));
     }
     limit = Math.max(1, Math.floor(limit / 2));
   }

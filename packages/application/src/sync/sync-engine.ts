@@ -1251,6 +1251,47 @@ export async function createSyncEngine(
     return { signal: source.signal, cancelled: false };
   }
 
+  /**
+   * The op envelope every entry point shares: resolve the caller's
+   * signal (a fresh never-cancelled source when absent), refuse early
+   * when already cancelled, serialize the body behind the queue, and
+   * race first-settle-wins cancellation against it. `at`/`deadlineMs`
+   * arrive precomputed — the clock read lives inside the serialized
+   * turn so a queued op timestamps at run time, not queue time.
+   */
+  function runOp<T>(
+    signal: CancellationSignal | undefined,
+    work: (
+      sig: CancellationSignal,
+      atMs: number,
+      deadlineMs: number,
+    ) => Promise<Result<T>>,
+  ): Promise<Result<T>> {
+    const sig = resolveSignal(signal).signal;
+    if (sig.cancelled) {
+      return Promise.resolve(err(appError('cancelled', 'cancelled')));
+    }
+    return cancellable(
+      serialized(async () => {
+        if (sig.cancelled) {
+          return err(appError('cancelled', 'cancelled'));
+        }
+        const at = now();
+        if (at === null) {
+          return err(
+            appError('internal', 'clock returned an unsafe timestamp'),
+          );
+        }
+        return work(
+          sig,
+          at,
+          Math.min(at + OP_DEADLINE_MS, Number.MAX_SAFE_INTEGER),
+        );
+      }),
+      sig,
+    );
+  }
+
   // ---- mutable merge state ------------------------------------------------
 
   const records = new Map<string, RecordState>();
@@ -2230,24 +2271,7 @@ export async function createSyncEngine(
         return err(checked.error);
       }
     }
-    const { signal: sig } = resolveSignal(signal);
-    if (sig.cancelled) {
-      return err(appError('cancelled', 'cancelled'));
-    }
-    const work = serialized(async () => {
-      if (sig.cancelled) {
-        return err(appError('cancelled', 'cancelled'));
-      }
-      const at = now();
-      if (at === null) {
-        return err(
-          appError('internal', 'clock returned an unsafe timestamp'),
-        );
-      }
-      const deadlineMs = Math.min(
-        at + OP_DEADLINE_MS,
-        Number.MAX_SAFE_INTEGER,
-      );
+    return runOp(signal, async (sig, at, deadlineMs) => {
       let entries: ChangeEntry[];
       try {
         entries = inputs.map((input, index) => {
@@ -2297,7 +2321,6 @@ export async function createSyncEngine(
       await appendDivergence(divs, undefined, sig, deadlineMs);
       return ok(results);
     });
-    return cancellable(work, sig);
   }
 
   /** Unwrap the single-write batch both write entry points share. */
@@ -2332,20 +2355,7 @@ export async function createSyncEngine(
       return err(appError('invalid-response', 'invalid delta limit'));
     }
     const bound = Math.min(limit, MAX_DELTA_ENTRIES);
-    const { signal: sig } = resolveSignal(signal);
-    if (sig.cancelled) {
-      return err(appError('cancelled', 'cancelled'));
-    }
-    const work = serialized(async () => {
-      if (sig.cancelled) {
-        return err(appError('cancelled', 'cancelled'));
-      }
-      const at = now();
-      if (at === null) {
-        return err(
-          appError('internal', 'clock returned an unsafe timestamp'),
-        );
-      }
+    return runOp(signal, async (_sig, at) => {
       const retainedFloor = at - PLAY_HISTORY_RETENTION_MS;
       // Seqs dropped by the retention filter inside this request's
       // window — collected per device so the receiver's contiguous
@@ -2516,7 +2526,6 @@ export async function createSyncEngine(
       };
       return ok(doc);
     });
-    return cancellable(work, sig);
   }
 
   async function applyDelta(
@@ -2526,25 +2535,7 @@ export async function createSyncEngine(
     if (!isSyncDelta(doc)) {
       return err(appError('invalid-message', 'malformed sync delta'));
     }
-    const { signal: sig } = resolveSignal(signal);
-    if (sig.cancelled) {
-      return err(appError('cancelled', 'cancelled'));
-    }
-    const work = serialized(async () => {
-      if (sig.cancelled) {
-        return err(appError('cancelled', 'cancelled'));
-      }
-      const at = now();
-      if (at === null) {
-        return err(
-          appError('internal', 'clock returned an unsafe timestamp'),
-        );
-      }
-      const deadlineMs = Math.min(
-        at + OP_DEADLINE_MS,
-        Number.MAX_SAFE_INTEGER,
-      );
-
+    return runOp(signal, async (sig, at, deadlineMs) => {
       const outcomes: MergeOutcome[] = [];
       const valid: ChangeEntry[] = [];
       const inDoc = new Set<string>();
@@ -2668,7 +2659,6 @@ export async function createSyncEngine(
       };
       return ok(result);
     });
-    return cancellable(work, sig);
   }
 
   /** A record's surviving field→value map as the merge sees it. */

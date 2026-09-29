@@ -1,16 +1,13 @@
 import type { CancellationSignal } from '../cancellation.ts';
 import { appError, err, ok, type Result } from '../errors.ts';
 import type { SyncEnginePort } from '../ports/sync-engine.ts';
+import { exportFittedDeltaDoc } from './delta-docs.ts';
 import {
   isSyncCursor,
   isSyncDelta,
   type SyncCursor,
   type SyncEngine,
 } from './sync-engine.ts';
-import {
-  MAX_SYNC_DOC_BYTES,
-  utf8ByteLength,
-} from './sync-wire.ts';
 
 /**
  * SyncEngine → SyncEnginePort: the adapter a sync transport plugs in
@@ -20,15 +17,12 @@ import {
  * char bound — see below).
  *
  * The wire caps a document at MAX_SYNC_DOC_BYTES while the engine
- * pages by entry count — exportDelta refits by halving the entry
- * limit until the serialized doc ships, so a large log can never emit
- * a page the receiver rejects (which would strand the cursor
+ * pages by entry count — `exportFittedDeltaDoc` refits by halving the
+ * entry limit until the serialized doc ships, so a large log can never
+ * emit a page the receiver rejects (which would strand the cursor
  * forever). `more` stays honest: the engine sets it against the same
  * limit it just applied.
  */
-
-/** Starting page for `exportDelta` — the engine's own entry cap. */
-const MAX_EXPORT_PAGE = 10_000;
 
 function jsonCursor(since: string): SyncCursor | null {
   if (since === '') {
@@ -61,28 +55,16 @@ export function createSyncEnginePort(engine: SyncEngine): SyncEnginePort {
           appError('invalid-response', 'sync cursor malformed'),
         );
       }
-      let limit = MAX_EXPORT_PAGE;
-      for (;;) {
-        const delta = await engine.exportDelta(cursor, limit, signal);
-        if (!delta.ok) {
-          return delta;
-        }
-        const doc: unknown = JSON.parse(JSON.stringify(delta.value));
-        if (
-          utf8ByteLength(JSON.stringify(doc)) <= MAX_SYNC_DOC_BYTES
-        ) {
-          return ok(doc);
-        }
-        if (limit === 1) {
-          return err(
-            appError(
-              'invalid-response',
-              'sync: single sync entry exceeds the wire bound',
-            ),
-          );
-        }
-        limit = Math.max(1, Math.floor(limit / 2));
+      const fitted = await exportFittedDeltaDoc(
+        engine.exportDelta,
+        cursor,
+        signal,
+        'sync: single sync entry exceeds the wire bound',
+      );
+      if (!fitted.ok) {
+        return fitted;
       }
+      return ok(JSON.parse(JSON.stringify(fitted.value)));
     },
     async applyDelta(
       delta: unknown,
