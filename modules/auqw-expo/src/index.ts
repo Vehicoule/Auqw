@@ -348,13 +348,15 @@ const native = requireNativeModule<AuqwExpoNative>('AuqwExpo');
  */
 const seam = native as Partial<AuqwExpoNative>;
 
-function seamUnavailable<T>(name: string): Promise<T> {
-  return Promise.reject(
-    new CodedError(
-      'unavailable',
-      `auqw-expo '${name}' is unavailable on this platform`,
-    ),
+function seamError(name: string): CodedError {
+  return new CodedError(
+    'unavailable',
+    `auqw-expo '${name}' is unavailable on this platform`,
   );
+}
+
+function seamUnavailable<T>(name: string): Promise<T> {
+  return Promise.reject(seamError(name));
 }
 
 export function createHost(config: HostConfig): Promise<void> {
@@ -411,9 +413,8 @@ export function prepare(
   attemptId: string,
   queueRev: number,
 ): Promise<string> {
-  return seam.prepare === undefined
-    ? seamUnavailable('prepare')
-    : seam.prepare(provider, sourceRef, attemptId, queueRev);
+  return seam.prepare?.(provider, sourceRef, attemptId, queueRev) ??
+    seamUnavailable('prepare');
 }
 
 /**
@@ -422,10 +423,7 @@ export function prepare(
  * created: `play`/`releaseStream`/`cancelPrepare` resolve the handle
  * locally (release/cancel are bookkeeping no-ops).
  */
-export function prepareLocal(
-  path: string,
-  mime?: string | null,
-): Promise<string> {
+export function prepareLocal(path: string, mime?: string | null): Promise<string> {
   return native.prepareLocal(path, mime ?? null);
 }
 
@@ -436,48 +434,35 @@ export function play(
   queueRev: number,
   positionMs?: number,
 ): Promise<void> {
-  return seam.play === undefined
-    ? seamUnavailable('play')
-    : seam.play(handle, attemptId, queueRev, positionMs);
+  return seam.play?.(handle, attemptId, queueRev, positionMs) ??
+    seamUnavailable('play');
 }
 
 export function pause(): Promise<void> {
-  return seam.pause === undefined
-    ? seamUnavailable('pause')
-    : seam.pause();
+  return seam.pause?.() ?? seamUnavailable('pause');
 }
 
 /** Seek in milliseconds; may target unfetched offsets (fetch-through). */
 export function seekTo(positionMs: number): Promise<void> {
-  return seam.seekTo === undefined
-    ? seamUnavailable('seekTo')
-    : seam.seekTo(positionMs);
+  return seam.seekTo?.(positionMs) ?? seamUnavailable('seekTo');
 }
 
 export function stop(): Promise<void> {
-  return seam.stop === undefined
-    ? seamUnavailable('stop')
-    : seam.stop();
+  return seam.stop?.() ?? seamUnavailable('stop');
 }
 
 export function cancelPrepare(requestId: string): Promise<void> {
-  return seam.cancelPrepare === undefined
-    ? seamUnavailable('cancelPrepare')
-    : seam.cancelPrepare(requestId);
+  return seam.cancelPrepare?.(requestId) ?? seamUnavailable('cancelPrepare');
 }
 
 /** Idempotent: prepared → attached → released; release is a no-op otherwise. */
 export function releaseStream(handle: string): Promise<void> {
-  return seam.releaseStream === undefined
-    ? seamUnavailable('releaseStream')
-    : seam.releaseStream(handle);
+  return seam.releaseStream?.(handle) ?? seamUnavailable('releaseStream');
 }
 
 /** Rust-side seam marks for a handle (flat record: epochs + durations). */
 export function phaseMarks(handle: string): Promise<StreamPhaseMarks> {
-  return seam.phaseMarks === undefined
-    ? seamUnavailable('phaseMarks')
-    : seam.phaseMarks(handle);
+  return seam.phaseMarks?.(handle) ?? seamUnavailable('phaseMarks');
 }
 
 /**
@@ -495,9 +480,13 @@ export function waveformPeaks(
   maxBytes: number,
   provisionalCap: boolean,
 ): Promise<readonly number[]> {
-  return seam.waveformPeaks === undefined
-    ? seamUnavailable('waveformPeaks')
-    : seam.waveformPeaks(requestId, handle, count, maxBytes, provisionalCap);
+  return seam.waveformPeaks?.(
+    requestId,
+    handle,
+    count,
+    maxBytes,
+    provisionalCap,
+  ) ?? seamUnavailable('waveformPeaks');
 }
 
 /** Cancels a running `waveformPeaks` sweep — its promise rejects 'cancelled'. */
@@ -511,16 +500,16 @@ export function waveformPeaksCancel(requestId: string): void {
  * `onQueueTransition` events.
  */
 export function setQueueProjection(projection: QueueProjection): Promise<void> {
-  return seam.setQueueProjection === undefined
-    ? seamUnavailable('setQueueProjection')
-    : seam.setQueueProjection(projection);
+  return seam.setQueueProjection?.(projection) ??
+    seamUnavailable('setQueueProjection');
 }
 
-/**
- * Gate-0 file leg: attach a pushed local file through the SAME warm
- * player so the attach→rendered-first-frame floor is measured without
- * the seam. Dev instrumentation; resolves with the dev handle.
- */
+/** Material You stops for 'adaptive' — Android-only seam; resolves
+    null on iOS (flag-only there) and below API 31. */
+export function systemTonalPalette(): Promise<SystemTonalPalette | null> {
+  return seam.systemTonalPalette?.() ?? Promise.resolve(null);
+}
+
 /**
  * Slice-3 keep-alive: the DownloadManager reports its live
  * active-transfer count; >0 runs the `dataSync` foreground service
@@ -528,22 +517,17 @@ export function setQueueProjection(projection: QueueProjection): Promise<void> {
  * carries no state — a process kill just means the next init resumes
  * rows from their committed offsets.
  */
-/** Material You stops for 'adaptive' — Android-only seam; resolves
-    null on iOS (flag-only there) and below API 31. */
-export function systemTonalPalette(): Promise<SystemTonalPalette | null> {
-  return seam.systemTonalPalette !== undefined
-    ? seam.systemTonalPalette()
-    : Promise.resolve(null);
-}
-
 export function downloadsActiveChanged(active: number): Promise<void> {
   return native.downloadsActiveChanged(active);
 }
 
+/**
+ * Gate-0 file leg: attach a pushed local file through the SAME warm
+ * player so the attach→rendered-first-frame floor is measured without
+ * the seam. Dev instrumentation; resolves with the dev handle.
+ */
 export function devAttachFile(path: string): Promise<string> {
-  return seam.devAttachFile === undefined
-    ? seamUnavailable('devAttachFile')
-    : seam.devAttachFile(path);
+  return seam.devAttachFile?.(path) ?? seamUnavailable('devAttachFile');
 }
 
 /**
@@ -558,38 +542,27 @@ export function devPrepareUrl(
   contentLength?: number,
   remintable?: boolean,
 ): Promise<string> {
-  return seam.devPrepareUrl === undefined
-    ? seamUnavailable('devPrepareUrl')
-    : seam.devPrepareUrl(url, mime, contentLength, remintable);
+  return seam.devPrepareUrl?.(url, mime, contentLength, remintable) ??
+    seamUnavailable('devPrepareUrl');
 }
 
-export function addRequestOutcomeListener(
-  listener: (event: RequestOutcomeEvent) => void,
-): EventSubscription {
+export function addRequestOutcomeListener(listener: (event: RequestOutcomeEvent) => void): EventSubscription {
   return native.addListener('onRequestOutcome', listener);
 }
 
-export function addPrepareOutcomeListener(
-  listener: (event: PrepareOutcomeEvent) => void,
-): EventSubscription {
+export function addPrepareOutcomeListener(listener: (event: PrepareOutcomeEvent) => void): EventSubscription {
   return native.addListener('onPrepareOutcome', listener);
 }
 
-export function addPlaybackStatusListener(
-  listener: (event: PlaybackStatusEvent) => void,
-): EventSubscription {
+export function addPlaybackStatusListener(listener: (event: PlaybackStatusEvent) => void): EventSubscription {
   return native.addListener('onPlaybackStatus', listener);
 }
 
-export function addPhaseMarkListener(
-  listener: (event: PhaseMarkEvent) => void,
-): EventSubscription {
+export function addPhaseMarkListener(listener: (event: PhaseMarkEvent) => void): EventSubscription {
   return native.addListener('onPhaseMark', listener);
 }
 
-export function addQueueTransitionListener(
-  listener: (event: QueueTransitionEvent) => void,
-): EventSubscription {
+export function addQueueTransitionListener(listener: (event: QueueTransitionEvent) => void): EventSubscription {
   return native.addListener('onQueueTransition', listener);
 }
 
@@ -612,9 +585,7 @@ export function connectivityUnwatch(): void {
   native.connectivityUnwatch();
 }
 
-export function addConnectivityChangedListener(
-  listener: (event: ConnectivityChangedEvent) => void,
-): EventSubscription {
+export function addConnectivityChangedListener(listener: (event: ConnectivityChangedEvent) => void): EventSubscription {
   return native.addListener('onConnectivityChanged', listener);
 }
 
@@ -628,9 +599,7 @@ export function tagPickFolder(): Promise<{ treeUri: string; label: string }> {
   return native.tagPickFolder();
 }
 
-export function tagEnumerate(
-  treeUri: string,
-): Promise<readonly TagReaderEntry[]> {
+export function tagEnumerate(treeUri: string): Promise<readonly TagReaderEntry[]> {
   return native.tagEnumerate(treeUri);
 }
 
@@ -660,10 +629,8 @@ export function docUri(treeUri: string, docId: string): string {
  */
 export function hasTagReader(): boolean {
   return (
-    typeof (native as { tagPickFolder?: unknown }).tagPickFolder ===
-      'function' &&
-    typeof (native as { tagEnumerate?: unknown }).tagEnumerate ===
-      'function'
+    typeof seam.tagPickFolder === 'function' &&
+    typeof seam.tagEnumerate === 'function'
   );
 }
 
@@ -687,55 +654,38 @@ export function syncConnect(
   port: number,
   timeoutMs: number,
 ): Promise<{ remoteAddress: string | null }> {
-  return seam.syncConnect === undefined
-    ? seamUnavailable('syncConnect')
-    : seam.syncConnect(socketId, host, port, timeoutMs);
+  return seam.syncConnect?.(socketId, host, port, timeoutMs) ??
+    seamUnavailable('syncConnect');
 }
 
-export function syncSend(
-  socketId: string,
-  data: string,
-): Promise<void> {
-  return seam.syncSend === undefined
-    ? seamUnavailable('syncSend')
-    : seam.syncSend(socketId, data);
+export function syncSend(socketId: string, data: string): Promise<void> {
+  return seam.syncSend?.(socketId, data) ?? seamUnavailable('syncSend');
 }
 
 /** Graceful half-close — queued writes flush, then FIN. */
 export function syncClose(socketId: string): Promise<void> {
-  return seam.syncClose === undefined
-    ? seamUnavailable('syncClose')
-    : seam.syncClose(socketId);
+  return seam.syncClose?.(socketId) ?? seamUnavailable('syncClose');
 }
 
 /** Immediate teardown — pending writes may drop. */
 export function syncDestroy(socketId: string): Promise<void> {
-  return seam.syncDestroy === undefined
-    ? seamUnavailable('syncDestroy')
-    : seam.syncDestroy(socketId);
+  return seam.syncDestroy?.(socketId) ?? seamUnavailable('syncDestroy');
 }
 
 /** SecureRandom bytes as base64 — the sync crypto's CSPRNG source.
  * Synchronous like the noble calls that consume it. */
 export function syncRandomBytes(length: number): string {
   if (seam.syncRandomBytes === undefined) {
-    throw new CodedError(
-      'unavailable',
-      "auqw-expo 'syncRandomBytes' is unavailable on this platform",
-    );
+    throw seamError('syncRandomBytes');
   }
   return seam.syncRandomBytes(length);
 }
 
-export function addSyncSocketDataListener(
-  listener: (event: SyncSocketDataEvent) => void,
-): EventSubscription {
+export function addSyncSocketDataListener(listener: (event: SyncSocketDataEvent) => void): EventSubscription {
   return native.addListener('onSyncSocketData', listener);
 }
 
-export function addSyncSocketClosedListener(
-  listener: (event: SyncSocketClosedEvent) => void,
-): EventSubscription {
+export function addSyncSocketClosedListener(listener: (event: SyncSocketClosedEvent) => void): EventSubscription {
   return native.addListener('onSyncSocketClosed', listener);
 }
 
@@ -746,9 +696,7 @@ export function addSyncSocketClosedListener(
  */
 export function hasSyncSocket(): boolean {
   return (
-    typeof (native as { syncConnect?: unknown }).syncConnect ===
-      'function' &&
-    typeof (native as { syncRandomBytes?: unknown }).syncRandomBytes ===
-      'function'
+    typeof seam.syncConnect === 'function' &&
+    typeof seam.syncRandomBytes === 'function'
   );
 }
