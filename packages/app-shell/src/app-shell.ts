@@ -206,6 +206,12 @@ function pickSetting(
   };
 }
 
+const dismissSheet =
+  (epoch: { current: number }, set: (v: boolean) => void) => () => {
+    epoch.current += 1;
+    set(false);
+  };
+
 // The storefront/quality flavor: the save reports even when stale —
 // only the sheet close waits on the epoch.
 function commitSetting(
@@ -1943,19 +1949,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
             prev.recordingId !== recordingId ||
             source.signal.cancelled
               ? prev
-              : result.ok
-                ? {
-                    recordingId,
-                    sheet: result.value,
-                    error: null,
-                    loading: false,
-                  }
-                : {
-                    recordingId,
-                    sheet: null,
-                    error: result.error,
-                    loading: false,
-                  },
+              : {
+                  recordingId,
+                  sheet: result.ok ? result.value : null,
+                  error: result.ok ? null : result.error,
+                  loading: false,
+                },
           );
         });
     },
@@ -2337,9 +2336,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const openEntity = useCallback(
     (ref: EntityRef) => {
       // Re-opening the entity already on top just reloads it.
-      const top = shellOverlayOf(
-        overlayStack[overlayStack.length - 1]?.overlay,
-      );
+      const top = shellOverlayOf(overlay);
       if (
         top?.type !== 'entity' ||
         entityRefKey(top.ref) !== entityRefKey(ref)
@@ -2348,7 +2345,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       }
       loadEntityPage(ref);
     },
-    [overlayStack, pushOverlay, loadEntityPage],
+    [overlay, pushOverlay, loadEntityPage],
   );
 
   const onLoadMore = useCallback(() => {
@@ -2924,10 +2921,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       ),
     [queueSettingsWrite],
   );
-  const closeThemePicker = useCallback(() => {
-    themeEpoch.current += 1;
-    setThemePickerOpen(false);
-  }, []);
+  const closeThemePicker = useMemo(
+    () => dismissSheet(themeEpoch, setThemePickerOpen),
+    [],
+  );
   // The locale applies only once the save landed — a failed save
   // must not leave the UI on a selection storage never recorded.
   const onPickLanguage = useMemo(
@@ -2942,10 +2939,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       ),
     [applyLocale, queueSettingsWrite],
   );
-  const closeLanguagePicker = useCallback(() => {
-    languageEpoch.current += 1;
-    setLanguagePickerOpen(false);
-  }, []);
+  const closeLanguagePicker = useMemo(
+    () => dismissSheet(languageEpoch, setLanguagePickerOpen),
+    [],
+  );
   // The domain bound: ISO-3166 alpha-2, or null for system-locale
   // resolution. Dismiss only on commit — a failed save shows the
   // toast, not a closed sheet over an unchanged row.
@@ -3126,9 +3123,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
     onPickProvider,
     closeProviderPicker,
     themePickerOpen,
+    // A failed save keeps the sheet open so an unapplied pick still
+    // reads unselected.
     onPickTheme,
     closeThemePicker,
     languagePickerOpen,
+    // The locale applies only once the save landed — a failed save
+    // must not leave the UI on a selection storage never recorded.
     onPickLanguage,
     closeLanguagePicker,
     storefrontSheetOpen,
