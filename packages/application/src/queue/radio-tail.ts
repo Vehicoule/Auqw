@@ -1,6 +1,5 @@
 import type { CancellationSource } from '../cancellation.ts';
 import type {
-  MatchEvidence,
   QueueOccurrence,
   Recording,
   SourceMapping,
