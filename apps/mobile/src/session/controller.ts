@@ -19,12 +19,14 @@ import type {
   ConnectivityPort,
   ImportPreview,
   LocalWrite,
+  PersistedState,
   PlayerPort,
   ProviderCapability,
   ProviderPort,
   QueueSnapshot,
   Result,
   Settings,
+  SyncApplyReport,
   SyncScheduler,
 } from '@auqw/application';
 import { SqliteStorage, SqliteSyncLogStore } from '@auqw/storage-sqlite';
@@ -73,14 +75,19 @@ const DEEZER_MANIFEST: unknown = require('../../assets/plugins/deezer.manifest.j
 const LYRICS_LRCLIB_WASM: number = require('../../assets/plugins/lyrics-lrclib.wasm');
 const LYRICS_LRCLIB_MANIFEST: unknown = require('../../assets/plugins/lyrics-lrclib.manifest.json');
 
-/**
- * Defaults for a fresh install. `qualityKbps: 128` is the spec's
- * target-bitrate default (docs/specs/providers.md "default ≈ 128
- * kbps") and inside isSettings' 1–512 bound; `storefront: null`
- * defers to the spec's system-locale → API-default resolution order
- * (docs/specs/providers.md); `theme: 'system'` and `prefetch: true`
- * match the domain Settings contract.
- */
+const BUNDLED_PLUGINS = [
+  ['itunes', ITUNES_WASM, ITUNES_MANIFEST],
+  ['youtube-music', YOUTUBE_MUSIC_WASM, YOUTUBE_MUSIC_MANIFEST],
+  ['deezer', DEEZER_WASM, DEEZER_MANIFEST],
+  ['lyrics-lrclib', LYRICS_LRCLIB_WASM, LYRICS_LRCLIB_MANIFEST],
+] as const;
+
+// The decided per-surface container pick: webm-first on Android
+// (higher bitrate, Matroska Cues seek verified on-device); iOS is
+// mp4-required — AVPlayer has no WebM/Opus.
+const PREFERRED_CONTAINERS: readonly ('audio/webm' | 'audio/mp4')[] =
+  Platform.OS === 'ios' ? ['audio/mp4'] : ['audio/webm', 'audio/mp4'];
+
 function nativeMessage(thrown: unknown): string {
   return thrown instanceof Error && thrown.message.length > 0
     ? thrown.message
@@ -136,11 +143,11 @@ function defaultSettings(
     SLOT_CAPABILITIES.playbackProvider,
     'youtube-music',
   );
-  const missing = [
-    ...(catalog === null ? (['catalog.search'] as const) : []),
-    ...(playback === null ? (['playback.resolve'] as const) : []),
-  ];
   if (catalog === null || playback === null) {
+    const missing = [
+      ...(catalog === null ? ['catalog.search'] : []),
+      ...(playback === null ? ['playback.resolve'] : []),
+    ];
     throw new Error(
       `no provider declares ${missing.join(' / ')} — the plugin set cannot serve a session`,
     );
@@ -148,6 +155,9 @@ function defaultSettings(
   return {
     catalogProvider: catalog,
     playbackProvider: playback,
+    // qualityKbps 128 is the spec's target-bitrate default
+    // (docs/specs/providers.md); storefront null defers to the
+    // system-locale → API-default resolution order.
     storefront: null,
     qualityKbps: 128,
     theme: 'system',
@@ -173,10 +183,10 @@ function repairedSettings(
     id: string | null | undefined,
     capabilities: readonly ProviderCapability[],
   ): boolean => {
-    if (id === null || id === undefined) {
-      return false;
-    }
-    const provider = providers.find((p) => p.id === id);
+    const provider =
+      id === null || id === undefined
+        ? undefined
+        : providers.find((p) => p.id === id);
     return (
       provider !== undefined &&
       capabilities.some((capability) =>
@@ -186,28 +196,20 @@ function repairedSettings(
   };
   const next = { ...settings };
   let changed = false;
-  if (!declares(settings.catalogProvider, SLOT_CAPABILITIES.catalogProvider)) {
-    const repaired = pickProvider(
-      providers,
-      SLOT_CAPABILITIES.catalogProvider,
-      'deezer',
-    );
-    if (repaired !== null) {
-      next.catalogProvider = repaired;
-      changed = true;
-    }
-  }
-  if (
-    !declares(settings.playbackProvider, SLOT_CAPABILITIES.playbackProvider)
-  ) {
-    const repaired = pickProvider(
-      providers,
-      SLOT_CAPABILITIES.playbackProvider,
-      'youtube-music',
-    );
-    if (repaired !== null) {
-      next.playbackProvider = repaired;
-      changed = true;
+  for (const [slot, preferred] of [
+    ['catalogProvider', 'deezer'],
+    ['playbackProvider', 'youtube-music'],
+  ] as const) {
+    if (!declares(settings[slot], SLOT_CAPABILITIES[slot])) {
+      const repaired = pickProvider(
+        providers,
+        SLOT_CAPABILITIES[slot],
+        preferred,
+      );
+      if (repaired !== null) {
+        next[slot] = repaired;
+        changed = true;
+      }
     }
   }
   for (const slot of ['lyricsProvider', 'radioProvider'] as const) {
@@ -289,22 +291,20 @@ export type SessionController = {
   dispose(): Promise<void>;
 };
 
-async function wasmAssetBase64(moduleRef: number): Promise<string> {
-  const asset = Asset.fromModule(moduleRef);
-  await asset.downloadAsync();
-  if (!asset.localUri) {
-    throw new Error('asset has no localUri after download');
-  }
-  return new File(asset.localUri).base64();
-}
-
 async function loadBundledPlugin(
   host: AuqwExpoHostModuleLike,
   wasmRef: number,
   manifest: unknown,
 ): Promise<string> {
-  const wasmBase64 = await wasmAssetBase64(wasmRef);
-  return host.loadPlugin(wasmBase64, JSON.stringify(manifest));
+  const asset = Asset.fromModule(wasmRef);
+  await asset.downloadAsync();
+  if (!asset.localUri) {
+    throw new Error('asset has no localUri after download');
+  }
+  return host.loadPlugin(
+    await new File(asset.localUri).base64(),
+    JSON.stringify(manifest),
+  );
 }
 
 export type SessionControllerOptions = {
@@ -347,55 +347,33 @@ export async function createSessionController(
     fuelPerEntry: 200_000_000,
     fuelTotal: 2_000_000_000,
     potProviderUrl: options.potProviderUrl,
-    // The decided per-surface container pick: webm-first on Android
-    // (higher bitrate, Matroska Cues seek verified on-device); iOS is
-    // mp4-required — AVPlayer has no WebM/Opus.
-    prefer:
-      Platform.OS === 'ios' ? ['audio/mp4'] : ['audio/webm', 'audio/mp4'],
+    prefer: PREFERRED_CONTAINERS,
   });
-  const [itunesPluginId, youtubeMusicPluginId, deezerPluginId, lyricsLrclibPluginId] =
-    await Promise.all([
-      loadBundledPlugin(host, ITUNES_WASM, ITUNES_MANIFEST),
-      loadBundledPlugin(host, YOUTUBE_MUSIC_WASM, YOUTUBE_MUSIC_MANIFEST),
-      loadBundledPlugin(host, DEEZER_WASM, DEEZER_MANIFEST),
-      loadBundledPlugin(host, LYRICS_LRCLIB_WASM, LYRICS_LRCLIB_MANIFEST),
-    ]);
-  const providers: PluginProvider[] = [
-    createPluginProvider(
-      host,
-      itunesPluginId,
-      'itunes',
-      manifestCapabilities(ITUNES_MANIFEST),
-      manifestVersion(ITUNES_MANIFEST),
+  // Two phases, not one interleave: a rejected load must leave zero
+  // providers constructed — each adapter registers a native listener at
+  // construction and a half-built set has no controller to dispose it.
+  const loaded = await Promise.all(
+    BUNDLED_PLUGINS.map(([providerId, wasm, manifest]) =>
+      loadBundledPlugin(host, wasm, manifest).then((pluginId) => ({
+        providerId,
+        manifest,
+        pluginId,
+      })),
     ),
-    createPluginProvider(
-      host,
-      youtubeMusicPluginId,
-      'youtube-music',
-      manifestCapabilities(YOUTUBE_MUSIC_MANIFEST),
-      manifestVersion(YOUTUBE_MUSIC_MANIFEST),
-    ),
-    createPluginProvider(
-      host,
-      deezerPluginId,
-      'deezer',
-      manifestCapabilities(DEEZER_MANIFEST),
-      manifestVersion(DEEZER_MANIFEST),
-    ),
-    createPluginProvider(
-      host,
-      lyricsLrclibPluginId,
-      'lyrics-lrclib',
-      manifestCapabilities(LYRICS_LRCLIB_MANIFEST),
-      manifestVersion(LYRICS_LRCLIB_MANIFEST),
-    ),
-  ];
+  );
+  const providers: PluginProvider[] = loaded.map(
+    ({ providerId, manifest, pluginId }) =>
+      createPluginProvider(
+        host,
+        pluginId,
+        providerId,
+        manifestCapabilities(manifest),
+        manifestVersion(manifest),
+      ),
+  );
   const defaults = defaultSettings(providers);
   const sqliteDriver = await createExpoSqliteDriver(options.databasePath);
-  const storage = new SqliteStorage(
-    sqliteDriver,
-    defaults,
-  );
+  const storage = new SqliteStorage(sqliteDriver, defaults);
   // Sync-log tables ride the same file + driver — the shared
   // transaction tail serializes sync writes with library writes.
   const syncLogStore = new SqliteSyncLogStore(sqliteDriver);
@@ -415,13 +393,14 @@ export async function createSessionController(
     surface: () => syncSurface?.engine ?? null,
   });
   const providerMap = new Map(providers.map((p) => [p.id, p]));
-  const player = (options.player ?? ((map) => {
-    return createExpoAudioPlayer({
-      providers: map,
-      ids: createIds(),
-      qualityKbps: defaults.qualityKbps,
-    });
-  }))(providerMap);
+  const player =
+    options.player === undefined
+      ? createExpoAudioPlayer({
+          providers: providerMap,
+          ids: createIds(),
+          qualityKbps: defaults.qualityKbps,
+        })
+      : options.player(providerMap);
   const ids = createIds();
   const clock = createClock();
   // The Kotlin NetworkCallback monitor is Android-only; iOS gets the
@@ -526,15 +505,12 @@ export async function createSessionController(
         () => unsub(),
       );
     },
-    resolvePlayback: (ref, input, context) => {
+    resolvePlayback: async (ref, input, context) => {
       // Mint + re-mint route through the row's own sourceRef provider —
       // it alone can serve the same encoding at the durable offset.
       const provider = providerMap.get(ref.provider);
       if (provider === undefined) {
-        return Promise.resolve({
-          ok: false as const,
-          error: appError('unavailable', 'download provider not loaded'),
-        });
+        return err(appError('unavailable', 'download provider not loaded'));
       }
       return provider.resolvePlayback(
         ref,
@@ -543,10 +519,7 @@ export async function createSessionController(
             (s) => s.settings.qualityKbps,
             defaults.qualityKbps,
           ),
-          prefer:
-            Platform.OS === 'ios'
-              ? ['audio/mp4']
-              : ['audio/webm', 'audio/mp4'],
+          prefer: PREFERRED_CONTAINERS,
           pinItag: input.pinItag,
           resumeOffset: input.resumeOffset,
         },
@@ -573,15 +546,22 @@ export async function createSessionController(
   // Media-owner subscriptions made in start() — dispose() detaches
   // them so a second boot or an unmounted app can't double-fire.
   const mediaUnsubs: Array<() => void> = [];
+  const buildLocalSource = (loaded: PersistedState) =>
+    new LocalFileSource(
+      { storage, tagReader: createExpoTagReader(host), ids, clock, log },
+      {
+        localSources: loaded.localSources,
+        localFiles: loaded.localFiles,
+        recordings: loaded.recordings,
+      },
+    );
   /**
    * A whole-library replace (import) swaps the persisted sections
    * out from under the media owners — re-init the download ledger
    * and rebuild the local source from the post-import snapshot
    * before the UI calls back in.
    */
-  const reloadLocalSource = async (
-    signal: CancellationSignal,
-  ) => {
+  const reloadLocalSource = async (signal: CancellationSignal) => {
     const loaded = await storage.load({
       requestId: ids.next('media-rehydrate'),
       deadlineMs: clock.nowMs() + 30_000,
@@ -595,14 +575,7 @@ export async function createSessionController(
       });
       return null;
     }
-    localSource = new LocalFileSource(
-      { storage, tagReader: createExpoTagReader(host), ids, clock, log },
-      {
-        localSources: loaded.value.localSources,
-        localFiles: loaded.value.localFiles,
-        recordings: loaded.value.recordings,
-      },
-    );
+    localSource = buildLocalSource(loaded.value);
     return loaded.value;
   };
   const rehydrateMedia = async (
@@ -643,14 +616,10 @@ export async function createSessionController(
     local: () => localSource,
     connectivity,
     sync: () => syncSurface,
-    setPotProvider: (url) => {
-      // A stale native module predating the pot seam has no such
-      // function — the provider keeps its boot value rather than
-      // crashing the sync-status effect that calls this.
-      if (typeof host.setPotProvider === 'function') {
-        host.setPotProvider(url);
-      }
-    },
+    // A stale native module predating the pot seam has no such
+    // function — the provider keeps its boot value rather than
+    // crashing the sync-status effect that calls this.
+    setPotProvider: (url) => host.setPotProvider?.(url),
     async start(signal) {
       // Post-restore reconcile: persisted slots name ids picked under
       // an earlier bundle or synced from a peer — repick any slot whose
@@ -682,15 +651,7 @@ export async function createSessionController(
         // Cleanup raced the load — do not un-stop the manager.
         return;
       }
-      const tagReader = createExpoTagReader(host);
-      localSource = new LocalFileSource(
-        { storage, tagReader, ids, clock, log },
-        {
-          localSources: loaded.value.localSources,
-          localFiles: loaded.value.localFiles,
-          recordings: loaded.value.recordings,
-        },
-      );
+      localSource = buildLocalSource(loaded.value);
       // Re-band pending downloads when the queue moves: a track that
       // becomes now-playing jumps the line.
       let queueRevision = readyOr((s) => s.queue.revision, 0);
@@ -811,6 +772,44 @@ export async function createSessionController(
       if (inited.ok) {
         session.connectivityChanged();
       }
+      // Bounded refold shared by inbound merges and the bring-up
+      // reconcile: attempt 1 folds the fresh batch, retries refold
+      // the session's retained pending with [] — the backstop is
+      // sized past the call's own internal op deadline so it abandons
+      // only a wedged commit, never a healthy in-flight one.
+      const refold = async <E>(
+        first: readonly E[],
+        fold: (
+          entries: readonly E[],
+          signal: CancellationSignal,
+        ) => Promise<Result<SyncApplyReport>>,
+        label: string,
+      ): Promise<boolean> => {
+        const result = await retryBounded({
+          deadlineMs: clock.nowMs() + 300_000,
+          signal,
+          clock,
+          maxAttempts: 4,
+          baseBackoffMs: 400,
+          call: (attemptSignal, attempt) =>
+            fold(attempt === 1 ? first : [], attemptSignal),
+        });
+        if (signal.cancelled) {
+          return false;
+        }
+        if (!result.ok) {
+          void log.write({
+            level: 'warn',
+            message: `${label} failed: ${result.error.kind}`,
+            atMs: clock.nowMs(),
+          });
+          return false;
+        }
+        if (result.value.rehydrateMedia) {
+          void rehydrateMedia(signal);
+        }
+        return true;
+      };
       // Slice-4 LAN sync: Android-only — iOS carries no socket seam.
       // Built last so the sync tables exist (restore ran migrations)
       // and the media owners are live before deltas can land. A
@@ -833,39 +832,11 @@ export async function createSessionController(
           // refold with bounded retries rather than wait for an
           // inbound delta that may never come.
           onApplied: (applied) => {
-            void (async () => {
-              // Attempt 1 folds the fresh outcomes; retries refold
-              // the session's retained pending with [].
-              const result = await retryBounded({
-                // Backstop sized past the call's own internal op
-                // deadline — it must never abandon a healthy
-                // in-flight commit, only a wedged one.
-                deadlineMs: clock.nowMs() + 300_000,
-                signal,
-                clock,
-                maxAttempts: 4,
-                baseBackoffMs: 400,
-                call: (attemptSignal, attempt) =>
-                  session.applySyncedEntries(
-                    attempt === 1 ? applied.outcomes : [],
-                    attemptSignal,
-                  ),
-              });
-              if (signal.cancelled) {
-                return;
-              }
-              if (!result.ok) {
-                void log.write({
-                  level: 'warn',
-                  message: `sync apply failed: ${result.error.kind}`,
-                  atMs: clock.nowMs(),
-                });
-                return;
-              }
-              if (result.value.rehydrateMedia) {
-                void rehydrateMedia(signal);
-              }
-            })().catch(() => undefined);
+            void refold(
+              applied.outcomes,
+              (entries, s) => session.applySyncedEntries(entries, s),
+              'sync apply',
+            ).catch(() => undefined);
           },
         });
         if (built.ok) {
@@ -916,38 +887,13 @@ export async function createSessionController(
           // re-fold to the same rows.
           void (async () => {
             const materialized = syncSurface.engine.materialize();
-            // A failed apply keeps the whole union in the session's
-            // retained pending — refold with bounded retries rather
-            // than drop the recovery page until restart (Review #46):
-            // attempt 1 folds the fresh view, later attempts [].
-            const applied = await retryBounded({
-              // Backstop sized past the call's own internal op
-              // deadline — it must never abandon a healthy
-              // in-flight commit, only a wedged one.
-              deadlineMs: clock.nowMs() + 300_000,
-              signal,
-              clock,
-              maxAttempts: 4,
-              baseBackoffMs: 400,
-              call: (attemptSignal, attempt) =>
-                session.applyMaterializedEntries(
-                  attempt === 1 ? materialized : [],
-                  attemptSignal,
-                ),
-            });
-            if (signal.cancelled) {
+            const ok_ = await refold(
+              materialized,
+              (entries, s) => session.applyMaterializedEntries(entries, s),
+              'sync reconcile',
+            );
+            if (!ok_) {
               return;
-            }
-            if (!applied.ok) {
-              void log.write({
-                level: 'warn',
-                message: `sync reconcile failed: ${applied.error.kind}`,
-                atMs: clock.nowMs(),
-              });
-              return;
-            }
-            if (applied.value.rehydrateMedia) {
-              void rehydrateMedia(signal);
             }
             // The session's emit queue is memory-only — committed
             // writes a past kill stranded re-emit against the
@@ -1043,12 +989,10 @@ export async function createSessionController(
       syncScheduler = null;
       // Sync goes down next — bye frames flush while the sockets
       // still answer; a live session must never outlive its client.
+      // A live share (listener + advert) dies with the session —
+      // close is terminal; the UI-level stop is the reversible one.
       if (syncSurface !== null) {
-        // A live share (listener + advert) dies with the session —
-        // close is terminal; the UI-level stop is the reversible one.
-        if (syncSurface.host !== null) {
-          await syncSurface.host.close();
-        }
+        await syncSurface.host?.close();
         await syncSurface.client.close();
         syncSurface = null;
       }

@@ -60,40 +60,38 @@ export async function createExpoSqliteDriver(
   };
   // The device path of the main database, resolved from SQLite itself
   // so the backup lands next to the file it preserves.
-  const mainFile = async (): Promise<string | null> => {
+  const backupTarget = async (
+    tag: string,
+  ): Promise<{ file: string; target: File } | null> => {
+    checkTag(tag);
     const rows = await db.getAllAsync<{ name: string; file: string }>(
       'PRAGMA database_list',
     );
     const file = rows.find((r) => r.name === 'main')?.file;
-    return typeof file === 'string' && file.length > 0 ? file : null;
+    return typeof file === 'string' && file.length > 0
+      ? { file, target: new File(`file://${file}.bak-${tag}`) }
+      : null;
   };
-  const backupFile = (tag: string, path: string): File =>
-    new File(`file://${path}.bak-${tag}`);
 
   return {
     async backup(tag: string): Promise<void> {
-      checkTag(tag);
-      const file = await mainFile();
-      if (file !== null) {
-        // VACUUM INTO refuses an existing target: a stale image from a
-        // failed attempt is replaced so retries stay retryable.
-        const target = backupFile(tag, file);
-        if (target.exists) {
-          target.delete();
-        }
-        await db.execAsync(
-          `VACUUM INTO '${file.replaceAll("'", "''")}.bak-${tag}'`,
-        );
+      const hit = await backupTarget(tag);
+      if (hit === null) {
+        return;
       }
+      // VACUUM INTO refuses an existing target: a stale image from a
+      // failed attempt is replaced so retries stay retryable.
+      if (hit.target.exists) {
+        hit.target.delete();
+      }
+      await db.execAsync(
+        `VACUUM INTO '${hit.file.replaceAll("'", "''")}.bak-${tag}'`,
+      );
     },
     async dropBackup(tag: string): Promise<void> {
-      checkTag(tag);
-      const file = await mainFile();
-      if (file !== null) {
-        const target = backupFile(tag, file);
-        if (target.exists) {
-          target.delete();
-        }
+      const hit = await backupTarget(tag);
+      if (hit !== null && hit.target.exists) {
+        hit.target.delete();
       }
     },
     async transaction<T>(

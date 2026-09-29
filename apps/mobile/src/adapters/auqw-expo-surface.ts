@@ -16,28 +16,15 @@ type Module = typeof import('auqw-expo');
 
 export type AuqwExpoSubscription = { remove(): void };
 
-export type AuqwExpoHostConfig = AuqwExpo.HostConfig;
-
-/** Diagnostics for one guest attempt; identical shape to AttemptTrace. */
-export type AuqwExpoAttemptSummary = AuqwExpo.AttemptSummary;
-
 export type AuqwExpoRequestOutcome = AuqwExpo.RequestOutcome;
 
 export type AuqwExpoRequestOutcomeEvent = AuqwExpo.RequestOutcomeEvent;
 
-export type AuqwExpoPreparedStream = AuqwExpo.PreparedStream;
-
-export type AuqwExpoPrepareOutcome = AuqwExpo.PrepareOutcome;
-
 export type AuqwExpoPrepareOutcomeEvent = AuqwExpo.PrepareOutcomeEvent;
-
-export type AuqwExpoPlaybackState = AuqwExpo.PlaybackState;
 
 export type AuqwExpoPlaybackStatusEvent = AuqwExpo.PlaybackStatusEvent;
 
 export type AuqwExpoPhaseMarkEvent = AuqwExpo.PhaseMarkEvent;
-
-export type AuqwExpoQueueTransitionReason = AuqwExpo.QueueTransitionReason;
 
 export type AuqwExpoQueueTransitionEvent = AuqwExpo.QueueTransitionEvent;
 
@@ -89,24 +76,6 @@ export type AuqwPeaksNative = {
   ): Promise<readonly number[]>;
   waveformPeaksCancel?(requestId: string): void;
 };
-
-/** The whole module: host + player + lifecycle. */
-export type AuqwExpoLike = AuqwExpoHostLike &
-  AuqwExpoPlayerLike &
-  AuqwPeaksNative &
-  Pick<
-    Module,
-    | 'createHost'
-    | 'setAuthToken'
-    /**
-     * Live PO-token provider update — resolves read the host's slot
-     * at invocation spawn, so a pairing or unpairing that lands after
-     * `createHost` applies without recreating the host. `null`
-     * restores the anonymous resolve ladder.
-     */
-    | 'setPotProvider'
-    | 'loadPlugin'
-  >;
 
 /**
  * The host half plus lifecycle — satisfied by the `auqw-expo` module
@@ -189,12 +158,6 @@ export type AuqwConnectivityNative = Pick<
 // Sync socket — the auqw-expo `sync*` surface (slice 4).
 // ---------------------------------------------------------------------------
 
-/** `data` is base64 — binary frames never cross the bridge as JSON. */
-export type AuqwSyncSocketDataEvent = AuqwExpo.SyncSocketDataEvent;
-
-/** reason: 'peer' = remote FIN, 'error' = socket fault, 'local' = destroyed. */
-export type AuqwSyncSocketClosedEvent = AuqwExpo.SyncSocketClosedEvent;
-
 export type AuqwSyncNative = Pick<
   Module,
   | 'syncConnect'
@@ -255,12 +218,6 @@ export type AuqwSyncNative = Pick<
 // ---------------------------------------------------------------------------
 // TagReader — the auqw-expo `tag*`/`docUri` surface (slice 3).
 // ---------------------------------------------------------------------------
-
-export type AuqwTagEntryNative = AuqwExpo.TagReaderEntry;
-
-export type AuqwTagFingerprintNative = AuqwExpo.TagReaderFingerprint;
-
-export type AuqwTagTagsNative = AuqwExpo.TagReaderTags;
 
 export type AuqwDownloadsNative = Pick<Module, 'downloadsActiveChanged'>;
 

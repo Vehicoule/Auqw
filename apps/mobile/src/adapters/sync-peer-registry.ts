@@ -27,6 +27,21 @@ export function createSyncPeerRegistry(
     lastSeenAt: peer.lastSeenAt,
     endpoints: peer.endpoints,
   });
+  // Atomic read-merge-write on the keys port: custody keeps the
+  // stored cursor/lastSyncAt/pairedAt/pot while the host's fresh
+  // name/endpoints/id/pub land — a concurrent syncRound's cursor
+  // write can't be lost between a read and a write here.
+  const toPeer = (peer: SyncHostPeer): SyncPeer => ({
+    role: 'responder',
+    fp: peer.fp,
+    name: peer.name,
+    endpoints: peer.endpoints ?? [],
+    pairedAt: peer.pairedAt,
+    lastSeenAt: peer.lastSeenAt,
+    peerCursor: {},
+    ...(peer.id === '' ? {} : { deviceId: peer.id }),
+    ...(peer.pub === '' ? {} : { pub: peer.pub }),
+  });
   return {
     async find(fp) {
       const listed = await keys.peerList();
@@ -36,39 +51,13 @@ export function createSyncPeerRegistry(
       const found = listed.value.find((p) => p.fp === fp);
       return ok(found === undefined ? null : toHostPeer(found));
     },
-    async put(peer) {
-      // Atomic read-merge-write on the keys port: custody keeps the
-      // stored cursor/lastSyncAt/pairedAt/pot while the host's fresh
-      // name/endpoints/id/pub land — a concurrent syncRound's cursor
-      // write can't be lost between a read and a write here.
-      return keys.peerMerge({
-        role: 'responder',
-        fp: peer.fp,
-        name: peer.name,
-        endpoints: peer.endpoints ?? [],
-        pairedAt: peer.pairedAt,
-        lastSeenAt: peer.lastSeenAt,
-        peerCursor: {},
-        ...(peer.id === '' ? {} : { deviceId: peer.id }),
-        ...(peer.pub === '' ? {} : { pub: peer.pub }),
-      });
-    },
+    put: (peer) => keys.peerMerge(toPeer(peer)),
+    // One atomic existence-gated merge — the port itself preserves
+    // the stored cursor/lastSyncAt/pairedAt/pot and skips empty
+    // endpoint/id/pub overlays, so no caller-side read races a
+    // concurrent syncRound's cursor write (or an unpair).
     async touch(peer) {
-      // One atomic existence-gated merge — the port itself preserves
-      // the stored cursor/lastSyncAt/pairedAt/pot and skips empty
-      // endpoint/id/pub overlays, so no caller-side read races a
-      // concurrent syncRound's cursor write (or an unpair).
-      const touched = await keys.peerTouch({
-        role: 'responder',
-        fp: peer.fp,
-        name: peer.name,
-        endpoints: peer.endpoints ?? [],
-        pairedAt: peer.pairedAt,
-        lastSeenAt: peer.lastSeenAt,
-        peerCursor: {},
-        ...(peer.id === '' ? {} : { deviceId: peer.id }),
-        ...(peer.pub === '' ? {} : { pub: peer.pub }),
-      });
+      const touched = await keys.peerTouch(toPeer(peer));
       if (!touched.ok) {
         return err(touched.error);
       }
@@ -76,5 +65,3 @@ export function createSyncPeerRegistry(
     },
   };
 }
-
-export type { SyncHostPeer };

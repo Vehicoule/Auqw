@@ -164,21 +164,24 @@ export function createAuqwExpoPlayer(
     sourceRef: string;
     identity: PlaybackIdentity;
   }): Promise<Result<string>> {
-    const path = isString(input.sourceRef, 4096)
-      ? input.sourceRef
-      : null;
     const requestId = `lf-req-${++localSeq}`;
-    if (path === null) {
+    const fail = (error: AppError): void => {
       emit({
         type: 'prepare',
         requestId,
         identity: input.identity,
         outcome: {
           type: 'failed',
-          error: appError('invalid-response', 'bad local sourceRef'),
+          error,
           attempt: toAttemptTrace(null, requestId),
         },
       });
+    };
+    const path = isString(input.sourceRef, 4096)
+      ? input.sourceRef
+      : null;
+    if (path === null) {
+      fail(appError('invalid-response', 'bad local sourceRef'));
       return ok(requestId);
     }
     localPrepares.set(requestId, null);
@@ -198,16 +201,7 @@ export function createAuqwExpoPlayer(
     } catch (thrown) {
       // No handle minted — the entry has nothing left to reclaim.
       localPrepares.delete(requestId);
-      emit({
-        type: 'prepare',
-        requestId,
-        identity: input.identity,
-        outcome: {
-          type: 'failed',
-          error: nativeError(thrown),
-          attempt: toAttemptTrace(null, requestId),
-        },
-      });
+      fail(nativeError(thrown));
     }
     return ok(requestId);
   }
@@ -223,10 +217,7 @@ export function createAuqwExpoPlayer(
   }
 
   function onPrepareOutcome(event: AuqwExpoPrepareOutcomeEvent): void {
-    if (!isRecord(event)) {
-      return;
-    }
-    if (!isString(event.requestId, 128)) {
+    if (!isRecord(event) || !isString(event.requestId, 128)) {
       return;
     }
     const identity = toIdentity(event.attemptId, event.queueRev);
@@ -279,10 +270,8 @@ export function createAuqwExpoPlayer(
   }
 
   function onPlaybackStatus(event: AuqwExpoPlaybackStatusEvent): void {
-    if (!isRecord(event)) {
-      return;
-    }
     if (
+      !isRecord(event) ||
       !isString(event.handle, 512) ||
       !isSafeNonNegative(event.positionMs) ||
       (event.durationMs !== undefined &&
@@ -296,7 +285,6 @@ export function createAuqwExpoPlayer(
     if (identity === null) {
       return;
     }
-    const state = event.state;
     const error =
       event.error === undefined
         ? undefined
@@ -305,7 +293,7 @@ export function createAuqwExpoPlayer(
       type: 'status',
       handle: event.handle,
       identity,
-      state,
+      state: event.state,
       positionMs: event.positionMs,
       ...(event.durationMs === undefined
         ? {}
@@ -342,12 +330,9 @@ export function createAuqwExpoPlayer(
     if (!isRecord(event)) {
       return;
     }
-    const identity =
-      event.identity === null
-        ? null
-        : isRecord(event.identity)
-          ? toIdentity(event.identity.attemptId, event.identity.queueRev)
-          : null;
+    const identity = isRecord(event.identity)
+      ? toIdentity(event.identity.attemptId, event.identity.queueRev)
+      : null;
     if (
       !isString(event.projectionId, 128) ||
       !isSafeNonNegative(event.projectedQueueRev) ||
@@ -388,38 +373,30 @@ export function createAuqwExpoPlayer(
     ];
   }
 
+  const startPrepare = (input: {
+    provider: string;
+    sourceRef: string;
+    identity: PlaybackIdentity;
+  }): Promise<Result<string>> =>
+    input.provider === 'local'
+      ? prepareLocalFile(input)
+      : guard(() =>
+          module.prepare(
+            input.provider,
+            input.sourceRef,
+            input.identity.attemptId,
+            input.identity.queueRev,
+          ),
+        );
+
   return {
-    prepare(input) {
-      if (input.provider === 'local') {
-        return prepareLocalFile(input);
-      }
-      return guard(() =>
-        module.prepare(
-          input.provider,
-          input.sourceRef,
-          input.identity.attemptId,
-          input.identity.queueRev,
-        ),
-      );
-    },
-    prewarm(input) {
-      // The seam owns the warm: same startPrepare call — the registry
-      // already enforces at-most-one unattached session, supersedes
-      // stale ones, and lets a later same-ref prepare adopt this one
-      // without re-resolving. provider:'local' warms never issue here
-      // (the session gates them out); keep the delegate for symmetry.
-      if (input.provider === 'local') {
-        return prepareLocalFile(input);
-      }
-      return guard(() =>
-        module.prepare(
-          input.provider,
-          input.sourceRef,
-          input.identity.attemptId,
-          input.identity.queueRev,
-        ),
-      );
-    },
+    prepare: startPrepare,
+    // The seam owns the warm: same startPrepare call — the registry
+    // already enforces at-most-one unattached session, supersedes
+    // stale ones, and lets a later same-ref prepare adopt this one
+    // without re-resolving. provider:'local' warms never issue here
+    // (the session gates them out); keep the delegate for symmetry.
+    prewarm: startPrepare,
     play(input) {
       return guard(() =>
         module.play(
@@ -439,17 +416,16 @@ export function createAuqwExpoPlayer(
     stop() {
       return guard(() => module.stop());
     },
-    cancelPrepare(input) {
+    async cancelPrepare(input) {
       // lf-* ids are minted here and never reach the plugin host —
       // nothing on the host to cancel. A minted handle dies via
       // releaseStream so a cancelled prepare can't orphan it.
       if (input.requestId.startsWith('lf-req-')) {
         const localHandle = localPrepares.get(input.requestId);
         localPrepares.delete(input.requestId);
-        if (localHandle !== undefined && localHandle !== null) {
-          return guard(() => module.releaseStream(localHandle));
-        }
-        return Promise.resolve(ok(undefined));
+        return localHandle == null
+          ? ok(undefined)
+          : guard(() => module.releaseStream(localHandle));
       }
       return guard(() => module.cancelPrepare(input.requestId));
     },

@@ -13,16 +13,10 @@ import { potProviderUrlFromPeers } from './pot-provider.ts';
 export async function discoveredPotProviderUrl(): Promise<
   string | undefined
 > {
-  let peers: Awaited<
-    ReturnType<ReturnType<typeof createSecureSyncKeys>['peerList']>
-  >;
   try {
-    peers = await createSecureSyncKeys().peerList();
+    const peers = await createSecureSyncKeys().peerList();
+    return peers.ok ? potProviderUrlFromPeers(peers.value) : undefined;
   } catch {
     return undefined;
   }
-  if (!peers.ok) {
-    return undefined;
-  }
-  return potProviderUrlFromPeers(peers.value);
 }

@@ -36,41 +36,27 @@ export function nobleNoisePrimitives(
   randomBytes: (n: number) => Uint8Array,
 ): NoisePrimitives {
   return {
-    x25519(privateKey, publicKey) {
-      return x25519.getSharedSecret(privateKey, publicKey);
-    },
-    x25519Public(privateKey) {
-      return x25519.getPublicKey(privateKey);
-    },
+    x25519: (privateKey, publicKey) =>
+      x25519.getSharedSecret(privateKey, publicKey),
+    x25519Public: (privateKey) => x25519.getPublicKey(privateKey),
     generateX25519() {
       const privateKey = randomBytes(32);
       return { privateKey, publicKey: x25519.getPublicKey(privateKey) };
     },
-    sha256(bytes) {
-      return sha256(bytes);
-    },
-    hkdf(ikm, salt, info, length) {
-      return hkdf(sha256, ikm, salt, info, length);
-    },
-    aesGcmEncrypt(key, iv, plaintext, aad) {
-      // gcm.encrypt returns ciphertext ‖ 16-byte tag.
-      return gcm(key, iv, aad).encrypt(plaintext);
-    },
-    aesGcmDecrypt(key, iv, ctTag, aad) {
-      // gcm.decrypt throws on tag failure — the suite's open() relies
-      // on that.
-      return gcm(key, iv, aad).decrypt(ctTag);
-    },
+    sha256: (bytes) => sha256(bytes),
+    hkdf: (ikm, salt, info, length) => hkdf(sha256, ikm, salt, info, length),
+    // gcm.encrypt returns ciphertext ‖ 16-byte tag; gcm.decrypt
+    // throws on tag failure — the suite's open() relies on that.
+    aesGcmEncrypt: (key, iv, plaintext, aad) =>
+      gcm(key, iv, aad).encrypt(plaintext),
+    aesGcmDecrypt: (key, iv, ctTag, aad) => gcm(key, iv, aad).decrypt(ctTag),
     randomBytes,
   };
 }
 
 /** A bound noise-v1 suite on noble — one per CSPRNG binding. */
-export function nobleNoise(
-  randomBytes: (n: number) => Uint8Array,
-): NoiseSuite {
-  return createNoiseSuite(nobleNoisePrimitives(randomBytes));
-}
+const nobleNoise = (randomBytes: (n: number) => Uint8Array): NoiseSuite =>
+  createNoiseSuite(nobleNoisePrimitives(randomBytes));
 
 /** Mint a device keypair — the standalone mint lets custody
  * (`ensureSyncIdentity`) run before a suite instance exists. */

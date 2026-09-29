@@ -14,7 +14,7 @@ import type {
  * surface lands — a platform that never becomes syncable (iOS, web
  * build) sheds the tail instead of growing memory forever.
  */
-export type SyncEmit = (
+type SyncEmit = (
   writes: readonly LocalWrite[],
   signal?: CancellationSignal,
 ) => Promise<Result<unknown>>;
@@ -33,6 +33,11 @@ export function createSyncEmit(opts: {
   const maxBuffered = opts.maxBuffered ?? 2_048;
   const buffered: LocalWrite[] = [];
   let tail: Promise<unknown> = Promise.resolve();
+  const capBuffered = (): void => {
+    if (buffered.length > maxBuffered) {
+      buffered.splice(0, buffered.length - maxBuffered);
+    }
+  };
   const locked = async (
     writes: readonly LocalWrite[],
     signal?: CancellationSignal,
@@ -40,9 +45,7 @@ export function createSyncEmit(opts: {
     const surface = opts.surface();
     if (surface === null) {
       buffered.push(...writes);
-      if (buffered.length > maxBuffered) {
-        buffered.splice(0, buffered.length - maxBuffered);
-      }
+      capBuffered();
       return ok(undefined);
     }
     const pending = buffered.splice(0);
@@ -67,9 +70,7 @@ export function createSyncEmit(opts: {
       // re-submit the failed writes twice per retry (Review #46
       // round-12).
       buffered.unshift(...pending);
-      if (buffered.length > maxBuffered) {
-        buffered.splice(0, buffered.length - maxBuffered);
-      }
+      capBuffered();
     }
     return stamped;
   };

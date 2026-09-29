@@ -1,6 +1,6 @@
-export type DevRoute = 'gallery' | 'seam' | 'journey' | null;
-
-export function devRoute(url: string): DevRoute {
+export function devRoute(
+  url: string,
+): 'gallery' | 'seam' | 'journey' | null {
   if (!url.startsWith('auqw://')) {
     return null;
   }
@@ -8,8 +8,5 @@ export function devRoute(url: string): DevRoute {
   if (verb === 'gallery') {
     return 'gallery';
   }
-  if (verb.startsWith('seam')) {
-    return 'seam';
-  }
-  return 'journey';
+  return verb.startsWith('seam') ? 'seam' : 'journey';
 }

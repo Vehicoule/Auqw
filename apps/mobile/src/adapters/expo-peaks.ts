@@ -69,6 +69,14 @@ export function createExpoPeaksPort(native: AuqwPeaksNative): PeaksPort {
         deadlineFired = true;
         cancelNative(requestId);
       }, remainingMs);
+      // A cancel can race a late native resolve — the caller's
+      // signal wins over data that arrived after it fired.
+      const settled = (): Result<never> | null =>
+        context.signal.cancelled
+          ? err(appError('cancelled', 'peak extraction cancelled'))
+          : deadlineFired
+            ? err(appError('timeout', 'peak extraction deadline'))
+            : null;
       try {
         const flat = await extract(
           requestId,
@@ -77,13 +85,9 @@ export function createExpoPeaksPort(native: AuqwPeaksNative): PeaksPort {
           cap,
           provisional,
         );
-        // A cancel can race a late native resolve — the caller's
-        // signal wins over data that arrived after it fired.
-        if (context.signal.cancelled) {
-          return err(appError('cancelled', 'peak extraction cancelled'));
-        }
-        if (deadlineFired) {
-          return err(appError('timeout', 'peak extraction deadline'));
+        const hit = settled();
+        if (hit !== null) {
+          return hit;
         }
         // The contract is exactly `count` [up,down] pairs — a shorter
         // list is a partial decode, not a waveform, and caching it
@@ -121,11 +125,9 @@ export function createExpoPeaksPort(native: AuqwPeaksNative): PeaksPort {
         }
         return ok(normalizePeakWindows(windows));
       } catch (thrown) {
-        if (context.signal.cancelled) {
-          return err(appError('cancelled', 'peak extraction cancelled'));
-        }
-        if (deadlineFired) {
-          return err(appError('timeout', 'peak extraction deadline'));
+        const hit = settled();
+        if (hit !== null) {
+          return hit;
         }
         return err(nativeError(thrown));
       } finally {

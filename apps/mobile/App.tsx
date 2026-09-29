@@ -23,6 +23,7 @@
 // in the hook fixes both shells.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   AppState,
   BackHandler,
@@ -73,6 +74,7 @@ import type {
   SessionState,
   Settings,
   SyncClientStatus,
+  SyncDiscoveredPeer,
 } from '@auqw/application';
 import {
   AddToPlaylistSheet,
@@ -171,11 +173,6 @@ const expoNavigationBar =
       }>('ExpoNavigationBar')
     : null;
 
-// Bounds the held-sheet release: long enough for the settle spring
-// (stage-sheet STAGE_SETTLE_SPRING, critically damped at 200/28) to
-// land before unmount.
-const STAGE_RELEASE_MS = 450;
-
 /**
  * The sync screen's QR scanner — expo-camera lives in the app (not
  * ui-native), so the camera mounts here and the screen receives it
@@ -235,21 +232,19 @@ function artworkCacheOptions(): readonly ProviderPickerOption[] {
 
 // A SAF file URI (content://…/document/<encoded docId>) reads as a
 // path the user can find — "Download/auqw-library-….json" — rather
-// than a provider-internal tree id.
+// than a provider-internal tree id. A badly-escaped docId still
+// exported fine — label it raw rather than surface a write failure
+// for what is only a label-formatting problem.
 function exportDestinationLabel(uri: string): string {
   if (!uri.startsWith('content://')) {
     return uri;
   }
   const raw = uri.split('/document/').pop() ?? uri;
-  let docId = raw;
   try {
-    docId = decodeURIComponent(raw);
+    return decodeURIComponent(raw).replace(/^[a-zA-Z0-9_-]+:/, '');
   } catch {
-    // A provider that escapes its docId badly still exported fine —
-    // fall back to the raw id instead of surfacing a write failure
-    // for what is only a label-formatting problem.
+    return raw.replace(/^[a-zA-Z0-9_-]+:/, '');
   }
-  return docId.replace(/^[a-zA-Z0-9_-]+:/, '');
 }
 
 export function App() {
@@ -352,15 +347,7 @@ export function App() {
   );
 }
 
-function BootGate({
-  boot,
-  fontsLoaded,
-  onRetry,
-}: {
-  readonly boot: Boot<SessionController>;
-  readonly fontsLoaded: boolean;
-  readonly onRetry: () => void;
-}) {
+function GateFrame({ children }: { readonly children: ReactNode }) {
   const theme = useTheme();
   return (
     <View
@@ -371,6 +358,22 @@ function BootGate({
       }}
     >
       <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+      {children}
+    </View>
+  );
+}
+
+function BootGate({
+  boot,
+  fontsLoaded,
+  onRetry,
+}: {
+  readonly boot: Boot<SessionController>;
+  readonly fontsLoaded: boolean;
+  readonly onRetry: () => void;
+}) {
+  return (
+    <GateFrame>
       {boot.type === 'failed' ? (
         <ErrorState
           title={t('boot.startFailed')}
@@ -382,7 +385,7 @@ function BootGate({
           title={fontsLoaded ? t('boot.loadingPlugins') : t('state.loading')}
         />
       )}
-    </View>
+    </GateFrame>
   );
 }
 
@@ -416,17 +419,16 @@ function useAdaptiveSource(enabled: boolean): ThemeSource | null {
     let generation = 0;
     const read = () => {
       const mine = ++generation;
-      void AuqwExpo.systemTonalPalette()
-        .then((next) => {
-          if (live && mine === generation) {
-            setTones(next);
-          }
-        })
-        .catch(() => {
-          if (live && mine === generation) {
-            setTones(null);
-          }
-        });
+      const setIfLatest = (
+        next: AuqwExpo.SystemTonalPalette | null,
+      ): void => {
+        if (live && mine === generation) {
+          setTones(next);
+        }
+      };
+      void AuqwExpo.systemTonalPalette().then(setIfLatest, () =>
+        setIfLatest(null),
+      );
     };
     read();
     const sub = AppState.addEventListener('change', (status) => {
@@ -446,13 +448,13 @@ function useAdaptiveSource(enabled: boolean): ThemeSource | null {
     if (tones === null) {
       return { scheme };
     }
+    const dark = scheme === 'dark';
     return {
       scheme,
       palette: {
-        bg: scheme === 'dark' ? tones.neutral1_900 : tones.neutral1_50,
-        fg: scheme === 'dark' ? tones.neutral1_50 : tones.neutral1_900,
-        accent:
-          scheme === 'dark' ? tones.accent1_200 : tones.accent1_600,
+        bg: dark ? tones.neutral1_900 : tones.neutral1_50,
+        fg: dark ? tones.neutral1_50 : tones.neutral1_900,
+        accent: dark ? tones.accent1_200 : tones.accent1_600,
       },
     };
   }, [enabled, tones, scheme]);
@@ -504,16 +506,8 @@ function SessionGate({
   readonly state: SessionState;
   readonly controller: SessionController;
 }) {
-  const theme = useTheme();
   return (
-    <View
-      style={{
-        flex: 1,
-        backgroundColor: theme.colors.canvas,
-        justifyContent: 'center',
-      }}
-    >
-      <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+    <GateFrame>
       {state.type === 'restore-failed' ? (
         <ErrorState
           title={t('boot.restoreFailed')}
@@ -523,7 +517,7 @@ function SessionGate({
       ) : (
         <LoadingState title={t('boot.restoring')} />
       )}
-    </View>
+    </GateFrame>
   );
 }
 
@@ -534,6 +528,25 @@ type Overlay =
   | { readonly type: 'corrections' }
   | { readonly type: 'transfer' }
   | { readonly type: 'sync' };
+
+type ShareState = {
+  readonly active: boolean;
+  readonly busy: boolean;
+  readonly code: string | null;
+  readonly payload: string | null;
+  /** Primary `host:port` the offer advertises — typed-join display. */
+  readonly endpoint: string | null;
+  readonly expiresAt: number | null;
+};
+
+const SHARE_CLOSED: ShareState = {
+  active: false,
+  busy: false,
+  code: null,
+  payload: null,
+  endpoint: null,
+  expiresAt: null,
+};
 
 function Main({
   controller,
@@ -579,22 +592,7 @@ function Main({
   // `nearbyPeers` = mDNS-discovered devices we can dial into. Both
   // live only while the sync screen is open — the listener is
   // pairing-only (rounds still dial out via the client).
-  const [share, setShare] = useState<{
-    readonly active: boolean;
-    readonly busy: boolean;
-    readonly code: string | null;
-    readonly payload: string | null;
-    /** Primary `host:port` the offer advertises — typed-join display. */
-    readonly endpoint: string | null;
-    readonly expiresAt: number | null;
-  }>({
-    active: false,
-    busy: false,
-    code: null,
-    payload: null,
-    endpoint: null,
-    expiresAt: null,
-  });
+  const [share, setShare] = useState<ShareState>(SHARE_CLOSED);
   // Share generations, not a bool: a stale start()/stop() from a
   // dismissed share must not resolve into — or tear down — a NEWER
   // share's listener. Nonzero means "a share attempt owns the host".
@@ -607,14 +605,7 @@ function Main({
   // display a code the host no longer honors.
   const shareMintRef = useRef(0);
   const [nearbyPeers, setNearbyPeers] = useState<
-    readonly {
-      key: string;
-      name: string;
-      host: string;
-      port: number;
-      addresses: readonly string[];
-      fp: string | null;
-    }[]
+    readonly SyncDiscoveredPeer[]
   >([]);
   useEffect(() => {
     if (syncSurface === null) {
@@ -973,7 +964,7 @@ function Main({
           },
     ) => {
       const client = syncSurface?.client;
-      if (client === undefined || pairing) {
+      if (client == null || pairing) {
         return;
       }
       setPairing(true);
@@ -1020,7 +1011,7 @@ function Main({
   const syncOpen = overlay?.type === 'sync';
   useEffect(() => {
     const discovery = syncSurface?.discovery;
-    if (!syncOpen || discovery === undefined || discovery === null) {
+    if (!syncOpen || discovery == null) {
       return;
     }
     let session: { close(): void } | null = null;
@@ -1038,14 +1029,7 @@ function Main({
           // same-named neighbor keeps its own.
           setNearbyPeers((prev) => [
             ...prev.filter((p) => p.key !== peer.key),
-            {
-              key: peer.key,
-              name: peer.name,
-              host: peer.host,
-              port: peer.port,
-              addresses: peer.addresses,
-              fp: peer.fp,
-            },
+            peer,
           ]);
         },
         onLost: (key) => {
@@ -1087,14 +1071,7 @@ function Main({
       shareRetryRef.current = 0;
       void syncSurface?.host?.stop();
     }
-    setShare({
-      active: false,
-      busy: false,
-      code: null,
-      payload: null,
-      endpoint: null,
-      expiresAt: null,
-    });
+    setShare(SHARE_CLOSED);
     setAdvertNotice(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [syncOpen]);
@@ -1103,7 +1080,7 @@ function Main({
   // host (shareGenRef) and share still active inside the set.
   const remintShareOffer = useCallback(() => {
     const host = syncSurface?.host;
-    if (host === undefined || host === null || shareGenRef.current === 0) {
+    if (host == null || shareGenRef.current === 0) {
       return;
     }
     const attempt = ++shareMintRef.current;
@@ -1145,7 +1122,7 @@ function Main({
                 ...prev,
                 code: offer.value.code,
                 payload: offer.value.payload,
-              endpoint: offer.value.endpoint,
+                endpoint: offer.value.endpoint,
                 expiresAt: offer.value.expiresAt,
               }
             : prev,
@@ -1173,7 +1150,7 @@ function Main({
   // the UI never shows a dead offer the next caller can't redeem.
   useEffect(() => {
     const host = syncSurface?.host;
-    if (!share.active || host === undefined || host === null) {
+    if (!share.active || host == null) {
       return;
     }
     const unPair = host.onPaired(remintShareOffer);
@@ -1209,20 +1186,13 @@ function Main({
 
   const onShareToggle = useCallback(() => {
     const host = syncSurface?.host;
-    if (host === undefined || host === null || share.busy) {
+    if (host == null || share.busy) {
       return;
     }
     if (share.active) {
       shareGenRef.current = 0;
       void host.stop();
-      setShare({
-        active: false,
-        busy: false,
-        code: null,
-        payload: null,
-        endpoint: null,
-        expiresAt: null,
-      });
+      setShare(SHARE_CLOSED);
       // Sharing stopped — advertise/pair notices are moot while
       // nothing is advertised.
       setPairNotice(null);
@@ -1243,23 +1213,21 @@ function Main({
     // stale start() resolution can't stop a successor's listener.
     const gen = ++shareGenRef.current;
     shareRetryRef.current = 0;
+    // A failed start/mint unwinds the same way: release the host,
+    // clear the share surface, surface the error.
+    const abortShare = async (error: AppError): Promise<void> => {
+      shareGenRef.current = 0;
+      await host.stop();
+      setShare(SHARE_CLOSED);
+      setPairError(error);
+    };
     void (async () => {
       const started = await host.start();
       if (shareGenRef.current !== gen) {
         return; // cleanup stopped the host, or a newer share owns it
       }
       if (!started.ok) {
-        shareGenRef.current = 0;
-        await host.stop();
-        setShare({
-          active: false,
-          busy: false,
-          code: null,
-          payload: null,
-          endpoint: null,
-          expiresAt: null,
-        });
-        setPairError(started.error);
+        await abortShare(started.error);
         return;
       }
       const offer = await host.mintOffer();
@@ -1267,17 +1235,7 @@ function Main({
         return;
       }
       if (!offer.ok) {
-        shareGenRef.current = 0;
-        await host.stop();
-        setShare({
-          active: false,
-          busy: false,
-          code: null,
-          payload: null,
-          endpoint: null,
-          expiresAt: null,
-        });
-        setPairError(offer.error);
+        await abortShare(offer.error);
         return;
       }
       setShare({
@@ -1297,14 +1255,7 @@ function Main({
       }
       shareGenRef.current = 0;
       void host.stop();
-      setShare({
-        active: false,
-        busy: false,
-        code: null,
-        payload: null,
-        endpoint: null,
-        expiresAt: null,
-      });
+      setShare(SHARE_CLOSED);
       setPairNotice('sync.pairFailed');
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1333,22 +1284,14 @@ function Main({
 
   const onSyncNow = useCallback(
     (fp: string) => {
-      const client = syncSurface?.client;
-      if (client === undefined) {
-        return;
-      }
-      void client.syncNow(fp, new CancellationSource().signal);
+      void syncSurface?.client.syncNow(fp, new CancellationSource().signal);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [controller],
   );
   const onUnpair = useCallback(
     (fp: string) => {
-      const client = syncSurface?.client;
-      if (client === undefined) {
-        return;
-      }
-      void client.unpair(fp, new CancellationSource().signal);
+      void syncSurface?.client.unpair(fp, new CancellationSource().signal);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [controller],
@@ -1513,26 +1456,8 @@ function Main({
   // review?list|confirm=&candidate=|reject=|undo=, transfer?export|
   // import=<path>|apply-import, download?i=N|downloads, local-add|
   // local-rescan|local-list, airplane. Never ships in release bundles.
-  const journeyDeps = useRef({
-    session,
-    search,
-    state,
-    controller,
-    downloadRefFor,
-    reportPlay,
-    queueSettingsWrite,
-    seekToPosition,
-  });
-  journeyDeps.current = {
-    session,
-    search,
-    state,
-    controller,
-    downloadRefFor,
-    reportPlay,
-    queueSettingsWrite,
-    seekToPosition,
-  };
+  const journeyDeps = useRef({ session, search, state, controller, downloadRefFor, reportPlay, queueSettingsWrite, seekToPosition });
+  journeyDeps.current = { session, search, state, controller, downloadRefFor, reportPlay, queueSettingsWrite, seekToPosition };
   useEffect(() => {
     if (!__DEV__) {
       return undefined;
@@ -1568,6 +1493,14 @@ function Main({
         queueSettingsWrite: queueWrite,
         seekToPosition: seekTo,
       } = journeyDeps.current;
+      // The local-files journeys share the "source started" gate.
+      const localOr = (verb: string) => {
+        const local = ctl.local();
+        if (local === null) {
+          console.log(`[journey] ${verb}: source not started`);
+        }
+        return local;
+      };
       const body = url.slice('auqw://'.length);
       // Split on the first '?' only — param values may embed '?' of
       // their own (import paths, pasted URLs), and `split('?')` would
@@ -1815,9 +1748,8 @@ function Main({
           break;
         case 'local-add': {
           // auqw://local-add — drives the real SAF folder picker.
-          const local = ctl.local();
+          const local = localOr('local-add');
           if (local === null) {
-            console.log('[journey] local-add: source not started');
             break;
           }
           void local
@@ -1835,9 +1767,8 @@ function Main({
           break;
         }
         case 'local-rescan': {
-          const local = ctl.local();
+          const local = localOr('local-rescan');
           if (local === null) {
-            console.log('[journey] local-rescan: source not started');
             break;
           }
           void local
@@ -1860,9 +1791,8 @@ function Main({
           break;
         }
         case 'local-list': {
-          const local = ctl.local();
+          const local = localOr('local-list');
           if (local === null) {
-            console.log('[journey] local-list: source not started');
             break;
           }
           for (const source of local.list()) {
@@ -1980,6 +1910,15 @@ function Main({
   }, [navBarStyle]);
 
   const topInset = insets.top;
+  // Both floating pills (offline banner, toast) share the chrome.
+  const pillStyle = {
+    position: 'absolute' as const,
+    alignSelf: 'center' as const,
+    borderRadius: 999,
+    backgroundColor: theme.colors.raised,
+    borderWidth: theme.strokes.hairline,
+    borderColor: theme.colors.hairline,
+  };
   if (galleryActive) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
@@ -2177,7 +2116,9 @@ function Main({
             onResetImport={onResetImport}
           />
         );
-      case 'sync':
+      case 'sync': {
+        const hasHost = syncSurface?.host != null;
+        const hasDiscovery = syncSurface?.discovery != null;
         return (
           <SyncScreen
             model={syncModel}
@@ -2194,9 +2135,8 @@ function Main({
               (pairNotice === null ? null : t(pairNotice))
             }
             share={
-              syncSurface?.host === undefined || syncSurface?.host === null
-                ? undefined
-                : {
+              hasHost
+                ? {
                     supported: true,
                     active: share.active,
                     busy: share.busy,
@@ -2208,34 +2148,21 @@ function Main({
                         ? null
                         : formatExpiry(share.expiresAt, shareTick),
                   }
+                : undefined
             }
-            onShareToggle={
-              syncSurface?.host === undefined || syncSurface?.host === null
-                ? undefined
-                : onShareToggle
-            }
-            onCopyPayload={
-              syncSurface?.host === undefined || syncSurface?.host === null
-                ? undefined
-                : onCopyPayload
-            }
+            onShareToggle={hasHost ? onShareToggle : undefined}
+            onCopyPayload={hasHost ? onCopyPayload : undefined}
             nearbyPeers={
-              syncSurface?.discovery === undefined ||
-              syncSurface?.discovery === null
-                ? undefined
-                : nearbyPeers.map((peer) => ({
+              hasDiscovery
+                ? nearbyPeers.map((peer) => ({
                     key: peer.key,
                     name: peer.name,
                     address: `${peer.host}:${peer.port}`,
                     pinned: peer.fp !== null,
                   }))
+                : undefined
             }
-            onPairNearby={
-              syncSurface?.discovery === undefined ||
-              syncSurface?.discovery === null
-                ? undefined
-                : onPairNearby
-            }
+            onPairNearby={hasDiscovery ? onPairNearby : undefined}
             renderScanner={
               Platform.OS === 'android'
                 ? (onScan) => <SyncScanner onScan={onScan} />
@@ -2249,6 +2176,7 @@ function Main({
             }
           />
         );
+      }
       default:
         return null;
     }
@@ -2400,15 +2328,10 @@ function Main({
           {online === false && (
             <View
               style={{
-                position: 'absolute',
+                ...pillStyle,
                 top: topInset + 4,
-                alignSelf: 'center',
                 paddingHorizontal: 12,
                 paddingVertical: 5,
-                borderRadius: 999,
-                backgroundColor: theme.colors.raised,
-                borderWidth: theme.strokes.hairline,
-                borderColor: theme.colors.hairline,
               }}
             >
               <Text variant="metadata" color="secondary">
@@ -2420,16 +2343,11 @@ function Main({
             <View
               accessibilityLiveRegion="polite"
               style={{
-                position: 'absolute',
+                ...pillStyle,
                 bottom: insets.bottom + 88,
-                alignSelf: 'center',
                 maxWidth: '92%',
                 paddingHorizontal: 14,
                 paddingVertical: 6,
-                borderRadius: 999,
-                backgroundColor: theme.colors.raised,
-                borderWidth: theme.strokes.hairline,
-                borderColor: theme.colors.hairline,
                 zIndex: 70,
               }}
             >

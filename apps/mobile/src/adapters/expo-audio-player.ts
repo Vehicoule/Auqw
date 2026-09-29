@@ -25,16 +25,10 @@ function toStreamSource(resource: PlayableResource): StreamSource {
   return {
     url: resource.url,
     mime: resource.mime,
-    ...(resource.bitrateKbps === null
-      ? {}
-      : { bitrateKbps: resource.bitrateKbps }),
-    ...(resource.contentLength === null
-      ? {}
-      : { contentLength: resource.contentLength }),
-    ...(resource.itag === null ? {} : { itag: resource.itag }),
-    ...(resource.expiresAtMs === null
-      ? {}
-      : { expiresAtMs: resource.expiresAtMs }),
+    bitrateKbps: resource.bitrateKbps ?? undefined,
+    contentLength: resource.contentLength ?? undefined,
+    itag: resource.itag ?? undefined,
+    expiresAtMs: resource.expiresAtMs ?? undefined,
   };
 }
 
@@ -116,7 +110,7 @@ function zeroTrace(requestId: string, elapsedMs: number): AttemptTrace {
   };
 }
 
-export type ExpoAudioPlayerDeps = {
+type ExpoAudioPlayerDeps = {
   readonly providers: ReadonlyMap<string, ProviderPort>;
   readonly ids: IdPort;
   readonly qualityKbps: number;
@@ -312,16 +306,18 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
         kind: 'track',
         id: record.sourceRef,
       };
-      const resolved = await provider.resolvePlayback(
-        ref,
-        {
-          targetBitrateKbps: deps.qualityKbps,
-          prefer: ['audio/mp4', 'audio/webm'],
-          pinItag: null,
-          resumeOffset: null,
-        },
-        context,
-      );
+      const resolve = (pinItag: number | null) =>
+        provider.resolvePlayback(
+          ref,
+          {
+            targetBitrateKbps: deps.qualityKbps,
+            prefer: ['audio/mp4', 'audio/webm'],
+            pinItag,
+            resumeOffset: null,
+          },
+          context,
+        );
+      const resolved = await resolve(null);
       if (!alive(record)) {
         return;
       }
@@ -332,16 +328,7 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
       const first = toStreamSource(resolved.value);
       record.expiresAtMs = first.expiresAtMs ?? null;
       const remint = async (): Promise<StreamSource> => {
-        const again = await provider.resolvePlayback(
-          ref,
-          {
-            targetBitrateKbps: deps.qualityKbps,
-            prefer: ['audio/mp4', 'audio/webm'],
-            pinItag: first.itag ?? null,
-            resumeOffset: null,
-          },
-          context,
-        );
+        const again = await resolve(first.itag ?? null);
         if (!again.ok) {
           throw new DownloadFailure(again.error.kind, again.error.message);
         }
@@ -407,27 +394,15 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
       });
       return;
     }
-    if (status.didJustFinish) {
-      if (!record.downloadDone) {
-        // Growing-file edge, not end-of-stream: wait for more bytes
-        // and resume where the player ran out.
-        record.resumeAtSec = status.currentTime;
-        return;
-      }
-      emit({
-        type: 'status',
-        handle: record.handle,
-        identity: attached.identity,
-        state: 'ended',
-        positionMs: Math.max(0, Math.floor(status.currentTime * 1000)),
-        ...(status.duration > 0
-          ? { durationMs: Math.floor(status.duration * 1000) }
-          : {}),
-      });
+    if (status.didJustFinish && !record.downloadDone) {
+      // Growing-file edge, not end-of-stream: wait for more bytes
+      // and resume where the player ran out.
+      record.resumeAtSec = status.currentTime;
       return;
     }
-    const state =
-      !status.isLoaded || status.isBuffering
+    const state = status.didJustFinish
+      ? 'ended'
+      : !status.isLoaded || status.isBuffering
         ? 'buffering'
         : status.playing
           ? 'playing'
@@ -444,7 +419,7 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
     });
   }
 
-  function issuePrepare(input: {
+  async function issuePrepare(input: {
     provider: string;
     sourceRef: string;
     identity: PlaybackIdentity;
@@ -485,7 +460,7 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
             },
           });
         }
-        return Promise.resolve(ok(requestId));
+        return ok(requestId);
       }
     }
     supersedeUnattached();
@@ -523,7 +498,15 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
     prepared.set(record.handle, record);
     pending.set(requestId, record);
     void runPrepare(record);
-    return Promise.resolve(ok(requestId));
+    return ok(requestId);
+  }
+
+  function eachAttached(fn: (attached: AttachedRecord) => void): void {
+    for (const record of prepared.values()) {
+      if (record.attached !== null) {
+        fn(record.attached);
+      }
+    }
   }
 
   return {
@@ -589,39 +572,35 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
       }
     },
 
-    pause(identity) {
-      for (const record of prepared.values()) {
-        if (record.attached !== null) {
-          record.attached.identity = identity;
-          record.attached.player.pause();
-        }
-      }
-      return Promise.resolve(ok(undefined));
+    async pause(identity) {
+      eachAttached((attached) => {
+        attached.identity = identity;
+        attached.player.pause();
+      });
+      return ok(undefined);
     },
 
-    seekTo(input) {
-      for (const record of prepared.values()) {
-        if (record.attached !== null) {
-          record.attached.identity = input.identity;
-          void record.attached.player
-            .seekTo(input.positionMs / 1000)
-            .catch(() => undefined);
-        }
-      }
-      return Promise.resolve(ok(undefined));
+    async seekTo(input) {
+      eachAttached((attached) => {
+        attached.identity = input.identity;
+        void attached.player
+          .seekTo(input.positionMs / 1000)
+          .catch(() => undefined);
+      });
+      return ok(undefined);
     },
 
-    stop() {
+    async stop() {
       for (const record of prepared.values()) {
         detach(record);
       }
-      return Promise.resolve(ok(undefined));
+      return ok(undefined);
     },
 
-    cancelPrepare(input) {
+    async cancelPrepare(input) {
       const record = pending.get(input.requestId);
       if (record === undefined) {
-        return Promise.resolve(ok(undefined));
+        return ok(undefined);
       }
       const ownerIdentity = record.owners.get(input.requestId);
       pending.delete(input.requestId);
@@ -630,7 +609,7 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
       // kills an attached session (cancel_if_unattached): the consumer
       // playing it keeps the stream.
       if (record.attached !== null || record.attaching) {
-        return Promise.resolve(ok(undefined));
+        return ok(undefined);
       }
       emit({
         type: 'prepare',
@@ -645,27 +624,25 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
       if (record.owners.size === 0) {
         teardown(record);
       }
-      return Promise.resolve(ok(undefined));
+      return ok(undefined);
     },
 
-    release(input) {
+    async release(input) {
       const record = prepared.get(input.handle);
       if (record !== undefined) {
         teardown(record);
       }
-      return Promise.resolve(ok(undefined));
+      return ok(undefined);
     },
 
-    setQueueProjection() {
-      // No service cursor exists on this surface — the Session's
-      // designed fallback (JS-side advance on `ended`) engages on a
-      // failed install, which is exactly the honest answer here.
-      return Promise.resolve(
-        err(
-          appError(
-            'not-applicable',
-            'queue projection unsupported on the provisional player',
-          ),
+    // No service cursor exists on this surface — the Session's
+    // designed fallback (JS-side advance on `ended`) engages on a
+    // failed install, which is exactly the honest answer here.
+    async setQueueProjection() {
+      return err(
+        appError(
+          'not-applicable',
+          'queue projection unsupported on the provisional player',
         ),
       );
     },

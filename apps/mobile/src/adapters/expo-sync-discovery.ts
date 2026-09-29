@@ -1,5 +1,4 @@
 import type {
-  Result,
   SyncAdvertiseOpts,
   SyncDiscoveredPeer,
   SyncAdvertiser,
@@ -85,8 +84,17 @@ export function createExpoSyncDiscovery(
         string,
         Map<string, { port: number | undefined; fp: string | null }>
       >();
+      const queueBrowseStop = (): void => {
+        const stop = native.syncBrowseStop?.() ?? Promise.resolve();
+        stopChain = stopChain.then(
+          () => stop.catch(() => undefined),
+          () => undefined,
+        );
+      };
       const validFp = (v: unknown): string | null =>
         typeof v === 'string' && /^[0-9a-f]{64}$/.test(v) ? v : null;
+      const intPort = (v: number | null | undefined): number | undefined =>
+        typeof v === 'number' && Number.isSafeInteger(v) ? v : undefined;
       // Retract rows of one generation: an fp mismatch disqualifies
       // outright, then a known port scopes the match to that
       // generation — a stale goodbye for a dead generation must not
@@ -130,11 +138,10 @@ export function createExpoSyncDiscovery(
               (typeof event.host === 'string' ? [event.host] : []),
           );
           const host = candidates[0] ?? null;
+          const rawPort = intPort(event.port);
           const port =
-            Number.isSafeInteger(event.port) &&
-            (event.port ?? 0) >= 1 &&
-            (event.port ?? 0) <= 65_535
-              ? (event.port as number)
+            rawPort !== undefined && rawPort >= 1 && rawPort <= 65_535
+              ? rawPort
               : undefined;
           // A PRESENT-but-malformed `fp` poisons the pin the pair
           // would dial with — drop the advert rather than serve an
@@ -152,13 +159,7 @@ export function createExpoSyncDiscovery(
             event.name.length > 128 ||
             malformedFp
           ) {
-            retract(
-              event.name,
-              fp,
-              Number.isSafeInteger(event.port)
-                ? (event.port as number)
-                : undefined,
-            );
+            retract(event.name, fp, rawPort);
             return;
           }
           // The port belongs in the key — a re-announced service on
@@ -198,13 +199,7 @@ export function createExpoSyncDiscovery(
           // so a goodbye retracts just that generation — a name-only
           // record still retracts every row under the name (a surviving
           // same-named neighbor re-announces on its next PTR refresh).
-          retract(
-            event.name,
-            validFp(event.fp),
-            Number.isSafeInteger(event.port)
-              ? (event.port as number)
-              : undefined,
-          );
+          retract(event.name, validFp(event.fp), intPort(event.port));
         } else if (event.type === 'stopped') {
           for (const entries of emitted.values()) {
             for (const key of entries.keys()) {
@@ -230,11 +225,7 @@ export function createExpoSyncDiscovery(
         // its executor before failing — a rejected start still owes a
         // stop, but only while we still own the slot.
         if (ours) {
-          const stop = native.syncBrowseStop?.() ?? Promise.resolve();
-          stopChain = stopChain.then(
-            () => stop.catch(() => undefined),
-            () => undefined,
-          );
+          queueBrowseStop();
         }
         return err(
           nativeError(thrown) ??
@@ -251,11 +242,7 @@ export function createExpoSyncDiscovery(
           browseSub?.remove();
           browseSub = null;
           browsing = null;
-          const stop = native.syncBrowseStop?.() ?? Promise.resolve();
-          stopChain = stopChain.then(
-            () => stop.catch(() => undefined),
-            () => undefined,
-          );
+          queueBrowseStop();
         },
       };
       return ok(session);

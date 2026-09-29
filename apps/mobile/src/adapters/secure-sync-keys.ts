@@ -80,16 +80,10 @@ function isFpList(value: unknown): value is string[] {
   );
 }
 
-/**
- * Stored peer rows read through the shared custody reader — it accepts
- * the pre-unification untagged shape (same bounds this file shipped)
- * and normalizes to the tagged `role:'responder'` record, so records
- * minted by older builds still load.
- */
-function readPeerRecord(value: unknown): SyncPeer | null {
-  return readSyncPeer(value);
-}
-
+// Stored peer rows read through the shared custody reader —
+// readSyncPeer accepts the pre-unification untagged shape (same
+// bounds this file shipped) and normalizes to the tagged
+// `role:'responder'` record, so records minted by older builds load.
 function cancelled(signal?: CancellationSignal): Result<never> | null {
   return signal?.cancelled === true
     ? err(appError('cancelled', 'sync: store read cancelled'))
@@ -109,235 +103,217 @@ export function createSecureSyncKeys(): SyncClientKeys {
     );
     return next;
   };
+  const gated = async <T>(
+    signal: CancellationSignal | undefined,
+    fn: () => Promise<Result<T>>,
+  ): Promise<Result<T>> => cancelled(signal) ?? fn();
+  // Index readers other than peerList degrade a non-list payload to
+  // [] — a write heals the index, only reads flag it corrupt.
+  const readFps = async (): Promise<Result<string[]>> => {
+    const indexRead = await readJsonStore(PEER_INDEX_KEY);
+    return indexRead.ok
+      ? ok(isFpList(indexRead.value) ? indexRead.value : [])
+      : indexRead;
+  };
+  // Absent and corrupt records share the caller's null path here —
+  // peerList keeps them distinct (corrupt is an error) and reads
+  // the store itself.
+  const readPeer = async (
+    fp: string,
+  ): Promise<Result<SyncPeer | null>> => {
+    const read = await readJsonStore(peerKey(fp));
+    return read.ok ? ok(readSyncPeer(read.value)) : read;
+  };
   const peerPutLocked = (peer: SyncPeer): Promise<Result<void>> =>
     withIndexLock(async () => {
       // Record + index inside one lock: a racing peerDelete between
       // the two writes would remove the freshly indexed record and
       // leave the pairing half-visible.
-      const indexRead = await readJsonStore(PEER_INDEX_KEY);
-      if (!indexRead.ok) {
-        return indexRead;
+      const fpsRead = await readFps();
+      if (!fpsRead.ok) {
+        return fpsRead;
       }
-      const fps = isFpList(indexRead.value) ? indexRead.value : [];
+      const fps = fpsRead.value;
       const wrote = await writeJsonStore(peerKey(peer.fp), peer);
       if (!wrote.ok) {
         return wrote;
       }
-      if (fps.includes(peer.fp)) {
-        return ok(undefined);
-      }
-      const indexed = await writeJsonStore(PEER_INDEX_KEY, [
-        ...fps,
-        peer.fp,
-      ]);
-      return indexed.ok ? ok(undefined) : indexed;
+      return fps.includes(peer.fp)
+        ? ok(undefined)
+        : writeJsonStore(PEER_INDEX_KEY, [...fps, peer.fp]);
     });
   return {
-    async identityGet(signal) {
-      const hit = cancelled(signal);
-      if (hit !== null) {
-        return hit;
-      }
-      const read = await readJsonStore(IDENTITY_KEY);
-      if (!read.ok) {
-        return read;
-      }
-      if (read.value === null) {
-        return ok(null);
-      }
-      if (!isIdentityRecord(read.value)) {
-        return err(
-          appError('invalid-response', 'sync: corrupt identity record'),
-        );
-      }
-      return ok(read.value);
-    },
-
-    async identitySet(record, signal) {
-      const hit = cancelled(signal);
-      if (hit !== null) {
-        return hit;
-      }
-      return writeJsonStore(IDENTITY_KEY, record);
-    },
-
-    async peerList(signal) {
-      const hit = cancelled(signal);
-      if (hit !== null) {
-        return hit;
-      }
-      const indexRead = await readJsonStore(PEER_INDEX_KEY);
-      if (!indexRead.ok) {
-        return indexRead;
-      }
-      const fps =
-        indexRead.value === null
-          ? []
-          : isFpList(indexRead.value)
-            ? indexRead.value
-            : null;
-      if (fps === null) {
-        return err(
-          appError('invalid-response', 'sync: corrupt peer index'),
-        );
-      }
-      const peers: SyncPeer[] = [];
-      for (const fp of fps) {
-        if (signal?.cancelled === true) {
-          return err(
-            appError('cancelled', 'sync: store read cancelled'),
-          );
-        }
-        const read = await readJsonStore(peerKey(fp));
+    identityGet: (signal) =>
+      gated(signal, async () => {
+        const read = await readJsonStore(IDENTITY_KEY);
         if (!read.ok) {
           return read;
         }
         if (read.value === null) {
-          continue; // stale index entry — prune on next write
+          return ok(null);
         }
-        const peer = readPeerRecord(read.value);
-        if (peer === null) {
+        if (!isIdentityRecord(read.value)) {
           return err(
-            appError('invalid-response', 'sync: corrupt peer record'),
+            appError('invalid-response', 'sync: corrupt identity record'),
           );
         }
-        peers.push(peer);
-      }
-      return ok(peers);
-    },
+        return ok(read.value);
+      }),
 
-    async peerPut(peer, signal) {
-      const hit = cancelled(signal);
-      if (hit !== null) {
-        return hit;
-      }
-      return peerPutLocked(peer);
-    },
+    identitySet: (record, signal) =>
+      gated(signal, () => writeJsonStore(IDENTITY_KEY, record)),
 
-    async peerTouch(peer, signal) {
-      const hit = cancelled(signal);
-      if (hit !== null) {
-        return hit;
-      }
+    peerList: (signal) =>
+      gated(signal, async () => {
+        const indexRead = await readJsonStore(PEER_INDEX_KEY);
+        if (!indexRead.ok) {
+          return indexRead;
+        }
+        const fps =
+          indexRead.value === null
+            ? []
+            : isFpList(indexRead.value)
+              ? indexRead.value
+              : null;
+        if (fps === null) {
+          return err(
+            appError('invalid-response', 'sync: corrupt peer index'),
+          );
+        }
+        const peers: SyncPeer[] = [];
+        for (const fp of fps) {
+          if (signal?.cancelled === true) {
+            return err(
+              appError('cancelled', 'sync: store read cancelled'),
+            );
+          }
+          const read = await readJsonStore(peerKey(fp));
+          if (!read.ok) {
+            return read;
+          }
+          if (read.value === null) {
+            continue; // stale index entry — prune on next write
+          }
+          const peer = readSyncPeer(read.value);
+          if (peer === null) {
+            return err(
+              appError('invalid-response', 'sync: corrupt peer record'),
+            );
+          }
+          peers.push(peer);
+        }
+        return ok(peers);
+      }),
+
+    peerPut: (peer, signal) => gated(signal, () => peerPutLocked(peer)),
+
+    peerTouch: (peer, signal) =>
       // Read-merge-write inside the index lock: existence-gated (a
       // deleted peer can't be resurrected) AND cursor-preserving (a
       // concurrent syncRound's peerPut can't be clobbered by a stale
       // caller-side read).
-      return withIndexLock(async () => {
-        const indexRead = await readJsonStore(PEER_INDEX_KEY);
-        if (!indexRead.ok) {
-          return indexRead;
-        }
-        const fps = isFpList(indexRead.value) ? indexRead.value : [];
-        if (!fps.includes(peer.fp)) {
-          return ok(false);
-        }
-        const existingRead = await readJsonStore(peerKey(peer.fp));
-        if (!existingRead.ok) {
-          return existingRead;
-        }
-        const existing = readPeerRecord(existingRead.value);
-        if (existing === null) {
-          return ok(false);
-        }
-        const merged: SyncPeer = {
-          ...existing,
-          name: peer.name,
-          lastSeenAt: peer.lastSeenAt,
-          ...(peer.endpoints.length > 0
-            ? { endpoints: peer.endpoints }
-            : {}),
-          ...(peer.deviceId === undefined || peer.deviceId === ''
-            ? {}
-            : { deviceId: peer.deviceId }),
-          ...(peer.pub === undefined || peer.pub === ''
-            ? {}
-            : { pub: peer.pub }),
-        };
-        const wrote = await writeJsonStore(peerKey(peer.fp), merged);
-        if (!wrote.ok) {
-          return wrote;
-        }
-        return ok(true);
-      });
-    },
-
-    async peerMerge(peer, signal) {
-      const hit = cancelled(signal);
-      if (hit !== null) {
-        return hit;
-      }
-      // Merge inside the index lock so a concurrent syncRound's cursor
-      // write can't land between a host-side read and write.
-      return withIndexLock(async () => {
-        const indexRead = await readJsonStore(PEER_INDEX_KEY);
-        if (!indexRead.ok) {
-          return indexRead;
-        }
-        const fps = isFpList(indexRead.value) ? indexRead.value : [];
-        let merged = peer;
-        if (fps.includes(peer.fp)) {
-          const existingRead = await readJsonStore(peerKey(peer.fp));
+      gated(signal, () =>
+        withIndexLock(async () => {
+          const fpsRead = await readFps();
+          if (!fpsRead.ok) {
+            return fpsRead;
+          }
+          if (!fpsRead.value.includes(peer.fp)) {
+            return ok(false);
+          }
+          const existingRead = await readPeer(peer.fp);
           if (!existingRead.ok) {
             return existingRead;
           }
-          const existing = readPeerRecord(existingRead.value);
-          if (existing !== null) {
-            merged = {
-              ...peer,
-              pairedAt: existing.pairedAt,
-              peerCursor: existing.peerCursor,
-              ...(existing.lastSyncAt === undefined
-                ? {}
-                : { lastSyncAt: existing.lastSyncAt }),
-              ...(existing.pot === undefined ? {} : { pot: existing.pot }),
-            };
+          const existing = existingRead.value;
+          if (existing === null) {
+            return ok(false);
           }
-        }
-        const wrote = await writeJsonStore(peerKey(peer.fp), merged);
-        if (!wrote.ok) {
-          return wrote;
-        }
-        if (fps.includes(peer.fp)) {
-          return ok(undefined);
-        }
-        const indexed = await writeJsonStore(PEER_INDEX_KEY, [
-          ...fps,
-          peer.fp,
-        ]);
-        return indexed.ok ? ok(undefined) : indexed;
-      });
-    },
+          const merged: SyncPeer = {
+            ...existing,
+            name: peer.name,
+            lastSeenAt: peer.lastSeenAt,
+            ...(peer.endpoints.length > 0
+              ? { endpoints: peer.endpoints }
+              : {}),
+            ...(peer.deviceId === undefined || peer.deviceId === ''
+              ? {}
+              : { deviceId: peer.deviceId }),
+            ...(peer.pub === undefined || peer.pub === ''
+              ? {}
+              : { pub: peer.pub }),
+          };
+          const wrote = await writeJsonStore(peerKey(peer.fp), merged);
+          return wrote.ok ? ok(true) : wrote;
+        }),
+      ),
 
-    async peerDelete(fp, signal) {
-      const hit = cancelled(signal);
-      if (hit !== null) {
-        return hit;
-      }
+    peerMerge: (peer, signal) =>
+      // Merge inside the index lock so a concurrent syncRound's cursor
+      // write can't land between a host-side read and write.
+      gated(signal, () =>
+        withIndexLock(async () => {
+          const fpsRead = await readFps();
+          if (!fpsRead.ok) {
+            return fpsRead;
+          }
+          const fps = fpsRead.value;
+          let merged = peer;
+          if (fps.includes(peer.fp)) {
+            const existingRead = await readPeer(peer.fp);
+            if (!existingRead.ok) {
+              return existingRead;
+            }
+            const existing = existingRead.value;
+            if (existing !== null) {
+              merged = {
+                ...peer,
+                pairedAt: existing.pairedAt,
+                peerCursor: existing.peerCursor,
+                ...(existing.lastSyncAt === undefined
+                  ? {}
+                  : { lastSyncAt: existing.lastSyncAt }),
+                ...(existing.pot === undefined
+                  ? {}
+                  : { pot: existing.pot }),
+              };
+            }
+          }
+          const wrote = await writeJsonStore(peerKey(peer.fp), merged);
+          if (!wrote.ok) {
+            return wrote;
+          }
+          return fps.includes(peer.fp)
+            ? ok(undefined)
+            : writeJsonStore(PEER_INDEX_KEY, [...fps, peer.fp]);
+        }),
+      ),
+
+    peerDelete: (fp, signal) =>
       // Index before the record, both inside the lock: a failed delete
       // leaves an unreferenced record (inert — the index drives
       // listing) rather than a stale index entry every peerList reads
       // forever, and a racing peerPut can't interleave between them.
-      return withIndexLock(async () => {
-        const indexRead = await readJsonStore(PEER_INDEX_KEY);
-        if (!indexRead.ok) {
-          return indexRead;
-        }
-        const fps = isFpList(indexRead.value) ? indexRead.value : [];
-        const wrote = await writeJsonStore(
-          PEER_INDEX_KEY,
-          fps.filter((f) => f !== fp),
-        );
-        if (!wrote.ok) {
-          return wrote;
-        }
-        try {
-          await deleteItemAsync(peerKey(fp));
-        } catch (thrown) {
-          return err(nativeError(thrown));
-        }
-        return ok(undefined);
-      });
-    },
+      gated(signal, () =>
+        withIndexLock(async () => {
+          const fpsRead = await readFps();
+          if (!fpsRead.ok) {
+            return fpsRead;
+          }
+          const wrote = await writeJsonStore(
+            PEER_INDEX_KEY,
+            fpsRead.value.filter((f) => f !== fp),
+          );
+          if (!wrote.ok) {
+            return wrote;
+          }
+          try {
+            await deleteItemAsync(peerKey(fp));
+          } catch (thrown) {
+            return err(nativeError(thrown));
+          }
+          return ok(undefined);
+        }),
+      ),
   };
 }
