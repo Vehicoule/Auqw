@@ -350,6 +350,15 @@ export function reportResult(
     // Log the typed kind only — an error message crossing a bridge can
     // embed a signed URL or token that has no business in renderer logs.
     console.warn(`[ui] ${action} failed: ${result.error.kind}`);
+    // Teardown suppression lives at this ops-level funnel — 'cancelled'
+    // can also be a provider's real verdict, so surfaces don't silence
+    // it, but an op torn down by a newer intent never toasts.
+    if (
+      result.error.kind === 'cancelled' ||
+      result.error.kind === 'superseded'
+    ) {
+      return;
+    }
     // The toast carries the humanized reason, never the raw kind or
     // message; silent (disposal) outcomes don't toast at all.
     const detail = errorText(result.error);

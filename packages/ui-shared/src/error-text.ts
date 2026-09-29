@@ -7,17 +7,20 @@
  * raw exception text (a signed request URL inside a fetch failure,
  * say) that has no business on screen.
  *
- * `null` marks supersession outcomes — cancelled and superseded are
- * the caller's own teardown (a pause during prepare, a queue jump
- * overtaking a play), not a failure worth reporting. `released` does
- * surface: a live prepare can resolve it when the host drops the
- * request, which strands playback with no other signal.
+ * `null` marks supersession outcomes — 'superseded' is the caller's
+ * own teardown (a queue jump overtaking a play), an internal verdict
+ * never worth reporting. 'cancelled' is NOT silent here: providers
+ * also return it as a real failure (a remote request cancelled
+ * mid-search), and teardown suppression belongs at the ops-level
+ * call sites (reportResult/reportPlay) that know the intent was
+ * superseded or disposed. `released` surfaces for the same reason:
+ * a live prepare can resolve it when the host drops the request.
  */
 import type { AppError, ErrorKind } from '@auqw/application';
 import { isMatchGate } from '@auqw/application';
 import { t, type MessageId } from './i18n.ts';
 
-const SILENT: ReadonlySet<ErrorKind> = new Set(['cancelled', 'superseded']);
+const SILENT: ReadonlySet<ErrorKind> = new Set(['superseded']);
 
 // Exhaustive over ErrorKind — a new taxonomy kind fails typecheck
 // until its copy lands in the `error.*` catalog section.
@@ -33,7 +36,7 @@ const TEXT_BY_KIND: Readonly<Record<ErrorKind, MessageId>> = {
   'permission-denied': 'error.permission',
   'invalid-response': 'error.unexpected',
   timeout: 'error.timeout',
-  cancelled: 'error.generic',
+  cancelled: 'error.transient',
   'budget-exceeded': 'error.limit',
   'guest-trap': 'error.plugin',
   'invalid-message': 'error.generic',

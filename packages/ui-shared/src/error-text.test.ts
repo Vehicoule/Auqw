@@ -42,7 +42,9 @@ const ALL_KINDS: readonly ErrorKind[] = [
 
 // 'released' is deliberately absent: a live prepare can resolve
 // released when its host drops the request — that failure must surface.
-const SILENT_KINDS: readonly ErrorKind[] = ['cancelled', 'superseded'];
+// 'cancelled' surfaces — providers return it as a real verdict; the
+// ops-level call sites (reportResult/reportPlay) own teardown silence.
+const SILENT_KINDS: readonly ErrorKind[] = ['superseded'];
 
 // absent input is absent output
 assertEqual(errorText(null), null);

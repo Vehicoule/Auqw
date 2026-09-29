@@ -2294,7 +2294,9 @@ function Main({
     }
     setShare((prev) => ({ ...prev, busy: true }));
     // A fresh share re-subscribes onAdvertiseError — drop the last
-    // share's notices so they can't linger under the new code.
+    // share's notices AND the retained pair error so they can't
+    // linger under the new code or mask a start failure.
+    setPairError(null);
     setPairNotice(null);
     setAdvertNotice(null);
     // Mark wanted BEFORE the async work: the screen-close cleanup reads
