@@ -1,0 +1,658 @@
+/**
+ * `createAuthSession` against faked custody/oauth/clock — the whole
+ * lifecycle without a network: boot restore, device sign-in (grant,
+ * denial, expiry, cancellation, missing refresh_token), custody
+ * round-trips and corruption, sign-out ordering (host slot cleared
+ * before custody), the client-id override's persistence across
+ * sign-out, and the expiry renew lane (success, transient backoff,
+ * revoked-grant drop). No token material is asserted into messages.
+ */
+import { appError, err, ok } from '../errors.ts';
+import type { AppError, Result } from '../errors.ts';
+import type { CancellationSignal } from '../cancellation.ts';
+import { assert, assertDeepEqual, assertEqual } from '../testing/assert.ts';
+import {
+  EMPTY_AUTH_CUSTODY,
+  createAuthSession,
+  isAuthCustodyRecord,
+} from './session.ts';
+import type {
+  AuthClock,
+  AuthCustody,
+  AuthCustodyRecord,
+  AuthSnapshot,
+} from './session.ts';
+import type {
+  DeviceGrant,
+  DevicePollVerdict,
+  OAuthClient,
+  OAuthCredentials,
+  TokenGrant,
+} from './oauth.ts';
+
+// ------------------------------------------------------------------
+// Fakes
+// ------------------------------------------------------------------
+
+function fakeCustody(initial: AuthCustodyRecord | null | AppError) {
+  const record: { current: AuthCustodyRecord | null } = {
+    current: initial !== null && 'kind' in initial ? null : initial,
+  };
+  const reads = { value: initial };
+  const writes: AuthCustodyRecord[] = [];
+  let cleared = 0;
+  const custody: AuthCustody = {
+    read() {
+      if (reads.value !== null && 'kind' in reads.value) {
+        return Promise.resolve(err(reads.value));
+      }
+      return Promise.resolve(ok(record.current));
+    },
+    write(next) {
+      writes.push(next);
+      record.current = next;
+      return Promise.resolve(ok(undefined));
+    },
+    clear() {
+      cleared += 1;
+      record.current = null;
+      return Promise.resolve(ok(undefined));
+    },
+  };
+  return { custody, record, writes, cleared: () => cleared };
+}
+
+type PollReply = Result<DevicePollVerdict>;
+
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+function fakeOAuth() {
+  const calls: {
+    kind: 'begin' | 'poll' | 'refresh';
+    creds: OAuthCredentials;
+  }[] = [];
+  const begins: Result<DeviceGrant>[] = [];
+  const polls: PollReply[] = [];
+  const pollDeferreds: ReturnType<typeof deferred<PollReply>>[] = [];
+  const refreshes: Result<TokenGrant>[] = [];
+  const oauth: OAuthClient = {
+    beginDeviceFlow(creds) {
+      calls.push({ kind: 'begin', creds });
+      const next = begins.shift();
+      assert(next !== undefined, 'oauth: unscripted beginDeviceFlow');
+      return Promise.resolve(next);
+    },
+    pollDeviceGrant(creds, _grant) {
+      calls.push({ kind: 'poll', creds });
+      const next = polls.shift();
+      if (next !== undefined) {
+        return Promise.resolve(next);
+      }
+      // Verdict exhaustion parks on a deferred — the test resolves it
+      // (or cancels the flow) explicitly.
+      const d = deferred<PollReply>();
+      pollDeferreds.push(d);
+      return d.promise;
+    },
+    refreshAccessToken(creds, _token) {
+      calls.push({ kind: 'refresh', creds });
+      const next = refreshes.shift();
+      assert(next !== undefined, 'oauth: unscripted refreshAccessToken');
+      return Promise.resolve(next);
+    },
+  };
+  return { oauth, calls, begins, polls, pollDeferreds, refreshes };
+}
+
+function deviceGrant(over: Partial<DeviceGrant> = {}): DeviceGrant {
+  return {
+    deviceCode: 'dev-code',
+    userCode: 'ABCD-EFGH',
+    verificationUrl: 'https://www.google.com/device',
+    intervalMs: 1_000,
+    expiresAtMs: 60_000,
+    ...over,
+  };
+}
+
+function tokenGrant(over: Partial<TokenGrant> = {}): TokenGrant {
+  return {
+    accessToken: 'access-1',
+    refreshToken: 'refresh-1',
+    expiresAtMs: 3_610_000,
+    ...over,
+  };
+}
+
+function fakeClock(start = 0) {
+  let now = start;
+  const armed: { ms: number; fire: () => void }[] = [];
+  const clock: AuthClock = {
+    now: () => now,
+    sleep(_ms, signal?: CancellationSignal) {
+      return Promise.resolve(!(signal?.cancelled ?? false));
+    },
+    arm(ms, fire) {
+      const entry = { ms, fire };
+      armed.push(entry);
+      let live = true;
+      return () => {
+        live = false;
+        const i = armed.indexOf(entry);
+        if (i >= 0) {
+          armed.splice(i, 1);
+        }
+      };
+    },
+  };
+  return {
+    clock,
+    armed,
+    setNow: (v: number) => (now = v),
+    fireNext() {
+      const entry = armed.shift();
+      assert(entry !== undefined, 'clock: nothing armed');
+      entry.fire();
+    },
+  };
+}
+
+/** Pump microtasks until the session settles (poll chains + custody). */
+async function flush(hops = 60): Promise<void> {
+  for (let i = 0; i < hops; i++) {
+    await Promise.resolve();
+  }
+}
+
+function collector(session: {
+  subscribe(l: () => void): () => void;
+  snapshot(): AuthSnapshot;
+}) {
+  const seen: AuthSnapshot['status']['state'][] = [];
+  session.subscribe(() => seen.push(session.snapshot().status.state));
+  return seen;
+}
+
+// ------------------------------------------------------------------
+// Custody record shape
+// ------------------------------------------------------------------
+
+function testCustodyValidator(): void {
+  assert(isAuthCustodyRecord(EMPTY_AUTH_CUSTODY), 'empty record rejected');
+  assert(
+    isAuthCustodyRecord({ v: 1, refreshToken: 'r', clientId: 'c' }),
+    'full record rejected',
+  );
+  for (const bad of [
+    null,
+    { v: 1 },
+    { v: 2, refreshToken: null, clientId: null },
+    { v: 1, refreshToken: 'r' },
+    { v: 1, refreshToken: '', clientId: null },
+    { v: 1, refreshToken: null, clientId: null, extra: 1 },
+    { v: 1, refreshToken: 'x'.repeat(5000), clientId: null },
+  ]) {
+    assert(
+      !isAuthCustodyRecord(bad),
+      `record accepted: ${JSON.stringify(bad)}`,
+    );
+  }
+}
+
+// ------------------------------------------------------------------
+// Restore
+// ------------------------------------------------------------------
+
+async function testRestoreEmpty(): Promise<void> {
+  const { custody } = fakeCustody(null);
+  const { oauth, calls } = fakeOAuth();
+  const applied: (string | null)[] = [];
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: fakeClock().clock,
+  });
+  await session.restore();
+  assertEqual(session.snapshot().status.state, 'signed-out');
+  assertEqual(calls.length, 0);
+  assertEqual(applied.length, 0);
+}
+
+async function testRestoreCorrupt(): Promise<void> {
+  const { custody } = fakeCustody(
+    appError('invalid-response', 'auth: corrupt custody record'),
+  );
+  const { oauth, calls } = fakeOAuth();
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  await session.restore();
+  assertEqual(session.snapshot().status.state, 'signed-out');
+  assertEqual(calls.length, 0);
+}
+
+async function testRestoreGrant(): Promise<void> {
+  const { custody } = fakeCustody({
+    v: 1,
+    refreshToken: 'stored-refresh',
+    clientId: 'stored-client',
+  });
+  const { oauth, calls, refreshes } = fakeOAuth();
+  refreshes.push(ok(tokenGrant({ accessToken: 'fresh-access' })));
+  const applied: (string | null)[] = [];
+  const clock = fakeClock();
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: clock.clock,
+  });
+  const seen = collector(session);
+  await session.restore();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-in');
+  // The boot refresh rode the stored grant and the override client.
+  assertEqual(calls.length, 1);
+  assertEqual(calls[0]?.kind, 'refresh');
+  assertEqual(calls[0]?.creds.clientId, 'stored-client');
+  assertDeepEqual(applied, ['fresh-access']);
+  // The stored grant published signed-in optimistically before the
+  // exchange resolved — a cold/offline boot renders honestly.
+  assert(seen.includes('signed-in'), 'signed-in never published');
+  // The renew timer is armed near the provider-stated expiry.
+  assertEqual(clock.armed.length, 1);
+  assert(clock.armed[0]!.ms <= 3_610_000 - 60_000 - 0);
+}
+
+// ------------------------------------------------------------------
+// Device sign-in
+// ------------------------------------------------------------------
+
+async function testSignInFlow(): Promise<void> {
+  const { custody, writes } = fakeCustody(null);
+  const { oauth, begins, polls, calls } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  polls.push(ok({ type: 'pending' }), ok({ type: 'slowDown' }));
+  polls.push(ok({ type: 'granted', grant: tokenGrant() }));
+  const applied: (string | null)[] = [];
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: fakeClock().clock,
+  });
+  const seen = collector(session);
+  session.beginSignIn();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-in');
+  assert(seen.includes('starting'), 'starting never published');
+  assert(seen.includes('authorizing'), 'authorizing never published');
+  assertDeepEqual(applied, ['access-1']);
+  // The refresh grant persisted BEFORE signed-in published.
+  assertEqual(writes.length, 1);
+  assertEqual(writes[0]?.refreshToken, 'refresh-1');
+  // begin → 3 polls (pending, slowDown, granted)
+  assertEqual(calls.length, 4);
+}
+
+async function testSignInCancelMidPoll(): Promise<void> {
+  const { custody, writes } = fakeCustody(null);
+  const { oauth, begins, pollDeferreds } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  const applied: (string | null)[] = [];
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  await flush();
+  const status = session.snapshot().status;
+  assert(status.state === 'authorizing', 'never reached authorizing');
+  assertEqual(status.userCode, 'ABCD-EFGH');
+  assertEqual(pollDeferreds.length, 1);
+  // Sheet closes mid-poll: the in-flight verdict resolves granted —
+  // it must not apply anything.
+  session.cancelSignIn();
+  pollDeferreds[0]!.resolve(ok({ type: 'granted', grant: tokenGrant() }));
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-out');
+  assertEqual(applied.length, 0);
+  assertEqual(writes.length, 0);
+}
+
+async function testSignInDenied(): Promise<void> {
+  const { custody, writes } = fakeCustody(null);
+  const { oauth, begins, polls } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  polls.push(ok({ type: 'denied' }));
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  await flush();
+  const status = session.snapshot().status;
+  assert(status.state === 'failed', 'denied did not fail');
+  assertEqual(status.error.kind, 'permission-denied');
+  assertEqual(writes.length, 0);
+  // A failed flow is re-beginnable — the sheet's retry row works.
+  session.cancelSignIn();
+  begins.push(ok(deviceGrant()));
+  polls.push(ok({ type: 'granted', grant: tokenGrant() }));
+  session.beginSignIn();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-in');
+}
+
+async function testSignInExpiry(): Promise<void> {
+  const { custody } = fakeCustody(null);
+  const { oauth, begins, polls } = fakeOAuth();
+  // expiresAtMs already in the past when the first poll sleeps.
+  begins.push(ok(deviceGrant({ expiresAtMs: 0 })));
+  const clock = fakeClock(10_000);
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: clock.clock,
+  });
+  session.beginSignIn();
+  await flush();
+  const status = session.snapshot().status;
+  assert(status.state === 'failed', 'expiry did not fail');
+  assertEqual(status.error.kind, 'expired');
+  assertEqual(polls.length, 0);
+}
+
+async function testSignInNoRefreshToken(): Promise<void> {
+  const { custody, writes } = fakeCustody(null);
+  const { oauth, begins, polls } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  polls.push(
+    ok({
+      type: 'granted',
+      grant: tokenGrant({ refreshToken: null }),
+    }),
+  );
+  const applied: (string | null)[] = [];
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  await flush();
+  const status = session.snapshot().status;
+  // A grant that can't outlive its ~1h access token is a failure,
+  // not a silent half-link — no custody write, no host bearer.
+  assert(status.state === 'failed', 'missing refresh token signed in');
+  assertEqual(status.error.kind, 'invalid-response');
+  assertEqual(writes.length, 0);
+  assertEqual(applied.length, 0);
+}
+
+async function testSignInCustodyFailure(): Promise<void> {
+  // Writes fail — sign-in must NOT claim success.
+  const failing: AuthCustody = {
+    read: () => Promise.resolve(ok(null)),
+    write: () =>
+      Promise.resolve(err(appError('unavailable', 'seal failed'))),
+    clear: () => Promise.resolve(ok(undefined)),
+  };
+  const { oauth, begins, polls } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  polls.push(ok({ type: 'granted', grant: tokenGrant() }));
+  const applied: (string | null)[] = [];
+  const session = createAuthSession({
+    custody: failing,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  await flush();
+  const status = session.snapshot().status;
+  assert(status.state === 'failed', 'custody failure signed in');
+  assertEqual(status.error.kind, 'unavailable');
+  assertEqual(applied.length, 0);
+}
+
+// ------------------------------------------------------------------
+// Sign-out ordering
+// ------------------------------------------------------------------
+
+async function testSignOut(): Promise<void> {
+  const { custody, record } = fakeCustody({
+    v: 1,
+    refreshToken: 'stored-refresh',
+    clientId: 'kept-client',
+  });
+  const { oauth, refreshes } = fakeOAuth();
+  refreshes.push(ok(tokenGrant()));
+  const order: string[] = [];
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      order.push(`token:${t === null ? 'null' : 'set'}`);
+    },
+    clock: fakeClock().clock,
+  });
+  const origWrite = custody.write;
+  custody.write = (next) => {
+    order.push('custody-write');
+    return origWrite(next);
+  };
+  await session.restore();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-in');
+  const out = await session.signOut();
+  assert(out.ok, 'signOut failed');
+  // The host slot cleared BEFORE the custody write — a write failure
+  // can never leave a live bearer behind.
+  const tokenNullIdx = order.indexOf('token:null');
+  const writeIdx = order.indexOf('custody-write');
+  assert(tokenNullIdx >= 0 && writeIdx > tokenNullIdx, 'wrong ordering');
+  assertEqual(session.snapshot().status.state, 'signed-out');
+  // Override preserved — it's a preference, not a credential.
+  assertEqual(record.current?.refreshToken, null);
+  assertEqual(record.current?.clientId, 'kept-client');
+}
+
+async function testSignOutWhileAuthorizing(): Promise<void> {
+  const { custody } = fakeCustody(null);
+  const { oauth, begins, pollDeferreds } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'authorizing');
+  const out = await session.signOut();
+  assert(out.ok);
+  assertEqual(session.snapshot().status.state, 'signed-out');
+  // A late grant on the torn-down flow applies nothing.
+  pollDeferreds[0]?.resolve(ok({ type: 'granted', grant: tokenGrant() }));
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-out');
+}
+
+// ------------------------------------------------------------------
+// Client-id override
+// ------------------------------------------------------------------
+
+async function testClientOverride(): Promise<void> {
+  const { custody, record } = fakeCustody(null);
+  const { oauth, calls, begins, polls } = fakeOAuth();
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  const set = await session.setClientOverride('custom-client');
+  assert(set.ok, 'override failed');
+  assertEqual(record.current?.clientId, 'custom-client');
+  assertEqual(session.snapshot().clientId, 'custom-client');
+  begins.push(ok(deviceGrant()));
+  polls.push(ok({ type: 'granted', grant: tokenGrant() }));
+  session.beginSignIn();
+  await flush();
+  // The flow ran under the override.
+  assertEqual(calls[0]?.creds.clientId, 'custom-client');
+  // Clearing restores the default snapshot.
+  const cleared = await session.setClientOverride(null);
+  assert(cleared.ok);
+  assertEqual(session.snapshot().clientId, null);
+  // Overlength input is rejected before any custody write.
+  const tooLong = await session.setClientOverride('x'.repeat(600));
+  assert(!tooLong.ok);
+  assertEqual(tooLong.error.kind, 'invalid-message');
+}
+
+// ------------------------------------------------------------------
+// Expiry renew lane
+// ------------------------------------------------------------------
+
+async function testRenewLane(): Promise<void> {
+  const { custody, record } = fakeCustody({
+    v: 1,
+    refreshToken: 'stored-refresh',
+    clientId: null,
+  });
+  const { oauth, refreshes, calls } = fakeOAuth();
+  refreshes.push(ok(tokenGrant({ accessToken: 'access-a' })));
+  const applied: (string | null)[] = [];
+  const clock = fakeClock();
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: clock.clock,
+  });
+  await session.restore();
+  await flush();
+  assertDeepEqual(applied, ['access-a']);
+  // Expiry approaches — the armed timer fires a refresh.
+  refreshes.push(ok(tokenGrant({ accessToken: 'access-b' })));
+  clock.setNow(3_550_000);
+  clock.fireNext();
+  await flush();
+  assertDeepEqual(applied, ['access-a', 'access-b']);
+  assertEqual(session.snapshot().status.state, 'signed-in');
+  // A revoked grant drops custody + the host bearer — once.
+  refreshes.push(err(appError('auth-expired', 'oauth: refresh invalid_grant')));
+  clock.setNow(3_560_000);
+  clock.fireNext();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-out');
+  assertEqual(applied.at(-1), null);
+  assertEqual(record.current?.refreshToken, null);
+  // No further refresh calls are armed on a dead grant.
+  const refreshCalls = calls.filter((c) => c.kind === 'refresh').length;
+  assertEqual(refreshCalls, 3);
+}
+
+async function testRenewTransientBackoff(): Promise<void> {
+  const { custody } = fakeCustody({
+    v: 1,
+    refreshToken: 'stored-refresh',
+    clientId: null,
+  });
+  const { oauth, refreshes } = fakeOAuth();
+  refreshes.push(ok(tokenGrant()));
+  const applied: (string | null)[] = [];
+  const clock = fakeClock();
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: clock.clock,
+  });
+  await session.restore();
+  await flush();
+  // A transient failure re-arms rather than dropping the grant.
+  refreshes.push(err(appError('unavailable', 'oauth: refresh http 500')));
+  clock.fireNext();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-in');
+  assert(clock.armed.length === 1, 'retry not re-armed');
+  assert(clock.armed[0]!.ms >= 30_000, 'retry armed too soon');
+  // The retry succeeds — the slot gets the new bearer.
+  refreshes.push(ok(tokenGrant({ accessToken: 'access-c' })));
+  clock.fireNext();
+  await flush();
+  assertEqual(applied.at(-1), 'access-c');
+}
+
+async function testDuplicateBegin(): Promise<void> {
+  const { custody } = fakeCustody(null);
+  const { oauth, begins, pollDeferreds } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  session.beginSignIn();
+  session.beginSignIn();
+  await flush();
+  // One beginDeviceFlow call, one deferred poll — the duplicate
+  // taps are no-ops.
+  assertEqual(pollDeferreds.length, 1);
+  session.cancelSignIn();
+}
+
+export async function run(): Promise<void> {
+  testCustodyValidator();
+  await testRestoreEmpty();
+  await testRestoreCorrupt();
+  await testRestoreGrant();
+  await testSignInFlow();
+  await testSignInCancelMidPoll();
+  await testSignInDenied();
+  await testSignInExpiry();
+  await testSignInNoRefreshToken();
+  await testSignInCustodyFailure();
+  await testSignOut();
+  await testSignOutWhileAuthorizing();
+  await testClientOverride();
+  await testRenewLane();
+  await testRenewTransientBackoff();
+  await testDuplicateBegin();
+}
