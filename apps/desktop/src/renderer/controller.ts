@@ -220,7 +220,7 @@ export type SessionController = {
   dispose(): Promise<void>;
 };
 
-export type SessionControllerOptions = {
+type SessionControllerOptions = {
   /** Storage seam — tests inject an in-memory port; real boot builds
    *  SqliteStorage over the IPC driver. */
   readonly storage?: StoragePort | undefined;
