@@ -26,6 +26,8 @@ import type {
 import {
   isLocalAddArgs,
   isLocalProbeArgs,
+  isLocalReadArgs,
+  isLocalResolveArgs,
   isHostCancelArgs,
   isHostRequestArgs,
   isPickFilesArgs,
@@ -606,6 +608,18 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     CHANNELS.localProbe,
     channel(isLocalProbeArgs, (args, deps) =>
       deps.utility.request(CHANNELS.localProbe, args),
+    ),
+  ],
+  [
+    CHANNELS.localResolve,
+    channel(isLocalResolveArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.localResolve, args),
+    ),
+  ],
+  [
+    CHANNELS.localRead,
+    channel(isLocalReadArgs, (args, deps) =>
+      deps.utility.request(CHANNELS.localRead, args),
     ),
   ],
   [

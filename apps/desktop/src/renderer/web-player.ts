@@ -257,11 +257,12 @@ export function createWebPlayerPort(deps: {
 
   /**
    * Desktop `provider:'local'` refs are `file://` URIs verbatim — the
-   * `localPlaybackFor`/`local:probe` convention (`toFileUri`). The
-   * length bound matches the mobile adapter's sourceRef check.
+   * `localPlaybackFor`/`local:probe` convention (`toFileUri`).
    */
   function isLocalUri(value: string): boolean {
-    return value.startsWith('file://') && value.length <= 4096;
+    // The `local:resolve`/`local:read` contract bound — a picked-dir
+    // URI plus a nested docId can exceed the path bound alone.
+    return value.startsWith('file://') && value.length <= 8192;
   }
 
   /**
@@ -586,7 +587,23 @@ export function createWebPlayerPort(deps: {
       if (item.provider === 'local') {
         // `provider:'local'` never reaches the seam — the port mints
         // the `lf-*` handle the attach below reads as a `file://` URI.
-        const minted = mintLocalHandle(item.sourceRef);
+        // Successors pass the same realpath confinement as prepare:
+        // a lexical URI could resolve to an escaped path post-scan.
+        const resolver = deps.localResolve;
+        const resolved =
+          resolver === undefined || resolver === null
+            ? item.sourceRef
+            : await resolver(item.sourceRef).catch(() => null);
+        if (resolved === null) {
+          if (gen === opGen && projection === p) {
+            status(
+              'failed',
+              appError('unavailable', 'local file not readable'),
+            );
+          }
+          return;
+        }
+        const minted = mintLocalHandle(resolved);
         if (!minted.ok) {
           if (gen === opGen && projection === p) {
             status('failed', minted.error);
@@ -718,18 +735,12 @@ export function createWebPlayerPort(deps: {
       // leaks would cap the registry. For a local mint whose `current`
       // was already set, reaping alone would leave a live `lf-*`
       // pointer: a later element error would probe the dead handle on
-      // the seam as `released`. Tear the element down here and report
-      // 'unavailable' — the file exists but can't play, never the
-      // retryable 'internal' a DOM rejection reads as.
+      // the seam as `released`. Report 'unavailable' FIRST — status()
+      // needs `current` to name the failing handle — then tear the
+      // element down. 'unavailable' over the retryable 'internal' a
+      // DOM rejection reads as: the file exists but can't play.
       const failedLocal =
         handle !== undefined && localHandles.has(handle);
-      if (handle !== undefined) {
-        releaseMinted(handle);
-        if (failedLocal && current !== null && current.handle === handle) {
-          audio.src = '';
-          current = null;
-        }
-      }
       if (stillMine) {
         status(
           'failed',
@@ -737,6 +748,13 @@ export function createWebPlayerPort(deps: {
             ? appError('unavailable', 'local file not playable')
             : toError(thrown),
         );
+      }
+      if (handle !== undefined) {
+        releaseMinted(handle);
+        if (failedLocal && current !== null && current.handle === handle) {
+          audio.src = '';
+          current = null;
+        }
       }
     }
   }

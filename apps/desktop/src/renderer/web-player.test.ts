@@ -552,6 +552,105 @@ export async function run(): Promise<void> {
     );
   }
 
+  // A local successor passes the same resolve gate as prepare — the
+  // mint keys to the realpath'd URI the element attaches.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      localResolve: (uri) =>
+        Promise.resolve(
+          uri === 'file:///music/link.flac' ? 'file:///music/real.flac' : null,
+        ),
+    });
+    const events = collect(player);
+    const identity = { attemptId: 'attempt-1', queueRev: 3 };
+    await player.setQueueProjection(
+      twoItemProjection({
+        items: [
+          {
+            occurrenceId: 'occ-1',
+            provider: 'deezer',
+            sourceRef: 't1',
+            title: 'one',
+            artist: null,
+            artworkUrl: null,
+          },
+          {
+            occurrenceId: 'occ-2',
+            provider: 'local',
+            sourceRef: 'file:///music/link.flac',
+            title: 'two',
+            artist: null,
+            artworkUrl: null,
+          },
+        ],
+      }),
+    );
+    await player.play({ handle: 'h-1', identity });
+    audio.fire('ended');
+    await settle();
+    assertEqual(
+      audio.src,
+      'file:///music/real.flac',
+      'the successor attach uses the resolved URI',
+    );
+  }
+
+  // A denied successor resolve fails the transition leg with the
+  // non-retryable verdict — no mint, no attach.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      localResolve: () => Promise.resolve(null),
+    });
+    const events = collect(player);
+    const identity = { attemptId: 'attempt-1', queueRev: 3 };
+    await player.setQueueProjection(
+      twoItemProjection({
+        items: [
+          {
+            occurrenceId: 'occ-1',
+            provider: 'deezer',
+            sourceRef: 't1',
+            title: 'one',
+            artist: null,
+            artworkUrl: null,
+          },
+          {
+            occurrenceId: 'occ-2',
+            provider: 'local',
+            sourceRef: 'file:///music/outside.flac',
+            title: 'two',
+            artist: null,
+            artworkUrl: null,
+          },
+        ],
+      }),
+    );
+    await player.play({ handle: 'h-1', identity });
+    audio.fire('ended');
+    await settle();
+    const failed = events.findLast(
+      (e) => e.type === 'status' && e.state === 'failed',
+    );
+    assert(
+      failed !== undefined &&
+        failed.type === 'status' &&
+        failed.error?.kind === 'unavailable',
+      'a denied successor resolve reports unavailable',
+    );
+    assert(
+      audio.src !== 'file:///music/outside.flac',
+      'no minted URI reaches the element',
+    );
+  }
+
   // An element error on a local attach reports a non-retryable verdict
   // — never the dead-handle kinds that loop re-prepares over a file
   // that cannot play.
