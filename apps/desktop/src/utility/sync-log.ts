@@ -31,7 +31,7 @@ import type {
   SyncLogStore,
   SyncLogWrite,
 } from '@auqw/application';
-import { isRecord } from '../shared/check.ts';
+import { hasOnlyKeys, isRecord } from '../shared/check.ts';
 
 /**
  * The desktop's `SyncLogStore` backing — a JSONL file under userData.
@@ -97,101 +97,83 @@ function isHeader(value: unknown): value is { v: number; deviceId: string } {
   );
 }
 
+const WRITE_DOC_KEYS = [
+  'entries',
+  'divergence',
+  'watermarks',
+  'dropDivergenceBefore',
+  'dropEntries',
+  'divergenceReplayOffset',
+  'divergenceDroppedEmissions',
+  'peerMarks',
+];
+
+const isNonNegInt = (value: unknown): boolean =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
 /**
  * A stored write line must parse to the SyncLogWrite shape — every
  * field is optional in the port; a malformed one marks corruption.
  */
 function isWriteDoc(value: unknown): value is SyncLogWrite {
-  if (!isRecord(value)) {
+  if (!isRecord(value) || !hasOnlyKeys(value, WRITE_DOC_KEYS)) {
     return false;
   }
-  for (const key of Object.keys(value)) {
-    if (
-      key !== 'entries' &&
-      key !== 'divergence' &&
-      key !== 'watermarks' &&
-      key !== 'dropDivergenceBefore' &&
-      key !== 'dropEntries' &&
-      key !== 'divergenceReplayOffset' &&
-      key !== 'divergenceDroppedEmissions' &&
-      key !== 'peerMarks'
-    ) {
-      return false;
-    }
-  }
+  const w = value;
   if (
-    value['entries'] !== undefined &&
-    (!Array.isArray(value['entries']) || !value['entries'].every(isChangeEntry))
+    w['entries'] !== undefined &&
+    (!Array.isArray(w['entries']) || !w['entries'].every(isChangeEntry))
   ) {
     return false;
   }
   if (
-    value['divergence'] !== undefined &&
-    (!Array.isArray(value['divergence']) ||
-      !value['divergence'].every(isDivergenceEntry))
+    w['divergence'] !== undefined &&
+    (!Array.isArray(w['divergence']) ||
+      !w['divergence'].every(isDivergenceEntry))
+  ) {
+    return false;
+  }
+  if (w['watermarks'] !== undefined && !isSyncCursor(w['watermarks'])) {
+    return false;
+  }
+  if (
+    w['dropDivergenceBefore'] !== undefined &&
+    !isNonNegInt(w['dropDivergenceBefore'])
   ) {
     return false;
   }
   if (
-    value['watermarks'] !== undefined &&
-    !isSyncCursor(value['watermarks'])
-  ) {
-    return false;
-  }
-  if (
-    value['dropDivergenceBefore'] !== undefined &&
+    w['dropEntries'] !== undefined &&
     !(
-      typeof value['dropDivergenceBefore'] === 'number' &&
-      Number.isSafeInteger(value['dropDivergenceBefore']) &&
-      value['dropDivergenceBefore'] >= 0
-    )
-  ) {
-    return false;
-  }
-  if (
-    value['dropEntries'] !== undefined &&
-    !(
-      Array.isArray(value['dropEntries']) &&
-      value['dropEntries'].every(
+      Array.isArray(w['dropEntries']) &&
+      w['dropEntries'].every(
         (drop) =>
           isRecord(drop) &&
           typeof drop['deviceId'] === 'string' &&
-          typeof drop['seq'] === 'number' &&
-          Number.isSafeInteger(drop['seq']) &&
-          drop['seq'] >= 0,
+          isNonNegInt(drop['seq']),
       )
     )
   ) {
     return false;
   }
   if (
-    value['divergenceReplayOffset'] !== undefined &&
-    !(
-      typeof value['divergenceReplayOffset'] === 'number' &&
-      Number.isSafeInteger(value['divergenceReplayOffset']) &&
-      value['divergenceReplayOffset'] >= 0
-    )
+    w['divergenceReplayOffset'] !== undefined &&
+    !isNonNegInt(w['divergenceReplayOffset'])
   ) {
     return false;
   }
   if (
-    value['divergenceDroppedEmissions'] !== undefined &&
+    w['divergenceDroppedEmissions'] !== undefined &&
     !(
-      Array.isArray(value['divergenceDroppedEmissions']) &&
-      value['divergenceDroppedEmissions'].every(
-        (emission) =>
-          typeof emission === 'number' &&
-          Number.isSafeInteger(emission) &&
-          emission >= 1,
+      Array.isArray(w['divergenceDroppedEmissions']) &&
+      w['divergenceDroppedEmissions'].every(
+        (emission) => isNonNegInt(emission) && emission >= 1,
       )
     )
   ) {
     return false;
   }
-  if (
-    value['peerMarks'] !== undefined &&
-    !isPeerMarks(value['peerMarks'])
-  ) {
+  if (w['peerMarks'] !== undefined && !isPeerMarks(w['peerMarks'])) {
     return false;
   }
   return true;

@@ -61,8 +61,7 @@ export function createServiceClient(opts: {
           shellError('released', 'service client is closed'),
         );
       }
-      const id = nextId;
-      nextId += 1;
+      const id = nextId++;
       return new Promise<unknown>((resolve, reject) => {
         const timer = setTimeout(() => {
           settle(id, (slot) =>

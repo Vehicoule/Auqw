@@ -59,14 +59,10 @@ function createPushService<E>(channel: string): PushService<E> {
   };
 }
 
-type AppliedPushService = PushService<SyncAppliedEvent>;
-
-export function createAppliedPushService(): AppliedPushService {
+export function createAppliedPushService(): PushService<SyncAppliedEvent> {
   return createPushService<SyncAppliedEvent>(CHANNELS.syncApplied);
 }
 
-type NearbyPushService = PushService<SyncNearbyEvent>;
-
-export function createNearbyPushService(): NearbyPushService {
+export function createNearbyPushService(): PushService<SyncNearbyEvent> {
   return createPushService<SyncNearbyEvent>(CHANNELS.syncNearby);
 }

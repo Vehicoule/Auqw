@@ -415,7 +415,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
 
   async function status(): Promise<SyncStatusResult> {
     return {
-      listener,
+      ...idleStatus(listener),
       endpoint: endpoint(),
       boundPort,
       advertise: advertiseState,
@@ -426,10 +426,6 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       sessions: [...responder.sessions].filter(
         (s) => s.phase === 'open',
       ).length,
-      lastSyncAt,
-      engine: engine === undefined ? 'absent' : 'ready',
-      name: deviceName,
-      fingerprint,
     };
   }
 
