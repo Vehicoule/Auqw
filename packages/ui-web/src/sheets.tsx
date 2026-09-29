@@ -113,6 +113,59 @@ function SheetDialog({
   );
 }
 
+// Digits-only input for the pairing code/port fields — same rounded
+// field treatment as NameField.
+function DigitField(p: {
+  readonly value: string;
+  readonly set: (value: string) => void;
+  readonly ariaLabel: string;
+  readonly placeholder: string;
+  readonly max: number;
+  readonly className?: string | undefined;
+}) {
+  return (
+    <input
+      className={`uw-namefield__input${p.className ? ` ${p.className}` : ''}`}
+      aria-label={p.ariaLabel}
+      placeholder={p.placeholder}
+      autoComplete="off"
+      inputMode="numeric"
+      maxLength={p.max}
+      value={p.value}
+      onChange={(event) =>
+        p.set(event.currentTarget.value.replace(/[^0-9]/g, '').slice(0, p.max))
+      }
+    />
+  );
+}
+
+// Accent pill submit — the pair/connect/apply affordance.
+function PillAction(p: {
+  readonly label: string;
+  readonly onPress?: (() => void) | undefined;
+  readonly disabled?: boolean | undefined;
+}) {
+  return (
+    <Pressable
+      onPress={p.onPress}
+      disabled={p.disabled}
+      ariaLabel={p.label}
+      className="uw-pill uw-pill--accent"
+    >
+      <Text variant="metadata" color="bright">
+        {p.label}
+      </Text>
+    </Pressable>
+  );
+}
+
+type PairCodeInput = {
+  readonly code: string;
+  readonly host: string;
+  readonly port: number | null;
+};
+type OnPairCode = ((input: PairCodeInput) => void) | undefined;
+
 /**
  * Field + confirm/cancel row — the same rounded-field treatment the
  * search bar uses, reused by the new-playlist flow and the picker.
@@ -291,8 +344,6 @@ export function RowActionsSheet({
   );
 }
 
-export type { ProviderPickerOption };
-
 /**
  * One settings slot's provider choices — only providers that
  * declared the slot's capability reach `options` (the caller gates);
@@ -440,7 +491,7 @@ export function AddToPlaylistSheet({
   );
 }
 
-export type NearbyPeerModel = {
+type NearbyPeerModel = {
   readonly key: string;
   readonly name: string;
   readonly address: string;
@@ -477,32 +528,22 @@ function NearbyRow({
       </Pressable>
       {open && (
         <div className="uw-nearby__dial">
-          <input
-            className="uw-namefield__input"
-            aria-label={t('sync.form.codeA11y')}
-            placeholder={t('sync.nearby.codeFor', { name: peer.name })}
-            autoComplete="off"
-            inputMode="numeric"
-            maxLength={6}
+          <DigitField
             value={code}
-            onChange={(event) =>
-              setCode(event.currentTarget.value.replace(/[^0-9]/g, '').slice(0, 6))
-            }
+            set={setCode}
+            ariaLabel={t('sync.form.codeA11y')}
+            placeholder={t('sync.nearby.codeFor', { name: peer.name })}
+            max={6}
           />
-          <Pressable
+          <PillAction
+            label={t('sync.nearby.connect')}
             onPress={
               !ready || onPair === undefined
                 ? undefined
                 : () => onPair(peer.key, code)
             }
             disabled={!ready || onPair === undefined || disabled}
-            ariaLabel={t('sync.nearby.connect')}
-            className="uw-pill uw-pill--accent"
-          >
-            <Text variant="metadata" color="bright">
-              {t('sync.nearby.connect')}
-            </Text>
-          </Pressable>
+          />
         </div>
       )}
     </div>
@@ -520,13 +561,7 @@ function ManualPairForm({
   onPairCode,
 }: {
   readonly disabled: boolean;
-  readonly onPairCode?:
-    | ((input: {
-        code: string;
-        host: string;
-        port: number | null;
-      }) => void)
-    | undefined;
+  readonly onPairCode?: OnPairCode;
 }) {
   const [code, setCode] = useState('');
   const [host, setHost] = useState('');
@@ -546,17 +581,12 @@ function ManualPairForm({
         {t('sync.form.help')}
       </Text>
       <div className="uw-nearby__dial">
-        <input
-          className="uw-namefield__input"
-          aria-label={t('sync.form.codeA11y')}
-          placeholder="123456"
-          autoComplete="off"
-          inputMode="numeric"
-          maxLength={6}
+        <DigitField
           value={code}
-          onChange={(event) =>
-            setCode(event.currentTarget.value.replace(/[^0-9]/g, '').slice(0, 6))
-          }
+          set={setCode}
+          ariaLabel={t('sync.form.codeA11y')}
+          placeholder="123456"
+          max={6}
         />
       </div>
       <div className="uw-nearby__dial">
@@ -569,39 +599,26 @@ function ManualPairForm({
           value={host}
           onChange={(event) => setHost(event.currentTarget.value)}
         />
-        <input
-          className="uw-namefield__input uw-manual-pair__port"
-          aria-label={t('sync.form.portA11y')}
-          placeholder={t('sync.form.port')}
-          autoComplete="off"
-          inputMode="numeric"
-          maxLength={5}
+        <DigitField
           value={port}
-          onChange={(event) =>
-            setPort(event.currentTarget.value.replace(/[^0-9]/g, '').slice(0, 5))
-          }
+          set={setPort}
+          ariaLabel={t('sync.form.portA11y')}
+          placeholder={t('sync.form.port')}
+          max={5}
+          className="uw-manual-pair__port"
         />
       </div>
       <div className="uw-nearby__dial">
-        <Pressable
+        <PillAction
+          label={disabled ? t('sync.form.pairing') : t('sync.form.pair')}
           onPress={
             !ready || onPairCode === undefined
               ? undefined
               : () =>
-                onPairCode({
-                  code,
-                  host: host.trim(),
-                  port: parsedPort,
-                })
+                onPairCode({ code, host: host.trim(), port: parsedPort })
           }
           disabled={!ready || onPairCode === undefined}
-          ariaLabel={disabled ? t('sync.form.pairing') : t('sync.form.pair')}
-          className="uw-pill uw-pill--accent"
-        >
-          <Text variant="metadata" color="bright">
-            {disabled ? t('sync.form.pairing') : t('sync.form.pair')}
-          </Text>
-        </Pressable>
+        />
       </div>
     </div>
   );
@@ -636,13 +653,7 @@ export function PairingSheet({
    * Typed join: code + host + port — the desktop's join-by-address
    * path (it has no camera; the QR scanner is a mobile surface).
    */
-  readonly onPairCode?:
-    | ((input: {
-        code: string;
-        host: string;
-        port: number | null;
-      }) => void)
-    | undefined;
+  readonly onPairCode?: OnPairCode;
   readonly onPastePayload?: ((payload: string) => void) | undefined;
   readonly dialing?: boolean | undefined;
   readonly dialError?: string | null | undefined;
@@ -726,20 +737,15 @@ export function PairingSheet({
               value={payloadDraft}
               onChange={(event) => setPayloadDraft(event.currentTarget.value)}
             />
-            <Pressable
+            <PillAction
+              label={t('sync.form.usePayload')}
               onPress={
                 payloadDraft.trim() === ''
                   ? undefined
                   : () => onPastePayload(payloadDraft.trim())
               }
               disabled={payloadDraft.trim() === '' || dialing}
-              ariaLabel={t('sync.form.usePayload')}
-              className="uw-pill uw-pill--accent"
-            >
-              <Text variant="metadata" color="bright">
-                {t('sync.form.usePayload')}
-              </Text>
-            </Pressable>
+            />
           </div>
         )}
         {dialError !== null && (
