@@ -8,7 +8,7 @@ import { isSyncCursor, type SyncCursor } from './sync-engine.ts';
 import {
   DEVICE_ID_PATTERN,
   DEVICE_NAME_MAX,
-  FINGERPRINT_PATTERN,
+  isFp,
 } from './sync-wire.ts';
 
 /**
@@ -80,10 +80,6 @@ export type SyncPeer = {
 };
 
 export type SyncPeerRecord = SyncPeer | SyncCallerPeer;
-
-function isFp(value: unknown): value is string {
-  return typeof value === 'string' && FINGERPRINT_PATTERN.test(value);
-}
 
 /**
  * The responder row's fields, minus the role tag — the READ bounds

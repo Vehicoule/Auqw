@@ -12,7 +12,7 @@
  * so a non-canonical literal can resolve to a different address than
  * it spells).
  */
-export function parseIpv4(host: string): [number, number, number, number] | null {
+function parseIpv4(host: string): [number, number, number, number] | null {
   const octet = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]\\d?|0)';
   const m = new RegExp(`^(${octet})\\.(${octet})\\.(${octet})\\.(${octet})$`).exec(host);
   if (m === null) {
@@ -29,7 +29,7 @@ export function parseIpv4(host: string): [number, number, number, number] | null
  * part of a valid literal, so nothing here can smuggle a DNS name
  * through.
  */
-export function parseIpv6(
+function parseIpv6(
   addr: string,
 ): { groups: number[]; zone: string | null } | null {
   // A `%zone` suffix selects the egress interface — it can only make
@@ -100,30 +100,21 @@ export function parseIpv6(
 }
 
 /**
- * Pairing targets are LAN-scoped: the caller (renderer IPC, or a
- * remote peer's hello) may be compromised, so `host` must be an IP
- * literal a LAN pairing protocol legitimately dials —
- * private/loopback/link-local/CGNAT/ULA — never a DNS name, which
- * could resolve anywhere.
+ * One bracket-stripped literal parsed both ways: a direct v4 dotted
+ * quad, else a v6 group list + zone. `v4` also carries the IPv4-mapped
+ * ::ffff:a.b.c.d tail when the literal is v6 — a mapped loopback is
+ * still a loopback.
  */
-export function isPairableLanHost(host: string): boolean {
-  const bare =
-    host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
-  const v4direct = parseIpv4(bare);
-  const v6 = v4direct === null ? parseIpv6(bare) : null;
+function lanLiteral(bare: string): {
+  v4: readonly number[] | null;
+  groups: readonly number[] | null;
+  zone: string | null;
+} {
+  const direct = parseIpv4(bare);
+  const v6 = direct === null ? parseIpv6(bare) : null;
   const groups = v6?.groups ?? null;
-  // A zone id only exists for link-local addressing — elsewhere it's
-  // noise that would reach the dial unsanitized.
-  if (
-    v6 !== null &&
-    v6.zone !== null &&
-    groups !== null &&
-    (groups[0]! & 0xffc0) !== 0xfe80
-  ) {
-    return false;
-  }
-  const v4 =
-    v4direct ??
+  const v4: readonly number[] | null =
+    direct ??
     // IPv4-mapped form: ::ffff:a.b.c.d → groups [0,0,0,0,0,ffff,…].
     (groups !== null &&
     groups.slice(0, 5).every((g) => g === 0) &&
@@ -135,8 +126,27 @@ export function isPairableLanHost(host: string): boolean {
           groups[7]! & 0xff,
         ]
       : null);
+  return { v4, groups, zone: v6?.zone ?? null };
+}
+
+/**
+ * Pairing targets are LAN-scoped: the caller (renderer IPC, or a
+ * remote peer's hello) may be compromised, so `host` must be an IP
+ * literal a LAN pairing protocol legitimately dials —
+ * private/loopback/link-local/CGNAT/ULA — never a DNS name, which
+ * could resolve anywhere.
+ */
+export function isPairableLanHost(host: string): boolean {
+  const bare =
+    host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  const { v4, groups, zone } = lanLiteral(bare);
+  // A zone id only exists for link-local addressing — elsewhere it's
+  // noise that would reach the dial unsanitized.
+  if (zone !== null && groups !== null && (groups[0]! & 0xffc0) !== 0xfe80) {
+    return false;
+  }
   if (v4 !== null) {
-    const [a, b] = v4;
+    const [a = -1, b = -1] = v4;
     return (
       a === 10 || // RFC1918
       a === 127 || // loopback
@@ -199,34 +209,18 @@ export function dialableHostsRanked(
       address.startsWith('[') && address.endsWith(']')
         ? address.slice(1, -1)
         : address;
-    const v4 = parseIpv4(bare);
-    const v6 = v4 === null ? parseIpv6(bare) : null;
-    const groups = v6?.groups ?? null;
-    // ::ffff:a.b.c.d maps to the v4 octets — a mapped loopback is
-    // still a loopback.
-    const octets =
-      v4 ??
-      (groups !== null &&
-      groups.slice(0, 5).every((g) => g === 0) &&
-      groups[5] === 0xffff
-        ? [
-            (groups[6]! >> 8) & 0xff,
-            groups[6]! & 0xff,
-            (groups[7]! >> 8) & 0xff,
-            groups[7]! & 0xff,
-          ]
-        : null);
+    const { v4, groups, zone } = lanLiteral(bare);
     const first = groups?.[0];
     const loopback =
-      (octets !== null && octets[0] === 127) ||
+      v4?.[0] === 127 ||
       (groups !== null &&
         groups.slice(0, 7).every((g) => g === 0) &&
         groups[7] === 1);
     const rank = loopback
       ? 3 // remote loopback would dial the browser itself
-      : v6 === null
+      : groups === null
         ? 0 // IPv4
-        : v6.zone === null &&
+        : zone === null &&
             first !== undefined &&
             (first & 0xffc0) === 0xfe80
           ? 2 // bare fe80:: — undialable
