@@ -31,7 +31,7 @@ import type {
   StoragePort,
 } from '@auqw/application';
 import { SqliteStorage } from '@auqw/storage-sqlite';
-import { SLOT_CAPABILITIES } from '@auqw/ui-shared';
+import { SLOT_META } from '@auqw/ui-shared';
 import type { AuqwApi } from '../shared/contract.ts';
 import { toFileUri } from '../shared/local-paths.ts';
 import { createDesktopConnectivity } from './connectivity.ts';
@@ -82,12 +82,12 @@ function defaultSettings(
 ): Settings {
   const catalog = pickProvider(
     providers,
-    SLOT_CAPABILITIES.catalogProvider,
+    SLOT_META.catalogProvider.capabilities,
     'deezer',
   );
   const playback = pickProvider(
     providers,
-    SLOT_CAPABILITIES.playbackProvider,
+    SLOT_META.playbackProvider.capabilities,
     'youtube-music',
   );
   const missing = [
@@ -140,12 +140,12 @@ function repairedSettings(
     slot: 'catalogProvider' | 'playbackProvider',
     preferred: string,
   ): void => {
-    if (declares(settings[slot], SLOT_CAPABILITIES[slot])) {
+    if (declares(settings[slot], SLOT_META[slot].capabilities)) {
       return;
     }
     const repaired = pickProvider(
       providers,
-      SLOT_CAPABILITIES[slot],
+      SLOT_META[slot].capabilities,
       preferred,
     );
     if (repaired !== null) {
@@ -158,7 +158,7 @@ function repairedSettings(
   for (const slot of ['lyricsProvider', 'radioProvider'] as const) {
     if (
       settings[slot] != null &&
-      !declares(settings[slot], SLOT_CAPABILITIES[slot])
+      !declares(settings[slot], SLOT_META[slot].capabilities)
     ) {
       next[slot] = null;
       changed = true;
