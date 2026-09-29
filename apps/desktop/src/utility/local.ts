@@ -313,15 +313,41 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
     }
   }
 
+  // Verdicts memoized per URI — waveform reads hit the same URI per
+  // 1 MiB chunk, and a full index scan per chunk multiplies realpaths
+  // by library size. Freshness is probed by COUNT+MAX(rowid) stamps
+  // (sub-microsecond vs a realpath per row): any insert/delete in the
+  // three index tables changes a stamp and re-opens the scan.
+  const gateCache = new Map<string, string | null>();
+  let gateStamp = '';
+  function indexStamp(db: DatabaseSync): string {
+    const probe = (table: string): number => {
+      try {
+        const row = db
+          .prepare(
+            `SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM ${table}`,
+          )
+          .get() as { n?: unknown; m?: unknown };
+        return (
+          (typeof row.n === 'number' ? row.n : 0) +
+          (typeof row.m === 'number' ? row.m : 0)
+        );
+      } catch {
+        return 0;
+      }
+    };
+    return `${probe('local_files')}:${probe('local_sources')}:${probe('downloads')}`;
+  }
+
   /**
    * A `file://` URI the renderer is allowed to touch — the lexical
    * path is realpath'd (a symlink swap can't smuggle an escape through
    * the gap between index-time resolution and playback-time open),
-   * then two gates must hold: media-dir confinement (the app's own
-   * managed-download dir), or the resolved path must BE an indexed
-   * `local_files` row (realpath compare) AND confine under that row's
-   * tree root. Tree confinement alone is not enough — a granted folder
-   * can hold files the index never imported, and those stay unreadable.
+   * then the resolved path must be OWNED bytes: an `available`
+   * downloads-ledger row under the media dir, or an indexed
+   * `local_files` row still confined under its tree root. Confinement
+   * alone is not enough — a granted folder or the media dir can hold
+   * files the index never imported, and those stay unreadable.
    */
   async function allowedLocalPath(uri: string): Promise<string | null> {
     const abs = fileUrlPath(uri);
@@ -332,18 +358,68 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
     if (real === null) {
       return null;
     }
-    if (options.mediaDir !== undefined) {
-      const mediaReal = await realpathChecked(options.mediaDir);
-      if (
-        mediaReal !== null &&
-        (pathConfined(mediaReal, real) || real === mediaReal)
-      ) {
-        return real;
-      }
-    }
     const db = options.database();
     if (db === null) {
       return null;
+    }
+    const stamp = indexStamp(db);
+    if (stamp !== gateStamp) {
+      gateCache.clear();
+      gateStamp = stamp;
+    }
+    const cached = gateCache.get(uri);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const allowed = await gateLocalPath(db, abs, real);
+    gateCache.set(uri, allowed);
+    return allowed;
+  }
+
+  async function gateLocalPath(
+    db: DatabaseSync,
+    abs: string,
+    real: string,
+  ): Promise<string | null> {
+    if (options.mediaDir !== undefined) {
+      // Managed downloads only — mediaDir can hold arbitrary files
+      // beside the ledger's own, so confinement is not the gate.
+      let rows: Record<string, unknown>[];
+      try {
+        rows = db
+          .prepare(
+            `SELECT file_path AS filePath FROM downloads
+             WHERE state = 'available'`,
+          )
+          .all() as Record<string, unknown>[];
+      } catch (thrown) {
+        const message = thrown instanceof Error ? thrown.message : '';
+        if (message.includes('no such table')) {
+          rows = [];
+        } else {
+          asIo('local resolve failed', thrown);
+          return null;
+        }
+      }
+      const mediaReal = await realpathChecked(options.mediaDir);
+      for (const row of rows) {
+        if (typeof row['filePath'] !== 'string') {
+          continue;
+        }
+        const nameReal = await realpathChecked(
+          join(options.mediaDir, row['filePath']),
+        );
+        // A ledger name carrying separators must not resolve outside
+        // the media dir — same guard the probe leg applies.
+        if (
+          nameReal !== null &&
+          nameReal === real &&
+          mediaReal !== null &&
+          pathConfined(mediaReal, nameReal)
+        ) {
+          return real;
+        }
+      }
     }
     for (const row of localRows(db)) {
       // The file must BE an indexed row — compare realpath'd paths, not
@@ -357,9 +433,13 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
       if (docAbs === null) {
         continue;
       }
-      const docReal = await realpathChecked(docAbs);
-      if (docReal === null || docReal !== real) {
-        continue;
+      // The lexical fast path skips the fs call for the common
+      // resolve input; realpath'd inputs still verify per row.
+      if (docAbs !== abs) {
+        const docReal = await realpathChecked(docAbs);
+        if (docReal === null || docReal !== real) {
+          continue;
+        }
       }
       // …and still confine under its own tree root realpath — an
       // indexed file swapped for a symlink pointing out stays denied.

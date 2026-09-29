@@ -320,6 +320,28 @@ export async function run(): Promise<void> {
         (resolvedDl.result as { uri: string | null }).uri !== null,
       'a media-dir URI resolves',
     );
+    // …but only for ledger-owned bytes — an unmanaged file beside the
+    // downloads stays denied.
+    const unmanaged = join(mediaDir, 'not-a-download.wav');
+    await writeFile(unmanaged, Buffer.alloc(8, 9));
+    const unmanagedResolve = await call(CHANNELS.localResolve, {
+      uri: pathToFileURL(unmanaged).href,
+    });
+    assert(
+      unmanagedResolve.ok &&
+        (unmanagedResolve.result as { uri: string | null }).uri === null,
+      'an unmanaged file inside the media dir refuses',
+    );
+    const unmanagedRead = await call(CHANNELS.localRead, {
+      uri: pathToFileURL(unmanaged).href,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !unmanagedRead.ok &&
+        unmanagedRead.error?.kind === 'permission-denied',
+      'an unmanaged media-dir read is permission-denied',
+    );
 
     // `local:read` — ranged bytes over the same grant gate.
     const read = await call(CHANNELS.localRead, {

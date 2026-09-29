@@ -19,48 +19,23 @@ Two utility channels DO ride the attach — they landed after review:
 `local:resolve` realpath-gates the mint to an indexed, grant-confined
 path (renderer URIs are lexical; only the utility can realpath), and
 `local:read` feeds waveform peaks the same gated ranged read. Both gate
-through `allowedLocalPath` (mediaDir confinement OR indexed `local_files`
-row + tree-root confinement).
+through `allowedLocalPath` (owned bytes only: an `available`
+downloads-ledger row under mediaDir, or an indexed `local_files` row +
+tree-root confinement). Verdicts are memoized per URI and re-probed on a
+COUNT+MAX(rowid) stamp across the three index tables, so a chunked
+`local:read` scan costs one index pass per URI, not one per megabyte.
 
-Why this leg over the alternatives evaluated:
+Mechanism rationale (alternatives evaluated, CSP dependency,
+`localPlaybackFor` wiring split, ownership-vs-attachability):
+recorded in `docs/decisions.md` rows 27–28 — this report intentionally
+does not repeat them.
 
-- **Direct `file://`** — zero new machinery: Chromium decodes the
-  container and seeks the file with native random access. `currentTime`
-  seeks work (verified live: `seeked` event at t=6 s on an 8 s WAV).
-  The only dependency was CSP: `media-src` now admits `file:` next to
-  `'self'` in `app.html` and the dev-harness `index.html`. `'self'` does
-  not cover `file:` even for a `file:`-origin document.
-- **Ranged-read seam via the utility** — `src/utility/` exposes no
-  generic file-read IPC the renderer can borrow. `local:probe` /
-  `local:playback` only resolve names/indexes to URIs. The `stream:*`
-  channels are the remote/plugin pump; `stream:dev-prepare` is
-  dev-gated. Building a file-read pump would be a *new* seam — out of
-  scope and strictly more code than the leg that already plays.
-- **Existing custom protocol** — none is registered in
-  `main/index.ts`; the task also forbids registering one for this.
-
-`localPlaybackFor` wiring: `controller.ts` now answers
-`probe?.(id) ?? uriForHook(id)` — `createLocalPlayback` resolves
-download-ledger names to `file://<mediaDir>/<name>` first, then falls
-through to `LocalFileSource.uriFor` for imported files. A null answer
-still means "cannot attach" and stays separate from ownership
-(`fileFor`/`uriMap().has`), which `app.tsx` reads unchanged.
-
-## What `localPlaybackCapable = false` was protecting
-
-The gate compensated for a player that rejected every local prepare.
-Had the probe answered real URIs while the player emitted
-`unavailable`, the session's `#pickRef` would have preferred
-*unplayable* local refs over good provider refs (owned bytes outrank
-auto-picks online and are the *only* picks offline) — every owned track
-would have resolved to a guaranteed-dead `provider:'local'` prepare,
-and the offline play-marking would have advertised presses that could
-only fail. The constant was a whole-leg circuit breaker, not a runtime
-probe. It can now be true unconditionally because the player owns the
-leg: `provider:'local'` is handled for `prepare`, `prewarm`,
-`attachItem`, `play`, `cancelPrepare`, `release`, marks, and the
-element `error` path — there is no reachable local op the port still
-punts on.
+`localPlaybackCapable = false` (removed): it was the circuit breaker
+that kept `#pickRef` from preferring unplayable local refs while the
+player punted every local prepare — covered in the decision row. It is
+unconditional now because `provider:'local'` is handled for `prepare`,
+`prewarm`, `attachItem`, `play`, `cancelPrepare`, `release`, marks, and
+the element `error` path — no reachable local op punts.
 
 ## Handle and lifecycle conventions (mobile parity)
 
