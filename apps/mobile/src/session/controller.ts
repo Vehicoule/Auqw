@@ -20,6 +20,7 @@ import type {
   ImportPreview,
   LocalWrite,
   PlayerPort,
+  ProviderCapability,
   ProviderPort,
   QueueSnapshot,
   Result,
@@ -86,14 +87,140 @@ function nativeMessage(thrown: unknown): string {
     : 'native call failed';
 }
 
-const DEFAULT_SETTINGS: Settings = {
-  catalogProvider: 'deezer',
-  playbackProvider: 'youtube-music',
-  storefront: null,
-  qualityKbps: 128,
-  theme: 'system',
-  prefetch: true,
-};
+/**
+ * The provider-slot → routing-capability map mirrored from the app's
+ * settings pickers: a slot value is only meaningful while a provider
+ * with that id declares one of the slot's capabilities.
+ */
+const SLOT_CAPABILITIES = {
+  catalogProvider: ['catalog.search'],
+  playbackProvider: ['playback.resolve'],
+  lyricsProvider: ['lyrics.synced', 'lyrics.plain'],
+  radioProvider: ['radio.seed'],
+} as const;
+
+/** First provider declaring the slot's capability — the shipped id
+ *  preferred, then any declarer; null when nothing can serve it. */
+function pickProvider(
+  providers: readonly PluginProvider[],
+  capabilities: readonly ProviderCapability[],
+  preferred: string,
+): string | null {
+  const declares = (p: PluginProvider) =>
+    capabilities.some((capability) => p.capabilities.includes(capability));
+  return (
+    providers.find((p) => p.id === preferred && declares(p))?.id ??
+    providers.find(declares)?.id ??
+    null
+  );
+}
+
+/**
+ * The provider slots are derived per boot rather than hardcoded: a
+ * manifest that drops the slot's capability would strand a named id
+ * into `unsupported` routing — prefer the shipped ids, else the first
+ * provider declaring the slot's capability. A set with no declarer
+ * for a required slot cannot boot — an id alone would only route
+ * every search/playback into `unsupported`.
+ */
+function defaultSettings(
+  providers: readonly PluginProvider[],
+): Settings {
+  const catalog = pickProvider(
+    providers,
+    SLOT_CAPABILITIES.catalogProvider,
+    'deezer',
+  );
+  const playback = pickProvider(
+    providers,
+    SLOT_CAPABILITIES.playbackProvider,
+    'youtube-music',
+  );
+  const missing = [
+    ...(catalog === null ? (['catalog.search'] as const) : []),
+    ...(playback === null ? (['playback.resolve'] as const) : []),
+  ];
+  if (catalog === null || playback === null) {
+    throw new Error(
+      `no provider declares ${missing.join(' / ')} — the plugin set cannot serve a session`,
+    );
+  }
+  return {
+    catalogProvider: catalog,
+    playbackProvider: playback,
+    storefront: null,
+    qualityKbps: 128,
+    theme: 'system',
+    prefetch: true,
+  };
+}
+
+/**
+ * Reconciles restored settings against the providers this boot loaded:
+ * persisted slots name ids picked under an earlier bundle (or synced
+ * from a peer whose plugin set differs), and a missing capability
+ * strands every op routed to it. Required slots are repicked through
+ * the capability map (a declarer is guaranteed by the boot gate);
+ * optional overrides drop to `null` (auto routing) rather than
+ * resurrecting a provider that cannot serve them. Returns null when
+ * nothing needed repair.
+ */
+function repairedSettings(
+  settings: Settings,
+  providers: readonly PluginProvider[],
+): Settings | null {
+  const declares = (
+    id: string | null | undefined,
+    capabilities: readonly ProviderCapability[],
+  ): boolean => {
+    if (id === null || id === undefined) {
+      return false;
+    }
+    const provider = providers.find((p) => p.id === id);
+    return (
+      provider !== undefined &&
+      capabilities.some((capability) =>
+        provider.capabilities.includes(capability),
+      )
+    );
+  };
+  const next = { ...settings };
+  let changed = false;
+  if (!declares(settings.catalogProvider, SLOT_CAPABILITIES.catalogProvider)) {
+    const repaired = pickProvider(
+      providers,
+      SLOT_CAPABILITIES.catalogProvider,
+      'deezer',
+    );
+    if (repaired !== null) {
+      next.catalogProvider = repaired;
+      changed = true;
+    }
+  }
+  if (
+    !declares(settings.playbackProvider, SLOT_CAPABILITIES.playbackProvider)
+  ) {
+    const repaired = pickProvider(
+      providers,
+      SLOT_CAPABILITIES.playbackProvider,
+      'youtube-music',
+    );
+    if (repaired !== null) {
+      next.playbackProvider = repaired;
+      changed = true;
+    }
+  }
+  for (const slot of ['lyricsProvider', 'radioProvider'] as const) {
+    if (
+      settings[slot] != null &&
+      !declares(settings[slot], SLOT_CAPABILITIES[slot])
+    ) {
+      next[slot] = null;
+      changed = true;
+    }
+  }
+  return changed ? next : null;
+}
 
 export type SessionController = {
   readonly session: Session;
@@ -141,6 +268,13 @@ export type SessionController = {
    * re-inits the download ledger so their rows can't go stale.
    */
   rehydrateMedia(signal: CancellationSignal): Promise<void>;
+  /**
+   * Local-source-only variant: rebuilds `localSource` from persisted
+   * rows and projects them into the session WITHOUT touching the
+   * download ledger — safe while transfers are live (rehydrateMedia's
+   * downloads.init would sweep their partial files).
+   */
+  rehydrateLocal(signal: CancellationSignal): Promise<void>;
   /**
    * Whole-library replace with the ordering the media owners need:
    * the download manager stops and clears its files BEFORE the
@@ -256,10 +390,11 @@ export async function createSessionController(
       manifestVersion(LYRICS_LRCLIB_MANIFEST),
     ),
   ];
+  const defaults = defaultSettings(providers);
   const sqliteDriver = await createExpoSqliteDriver(options.databasePath);
   const storage = new SqliteStorage(
     sqliteDriver,
-    DEFAULT_SETTINGS,
+    defaults,
   );
   // Sync-log tables ride the same file + driver — the shared
   // transaction tail serializes sync writes with library writes.
@@ -284,7 +419,7 @@ export async function createSessionController(
     return createExpoAudioPlayer({
       providers: map,
       ids: createIds(),
-      qualityKbps: DEFAULT_SETTINGS.qualityKbps,
+      qualityKbps: defaults.qualityKbps,
     });
   }))(providerMap);
   const ids = createIds();
@@ -317,7 +452,7 @@ export async function createSessionController(
     ids,
     random: createRandom(),
     log,
-    defaults: DEFAULT_SETTINGS,
+    defaults,
     // Android-only: the auqw-expo player attaches local files; the
     // iOS provisional player has no local-provider path, so owned
     // bytes there fall back to remote playback instead of failing.
@@ -406,7 +541,7 @@ export async function createSessionController(
         {
           targetBitrateKbps: readyOr(
             (s) => s.settings.qualityKbps,
-            DEFAULT_SETTINGS.qualityKbps,
+            defaults.qualityKbps,
           ),
           prefer:
             Platform.OS === 'ios'
@@ -419,7 +554,7 @@ export async function createSessionController(
       );
     },
     queue: () => readyOr((s) => s.queue, emptyQueue),
-    settings: () => readyOr((s) => s.settings, DEFAULT_SETTINGS),
+    settings: () => readyOr((s) => s.settings, defaults),
   });
   const { cache: artworkCache } = createExpoArtwork({
     storage,
@@ -444,9 +579,9 @@ export async function createSessionController(
    * and rebuild the local source from the post-import snapshot
    * before the UI calls back in.
    */
-  const rehydrateMedia = async (
+  const reloadLocalSource = async (
     signal: CancellationSignal,
-  ): Promise<void> => {
+  ) => {
     const loaded = await storage.load({
       requestId: ids.next('media-rehydrate'),
       deadlineMs: clock.nowMs() + 30_000,
@@ -458,7 +593,7 @@ export async function createSessionController(
         message: 'media rehydrate skipped: storage load failed',
         atMs: clock.nowMs(),
       });
-      return;
+      return null;
     }
     localSource = new LocalFileSource(
       { storage, tagReader: createExpoTagReader(host), ids, clock, log },
@@ -468,7 +603,16 @@ export async function createSessionController(
         recordings: loaded.value.recordings,
       },
     );
-    const inited = await downloads.init(loaded.value.downloads, signal);
+    return loaded.value;
+  };
+  const rehydrateMedia = async (
+    signal: CancellationSignal,
+  ): Promise<void> => {
+    const loaded = await reloadLocalSource(signal);
+    if (loaded === null) {
+      return;
+    }
+    const inited = await downloads.init(loaded.downloads, signal);
     if (!inited.ok) {
       void log.write({
         level: 'warn',
@@ -478,7 +622,16 @@ export async function createSessionController(
     }
     // Imported recordings replace prior local rows — the session
     // re-merges provenance-local rows through this hook.
-    session.syncLocalRecordings(localSource.recordings());
+    session.syncLocalRecordings(localSource?.recordings() ?? []);
+  };
+  const rehydrateLocal = async (
+    signal: CancellationSignal,
+  ): Promise<void> => {
+    // NO downloads.init — a folder commit that lands on a superseded
+    // source must not clear live transfer rows or sweep .part files.
+    if ((await reloadLocalSource(signal)) !== null) {
+      session.syncLocalRecordings(localSource?.recordings() ?? []);
+    }
   };
   return {
     session,
@@ -499,6 +652,17 @@ export async function createSessionController(
       }
     },
     async start(signal) {
+      // Post-restore reconcile: persisted slots name ids picked under
+      // an earlier bundle or synced from a peer — repick any slot whose
+      // provider no longer declares the slot's capability.
+      const restored = session.snapshot();
+      if (restored.type === 'ready') {
+        const repaired = repairedSettings(restored.settings, providers);
+        if (repaired !== null) {
+          // Persist the reconciliation so the next boot restores clean.
+          await session.updateSettings(repaired);
+        }
+      }
       const loaded = await storage.load({
         requestId: ids.next('local-boot'),
         deadlineMs: clock.nowMs() + 30_000,
@@ -806,6 +970,7 @@ export async function createSessionController(
       }
     },
     rehydrateMedia,
+    rehydrateLocal,
     async replaceLibrary(text, signal) {
       // Validate BEFORE the drain: a malformed document must not
       // destroy existing downloads. Session.importLibrary revalidates
@@ -831,6 +996,17 @@ export async function createSessionController(
       try {
         const imported = await session.importLibrary(text);
         if (imported.ok) {
+          // Imported settings may name providers this bundle lacks or
+          // ids whose manifests no longer declare the slot — reconcile
+          // through the same repair the boot path runs so playback
+          // does not strand until the next restart.
+          const snap = session.snapshot();
+          if (snap.type === 'ready') {
+            const repaired = repairedSettings(snap.settings, providers);
+            if (repaired !== null) {
+              await session.updateSettings(repaired);
+            }
+          }
           // The swap landed — delete the old ledger's files by their
           // captured paths. A failed import instead leaves the ledger
           // untouched; the finally's rehydrate resumes its rows.

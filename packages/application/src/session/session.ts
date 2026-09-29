@@ -562,6 +562,15 @@ export class Session {
         own: (work) => this.#own(work),
         logWarn: (message) => this.#logWarn(message),
         hasProvider: (id) => this.#providers.has(id),
+        providerDeclares: (id, capabilities) => {
+          const provider = this.#providers.get(id);
+          return (
+            provider !== undefined &&
+            capabilities.some((capability) =>
+              provider.capabilities.includes(capability),
+            )
+          );
+        },
         enqueueStorage: (fn, options) => this.#enqueueStorage(fn, options),
         trackSource: (source) => {
           this.#opSources.add(source);

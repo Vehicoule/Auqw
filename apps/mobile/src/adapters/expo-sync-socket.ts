@@ -3,7 +3,7 @@ import type {
   SyncSocket,
   SyncSocketPort,
 } from '@auqw/application';
-import { appError, err, ok } from '@auqw/application';
+import { appError, err, ok, raced } from '@auqw/application';
 import { base64Decode, base64Encode } from './noble-sync-crypto.ts';
 import {
   nativeError,
@@ -190,25 +190,6 @@ export function createExpoSyncSockets(
       }
       const socketId = `sync-${(socketSeq += 1)}-${Date.now().toString(36)}`;
       ensureWatch();
-      const unsubscribe: (() => void)[] = [];
-      const cancelled = new Promise<Result<SyncSocket>>((resolve) => {
-        if (signal === undefined) {
-          return;
-        }
-        unsubscribe.push(
-          signal.subscribe(() => {
-            void native
-              .syncDestroy(socketId)
-              .catch(() => undefined)
-              .finally(() =>
-                resolve(err(appError('cancelled', 'sync: dial cancelled'))),
-              );
-          }),
-        );
-        if (signal.cancelled) {
-          resolve(err(appError('cancelled', 'sync: dial cancelled')));
-        }
-      });
       const dial = (async (): Promise<Result<SyncSocket>> => {
         try {
           const reply = await native.syncConnect(
@@ -244,9 +225,21 @@ export function createExpoSyncSockets(
           );
         }
       })();
-      const result = await Promise.race([dial, cancelled]);
-      unsubscribe[0]?.();
-      return result;
+      if (signal === undefined) {
+        return dial;
+      }
+      const outcome = await raced(dial, signal);
+      if (outcome.t === 'cancelled') {
+        // The dial may still be minting native-side — destroy the id
+        // eagerly; a late syncConnect resolution is reaped by the
+        // dial's own cancelled check.
+        void native.syncDestroy(socketId).catch(() => undefined);
+        return err(appError('cancelled', 'sync: dial cancelled'));
+      }
+      if (outcome.t === 'failed') {
+        return err(nativeError(outcome.thrown));
+      }
+      return outcome.value;
     },
     close() {
       if (released) {

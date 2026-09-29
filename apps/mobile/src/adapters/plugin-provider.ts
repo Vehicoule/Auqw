@@ -7,11 +7,13 @@ import type {
 } from '@auqw/application';
 import {
   appError,
+  CancellationSource,
   createProviderWirePort,
   decodeProviderOutcome,
   err,
   isRecord,
   providerCancelledError,
+  raced,
 } from '@auqw/application';
 import type {
   AuqwExpoHostLike,
@@ -117,8 +119,8 @@ export function createPluginProvider(
       // outlives it still settles here, and its late id is cancelled.
       let startTimer: ReturnType<typeof setTimeout> | undefined;
       let expireStart: (() => void) | undefined;
-      const expired = new Promise<{ kind: 'expired' }>((res) => {
-        expireStart = () => res({ kind: 'expired' });
+      const expired = new Promise<{ t: 'expired' }>((res) => {
+        expireStart = () => res({ t: 'expired' });
       });
       const armStartDeadline = (): void => {
         startTimer = setTimeout(
@@ -148,9 +150,29 @@ export function createPluginProvider(
         (id) => ({ kind: 'started' as const, id }),
         (thrown) => ({ kind: 'threw' as const, thrown }),
       );
-      const first = await Promise.race([started, expired]);
+      // The caller's signal races the handshake alongside the
+      // deadline — a startRequest parked host-side must not hold a
+      // cancelled caller to it. Race a CHILD source: if the deadline
+      // wins, raced()'s subscription would stay parked on the caller's
+      // signal until the host call settles — one retained listener
+      // per timed-out request. Cancelling the child settles raced()
+      // on every exit and frees its listener without touching the
+      // caller's signal.
+      const handshakeSource = new CancellationSource();
+      const bridge = signal.subscribe(() => handshakeSource.cancel());
+      if (signal.cancelled) {
+        handshakeSource.cancel();
+      }
+      const first = await Promise.race([
+        raced(call, handshakeSource.signal),
+        expired,
+      ]);
       clearTimeout(startTimer);
-      if (first.kind === 'expired') {
+      bridge();
+      handshakeSource.cancel();
+      // A handshake that outlives its race still settles — its late
+      // request id is cancelled so nothing minted leaks host-side.
+      const reapLateId = (): void => {
         void started.then((late) => {
           if (
             late.kind === 'started' &&
@@ -158,7 +180,7 @@ export function createPluginProvider(
             late.id.length > 0
           ) {
             // Best-effort abort — a throwing host must not turn the
-            // already-returned timeout into an unhandled rejection.
+            // already-returned outcome into an unhandled rejection.
             try {
               host.cancel(late.id);
             } catch {
@@ -166,12 +188,19 @@ export function createPluginProvider(
             }
           }
         });
+      };
+      if (first.t === 'expired') {
+        reapLateId();
         return err(timeoutError());
       }
-      if (first.kind === 'threw') {
+      if (first.t === 'cancelled') {
+        reapLateId();
+        return err(providerCancelledError());
+      }
+      if (first.t === 'failed') {
         return err(nativeError(first.thrown));
       }
-      const requestId = first.id;
+      const requestId = first.value;
       if (typeof requestId !== 'string' || requestId.length === 0) {
         return err(appError('invalid-response', 'empty request id'));
       }

@@ -19,6 +19,7 @@ import {
   unsyncedWrites,
 } from '../sync/sync-projection.ts';
 import { utf8ByteLength } from '../sync/sync-wire.ts';
+import type { ProviderCapability } from '../ports/provider.ts';
 import type { StorageBatch, StoragePort } from '../ports/storage.ts';
 import { Serializer } from './serializer.ts';
 import type { Ready } from './ready.ts';
@@ -165,8 +166,14 @@ export type SyncHost = {
   readonly own: (work: Promise<unknown>) => void;
   /** Bounded, nonfatal, sanitized internal logging. */
   readonly logWarn: (message: string) => void;
-  /** Whether an injected provider serves a synced settings slot. */
+  /** Whether an injected provider is installed under this id. */
   readonly hasProvider: (id: string) => boolean;
+  /** Whether an injected provider DECLARES one of the capabilities —
+   *  presence alone does not route a slot into a usable op. */
+  readonly providerDeclares: (
+    id: string,
+    capabilities: readonly ProviderCapability[],
+  ) => boolean;
   /** One serialized storage segment — the session's commit lane. */
   readonly enqueueStorage: <T>(
     fn: () => Promise<Result<T>>,
@@ -819,27 +826,38 @@ export class SyncIngress {
     source: CancellationSource,
     deadlineMs: number,
   ): Promise<Result<SyncApplyReport>> {
-    // Reconcile remote settings against THIS session's providers
-    // — projection validates the shape only; the required-slot
-    // fallback / optional-slot nulling mirrors updateSettings.
+    // Reconcile remote settings against THIS session's providers —
+    // projection validates the shape only. Presence is not enough:
+    // the peer's slot ids must DECLARE this build's slot capability,
+    // else playback routes every op into `unsupported` (a provider
+    // can exist under the id with a reduced manifest). Required slots
+    // fall back to local, optional slots drop to null — mirrors
+    // updateSettings.
     if (batch.settings !== undefined) {
       const s = batch.settings;
       batch.settings = {
         ...s,
-        catalogProvider: this.#host.hasProvider(s.catalogProvider)
+        catalogProvider: this.#host.providerDeclares(s.catalogProvider, [
+          'catalog.search',
+        ])
           ? s.catalogProvider
           : r.settings.catalogProvider,
-        playbackProvider: this.#host.hasProvider(s.playbackProvider)
+        playbackProvider: this.#host.providerDeclares(s.playbackProvider, [
+          'playback.resolve',
+        ])
           ? s.playbackProvider
           : r.settings.playbackProvider,
         lyricsProvider:
           s.lyricsProvider != null &&
-            !this.#host.hasProvider(s.lyricsProvider)
+            !this.#host.providerDeclares(s.lyricsProvider, [
+              'lyrics.synced',
+              'lyrics.plain',
+            ])
             ? null
             : (s.lyricsProvider ?? null),
         radioProvider:
           s.radioProvider != null &&
-            !this.#host.hasProvider(s.radioProvider)
+            !this.#host.providerDeclares(s.radioProvider, ['radio.seed'])
             ? null
             : (s.radioProvider ?? null),
       };
