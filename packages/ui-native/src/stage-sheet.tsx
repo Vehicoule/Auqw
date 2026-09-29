@@ -41,6 +41,7 @@ import {
   Spinner,
   Text,
 } from './primitives.tsx';
+import type { IconName } from './primitives.tsx';
 import { useResolvedArtworkUri } from './artwork.tsx';
 import {
   resolveStageAnchor,
@@ -50,7 +51,7 @@ import {
 } from './stage-motion';
 import { WaveformSeek } from './progress.tsx';
 import { QueueList } from './queue-list';
-import { EmptyState, ErrorState, LoadingState } from './states.tsx';
+import { EmptyState, StateFor } from './states.tsx';
 import type {
   LyricsModel,
   PlatformVariant,
@@ -137,22 +138,16 @@ function transportVariant(
       playSize: 56,
     };
   }
+  const glass: ViewStyle = {
+    borderRadius: 999,
+    backgroundColor: theme.colors.glass,
+    borderWidth: theme.strokes.hairline,
+    borderColor: theme.colors.hairline,
+  };
   return {
     side: { borderRadius: 999 },
-    main: {
-      borderRadius: 999,
-      backgroundColor: theme.colors.glass,
-      borderWidth: theme.strokes.hairline,
-      borderColor: theme.colors.hairline,
-    },
-    play: {
-      borderRadius: 999,
-      backgroundColor: theme.colors.glass,
-      borderWidth: theme.strokes.hairline,
-      borderColor: theme.colors.hairline,
-      width: 56,
-      height: 56,
-    },
+    main: glass,
+    play: { ...glass, width: 56, height: 56 },
     playSize: 56,
   };
 }
@@ -190,7 +185,32 @@ export function TransportControls({
     onToggleShuffle,
     onCycleRepeat,
   });
-  const playColor = variant === 'm3e' ? theme.colors.canvas : theme.colors.textBright;
+  const c = theme.colors;
+  const accent = (on?: boolean) => (on ? c.accent : c.textSecondary);
+  const button = (
+    b: {
+      readonly icon: IconName;
+      readonly a11yLabel: string;
+      readonly onPress: (() => void) | undefined;
+      readonly disabled?: boolean | undefined;
+      readonly active?: boolean | undefined;
+    },
+    color: string,
+    main = false,
+  ) => (
+    <IconButton
+      icon={b.icon}
+      size={main ? 36 : 32}
+      iconSize={main ? 15 : 14}
+      color={color}
+      accessibilityLabel={b.a11yLabel}
+      disabled={b.disabled}
+      active={b.active}
+      onPress={b.onPress}
+      style={main ? v.main : v.side}
+    />
+  );
+  const playColor = variant === 'm3e' ? c.canvas : c.textBright;
   return (
     <View
       style={{
@@ -200,39 +220,9 @@ export function TransportControls({
         gap: theme.spacing.xs + 2,
       }}
     >
-      <IconButton
-        icon={view.like.icon}
-        size={32}
-        iconSize={14}
-        color={view.like.liked ? theme.colors.liked : theme.colors.textSecondary}
-        accessibilityLabel={view.like.a11yLabel}
-        active={view.like.active}
-        onPress={view.like.onPress}
-        style={v.side}
-      />
-      <IconButton
-        icon={view.shuffle.icon}
-        size={32}
-        iconSize={14}
-        color={
-          view.shuffle.active ? theme.colors.accent : theme.colors.textSecondary
-        }
-        accessibilityLabel={view.shuffle.a11yLabel}
-        disabled={view.shuffle.disabled}
-        active={view.shuffle.active}
-        onPress={view.shuffle.onPress}
-        style={v.side}
-      />
-      <IconButton
-        icon={view.previous.icon}
-        size={36}
-        iconSize={15}
-        color={theme.colors.textPrimary}
-        accessibilityLabel={view.previous.a11yLabel}
-        disabled={view.previous.disabled}
-        onPress={view.previous.onPress}
-        style={v.main}
-      />
+      {button(view.like, view.like.liked ? c.liked : c.textSecondary)}
+      {button(view.shuffle, accent(view.shuffle.active))}
+      {button(view.previous, c.textPrimary, true)}
       <Pressable
         compact
         onPress={view.play.onPress}
@@ -251,36 +241,11 @@ export function TransportControls({
         {view.busy ? (
           <Spinner size={18} color={playColor} />
         ) : (
-          <PlayPauseIcon
-            playing={view.playing}
-            size={18}
-            color={playColor}
-          />
+          <PlayPauseIcon playing={view.playing} size={18} color={playColor} />
         )}
       </Pressable>
-      <IconButton
-        icon={view.next.icon}
-        size={36}
-        iconSize={15}
-        color={theme.colors.textPrimary}
-        accessibilityLabel={view.next.a11yLabel}
-        disabled={view.next.disabled}
-        onPress={view.next.onPress}
-        style={v.main}
-      />
-      <IconButton
-        icon={view.repeat.icon}
-        size={32}
-        iconSize={14}
-        color={
-          view.repeat.active ? theme.colors.accent : theme.colors.textSecondary
-        }
-        accessibilityLabel={view.repeat.a11yLabel}
-        disabled={view.repeat.disabled}
-        active={view.repeat.active}
-        onPress={view.repeat.onPress}
-        style={v.side}
-      />
+      {button(view.next, c.textPrimary, true)}
+      {button(view.repeat, accent(view.repeat.active))}
     </View>
   );
 }
@@ -652,13 +617,14 @@ export function StageSheet({
   // stomp the settle spring the expand effect just started.
   useEffect(() => {
     if (dragPreview === undefined) return;
-    if (dragPreview === 'rest') {
-      progress.value = expanded ? 1 : 0;
-    } else if (dragPreview === 'mid-drag') {
-      progress.value = 0.75;
-    } else {
-      progress.value = 0;
-    }
+    progress.value =
+      dragPreview === 'rest'
+        ? expanded
+          ? 1
+          : 0
+        : dragPreview === 'mid-drag'
+          ? 0.75
+          : 0;
   }, [dragPreview, expanded, progress]);
 
   const commitAnchor = useCallback((target: number) => {
@@ -700,18 +666,19 @@ export function StageSheet({
         })
         .onFinalize((e, success) => {
           const travel = Math.max(1, travelPx.value);
+          const settle = (target: number) =>
+            theme.reducedMotion
+              ? target
+              : withSpring(target, {
+                  ...STAGE_SETTLE_SPRING,
+                  velocity: -e.velocityY / travel,
+                });
           if (!success) {
             // RNGH fires onFinalize on END *and* on FAIL/CANCELLED —
             // a failed recognizer (failOffsetX drift, OS gesture
             // steal) must not commit the anchor it never earned:
             // spring back onto the sheet's current anchor only.
-            const anchor = expanded ? 1 : 0;
-            progress.value = theme.reducedMotion
-              ? anchor
-              : withSpring(anchor, {
-                  ...STAGE_SETTLE_SPRING,
-                  velocity: -e.velocityY / travel,
-                });
+            progress.value = settle(expanded ? 1 : 0);
             return;
           }
           const target =
@@ -725,12 +692,7 @@ export function StageSheet({
           // Mark the settle as gesture-owned so the `expanded` flip the
           // commit schedules doesn't cold-restart this spring.
           anchor.value = target;
-          progress.value = theme.reducedMotion
-            ? target
-            : withSpring(target, {
-                ...STAGE_SETTLE_SPRING,
-                velocity: -e.velocityY / travel,
-              });
+          progress.value = settle(target);
           // A settle that lands on the anchor we're already on is a
           // no-op for the host — committing it would fire a spurious
           // expanded flip (the App wrapper maps every commit to
@@ -1290,27 +1252,7 @@ export function StageSheet({
           <GestureDetector gesture={chromePan}>
             <View style={{ flex: 1 }}>
               {lyricsHeaderEl}
-              {/*
-               * Honest lyrics: only `state === 'synced'` highlights the
-               * active line — plain text never gets synced treatment,
-               * instrumental/unavailable/error are explicit states, and
-               * loading is bounded by the session's own op deadline.
-               */}
-              {lyricsPane.kind === 'empty' ? (
-                <EmptyState
-                  title={lyricsPane.title}
-                  hint={lyricsPane.hint}
-                  icon={lyricsPane.icon}
-                />
-              ) : lyricsPane.kind === 'loading' ? (
-                <LoadingState title={lyricsPane.title} />
-              ) : (
-                <ErrorState
-                  title={lyricsPane.title}
-                  hint={lyricsPane.hint}
-                  onRetry={lyricsPane.onRetry}
-                />
-              )}
+              <StateFor view={lyricsPane} />
             </View>
           </GestureDetector>
         )
@@ -1381,6 +1323,21 @@ export function StageSheet({
         <ModeSegment mode={activeMode} onSelect={selectMode} />
       </View>
     </>
+  );
+
+  // The player's pinned tail (waveform + transport) can't scroll
+  // beneath the segment, so it reserves the segment's footprint here;
+  // lyrics/queue put it inside their scroll content instead.
+  const content = (
+    <View
+      style={{
+        flex: 1,
+        paddingHorizontal: theme.spacing.xl,
+        paddingBottom: activeMode === 'player' ? segmentReserve : 0,
+      }}
+    >
+      {body}
+    </View>
   );
 
   return (
@@ -1465,32 +1422,10 @@ export function StageSheet({
               textScale={theme.textScale}
               reducedMotion={theme.reducedMotion}
             >
-              <View
-                style={{
-                  flex: 1,
-                  paddingHorizontal: theme.spacing.xl,
-                  // The player's pinned tail (waveform + transport) can't
-                  // scroll beneath the segment, so it reserves the
-                  // segment's footprint here; lyrics/queue put it inside
-                  // their scroll content instead.
-                  paddingBottom:
-                    activeMode === 'player' ? segmentReserve : 0,
-                }}
-              >
-                {body}
-              </View>
+              {content}
             </ThemeProvider>
           ) : (
-            <View
-              style={{
-                flex: 1,
-                paddingHorizontal: theme.spacing.xl,
-                paddingBottom:
-                  activeMode === 'player' ? segmentReserve : 0,
-              }}
-            >
-              {body}
-            </View>
+            content
           )}
         </Animated.View>
       </Animated.View>
