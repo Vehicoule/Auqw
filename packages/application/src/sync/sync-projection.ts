@@ -49,7 +49,12 @@ import {
 import type { PersistedState, StorageBatch } from '../ports/storage.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import { QueueEngine } from '../queue/queue-engine.ts';
-import { compareStamp } from './hlc.ts';
+import {
+  KEY_SEP,
+  compareEntryTs,
+  entryKey,
+  jsonEquals,
+} from './entry-order.ts';
 import type {
   ChangeEntry,
   LocalWrite,
@@ -140,8 +145,6 @@ type SyncProjection = {
   readonly changedKinds: readonly SyncRecordKind[];
 };
 
-const KEY_SEP = '\u001f';
-
 function decodeParts(
   recordId: string,
   count: number,
@@ -159,35 +162,6 @@ function sameMapping(a: SourceMapping, b: SourceMapping): boolean {
     sameRef(a.ref, b.ref) &&
     a.status === b.status &&
     a.matchedAtMs === b.matchedAtMs
-  );
-}
-
-function jsonEqual(a: unknown, b: unknown): boolean {
-  if (Object.is(a, b)) {
-    return true;
-  }
-  if (
-    typeof a !== 'object' ||
-    typeof b !== 'object' ||
-    a === null ||
-    b === null
-  ) {
-    return false;
-  }
-  if (Array.isArray(a) !== Array.isArray(b)) {
-    return false;
-  }
-  if (Array.isArray(a) && Array.isArray(b)) {
-    return (
-      a.length === b.length && a.every((v, i) => jsonEqual(v, b[i]))
-    );
-  }
-  const aObj = a as Record<string, unknown>;
-  const bObj = b as Record<string, unknown>;
-  const aKeys = Object.keys(aObj);
-  return (
-    aKeys.length === Object.keys(bObj).length &&
-    aKeys.every((k) => Object.hasOwn(bObj, k) && jsonEqual(aObj[k], bObj[k]))
   );
 }
 
@@ -416,7 +390,7 @@ export function entityUpsertWrites(
     // Same-provider row with a changed ref value is still an upsert —
     // provider-key presence alone would silently absorb the edit.
     const prior = prev.find((p) => p.provider === ref.provider);
-    if (prior === undefined || !jsonEqual(prior.ref, ref.ref)) {
+    if (prior === undefined || !jsonEquals(prior.ref, ref.ref)) {
       writes.push({
         kind: 'entitySourceRef',
         recordId: entitySourceRefRecordId(entity.entityId, ref.provider),
@@ -474,7 +448,7 @@ export function settingsWrites(
 ): LocalWrite[] {
   const writes: LocalWrite[] = [];
   for (const field of SETTINGS_SYNC_FIELDS) {
-    if (!jsonEqual(prev[field], next[field])) {
+    if (!jsonEquals(prev[field], next[field])) {
       writes.push(
         fieldWrite('settings', SETTINGS_RECORD_ID, field, next[field]),
       );
@@ -593,7 +567,7 @@ export function emissionWrites(
       );
       for (const [provider, refValue] of nextMap) {
         const prior = prevMap.get(provider);
-        if (prior === undefined || !jsonEqual(prior, refValue)) {
+        if (prior === undefined || !jsonEquals(prior, refValue)) {
           writes.push({
             kind: 'entitySourceRef',
             recordId: entitySourceRefRecordId(entityId, provider),
@@ -641,7 +615,7 @@ export function emissionWrites(
       // Value compare, not identity — a same-provider row whose ref
       // changed emits the upsert; a rebuilt identical ref does not.
       const priorRef = prevKeys.get(keyOf(ref));
-      if (priorRef === undefined || !jsonEqual(priorRef.ref, ref.ref)) {
+      if (priorRef === undefined || !jsonEquals(priorRef.ref, ref.ref)) {
         writes.push({
           kind: 'entitySourceRef',
           recordId: entitySourceRefRecordId(ref.entityId, ref.provider),
@@ -812,7 +786,7 @@ export function unsyncedWrites(
     ) {
       return typeof syncedValue === 'number' && syncedValue >= write.value;
     }
-    return jsonEqual(syncedValue, write.value);
+    return jsonEquals(syncedValue, write.value);
   };
   const batch: StorageBatch = {
     recordings: [...input.recordings],
@@ -914,18 +888,6 @@ export function importEmissionWrites(
 // ---- inbound: applied outcomes → domain batch -----------------------------
 
 type AppliedOutcome = Extract<MergeOutcome, { type: 'applied' }>;
-
-function entryKey(entry: ChangeEntry): string {
-  return `${entry.deviceId}${KEY_SEP}${entry.hlc.l}${KEY_SEP}${entry.hlc.c}`;
-}
-
-function compareEntries(a: ChangeEntry, b: ChangeEntry): number {
-  const byStamp = compareStamp(a.hlc, b.hlc);
-  if (byStamp !== 0) {
-    return byStamp;
-  }
-  return a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0;
-}
 
 /**
  * Per-record fold of applied outcomes, mirroring the engine's merge
@@ -1063,7 +1025,7 @@ export function projectAppliedEntries(
   // Folds replay canonically (hlc, then deviceId) — the merge is
   // deterministic no matter the order a drain delivered outcomes in.
   const ordered = [...applied].sort((a, b) =>
-    compareEntries(a.entry, b.entry),
+    compareEntryTs(a.entry, b.entry),
   );
 
   const folds = new Map<string, RecordFold>();
