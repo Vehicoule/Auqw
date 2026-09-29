@@ -271,7 +271,15 @@ function exportDestinationLabel(uri: string): string {
   if (!uri.startsWith('content://')) {
     return uri;
   }
-  const docId = decodeURIComponent(uri.split('/document/').pop() ?? uri);
+  const raw = uri.split('/document/').pop() ?? uri;
+  let docId = raw;
+  try {
+    docId = decodeURIComponent(raw);
+  } catch {
+    // A provider that escapes its docId badly still exported fine —
+    // fall back to the raw id instead of surfacing a write failure
+    // for what is only a label-formatting problem.
+  }
   return docId.replace(/^[a-zA-Z0-9_-]+:/, '');
 }
 
