@@ -15,7 +15,7 @@ import type {
   SourceRef,
   TrackMetadata,
 } from '../domain.ts';
-import { appError, err, ok } from '../errors.ts';
+import { appError, cancelledError, err, ok } from '../errors.ts';
 import type { AppError, ErrorKind, Result } from '../errors.ts';
 import { isProviderCapability } from '../ports/provider.ts';
 import type {
@@ -103,7 +103,7 @@ export function manifestVersion(manifest: unknown): string | null {
 }
 
 export function providerCancelledError(): AppError {
-  return appError('cancelled', 'cancelled');
+  return cancelledError();
 }
 
 /** A result that fails JSON.parse or capability decode. */

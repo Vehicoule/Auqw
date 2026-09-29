@@ -1,4 +1,4 @@
-import { appError, err, ok } from './errors.ts';
+import { appError, cancelledError, err, ok } from './errors.ts';
 import type { AppError, Result } from './errors.ts';
 import { CancellationSource } from './cancellation.ts';
 import type { CancellationSignal } from './cancellation.ts';
@@ -97,7 +97,7 @@ export async function retryBounded<T>(
     // spend another port call — the signal is consulted at every
     // attempt, not only through the backoff sleep.
     if (opts.signal.cancelled) {
-      return err(appError('cancelled', 'cancelled'));
+      return err(cancelledError());
     }
     const now = nowMs();
     if (now === undefined) {

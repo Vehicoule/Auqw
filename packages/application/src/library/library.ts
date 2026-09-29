@@ -218,6 +218,14 @@ function hasUniqueIds<T>(items: readonly T[], idOf: (item: T) => string) {
   return new Set(items.map(idOf)).size === items.length;
 }
 
+/** Array where every element passes `guard`. */
+function allOf<T>(
+  value: unknown,
+  guard: (item: unknown) => item is T,
+): value is readonly T[] {
+  return Array.isArray(value) && value.every(guard);
+}
+
 export function isEntity(value: unknown): value is Entity {
   if (!isRecord(value)) return false;
   const { entityId, kind, title, artistName, artwork, createdMs } = value;
@@ -487,22 +495,14 @@ function hasValidLibrarySections(
   const playCounts = sections['playCounts'];
   const matchReviews = sections['matchReviews'];
   if (
-    !Array.isArray(likes) ||
-    !likes.every(isLike) ||
-    !Array.isArray(entities) ||
-    !entities.every(isEntity) ||
-    !Array.isArray(entitySourceRefs) ||
-    !entitySourceRefs.every(isEntitySourceRef) ||
-    !Array.isArray(playlists) ||
-    !playlists.every(isPlaylist) ||
-    !Array.isArray(playlistEntries) ||
-    !playlistEntries.every(isPlaylistEntry) ||
-    !Array.isArray(playHistory) ||
-    !playHistory.every(isPlayEvent) ||
-    !Array.isArray(playCounts) ||
-    !playCounts.every(isPlayCount) ||
-    !Array.isArray(matchReviews) ||
-    !matchReviews.every(isMatchReview)
+    !allOf(likes, isLike) ||
+    !allOf(entities, isEntity) ||
+    !allOf(entitySourceRefs, isEntitySourceRef) ||
+    !allOf(playlists, isPlaylist) ||
+    !allOf(playlistEntries, isPlaylistEntry) ||
+    !allOf(playHistory, isPlayEvent) ||
+    !allOf(playCounts, isPlayCount) ||
+    !allOf(matchReviews, isMatchReview)
   ) {
     return false;
   }
@@ -518,15 +518,12 @@ function hasValidLibrarySections(
   }
   const entityKinds = new Map(entities.map((e) => [e.entityId, e.kind]));
   const playlistIds = new Set(playlists.map((p) => p.playlistId));
-  const likeKeys = new Set<string>();
+  // 'track' likes name recordings; entity likes must name an entity
+  // of the same kind.
+  if (!hasUniqueIds(likes, (l) => `${l.entityKind} ${l.targetId}`)) {
+    return false;
+  }
   for (const like of likes) {
-    const key = `${like.entityKind} ${like.targetId}`;
-    if (likeKeys.has(key)) {
-      return false;
-    }
-    likeKeys.add(key);
-    // 'track' likes name recordings; entity likes must name an entity
-    // of the same kind.
     if (
       like.entityKind === 'track'
         ? !recordingIds.has(like.targetId)
@@ -535,32 +532,30 @@ function hasValidLibrarySections(
       return false;
     }
   }
-  const entityRefKeys = new Set<string>();
+  if (
+    !hasUniqueIds(entitySourceRefs, (r) => `${r.entityId} ${r.provider}`)
+  ) {
+    return false;
+  }
   for (const ref of entitySourceRefs) {
     // The ref's kind must agree with the target entity's kind.
     if (entityKinds.get(ref.entityId) !== ref.ref.kind) {
       return false;
     }
-    const key = `${ref.entityId} ${ref.provider}`;
-    if (entityRefKeys.has(key)) {
-      return false;
-    }
-    entityRefKeys.add(key);
   }
   const positions = new Map<string, Set<number>>();
   for (const entry of playlistEntries) {
-    if (!playlistIds.has(entry.playlistId)) {
-      return false;
-    }
-    if (!recordingIds.has(entry.recordingId)) {
+    if (
+      !playlistIds.has(entry.playlistId) ||
+      !recordingIds.has(entry.recordingId)
+    ) {
       return false;
     }
     const seen = positions.get(entry.playlistId) ?? new Set<number>();
     if (seen.has(entry.position)) {
       return false;
     }
-    seen.add(entry.position);
-    positions.set(entry.playlistId, seen);
+    positions.set(entry.playlistId, seen.add(entry.position));
   }
   if (
     !playHistory.every((e) => recordingIds.has(e.recordingId)) ||
@@ -577,12 +572,9 @@ function hasValidLibrarySections(
     const localSources = localSections.localSources;
     const localFiles = localSections.localFiles;
     if (
-      !Array.isArray(downloads) ||
-      !downloads.every(isDownloadRecord) ||
-      !Array.isArray(localSources) ||
-      !localSources.every(isLocalSource) ||
-      !Array.isArray(localFiles) ||
-      !localFiles.every(isLocalFile)
+      !allOf(downloads, isDownloadRecord) ||
+      !allOf(localSources, isLocalSource) ||
+      !allOf(localFiles, isLocalFile)
     ) {
       return false;
     }
@@ -636,12 +628,9 @@ export function isPersistedState(value: unknown): value is PersistedShape {
   }
   const v = value;
   if (
-    !Array.isArray(v['recordings']) ||
-    !v['recordings'].every(isRecording) ||
-    !Array.isArray(v['lyricsCache']) ||
-    !v['lyricsCache'].every(isLyricsCacheEntry) ||
-    !Array.isArray(v['artworkCache']) ||
-    !v['artworkCache'].every(isArtworkCacheEntry) ||
+    !allOf(v['recordings'], isRecording) ||
+    !allOf(v['lyricsCache'], isLyricsCacheEntry) ||
+    !allOf(v['artworkCache'], isArtworkCacheEntry) ||
     !isQueueSnapshot(v['queue']) ||
     !isSettings(v['settings'])
   ) {
@@ -720,10 +709,11 @@ export function isExportDocument(value: unknown): value is ExportDocument {
   const recordingIds = new Set<string>();
   const records: { rec: Record<string, unknown>; id: string }[] = [];
   for (const rec of v['recordings']) {
-    if (!isRecord(rec) || !isString(rec['id'], 64)) {
-      return false;
-    }
-    if (recordingIds.has(rec['id'])) {
+    if (
+      !isRecord(rec) ||
+      !isString(rec['id'], 64) ||
+      recordingIds.has(rec['id'])
+    ) {
       return false;
     }
     recordingIds.add(rec['id']);

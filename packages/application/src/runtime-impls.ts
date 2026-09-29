@@ -2,7 +2,7 @@ import type { ClockPort } from './ports/clock.ts';
 import type { IdPort, RandomPort } from './ports/runtime.ts';
 import type { LogPort } from './ports/log.ts';
 import type { Result } from './errors.ts';
-import { appError, err, ok } from './errors.ts';
+import { appError, cancelledError, err, ok } from './errors.ts';
 import { isSafeNonNegative } from './domain.ts';
 
 // This file is the platform edge: every runtime the apps run on
@@ -18,10 +18,6 @@ declare const console: {
   error(message: string): void;
 };
 declare const crypto: { readonly randomUUID: () => string } | undefined;
-
-function cancelledError() {
-  return appError('cancelled', 'cancelled');
-}
 
 /**
  * Wall-clock/system shell ports shared by the desktop renderer and

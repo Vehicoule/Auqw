@@ -123,6 +123,11 @@ export function err(error: AppError): Result<never> {
   return { ok: false, error };
 }
 
+/** The 'cancelled' shape every op surfaces on a fired signal. */
+export function cancelledError(): AppError {
+  return appError('cancelled', 'cancelled');
+}
+
 /**
  * Maps an unexpected thrown value crossing a port boundary to a fixed
  * internal error. The raw value is never carried across the port.

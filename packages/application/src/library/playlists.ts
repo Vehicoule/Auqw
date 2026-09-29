@@ -42,6 +42,13 @@ function requireNow(nowMs: number): void {
   }
 }
 
+function playlistById(
+  state: PlaylistState,
+  playlistId: string,
+): Playlist | undefined {
+  return state.playlists.find((p) => p.playlistId === playlistId);
+}
+
 function siblings(
   entries: readonly PlaylistEntry[],
   playlistId: string,
@@ -75,7 +82,7 @@ export function createPlaylist(
   requireId(playlistId, 'playlistId');
   requireName(name);
   requireNow(nowMs);
-  if (state.playlists.some((p) => p.playlistId === playlistId)) {
+  if (playlistById(state, playlistId) !== undefined) {
     throw new TypeError('duplicate playlistId');
   }
   const playlist: Playlist = {
@@ -99,8 +106,7 @@ export function renamePlaylist(
   requireId(playlistId, 'playlistId');
   requireName(name);
   requireNow(nowMs);
-  const existing = state.playlists.find((p) => p.playlistId === playlistId);
-  if (existing === undefined) {
+  if (playlistById(state, playlistId) === undefined) {
     throw new TypeError('unknown playlist');
   }
   return {
@@ -119,7 +125,7 @@ export function deletePlaylist(
   playlistId: string,
 ): PlaylistState {
   requireId(playlistId, 'playlistId');
-  if (!state.playlists.some((p) => p.playlistId === playlistId)) {
+  if (playlistById(state, playlistId) === undefined) {
     throw new TypeError('unknown playlist');
   }
   return {
@@ -149,10 +155,7 @@ export function addPlaylistEntry(
     throw new TypeError('selectedRef must be a track ref or null');
   }
   requireNow(input.addedMs);
-  const playlist = state.playlists.find(
-    (p) => p.playlistId === input.playlistId,
-  );
-  if (playlist === undefined) {
+  if (playlistById(state, input.playlistId) === undefined) {
     throw new TypeError('unknown playlist');
   }
   if (state.entries.some((e) => e.entryId === input.entryId)) {
@@ -216,10 +219,8 @@ export function reorderPlaylistEntry(
   const rest = siblings(state.entries, entry.playlistId).filter(
     (e) => e.entryId !== entryId,
   );
-  let index: number;
-  if (move === null) {
-    index = rest.length;
-  } else {
+  let index = rest.length;
+  if (move !== null) {
     const targetId = 'before' in move ? move.before : move.after;
     const at = rest.findIndex((e) => e.entryId === targetId);
     if (at < 0) {
@@ -231,21 +232,19 @@ export function reorderPlaylistEntry(
   const after = index < rest.length ? rest[index] : undefined;
   // Null means no strictly-new finite double exists at the slot —
   // the playlist's positions compact back to integers.
-  let position: number | null = null;
-  if (before === undefined) {
-    if (after === undefined) {
-      position = 1;
-    } else {
-      const head = after.position - 1;
-      position = head < after.position ? head : null;
-    }
-  } else if (after === undefined) {
-    const tail = before.position + 1;
-    position = tail > before.position ? tail : null;
-  } else {
-    const mid = (before.position + after.position) / 2;
-    position = mid > before.position && mid < after.position ? mid : null;
-  }
+  const candidate =
+    before === undefined
+      ? after === undefined
+        ? 1
+        : after.position - 1
+      : after === undefined
+        ? before.position + 1
+        : (before.position + after.position) / 2;
+  const position =
+    (before === undefined || candidate > before.position) &&
+    (after === undefined || candidate < after.position)
+      ? candidate
+      : null;
   if (position === null) {
     const order = new Map(
       [...rest.slice(0, index), entry, ...rest.slice(index)].map(

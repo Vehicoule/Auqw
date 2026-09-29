@@ -3,7 +3,7 @@ import type {
   CancellationSignal,
   OperationContext,
 } from '../cancellation.ts';
-import { appError, err, ok } from '../errors.ts';
+import { appError, cancelledError, err, ok } from '../errors.ts';
 import type { Result } from '../errors.ts';
 import type {
   DownloadProgress,
@@ -175,7 +175,7 @@ export class DownloadManager {
     let dirty = false;
     for (const row of [...staged.values()]) {
       if (signal.cancelled) {
-        return failed(err(appError('cancelled', 'cancelled')));
+        return failed(err(cancelledError()));
       }
       if (row.state === 'available') {
         const st = await this.#deps.transfer.stat(row.filePath, signal);
@@ -449,7 +449,7 @@ export class DownloadManager {
   ): Promise<Result<void>> {
     for (const item of items) {
       if (signal.cancelled) {
-        return err(appError('cancelled', 'cancelled'));
+        return err(cancelledError());
       }
       const requested = await this.request(item, signal);
       if (!requested.ok) {
@@ -526,7 +526,7 @@ export class DownloadManager {
   async removeAll(signal: CancellationSignal): Promise<Result<void>> {
     for (const row of [...this.#rows.values()]) {
       if (signal.cancelled) {
-        return err(appError('cancelled', 'cancelled'));
+        return err(cancelledError());
       }
       const removed = await this.#removeRow(row, signal);
       if (!removed.ok) {

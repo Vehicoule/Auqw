@@ -1,4 +1,4 @@
-import { appError, err, ok } from '../errors.ts';
+import { appError, cancelledError, err, ok } from '../errors.ts';
 import type { AppError, ErrorKind, Result } from '../errors.ts';
 import { CancellationSource } from '../cancellation.ts';
 import type { CancellationSignal } from '../cancellation.ts';
@@ -58,7 +58,7 @@ export function asAppError(thrown: unknown): AppError {
     thrown !== null &&
     (thrown as { name?: unknown }).name === 'AbortError'
   ) {
-    return appError('cancelled', 'cancelled');
+    return cancelledError();
   }
   return appError('internal', 'download failed');
 }

@@ -4,7 +4,7 @@ import type {
   OperationContext,
 } from '../cancellation.ts';
 import type { AppError, ErrorKind, Result } from '../errors.ts';
-import { appError, err, fromUnknown, ok } from '../errors.ts';
+import { appError, cancelledError, err, fromUnknown, ok } from '../errors.ts';
 import type { Settings } from '../domain.ts';
 import {
   ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
@@ -127,14 +127,16 @@ function isArtworkUrl(url: unknown): url is string {
   return isString(url, 2048) && isPublicHttpsUrl(url);
 }
 
+const invalidResponse = (message: string): Result<never> =>
+  err(appError('invalid-response', message));
+
 type Section = {
   readonly entries: Map<string, ArtworkCacheEntry>;
   readonly settings: Settings;
 };
 
-type Probe =
-  | { readonly type: 'hit'; readonly filePath: string }
-  | { readonly type: 'absent' };
+/** Phase-1 verdict: the cached filePath on a hit, null when absent. */
+type Probe = string | null;
 
 type Inflight = {
   promise: Promise<Result<ArtworkLookup>>;
@@ -311,34 +313,16 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     }
     const state = loaded.value;
     if (!isSettings(state.settings)) {
-      return err(
-        appError(
-          'invalid-response',
-          'persisted settings failed validation',
-        ),
-      );
+      return invalidResponse('persisted settings failed validation');
     }
     const rows: unknown = state.artworkCache;
-    if (
-      !Array.isArray(rows) ||
-      !rows.every(isArtworkCacheEntry)
-    ) {
-      return err(
-        appError(
-          'invalid-response',
-          'persisted artwork cache failed validation',
-        ),
-      );
+    if (!Array.isArray(rows) || !rows.every(isArtworkCacheEntry)) {
+      return invalidResponse('persisted artwork cache failed validation');
     }
     const entries = new Map<string, ArtworkCacheEntry>();
     for (const row of rows) {
       if (entries.has(row.url)) {
-        return err(
-          appError(
-            'invalid-response',
-            'persisted artwork cache has duplicate urls',
-          ),
-        );
+        return invalidResponse('persisted artwork cache has duplicate urls');
       }
       entries.set(row.url, { ...row });
     }
@@ -402,7 +386,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         break;
       }
       if (signal.cancelled) {
-        firstError ??= appError('cancelled', 'cancelled');
+        firstError ??= cancelledError();
         break;
       }
       const removed = await call(() =>
@@ -438,7 +422,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         }
         const entry = section.value.entries.get(url);
         if (entry === undefined) {
-          return ok({ type: 'absent' });
+          return ok<Probe>(null);
         }
         const present = await call(() =>
           deps.paths.exists(entry.filePath, context.signal),
@@ -450,10 +434,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         if (!present.value) {
           entries.delete(url);
           const committed = await commitSection(entries, context);
-          if (!committed.ok) {
-            return committed;
-          }
-          return ok({ type: 'absent' });
+          return committed.ok ? ok<Probe>(null) : committed;
         }
         const now = safeNow();
         if (now === null) {
@@ -463,27 +444,19 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         }
         entry.lastAccessedMs = now;
         const committed = await commitSection(entries, context);
-        if (!committed.ok) {
-          return committed;
-        }
-        return ok({ type: 'hit', filePath: entry.filePath });
+        return committed.ok ? ok<Probe>(entry.filePath) : committed;
       },
     );
     if (!probed.ok) {
       return probed;
     }
-    if (probed.value.type === 'hit') {
-      return ok({ hit: true, filePath: probed.value.filePath });
+    if (probed.value !== null) {
+      return ok({ hit: true, filePath: probed.value });
     }
 
     const destPath = deps.paths.destFor(url);
     if (!isString(destPath, 1024)) {
-      return err(
-        appError(
-          'invalid-response',
-          'artwork destination path failed validation',
-        ),
-      );
+      return invalidResponse('artwork destination path failed validation');
     }
     const removeDest = (): Promise<Result<void>> =>
       call(() => deps.paths.remove(destPath, context.signal));
@@ -538,12 +511,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     const bytes = downloaded.value.bytes;
     if (!isSafeNonNegative(bytes)) {
       await removeDest();
-      return err(
-        appError(
-          'invalid-response',
-          'download reported an invalid byte count',
-        ),
-      );
+      return invalidResponse('download reported an invalid byte count');
     }
     const now = safeNow();
     if (now === null) {
@@ -595,11 +563,8 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       for (const other of entries.values()) {
         if (other.filePath === destPath) {
           await removeDest();
-          return err(
-            appError(
-              'invalid-response',
-              'artwork destination path collides with a cached entry',
-            ),
+          return invalidResponse(
+            'artwork destination path collides with a cached entry',
           );
         }
       }
@@ -668,7 +633,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         resolve(result);
       };
       unsubscribe = context.signal.subscribe(() => {
-        finish(err(appError('cancelled', 'cancelled')));
+        finish(err(cancelledError()));
       });
       // Each waiter's own deadline bounds its wait — a caller whose
       // budget dies while others remain leaves without cancelling
@@ -700,14 +665,10 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     context: OperationContext,
   ): Promise<Result<ArtworkLookup>> {
     if (!isArtworkUrl(url)) {
-      return Promise.resolve(
-        err(appError('invalid-response', 'invalid artwork url')),
-      );
+      return Promise.resolve(invalidResponse('invalid artwork url'));
     }
     if (context.signal.cancelled) {
-      return Promise.resolve(
-        err(appError('cancelled', 'cancelled')),
-      );
+      return Promise.resolve(err(cancelledError()));
     }
     const remembered = failures.get(url);
     if (remembered !== undefined) {
@@ -767,7 +728,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     return serialized(
       async (): Promise<Result<ArtworkSweepReport>> => {
         if (context.signal.cancelled) {
-          return err(appError('cancelled', 'cancelled'));
+          return err(cancelledError());
         }
         const section = await loadSection(context);
         if (!section.ok) {
@@ -783,7 +744,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         let firstError: AppError | null = null;
         for (const entry of [...entries.values()]) {
           if (context.signal.cancelled) {
-            firstError ??= appError('cancelled', 'cancelled');
+            firstError ??= cancelledError();
             break;
           }
           const present = await call(() =>

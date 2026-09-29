@@ -1,7 +1,7 @@
 import { CancellationSource } from '../cancellation.ts';
 import type { CancellationSignal, OperationContext } from '../cancellation.ts';
 import type { AppError, Result } from '../errors.ts';
-import { appError, err, fromUnknown, ok } from '../errors.ts';
+import { appError, cancelledError, err, fromUnknown, ok } from '../errors.ts';
 import type {
   MappingStatus,
   Recording,
@@ -267,7 +267,7 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
     return serialized(async () => {
       const { signal: sig, cancelled } = resolveSignal(signal);
       if (cancelled) {
-        return err(appError('cancelled', 'cancelled'));
+        return err(cancelledError());
       }
       const at = now();
       if (at === null) {
@@ -283,7 +283,7 @@ export function createCorrections(deps: CorrectionsDeps): Corrections {
         return err(loaded.error);
       }
       if (recheck && sig.cancelled) {
-        return err(appError('cancelled', 'cancelled'));
+        return err(cancelledError());
       }
       return body({ state: loaded.value, at, deadlineMs, sig });
     });
