@@ -489,6 +489,50 @@ export function Artwork({
   );
 }
 
+/** Artwork with the playing-state scrim + EqBars overlay. */
+export function PlayingArtwork({
+  url,
+  playing,
+  size = 40,
+  dimmed = false,
+}: {
+  readonly url: string | null;
+  readonly playing: boolean;
+  readonly size?: number | undefined;
+  readonly dimmed?: boolean | undefined;
+}) {
+  const theme = useTheme();
+  return (
+    <View
+      style={{
+        width: size,
+        height: size,
+        borderRadius: theme.radius.thumb,
+        overflow: 'hidden',
+      }}
+      accessible={false}
+    >
+      <Artwork url={url} size={size} dimmed={dimmed} />
+      {playing && (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: theme.colors.scrim,
+          }}
+        >
+          <EqBars size={11} />
+        </View>
+      )}
+    </View>
+  );
+}
+
 export type IconName =
   | 'play'
   | 'pause'

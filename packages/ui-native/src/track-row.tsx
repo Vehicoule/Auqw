@@ -1,10 +1,9 @@
 import { View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import {
-  Artwork,
-  EqBars,
   Icon,
   IconButton,
+  PlayingArtwork,
   Pressable,
   Text,
 } from './primitives.tsx';
@@ -174,33 +173,11 @@ export function TrackRow({
           pressed && { backgroundColor: theme.colors.fg08 },
         ]}
       >
-        <View
-          style={{
-            width: 40,
-            height: 40,
-            borderRadius: theme.radius.thumb,
-            overflow: 'hidden',
-          }}
-          accessible={false}
-        >
-          <Artwork url={row.artworkUrl} size={40} dimmed={unavailable} />
-          {row.playing && (
-            <View
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                right: 0,
-                bottom: 0,
-                alignItems: 'center',
-                justifyContent: 'center',
-                backgroundColor: theme.colors.scrim,
-              }}
-            >
-              <EqBars size={11} />
-            </View>
-          )}
-        </View>
+        <PlayingArtwork
+          url={row.artworkUrl}
+          playing={row.playing}
+          dimmed={unavailable}
+        />
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text
             variant="body"
