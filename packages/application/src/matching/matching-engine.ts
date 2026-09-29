@@ -208,7 +208,7 @@ export function extractVersionLabels(
   return LABEL_ORDER.filter((l) => labels.has(l));
 }
 
-function refKey(ref: SourceRef): string {
+export function refKey(ref: SourceRef): string {
   return `${ref.provider}\u001f${ref.kind}\u001f${ref.id}`;
 }
 

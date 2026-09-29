@@ -57,7 +57,10 @@ function validateOccurrence(occurrence: QueueOccurrence): void {
   }
 }
 
-function sameError(a: AppError | undefined, b: AppError | undefined): boolean {
+export function sameError(
+  a: AppError | undefined,
+  b: AppError | undefined,
+): boolean {
   if (a === undefined || b === undefined) {
     return a === b;
   }

@@ -12,6 +12,7 @@ import { isSafeNonNegative, isString } from '../domain.ts';
 import {
   collapseByRef,
   MatchingEngine,
+  refKey,
 } from '../matching/matching-engine.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { LogPort } from '../ports/log.ts';
@@ -21,6 +22,7 @@ import type {
   StorageBatch,
   StoragePort,
 } from '../ports/storage.ts';
+import { saturatingAdd } from '../session/util.ts';
 import { isCandidateSnapshot } from './library.ts';
 import type {
   CandidateSnapshot,
@@ -125,15 +127,6 @@ export function isMatchGate(error: AppError): boolean {
   return (
     error.kind === 'unavailable' && error.message === MATCH_GATE_MESSAGE
   );
-}
-
-function refKey(ref: SourceRef): string {
-  return `${ref.provider}\u001f${ref.kind}\u001f${ref.id}`;
-}
-
-function saturatingAdd(a: number, b: number): number {
-  const sum = a + b;
-  return sum > Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : sum;
 }
 
 /**
