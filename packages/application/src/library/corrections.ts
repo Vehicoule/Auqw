@@ -9,7 +9,10 @@ import type {
   SourceRef,
 } from '../domain.ts';
 import { isSafeNonNegative, isString } from '../domain.ts';
-import { MatchingEngine } from '../matching/matching-engine.ts';
+import {
+  collapseByRef,
+  MatchingEngine,
+} from '../matching/matching-engine.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { LogPort } from '../ports/log.ts';
 import type { IdPort } from '../ports/runtime.ts';
@@ -124,11 +127,6 @@ export function isMatchGate(error: AppError): boolean {
   );
 }
 
-/** Same conflict order as MatchingEngine's per-ref collapse. */
-function statusRank(status: MappingStatus): number {
-  return status === 'user-confirmed' ? 2 : status === 'rejected' ? 1 : 0;
-}
-
 function refKey(ref: SourceRef): string {
   return `${ref.provider}\u001f${ref.kind}\u001f${ref.id}`;
 }
@@ -136,29 +134,6 @@ function refKey(ref: SourceRef): string {
 function saturatingAdd(a: number, b: number): number {
   const sum = a + b;
   return sum > Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : sum;
-}
-
-/**
- * The effective claim per ref: latest matchedAtMs wins; equal
- * timestamps rank user-confirmed > rejected > automatic.
- */
-function collapseByRef(
-  mappings: readonly SourceMapping[],
-): Map<string, SourceMapping> {
-  const byRef = new Map<string, SourceMapping>();
-  for (const mapping of mappings) {
-    const key = refKey(mapping.ref);
-    const existing = byRef.get(key);
-    if (
-      existing === undefined ||
-      mapping.matchedAtMs > existing.matchedAtMs ||
-      (mapping.matchedAtMs === existing.matchedAtMs &&
-        statusRank(mapping.status) > statusRank(existing.status))
-    ) {
-      byRef.set(key, mapping);
-    }
-  }
-  return byRef;
 }
 
 /**
