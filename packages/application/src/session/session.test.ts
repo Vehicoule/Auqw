@@ -4613,16 +4613,17 @@ async function deadPrepareOutcomeStopsAtBudget(): Promise<void> {
     },
   });
   await pump();
-  // The second hop finds the shared budget spent — 'budget-exceeded'
-  // stays the terminal bound; a dead-stream storm never stacks a
-  // third prepare.
+  // The second hop finds the shared budget spent — no third
+  // prepare issues, and the terminal verdict is the LAST dead-stream
+  // outcome verbatim: a provider's real 'not-found' rides the same
+  // kinds, so 'budget-exceeded' must never mask it.
   assertEqual(calls(r, 'prepare').length, 2, 'spent budget issues no third');
   const playback = readyOf(r).playback;
   assert(playback.type === 'failed', 'spent budget fails the attempt');
-  assertEqual(playback.error.kind, 'budget-exceeded');
+  assertEqual(playback.error.kind, 'released');
   const queue = readyOf(r).queue;
   assertEqual(queue.mode, 'paused', 'terminal verdict pauses the queue');
-  assertEqual(queue.blockedError?.kind, 'budget-exceeded');
+  assertEqual(queue.blockedError?.kind, 'released');
   assert(
     r.player.projections.at(-1)?.items[0]?.skipsForward !== true,
     'a budget verdict does not flag the row',

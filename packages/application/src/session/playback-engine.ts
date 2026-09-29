@@ -1,6 +1,13 @@
 import { CancellationSource } from '../cancellation.ts';
 import type { AppError, ErrorKind, Result } from '../errors.ts';
-import { appError, err, fromUnknown, isBotCheckWall, ok } from '../errors.ts';
+import {
+  appError,
+  err,
+  fromUnknown,
+  isBotCheckWall,
+  isPermanentFailure,
+  ok,
+} from '../errors.ts';
 import type {
   Recording,
   SourceMapping,
@@ -84,22 +91,6 @@ const DEAD_STREAM_KINDS: ReadonlySet<ErrorKind> = new Set([
   'expired',
   'superseded',
   'not-found',
-]);
-
-/**
- * Verdicts that condemn the row itself — the source is gone,
- * unplayable, or gated. Only these earn `markUnplayable`'s
- * forward-skip flag; every other failure (weather, rate walls,
- * deadlines, bookkeeping) still pauses the queue on its typed
- * verdict but leaves the row reachable — `next()` must not step
- * over a hiccup forever.
- */
-const PERMANENT_FAILURE_KINDS: ReadonlySet<ErrorKind> = new Set([
-  'not-found',
-  'unsupported',
-  'no-result',
-  'auth-required',
-  'expired-resource',
 ]);
 
 /**
@@ -1776,7 +1767,7 @@ export class PlaybackEngine {
         // Only permanent verdicts flag the row unplayable — a
         // transient wall, deadline, or bookkeeping kill pauses the
         // queue on the typed error but leaves the row in the walk.
-        if (PERMANENT_FAILURE_KINDS.has(error.kind)) {
+        if (isPermanentFailure(error)) {
           r.queue.markUnplayable(error);
         } else {
           r.queue.markFailed(error);
@@ -2194,13 +2185,19 @@ export class PlaybackEngine {
     active.timer?.cancel();
     if (event.outcome.type === 'failed') {
       const attempts = [event.outcome.attempt];
-      if (DEAD_STREAM_KINDS.has(event.outcome.error.kind)) {
+      if (
+        DEAD_STREAM_KINDS.has(event.outcome.error.kind) &&
+        active.preparesUsed < PREPARE_CALL_BUDGET
+      ) {
         // A dead-stream verdict on the outcome itself means the
         // minted session died between commit and delivery — a
         // registry kill, not provider truth. Same recovery as the
         // dead-handle legs: re-run the intent inside its own
-        // deadline + prepare budget; a spent bound still fails
-        // 'budget-exceeded' in startAttempt.
+        // deadline + prepare budget. The budget gate lives here,
+        // not inside startAttempt: a provider's real verdict rides
+        // the same kinds, so once the budget is spent the last
+        // verdict must surface verbatim — 'budget-exceeded' would
+        // mask a genuine 'not-found'.
         await this.startAttempt(active.occurrenceId, {
           deadlineMs: active.deadlineMs,
           listenedMsAccum: active.listenedMsAccum,

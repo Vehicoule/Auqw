@@ -99,6 +99,7 @@ import type {
 } from '@auqw/ui-shared';
 import {
   advanceTargetId,
+  failedSkipIds,
   playlistDownloadPlan,
   reportStoredDownloadError,
   rowActionsModel,
@@ -916,9 +917,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
     player === null ? (stagePlayer?.occurrenceId ?? null) : null;
 
   // playback.type names only the latest failure — the hook carries
-  // the set so a row the cursor moved past keeps its 'error' mark;
-  // a fresh attempt for the occurrence clears it, removals prune.
-  const failedQueueIds = useRef(new Set<string>());
+  // each failed row's verdict so a row the cursor moved past keeps
+  // its 'error' mark; a fresh attempt for the occurrence clears it,
+  // removals prune. The verdict rides along because the advance
+  // gate's skip set is only the permanent subset (isPermanentFailure
+  // — the same policy the queue engine marks by).
+  const failedQueueErrors = useRef(new Map<string, AppError>());
   // Rows never read playback.positionMs — dep on the fields the
   // bookkeeping uses so a position tick doesn't rebuild the model.
   const playbackType = state.playback.type;
@@ -928,17 +932,17 @@ export function useAppShell<E extends { readonly type: string } = never>(
     const playback = state.playback;
     if (playback.type === 'failed') {
       if (playback.occurrenceId !== null) {
-        failedQueueIds.current.add(playback.occurrenceId);
+        failedQueueErrors.current.set(playback.occurrenceId, playback.error);
       }
     } else if (playback.type !== 'idle') {
-      failedQueueIds.current.delete(playback.occurrenceId);
+      failedQueueErrors.current.delete(playback.occurrenceId);
     }
     const live = new Set(
       state.queue.occurrences.map((o) => o.occurrenceId),
     );
-    for (const id of failedQueueIds.current) {
+    for (const id of failedQueueErrors.current.keys()) {
       if (!live.has(id)) {
-        failedQueueIds.current.delete(id);
+        failedQueueErrors.current.delete(id);
       }
     }
     return toQueueModel({
@@ -956,9 +960,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
             )
           : undefined,
       failedOccurrenceIds:
-        failedQueueIds.current.size === 0
+        failedQueueErrors.current.size === 0
           ? undefined
-          : failedQueueIds.current,
+          : new Set(failedQueueErrors.current.keys()),
       dealtOrder: state.shuffleOrder ?? undefined,
     });
     // localPlayable re-reads downloads/local after their mutations.
@@ -1549,7 +1553,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
           occurrences,
           currentOccurrenceId,
           dealtOrder: state.shuffleOrder,
-          failedIds: failedQueueIds.current,
+          failedIds: failedSkipIds(failedQueueErrors.current),
           repeat: state.repeat,
           positionMs: session.positionMs(),
         });

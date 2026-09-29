@@ -133,6 +133,25 @@ export function isBotCheckWall(error: AppError): boolean {
   );
 }
 
+/**
+ * Verdicts that condemn the row itself — the source is gone,
+ * unplayable, or gated. Only these earn the forward-skip flag;
+ * every other failure still pauses the queue on its typed verdict
+ * but leaves the row in the walk. Shared by the engine's mark
+ * policy and the shells' advance gate — the two walks must agree.
+ */
+const PERMANENT_FAILURE_KINDS: ReadonlySet<ErrorKind> = new Set([
+  'not-found',
+  'unsupported',
+  'no-result',
+  'auth-required',
+  'expired-resource',
+]);
+
+export function isPermanentFailure(error: AppError): boolean {
+  return PERMANENT_FAILURE_KINDS.has(error.kind);
+}
+
 export function ok<T>(value: T): Result<T> {
   return { ok: true, value };
 }

@@ -23,10 +23,13 @@ branch) checks `DEAD_STREAM_KINDS` first and hops through
 `startAttempt(occurrenceId, {deadlineMs, listenedMsAccum,
 preparesUsed})` — the same recovery shape `#adoptPrepared` already
 uses for a dead handle. The hop draws on the intent's own deadline and
-shared `preparesUsed`, so `PREPARE_CALL_BUDGET = 2` remains the upper
-bound: when the budget is spent, `startAttempt`'s guard fails
-`'budget-exceeded'` exactly as before. Playback publishes `preparing`
-throughout — no failed flicker, no queue mark.
+shared `preparesUsed`, and the budget gate lives in the branch itself:
+once `preparesUsed` reaches `PREPARE_CALL_BUDGET = 2` the outcome
+falls through to the ordinary failure path, so the terminal verdict
+is the LAST outcome verbatim — a provider's real `'not-found'` rides
+the same kinds and must never surface as `'budget-exceeded'`.
+Playback publishes `preparing` throughout — no failed flicker, no
+queue mark.
 
 ## Fix 2 — only permanent verdicts flag the row
 
