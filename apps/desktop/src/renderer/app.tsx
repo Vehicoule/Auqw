@@ -1765,13 +1765,7 @@ function Main({
       }
       await dispatchPlay('common.play', session.playOccurrence(enqueued.value));
     },
-<<<<<<< HEAD
-    [session, canPlay, reportPlay],
-||||||| parent of 442a918 (feat(queue): standard player queue order — now playing, up next, history)
-    [session, canPlay],
-=======
-    [session, state.queue, canPlay],
->>>>>>> 442a918 (feat(queue): standard player queue order — now playing, up next, history)
+    [session, state.queue, canPlay, reportPlay],
   );
 
   // Queue presses and transport follow the same offline rule as
@@ -1891,22 +1885,10 @@ function Main({
       const meta = resultMeta.current.get(row.key);
       if (meta !== undefined && canPlayMeta(meta)) {
         recordRecentSearch(query);
-<<<<<<< HEAD
-        void dispatchPlay('action.playResult', session.addAndPlay(meta));
-||||||| parent of 442a918 (feat(queue): standard player queue order — now playing, up next, history)
-        void session.addAndPlay(meta);
-=======
-        void playMeta(meta);
->>>>>>> 442a918 (feat(queue): standard player queue order — now playing, up next, history)
+        void dispatchPlay('action.playResult', playMeta(meta));
       }
     },
-<<<<<<< HEAD
-    [session, canPlayMeta, query, recordRecentSearch, reportPlay],
-||||||| parent of 442a918 (feat(queue): standard player queue order — now playing, up next, history)
-    [session, canPlayMeta, query, recordRecentSearch],
-=======
-    [canPlayMeta, playMeta, query, recordRecentSearch],
->>>>>>> 442a918 (feat(queue): standard player queue order — now playing, up next, history)
+    [canPlayMeta, playMeta, dispatchPlay, query, recordRecentSearch],
   );
 
   const onSettingsSelect = useCallback(
@@ -2964,16 +2946,7 @@ function Main({
                   if (searchState.type === 'content') {
                     recordRecentSearch(searchState.query);
                   }
-<<<<<<< HEAD
-                  void dispatchPlay(
-                    'action.playResult',
-                    session.addAndPlay(meta),
-                  );
-||||||| parent of 442a918 (feat(queue): standard player queue order — now playing, up next, history)
-                  void session.addAndPlay(meta);
-=======
-                  void playMeta(meta);
->>>>>>> 442a918 (feat(queue): standard player queue order — now playing, up next, history)
+                  void dispatchPlay('action.playResult', playMeta(meta));
                 }
                 return;
               }
@@ -3130,16 +3103,7 @@ function Main({
             onPressItem={(row) => {
               const meta = metaFor(row);
               if (meta !== undefined && canPlayMeta(meta)) {
-<<<<<<< HEAD
-                void dispatchPlay(
-                  'action.playResult',
-                  session.addAndPlay(meta),
-                );
-||||||| parent of 442a918 (feat(queue): standard player queue order — now playing, up next, history)
-                void session.addAndPlay(meta);
-=======
-                void playMeta(meta);
->>>>>>> 442a918 (feat(queue): standard player queue order — now playing, up next, history)
+                void dispatchPlay('action.playResult', playMeta(meta));
               }
             }}
             onAddToPlaylist={(row) => {
