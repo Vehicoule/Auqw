@@ -130,11 +130,5 @@ class Sha256State {
 }
 
 export function createSha256(): ChunkHasher {
-  const state = new Sha256State();
-  return {
-    update: (bytes: Uint8Array): void => {
-      state.update(bytes);
-    },
-    digest: (): string => state.digest(),
-  };
+  return new Sha256State();
 }

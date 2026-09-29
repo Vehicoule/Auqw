@@ -72,11 +72,7 @@ function analyzeTitle(title: string): AnalyzedTitle {
   // Labels are detected over the whole title, including any suffix we
   // later strip from the base.
   const allTokens = tokenize(lower);
-  for (let i = 0; i < allTokens.length; i += 1) {
-    const token = allTokens[i];
-    if (token === undefined) {
-      continue;
-    }
+  for (const [i, token] of allTokens.entries()) {
     const label = LABEL_TOKEN.get(token);
     if (label !== undefined) {
       labels.add(label);
@@ -137,66 +133,58 @@ function analyzeTitle(title: string): AnalyzedTitle {
   return { base: baseTokens.join(' '), labels };
 }
 
+/** Multiset counts over items. */
+function counts<T>(items: readonly T[]): Map<T, number> {
+  const out = new Map<T, number>();
+  for (const item of items) {
+    out.set(item, (out.get(item) ?? 0) + 1);
+  }
+  return out;
+}
+
+/** Sørensen–Dice over two count maps. */
+function diceScore(
+  left: Map<string, number>,
+  right: Map<string, number>,
+): number {
+  let overlap = 0;
+  let leftTotal = 0;
+  for (const [key, count] of left) {
+    leftTotal += count;
+    overlap += Math.min(count, right.get(key) ?? 0);
+  }
+  let rightTotal = 0;
+  for (const count of right.values()) {
+    rightTotal += count;
+  }
+  return (2 * overlap) / (leftTotal + rightTotal);
+}
+
 /** Sørensen–Dice over Unicode code-point bigrams. */
 function dice(a: string, b: string): number {
   if (a === b) {
     return 1;
   }
-  const aLen = [...a].length;
-  const bLen = [...b].length;
+  const bigrams = (s: string): string[] => {
+    const chars = [...s];
+    return chars.slice(1).map((c, i) => `${chars[i] ?? ''}${c}`);
+  };
   // One-code-point strings have no bigrams; unequal strings score 0,
   // never NaN.
-  if (aLen < 2 || bLen < 2) {
+  if ([...a].length < 2 || [...b].length < 2) {
     return 0;
   }
-  const bigrams = (s: string): Map<string, number> => {
-    const grams = new Map<string, number>();
-    const chars = [...s];
-    for (let i = 0; i + 1 < chars.length; i += 1) {
-      const gram = `${chars[i] ?? ''}${chars[i + 1] ?? ''}`;
-      grams.set(gram, (grams.get(gram) ?? 0) + 1);
-    }
-    return grams;
-  };
-  const left = bigrams(a);
-  const right = bigrams(b);
-  let overlap = 0;
-  for (const [gram, count] of left) {
-    overlap += Math.min(count, right.get(gram) ?? 0);
-  }
-  return (2 * overlap) / (aLen - 1 + bLen - 1);
+  return diceScore(counts(bigrams(a)), counts(bigrams(b)));
 }
 
 /** Sørensen–Dice over whitespace-token multisets. */
 function tokenDice(a: string, b: string): number {
-  if (a === b) {
-    return 1;
+  if (a === b || a.length === 0 || b.length === 0) {
+    return a === b ? 1 : 0;
   }
-  if (a.length === 0 || b.length === 0) {
-    return 0;
-  }
-  const tokens = (s: string): Map<string, number> => {
-    const counts = new Map<string, number>();
-    for (const token of s.split(/\s+/u).filter((t) => t.length > 0)) {
-      counts.set(token, (counts.get(token) ?? 0) + 1);
-    }
-    return counts;
-  };
-  const left = tokens(a);
-  const right = tokens(b);
-  let overlap = 0;
-  let leftTotal = 0;
-  let rightTotal = 0;
-  for (const count of left.values()) {
-    leftTotal += count;
-  }
-  for (const count of right.values()) {
-    rightTotal += count;
-  }
-  for (const [token, count] of left) {
-    overlap += Math.min(count, right.get(token) ?? 0);
-  }
-  return (2 * overlap) / (leftTotal + rightTotal);
+  const tokens = (s: string): string[] =>
+    s.split(/\s+/u).filter((t) => t.length > 0);
+  return diceScore(counts(tokens(a)), counts(tokens(b)));
 }
 
 export function extractVersionLabels(
@@ -212,8 +200,33 @@ export function extractVersionLabels(
   return LABEL_ORDER.filter((l) => labels.has(l));
 }
 
-function refKey(ref: SourceRef): string {
+export function refKey(ref: SourceRef): string {
   return `${ref.provider}\u001f${ref.kind}\u001f${ref.id}`;
+}
+
+/**
+ * The effective claim per ref: latest matchedAtMs wins; equal
+ * timestamps rank user-confirmed > rejected > automatic.
+ */
+export function collapseByRef(
+  mappings: readonly SourceMapping[],
+): Map<string, SourceMapping> {
+  const rank = (status: SourceMapping['status']): number =>
+    status === 'user-confirmed' ? 2 : status === 'rejected' ? 1 : 0;
+  const byRef = new Map<string, SourceMapping>();
+  for (const mapping of mappings) {
+    const key = refKey(mapping.ref);
+    const existing = byRef.get(key);
+    if (
+      existing === undefined ||
+      mapping.matchedAtMs > existing.matchedAtMs ||
+      (mapping.matchedAtMs === existing.matchedAtMs &&
+        rank(mapping.status) > rank(existing.status))
+    ) {
+      byRef.set(key, mapping);
+    }
+  }
+  return byRef;
 }
 
 function normalizeFree(text: string): string {
@@ -259,12 +272,9 @@ function bestArtistSimilarity(a: string, b: string): number {
   let best = 0;
   for (const left of artistViews(a)) {
     for (const right of artistViews(b)) {
-      const score = artistSimilarityBetween(left, right);
-      if (score > best) {
-        best = score;
-        if (best === 1) {
-          return 1;
-        }
+      best = Math.max(best, artistSimilarityBetween(left, right));
+      if (best === 1) {
+        return 1;
       }
     }
   }
@@ -335,28 +345,10 @@ export class MatchingEngine {
     // Conflicting mappings for one ref resolve by latest
     // matchedAtMs; equal timestamps rank user-confirmed > rejected >
     // automatic.
-    const precedence = (status: SourceMapping['status']): number =>
-      status === 'user-confirmed' ? 2 : status === 'rejected' ? 1 : 0;
-    const mappingByRef = new Map<string, SourceMapping>();
-    for (const mapping of userMappings) {
-      const key = refKey(mapping.ref);
-      const existing = mappingByRef.get(key);
-      if (
-        existing === undefined ||
-        mapping.matchedAtMs > existing.matchedAtMs ||
-        (mapping.matchedAtMs === existing.matchedAtMs &&
-          precedence(mapping.status) > precedence(existing.status))
-      ) {
-        mappingByRef.set(key, mapping);
-      }
-    }
+    const mappingByRef = collapseByRef(userMappings);
 
-    const eligible: { candidate: MatchCandidate; index: number }[] = [];
-    for (let i = 0; i < candidates.length; i += 1) {
-      const candidate = candidates[i];
-      if (candidate === undefined) {
-        continue;
-      }
+    const scored: Scored[] = [];
+    for (const [index, candidate] of candidates.entries()) {
       const mapping = mappingByRef.get(refKey(candidate.sourceRef));
       if (mapping?.status === 'rejected') {
         continue;
@@ -371,11 +363,6 @@ export class MatchingEngine {
           evidence: this.userEvidence(recording, candidate),
         };
       }
-      eligible.push({ candidate, index: i });
-    }
-
-    const scored: Scored[] = [];
-    for (const { candidate, index } of eligible) {
       const outcome = this.evidence(recording, candidate);
       if (outcome !== null) {
         scored.push({ candidate, evidence: outcome.evidence, index });
@@ -424,10 +411,7 @@ export class MatchingEngine {
         [];
       const parkedGroups = new Set<string>();
       for (const s of scored) {
-        if (top.evidence.score - s.evidence.score >= 7) {
-          break;
-        }
-        if (near.length >= 64) {
+        if (top.evidence.score - s.evidence.score >= 7 || near.length >= 64) {
           break;
         }
         const key = displayKey(s.candidate);
@@ -561,13 +545,14 @@ export class MatchingEngine {
     let durationDeltaMs: number | null = null;
     if (recording.durationMs !== null && candidate.durationMs !== null) {
       durationDeltaMs = Math.abs(recording.durationMs - candidate.durationMs);
-      if (durationDeltaMs <= 2000) {
-        adjustment = 10;
-      } else if (durationDeltaMs <= 6000) {
-        adjustment = 4;
-      } else if (durationDeltaMs > 15000) {
-        adjustment = -10;
-      }
+      adjustment =
+        durationDeltaMs <= 2000
+          ? 10
+          : durationDeltaMs <= 6000
+            ? 4
+            : durationDeltaMs > 15000
+              ? -10
+              : 0;
     }
 
     return {

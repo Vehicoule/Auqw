@@ -4,7 +4,7 @@ import type {
   OperationContext,
 } from '../cancellation.ts';
 import type { AppError, ErrorKind, Result } from '../errors.ts';
-import { appError, err, fromUnknown, ok } from '../errors.ts';
+import { appError, cancelledError, err, fromUnknown, ok } from '../errors.ts';
 import type { Settings } from '../domain.ts';
 import {
   ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
@@ -120,23 +120,23 @@ export type ArtworkCache = {
 
 /** Resolves the active byte budget: the setting or the spec default. */
 export function artworkCacheBudgetBytes(settings: Settings): number {
-  return (
-    settings.artworkCacheBytes ?? ARTWORK_CACHE_BUDGET_DEFAULT_BYTES
-  );
+  return settings.artworkCacheBytes ?? ARTWORK_CACHE_BUDGET_DEFAULT_BYTES;
 }
 
 function isArtworkUrl(url: unknown): url is string {
   return isString(url, 2048) && isPublicHttpsUrl(url);
 }
 
+const invalidResponse = (message: string): Result<never> =>
+  err(appError('invalid-response', message));
+
 type Section = {
   readonly entries: Map<string, ArtworkCacheEntry>;
   readonly settings: Settings;
 };
 
-type Probe =
-  | { readonly type: 'hit'; readonly filePath: string }
-  | { readonly type: 'absent' };
+/** Phase-1 verdict: the cached filePath on a hit, null when absent. */
+type Probe = string | null;
 
 type Inflight = {
   promise: Promise<Result<ArtworkLookup>>;
@@ -281,14 +281,10 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
   /** Fire-and-forget promises still get an owner. */
   function own(work: Promise<unknown>): void {
     owned.add(work);
-    void work.then(
-      () => {
-        owned.delete(work);
-      },
-      () => {
-        owned.delete(work);
-      },
-    );
+    const done = (): void => {
+      owned.delete(work);
+    };
+    void work.then(done, done);
   }
 
   /** Bounded, nonfatal, sanitized logging: never urls or paths. */
@@ -317,34 +313,16 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     }
     const state = loaded.value;
     if (!isSettings(state.settings)) {
-      return err(
-        appError(
-          'invalid-response',
-          'persisted settings failed validation',
-        ),
-      );
+      return invalidResponse('persisted settings failed validation');
     }
     const rows: unknown = state.artworkCache;
-    if (
-      !Array.isArray(rows) ||
-      !rows.every(isArtworkCacheEntry)
-    ) {
-      return err(
-        appError(
-          'invalid-response',
-          'persisted artwork cache failed validation',
-        ),
-      );
+    if (!Array.isArray(rows) || !rows.every(isArtworkCacheEntry)) {
+      return invalidResponse('persisted artwork cache failed validation');
     }
     const entries = new Map<string, ArtworkCacheEntry>();
     for (const row of rows) {
       if (entries.has(row.url)) {
-        return err(
-          appError(
-            'invalid-response',
-            'persisted artwork cache has duplicate urls',
-          ),
-        );
+        return invalidResponse('persisted artwork cache has duplicate urls');
       }
       entries.set(row.url, { ...row });
     }
@@ -408,9 +386,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         break;
       }
       if (signal.cancelled) {
-        if (firstError === null) {
-          firstError = appError('cancelled', 'cancelled');
-        }
+        firstError ??= cancelledError();
         break;
       }
       const removed = await call(() =>
@@ -446,7 +422,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         }
         const entry = section.value.entries.get(url);
         if (entry === undefined) {
-          return ok({ type: 'absent' });
+          return ok<Probe>(null);
         }
         const present = await call(() =>
           deps.paths.exists(entry.filePath, context.signal),
@@ -458,10 +434,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         if (!present.value) {
           entries.delete(url);
           const committed = await commitSection(entries, context);
-          if (!committed.ok) {
-            return committed;
-          }
-          return ok({ type: 'absent' });
+          return committed.ok ? ok<Probe>(null) : committed;
         }
         const now = safeNow();
         if (now === null) {
@@ -471,28 +444,22 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         }
         entry.lastAccessedMs = now;
         const committed = await commitSection(entries, context);
-        if (!committed.ok) {
-          return committed;
-        }
-        return ok({ type: 'hit', filePath: entry.filePath });
+        return committed.ok ? ok<Probe>(entry.filePath) : committed;
       },
     );
     if (!probed.ok) {
       return probed;
     }
-    if (probed.value.type === 'hit') {
-      return ok({ hit: true, filePath: probed.value.filePath });
+    if (probed.value !== null) {
+      return ok({ hit: true, filePath: probed.value });
     }
 
     const destPath = deps.paths.destFor(url);
     if (!isString(destPath, 1024)) {
-      return err(
-        appError(
-          'invalid-response',
-          'artwork destination path failed validation',
-        ),
-      );
+      return invalidResponse('artwork destination path failed validation');
     }
+    const removeDest = (): Promise<Result<void>> =>
+      call(() => deps.paths.remove(destPath, context.signal));
     // Transient verdicts retry once inside the record's deadline —
     // the live max over its waiters, not just the leader's, so a
     // joined caller's budget keeps the shared transfer alive; a
@@ -543,17 +510,12 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     }
     const bytes = downloaded.value.bytes;
     if (!isSafeNonNegative(bytes)) {
-      await call(() => deps.paths.remove(destPath, context.signal));
-      return err(
-        appError(
-          'invalid-response',
-          'download reported an invalid byte count',
-        ),
-      );
+      await removeDest();
+      return invalidResponse('download reported an invalid byte count');
     }
     const now = safeNow();
     if (now === null) {
-      await call(() => deps.paths.remove(destPath, context.signal));
+      await removeDest();
       return err(
         appError('internal', 'clock returned an unsafe timestamp'),
       );
@@ -577,7 +539,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         // An entry larger than the whole budget is rejected, not
         // inserted-then-evicted: caching it would still exceed the
         // budget and returning its path would dangle after cleanup.
-        await call(() => deps.paths.remove(destPath, context.signal));
+        await removeDest();
         return err(
           appError(
             'budget-exceeded',
@@ -600,14 +562,9 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       }
       for (const other of entries.values()) {
         if (other.filePath === destPath) {
-          await call(() =>
-            deps.paths.remove(destPath, context.signal),
-          );
-          return err(
-            appError(
-              'invalid-response',
-              'artwork destination path collides with a cached entry',
-            ),
+          await removeDest();
+          return invalidResponse(
+            'artwork destination path collides with a cached entry',
           );
         }
       }
@@ -626,7 +583,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       const committed = await commitSection(entries, context);
       if (!committed.ok) {
         // Without its row the new file is orphaned; remove it.
-        await call(() => deps.paths.remove(destPath, context.signal));
+        await removeDest();
         return committed;
       }
       return ok({ hit: false, filePath: destPath });
@@ -676,23 +633,24 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         resolve(result);
       };
       unsubscribe = context.signal.subscribe(() => {
-        finish(err(appError('cancelled', 'cancelled')));
+        finish(err(cancelledError()));
       });
       // Each waiter's own deadline bounds its wait — a caller whose
       // budget dies while others remain leaves without cancelling
       // the shared work.
+      const timedOut = err(
+        appError('timeout', 'operation deadline exceeded'),
+      );
       const now = safeNow();
       const remaining = now === null ? 0 : mine - now;
       if (remaining <= 0) {
-        finish(err(appError('timeout', 'operation deadline exceeded')));
+        finish(timedOut);
       } else {
         void deps.clock
           .sleep(remaining, deadline.signal)
           .then((slept) => {
             if (slept.ok) {
-              finish(
-                err(appError('timeout', 'operation deadline exceeded')),
-              );
+              finish(timedOut);
             }
           });
       }
@@ -707,14 +665,10 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     context: OperationContext,
   ): Promise<Result<ArtworkLookup>> {
     if (!isArtworkUrl(url)) {
-      return Promise.resolve(
-        err(appError('invalid-response', 'invalid artwork url')),
-      );
+      return Promise.resolve(invalidResponse('invalid artwork url'));
     }
     if (context.signal.cancelled) {
-      return Promise.resolve(
-        err(appError('cancelled', 'cancelled')),
-      );
+      return Promise.resolve(err(cancelledError()));
     }
     const remembered = failures.get(url);
     if (remembered !== undefined) {
@@ -774,7 +728,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     return serialized(
       async (): Promise<Result<ArtworkSweepReport>> => {
         if (context.signal.cancelled) {
-          return err(appError('cancelled', 'cancelled'));
+          return err(cancelledError());
         }
         const section = await loadSection(context);
         if (!section.ok) {
@@ -790,18 +744,14 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         let firstError: AppError | null = null;
         for (const entry of [...entries.values()]) {
           if (context.signal.cancelled) {
-            if (firstError === null) {
-              firstError = appError('cancelled', 'cancelled');
-            }
+            firstError ??= cancelledError();
             break;
           }
           const present = await call(() =>
             deps.paths.exists(entry.filePath, context.signal),
           );
           if (!present.ok) {
-            if (firstError === null) {
-              firstError = present.error;
-            }
+            firstError ??= present.error;
             warn('artwork cache stat failed');
             continue;
           }
@@ -820,9 +770,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
           null,
           context.signal,
         );
-        if (firstError === null) {
-          firstError = eviction.firstError;
-        }
+        firstError ??= eviction.firstError;
         if (reaped > 0 || eviction.evicted > 0) {
           const committed = await commitSection(entries, context);
           if (!committed.ok) {
@@ -840,10 +788,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         // A stat/removal failure is honest: achieved reaps and
         // evictions are already committed, but the sweep reports the
         // error it hit.
-        if (firstError !== null) {
-          return err(firstError);
-        }
-        return ok(report);
+        return firstError === null ? ok(report) : err(firstError);
       },
     );
   }

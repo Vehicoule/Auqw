@@ -1,35 +1,47 @@
-import type { EntityKind, Like } from '../domain.ts';
+import type { EntityKind, Like, LikeEntityKind } from '../domain.ts';
+
+function toggle(
+  likes: readonly Like[],
+  entityKind: LikeEntityKind,
+  targetId: string,
+  nowMs: number,
+  label: string,
+): readonly Like[] {
+  if (targetId.trim().length === 0) {
+    throw new TypeError(`${label} must be nonempty`);
+  }
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
+    throw new TypeError('nowMs must be a safe nonnegative integer');
+  }
+  const existing = likes.findIndex(
+    (l) => l.entityKind === entityKind && l.targetId === targetId,
+  );
+  if (existing >= 0) {
+    return likes.filter((_, i) => i !== existing);
+  }
+  return [...likes, { entityKind, targetId, likedAtMs: nowMs }];
+}
+
+const has = (
+  likes: readonly Like[],
+  entityKind: LikeEntityKind,
+  targetId: string,
+): boolean =>
+  likes.some((l) => l.entityKind === entityKind && l.targetId === targetId);
 
 export function toggleTrackLike(
   likes: readonly Like[],
   recordingId: string,
   nowMs: number,
 ): readonly Like[] {
-  if (recordingId.trim().length === 0) {
-    throw new TypeError('recordingId must be nonempty');
-  }
-  if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
-    throw new TypeError('nowMs must be a safe nonnegative integer');
-  }
-  const existing = likes.findIndex(
-    (l) => l.entityKind === 'track' && l.targetId === recordingId,
-  );
-  if (existing >= 0) {
-    return likes.filter((_, i) => i !== existing);
-  }
-  return [
-    ...likes,
-    { entityKind: 'track' as const, targetId: recordingId, likedAtMs: nowMs },
-  ];
+  return toggle(likes, 'track', recordingId, nowMs, 'recordingId');
 }
 
 export function isTrackLiked(
   likes: readonly Like[],
   recordingId: string,
 ): boolean {
-  return likes.some(
-    (l) => l.entityKind === 'track' && l.targetId === recordingId,
-  );
+  return has(likes, 'track', recordingId);
 }
 
 /**
@@ -45,22 +57,7 @@ export function toggleEntityLike(
   if (kind !== 'album' && kind !== 'artist') {
     throw new TypeError('kind must be album or artist');
   }
-  if (entityId.trim().length === 0) {
-    throw new TypeError('entityId must be nonempty');
-  }
-  if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
-    throw new TypeError('nowMs must be a safe nonnegative integer');
-  }
-  const existing = likes.findIndex(
-    (l) => l.entityKind === kind && l.targetId === entityId,
-  );
-  if (existing >= 0) {
-    return likes.filter((_, i) => i !== existing);
-  }
-  return [
-    ...likes,
-    { entityKind: kind, targetId: entityId, likedAtMs: nowMs },
-  ];
+  return toggle(likes, kind, entityId, nowMs, 'entityId');
 }
 
 export function isEntityLiked(
@@ -68,7 +65,5 @@ export function isEntityLiked(
   kind: EntityKind,
   entityId: string,
 ): boolean {
-  return likes.some(
-    (l) => l.entityKind === kind && l.targetId === entityId,
-  );
+  return has(likes, kind, entityId);
 }

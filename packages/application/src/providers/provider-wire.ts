@@ -4,8 +4,11 @@ import {
   hasKeys,
   isArtworkRef,
   isEntityRef,
+  isOptString,
   isRecord,
   isSourceRef,
+  isStorefront,
+  isString,
   isTrackMetadata,
 } from '../domain.ts';
 import type {
@@ -13,7 +16,7 @@ import type {
   SourceRef,
   TrackMetadata,
 } from '../domain.ts';
-import { appError, err, ok } from '../errors.ts';
+import { appError, cancelledError, err, ok } from '../errors.ts';
 import type { AppError, ErrorKind, Result } from '../errors.ts';
 import { isProviderCapability } from '../ports/provider.ts';
 import type {
@@ -83,10 +86,9 @@ export function manifestCapabilities(
     return [];
   }
   const raw = manifest['capabilities'];
-  if (!Array.isArray(raw)) {
-    return [];
-  }
-  return [...new Set(raw)].filter(isProviderCapability);
+  return Array.isArray(raw)
+    ? [...new Set(raw)].filter(isProviderCapability)
+    : [];
 }
 
 /**
@@ -95,17 +97,14 @@ export function manifestCapabilities(
  * written under older plugin builds.
  */
 export function manifestVersion(manifest: unknown): string | null {
-  if (!isRecord(manifest)) {
-    return null;
-  }
-  const version = manifest['version'];
+  const version = isRecord(manifest) ? manifest['version'] : null;
   return typeof version === 'string' && version.length > 0
     ? version
     : null;
 }
 
 export function providerCancelledError(): AppError {
-  return appError('cancelled', 'cancelled');
+  return cancelledError();
 }
 
 /** A result that fails JSON.parse or capability decode. */
@@ -144,12 +143,6 @@ export function decodeProviderOutcome<T>(
   return decoded === null ? err(invalidProviderResult()) : ok(decoded);
 }
 
-function isStorefront(value: unknown): value is string | null {
-  return (
-    value === null || (typeof value === 'string' && /^[A-Z]{2}$/.test(value))
-  );
-}
-
 function isOptInt(
   value: unknown,
   min: number,
@@ -164,6 +157,16 @@ function isOptInt(
   );
 }
 
+/** Absent/null pass; a present value must be a well-formed EntityRef. */
+function isOptEntityRef(value: unknown): boolean {
+  return value === undefined || value === null || isEntityRef(value);
+}
+
+/** Null, or a nonempty wire string. */
+function isOptWireString(value: unknown): value is string | null {
+  return value === null || (typeof value === 'string' && value.length > 0);
+}
+
 /** Wire `trackMetadata` (snake_case) → domain `TrackMetadata`. */
 function toTrackMetadata(value: unknown): TrackMetadata | null {
   if (!isRecord(value)) {
@@ -172,28 +175,12 @@ function toTrackMetadata(value: unknown): TrackMetadata | null {
   // ABI 0.3.0 optional catalog evidence; absent and null normalize
   // to null, a malformed value rejects the whole track.
   const artistRef = value['artist_ref'];
-  if (
-    artistRef !== undefined &&
-    artistRef !== null &&
-    !isEntityRef(artistRef)
-  ) {
-    return null;
-  }
   const albumRef = value['album_ref'];
-  if (
-    albumRef !== undefined &&
-    albumRef !== null &&
-    !isEntityRef(albumRef)
-  ) {
-    return null;
-  }
   const isrc = value['isrc'];
   if (
-    isrc !== undefined &&
-    !(
-      isrc === null ||
-      (typeof isrc === 'string' && isrc.length > 0 && isrc.length <= 16)
-    )
+    !isOptEntityRef(artistRef) ||
+    !isOptEntityRef(albumRef) ||
+    (isrc !== undefined && !isOptString(isrc, 16))
   ) {
     return null;
   }
@@ -252,72 +239,42 @@ function toTrackItems(items: readonly unknown[]): TrackMetadata[] | null {
   return out;
 }
 
-function toTrackList(value: unknown): readonly TrackMetadata[] | null {
-  if (!isRecord(value) || !hasExactKeys(value, ['items'])) {
-    return null;
-  }
+/** `items` field decode shared by every list-shaped result. */
+function tracksField(
+  value: Record<string, unknown>,
+): TrackMetadata[] | null {
   const items = value['items'];
-  if (!Array.isArray(items)) {
-    return null;
-  }
-  return toTrackItems(items);
+  return Array.isArray(items) ? toTrackItems(items) : null;
+}
+
+function toTrackList(value: unknown): readonly TrackMetadata[] | null {
+  return isRecord(value) && hasExactKeys(value, ['items'])
+    ? tracksField(value)
+    : null;
 }
 
 function toSearchPage(value: unknown): SearchPage | null {
-  if (!isRecord(value) || !hasExactKeys(value, ['items', 'storefront'])) {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['items', 'storefront']) ||
+    !isStorefront(value['storefront'])
+  ) {
     return null;
   }
-  if (!isStorefront(value['storefront'])) {
-    return null;
-  }
-  const items = value['items'];
-  if (!Array.isArray(items)) {
-    return null;
-  }
-  const out = toTrackItems(items);
-  if (out === null) {
-    return null;
-  }
-  return { items: out, storefront: value['storefront'] };
+  const items = tracksField(value);
+  return items === null
+    ? null
+    : { items, storefront: value['storefront'] };
 }
 
 /** Wire `playbackResolveResult` → domain `PlayableResource`. */
 function toPlayableResource(value: unknown): PlayableResource | null {
   if (
     !isRecord(value) ||
-    !(
-      hasExactKeys(value, [
-        'url',
-        'mime',
-        'bitrate_kbps',
-        'expires_at_ms',
-        'client',
-      ]) ||
-      hasExactKeys(value, [
-        'url',
-        'mime',
-        'bitrate_kbps',
-        'expires_at_ms',
-        'client',
-        'content_length',
-      ]) ||
-      hasExactKeys(value, [
-        'url',
-        'mime',
-        'bitrate_kbps',
-        'expires_at_ms',
-        'client',
-        'itag',
-      ]) ||
-      hasExactKeys(value, [
-        'url',
-        'mime',
-        'bitrate_kbps',
-        'expires_at_ms',
-        'client',
-        'content_length',
-        'itag',
-      ])
+    !hasKeys(
+      value,
+      ['url', 'mime', 'bitrate_kbps', 'expires_at_ms', 'client'],
+      ['content_length', 'itag'],
     )
   ) {
     return null;
@@ -368,11 +325,8 @@ function toEntityMetadata(value: unknown): EntityMetadata | null {
   const subtitle = value['subtitle'] ?? null;
   const artwork = value['artwork'];
   if (
-    typeof title !== 'string' ||
-    title.length === 0 ||
-    title.length > 512 ||
-    (subtitle !== null &&
-      (typeof subtitle !== 'string' || subtitle.length === 0)) ||
+    !isString(title, 512) ||
+    !isOptWireString(subtitle) ||
     !Array.isArray(artwork) ||
     artwork.length > 8 ||
     !artwork.every(isArtworkRef)
@@ -400,19 +354,12 @@ function toEntityPage(value: unknown): EntityPage | null {
   if (entity === null || typeof value['complete'] !== 'boolean') {
     return null;
   }
-  const items = value['items'];
-  if (!Array.isArray(items)) {
-    return null;
-  }
-  const tracks = toTrackItems(items);
+  const tracks = tracksField(value);
   if (tracks === null) {
     return null;
   }
   const continuation = value['continuation'] ?? null;
-  if (
-    continuation !== null &&
-    (typeof continuation !== 'string' || continuation.length === 0)
-  ) {
+  if (!isOptWireString(continuation)) {
     return null;
   }
   return {
@@ -439,8 +386,8 @@ function toLyricsMatch(value: unknown): LyricsMatch | null {
     typeof title !== 'string' ||
     title.length === 0 ||
     title.length > 512 ||
-    !(artist === null || (typeof artist === 'string' && artist.length > 0)) ||
-    !(album === null || (typeof album === 'string' && album.length > 0)) ||
+    !isOptWireString(artist) ||
+    !isOptWireString(album) ||
     !isOptInt(durationMs, 0)
   ) {
     return null;
@@ -453,86 +400,96 @@ function matchedField(value: Record<string, unknown>): LyricsMatch | null | unde
   return raw === null ? null : (toLyricsMatch(raw) ?? undefined);
 }
 
-/** Wire `lyricsSyncedResult` → domain `LyricsResult`. */
-function toSyncedLyrics(value: unknown): LyricsResult | null {
-  if (
-    !isRecord(value) ||
-    !hasKeys(value, ['state', 'matched'], ['lines'])
-  ) {
+/** The non-text states both lyrics results share. */
+function staticLyrics(
+  state: unknown,
+  matched: LyricsMatch | null,
+): LyricsResult | null {
+  if (state === 'instrumental') {
+    return { kind: 'instrumental', matched };
+  }
+  return state === 'absent' ? { kind: 'unavailable', matched } : null;
+}
+
+/**
+ * Shared lyrics-record preamble: `{state, matched}` keys plus the
+ * capability's own payload key. Null rejects; `extra` is the payload.
+ */
+function lyricsBase(
+  value: unknown,
+  payloadKey: 'lines' | 'text',
+): { state: unknown; matched: LyricsMatch | null; extra: unknown } | null {
+  if (!isRecord(value) || !hasKeys(value, ['state', 'matched'], [payloadKey])) {
     return null;
   }
   const matched = matchedField(value);
   if (matched === undefined) {
     return null;
   }
-  const state = value['state'];
-  const rawLines = value['lines'] ?? null;
-  if (state === 'synced') {
-    if (!Array.isArray(rawLines) || rawLines.length === 0) {
+  return {
+    state: value['state'],
+    matched,
+    extra: value[payloadKey] ?? null,
+  };
+}
+
+function toLyricsLine(raw: unknown): LyricsLine | null {
+  if (!isRecord(raw) || !hasExactKeys(raw, ['t_ms', 'text'])) {
+    return null;
+  }
+  const tMs = raw['t_ms'];
+  const text = raw['text'];
+  return typeof tMs === 'number' &&
+    Number.isSafeInteger(tMs) &&
+    tMs >= 0 &&
+    typeof text === 'string' &&
+    text.length <= 1024
+    ? { tMs, text }
+    : null;
+}
+
+/** Wire `lyricsSyncedResult` → domain `LyricsResult`. */
+function toSyncedLyrics(value: unknown): LyricsResult | null {
+  const base = lyricsBase(value, 'lines');
+  if (base === null) {
+    return null;
+  }
+  if (base.state === 'synced') {
+    if (!Array.isArray(base.extra) || base.extra.length === 0) {
       return null;
     }
     const lines: LyricsLine[] = [];
-    for (const raw of rawLines) {
-      if (!isRecord(raw) || !hasExactKeys(raw, ['t_ms', 'text'])) {
+    for (const raw of base.extra) {
+      const line = toLyricsLine(raw);
+      if (line === null) {
         return null;
       }
-      const tMs = raw['t_ms'];
-      const text = raw['text'];
-      if (
-        typeof tMs !== 'number' ||
-        !Number.isSafeInteger(tMs) ||
-        tMs < 0 ||
-        typeof text !== 'string' ||
-        text.length > 1024
-      ) {
-        return null;
-      }
-      lines.push({ tMs, text });
+      lines.push(line);
     }
-    return { kind: 'synced', lines, matched };
+    return { kind: 'synced', lines, matched: base.matched };
   }
   // Timed lines on a non-synced state contradict it; never dropped.
-  if (rawLines !== null) {
+  if (base.extra !== null) {
     return null;
   }
-  if (state === 'instrumental') {
-    return { kind: 'instrumental', matched };
-  }
-  if (state === 'absent') {
-    return { kind: 'unavailable', matched };
-  }
-  return null;
+  return staticLyrics(base.state, base.matched);
 }
 
 /** Wire `lyricsPlainResult` → domain `LyricsResult`. */
 function toPlainLyrics(value: unknown): LyricsResult | null {
-  if (
-    !isRecord(value) ||
-    !hasKeys(value, ['state', 'matched'], ['text'])
-  ) {
+  const base = lyricsBase(value, 'text');
+  if (base === null) {
     return null;
   }
-  const matched = matchedField(value);
-  if (matched === undefined) {
-    return null;
-  }
-  const state = value['state'];
-  const text = value['text'] ?? null;
-  if (state === 'plain') {
-    return typeof text === 'string' && text.length > 0
-      ? { kind: 'plain', text, matched }
+  if (base.state === 'plain') {
+    return isOptWireString(base.extra) && base.extra !== null
+      ? { kind: 'plain', text: base.extra, matched: base.matched }
       : null;
   }
-  if (text !== null) {
+  if (base.extra !== null) {
     return null;
   }
-  if (state === 'instrumental') {
-    return { kind: 'instrumental', matched };
-  }
-  if (state === 'absent') {
-    return { kind: 'unavailable', matched };
-  }
-  return null;
+  return staticLyrics(base.state, base.matched);
 }
 
 /** Wire `{suggestions: string[]}` → flat completion list. */
@@ -541,21 +498,14 @@ function toSuggestionList(value: unknown): readonly string[] | null {
     return null;
   }
   const suggestions = value['suggestions'];
-  if (!Array.isArray(suggestions) || suggestions.length > 32) {
+  if (
+    !Array.isArray(suggestions) ||
+    suggestions.length > 32 ||
+    !suggestions.every((s): s is string => isString(s, 512))
+  ) {
     return null;
   }
-  const out: string[] = [];
-  for (const item of suggestions) {
-    if (
-      typeof item !== 'string' ||
-      item.length === 0 ||
-      item.length > 512
-    ) {
-      return null;
-    }
-    out.push(item);
-  }
-  return out;
+  return suggestions;
 }
 
 /** Wire `radioSeedResult` → domain `RadioPage`. */
@@ -563,22 +513,11 @@ function toRadioPage(value: unknown): RadioPage | null {
   if (!isRecord(value) || !hasExactKeys(value, ['items', 'continuation'])) {
     return null;
   }
-  const items = value['items'];
-  if (!Array.isArray(items)) {
+  const candidates = tracksField(value);
+  if (candidates === null || !isOptWireString(value['continuation'])) {
     return null;
   }
-  const candidates = toTrackItems(items);
-  if (candidates === null) {
-    return null;
-  }
-  const continuation = value['continuation'];
-  if (
-    continuation !== null &&
-    (typeof continuation !== 'string' || continuation.length === 0)
-  ) {
-    return null;
-  }
-  return { candidates, continuation };
+  return { candidates, continuation: value['continuation'] };
 }
 
 /** Wire `catalogArtworkResult` → domain `ArtworkRef` list. */

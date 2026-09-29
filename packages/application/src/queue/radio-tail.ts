@@ -1,6 +1,5 @@
 import type { CancellationSource } from '../cancellation.ts';
 import type {
-  MatchEvidence,
   QueueOccurrence,
   Recording,
   SourceMapping,
@@ -15,9 +14,15 @@ import {
   recordingFromMetadata,
 } from '../domain.ts';
 import type { AppError } from '../errors.ts';
-import { MatchingEngine } from '../matching/matching-engine.ts';
+import {
+  collapseByRef,
+  MatchingEngine,
+  refKey,
+} from '../matching/matching-engine.ts';
 import type { RadioPage } from '../ports/provider.ts';
 import type { IdPort } from '../ports/runtime.ts';
+import { sameRef } from '../session/util.ts';
+import { sameError } from './queue-engine.ts';
 import type { QueueSnapshot } from './queue-engine.ts';
 
 /**
@@ -102,29 +107,16 @@ export function publishRadio(record: RadioTailRecord | null): RadioTail | null {
   if (record === null) {
     return null;
   }
-  const base = {
+  const tail: RadioTail = {
     seedRef: Object.freeze({ ...record.seedRef }),
     providerId: record.providerId,
     status: record.status,
     fetching: record.fetching,
+    ...(record.error === undefined
+      ? {}
+      : { error: Object.freeze({ ...record.error }) }),
   };
-  const tail: RadioTail =
-    record.error === undefined
-      ? base
-      : { ...base, error: Object.freeze({ ...record.error }) };
   return Object.freeze(tail);
-}
-
-function sameError(a: AppError | undefined, b: AppError | undefined): boolean {
-  if (a === undefined || b === undefined) {
-    return a === b;
-  }
-  return (
-    a.kind === b.kind &&
-    a.message === b.message &&
-    a.retryable === b.retryable &&
-    a.retryAfterMs === b.retryAfterMs
-  );
 }
 
 /**
@@ -207,36 +199,6 @@ export function shouldGrowRadio(
   );
 }
 
-function refKey(ref: SourceRef): string {
-  return `${ref.provider}${ref.kind}${ref.id}`;
-}
-
-function sameRef(a: SourceRef, b: SourceRef): boolean {
-  return a.provider === b.provider && a.kind === b.kind && a.id === b.id;
-}
-
-/** Mapping precedence identical to MatchingEngine's conflict rule. */
-function mappingRank(status: SourceMapping['status']): number {
-  return status === 'user-confirmed' ? 2 : status === 'rejected' ? 1 : 0;
-}
-
-function winningMapping(
-  mappings: readonly SourceMapping[],
-): SourceMapping | undefined {
-  let best: SourceMapping | undefined;
-  for (const mapping of mappings) {
-    if (
-      best === undefined ||
-      mapping.matchedAtMs > best.matchedAtMs ||
-      (mapping.matchedAtMs === best.matchedAtMs &&
-        mappingRank(mapping.status) > mappingRank(best.status))
-    ) {
-      best = mapping;
-    }
-  }
-  return best;
-}
-
 /**
  * Records the provider's own assertion that `ref` serves `recording`
  * as an `automatic` mapping, with the real scored evidence. A
@@ -254,9 +216,7 @@ function withProviderMapping(
   matchedAtMs: number,
 ): Recording | null {
   const ref = item.sourceRef;
-  const winner = winningMapping(
-    recording.mappings.filter((m) => sameRef(m.ref, ref)),
-  );
+  const winner = collapseByRef(recording.mappings).get(refKey(ref));
   // A settled verdict decides the pairing without scoring.
   if (winner?.status === 'user-confirmed') {
     return recording;
@@ -270,12 +230,11 @@ function withProviderMapping(
       ? null
       : recording;
   }
-  const evidence: MatchEvidence = scored.evidence;
   const mapping: SourceMapping = {
     ref,
     status: 'automatic',
     matchedAtMs,
-    evidence,
+    evidence: scored.evidence,
   };
   return {
     ...recording,

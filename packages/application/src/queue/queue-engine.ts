@@ -1,6 +1,7 @@
 import type { AppError } from '../errors.ts';
 import { isSafeNonNegative, isSourceRef } from '../domain.ts';
 import type { QueueOccurrence, Recording, SourceRef } from '../domain.ts';
+import { sameRef } from '../session/util.ts';
 
 export type QueueMode = 'stopped' | 'paused' | 'playing';
 
@@ -34,19 +35,21 @@ function cloneError(error: AppError | undefined): AppError | undefined {
   return error === undefined ? undefined : Object.freeze({ ...error });
 }
 
+function requireStr(value: unknown, name: string): void {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new TypeError(`${name} must be a nonempty string`);
+  }
+}
+
+function requirePosition(ms: number): void {
+  if (!isSafeNonNegative(ms)) {
+    throw new TypeError('positionMs must be a safe nonnegative integer');
+  }
+}
+
 function validateOccurrence(occurrence: QueueOccurrence): void {
-  if (
-    typeof occurrence.occurrenceId !== 'string' ||
-    occurrence.occurrenceId.length === 0
-  ) {
-    throw new TypeError('occurrenceId must be a nonempty string');
-  }
-  if (
-    typeof occurrence.recordingId !== 'string' ||
-    occurrence.recordingId.length === 0
-  ) {
-    throw new TypeError('recordingId must be a nonempty string');
-  }
+  requireStr(occurrence.occurrenceId, 'occurrenceId');
+  requireStr(occurrence.recordingId, 'recordingId');
   if (
     occurrence.selectedRef !== null &&
     !isSourceRef(occurrence.selectedRef)
@@ -55,7 +58,10 @@ function validateOccurrence(occurrence: QueueOccurrence): void {
   }
 }
 
-function sameError(a: AppError | undefined, b: AppError | undefined): boolean {
+export function sameError(
+  a: AppError | undefined,
+  b: AppError | undefined,
+): boolean {
   if (a === undefined || b === undefined) {
     return a === b;
   }
@@ -65,13 +71,6 @@ function sameError(a: AppError | undefined, b: AppError | undefined): boolean {
     a.retryable === b.retryable &&
     a.retryAfterMs === b.retryAfterMs
   );
-}
-
-function sameRef(a: SourceRef | null, b: SourceRef | null): boolean {
-  if (a === null || b === null) {
-    return a === b;
-  }
-  return a.provider === b.provider && a.kind === b.kind && a.id === b.id;
 }
 
 /**
@@ -185,9 +184,7 @@ export class QueueEngine {
     if (!isSafeNonNegative(revision)) {
       throw new TypeError('revision must be a safe nonnegative integer');
     }
-    if (!isSafeNonNegative(positionMs)) {
-      throw new TypeError('positionMs must be a safe nonnegative integer');
-    }
+    requirePosition(positionMs);
     if (mode !== 'stopped' && mode !== 'paused' && mode !== 'playing') {
       throw new TypeError('mode must be stopped, paused, or playing');
     }
@@ -290,17 +287,16 @@ export class QueueEngine {
         occurrences,
       };
     }
-    const base = {
+    const snap: QueueSnapshot = {
       revision: this.#revision,
       occurrences,
       currentOccurrenceId: this.#currentId,
       positionMs: this.#positionMs,
       mode: this.#mode,
+      ...(this.#blockedError === undefined
+        ? {}
+        : { blockedError: this.#blockedError }),
     };
-    const snap: QueueSnapshot =
-      this.#blockedError === undefined
-        ? base
-        : { ...base, blockedError: this.#blockedError };
     this.#snapshotCache = Object.freeze(snap);
     return this.#snapshotCache;
   }
@@ -315,6 +311,19 @@ export class QueueEngine {
   /** Increments after a mutation; #requireTick() guaranteed capacity. */
   #tick(): void {
     this.#revision += 1;
+  }
+
+  /** Cursor+mode assignment every mutating command converges on. */
+  #apply(
+    currentId: string | null,
+    positionMs: number,
+    mode: QueueMode,
+  ): void {
+    this.#currentId = currentId;
+    this.#positionMs = positionMs;
+    this.#mode = mode;
+    this.#blockedError = undefined;
+    this.#tick();
   }
 
   #indexOf(id: string): number {
@@ -338,10 +347,10 @@ export class QueueEngine {
       throw new TypeError('index must be a safe integer when supplied');
     }
     this.#requireTick();
-    const at =
-      index === undefined
-        ? this.#occurrences.length
-        : Math.max(0, Math.min(index, this.#occurrences.length));
+    const at = Math.max(
+      0,
+      Math.min(index ?? this.#occurrences.length, this.#occurrences.length),
+    );
     this.#occurrences.splice(at, 0, cloneOccurrence(occurrence));
     this.#tick();
   }
@@ -364,11 +373,7 @@ export class QueueEngine {
       // the capacity check so a rejected select can't mutate marks.
       this.#unplayable.delete(id);
     }
-    this.#currentId = id;
-    this.#positionMs = 0;
-    this.#mode = mode;
-    this.#blockedError = undefined;
-    this.#tick();
+    this.#apply(id, 0, mode);
   }
 
   next(): void {
@@ -382,31 +387,18 @@ export class QueueEngine {
     // Step over entries already failed this session instead of
     // parking the walk on a known-dead row; an explicit select()
     // still lands on them — a flagged row is retryable, not gone.
-    let nextIndex = index + 1;
-    while (nextIndex < this.#occurrences.length) {
-      const next = this.#occurrences[nextIndex];
-      if (next === undefined || !this.#unplayable.has(next.occurrenceId)) {
-        break;
-      }
-      nextIndex += 1;
-    }
-    if (nextIndex >= this.#occurrences.length) {
-      this.#currentId = null;
-      this.#positionMs = 0;
-      this.#mode = 'stopped';
-      this.#blockedError = undefined;
-      this.#tick();
-      return;
-    }
-    const next = this.#occurrences[nextIndex];
+    const next = this.#occurrences
+      .slice(index + 1)
+      .find((o) => !this.#unplayable.has(o.occurrenceId));
     if (next === undefined) {
+      this.#apply(null, 0, 'stopped');
       return;
     }
-    this.#currentId = next.occurrenceId;
-    this.#positionMs = 0;
-    this.#mode = this.#mode === 'playing' ? 'playing' : 'paused';
-    this.#blockedError = undefined;
-    this.#tick();
+    this.#apply(
+      next.occurrenceId,
+      0,
+      this.#mode === 'playing' ? 'playing' : 'paused',
+    );
   }
 
   /**
@@ -418,11 +410,7 @@ export class QueueEngine {
       return;
     }
     this.#requireTick();
-    this.#currentId = null;
-    this.#positionMs = 0;
-    this.#mode = 'stopped';
-    this.#blockedError = undefined;
-    this.#tick();
+    this.#apply(null, 0, 'stopped');
   }
 
   previous(): void {
@@ -433,35 +421,28 @@ export class QueueEngine {
     if (index < 0) {
       return;
     }
-    // The >3s restart applies to live playback — a blocked row's
-    // retained position isn't progress it can resume from, so prev
-    // steps to the predecessor instead of consuming the press.
-    if (this.#positionMs > 3000 && this.#blockedError === undefined) {
+    // Rewind instead of stepping: live playback past 3s restarts the
+    // row (a blocked row's retained position isn't progress to resume
+    // from — it steps), and at the head any nonzero position rewinds.
+    if (
+      this.#positionMs > 0 &&
+      (index === 0 ||
+        (this.#positionMs > 3000 && this.#blockedError === undefined))
+    ) {
       this.#requireTick();
       this.#positionMs = 0;
       this.#tick();
       return;
     }
+    // At the first occurrence with position 0: a true no-op.
     if (index === 0) {
-      // At the first occurrence with position 0: a true no-op.
-      if (this.#positionMs === 0) {
-        return;
-      }
-      this.#requireTick();
-      this.#positionMs = 0;
-      this.#tick();
       return;
     }
     this.#requireTick();
     const prev = this.#occurrences[index - 1];
-    if (prev !== undefined) {
-      this.#currentId = prev.occurrenceId;
-    }
-    this.#positionMs = 0;
     // The cursor moved: the failed item's blocked error must not
     // misattribute to the new current occurrence.
-    this.#blockedError = undefined;
-    this.#tick();
+    this.#apply(prev?.occurrenceId ?? this.#currentId, 0, this.#mode);
   }
 
   remove(id: string): void {
@@ -471,17 +452,17 @@ export class QueueEngine {
     this.#occurrences.splice(index, 1);
     this.#unplayable.delete(id);
     if (wasCurrent) {
-      this.#blockedError = undefined;
       const successor = this.#occurrences[index];
-      if (successor === undefined) {
-        this.#currentId = null;
-        this.#positionMs = 0;
-        this.#mode = 'stopped';
-      } else {
-        this.#currentId = successor.occurrenceId;
-        this.#positionMs = 0;
-        this.#mode = this.#mode === 'playing' ? 'playing' : 'paused';
-      }
+      this.#apply(
+        successor?.occurrenceId ?? null,
+        0,
+        successor === undefined
+          ? 'stopped'
+          : this.#mode === 'playing'
+            ? 'playing'
+            : 'paused',
+      );
+      return;
     }
     this.#tick();
   }
@@ -572,9 +553,7 @@ export class QueueEngine {
     // failed mark clears with it.
     this.#requireTick();
     this.#unplayable.delete(this.#currentId);
-    this.#blockedError = undefined;
-    this.#mode = 'playing';
-    this.#tick();
+    this.#apply(this.#currentId, this.#positionMs, 'playing');
   }
 
   pause(): void {
@@ -582,6 +561,7 @@ export class QueueEngine {
       return;
     }
     this.#requireTick();
+    // 'playing' implies no blockedError, so only the mode changes.
     this.#mode = 'paused';
     this.#tick();
   }
@@ -592,9 +572,7 @@ export class QueueEngine {
    * No current or identical position is a no-op.
    */
   observePosition(ms: number): void {
-    if (!isSafeNonNegative(ms)) {
-      throw new TypeError('positionMs must be a safe nonnegative integer');
-    }
+    requirePosition(ms);
     if (this.#currentId === null || this.#positionMs === ms) {
       return;
     }
@@ -603,9 +581,7 @@ export class QueueEngine {
 
   /** User intent to seek: requires a current occurrence and ticks. */
   seekTo(ms: number): void {
-    if (!isSafeNonNegative(ms)) {
-      throw new TypeError('positionMs must be a safe nonnegative integer');
-    }
+    requirePosition(ms);
     if (this.#currentId === null || this.#positionMs === ms) {
       return;
     }
@@ -640,9 +616,7 @@ export class QueueEngine {
     positionMs: number,
     playing: boolean,
   ): void {
-    if (!isSafeNonNegative(positionMs)) {
-      throw new TypeError('positionMs must be a safe nonnegative integer');
-    }
+    requirePosition(positionMs);
     if (occurrenceId !== null) {
       this.#requireIndex(occurrenceId);
     }
@@ -658,15 +632,11 @@ export class QueueEngine {
       return;
     }
     this.#requireTick();
-    this.#currentId = occurrenceId;
-    this.#positionMs = position;
-    this.#mode = mode;
-    this.#blockedError = undefined;
+    this.#apply(occurrenceId, position, mode);
     if (playing && occurrenceId !== null) {
       // The service reports the row playing — its failed mark is stale.
       this.#unplayable.delete(occurrenceId);
     }
-    this.#tick();
   }
 
   restorePaused(): void {
@@ -675,8 +645,6 @@ export class QueueEngine {
       return;
     }
     this.#requireTick();
-    this.#mode = mode;
-    this.#blockedError = undefined;
-    this.#tick();
+    this.#apply(this.#currentId, this.#positionMs, mode);
   }
 }

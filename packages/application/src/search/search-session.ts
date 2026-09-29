@@ -4,6 +4,7 @@ import type { AppError, Result } from '../errors.ts';
 import { appError, fromUnknown } from '../errors.ts';
 import { isSafeNonNegative } from '../domain.ts';
 import { retryBounded } from '../retry.ts';
+import { saturatingAdd } from '../session/util.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { ProviderPort, SearchPage } from '../ports/provider.ts';
@@ -35,11 +36,6 @@ const DEFAULT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_ENTRIES = 100;
 const REQUEST_DEADLINE_MS = 15_000;
 const RATE_LIMIT_FALLBACK_MS = 60_000;
-
-function saturatingAdd(a: number, b: number): number {
-  const sum = a + b;
-  return sum > Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : sum;
-}
 
 type CacheEntry = { readonly page: SearchPage; readonly storedAtMs: number };
 
@@ -295,10 +291,8 @@ export class SearchSession {
       ? saturatingAdd(retryNow, error.retryAfterMs ?? RATE_LIMIT_FALLBACK_MS)
       : undefined;
     const state: SearchState =
-      error.kind === 'rate-limit'
-        ? retryAtMs === undefined
-          ? { type: 'error', revision, query, error }
-          : { type: 'error', revision, query, error, retryAtMs }
+      error.kind === 'rate-limit' && retryAtMs !== undefined
+        ? { type: 'error', revision, query, error, retryAtMs }
         : { type: 'error', revision, query, error };
     this.#publish(state);
     return state;

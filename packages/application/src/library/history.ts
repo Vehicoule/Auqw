@@ -229,11 +229,7 @@ export function topPlayed(
   for (const entry of heap.sort(rankPlayCount)) {
     const recording = byId.get(entry.recordingId);
     if (recording !== undefined) {
-      rows.push({
-        recording,
-        count: entry.count,
-        lastMs: entry.lastMs,
-      });
+      rows.push({ recording, count: entry.count, lastMs: entry.lastMs });
     }
   }
   return rows;

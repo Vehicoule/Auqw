@@ -110,11 +110,9 @@ export function appError(
   message: string,
   retryAfterMs?: number,
 ): AppError {
-  const error: AppError =
-    retryAfterMs === undefined
-      ? { kind, message, retryable: RETRYABLE.has(kind) }
-      : { kind, message, retryable: RETRYABLE.has(kind), retryAfterMs };
-  return error;
+  return retryAfterMs === undefined
+    ? { kind, message, retryable: RETRYABLE.has(kind) }
+    : { kind, message, retryable: RETRYABLE.has(kind), retryAfterMs };
 }
 
 export function ok<T>(value: T): Result<T> {
@@ -123,6 +121,11 @@ export function ok<T>(value: T): Result<T> {
 
 export function err(error: AppError): Result<never> {
   return { ok: false, error };
+}
+
+/** The 'cancelled' shape every op surfaces on a fired signal. */
+export function cancelledError(): AppError {
+  return appError('cancelled', 'cancelled');
 }
 
 /**

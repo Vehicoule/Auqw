@@ -88,8 +88,12 @@ export function applyAcceptance(
   if (result.kind === 'unavailable') {
     return result;
   }
+  const unavailable: LyricsResult = {
+    kind: 'unavailable',
+    matched: result.matched,
+  };
   if (drifted(result.matched, context.durationMs)) {
-    return { kind: 'unavailable', matched: result.matched };
+    return unavailable;
   }
   switch (result.kind) {
     case 'instrumental':
@@ -97,9 +101,7 @@ export function applyAcceptance(
       // honored as reported.
       return result;
     case 'plain':
-      return hasText(result.text)
-        ? result
-        : { kind: 'unavailable', matched: result.matched };
+      return hasText(result.text) ? result : unavailable;
     case 'synced': {
       if (isValidSyncedLines(result.lines)) {
         return result;
@@ -107,7 +109,7 @@ export function applyAcceptance(
       const text = joinedText(result.lines);
       return hasText(text)
         ? { kind: 'plain', text, matched: result.matched }
-        : { kind: 'unavailable', matched: result.matched };
+        : unavailable;
     }
   }
 }
@@ -131,16 +133,17 @@ function parseLrcTimestamp(tag: string): number | null {
   const dot = rest.indexOf('.');
   const secPart = (dot < 0 ? rest : rest.slice(0, dot)).trim();
   const fracPart = dot < 0 ? '' : rest.slice(dot + 1).trim();
-  if (!/^\d+$/.test(minPart) || !/^\d+$/.test(secPart)) {
+  if (
+    !/^\d+$/.test(minPart) ||
+    !/^\d+$/.test(secPart) ||
+    (fracPart.length > 0 && !/^\d+$/.test(fracPart))
+  ) {
     return null;
   }
-  let ms = 0;
-  if (fracPart.length > 0) {
-    if (!/^\d+$/.test(fracPart)) {
-      return null;
-    }
-    ms = Number.parseInt((fracPart + '000').slice(0, 3), 10);
-  }
+  const ms =
+    fracPart.length === 0
+      ? 0
+      : Number.parseInt((fracPart + '000').slice(0, 3), 10);
   const tMs =
     Number.parseInt(minPart, 10) * 60_000 +
     Number.parseInt(secPart, 10) * 1_000 +
@@ -186,8 +189,7 @@ export function parseLrc(text: string): LyricsLine[] {
     }
     const lineText = [...rest.trim()].slice(0, MAX_LRC_LINE_TEXT).join('');
     for (const stamp of stamps) {
-      const tMs = stamp + offsetMs;
-      out.push({ tMs: tMs < 0 ? 0 : tMs, text: lineText });
+      out.push({ tMs: Math.max(0, stamp + offsetMs), text: lineText });
     }
   }
   out.sort((a, b) => a.tMs - b.tMs);
@@ -235,48 +237,40 @@ export function lyricsCacheEntry(
   accepted: LyricsResult,
   fetchedMs: number,
 ): LyricsCacheEntry | null {
+  const base = { recordingId, provider, providerVersion, fetchedMs };
   switch (accepted.kind) {
     case 'unavailable':
       return null;
     case 'instrumental':
       return {
-        recordingId,
-        provider,
-        providerVersion,
+        ...base,
         kind: 'plain',
         payload: {
           plainLyrics: null,
           syncedLyrics: null,
           instrumental: true,
         },
-        fetchedMs,
       };
     case 'plain':
       return {
-        recordingId,
-        provider,
-        providerVersion,
+        ...base,
         kind: 'plain',
         payload: {
           plainLyrics: accepted.text,
           syncedLyrics: null,
           instrumental: false,
         },
-        fetchedMs,
       };
     case 'synced': {
       const text = joinedText(accepted.lines);
       return {
-        recordingId,
-        provider,
-        providerVersion,
+        ...base,
         kind: 'synced',
         payload: {
           plainLyrics: hasText(text) ? text : null,
           syncedLyrics: linesToLrc(accepted.lines),
           instrumental: false,
         },
-        fetchedMs,
       };
     }
   }
@@ -366,24 +360,5 @@ export function lyricsSheet(
     cached: boolean;
   },
 ): LyricsSheet {
-  switch (accepted.kind) {
-    case 'synced':
-      return {
-        kind: 'synced',
-        lines: accepted.lines,
-        matched: accepted.matched,
-        ...source,
-      };
-    case 'plain':
-      return {
-        kind: 'plain',
-        text: accepted.text,
-        matched: accepted.matched,
-        ...source,
-      };
-    case 'instrumental':
-      return { kind: 'instrumental', matched: accepted.matched, ...source };
-    case 'unavailable':
-      return { kind: 'unavailable', matched: accepted.matched, ...source };
-  }
+  return { ...accepted, ...source };
 }

@@ -95,7 +95,7 @@ export type CandidateSnapshot = {
 };
 
 /** What a resolved review wrote: the confirmed ref, or null. */
-export type MatchResolution = {
+type MatchResolution = {
   ref: SourceRef | null;
 };
 
@@ -115,7 +115,7 @@ export type MatchReview = {
   resolvedMs: number | null;
 };
 
-export type LyricsPayload = {
+type LyricsPayload = {
   plainLyrics: string | null;
   syncedLyrics: string | null;
   instrumental: boolean;
@@ -143,11 +143,11 @@ export type ArtworkCacheEntry = {
 };
 
 /** Recording rows export flat; refs and mappings export as junctions. */
-export type ExportRecording = Omit<Recording, 'sourceRefs' | 'mappings'>;
+type ExportRecording = Omit<Recording, 'sourceRefs' | 'mappings'>;
 
-export type RecordingSourceRef = { recordingId: string; ref: SourceRef };
+type RecordingSourceRef = { recordingId: string; ref: SourceRef };
 
-export type RecordingMapping = {
+type RecordingMapping = {
   recordingId: string;
   mapping: SourceMapping;
 };
@@ -174,7 +174,7 @@ export type ExportDocument = {
   settings: Settings;
 };
 
-export type PersistedShape = {
+type PersistedShape = {
   readonly recordings: readonly Recording[];
   readonly likes: readonly Like[];
   readonly entities: readonly Entity[];
@@ -194,11 +194,17 @@ export type PersistedShape = {
 };
 
 const MATCH_REVIEW_STATUSES: ReadonlySet<string> = new Set([
-  'pending',
-  'confirmed',
-  'rejected',
-  'dismissed',
+  'pending', 'confirmed', 'rejected', 'dismissed',
 ]);
+
+function pushInto<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const list = map.get(key);
+  if (list === undefined) {
+    map.set(key, [value]);
+  } else {
+    list.push(value);
+  }
+}
 
 function isEntityKind(value: unknown): value is EntityKind {
   return value === 'album' || value === 'artist';
@@ -212,10 +218,16 @@ function hasUniqueIds<T>(items: readonly T[], idOf: (item: T) => string) {
   return new Set(items.map(idOf)).size === items.length;
 }
 
+/** Array where every element passes `guard`. */
+function allOf<T>(
+  value: unknown,
+  guard: (item: unknown) => item is T,
+): value is readonly T[] {
+  return Array.isArray(value) && value.every(guard);
+}
+
 export function isEntity(value: unknown): value is Entity {
-  if (!isRecord(value)) {
-    return false;
-  }
+  if (!isRecord(value)) return false;
   const { entityId, kind, title, artistName, artwork, createdMs } = value;
   return (
     hasExactKeys(value, [
@@ -240,9 +252,7 @@ export function isEntity(value: unknown): value is Entity {
 export function isEntitySourceRef(
   value: unknown,
 ): value is EntitySourceRef {
-  if (!isRecord(value)) {
-    return false;
-  }
+  if (!isRecord(value)) return false;
   const { entityId, provider, ref } = value;
   return (
     hasExactKeys(value, ['entityId', 'provider', 'ref']) &&
@@ -254,9 +264,7 @@ export function isEntitySourceRef(
 }
 
 export function isPlaylist(value: unknown): value is Playlist {
-  if (!isRecord(value)) {
-    return false;
-  }
+  if (!isRecord(value)) return false;
   const { playlistId, name, createdMs, updatedMs } = value;
   return (
     hasExactKeys(value, ['playlistId', 'name', 'createdMs', 'updatedMs']) &&
@@ -269,9 +277,7 @@ export function isPlaylist(value: unknown): value is Playlist {
 }
 
 export function isPlaylistEntry(value: unknown): value is PlaylistEntry {
-  if (!isRecord(value)) {
-    return false;
-  }
+  if (!isRecord(value)) return false;
   const {
     entryId,
     playlistId,
@@ -299,9 +305,7 @@ export function isPlaylistEntry(value: unknown): value is PlaylistEntry {
 }
 
 export function isPlayEvent(value: unknown): value is PlayEvent {
-  if (!isRecord(value)) {
-    return false;
-  }
+  if (!isRecord(value)) return false;
   const { eventId, recordingId, occurrenceId, playedMs, listenedMs } = value;
   return (
     hasExactKeys(value, [
@@ -320,9 +324,7 @@ export function isPlayEvent(value: unknown): value is PlayEvent {
 }
 
 export function isPlayCount(value: unknown): value is PlayCount {
-  if (!isRecord(value)) {
-    return false;
-  }
+  if (!isRecord(value)) return false;
   const { recordingId, count, lastMs } = value;
   return (
     hasExactKeys(value, ['recordingId', 'count', 'lastMs']) &&
@@ -335,9 +337,7 @@ export function isPlayCount(value: unknown): value is PlayCount {
 export function isCandidateSnapshot(
   value: unknown,
 ): value is CandidateSnapshot {
-  if (!isRecord(value)) {
-    return false;
-  }
+  if (!isRecord(value)) return false;
   const { metadata, ref } = value;
   return (
     hasExactKeys(value, ['metadata', 'ref']) &&
@@ -354,19 +354,13 @@ export function isCandidateSnapshot(
 export function isMatchResolution(
   value: unknown,
 ): value is MatchResolution {
-  if (!isRecord(value)) {
-    return false;
-  }
+  if (!isRecord(value)) return false;
   const { ref } = value;
-  return (
-    hasExactKeys(value, ['ref']) && (ref === null || isTrackRef(ref))
-  );
+  return hasExactKeys(value, ['ref']) && (ref === null || isTrackRef(ref));
 }
 
 export function isMatchReview(value: unknown): value is MatchReview {
-  if (!isRecord(value)) {
-    return false;
-  }
+  if (!isRecord(value)) return false;
   const {
     reviewId,
     recordingId,
@@ -403,10 +397,8 @@ export function isMatchReview(value: unknown): value is MatchReview {
   );
 }
 
-export function isLyricsPayload(value: unknown): value is LyricsPayload {
-  if (!isRecord(value)) {
-    return false;
-  }
+function isLyricsPayload(value: unknown): value is LyricsPayload {
+  if (!isRecord(value)) return false;
   const { plainLyrics, syncedLyrics, instrumental } = value;
   return (
     hasExactKeys(value, ['plainLyrics', 'syncedLyrics', 'instrumental']) &&
@@ -419,9 +411,7 @@ export function isLyricsPayload(value: unknown): value is LyricsPayload {
 export function isLyricsCacheEntry(
   value: unknown,
 ): value is LyricsCacheEntry {
-  if (!isRecord(value)) {
-    return false;
-  }
+  if (!isRecord(value)) return false;
   const { recordingId, provider, kind, payload, fetchedMs } = value;
   return (
     hasKeys(
@@ -448,9 +438,7 @@ export function isLyricsCacheEntry(
 export function isArtworkCacheEntry(
   value: unknown,
 ): value is ArtworkCacheEntry {
-  if (!isRecord(value)) {
-    return false;
-  }
+  if (!isRecord(value)) return false;
   const { url, filePath, bytes, lastAccessedMs } = value;
   return (
     hasExactKeys(value, ['url', 'filePath', 'bytes', 'lastAccessedMs']) &&
@@ -465,9 +453,7 @@ export function isArtworkCacheEntry(
 function isRecordingSourceRef(
   value: unknown,
 ): value is RecordingSourceRef {
-  if (!isRecord(value)) {
-    return false;
-  }
+  if (!isRecord(value)) return false;
   const { recordingId, ref } = value;
   return (
     hasExactKeys(value, ['recordingId', 'ref']) &&
@@ -477,9 +463,7 @@ function isRecordingSourceRef(
 }
 
 function isRecordingMapping(value: unknown): value is RecordingMapping {
-  if (!isRecord(value)) {
-    return false;
-  }
+  if (!isRecord(value)) return false;
   const { recordingId, mapping } = value;
   return (
     hasExactKeys(value, ['recordingId', 'mapping']) &&
@@ -511,22 +495,14 @@ function hasValidLibrarySections(
   const playCounts = sections['playCounts'];
   const matchReviews = sections['matchReviews'];
   if (
-    !Array.isArray(likes) ||
-    !likes.every(isLike) ||
-    !Array.isArray(entities) ||
-    !entities.every(isEntity) ||
-    !Array.isArray(entitySourceRefs) ||
-    !entitySourceRefs.every(isEntitySourceRef) ||
-    !Array.isArray(playlists) ||
-    !playlists.every(isPlaylist) ||
-    !Array.isArray(playlistEntries) ||
-    !playlistEntries.every(isPlaylistEntry) ||
-    !Array.isArray(playHistory) ||
-    !playHistory.every(isPlayEvent) ||
-    !Array.isArray(playCounts) ||
-    !playCounts.every(isPlayCount) ||
-    !Array.isArray(matchReviews) ||
-    !matchReviews.every(isMatchReview)
+    !allOf(likes, isLike) ||
+    !allOf(entities, isEntity) ||
+    !allOf(entitySourceRefs, isEntitySourceRef) ||
+    !allOf(playlists, isPlaylist) ||
+    !allOf(playlistEntries, isPlaylistEntry) ||
+    !allOf(playHistory, isPlayEvent) ||
+    !allOf(playCounts, isPlayCount) ||
+    !allOf(matchReviews, isMatchReview)
   ) {
     return false;
   }
@@ -542,64 +518,51 @@ function hasValidLibrarySections(
   }
   const entityKinds = new Map(entities.map((e) => [e.entityId, e.kind]));
   const playlistIds = new Set(playlists.map((p) => p.playlistId));
-  const likeKeys = new Set<string>();
+  // 'track' likes name recordings; entity likes must name an entity
+  // of the same kind.
+  if (!hasUniqueIds(likes, (l) => `${l.entityKind} ${l.targetId}`)) {
+    return false;
+  }
   for (const like of likes) {
-    const key = `${like.entityKind} ${like.targetId}`;
-    if (likeKeys.has(key)) {
-      return false;
-    }
-    likeKeys.add(key);
-    // 'track' likes name recordings; entity likes must name an entity
-    // of the same kind.
-    const resolves =
+    if (
       like.entityKind === 'track'
-        ? recordingIds.has(like.targetId)
-        : entityKinds.get(like.targetId) === like.entityKind;
-    if (!resolves) {
+        ? !recordingIds.has(like.targetId)
+        : entityKinds.get(like.targetId) !== like.entityKind
+    ) {
       return false;
     }
   }
-  const entityRefKeys = new Set<string>();
+  if (
+    !hasUniqueIds(entitySourceRefs, (r) => `${r.entityId} ${r.provider}`)
+  ) {
+    return false;
+  }
   for (const ref of entitySourceRefs) {
     // The ref's kind must agree with the target entity's kind.
     if (entityKinds.get(ref.entityId) !== ref.ref.kind) {
       return false;
     }
-    const key = `${ref.entityId} ${ref.provider}`;
-    if (entityRefKeys.has(key)) {
-      return false;
-    }
-    entityRefKeys.add(key);
   }
   const positions = new Map<string, Set<number>>();
   for (const entry of playlistEntries) {
-    if (!playlistIds.has(entry.playlistId)) {
-      return false;
-    }
-    if (!recordingIds.has(entry.recordingId)) {
+    if (
+      !playlistIds.has(entry.playlistId) ||
+      !recordingIds.has(entry.recordingId)
+    ) {
       return false;
     }
     const seen = positions.get(entry.playlistId) ?? new Set<number>();
     if (seen.has(entry.position)) {
       return false;
     }
-    seen.add(entry.position);
-    positions.set(entry.playlistId, seen);
+    positions.set(entry.playlistId, seen.add(entry.position));
   }
-  for (const event of playHistory) {
-    if (!recordingIds.has(event.recordingId)) {
-      return false;
-    }
-  }
-  for (const count of playCounts) {
-    if (!recordingIds.has(count.recordingId)) {
-      return false;
-    }
-  }
-  for (const review of matchReviews) {
-    if (!recordingIds.has(review.recordingId)) {
-      return false;
-    }
+  if (
+    !playHistory.every((e) => recordingIds.has(e.recordingId)) ||
+    !playCounts.every((c) => recordingIds.has(c.recordingId)) ||
+    !matchReviews.every((r) => recordingIds.has(r.recordingId))
+  ) {
+    return false;
   }
   // Download/local sections persist with the library but never export —
   // filePath/docId/treeUri are device-local. Their foreign keys still
@@ -609,12 +572,9 @@ function hasValidLibrarySections(
     const localSources = localSections.localSources;
     const localFiles = localSections.localFiles;
     if (
-      !Array.isArray(downloads) ||
-      !downloads.every(isDownloadRecord) ||
-      !Array.isArray(localSources) ||
-      !localSources.every(isLocalSource) ||
-      !Array.isArray(localFiles) ||
-      !localFiles.every(isLocalFile)
+      !allOf(downloads, isDownloadRecord) ||
+      !allOf(localSources, isLocalSource) ||
+      !allOf(localFiles, isLocalFile)
     ) {
       return false;
     }
@@ -630,18 +590,13 @@ function hasValidLibrarySections(
       return false;
     }
     const sourceIds = new Set(localSources.map((s) => s.sourceId));
-    for (const download of downloads) {
-      if (!recordingIds.has(download.recordingId)) {
-        return false;
-      }
-    }
-    for (const file of localFiles) {
-      if (
-        !sourceIds.has(file.sourceId) ||
-        !recordingIds.has(file.recordingId)
-      ) {
-        return false;
-      }
+    if (
+      !downloads.every((d) => recordingIds.has(d.recordingId)) ||
+      !localFiles.every(
+        (f) => sourceIds.has(f.sourceId) && recordingIds.has(f.recordingId),
+      )
+    ) {
+      return false;
     }
   }
   return true;
@@ -673,12 +628,9 @@ export function isPersistedState(value: unknown): value is PersistedShape {
   }
   const v = value;
   if (
-    !Array.isArray(v['recordings']) ||
-    !v['recordings'].every(isRecording) ||
-    !Array.isArray(v['lyricsCache']) ||
-    !v['lyricsCache'].every(isLyricsCacheEntry) ||
-    !Array.isArray(v['artworkCache']) ||
-    !v['artworkCache'].every(isArtworkCacheEntry) ||
+    !allOf(v['recordings'], isRecording) ||
+    !allOf(v['lyricsCache'], isLyricsCacheEntry) ||
+    !allOf(v['artworkCache'], isArtworkCacheEntry) ||
     !isQueueSnapshot(v['queue']) ||
     !isSettings(v['settings'])
   ) {
@@ -713,12 +665,7 @@ export function isPersistedState(value: unknown): value is PersistedShape {
   ) {
     return false;
   }
-  for (const occurrence of queue.occurrences) {
-    if (!recordingIds.has(occurrence.recordingId)) {
-      return false;
-    }
-  }
-  return true;
+  return queue.occurrences.every((o) => recordingIds.has(o.recordingId));
 }
 
 const EXPORT_KEYS = [
@@ -762,10 +709,11 @@ export function isExportDocument(value: unknown): value is ExportDocument {
   const recordingIds = new Set<string>();
   const records: { rec: Record<string, unknown>; id: string }[] = [];
   for (const rec of v['recordings']) {
-    if (!isRecord(rec) || !isString(rec['id'], 64)) {
-      return false;
-    }
-    if (recordingIds.has(rec['id'])) {
+    if (
+      !isRecord(rec) ||
+      !isString(rec['id'], 64) ||
+      recordingIds.has(rec['id'])
+    ) {
       return false;
     }
     recordingIds.add(rec['id']);
@@ -776,18 +724,14 @@ export function isExportDocument(value: unknown): value is ExportDocument {
     if (!isRecordingSourceRef(row) || !recordingIds.has(row.recordingId)) {
       return false;
     }
-    const list = refsByRecording.get(row.recordingId) ?? [];
-    list.push(row.ref);
-    refsByRecording.set(row.recordingId, list);
+    pushInto(refsByRecording, row.recordingId, row.ref);
   }
   const mappingsByRecording = new Map<string, SourceMapping[]>();
   for (const row of v['mappings']) {
     if (!isRecordingMapping(row) || !recordingIds.has(row.recordingId)) {
       return false;
     }
-    const list = mappingsByRecording.get(row.recordingId) ?? [];
-    list.push(row.mapping);
-    mappingsByRecording.set(row.recordingId, list);
+    pushInto(mappingsByRecording, row.recordingId, row.mapping);
   }
   // Reassembling each recording also enforces >=1 source ref and
   // (provider, kind, id) uniqueness per recording. Pre-slice-3 exports

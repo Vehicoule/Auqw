@@ -1,4 +1,4 @@
-import { appError, err, ok } from '../errors.ts';
+import { appError, cancelledError, err, ok } from '../errors.ts';
 import type { AppError, ErrorKind, Result } from '../errors.ts';
 import { CancellationSource } from '../cancellation.ts';
 import type { CancellationSignal } from '../cancellation.ts';
@@ -58,7 +58,7 @@ export function asAppError(thrown: unknown): AppError {
     thrown !== null &&
     (thrown as { name?: unknown }).name === 'AbortError'
   ) {
-    return appError('cancelled', 'cancelled');
+    return cancelledError();
   }
   return appError('internal', 'download failed');
 }
@@ -189,6 +189,11 @@ function checkSignal(signal: CancellationSignal): void {
   if (signal.cancelled) {
     throw new DownloadFailure('cancelled', 'cancelled');
   }
+}
+
+/** A failed port Result rethrows as a typed DownloadFailure. */
+function raise(error: AppError): never {
+  throw new DownloadFailure(error.kind, error.message);
 }
 
 /** Incremental sha-256 over committed bytes, for the publish checksum. */
@@ -324,24 +329,20 @@ export async function runTransfer(options: {
     // file (fresh start or an encoding restart back to offset 0).
     let hasher = options.hasher();
     let digestCoversFile = start === 0;
-    let sink: TransferSink;
+    let sinkOpen = false;
     const openSink = async (resume: number): Promise<TransferSink> => {
       const opened = await transfer.begin(
         { destPath: destName, resumeAtBytes: resume },
         signal,
       );
       if (!opened.ok) {
-        throw new DownloadFailure(
-          opened.error.kind,
-          opened.error.message,
-        );
+        raise(opened.error);
       }
-      sink = opened.value;
-      return sink;
+      sinkOpen = true;
+      return opened.value;
     };
-    sink = await openSink(start);
+    let sink = await openSink(start);
 
-    let sinkOpen = true;
     const closeAbort = async (keep: boolean): Promise<void> => {
       if (!sinkOpen) {
         return;
@@ -381,7 +382,7 @@ export async function runTransfer(options: {
           const fresh = await remint(start, current.itag);
           checkSignal(signal);
           if (!fresh.ok) {
-            throw new DownloadFailure(fresh.error.kind, fresh.error.message);
+            raise(fresh.error);
           }
           const sameEncoding =
             fresh.value.mime === current.mime &&
@@ -406,7 +407,6 @@ export async function runTransfer(options: {
             hasher = options.hasher();
             digestCoversFile = true;
             sink = await openSink(start);
-            sinkOpen = true;
           }
           continue;
         }
@@ -455,15 +455,12 @@ export async function runTransfer(options: {
         }
         const written = await sink.write(chunk.bytes);
         if (!written.ok) {
-          throw new DownloadFailure(written.error.kind, written.error.message);
+          raise(written.error);
         }
         hasher.update(chunk.bytes);
         const committed = await sink.commit();
         if (!committed.ok) {
-          throw new DownloadFailure(
-            committed.error.kind,
-            committed.error.message,
-          );
+          raise(committed.error);
         }
         start = committed.value;
         checkSignal(signal);

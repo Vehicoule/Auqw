@@ -1,9 +1,10 @@
-import { appError, err, ok } from './errors.ts';
+import { appError, cancelledError, err, ok } from './errors.ts';
 import type { AppError, Result } from './errors.ts';
 import { CancellationSource } from './cancellation.ts';
 import type { CancellationSignal } from './cancellation.ts';
 import type { ClockPort } from './ports/clock.ts';
 import { isSafeNonNegative } from './domain.ts';
+import { internalError, timeoutError } from './session/util.ts';
 
 /**
  * Bounded retry for port calls that already carry an absolute
@@ -45,14 +46,6 @@ const DEFAULT_MAX_ATTEMPTS = 2;
 const DEFAULT_BACKOFF_MS = 300;
 const MAX_BACKOFF_MS = 5_000;
 
-function timeoutError(): AppError {
-  return appError('timeout', 'operation deadline exceeded');
-}
-
-function internalError(): AppError {
-  return appError('internal', 'an internal error occurred');
-}
-
 /**
  * Runs `call` up to `maxAttempts` times while failures stay
  * retryable and budget remains. The thunk receives the caller's
@@ -90,21 +83,24 @@ export async function retryBounded<T>(
       opts.baseBackoffMs >= 0
       ? opts.baseBackoffMs
       : DEFAULT_BACKOFF_MS;
+  const nowMs = (): number | undefined => {
+    try {
+      const n = opts.clock.nowMs();
+      return isSafeNonNegative(n) ? n : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   let lastError: AppError = timeoutError();
   for (let attempt = 1; ; attempt += 1) {
     // A cancellation landing after a successful backoff must not
     // spend another port call — the signal is consulted at every
     // attempt, not only through the backoff sleep.
     if (opts.signal.cancelled) {
-      return err(appError('cancelled', 'cancelled'));
+      return err(cancelledError());
     }
-    let now: number;
-    try {
-      now = opts.clock.nowMs();
-    } catch {
-      return err(internalError());
-    }
-    if (!isSafeNonNegative(now)) {
+    const now = nowMs();
+    if (now === undefined) {
       return err(internalError());
     }
     const remaining = opts.deadlineMs - now;
@@ -143,16 +139,8 @@ export async function retryBounded<T>(
     // firing on a stale bound.
     const watchdogP = (async () => {
       for (; ;) {
-        let wokeAt: number;
-        try {
-          wokeAt = opts.clock.nowMs();
-        } catch {
-          return {
-            tag: 'sleep' as const,
-            slept: err(internalError()),
-          };
-        }
-        if (!isSafeNonNegative(wokeAt)) {
+        const wokeAt = nowMs();
+        if (wokeAt === undefined) {
           return { tag: 'sleep' as const, slept: err(internalError()) };
         }
         if (opts.deadlineMs - wokeAt <= 0) {
@@ -161,19 +149,11 @@ export async function retryBounded<T>(
           // so its own verdict wins the race, then confirm the bound
           // is still dead (a live getter may have moved it forward).
           await Promise.resolve();
-          let recheck: number;
-          try {
-            recheck = opts.clock.nowMs();
-          } catch {
-            return {
-              tag: 'sleep' as const,
-              slept: err(internalError()),
-            };
+          const recheck = nowMs();
+          if (recheck === undefined) {
+            return { tag: 'sleep' as const, slept: err(internalError()) };
           }
-          if (
-            !isSafeNonNegative(recheck) ||
-            opts.deadlineMs - recheck <= 0
-          ) {
+          if (opts.deadlineMs - recheck <= 0) {
             return { tag: 'sleep' as const, slept: ok(undefined) };
           }
           continue;
@@ -205,13 +185,8 @@ export async function retryBounded<T>(
     if (!result.error.retryable || attempt >= maxAttempts) {
       return result;
     }
-    let now2: number;
-    try {
-      now2 = opts.clock.nowMs();
-    } catch {
-      return err(internalError());
-    }
-    if (!isSafeNonNegative(now2)) {
+    const now2 = nowMs();
+    if (now2 === undefined) {
       return err(internalError());
     }
     const budgetLeft = opts.deadlineMs - now2;
