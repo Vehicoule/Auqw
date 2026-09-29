@@ -57,7 +57,7 @@ Typed JSON source (DTCG), one authority; generated TS/CSS outputs. Three schemes
 | switch.thumb | `#ffffff` | `#ffffff` | `#ffffff` | thumb is constant white |
 | hairline | `fg @ 14%` | `fg @ 15%` | `fg @ 13%` | furniture borders |
 | alpha.fg08/18/25/40 | `fg @ 8/16/26/42%` | `fg @ 6/13/26/42%` | same as dark | selected fills, disabled |
-| hover | `accent @ 9%` | `accent @ 9%` | `accent @ 9%` | hover wash — inside the accent channel but below accent.soft so selected still reads stronger; the neutral fg08 wash read as "greyed out" and drowned on accent-filled controls |
+| hover | `accent.soft @ 55%` | `accent.soft @ 55%` | `accent.soft @ 55%` | hover wash — half the selected fill's own source so it always reads below selected in every scheme (adaptive palettes may source the selection color elsewhere than accent); the neutral fg08 wash read as "greyed out" and drowned on accent-filled controls |
 
 States carry meaning beyond color: playing = accent text **and** eq overlay on the thumb; liked = filled pink heart; unavailable = dimmed + warn glyph; selected = alpha fill + weight. `playback.active` = `accent.active` (split only if the two meanings differ beyond color). No decorative text below 4.5:1; decorative-only roles (grab handles, hints) may sit below.
 

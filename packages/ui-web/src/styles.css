@@ -24,12 +24,13 @@
      macOS traffic lights inset into). */
   --uw-titlebar-h: 40px;
   -webkit-user-select: none;
-  /* Hover affordance — a faint warm tint, deliberately inside the
-     accent channel but BELOW the accentSoft selected fill so the two
-     state colors never collide (design.md owns this choice). The
-     neutral fg08 wash read as "greyed out" and drowned on
-     accent-filled controls. */
-  --uw-hover: color-mix(in srgb, var(--accent) 9%, transparent);
+  /* Hover affordance — a faint wash at roughly half the accentSoft
+     selected fill, derived from the SAME source so hover always reads
+     below selected in every scheme (adaptive palettes may source the
+     selection color elsewhere than accent). The neutral fg08 wash
+     read as "greyed out" and drowned on accent-filled controls;
+     design.md owns this choice. */
+  --uw-hover: color-mix(in srgb, var(--accent-soft) 55%, transparent);
 }
 
 .ui-web.t-light {
