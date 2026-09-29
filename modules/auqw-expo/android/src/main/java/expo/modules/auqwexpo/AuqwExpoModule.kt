@@ -1637,7 +1637,7 @@ class AuqwExpoModule : Module() {
     }
     // Forward moves step over `skipsForward` rows — the same skip the
     // engine's next() applies; backward moves above still reach them.
-    fun unflaggedAfter(walkPos: Int): QueueProjectionItem? {
+    fun unflaggedAfter(walkPos: Int): ProjectionItemInput? {
       for (i in walkPos + 1 until order.size) {
         val item = proj.items.getOrNull(order[i])
         if (item != null && item.skipsForward != true) {

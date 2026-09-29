@@ -690,9 +690,14 @@ export class PlaybackEngine {
         }
       } else if (dealt !== null) {
         const pos = dealt.indexOf(before.currentOccurrenceId);
+        // A blocked row's retained position isn't resumable progress —
+        // it reads as 0 for the restart-window rules the same way the
+        // engine's previous() treats it.
+        const prevPosMs =
+          before.blockedError !== undefined ? 0 : before.positionMs;
         if (
           pos === 0 &&
-          before.positionMs <= 3000 &&
+          prevPosMs <= 3000 &&
           r.repeat === 'all' &&
           dealt.length > 1
         ) {
@@ -703,7 +708,7 @@ export class PlaybackEngine {
             r.queue.select(tail, before.mode === 'playing');
             bumpListenCycle(r, tail);
           }
-        } else if (pos > 0 && before.positionMs <= 3000) {
+        } else if (pos > 0 && prevPosMs <= 3000) {
           const prev = dealt[pos - 1];
           if (prev !== undefined) {
             r.queue.select(prev, before.mode === 'playing');
@@ -718,7 +723,7 @@ export class PlaybackEngine {
         r.repeat === 'all' &&
         before.currentOccurrenceId === before.occurrences[0]?.occurrenceId &&
         before.occurrences.length > 1 &&
-        before.positionMs <= 3000
+        (before.blockedError !== undefined ? 0 : before.positionMs) <= 3000
       ) {
         // repeat=all at the head, within the restart threshold: the
         // move wraps to the tail — the same rule the service cursor

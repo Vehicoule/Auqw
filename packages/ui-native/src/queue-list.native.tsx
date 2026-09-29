@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { FlatList, View } from 'react-native';
 import DraggableFlatList, {
   ScaleDecorator,
@@ -45,6 +46,10 @@ export function QueueList({
   onMoveItemTo,
 }: QueueListProps) {
   const theme = useTheme();
+  // The draggable list animates to the raw drop slot; a drop outside
+  // up-next is clamped on write, so the list remounts to re-render
+  // from the model — otherwise it keeps showing the rejected landing.
+  const [dragRemount, bumpDragRemount] = useState(0);
   if (queue.items.length === 0) {
     return <EmptyState title={t('queue.empty')} icon="queue" />;
   }
@@ -127,6 +132,7 @@ export function QueueList({
   if (reordering && onMoveItemTo !== undefined) {
     return (
       <DraggableFlatList
+        key={dragRemount}
         data={items.slice()}
         keyExtractor={(item) => item.occurrenceId}
         scrollEnabled={scrollEnabled}
@@ -135,13 +141,20 @@ export function QueueList({
           const item = items[from];
           // Reorder is confined to up-next: the drop clamps into the
           // section — and the clamped display slot is the destination
-          // the session's move contract indexes.
+          // the session's move contract indexes. An out-of-bounds drop
+          // remounts the list so it can't keep showing the slot the
+          // write rejected.
           const destination =
             upNextStart === -1
               ? undefined
               : Math.max(upNextStart, Math.min(to, upNextEnd));
           if (item?.section === 'upNext' && destination !== undefined) {
+            if (destination !== to) {
+              bumpDragRemount((x) => x + 1);
+            }
             onMoveItemTo(item.occurrenceId, destination);
+          } else if (item?.section === 'upNext') {
+            bumpDragRemount((x) => x + 1);
           }
         }}
         renderItem={({

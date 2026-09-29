@@ -433,7 +433,10 @@ export class QueueEngine {
     if (index < 0) {
       return;
     }
-    if (this.#positionMs > 3000) {
+    // The >3s restart applies to live playback — a blocked row's
+    // retained position isn't progress it can resume from, so prev
+    // steps to the predecessor instead of consuming the press.
+    if (this.#positionMs > 3000 && this.#blockedError === undefined) {
       this.#requireTick();
       this.#positionMs = 0;
       this.#tick();
