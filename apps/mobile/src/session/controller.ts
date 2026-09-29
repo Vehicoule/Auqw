@@ -349,16 +349,27 @@ export async function createSessionController(
     potProviderUrl: options.potProviderUrl,
     prefer: PREFERRED_CONTAINERS,
   });
-  const providers: PluginProvider[] = await Promise.all(
-    BUNDLED_PLUGINS.map(async ([providerId, wasm, manifest]) =>
+  // Two phases, not one interleave: a rejected load must leave zero
+  // providers constructed — each adapter registers a native listener at
+  // construction and a half-built set has no controller to dispose it.
+  const loaded = await Promise.all(
+    BUNDLED_PLUGINS.map(([providerId, wasm, manifest]) =>
+      loadBundledPlugin(host, wasm, manifest).then((pluginId) => ({
+        providerId,
+        manifest,
+        pluginId,
+      })),
+    ),
+  );
+  const providers: PluginProvider[] = loaded.map(
+    ({ providerId, manifest, pluginId }) =>
       createPluginProvider(
         host,
-        await loadBundledPlugin(host, wasm, manifest),
+        pluginId,
         providerId,
         manifestCapabilities(manifest),
         manifestVersion(manifest),
       ),
-    ),
   );
   const defaults = defaultSettings(providers);
   const sqliteDriver = await createExpoSqliteDriver(options.databasePath);
