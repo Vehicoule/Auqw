@@ -484,6 +484,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'error.timeout': '仍在加载 — 重试',
   'error.limit': '超出限制 — 缩小请求或稍后重试',
   'error.transient': '操作被中断 — 请重试',
+  'error.providerWall': '提供方暂时拒绝了请求 — 请稍后重试',
   'error.plugin': '提供方插件行为异常',
   'error.rejected': '下载未通过校验 — 重试',
   'error.capped': '打开的流过多 — 稍等片刻',

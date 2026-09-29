@@ -690,6 +690,10 @@ function Main({
       localCatalog: true,
       // Entity + search rows mark the actually-resolved playing ref.
       markPlayingRef: true,
+      // Same late-verdict funnel as desktop: a native `failed` status
+      // landing after the op promise settled surfaces through the
+      // playback.failed watcher, not just the op's own Result.
+      trackAttemptActions: true,
       // The stage sheet morph owns the mount lifecycle — a queue end
       // holds the last player until the sheet settles collapsed.
       holdEndedPlayer: true,

@@ -89,9 +89,22 @@ assertEqual(
   errorText(appError('timeout', 'operation deadline exceeded')),
   'still loading — try again',
 );
+// A provider bot wall is 'transient' on the wire but not weather —
+// it gets its own honest line in every wrap shape the host emits.
 assertEqual(
   errorText(appError('transient', 'transient: bot-check')),
+  'the provider is refusing requests right now — try again later',
+);
+assertEqual(
+  errorText(
+    appError('transient', 'guest failure (transient): transient: bot-check'),
+  ),
+  'the provider is refusing requests right now — try again later',
+);
+assertEqual(
+  errorText(appError('transient', 'socket hangup')),
   'something interrupted that — try again',
+  'generic transient keeps the hiccup copy',
 );
 assertEqual(
   errorText(appError('rate-limit', 'rate-limit')),

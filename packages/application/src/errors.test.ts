@@ -2,6 +2,7 @@ import {
   appError,
   err,
   fromUnknown,
+  isBotCheckWall,
   ok,
 } from './errors.ts';
 import type { ErrorKind } from './errors.ts';
@@ -67,4 +68,37 @@ export function run(): void {
   assert(!mapped.message.includes('secret internals'));
   const mappedString = fromUnknown('plain string');
   assertEqual(mappedString.kind, 'internal');
+
+  // isBotCheckWall: the guest's 'bot-check' detail survives every
+  // host prefix-wrap as the LAST `:`-separated segment — only a
+  // `transient` verdict ending in exactly that token is the wall.
+  const walls = [
+    'bot-check',
+    'transient: bot-check',
+    'transient: bot-check ',
+    'guest failure (transient): transient: bot-check',
+    'transient: guest failure (transient): transient: bot-check',
+  ];
+  for (const message of walls) {
+    assert(
+      isBotCheckWall(appError('transient', message)),
+      `wall recognized: ${message}`,
+    );
+  }
+  const notWalls: readonly [ErrorKind, string][] = [
+    ['transient', 'socket hangup'],
+    ['transient', 'streams-capped'],
+    ['transient', 'transient: bot-checksum'],
+    ['transient', 'rung bot-check failed'],
+    ['transient', 'bot-check: recheck later'],
+    ['rate-limit', 'transient: bot-check'],
+    ['timeout', 'bot-check'],
+    ['not-found', 'bot-check'],
+  ];
+  for (const [kind, message] of notWalls) {
+    assert(
+      !isBotCheckWall(appError(kind, message)),
+      `not a wall: ${kind} / ${message}`,
+    );
+  }
 }

@@ -508,6 +508,8 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'error.timeout': 'chargement encore en cours — réessayer',
   'error.limit': 'au-delà d’une limite — réduisez ou réessayez plus tard',
   'error.transient': 'une interruption est survenue — réessayez',
+  'error.providerWall':
+    'le fournisseur refuse les requêtes pour le moment — réessayez plus tard',
   'error.plugin': "un plugin fournisseur s'est mal comporté",
   'error.rejected': 'le téléchargement a échoué aux contrôles — réessayez',
   'error.capped': 'trop de flux ouverts — attendez un moment',

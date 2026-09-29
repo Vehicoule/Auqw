@@ -1382,7 +1382,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // the published `playback.failed` carry the SAME error object, so
   // identity-dedupe reports each failure once regardless of channel.
   // The dedupe engages only under ports.trackAttemptActions — the
-  // watcher is desktop's (mobile has no late-verdict channel).
+  // watcher flag both shells mount for post-settle verdicts.
   const lastPlayErrorRef = useRef<AppError | null>(null);
   // Action labels travel with the ATTEMPT, not the button: a pause
   // during an in-flight prepare must not steal the play attempt's
@@ -1458,8 +1458,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // A failure that lands after the play promise resolved reaches the
   // UI only through `playback.failed` — the watcher reports it through
   // the same deduped funnel, with the attempt's recorded action.
-  // ports.trackAttemptActions mounts it — mobile's op promises cover
-  // its verdicts themselves.
+  // ports.trackAttemptActions mounts it — both shells: a late native
+  // `failed` status on mobile, an engine-advanced verdict on desktop.
   useEffect(() => {
     if (ports.trackAttemptActions !== true) {
       return;

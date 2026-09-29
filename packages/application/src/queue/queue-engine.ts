@@ -590,17 +590,45 @@ export class QueueEngine {
     this.#tick();
   }
 
+  /**
+   * The failed current pauses the queue and records the verdict —
+   * surfaces read `blockedError` for the reason and `play()` on the
+   * blocked row is the explicit retry. Unlike `markUnplayable` the
+   * row is NOT flagged: weather and bookkeeping verdicts are not a
+   * reason to step over a playable row forever.
+   */
+  markFailed(error: AppError): void {
+    this.#blockCurrent(error, false);
+  }
+
+  /**
+   * `markFailed` plus the forward-skip flag — for verdicts that
+   * condemn the row itself (gone, unplayable, gated): `next()` and
+   * the dealt walk step over it; `previous()` and an explicit
+   * `select` still reach it.
+   */
   markUnplayable(error: AppError): void {
-    if (this.#currentId === null) {
+    this.#blockCurrent(error, true);
+  }
+
+  #blockCurrent(error: AppError, unplayable: boolean): void {
+    const id = this.#currentId;
+    if (id === null) {
       return;
     }
-    if (this.#mode === 'paused' && sameError(this.#blockedError, error)) {
+    if (
+      this.#mode === 'paused' &&
+      sameError(this.#blockedError, error) &&
+      (!unplayable || this.#unplayable.has(id))
+    ) {
       return;
     }
     this.#requireTick();
     this.#mode = 'paused';
     this.#blockedError = cloneError(error);
-    this.#unplayable.add(this.#currentId);
+    if (unplayable) {
+      this.#unplayable.add(id);
+    }
     this.#tick();
   }
 

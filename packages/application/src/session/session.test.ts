@@ -6,7 +6,7 @@ import type {
   SourceRef,
   TrackMetadata,
 } from '../domain.ts';
-import { appError, err, ok } from '../errors.ts';
+import { appError, err, isBotCheckWall, ok } from '../errors.ts';
 import type { Result } from '../errors.ts';
 import type {
   AttemptTrace,
@@ -1434,6 +1434,12 @@ async function unplayableFailure(): Promise<void> {
   assertEqual(snap.queue.mode, 'paused', 'unplayable pauses item');
   assert(snap.queue.blockedError !== undefined, 'blocked error set');
   assertEqual(snap.playback.type, 'failed');
+  // 'unavailable' is not a permanent verdict — the row keeps its
+  // place in the forward walk.
+  assert(
+    r.player.projections.at(-1)?.items[0]?.skipsForward !== true,
+    'a non-permanent verdict does not flag the row',
+  );
   // Retry clears the block and starts fresh.
   const retry = r.session.retryCurrent();
   await pump();
@@ -1504,7 +1510,7 @@ async function unplayableRollbackRestoresMarks(): Promise<void> {
       'h-oA',
       'failed',
       0,
-      appError('unavailable', 'not playable'),
+      appError('no-result', 'not playable'),
     ),
   );
   await pump();
@@ -2208,7 +2214,7 @@ async function repeatAllWrapSkipsMarkedHead(): Promise<void> {
   const r = repeatRig();
   await restoreOk(r);
   await pump();
-  // oA fails: every later projection flags it skipsForward.
+  // oA fails permanently: every later projection flags it skipsForward.
   await playThrough(r, 'oA');
   r.player.emit(
     statusEvent(
@@ -2216,7 +2222,7 @@ async function repeatAllWrapSkipsMarkedHead(): Promise<void> {
       'h-oA',
       'failed',
       0,
-      appError('unavailable', 'not playable'),
+      appError('no-result', 'not playable'),
     ),
   );
   await pump();
@@ -4499,6 +4505,335 @@ async function prepareBudgetIsPerIntent(): Promise<void> {
   assertEqual(readyOf(r2).playback.type, 'failed', 'terminal on spent budget');
 }
 
+async function deadPrepareOutcomeRePrepares(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('o1');
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  // The minted session died between commit and delivery — a
+  // dead-stream verdict on the outcome itself is a registry kill,
+  // not provider truth: the same re-prepare the dead-handle legs
+  // already run, inside the intent's shared deadline + budget.
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-dead-1',
+    identity,
+    outcome: {
+      type: 'failed',
+      error: appError('not-found', 'stream session ended before delivery'),
+      attempt: TRACE,
+    },
+  });
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 2, 'dead outcome re-prepares');
+  assertEqual(
+    readyOf(r).playback.type,
+    'preparing',
+    'recovery stays preparing — no failed flicker',
+  );
+  assertEqual(
+    readyOf(r).queue.blockedError,
+    undefined,
+    'a registry kill leaves the row unblocked',
+  );
+  // The superseded attempt's pending prepare still settles — its
+  // caller reads the hop's bookkeeping, not a bogus provider verdict.
+  assert(
+    r.player.settlePrepare(ok('req-dead-1')),
+    'stale prepare still pending',
+  );
+  const res = await playing;
+  assert(!res.ok, 'hop supersedes the first attempt');
+  assertEqual(res.error.kind, 'superseded', 'bookkeeping verdict');
+  await pump();
+  // The re-prepare adopts its fresh session end to end.
+  const idB = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(idB, 'h-o1x'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-h-o1x')), 'pending re-prepare');
+  await pump();
+  assertEqual(calls(r, 'play').length, 1, 'fresh session plays');
+  assertEqual(readyOf(r).playback.type, 'buffering');
+}
+
+async function deadPrepareOutcomeStopsAtBudget(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('o1');
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-d1',
+    identity,
+    outcome: {
+      type: 'failed',
+      error: appError('not-found', 'session gone'),
+      attempt: TRACE,
+    },
+  });
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 2, 'first hop re-prepares');
+  // Both pending accepts resolve — the superseded attempt unwinds as
+  // bookkeeping and the hop's own request lands.
+  r.player.settlePrepare(ok('req-d1'));
+  r.player.settlePrepare(ok('req-d2'));
+  await pump();
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-d2',
+    identity: lastPrepareIdentity(r),
+    outcome: {
+      type: 'failed',
+      error: appError('released', 'session released'),
+      attempt: TRACE,
+    },
+  });
+  await pump();
+  // The second hop finds the shared budget spent — 'budget-exceeded'
+  // stays the terminal bound; a dead-stream storm never stacks a
+  // third prepare.
+  assertEqual(calls(r, 'prepare').length, 2, 'spent budget issues no third');
+  const playback = readyOf(r).playback;
+  assert(playback.type === 'failed', 'spent budget fails the attempt');
+  assertEqual(playback.error.kind, 'budget-exceeded');
+  const queue = readyOf(r).queue;
+  assertEqual(queue.mode, 'paused', 'terminal verdict pauses the queue');
+  assertEqual(queue.blockedError?.kind, 'budget-exceeded');
+  assert(
+    r.player.projections.at(-1)?.items[0]?.skipsForward !== true,
+    'a budget verdict does not flag the row',
+  );
+  assert(!(await playing).ok, 'play resolves failed');
+}
+
+async function transientFailureLeavesRowReachable(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+        recording('rC', [ref('youtube-music', 'yC')]),
+      ],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('oA', 'rA', ref('youtube-music', 'yA')),
+          occurrence('oB', 'rB', ref('youtube-music', 'yB')),
+          occurrence('oC', 'rC', ref('youtube-music', 'yC')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('oB');
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  // Generic transient weather still earns the one in-budget retry.
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-t1',
+    identity,
+    outcome: {
+      type: 'failed',
+      error: appError('transient', 'socket hangup'),
+      attempt: TRACE,
+    },
+  });
+  await pump();
+  assertEqual(readyOf(r).playback.type, 'preparing', 'retry arms');
+  r.clock.advance(500);
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 2, 'transient still re-prepares');
+  // The retried attempt's own transient verdict is terminal — but
+  // weather must not flag the row: the queue pauses on the typed
+  // error while the walk keeps the occurrence reachable.
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-t2',
+    identity: lastPrepareIdentity(r),
+    outcome: {
+      type: 'failed',
+      error: appError('transient', 'socket hangup'),
+      attempt: TRACE,
+    },
+  });
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.playback.type, 'failed');
+  assertEqual(snap.queue.mode, 'paused');
+  assertEqual(snap.queue.blockedError?.kind, 'transient');
+  assert(
+    r.player.projections.at(-1)?.items[1]?.skipsForward !== true,
+    'a transient verdict does not flag the row',
+  );
+  // Reachable: the forward walk still lands on it — under the old
+  // marking this next() stepped straight to oC.
+  assert((await r.session.previous()).ok, 'previous off the blocked row');
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oA');
+  assert((await r.session.next()).ok, 'next over the failed row');
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oB',
+    'unflagged failure keeps its place in the walk',
+  );
+  r.player.settlePrepare(ok('req-t1'));
+  r.player.settlePrepare(ok('req-t2'));
+  await pump();
+  assert(!(await playing).ok);
+}
+
+async function permanentFailureSkipsForward(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+        recording('rC', [ref('youtube-music', 'yC')]),
+      ],
+      queue: {
+        revision: 1,
+        occurrences: [
+          occurrence('oA', 'rA', ref('youtube-music', 'yA')),
+          occurrence('oB', 'rB', ref('youtube-music', 'yB')),
+          occurrence('oC', 'rC', ref('youtube-music', 'yC')),
+        ],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('oB');
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  // A permanent verdict condemns the row itself: same pause+verdict
+  // record, plus the forward-skip flag.
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-p1',
+    identity,
+    outcome: {
+      type: 'failed',
+      error: appError('auth-required', 'login needed'),
+      attempt: TRACE,
+    },
+  });
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.playback.type, 'failed');
+  assertEqual(snap.queue.mode, 'paused');
+  assertEqual(snap.queue.blockedError?.kind, 'auth-required');
+  assertEqual(
+    r.player.projections.at(-1)?.items[1]?.skipsForward,
+    true,
+    'a permanent verdict flags the row',
+  );
+  assert((await r.session.previous()).ok);
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oA');
+  assert((await r.session.next()).ok);
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oC',
+    'the flagged row is stepped over',
+  );
+  r.player.settlePrepare(ok('req-p1'));
+  await pump();
+  assert(!(await playing).ok);
+}
+
+async function botCheckWallPolicy(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('o1');
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  // The provider's bot wall wears `transient` + the guest's
+  // 'bot-check' detail — the message the host actually delivers.
+  const wall = appError(
+    'transient',
+    'guest failure (transient): transient: bot-check',
+  );
+  assert(isBotCheckWall(wall), 'fixture is the wall shape');
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-wall',
+    identity,
+    outcome: { type: 'failed', error: wall, attempt: TRACE },
+  });
+  await pump();
+  // A wall is provider truth, not weather: no 400 ms auto-retry, no
+  // row flag — the typed verdict pauses the queue honestly.
+  assertEqual(readyOf(r).playback.type, 'failed', 'wall is terminal');
+  assertEqual(calls(r, 'prepare').length, 1, 'no re-attempt issued');
+  r.clock.advance(2_000);
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 1, 'no armed retry fires');
+  const snap = readyOf(r);
+  assertEqual(snap.queue.mode, 'paused');
+  assertEqual(snap.queue.blockedError?.kind, 'transient');
+  assert(
+    r.player.projections.at(-1)?.items[0]?.skipsForward !== true,
+    'the wall does not flag the row',
+  );
+  r.player.settlePrepare(ok('req-wall'));
+  await pump();
+  const res = await playing;
+  assert(!res.ok, 'play resolves with the wall verdict');
+  assertEqual(res.error.kind, 'transient');
+  assert(isBotCheckWall(res.error), 'the caller sees the wall intact');
+  // An explicit user retry still reaches the row — the wall parked
+  // it, it did not condemn it.
+  const retry = r.session.retryCurrent();
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 2, 'explicit retry re-prepares');
+  const idB = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(idB, 'h-wall'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-h-wall')), 'retry prepare pending');
+  assert((await retry).ok, 'explicit retry accepted');
+  await pump();
+  assertEqual(readyOf(r).playback.type, 'buffering');
+}
+
 async function pauseDuringRetryBackoff(): Promise<void> {
   const r = rig(
     persisted({
@@ -6151,6 +6486,14 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['retryAfterBeyondBudget', retryAfterBeyondBudget],
   ['listenedMsCarriesAcrossRetry', listenedMsCarriesAcrossRetry],
   ['prepareBudgetIsPerIntent', prepareBudgetIsPerIntent],
+  ['deadPrepareOutcomeRePrepares', deadPrepareOutcomeRePrepares],
+  ['deadPrepareOutcomeStopsAtBudget', deadPrepareOutcomeStopsAtBudget],
+  [
+    'transientFailureLeavesRowReachable',
+    transientFailureLeavesRowReachable,
+  ],
+  ['permanentFailureSkipsForward', permanentFailureSkipsForward],
+  ['botCheckWallPolicy', botCheckWallPolicy],
   ['pauseDuringRetryBackoff', pauseDuringRetryBackoff],
   ['releaseRetry', releaseRetry],
   ['failedRetryReleaseIsNotStranded', failedRetryReleaseIsNotStranded],

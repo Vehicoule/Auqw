@@ -89,10 +89,11 @@ export interface AppShellPorts<E> {
   readonly localPlayable?: ((recordingId: string) => boolean) | undefined;
 
   /**
-   * Desktop's attempt-action funnel: pending action labels ride
+   * The attempt-action funnel: pending action labels ride
    * `attemptActionsRef` and a `playback.failed` watcher reports
-   * engine-advanced verdicts. Mobile reports each op's own Result
-   * directly. Default false (mobile).
+   * verdicts that land after the op promise settled — engine-advanced
+   * failures on desktop, late native `failed` statuses on mobile.
+   * Both shells set it. Default false.
    */
   readonly trackAttemptActions?: boolean | undefined;
 

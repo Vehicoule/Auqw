@@ -443,6 +443,27 @@ function testPlayerMapper(): void {
     failed.errorMessage !== null && failed.errorMessage.length > 0,
     'failed carries error message',
   );
+  // Bookkeeping verdicts never paint the player line: 'cancelled' is
+  // a torn-down intent, 'superseded' an overtaken play — the row
+  // still reads failed, but never wears interruption copy.
+  for (const kind of ['cancelled', 'superseded'] as const) {
+    const silent = toPlayerModel({
+      ...base,
+      playback: {
+        type: 'failed' as const,
+        recordingId: 'rec-roads',
+        occurrenceId: 'occ-5',
+        identity: fixtureIdentity,
+        error: { kind, message: kind, retryable: false },
+      },
+    });
+    assert(silent !== null && silent.status === 'failed');
+    assertEqual(
+      silent.errorMessage,
+      null,
+      `${kind} verdict stays off the player line`,
+    );
+  }
   const buffering = toPlayerModel({
     ...base,
     playback: fixturePlaybackBuffering,

@@ -17,7 +17,7 @@
  * a live prepare can resolve it when the host drops the request.
  */
 import type { AppError, ErrorKind } from '@auqw/application';
-import { isMatchGate } from '@auqw/application';
+import { isBotCheckWall, isMatchGate } from '@auqw/application';
 import { t, type MessageId } from './i18n.ts';
 
 const SILENT: ReadonlySet<ErrorKind> = new Set(['superseded']);
@@ -67,6 +67,11 @@ export function errorText(
   // remedy is the review queue, not a retry.
   if (isMatchGate(error)) {
     return t('error.matchGate');
+  }
+  // A bot-check wall is 'transient' on the wire but not weather —
+  // it gets its own honest line instead of the generic hiccup copy.
+  if (isBotCheckWall(error)) {
+    return t('error.providerWall');
   }
   return t(TEXT_BY_KIND[error.kind]);
 }

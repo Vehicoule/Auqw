@@ -488,6 +488,8 @@ export const en = {
   'error.timeout': 'still loading — try again',
   'error.limit': 'over a limit — slim it down or try later',
   'error.transient': 'something interrupted that — try again',
+  'error.providerWall':
+    'the provider is refusing requests right now — try again later',
   'error.plugin': 'a provider plugin misbehaved',
   'error.rejected': 'the download failed its checks — try again',
   'error.capped': 'too many streams open — wait a moment',
