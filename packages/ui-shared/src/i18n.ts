@@ -101,11 +101,6 @@ export function setLocale(locale: Locale): void {
   current = locale;
 }
 
-/** The active UI language. */
-export function getLocale(): Locale {
-  return current;
-}
-
 /**
  * Map a BCP-47 tag to a supported `Locale` by primary-language subtag
  * ('de-DE' → 'de', 'zh-Hans-CN' → 'zh'), or `null` when the language
@@ -121,27 +116,24 @@ export function fromTag(tag: string | null | undefined): Locale | null {
   }
   const parts = tag.trim().toLowerCase().split('-');
   const primary = parts[0];
-  switch (primary) {
-    case 'en':
-    case 'de':
-    case 'es':
-    case 'fr':
-      return primary;
-    case 'zh': {
-      // Script is the first subtag only — a 'hans'/'hant' later in the
-      // tag (e.g. inside private use, zh-Hant-x-hans) is not a script.
-      if (parts[1] === 'hans') {
-        return 'zh';
-      }
-      return parts
-        .slice(1)
-        .some((p) => p === 'hant' || p === 'tw' || p === 'hk' || p === 'mo')
-        ? null
-        : 'zh';
+  if (primary === 'zh') {
+    // Script is the first subtag only — a 'hans'/'hant' later in the
+    // tag (e.g. inside private use, zh-Hant-x-hans) is not a script.
+    if (parts[1] === 'hans') {
+      return 'zh';
     }
-    default:
-      return null;
+    return parts
+      .slice(1)
+      .some((p) => p === 'hant' || p === 'tw' || p === 'hk' || p === 'mo')
+      ? null
+      : 'zh';
   }
+  return primary === 'en' ||
+    primary === 'de' ||
+    primary === 'es' ||
+    primary === 'fr'
+    ? primary
+    : null;
 }
 
 /**

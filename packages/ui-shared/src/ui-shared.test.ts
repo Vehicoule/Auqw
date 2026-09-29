@@ -11,7 +11,6 @@ import {
   downloadChipsByRecording,
   downloadLedgerCount,
   formatAgo,
-  getLocale,
   languageOptionKey,
   nextQueueDestination,
   overlayReducer,
@@ -476,7 +475,6 @@ assertEqual(t('state.loading'), 'wird geladen');
 
 // fallback to en for a missing catalog / unknown id — never `undefined`
 setLocale('ja' as unknown as Locale);
-assertEqual(getLocale(), 'ja' as unknown as Locale);
 assertEqual(
   t('state.loading'),
   'loading',

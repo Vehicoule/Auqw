@@ -7,8 +7,6 @@ export * from './motion.ts';
 export * from './use-waveform-peaks.ts';
 export * as fixtures from './fixtures.ts';
 export {
-  fromTag,
-  getLocale,
   resolveLocale,
   setLocale,
   systemLocaleTag,

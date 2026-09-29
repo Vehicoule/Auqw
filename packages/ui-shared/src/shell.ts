@@ -41,13 +41,10 @@ declare const performance: { now(): number };
 export const SEARCH_LIMIT = 25;
 export const DIAGNOSTICS_LIMIT = 20;
 
+const NAV_KEYS = ['home', 'explore', 'library', 'settings'] as const;
+
 export function navItems(): readonly NavItemModel[] {
-  return [
-    { key: 'home', label: t('nav.home') },
-    { key: 'explore', label: t('nav.explore') },
-    { key: 'library', label: t('nav.library') },
-    { key: 'settings', label: t('nav.settings') },
-  ];
+  return NAV_KEYS.map((key) => ({ key, label: t(`nav.${key}`) }));
 }
 
 export const THEME_ORDER = [
@@ -67,46 +64,40 @@ export type ProviderPickerOption = {
 
 // Stream-quality tiers, kbps — inside the domain's 1–512 qualityKbps
 // bound; 128 is the spec default (providers.md).
+const QUALITY_TIERS: readonly (readonly [number, MessageId?])[] = [
+  [64],
+  [96],
+  [128, 'optionDetail.default'],
+  [192],
+  [256],
+  [320, 'optionDetail.maximum'],
+];
+
 export function qualityOptions(): readonly ProviderPickerOption[] {
-  return [
-    { key: '64', label: '64 kbps' },
-    { key: '96', label: '96 kbps' },
-    { key: '128', label: '128 kbps', detail: t('optionDetail.default') },
-    { key: '192', label: '192 kbps' },
-    { key: '256', label: '256 kbps' },
-    { key: '320', label: '320 kbps', detail: t('optionDetail.maximum') },
-  ];
+  return QUALITY_TIERS.map(([kbps, detail]) => ({
+    key: `${kbps}`,
+    label: `${kbps} kbps`,
+    ...(detail === undefined ? {} : { detail: t(detail) }),
+  }));
 }
 
+const THEME_DETAIL: Record<
+  Exclude<(typeof THEME_ORDER)[number], 'dark'>,
+  MessageId
+> = {
+  system: 'optionDetail.themeSystem',
+  adaptive: 'optionDetail.themeAdaptive',
+  light: 'optionDetail.themeLight',
+  oled: 'optionDetail.themeOled',
+};
+
 export function themeOptions(): readonly ProviderPickerOption[] {
-  return [
-    {
-      key: 'system',
-      label: t('settings.themeValue.system'),
-      detail: t('optionDetail.themeSystem'),
-    },
-    {
-      key: 'adaptive',
-      label: t('settings.themeValue.adaptive'),
-      detail: t('optionDetail.themeAdaptive'),
-    },
+  return THEME_ORDER.map((key) => ({
+    key,
+    label: t(`settings.themeValue.${key}`),
     // 'tokyo night' is the color scheme's name, not UI copy.
-    {
-      key: 'dark',
-      label: t('settings.themeValue.dark'),
-      detail: 'tokyo night',
-    },
-    {
-      key: 'light',
-      label: t('settings.themeValue.light'),
-      detail: t('optionDetail.themeLight'),
-    },
-    {
-      key: 'oled',
-      label: t('settings.themeValue.oled'),
-      detail: t('optionDetail.themeOled'),
-    },
-  ];
+    detail: key === 'dark' ? 'tokyo night' : t(THEME_DETAIL[key]),
+  }));
 }
 
 export type Boot<TController> =
@@ -533,32 +524,22 @@ export function useOverlayStack<O>(): OverlayStack<O> {
   const [stack, setStack] = useState<readonly OverlayEntry<O>[]>([]);
   const counter = useRef(0);
   const mintKey = (): string => `ov-${(counter.current += 1)}`;
+  const run = useCallback(
+    (command: OverlayCommand<O>) =>
+      setStack((s) => overlayReducer(s, command)),
+    [],
+  );
   const push = useCallback(
-    (next: O) =>
-      setStack((s) =>
-        overlayReducer(s, { type: 'push', key: mintKey(), overlay: next }),
-      ),
+    (next: O) => run({ type: 'push', key: mintKey(), overlay: next }),
     [],
   );
   const reset = useCallback(
-    (next: O) =>
-      setStack((s) =>
-        overlayReducer(s, { type: 'reset', key: mintKey(), overlay: next }),
-      ),
+    (next: O) => run({ type: 'reset', key: mintKey(), overlay: next }),
     [],
   );
-  const close = useCallback(
-    () => setStack((s) => overlayReducer(s, { type: 'close' })),
-    [],
-  );
-  const dismiss = useCallback(
-    (key: string) => setStack((s) => overlayReducer(s, { type: 'dismiss', key })),
-    [],
-  );
-  const clear = useCallback(
-    () => setStack((s) => overlayReducer(s, { type: 'clear' })),
-    [],
-  );
+  const close = useCallback(() => run({ type: 'close' }), []);
+  const dismiss = useCallback((key: string) => run({ type: 'dismiss', key }), []);
+  const clear = useCallback(() => run({ type: 'clear' }), []);
   const top = stack[stack.length - 1]?.overlay ?? null;
   return { stack, top, push, reset, close, dismiss, clear };
 }
