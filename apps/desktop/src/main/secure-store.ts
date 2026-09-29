@@ -36,7 +36,12 @@ export function createSecureStore(opts: {
   // resolved value bounds the prompt count to the number of records,
   // once, instead of once per read. These files only change through
   // this store, so the cache can't diverge from disk in-process.
-  const cache = new Map<string, string | null>();
+  // The map holds the READ PROMISE, not the settled value — two
+  // concurrent gets would each see a settled-value cache as empty and
+  // both decrypt (two Keychain prompts for one key). Sharing the
+  // in-flight promise coalesces them; failures evict so a recoverable
+  // read retries instead of memoizing the error.
+  const cache = new Map<string, Promise<string | null>>();
 
   function fileFor(key: string): string {
     return join(dir, `${key}.b64`);
@@ -51,37 +56,48 @@ export function createSecureStore(opts: {
     }
   }
 
+  async function readStored(key: string): Promise<string | null> {
+    let text: string;
+    try {
+      text = await readFile(fileFor(key), 'utf8');
+    } catch (thrown) {
+      if (errorCode(thrown) === 'ENOENT') {
+        return null;
+      }
+      throw shellError('io-error', 'secure entry could not be read');
+    }
+    let decoded: Uint8Array;
+    try {
+      decoded = Buffer.from(text, 'base64');
+    } catch {
+      throw shellError('corrupt-state', 'secure entry is not base64');
+    }
+    try {
+      return safeStorage.decryptString(decoded);
+    } catch {
+      // Corrupt entries stay uncached — a backend that recovers
+      // (or a file a rewrite repairs) is retried, not memoized.
+      throw shellError('corrupt-state', 'secure entry failed to decrypt');
+    }
+  }
+
   return {
     async get(key) {
       requireEncryption();
-      if (cache.has(key)) {
-        return cache.get(key) ?? null;
+      const hit = cache.get(key);
+      if (hit !== undefined) {
+        return hit;
       }
-      let text: string;
-      try {
-        text = await readFile(fileFor(key), 'utf8');
-      } catch (thrown) {
-        if (errorCode(thrown) === 'ENOENT') {
-          cache.set(key, null);
-          return null;
+      const inflight = readStored(key);
+      cache.set(key, inflight);
+      // Identity check: a stale rejection must not evict a value a
+      // concurrent set() wrote after this read started.
+      inflight.catch(() => {
+        if (cache.get(key) === inflight) {
+          cache.delete(key);
         }
-        throw shellError('io-error', 'secure entry could not be read');
-      }
-      let decoded: Uint8Array;
-      try {
-        decoded = Buffer.from(text, 'base64');
-      } catch {
-        throw shellError('corrupt-state', 'secure entry is not base64');
-      }
-      try {
-        const value = safeStorage.decryptString(decoded);
-        cache.set(key, value);
-        return value;
-      } catch {
-        // Corrupt entries stay uncached — a backend that recovers
-        // (or a file a rewrite repairs) is retried, not memoized.
-        throw shellError('corrupt-state', 'secure entry failed to decrypt');
-      }
+      });
+      return inflight;
     },
 
     async set(key, value) {
@@ -103,7 +119,7 @@ export function createSecureStore(opts: {
         await unlink(staging).catch(() => undefined);
         throw shellError('io-error', 'secure entry could not be written');
       }
-      cache.set(key, value);
+      cache.set(key, Promise.resolve(value));
     },
 
     async delete(key) {
@@ -115,7 +131,7 @@ export function createSecureStore(opts: {
           throw shellError('io-error', 'secure entry could not be removed');
         }
       }
-      cache.set(key, null);
+      cache.set(key, Promise.resolve(null));
     },
   };
 }

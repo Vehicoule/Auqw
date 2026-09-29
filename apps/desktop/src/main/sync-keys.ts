@@ -3,6 +3,7 @@ import {
   access,
   mkdir,
   readdir,
+  readFile,
   rename,
   unlink,
   writeFile,
@@ -203,6 +204,14 @@ export function createSyncKeysHandler(deps: {
   // as `skipped`, kept on disk, retried on the next boot.
   let pendingLegacy = 0;
   let mirrorSeq = 0;
+  // Set when a mirror write fails after the sealed blob is durable —
+  // the next custody op retries the heal rather than reporting a
+  // committed mutation as failed.
+  let mirrorDirty = false;
+
+  function mirrorContent(devices: readonly SyncDeviceRecord[]): string {
+    return JSON.stringify({ v: 1, devices });
+  }
 
   /**
    * The plaintext device mirror — tmp + rename publish, same as the
@@ -217,7 +226,7 @@ export function createSyncKeysHandler(deps: {
     const staging = `${target}.${process.pid}.${mirrorSeq}.tmp`;
     try {
       await mkdir(dir, { recursive: true });
-      await writeFile(staging, JSON.stringify({ v: 1, devices }), 'utf8');
+      await writeFile(staging, mirrorContent(devices), 'utf8');
       await rename(staging, target);
     } catch {
       await unlink(staging).catch(() => undefined);
@@ -225,6 +234,31 @@ export function createSyncKeysHandler(deps: {
         'io-error',
         'sync device mirror could not be written',
       );
+    }
+  }
+
+  /**
+   * Best-effort mirror maintenance: skip the write entirely when the
+   * file on disk already matches the sealed registry, swallow a failed
+   * write into `mirrorDirty` for the next op to retry. Custody reads
+   * must never fail just because this derived file can't be written.
+   */
+  async function healMirror(
+    devices: readonly SyncDeviceRecord[],
+  ): Promise<void> {
+    try {
+      if (!mirrorDirty) {
+        const onDisk = await readFile(join(dir, MIRROR_FILE), 'utf8').catch(
+          () => null,
+        );
+        if (onDisk === mirrorContent(devices)) {
+          return;
+        }
+      }
+      await writeMirror(devices);
+      mirrorDirty = false;
+    } catch {
+      mirrorDirty = true;
     }
   }
 
@@ -258,7 +292,10 @@ export function createSyncKeysHandler(deps: {
     // so a mirror failure can't leave memory disagreeing with disk.
     current = next;
     if (!gaining) {
-      await writeMirror(next.devices);
+      // The mutation is already committed — a failed mirror write is
+      // marked dirty for the next op to heal, never reported as a
+      // failed mutation.
+      await healMirror(next.devices);
     }
   }
 
@@ -373,9 +410,9 @@ export function createSyncKeysHandler(deps: {
       // write and cleanup just re-merges the same records (deduped).
       await persist(prev, state);
     } else {
-      // Nothing merged — still publish the mirror so a missing or
-      // stale one heals at first custody touch.
-      await writeMirror(state.devices);
+      // Nothing merged — heal the mirror only if it's missing or
+      // stale, so a pure read never needs the directory to be writable.
+      await healMirror(state.devices);
     }
     for (const key of consumed) {
       await secure.delete(key).catch(() => undefined);
@@ -383,25 +420,27 @@ export function createSyncKeysHandler(deps: {
     return state;
   }
 
-  function load(): Promise<SyncStoreState> {
-    if (current !== null) {
-      return Promise.resolve(current);
+  async function load(): Promise<SyncStoreState> {
+    if (current === null) {
+      // Failed loads aren't memoized — a recoverable failure (backend
+      // hiccup, transient io) retries on the next op instead of being
+      // sticky for the process's life.
+      loading ??= loadOnce().then(
+        (state) => {
+          current = state;
+          loading = null;
+          return state;
+        },
+        (thrown: unknown) => {
+          loading = null;
+          throw thrown;
+        },
+      );
+      await loading;
     }
-    // Failed loads aren't memoized — a recoverable failure (backend
-    // hiccup, transient io) retries on the next op instead of being
-    // sticky for the process's life.
-    loading ??= loadOnce().then(
-      (state) => {
-        current = state;
-        loading = null;
-        return state;
-      },
-      (thrown: unknown) => {
-        loading = null;
-        throw thrown;
-      },
-    );
-    return loading;
+    const state = current as SyncStoreState;
+    await healMirror(state.devices);
+    return state;
   }
 
   // Registry mutations serialize behind one promise chain: the
