@@ -180,6 +180,24 @@ function Caption({ children }: { readonly children: ReactNode }) {
   );
 }
 
+function ShowcaseFrame({
+  label,
+  height,
+  children,
+}: {
+  readonly label: ReactNode;
+  readonly height: number;
+  readonly children: ReactNode;
+}) {
+  const theme = useTheme();
+  return (
+    <View style={{ marginBottom: theme.spacing.md }}>
+      <Caption>{label}</Caption>
+      <Frame height={height}>{children}</Frame>
+    </View>
+  );
+}
+
 const PLATFORMS = ['android', 'ios'] as const;
 
 function IconSwatch({ name }: { readonly name: IconName }) {
@@ -270,6 +288,35 @@ function GalleryBody({
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const search = fixtureSearchStates[searchPhase] ?? fixtureSearchStates[0];
+  const stagePlayer = {
+    ...fixturePlayerPlaying,
+    title: 'Self Aware (Live at the Observatory)',
+  };
+  const queueHandlers = {
+    scrollEnabled: false,
+    onPressItem: noop,
+    onRemoveItem: noop,
+  };
+  const playlistHandlers = {
+    onBack: noop,
+    onPlayAll: noop,
+    onRename: noop,
+    onDelete: noop,
+    scrollEnabled: false,
+  };
+  const entityHandlers = {
+    onBack: noop,
+    onToggleLike: noop,
+    onPressItem: noop,
+    onContext: noop,
+    scrollEnabled: false,
+  };
+  const settingsHandlers = {
+    onSelectRow: noop,
+    onToggleRow: noop,
+    onOpenCorrections: noop,
+    scrollEnabled: false,
+  };
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: theme.colors.canvas }}
@@ -434,18 +481,16 @@ function GalleryBody({
 
       <Section title="states" note="loading · empty · error · unavailable">
         <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-          <View style={{ width: '50%', height: 160 }}>
-            <LoadingState title="searching" hint="roads portishead" onCancel={noop} />
-          </View>
-          <View style={{ width: '50%', height: 160 }}>
-            <EmptyState title="queue is empty" hint="add tracks to hear them" icon="queue" />
-          </View>
-          <View style={{ width: '50%', height: 160 }}>
-            <ErrorState title="search failed" hint="rate limited by provider" onRetry={noop} />
-          </View>
-          <View style={{ width: '50%', height: 160 }}>
-            <UnavailableState title="search unavailable" hint="provider unavailable" />
-          </View>
+          {[
+            <LoadingState title="searching" hint="roads portishead" onCancel={noop} />,
+            <EmptyState title="queue is empty" hint="add tracks to hear them" icon="queue" />,
+            <ErrorState title="search failed" hint="rate limited by provider" onRetry={noop} />,
+            <UnavailableState title="search unavailable" hint="provider unavailable" />,
+          ].map((state, i) => (
+            <View key={i} style={{ width: '50%', height: 160 }}>
+              {state}
+            </View>
+          ))}
         </View>
       </Section>
 
@@ -567,10 +612,7 @@ function GalleryBody({
             </Caption>
             <Frame height={620}>
               <StageSheet
-                player={{
-                  ...fixturePlayerPlaying,
-                  title: 'Self Aware (Live at the Observatory)',
-                }}
+                player={stagePlayer}
                 platform={platform}
                 expanded={expanded}
                 dragPreview={gestureState}
@@ -597,10 +639,7 @@ function GalleryBody({
             <Caption>{platform}</Caption>
             <Frame height={400} scaleWithText={false}>
               <StageSheet
-                player={{
-                  ...fixturePlayerPlaying,
-                  title: 'Self Aware (Live at the Observatory)',
-                }}
+                player={stagePlayer}
                 platform={platform}
                 expanded
                 topInset={theme.spacing.xxl}
@@ -658,9 +697,7 @@ function GalleryBody({
           <QueueScreen
             queue={fixtureQueueModel}
             player={fixturePlayerPlaying}
-            scrollEnabled={false}
-            onPressItem={noop}
-            onRemoveItem={noop}
+            {...queueHandlers}
           />
         </Frame>
         <View style={{ height: theme.spacing.md }} />
@@ -669,11 +706,9 @@ function GalleryBody({
             queue={fixtureQueueModelPaused}
             player={fixturePlayerPaused}
             reordering
-            scrollEnabled={false}
             onToggleReorder={noop}
-            onPressItem={noop}
-            onRemoveItem={noop}
             onMoveItem={noop}
+            {...queueHandlers}
           />
         </Frame>
       </Section>
@@ -742,22 +777,21 @@ function GalleryBody({
 
       <Section title="collection" note="top 50 · history ordering">
         {fixtureCollectionModels.map((collection) => (
-          <View key={collection.key} style={{ marginBottom: theme.spacing.md }}>
-            <Caption>
-              {collection.title} · {collection.rows.length} rows
-            </Caption>
-            <Frame height={380}>
-              <CollectionScreen
-                model={collection}
-                onBack={noop}
-                onPlayAll={noop}
-                onPressItem={noop}
-                onToggleLike={noop}
-                onContext={noop}
-                scrollEnabled={false}
-              />
-            </Frame>
-          </View>
+          <ShowcaseFrame
+            key={collection.key}
+            label={`${collection.title} · ${collection.rows.length} rows`}
+            height={380}
+          >
+            <CollectionScreen
+              model={collection}
+              onBack={noop}
+              onPlayAll={noop}
+              onPressItem={noop}
+              onToggleLike={noop}
+              onContext={noop}
+              scrollEnabled={false}
+            />
+          </ShowcaseFrame>
         ))}
       </Section>
 
@@ -765,51 +799,32 @@ function GalleryBody({
         <Frame height={480}>
           <PlaylistScreen
             model={fixturePlaylistModel}
-            onBack={noop}
-            onPlayAll={noop}
-            onRename={noop}
-            onDelete={noop}
             onPressEntry={noop}
             onToggleLike={noop}
             onRemoveEntry={noop}
             onMoveEntry={noop}
-            scrollEnabled={false}
+            {...playlistHandlers}
           />
         </Frame>
         <View style={{ height: theme.spacing.md }} />
         <Frame height={480}>
           <PlaylistScreen
             model={fixturePlaylistModelEmpty}
-            onBack={noop}
-            onPlayAll={noop}
-            onRename={noop}
-            onDelete={noop}
-            scrollEnabled={false}
+            {...playlistHandlers}
           />
         </Frame>
       </Section>
 
       <Section title="entity" note="complete · partial+continuation · error">
         <Frame height={480}>
-          <EntityScreen
-            model={fixtureEntityModel}
-            onBack={noop}
-            onToggleLike={noop}
-            onPressItem={noop}
-            onContext={noop}
-            scrollEnabled={false}
-          />
+          <EntityScreen model={fixtureEntityModel} {...entityHandlers} />
         </Frame>
         <View style={{ height: theme.spacing.md }} />
         <Frame height={480}>
           <EntityScreen
             model={fixtureEntityModelPartial}
-            onBack={noop}
-            onToggleLike={noop}
-            onPressItem={noop}
-            onContext={noop}
             onLoadMore={noop}
-            scrollEnabled={false}
+            {...entityHandlers}
           />
         </Frame>
         <View style={{ height: theme.spacing.md }} />
@@ -876,22 +891,13 @@ function GalleryBody({
 
       <Section title="settings" note="rows + diagnostics">
         <Frame height={620}>
-          <SettingsScreen
-            model={fixtureSettingsModel}
-            onSelectRow={noop}
-            onToggleRow={noop}
-            onOpenCorrections={noop}
-            scrollEnabled={false}
-          />
+          <SettingsScreen model={fixtureSettingsModel} {...settingsHandlers} />
         </Frame>
         <View style={{ height: theme.spacing.md }} />
         <Frame height={620}>
           <SettingsScreen
             model={fixtureSettingsModelDegraded}
-            onSelectRow={noop}
-            onToggleRow={noop}
-            onOpenCorrections={noop}
-            scrollEnabled={false}
+            {...settingsHandlers}
           />
         </Frame>
       </Section>
@@ -901,19 +907,16 @@ function GalleryBody({
         note="pending · resolved · empty · loading · error"
       >
         {fixtureCorrectionsScenarios.map(([label, model]) => (
-          <View key={label} style={{ marginBottom: theme.spacing.md }}>
-            <Caption>{label}</Caption>
-            <Frame height={480}>
-              <CorrectionsScreen
-                model={model}
-                onBack={noop}
-                onFilter={noop}
-                onConfirm={noop}
-                onReject={noop}
-                onUndo={noop}
-              />
-            </Frame>
-          </View>
+          <ShowcaseFrame key={label} label={label} height={480}>
+            <CorrectionsScreen
+              model={model}
+              onBack={noop}
+              onFilter={noop}
+              onConfirm={noop}
+              onReject={noop}
+              onUndo={noop}
+            />
+          </ShowcaseFrame>
         ))}
       </Section>
 
@@ -922,19 +925,16 @@ function GalleryBody({
         note="preview → confirm → apply · typed errors"
       >
         {fixtureTransferScenarios.map(([label, model]) => (
-          <View key={label} style={{ marginBottom: theme.spacing.md }}>
-            <Caption>{label}</Caption>
-            <Frame height={520}>
-              <TransferScreen
-                model={model}
-                onBack={noop}
-                onExport={noop}
-                onPickImportFile={noop}
-                onApplyImport={noop}
-                onResetImport={noop}
-              />
-            </Frame>
-          </View>
+          <ShowcaseFrame key={label} label={label} height={520}>
+            <TransferScreen
+              model={model}
+              onBack={noop}
+              onExport={noop}
+              onPickImportFile={noop}
+              onApplyImport={noop}
+              onResetImport={noop}
+            />
+          </ShowcaseFrame>
         ))}
       </Section>
 
@@ -950,19 +950,16 @@ function GalleryBody({
             ['unavailable', fixtureSyncModelUnavailable],
           ] as const
         ).map(([label, model]) => (
-          <View key={label} style={{ marginBottom: theme.spacing.md }}>
-            <Caption>{label}</Caption>
-            <Frame height={480}>
-              <SyncScreen
-                model={model}
-                onBack={noop}
-                onPairCode={noop}
-                onPairPayload={noop}
-                onSyncNow={noop}
-                onUnpair={noop}
-              />
-            </Frame>
-          </View>
+          <ShowcaseFrame key={label} label={label} height={480}>
+            <SyncScreen
+              model={model}
+              onBack={noop}
+              onPairCode={noop}
+              onPairPayload={noop}
+              onSyncNow={noop}
+              onUnpair={noop}
+            />
+          </ShowcaseFrame>
         ))}
       </Section>
 
