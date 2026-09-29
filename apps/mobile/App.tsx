@@ -1347,6 +1347,10 @@ function Main({
           intentPlaying: false,
         }
       : null);
+  // Held pose (queue ended): live transport ops have no current
+  // occurrence — play/seek taps replay the held track instead.
+  const heldOccurrenceId =
+    player === null ? (sheetPlayer?.occurrenceId ?? null) : null;
   const queueModel = useMemo(() => {
     // Same honesty rule as the library rows: offline + unowned marks
     // 'unavailable' so a dead press isn't a surprise.
@@ -4382,7 +4386,18 @@ function Main({
               bottomInset={insets.bottom}
               lyrics={lyricsModel}
               radio={radioModel}
-              onPlayPause={onPlayPause}
+              onPlayPause={
+                heldOccurrenceId !== null
+                  ? () => {
+                      void Haptics.impactAsync(
+                        Haptics.ImpactFeedbackStyle.Light,
+                      );
+                      void session
+                        .playOccurrence(heldOccurrenceId)
+                        .then((r) => reportPlay('common.play', r));
+                    }
+                  : onPlayPause
+              }
               onNext={() => advance('next')}
               onPrevious={() => advance('previous')}
               onToggleLike={onToggleLike}
@@ -4412,7 +4427,21 @@ function Main({
                       })
                   : undefined
               }
-              onSeek={seekToPosition}
+              onSeek={
+                heldOccurrenceId !== null
+                  ? (ms) => {
+                      void session
+                        .playOccurrence(heldOccurrenceId)
+                        .then((r) => {
+                          if (r.ok) {
+                            seekToPosition(ms);
+                          } else {
+                            reportPlay('common.play', r);
+                          }
+                        });
+                    }
+                  : seekToPosition
+              }
               peaks={peaks}
               onRetryLyrics={onRetryLyrics}
               onStartRadio={
