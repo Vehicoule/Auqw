@@ -1,7 +1,7 @@
 # Wave-3 LoC-reduction — shard: desktop-utility
 
 Base `a675a7b` → `devin/w3-desktop-utility` HEAD `742427a`.
-Final diff (vs origin/main): **29 files, +708 / −1108 → net −400 LoC.**
+Final diff (vs origin/main): **29 files, +708 / −1108 → net −397 LoC.**
 
 ## Gates
 
@@ -172,5 +172,5 @@ d045aaf refactor(desktop): shared guarded() + napiCall/napiRun seam helpers
 ## `git diff --stat` vs base
 
 ```
-28 files changed, 532 insertions(+), 1108 deletions(-)
+29 files changed, 715 insertions(+), 1112 deletions(-)
 ```
