@@ -241,9 +241,63 @@ async function lostScopedToGeneration(): Promise<void> {
   session.ok && session.value.close();
 }
 
+async function pinnedRetractMatchesByFp(): Promise<void> {
+  const { native, emit } = fakeNative();
+  const discovery = createExpoSyncDiscovery(native);
+  const found: SyncDiscoveredPeer[] = [];
+  const lost: string[] = [];
+  const session = await discovery.browse({
+    onFound: (p) => found.push(p),
+    onLost: (k) => lost.push(k),
+  });
+  assert(session.ok, 'browse session opens');
+
+  const pinned = 'a'.repeat(64);
+  emit({
+    type: 'found',
+    name: 'Phone',
+    hosts: ['10.0.0.4'],
+    port: 41000,
+    fp: pinned,
+  });
+  assertEqual(found.length, 1, 'pinned row emitted');
+
+  // The same generation re-announces unpairable with a junk port —
+  // the fp is the generation identity, so the emitted row retracts
+  // even though the event port can't match its key.
+  emit({
+    type: 'found',
+    name: 'Phone',
+    hosts: ['10.0.0.5'],
+    port: 70000,
+    fp: pinned,
+  });
+  assertEqual(lost.length, 1, 'junk-port gate failure retracts');
+  assertEqual(lost[0], 'Phone|10.0.0.4|41000', 'retracted stale key');
+  assertEqual(found.length, 1, 'no new row emitted');
+
+  // A 'lost' carrying the record's fp and an unusable port still
+  // matches by fp — the port scope only binds real ports.
+  emit({
+    type: 'found',
+    name: 'Phone',
+    hosts: ['10.0.0.9'],
+    port: 42000,
+    fp: pinned,
+  });
+  assertEqual(found.length, 2, 'fresh pinned row emitted');
+  emit({ type: 'lost', name: 'Phone', port: 41000, fp: pinned });
+  assertEqual(lost.length, 1, 'stale-port lost spares fresh row');
+  emit({ type: 'lost', name: 'Phone', port: 0, fp: pinned });
+  assertEqual(lost.length, 2, 'junk-port lost retracts by fp');
+  assertEqual(lost[1], 'Phone|10.0.0.9|42000', 'retracted pinned row');
+  session.ok && session.value.close();
+}
+
 export async function run(): Promise<void> {
   await rerankToUnpairableRetracts();
   await rerankPicksDialableOverList();
   await sameNameServicesCoexist();
   await lostScopedToGeneration();
+  await pinnedRetractMatchesByFp();
 }

@@ -411,6 +411,28 @@ async function failedOutcomeKinds(): Promise<void> {
   host.fail(host.requests[2]!.requestId, 'weird-host-kind', '');
   const r3 = await weird;
   assert(!r3.ok && r3.error.kind === 'internal');
+
+  // Object.prototype member slugs degrade the same way — the kind
+  // lookup is an own-property check, never `in`.
+  for (const slug of ['toString', 'constructor', '__proto__']) {
+    const proto = p.search(
+      { query: 'x', limit: 1, storefront: null },
+      ctx().context,
+    );
+    await flush();
+    host.fail(host.requests.at(-1)!.requestId, slug, 'x');
+    const r = await proto;
+    assert(!r.ok && r.error.kind === 'internal', `${slug} degrades`);
+  }
+
+  // Same for a rejection carrying a ShellError-shaped proto slug.
+  host.nextFailure = { kind: 'hasOwnProperty', message: 'x' };
+  const rejected = p.search(
+    { query: 'x', limit: 1, storefront: null },
+    ctx().context,
+  );
+  const r4 = await rejected;
+  assert(!r4.ok && r4.error.kind === 'internal');
 }
 
 // 5. Signal cancellation aborts the host request and settles cancelled;
