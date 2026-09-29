@@ -4,8 +4,10 @@ import {
   hasKeys,
   isArtworkRef,
   isEntityRef,
+  isOptString,
   isRecord,
   isSourceRef,
+  isString,
   isTrackMetadata,
 } from '../domain.ts';
 import type {
@@ -83,10 +85,9 @@ export function manifestCapabilities(
     return [];
   }
   const raw = manifest['capabilities'];
-  if (!Array.isArray(raw)) {
-    return [];
-  }
-  return [...new Set(raw)].filter(isProviderCapability);
+  return Array.isArray(raw)
+    ? [...new Set(raw)].filter(isProviderCapability)
+    : [];
 }
 
 /**
@@ -95,10 +96,7 @@ export function manifestCapabilities(
  * written under older plugin builds.
  */
 export function manifestVersion(manifest: unknown): string | null {
-  if (!isRecord(manifest)) {
-    return null;
-  }
-  const version = manifest['version'];
+  const version = isRecord(manifest) ? manifest['version'] : null;
   return typeof version === 'string' && version.length > 0
     ? version
     : null;
@@ -128,9 +126,7 @@ export function decodeProviderOutcome<T>(
     return err(
       appError(
         kindOf(outcome.kind),
-        typeof outcome.message === 'string' && outcome.message.length > 0
-          ? outcome.message
-          : 'plugin request failed',
+        outcome.message || 'plugin request failed',
       ),
     );
   }
@@ -164,6 +160,11 @@ function isOptInt(
   );
 }
 
+/** Absent/null pass; a present value must be a well-formed EntityRef. */
+function isOptEntityRef(value: unknown): boolean {
+  return value === undefined || value === null || isEntityRef(value);
+}
+
 /** Wire `trackMetadata` (snake_case) → domain `TrackMetadata`. */
 function toTrackMetadata(value: unknown): TrackMetadata | null {
   if (!isRecord(value)) {
@@ -172,28 +173,12 @@ function toTrackMetadata(value: unknown): TrackMetadata | null {
   // ABI 0.3.0 optional catalog evidence; absent and null normalize
   // to null, a malformed value rejects the whole track.
   const artistRef = value['artist_ref'];
-  if (
-    artistRef !== undefined &&
-    artistRef !== null &&
-    !isEntityRef(artistRef)
-  ) {
-    return null;
-  }
   const albumRef = value['album_ref'];
-  if (
-    albumRef !== undefined &&
-    albumRef !== null &&
-    !isEntityRef(albumRef)
-  ) {
-    return null;
-  }
   const isrc = value['isrc'];
   if (
-    isrc !== undefined &&
-    !(
-      isrc === null ||
-      (typeof isrc === 'string' && isrc.length > 0 && isrc.length <= 16)
-    )
+    !isOptEntityRef(artistRef) ||
+    !isOptEntityRef(albumRef) ||
+    (isrc !== undefined && !isOptString(isrc, 16))
   ) {
     return null;
   }
@@ -252,72 +237,42 @@ function toTrackItems(items: readonly unknown[]): TrackMetadata[] | null {
   return out;
 }
 
-function toTrackList(value: unknown): readonly TrackMetadata[] | null {
-  if (!isRecord(value) || !hasExactKeys(value, ['items'])) {
-    return null;
-  }
+/** `items` field decode shared by every list-shaped result. */
+function tracksField(
+  value: Record<string, unknown>,
+): TrackMetadata[] | null {
   const items = value['items'];
-  if (!Array.isArray(items)) {
-    return null;
-  }
-  return toTrackItems(items);
+  return Array.isArray(items) ? toTrackItems(items) : null;
+}
+
+function toTrackList(value: unknown): readonly TrackMetadata[] | null {
+  return isRecord(value) && hasExactKeys(value, ['items'])
+    ? tracksField(value)
+    : null;
 }
 
 function toSearchPage(value: unknown): SearchPage | null {
-  if (!isRecord(value) || !hasExactKeys(value, ['items', 'storefront'])) {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['items', 'storefront']) ||
+    !isStorefront(value['storefront'])
+  ) {
     return null;
   }
-  if (!isStorefront(value['storefront'])) {
-    return null;
-  }
-  const items = value['items'];
-  if (!Array.isArray(items)) {
-    return null;
-  }
-  const out = toTrackItems(items);
-  if (out === null) {
-    return null;
-  }
-  return { items: out, storefront: value['storefront'] };
+  const items = tracksField(value);
+  return items === null
+    ? null
+    : { items, storefront: value['storefront'] };
 }
 
 /** Wire `playbackResolveResult` → domain `PlayableResource`. */
 function toPlayableResource(value: unknown): PlayableResource | null {
   if (
     !isRecord(value) ||
-    !(
-      hasExactKeys(value, [
-        'url',
-        'mime',
-        'bitrate_kbps',
-        'expires_at_ms',
-        'client',
-      ]) ||
-      hasExactKeys(value, [
-        'url',
-        'mime',
-        'bitrate_kbps',
-        'expires_at_ms',
-        'client',
-        'content_length',
-      ]) ||
-      hasExactKeys(value, [
-        'url',
-        'mime',
-        'bitrate_kbps',
-        'expires_at_ms',
-        'client',
-        'itag',
-      ]) ||
-      hasExactKeys(value, [
-        'url',
-        'mime',
-        'bitrate_kbps',
-        'expires_at_ms',
-        'client',
-        'content_length',
-        'itag',
-      ])
+    !hasKeys(
+      value,
+      ['url', 'mime', 'bitrate_kbps', 'expires_at_ms', 'client'],
+      ['content_length', 'itag'],
     )
   ) {
     return null;
@@ -400,11 +355,7 @@ function toEntityPage(value: unknown): EntityPage | null {
   if (entity === null || typeof value['complete'] !== 'boolean') {
     return null;
   }
-  const items = value['items'];
-  if (!Array.isArray(items)) {
-    return null;
-  }
-  const tracks = toTrackItems(items);
+  const tracks = tracksField(value);
   if (tracks === null) {
     return null;
   }
@@ -453,6 +404,17 @@ function matchedField(value: Record<string, unknown>): LyricsMatch | null | unde
   return raw === null ? null : (toLyricsMatch(raw) ?? undefined);
 }
 
+/** The non-text states both lyrics results share. */
+function staticLyrics(
+  state: unknown,
+  matched: LyricsMatch | null,
+): LyricsResult | null {
+  if (state === 'instrumental') {
+    return { kind: 'instrumental', matched };
+  }
+  return state === 'absent' ? { kind: 'unavailable', matched } : null;
+}
+
 /** Wire `lyricsSyncedResult` → domain `LyricsResult`. */
 function toSyncedLyrics(value: unknown): LyricsResult | null {
   if (
@@ -495,13 +457,7 @@ function toSyncedLyrics(value: unknown): LyricsResult | null {
   if (rawLines !== null) {
     return null;
   }
-  if (state === 'instrumental') {
-    return { kind: 'instrumental', matched };
-  }
-  if (state === 'absent') {
-    return { kind: 'unavailable', matched };
-  }
-  return null;
+  return staticLyrics(state, matched);
 }
 
 /** Wire `lyricsPlainResult` → domain `LyricsResult`. */
@@ -526,13 +482,7 @@ function toPlainLyrics(value: unknown): LyricsResult | null {
   if (text !== null) {
     return null;
   }
-  if (state === 'instrumental') {
-    return { kind: 'instrumental', matched };
-  }
-  if (state === 'absent') {
-    return { kind: 'unavailable', matched };
-  }
-  return null;
+  return staticLyrics(state, matched);
 }
 
 /** Wire `{suggestions: string[]}` → flat completion list. */
@@ -541,21 +491,14 @@ function toSuggestionList(value: unknown): readonly string[] | null {
     return null;
   }
   const suggestions = value['suggestions'];
-  if (!Array.isArray(suggestions) || suggestions.length > 32) {
+  if (
+    !Array.isArray(suggestions) ||
+    suggestions.length > 32 ||
+    !suggestions.every((s): s is string => isString(s, 512))
+  ) {
     return null;
   }
-  const out: string[] = [];
-  for (const item of suggestions) {
-    if (
-      typeof item !== 'string' ||
-      item.length === 0 ||
-      item.length > 512
-    ) {
-      return null;
-    }
-    out.push(item);
-  }
-  return out;
+  return suggestions;
 }
 
 /** Wire `radioSeedResult` → domain `RadioPage`. */
@@ -563,11 +506,7 @@ function toRadioPage(value: unknown): RadioPage | null {
   if (!isRecord(value) || !hasExactKeys(value, ['items', 'continuation'])) {
     return null;
   }
-  const items = value['items'];
-  if (!Array.isArray(items)) {
-    return null;
-  }
-  const candidates = toTrackItems(items);
+  const candidates = tracksField(value);
   if (candidates === null) {
     return null;
   }
