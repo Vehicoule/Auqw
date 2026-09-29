@@ -76,11 +76,8 @@ export function boundedOp<T>(
   deadlineMs?: number,
 ): Promise<Result<T>> {
   const at = deadlineMs ?? host.deadline();
-  return host.withDeadline(
-    () => op(host.newContext(prefix, at, signal ?? source.signal)),
-    at,
-    source,
-  );
+  const context = host.newContext(prefix, at, signal ?? source.signal);
+  return host.withDeadline(() => op(context), at, source);
 }
 
 /** A deadline-bounded port call that mints no context. */

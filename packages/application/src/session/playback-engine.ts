@@ -3479,16 +3479,28 @@ export class PlaybackEngine {
     target: { query: RecordingQuery; key: string },
     source: CancellationSource,
   ): Promise<void> {
+    const onStale = () => {
+      this.#warmSeen.delete(target.key);
+      this.#warmPendingQueries.unshift(target);
+    };
     const warmed = await this.#warmCandidates(
       target.key,
       source,
       () => target.query,
-      () => {
-        this.#warmSeen.delete(target.key);
-        this.#warmPendingQueries.unshift(target);
-      },
+      onStale,
     );
     if (warmed === null) {
+      return;
+    }
+    // A provider switch can land between the helper's check and this
+    // continuation — the pass restarted under a new source must not
+    // see a stale seen-mark or process the old provider's candidates.
+    if (
+      source.signal.cancelled ||
+      this.#host.disposed() ||
+      this.#warmBatchSource !== source
+    ) {
+      onStale();
       return;
     }
     const { provider, candidates } = warmed;
