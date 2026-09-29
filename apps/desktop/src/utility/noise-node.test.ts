@@ -151,12 +151,13 @@ export function run(): void {
   // A flipped tag bit kills open.
   const tampered = Buffer.from(sealed);
   tampered[tampered.length - 1] = tampered[tampered.length - 1]! ^ 1;
+  let tamperedThrew = false;
   try {
     b.open(tampered);
-    assert(false, 'tampered frame must throw');
   } catch {
-    // gcm tag verification failure
+    tamperedThrew = true; // gcm tag verification failure
   }
+  assert(tamperedThrew, 'tampered frame must throw');
 
   // A replayed frame dies on the sequence check.
   const c = nodeNoise.createCodec({ sendKey: key, recvKey: key });
@@ -164,12 +165,13 @@ export function run(): void {
   const f1 = c.seal(utf8('first'));
   const f2 = c.seal(utf8('second'));
   assertEqual(Buffer.from(d.open(f1)).toString('utf8'), 'first');
+  let replayThrew = false;
   try {
     d.open(f1);
-    assert(false, 'replayed frame must throw');
   } catch {
-    // sequence mismatch
+    replayThrew = true; // sequence mismatch
   }
+  assert(replayThrew, 'replayed frame must throw');
   assertEqual(
     Buffer.from(d.open(f2)).toString('utf8'),
     'second',
@@ -257,18 +259,19 @@ export function run(): void {
     name: 'other',
   });
   const accepted2 = cipher.accept(peer2.hello(), { registered: true });
+  let pinThrew: unknown;
   try {
     peer2.complete(
       JSON.parse(Buffer.from(accepted2.challenge).toString('utf8')),
       nodeNoise.fingerprintOf(other.pub),
     );
-    assert(false, 'wrong pinned fingerprint must throw');
   } catch (thrown) {
-    assert(
-      thrown instanceof Error && thrown.message.includes('fingerprint'),
-      'pin mismatch reports fingerprint',
-    );
+    pinThrew = thrown;
   }
+  assert(
+    pinThrew instanceof Error && pinThrew.message.includes('fingerprint'),
+    'pin mismatch reports fingerprint',
+  );
 
   // A garbage dev key fails accept, not later.
   const badPeer = createNoiseTestPeer(nodeNoise, {
@@ -276,12 +279,13 @@ export function run(): void {
     name: 'bad',
   });
   const hello = badPeer.hello();
+  let badKeyThrew = false;
   try {
     cipher.accept({ ...hello, dev: 'not-a-key' }, { registered: false });
-    assert(false, 'bad device key must throw in accept');
   } catch {
-    // unusable key material
+    badKeyThrew = true; // unusable key material
   }
+  assert(badKeyThrew, 'bad device key must throw in accept');
 
   /* ----------------------- golden vectors --------------------------
    * The wire-format proof: one scripted transcript — fixed device and
