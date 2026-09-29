@@ -19,6 +19,7 @@ import type {
   PreparedStreamPayload,
   StreamMarksResult,
 } from '../shared/contract.ts';
+import { mimeForPath } from '../shared/audio-mime.ts';
 import { isRecord } from '../shared/check.ts';
 import {
   attachMseSource,
@@ -174,6 +175,9 @@ function toAttemptTrace(
  * page learned outside `prepare` (the dev-gate's `stream.devPrepare`). */
 export type WebPlayerPort = PlayerPort & {
   noteMime(handle: string, mime: string): void;
+  /** `lf-*` handle → its resolved `file://` URI, else null — the
+   * peaks port reads local bytes through `local:read` with this. */
+  localUriFor(handle: string): string | null;
 };
 
 export function createWebPlayerPort(deps: {
@@ -188,6 +192,21 @@ export function createWebPlayerPort(deps: {
    * non-fragmented container still falls back to `streamServeUrl`.
    */
   mse?: MseFactories | null;
+  /**
+   * MIME for extensionless managed-download URIs — the ledger records
+   * the provider stream's mime at finalize, so a `file://` URI under
+   * the media dir can resolve its container from the row instead of
+   * reporting 'audio/*'. Absent in tests/the dev harness.
+   */
+  localMime?: ((uri: string) => string | null) | null;
+  /**
+   * `local:resolve` — the utility's realpath + grant-confinement gate
+   * on a `file://` URI, consumed at prepare time: a null answer fails
+   * the prepare 'unavailable' so a lexical-URI-minted ref can never
+   * attach bytes outside the granted set. Absent in tests/the dev
+   * harness (the URI is trusted there).
+   */
+  localResolve?: ((uri: string) => Promise<string | null>) | null;
 }): WebPlayerPort {
   const { stream, audio } = deps;
   const now = deps.now ?? Date.now;
@@ -200,6 +219,22 @@ export function createWebPlayerPort(deps: {
   /** `handle` → container mime, recorded from this port's own prepares
    * — `play()` args carry no mime, so the MSE gate reads it here. */
   const handleMimes = new Map<string, string>();
+  /**
+   * `provider:'local'` mints `lf-*` handles keyed to their `file://`
+   * URI — the stream seam never sees them: prepare/attach/cancel/
+   * release all resolve inside this port (the mobile adapter's `lf-*`
+   * convention — the ref id IS the URI).
+   */
+  const localHandles = new Map<string, string>();
+  /** requestId → minted handle for `lf-req-*` prepares — the entry
+   * outlives the outcome so cancelPrepare can reclaim an adopted-
+   * but-unattached handle; release drops it with the handle. */
+  const localPrepares = new Map<string, string>();
+  /** `lf-req-*` ids whose `local:resolve` is still in flight — the
+   * requestId is live before the mint so `cancelPrepare` can stop a
+   * pending resolve from minting at all. */
+  const pendingLocalResolve = new Set<string>();
+  let localSeq = 0;
   /** The live MSE attach, keyed by the handle it serves. */
   let activeMse: { handle: string; source: MseSource } | null = null;
   /** In-flight attachUrl aborts keyed by op generation — between
@@ -218,6 +253,55 @@ export function createWebPlayerPort(deps: {
         pending.abort();
       }
     }
+  }
+
+  /**
+   * Desktop `provider:'local'` refs are `file://` URIs verbatim — the
+   * `localPlaybackFor`/`local:probe` convention (`toFileUri`).
+   */
+  function isLocalUri(value: string): boolean {
+    // The `local:resolve`/`local:read` contract bound — a picked-dir
+    // URI plus a nested docId can exceed the path bound alone.
+    return value.startsWith('file://') && value.length <= 8192;
+  }
+
+  /**
+   * Mint an `lf-*` handle for a `file://` URI. The mime derives from
+   * the extension table first, then the download ledger's recorded
+   * mime for `dl-*` names; 'audio/*' reports "container unknown —
+   * the element sniffs" like the mobile adapter does.
+   */
+  function mintLocalHandle(
+    sourceRef: string,
+  ): Result<{ handle: string; mime: string }> {
+    if (!isLocalUri(sourceRef)) {
+      return err(appError('invalid-response', 'bad local sourceRef'));
+    }
+    const handle = `lf-${++localSeq}`;
+    localHandles.set(handle, sourceRef);
+    const mime =
+      mimeForPath(sourceRef) ?? deps.localMime?.(sourceRef) ?? 'audio/*';
+    noteMime(handle, mime);
+    return ok({ handle, mime });
+  }
+
+  /**
+   * Reap a handle an attach leg minted but must not keep — an `lf-*`
+   * entry disappears locally (no host call), anything else rides the
+   * seam's release like before.
+   */
+  function releaseMinted(handle: string): void {
+    if (localHandles.delete(handle)) {
+      handleMimes.delete(handle);
+      for (const [requestId, minted] of localPrepares) {
+        if (minted === handle) {
+          localPrepares.delete(requestId);
+          break;
+        }
+      }
+      return;
+    }
+    void stream.release({ handle }).catch(() => undefined);
   }
 
   /**
@@ -306,6 +390,17 @@ export function createWebPlayerPort(deps: {
     settle: Promise<{ url: string; source: MseSource | null }>;
     abort(): void;
   }> {
+    const localUri = localHandles.get(handle);
+    if (localUri !== undefined) {
+      // The element reads `file://` itself — Chromium decodes and
+      // seeks the file with native random access, so there is no
+      // pump to lease, no settle stage, and nothing to abort.
+      return {
+        url: localUri,
+        settle: Promise.resolve({ url: localUri, source: null }),
+        abort: () => undefined,
+      };
+    }
     const mime = mimeHint ?? handleMimes.get(handle);
     if (
       deps.mse != null &&
@@ -488,30 +583,67 @@ export function createWebPlayerPort(deps: {
     // reference, so `projection === p` can no longer prove liveness.
     let attached = false;
     try {
-      const outcome = await stream.prepare({
-        pluginId: item.provider,
-        sourceRef: item.sourceRef,
-        requestId,
-      });
-      if (outcome.type !== 'prepared' || outcome.stream === undefined) {
-        // A stale op's failure is not the live attempt's — suppress it
-        // rather than label the stream the session already moved to.
-        if (gen === opGen && projection === p) {
-          const kind = appErrorKind(outcome.kind);
-          status(
-            'failed',
-            appError(kind, outcome.message ?? 'successor prepare failed'),
-          );
+      let mime: string;
+      if (item.provider === 'local') {
+        // `provider:'local'` never reaches the seam — the port mints
+        // the `lf-*` handle the attach below reads as a `file://` URI.
+        // Successors pass the same realpath confinement as prepare:
+        // a lexical URI could resolve to an escaped path post-scan.
+        // A REJECTED resolve propagates to the outer catch — the
+        // retryable toError path — not the 'unavailable' a null means.
+        const resolver = deps.localResolve;
+        const resolved =
+          resolver === undefined || resolver === null
+            ? item.sourceRef
+            : await resolver(item.sourceRef);
+        if (resolved === null) {
+          if (gen === opGen && projection === p) {
+            status(
+              'failed',
+              appError('unavailable', 'local file not readable'),
+            );
+          }
+          return;
         }
-        return;
+        const minted = mintLocalHandle(resolved);
+        if (!minted.ok) {
+          if (gen === opGen && projection === p) {
+            status('failed', minted.error);
+          }
+          return;
+        }
+        handle = minted.value.handle;
+        mime = minted.value.mime;
+      } else {
+        const outcome = await stream.prepare({
+          pluginId: item.provider,
+          sourceRef: item.sourceRef,
+          requestId,
+        });
+        if (outcome.type !== 'prepared' || outcome.stream === undefined) {
+          // A stale op's failure is not the live attempt's — suppress it
+          // rather than label the stream the session already moved to.
+          if (gen === opGen && projection === p) {
+            const kind = appErrorKind(outcome.kind);
+            status(
+              'failed',
+              appError(
+                kind,
+                outcome.message ?? 'successor prepare failed',
+              ),
+            );
+          }
+          return;
+        }
+        handle = outcome.stream.handle;
+        mime = outcome.stream.mime;
+        // Sessions this prepare superseded are dead registry-side —
+        // drop every local route aimed at them before they can serve
+        // a later attach.
+        dropSuperseded(outcome.superseded);
+        noteMime(handle, mime);
       }
-      handle = outcome.stream.handle;
-      // Sessions this prepare superseded are dead registry-side —
-      // drop every local route aimed at them before they can serve
-      // a later attach.
-      dropSuperseded(outcome.superseded);
-      noteMime(handle, outcome.stream.mime);
-      const first = await attachUrl(handle, outcome.stream.mime);
+      const first = await attachUrl(handle, mime);
       pendingAttaches.set(gen, { handle, abort: first.abort });
       // A later play/attach/prepare or a moved projection makes this
       // completion stale — release its minted handle and stay out of
@@ -522,7 +654,7 @@ export function createWebPlayerPort(deps: {
         void first.settle
           .then((s) => s.source?.destroy())
           .catch(() => undefined);
-        void stream.release({ handle }).catch(() => undefined);
+        releaseMinted(handle);
         return;
       }
       // The successor's pump must close before this source installs —
@@ -555,7 +687,7 @@ export function createWebPlayerPort(deps: {
         if (current !== null && current.handle === handle) {
           current = null;
         }
-        void stream.release({ handle }).catch(() => undefined);
+        releaseMinted(handle);
         return;
       }
       // Liveness past the element install is the handle match —
@@ -569,7 +701,7 @@ export function createWebPlayerPort(deps: {
       ) {
         pendingAttaches.delete(gen);
         settled.source?.destroy();
-        void stream.release({ handle }).catch(() => undefined);
+        releaseMinted(handle);
         return;
       }
       pendingAttaches.delete(gen);
@@ -591,11 +723,6 @@ export function createWebPlayerPort(deps: {
       // never resolved would leave its pump lease running.
       pendingAttaches.get(gen)?.abort();
       pendingAttaches.delete(gen);
-      // A minted-but-never-attached handle is ours to reap — repeated
-      // leaks would cap the registry.
-      if (handle !== undefined) {
-        void stream.release({ handle }).catch(() => undefined);
-      }
       // A stale op's rejection must not label the live attempt — its
       // outcome belongs to the op the session already replaced.
       // Ownership is the handle match once this op set `current` (our
@@ -606,8 +733,30 @@ export function createWebPlayerPort(deps: {
         (attached
           ? current !== null && current.handle === handle
           : projection === p);
+      // A minted-but-never-attached handle is ours to reap — repeated
+      // leaks would cap the registry. For a local mint whose `current`
+      // was already set, reaping alone would leave a live `lf-*`
+      // pointer: a later element error would probe the dead handle on
+      // the seam as `released`. Report 'unavailable' FIRST — status()
+      // needs `current` to name the failing handle — then tear the
+      // element down. 'unavailable' over the retryable 'internal' a
+      // DOM rejection reads as: the file exists but can't play.
+      const failedLocal =
+        handle !== undefined && localHandles.has(handle);
       if (stillMine) {
-        status('failed', toError(thrown));
+        status(
+          'failed',
+          failedLocal
+            ? appError('unavailable', 'local file not playable')
+            : toError(thrown),
+        );
+      }
+      if (handle !== undefined) {
+        releaseMinted(handle);
+        if (failedLocal && current !== null && current.handle === handle) {
+          audio.src = '';
+          current = null;
+        }
       }
     }
   }
@@ -732,6 +881,11 @@ export function createWebPlayerPort(deps: {
     handle: string,
     identity: PlaybackIdentity,
   ): void {
+    if (localHandles.has(handle)) {
+      // A local attach has no seam session to mark — `stream:marks`
+      // on an `lf-*` handle could only return not-found.
+      return;
+    }
     void stream
       .marks({ handle })
       .then((marks: StreamMarksResult) => {
@@ -802,6 +956,17 @@ export function createWebPlayerPort(deps: {
     const owner = current;
     if (owner === null) {
       status('failed', appError('transient', 'audio element failed'));
+      return;
+    }
+    if (localHandles.has(owner.handle)) {
+      // No stream to probe — the element IS the resource. A file://
+      // attach that errors can't be re-minted into playing bytes,
+      // so the honest verdict is non-retryable, never a dead-handle
+      // kind (that would loop re-prepares over the same bad file).
+      status(
+        'failed',
+        appError('unavailable', 'local file could not be played'),
+      );
       return;
     }
     // A media error on a reaped loopback URL is the stream's death
@@ -878,6 +1043,94 @@ export function createWebPlayerPort(deps: {
   }
 
   /**
+   * The `provider:'local'` prepare leg — `lf-*` in the mobile
+   * adapter's convention. The sourceRef already IS the `file://`
+   * URI, so the mint is synchronous; the outcome still emits on a
+   * microtask like the stream leg's `.then` so the session's event
+   * ordering stays exact. opGen/pendingAttaches ran in `prepare()`
+   * above this call — a newer op supersedes this one the same way it
+   * supersedes a stream mint.
+   */
+  function issueLocalPrepare(
+    input: {
+      sourceRef: string;
+      identity: PlaybackIdentity;
+    },
+    requestId: string,
+    emitFailed: (error: AppError) => void,
+  ): void {
+    // The URI mints on the utility's realpath-checked answer: a
+    // renderer-side `file://` string is lexical, and only the utility
+    // can realpath + confine it to the granted roots. A null answer
+    // (escape, revoke, gone) fails the prepare 'unavailable'. With no
+    // resolver (tests/dev harness) the lexical ref is trusted as-is.
+    pendingLocalResolve.add(requestId);
+    const mint = (resolved: string | null): void => {
+      if (!pendingLocalResolve.delete(requestId)) {
+        // cancelPrepare arrived while the resolve was in flight — the
+        // cancelled outcome mirrors the microtask path below.
+        emitFailed(
+          appError('cancelled', 'local prepare cancelled'),
+        );
+        return;
+      }
+      if (resolved === null) {
+        emitFailed(
+          appError('unavailable', 'local file not readable'),
+        );
+        return;
+      }
+      const minted = mintLocalHandle(resolved);
+      if (!minted.ok) {
+        emitFailed(minted.error);
+        return;
+      }
+      // The entry lands before the outcome so a `cancelPrepare` racing
+      // the microtask finds and reclaims the minted handle — the mobile
+      // adapter's reclaim-by-requestId contract.
+      localPrepares.set(requestId, minted.value.handle);
+      queueMicrotask(() => {
+        if (!localPrepares.has(requestId)) {
+          emitFailed(appError('cancelled', 'local prepare cancelled'));
+          return;
+        }
+        emit({
+          type: 'prepare',
+          requestId,
+          identity: input.identity,
+          outcome: {
+            type: 'prepared',
+            stream: {
+              handle: minted.value.handle,
+              mime: minted.value.mime,
+            },
+            attempt: toAttemptTrace(undefined, requestId),
+          },
+        });
+      });
+    };
+    const resolver = deps.localResolve;
+    if (resolver === undefined || resolver === null) {
+      queueMicrotask(() => mint(input.sourceRef));
+      return;
+    }
+    // A REJECTED resolve is a bridge/utility failure — the retryable
+    // path via toError, not the terminal 'unavailable' a null answer
+    // means. The session's retry policy can then re-prepare after a
+    // utility restart rather than skipping a track that never played.
+    resolver(input.sourceRef).then(mint, (thrown) => {
+      if (!pendingLocalResolve.delete(requestId)) {
+        emitFailed(
+          appError('cancelled', 'local prepare cancelled'),
+        );
+        return;
+      }
+      emitFailed(toError(thrown));
+    });
+    return;
+  }
+
+  /**
    * Issue a stream-seam resolve+prepare and translate its terminal
    * outcome into the `prepare` event — shared by `prepare` and
    * `prewarm`; the difference is the caller's playback-intent
@@ -904,10 +1157,9 @@ export function createWebPlayerPort(deps: {
       });
     };
     if (input.provider === 'local') {
-      // Desktop local files are the Phase-4 adapter — no seam leg yet.
-      emitFailed(
-        appError('unavailable', 'desktop local files not implemented'),
-      );
+      // Desktop local files attach as `file://` on the element — the
+      // seam never sees the ref, so mint the `lf-*` handle here.
+      issueLocalPrepare(input, requestId, emitFailed);
       return;
     }
     void stream
@@ -956,12 +1208,13 @@ export function createWebPlayerPort(deps: {
 
   return {
     async prepare(input) {
-      const requestId = `wreq-${++seq}`;
-      if (input.provider === 'local') {
-        // Desktop local files are the Phase-4 adapter — no seam leg yet.
-        issueStreamPrepare(input, requestId);
-        return ok(requestId);
-      }
+      // `provider:'local'` mints `lf-req-*` ids — they never reach
+      // the seam, so cancelPrepare routes on the prefix (the mobile
+      // adapter's convention).
+      const requestId =
+        input.provider === 'local'
+          ? `lf-req-${++localSeq}`
+          : `wreq-${++seq}`;
       // Return the requestId up front — the terminal outcome arrives
       // as a `prepare` event, so a session-side deadline can reach
       // `cancelPrepare` while the utility is still resolving.
@@ -984,7 +1237,10 @@ export function createWebPlayerPort(deps: {
      * re-resolving. The terminal outcome is still a `prepare` event.
      */
     async prewarm(input) {
-      const requestId = `wreq-${++seq}`;
+      const requestId =
+        input.provider === 'local'
+          ? `lf-req-${++localSeq}`
+          : `wreq-${++seq}`;
       issueStreamPrepare(input, requestId);
       return ok(requestId);
     },
@@ -1151,10 +1407,25 @@ export function createWebPlayerPort(deps: {
     },
 
     async cancelPrepare(input) {
+      // `lf-req-*` ids never reached the seam — the cancel reclaims
+      // the minted handle locally so a cancelled prepare can't
+      // orphan it (the mobile adapter's convention).
+      if (input.requestId.startsWith('lf-req-')) {
+        pendingLocalResolve.delete(input.requestId);
+        const handle = localPrepares.get(input.requestId);
+        localPrepares.delete(input.requestId);
+        if (handle !== undefined) {
+          localHandles.delete(handle);
+          handleMimes.delete(handle);
+        }
+        return ok(undefined);
+      }
       return guard(() => stream.cancel({ requestId: input.requestId }));
     },
 
     noteMime,
+
+    localUriFor: (handle) => localHandles.get(handle) ?? null,
 
     async release(input) {
       if (current !== null && current.handle === input.handle) {
@@ -1169,6 +1440,16 @@ export function createWebPlayerPort(deps: {
       // invalidate that op — otherwise its late serveUrl resolves into
       // an already-dropped host stream and audio resumes post-teardown.
       dropPendingPlay(input.handle);
+      if (localHandles.delete(input.handle)) {
+        for (const [requestId, minted] of localPrepares) {
+          if (minted === input.handle) {
+            localPrepares.delete(requestId);
+            break;
+          }
+        }
+        // The seam never saw this handle — there is nothing to release.
+        return ok(undefined);
+      }
       return guard(() => stream.release({ handle: input.handle }));
     },
 

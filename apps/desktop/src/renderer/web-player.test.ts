@@ -134,6 +134,24 @@ function collect(player: { subscribe(l: (e: PlayerEvent) => void): () => void })
   return events;
 }
 
+/** The stream handles carried by every prepared outcome, in order. */
+function preparedHandles(events: PlayerEvent[]): string[] {
+  const handles: string[] = [];
+  for (const e of events) {
+    if (e.type === 'prepare' && e.outcome.type === 'prepared') {
+      handles.push(e.outcome.stream.handle);
+    }
+  }
+  return handles;
+}
+
+/** The handle of the latest prepared outcome (fails the test when none). */
+function preparedHandle(events: PlayerEvent[]): string {
+  const handles = preparedHandles(events);
+  assert(handles.length > 0, 'a prepared outcome was emitted');
+  return handles[handles.length - 1]!;
+}
+
 function twoItemProjection(
   overrides: Partial<QueueProjection> = {},
 ): QueueProjection {
@@ -250,23 +268,518 @@ export async function run(): Promise<void> {
     );
   }
 
-  // local provider → honest unavailable failure, no host call.
+  // ---- provider:'local' (file://) leg --------------------------------
+
+  // A local prepare mints an lf-* handle off the file:// URI — the
+  // extension derives the mime and the stream seam never sees it.
   {
     const stream = fakeStream();
     const player = createWebPlayerPort({ stream, audio: fakeAudio() });
     const events = collect(player);
-    await player.prepare({ provider: 'local', sourceRef: '/x.mp3', identity });
+    const res = await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///music/rip.flac',
+      identity,
+    });
+    assert(res.ok, 'local prepare resolves a requestId');
+    assert(
+      res.ok && res.value.startsWith('lf-req-'),
+      'local requestIds carry the lf-req prefix',
+    );
+    await settle();
+    const prepared = events.find((e) => e.type === 'prepare');
+    assert(
+      prepared !== undefined &&
+        prepared.type === 'prepare' &&
+        prepared.outcome.type === 'prepared' &&
+        prepared.outcome.stream.handle.startsWith('lf-') &&
+        prepared.outcome.stream.mime === 'audio/flac' &&
+        prepared.identity.attemptId === 'attempt-1',
+      'prepared event carries the lf-* handle + derived mime',
+    );
+    assert(
+      !stream.calls.some((c) => c.method === 'prepare'),
+      'local never reaches the host',
+    );
+  }
+
+  // An extensionless managed-download URI asks the localMime hook —
+  // the ledger's recorded mime beats the 'audio/*' fallback.
+  {
+    const stream = fakeStream();
+    const player = createWebPlayerPort({
+      stream,
+      audio: fakeAudio(),
+      localMime: (uri) =>
+        uri === 'file:///media/dl-1' ? 'audio/webm' : null,
+    });
+    const events = collect(player);
+    await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///media/dl-1',
+      identity,
+    });
+    await settle();
+    const prepared = events.find((e) => e.type === 'prepare');
+    assert(
+      prepared !== undefined &&
+        prepared.type === 'prepare' &&
+        prepared.outcome.type === 'prepared' &&
+        prepared.outcome.stream.mime === 'audio/webm',
+      'extensionless uri takes the ledger mime',
+    );
+  }
+
+  // No extension and no ledger hit reports 'audio/*' — "container
+  // unknown, the element sniffs", the mobile adapter's convention.
+  {
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio: fakeAudio() });
+    const events = collect(player);
+    await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///media/dl-9',
+      identity,
+    });
+    await settle();
+    const prepared = events.find((e) => e.type === 'prepare');
+    assert(
+      prepared !== undefined &&
+        prepared.type === 'prepare' &&
+        prepared.outcome.type === 'prepared' &&
+        prepared.outcome.stream.mime === 'audio/*',
+      'an unknown container reports audio/*',
+    );
+  }
+
+  // A non-file:// sourceRef fails typed and mints no handle.
+  {
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio: fakeAudio() });
+    const events = collect(player);
+    await player.prepare({
+      provider: 'local',
+      sourceRef: 'https://x/y.mp3',
+      identity,
+    });
+    const prepared = events.find((e) => e.type === 'prepare');
+    assert(
+      prepared !== undefined &&
+        prepared.type === 'prepare' &&
+        prepared.outcome.type === 'failed' &&
+        prepared.outcome.error.kind === 'invalid-response',
+      'a bad local sourceRef fails typed',
+    );
+    assert(
+      !stream.calls.some((c) => c.method === 'prepare'),
+      'a rejected sourceRef never reaches the host',
+    );
+  }
+
+  // play attaches the file:// URI straight on the element — no
+  // serveUrl, no channel, no marks probe; seek/pause/release stay
+  // element-local and the host never sees the lf-* handle.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///music/rip.ogg',
+      identity,
+    });
+    await settle();
+    const handle = preparedHandle(events);
+    const res = await player.play({
+      handle,
+      identity,
+      positionMs: 2500,
+    });
+    assert(res.ok, 'local play resolves');
+    assertEqual(audio.src, 'file:///music/rip.ogg');
+    assertEqual(audio.currentTime, 2.5);
+    const states = events
+      .filter((e) => e.type === 'status')
+      .map((e) => (e.type === 'status' ? e.state : ''));
+    assert(
+      states.includes('buffering') && states.includes('playing'),
+      'buffering then playing statuses flow',
+    );
+    assert(
+      !stream.calls.some(
+        (c) =>
+          c.method === 'serveUrl' ||
+          c.method === 'channel' ||
+          c.method === 'marks',
+      ),
+      'a local attach touches no stream seam',
+    );
+    assert(
+      (await player.seekTo({ positionMs: 8000, identity })).ok,
+      'seek honours the live identity',
+    );
+    assert((await player.pause(identity)).ok, 'pause resolves');
+    assert((await player.release({ handle, identity })).ok);
+    assertEqual(audio.src, '');
+    assert(
+      !stream.calls.some((c) => c.method === 'release'),
+      'local release never reaches the host',
+    );
+  }
+
+  // cancelPrepare on an lf-req-* request reclaims the minted handle
+  // inside the port — the seam's cancel is never invoked, and a stray
+  // play on the reclaimed handle finds no file:// route left.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    const res = await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///music/x.mp3',
+      identity,
+    });
+    assert(res.ok, 'local prepare resolves');
+    await settle();
+    const handle = preparedHandle(events);
+    const cancelled = await player.cancelPrepare({
+      requestId: res.ok ? res.value : '',
+      identity,
+    });
+    assert(cancelled.ok, 'local cancel resolves');
+    assert(
+      !stream.calls.some((c) => c.method === 'cancel'),
+      'local cancel never reaches the host',
+    );
+    // The reclaimed handle no longer maps to its file:// URI — a
+    // play on it takes the ordinary stream attach (serveUrl fires).
+    await player.play({ handle, identity });
+    assert(
+      stream.calls.some((c) => c.method === 'serveUrl'),
+      'the reclaimed handle holds no file:// route',
+    );
+    assertEqual(
+      audio.src,
+      'http://127.0.0.1:9/s/tok',
+      'a cancelled attach cannot keep the file route',
+    );
+  }
+
+  // A newer local play supersedes the older one's generation — its
+  // late completion never retakes the element.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///a.mp3',
+      identity,
+    });
+    await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///b.mp3',
+      identity,
+    });
+    await settle();
+    const handles = preparedHandles(events);
+    const playA = player.play({ handle: handles[0]!, identity });
+    const playB = player.play({
+      handle: handles[1]!,
+      identity: { ...identity, attemptId: 'a2' },
+    });
+    await playA;
+    await playB;
+    await settle();
+    assertEqual(
+      audio.src,
+      'file:///b.mp3',
+      'the newer local play owns the element',
+    );
+  }
+
+  // A queue transition onto a local item mints + attaches the file://
+  // URI itself — the emitted transition carries the lf-* handle and
+  // the host prepares nothing.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    await player.setQueueProjection(
+      twoItemProjection({
+        items: [
+          {
+            occurrenceId: 'occ-1',
+            provider: 'deezer',
+            sourceRef: 't1',
+            title: 'one',
+            artist: null,
+            artworkUrl: null,
+          },
+          {
+            occurrenceId: 'occ-2',
+            provider: 'local',
+            sourceRef: 'file:///music/two.flac',
+            title: 'two',
+            artist: null,
+            artworkUrl: null,
+          },
+        ],
+      }),
+    );
+    await player.play({ handle: 'h-1', identity });
+    const callsBefore = stream.calls.length;
+    audio.fire('ended');
+    await settle();
+    const transition = events.find((e) => e.type === 'queue-transition');
+    assert(
+      transition !== undefined &&
+        transition.type === 'queue-transition' &&
+        transition.toOccurrenceId === 'occ-2' &&
+        typeof transition.handle === 'string' &&
+        transition.handle.startsWith('lf-'),
+      'the local successor reports its minted handle',
+    );
+    assertEqual(audio.src, 'file:///music/two.flac');
+    assertEqual(
+      stream.calls.length,
+      callsBefore,
+      'the local successor never reaches the host',
+    );
+  }
+
+  // A local successor passes the same resolve gate as prepare — the
+  // mint keys to the realpath'd URI the element attaches.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      localResolve: (uri) =>
+        Promise.resolve(
+          uri === 'file:///music/link.flac' ? 'file:///music/real.flac' : null,
+        ),
+    });
+    const events = collect(player);
+    const identity = { attemptId: 'attempt-1', queueRev: 3 };
+    await player.setQueueProjection(
+      twoItemProjection({
+        items: [
+          {
+            occurrenceId: 'occ-1',
+            provider: 'deezer',
+            sourceRef: 't1',
+            title: 'one',
+            artist: null,
+            artworkUrl: null,
+          },
+          {
+            occurrenceId: 'occ-2',
+            provider: 'local',
+            sourceRef: 'file:///music/link.flac',
+            title: 'two',
+            artist: null,
+            artworkUrl: null,
+          },
+        ],
+      }),
+    );
+    await player.play({ handle: 'h-1', identity });
+    audio.fire('ended');
+    await settle();
+    assertEqual(
+      audio.src,
+      'file:///music/real.flac',
+      'the successor attach uses the resolved URI',
+    );
+  }
+
+  // A denied successor resolve fails the transition leg with the
+  // non-retryable verdict — no mint, no attach.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      localResolve: () => Promise.resolve(null),
+    });
+    const events = collect(player);
+    const identity = { attemptId: 'attempt-1', queueRev: 3 };
+    await player.setQueueProjection(
+      twoItemProjection({
+        items: [
+          {
+            occurrenceId: 'occ-1',
+            provider: 'deezer',
+            sourceRef: 't1',
+            title: 'one',
+            artist: null,
+            artworkUrl: null,
+          },
+          {
+            occurrenceId: 'occ-2',
+            provider: 'local',
+            sourceRef: 'file:///music/outside.flac',
+            title: 'two',
+            artist: null,
+            artworkUrl: null,
+          },
+        ],
+      }),
+    );
+    await player.play({ handle: 'h-1', identity });
+    audio.fire('ended');
+    await settle();
+    const failed = events.findLast(
+      (e) => e.type === 'status' && e.state === 'failed',
+    );
+    assert(
+      failed !== undefined &&
+        failed.type === 'status' &&
+        failed.error?.kind === 'unavailable',
+      'a denied successor resolve reports unavailable',
+    );
+    assert(
+      audio.src !== 'file:///music/outside.flac',
+      'no minted URI reaches the element',
+    );
+  }
+
+  // An element error on a local attach reports a non-retryable verdict
+  // — never the dead-handle kinds that loop re-prepares over a file
+  // that cannot play.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio });
+    const events = collect(player);
+    await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///gone.mp3',
+      identity,
+    });
+    await settle();
+    await player.play({ handle: preparedHandle(events), identity });
+    audio.fire('error');
+    const failed = events.findLast(
+      (e) => e.type === 'status' && e.state === 'failed',
+    );
+    assert(
+      failed !== undefined &&
+        failed.type === 'status' &&
+        failed.error?.kind === 'unavailable',
+      'a local element error reports unavailable',
+    );
+    assert(
+      !stream.calls.some((c) => c.method === 'marks'),
+      'the dead-handle probe never runs for a local attach',
+    );
+  }
+
+  // `localResolve` re-keys the mint to the realpath'd URI — the
+  // lexical input is never what the element attaches, and
+  // `localUriFor` reports the resolved route.
+  {
+    const audio = fakeAudio();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      localResolve: (uri) =>
+        Promise.resolve(
+          uri === 'file:///music/lex.flac' ? 'file:///real/rip.flac' : null,
+        ),
+    });
+    const events = collect(player);
+    await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///music/lex.flac',
+      identity,
+    });
+    await settle();
+    const handle = preparedHandle(events);
+    assertEqual(
+      player.localUriFor(handle),
+      'file:///real/rip.flac',
+      'the minted handle keys to the resolved URI',
+    );
+    await player.play({ handle, identity });
+    assertEqual(
+      audio.src,
+      'file:///real/rip.flac',
+      'the element attaches the realpath answer',
+    );
+  }
+
+  // A null resolve answer fails 'unavailable' and mints nothing.
+  {
+    const stream = fakeStream();
+    const player = createWebPlayerPort({
+      stream,
+      audio: fakeAudio(),
+      localResolve: () => Promise.resolve(null),
+    });
+    const events = collect(player);
+    await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///escape/out.flac',
+      identity,
+    });
+    await settle();
     const prepared = events.find((e) => e.type === 'prepare');
     assert(
       prepared !== undefined &&
         prepared.type === 'prepare' &&
         prepared.outcome.type === 'failed' &&
         prepared.outcome.error.kind === 'unavailable',
-      'local reports unavailable until Phase 4',
+      'a refused URI fails unavailable',
+    );
+  }
+
+  // cancelPrepare during the in-flight resolve stops the mint and
+  // reports the same 'cancelled' outcome the minted path does.
+  {
+    const stream = fakeStream();
+    let resolveNow: (uri: string | null) => void = () => undefined;
+    const player = createWebPlayerPort({
+      stream,
+      audio: fakeAudio(),
+      localResolve: () =>
+        new Promise<string | null>((resolve) => {
+          resolveNow = resolve;
+        }),
+    });
+    const events = collect(player);
+    const res = await player.prepare({
+      provider: 'local',
+      sourceRef: 'file:///music/pending.flac',
+      identity,
+    });
+    assert(res.ok, 'local prepare resolves a requestId');
+    const cancelled = await player.cancelPrepare({
+      requestId: res.ok ? res.value : '',
+      identity,
+    });
+    assert(cancelled.ok, 'cancel during resolve resolves');
+    resolveNow('file:///real/pending.flac');
+    await settle();
+    const prepared = events.find((e) => e.type === 'prepare');
+    assert(
+      prepared !== undefined &&
+        prepared.type === 'prepare' &&
+        prepared.outcome.type === 'failed' &&
+        prepared.outcome.error.kind === 'cancelled',
+      'a cancelled resolve reports cancelled, never prepared',
     );
     assert(
-      !stream.calls.some((c) => c.method === 'prepare'),
-      'local never reaches the host',
+      preparedHandles(events).length === 0,
+      'the cancelled resolve mints no handle',
     );
   }
 

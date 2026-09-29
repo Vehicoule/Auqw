@@ -604,8 +604,8 @@ function Main({
 
   // Bytes on disk — a stored download or a scanned local file.
   // Ownership is NOT the local-playback probe: the probe answers
-  // whether the web player can attach the bytes (today it cannot),
-  // while ownership answers whether 'download missing' may skip the
+  // whether the web player can attach the bytes right now, while
+  // ownership answers whether 'download missing' may skip the
   // row — asking the first question with the second probe would
   // re-request stored tracks and delete their files on a changed
   // mapping.
@@ -2090,8 +2090,15 @@ function Main({
   // seeded pattern while pending and on failure). The port borrows
   // the live stream handle; it never owns or closes it.
   const peaksPort = useMemo(
-    () => createWebPeaksPort({ stream: window.auqw.stream }),
-    [],
+    () =>
+      createWebPeaksPort({
+        stream: window.auqw.stream,
+        // `lf-*` handles carry no seam session — local bytes come from
+        // the utility's grant-gated ranged read instead.
+        localUriFor: controller.localUriFor,
+        localRead: window.auqw.local.read,
+      }),
+    [controller],
   );
   const peaksTarget: PeaksTarget | null =
     playback.type === 'buffering' ||

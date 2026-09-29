@@ -1,5 +1,5 @@
 import type { Stats } from 'node:fs';
-import { access, realpath, stat } from 'node:fs/promises';
+import { access, open, realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { CHANNELS } from '../shared/channels.ts';
@@ -7,20 +7,28 @@ import { errorCode } from '../shared/check.ts';
 import type {
   LocalAddArgs,
   LocalProbeArgs,
+  LocalReadArgs,
+  LocalResolveArgs,
 } from '../shared/contract.ts';
-import { isLocalAddArgs, isLocalProbeArgs } from '../shared/contract.ts';
+import {
+  isLocalAddArgs,
+  isLocalProbeArgs,
+  isLocalReadArgs,
+  isLocalResolveArgs,
+} from '../shared/contract.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
 import {
   dirTreeUri,
   docIdConfined,
   docUriFor,
+  fileUrlPath,
   parseTree,
   pathConfined,
   pickedFileTreeUri,
   toFileUri,
 } from '../shared/local-paths.ts';
 import type { UtilityHandler } from './router.ts';
-import { mimeForPath } from './tags.ts';
+import { mimeForPath } from '../shared/audio-mime.ts';
 import { isBareName } from './transfer.ts';
 
 /**
@@ -305,6 +313,227 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
     }
   }
 
+  // Verdicts memoized per URI — waveform reads hit the same URI per
+  // 1 MiB chunk, and a full index scan per chunk multiplies realpaths
+  // by library size. Freshness is `PRAGMA data_version`: the index db
+  // is a read-only accessor — every write arrives via the storage
+  // service's connection, and data_version bumps on exactly those
+  // commits (inserts, deletes, AND updates — a file's doc move or a
+  // download leaving 'available' re-opens the scan). O(1) per call.
+  // If the pragma is unavailable the stamp falls back to a content
+  // hash over the gate-relevant columns (string work, still no fs).
+  const gateCache = new Map<string, string | null>();
+  let gateStamp = '';
+  function indexStamp(db: DatabaseSync): string {
+    try {
+      const row = db
+        .prepare('PRAGMA data_version')
+        .get() as { data_version?: unknown };
+      if (typeof row.data_version === 'number') {
+        return `v${row.data_version}`;
+      }
+    } catch {
+      // fall through to the content-hash stamp
+    }
+    let hash = 0x811c9dc5;
+    const mix = (table: string, columns: string): void => {
+      try {
+        const rows = db
+          .prepare(`SELECT ${columns} AS c FROM ${table} ORDER BY rowid`)
+          .all() as { c?: unknown }[];
+        for (const row of rows) {
+          if (typeof row.c !== 'string') {
+            continue;
+          }
+          for (let i = 0; i < row.c.length; i++) {
+            hash = Math.imul(hash ^ row.c.charCodeAt(i), 0x01000193);
+          }
+          hash = Math.imul(hash ^ 0xff, 0x01000193);
+        }
+      } catch {
+        hash = Math.imul(hash ^ table.length, 0x01000193);
+      }
+    };
+    mix('local_files', "COALESCE(file_id,'') || char(31) || COALESCE(doc_id,'')");
+    mix('local_sources', "COALESCE(source_id,'') || char(31) || COALESCE(tree_uri,'')");
+    mix('downloads', "COALESCE(file_path,'') || char(31) || COALESCE(state,'')");
+    return `h${hash >>> 0}`;
+  }
+
+  /**
+   * A `file://` URI the renderer is allowed to touch — the lexical
+   * path is realpath'd (a symlink swap can't smuggle an escape through
+   * the gap between index-time resolution and playback-time open),
+   * then the resolved path must be OWNED bytes: an `available`
+   * downloads-ledger row under the media dir, or an indexed
+   * `local_files` row still confined under its tree root. Confinement
+   * alone is not enough — a granted folder or the media dir can hold
+   * files the index never imported, and those stay unreadable.
+   */
+  async function allowedLocalPath(uri: string): Promise<string | null> {
+    const abs = fileUrlPath(uri);
+    if (abs === null) {
+      return null;
+    }
+    const real = await realpathChecked(abs);
+    if (real === null) {
+      return null;
+    }
+    const db = options.database();
+    if (db === null) {
+      return null;
+    }
+    const stamp = indexStamp(db);
+    if (stamp !== gateStamp) {
+      gateCache.clear();
+      gateStamp = stamp;
+    }
+    const cached = gateCache.get(uri);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const allowed = await gateLocalPath(db, abs, real);
+    // An index write mid-evaluation voids the verdict — only cache
+    // when the stamp still matches, so an in-flight scan can never
+    // repopulate the table with pre-mutation answers.
+    if (indexStamp(db) === stamp) {
+      gateCache.set(uri, allowed);
+    }
+    return allowed;
+  }
+
+  async function gateLocalPath(
+    db: DatabaseSync,
+    abs: string,
+    real: string,
+  ): Promise<string | null> {
+    if (options.mediaDir !== undefined) {
+      // Managed downloads only — mediaDir can hold arbitrary files
+      // beside the ledger's own, so confinement is not the gate.
+      let rows: Record<string, unknown>[];
+      try {
+        rows = db
+          .prepare(
+            `SELECT file_path AS filePath FROM downloads
+             WHERE state = 'available'`,
+          )
+          .all() as Record<string, unknown>[];
+      } catch (thrown) {
+        const message = thrown instanceof Error ? thrown.message : '';
+        if (message.includes('no such table')) {
+          rows = [];
+        } else {
+          asIo('local resolve failed', thrown);
+          return null;
+        }
+      }
+      const mediaReal = await realpathChecked(options.mediaDir);
+      for (const row of rows) {
+        if (typeof row['filePath'] !== 'string') {
+          continue;
+        }
+        const nameReal = await realpathChecked(
+          join(options.mediaDir, row['filePath']),
+        );
+        // A ledger name carrying separators must not resolve outside
+        // the media dir — same guard the probe leg applies.
+        if (
+          nameReal !== null &&
+          nameReal === real &&
+          mediaReal !== null &&
+          pathConfined(mediaReal, nameReal)
+        ) {
+          return real;
+        }
+      }
+    }
+    for (const row of localRows(db)) {
+      // The file must BE an indexed row — compare realpath'd paths, not
+      // lexical URIs, so both the lexical docUri (resolve) and the
+      // minted realpath'd URI (read) answer the same.
+      const docUri = docUriFor(row.treeUri, row.docId);
+      if (docUri === null) {
+        continue;
+      }
+      const docAbs = fileUrlPath(docUri);
+      if (docAbs === null) {
+        continue;
+      }
+      // The lexical fast path skips the fs call for the common
+      // resolve input; realpath'd inputs still verify per row.
+      if (docAbs !== abs) {
+        const docReal = await realpathChecked(docAbs);
+        if (docReal === null || docReal !== real) {
+          continue;
+        }
+      }
+      // …and still confine under its own tree root realpath — an
+      // indexed file swapped for a symlink pointing out stays denied.
+      const tree = parseTree(row.treeUri);
+      if (tree === null) {
+        continue;
+      }
+      const rootReal = await realpathChecked(tree.absPath);
+      if (rootReal === null) {
+        continue;
+      }
+      if (
+        tree.kind === 'file'
+          ? real === rootReal
+          : pathConfined(rootReal, real)
+      ) {
+        return real;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * `local:resolve` — the renderer's attach-time confinement check: a
+   * `file://` URI returns its realpath'd, grant-checked URI, or null
+   * when the path escapes every root. Consumed async at attach so a
+   * lexical-URI-minted `lf-*` handle can never resolve into bytes
+   * outside the granted set.
+   */
+  async function resolve(args: LocalResolveArgs): Promise<unknown> {
+    const real = await allowedLocalPath(args.uri);
+    return { uri: real === null ? null : toFileUri(real) };
+  }
+
+  /**
+   * `local:read` — ranged byte reads on a `file://` URI for features
+   * that need bytes, not an element attach (waveform peaks). The same
+   * `allowedLocalPath` gate as `resolve`; empty data reads as EOF.
+   */
+  async function read(args: LocalReadArgs): Promise<unknown> {
+    const real = await allowedLocalPath(args.uri);
+    if (real === null) {
+      throw shellError('permission-denied', 'path is not readable');
+    }
+    let file;
+    try {
+      file = await open(real, 'r');
+    } catch (thrown) {
+      // A vanished file is a typed failure, not a null result — the
+      // contract result shape is `{data}` only; null would surface to
+      // the renderer as a malformed `invalid-response`.
+      statError(thrown);
+      throw shellError('unavailable', 'local file is gone');
+    }
+    try {
+      const buffer = Buffer.alloc(args.maxLen);
+      const { bytesRead } = await file.read(
+        buffer,
+        0,
+        args.maxLen,
+        args.position,
+      );
+      return { data: buffer.subarray(0, bytesRead).toString('base64') };
+    } finally {
+      await file.close();
+    }
+  }
+
   async function list(): Promise<unknown> {
     const db = options.database();
     if (db === null) {
@@ -488,6 +717,16 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         CHANNELS.localProbe,
         isLocalProbeArgs,
         probe,
+      ),
+      [CHANNELS.localResolve]: guarded(
+        CHANNELS.localResolve,
+        isLocalResolveArgs,
+        resolve,
+      ),
+      [CHANNELS.localRead]: guarded(
+        CHANNELS.localRead,
+        isLocalReadArgs,
+        read,
       ),
       [CHANNELS.localList]: guarded(CHANNELS.localList, noArgs, list),
       [CHANNELS.localPlayback]: guarded(
