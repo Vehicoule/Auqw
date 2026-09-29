@@ -315,28 +315,36 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
 
   // Verdicts memoized per URI — waveform reads hit the same URI per
   // 1 MiB chunk, and a full index scan per chunk multiplies realpaths
-  // by library size. Freshness is probed by COUNT+MAX(rowid) stamps
-  // (sub-microsecond vs a realpath per row): any insert/delete in the
-  // three index tables changes a stamp and re-opens the scan.
+  // by library size. Freshness is probed by a content hash over the
+  // gate-relevant columns (string work, no fs): inserts, deletes, AND
+  // updates (a file's doc move, a download leaving 'available') all
+  // shift the stamp and re-open the scan.
   const gateCache = new Map<string, string | null>();
   let gateStamp = '';
   function indexStamp(db: DatabaseSync): string {
-    const probe = (table: string): number => {
+    let hash = 0x811c9dc5;
+    const mix = (table: string, columns: string): void => {
       try {
-        const row = db
-          .prepare(
-            `SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS m FROM ${table}`,
-          )
-          .get() as { n?: unknown; m?: unknown };
-        return (
-          (typeof row.n === 'number' ? row.n : 0) +
-          (typeof row.m === 'number' ? row.m : 0)
-        );
+        const rows = db
+          .prepare(`SELECT ${columns} AS c FROM ${table} ORDER BY rowid`)
+          .all() as { c?: unknown }[];
+        for (const row of rows) {
+          if (typeof row.c !== 'string') {
+            continue;
+          }
+          for (let i = 0; i < row.c.length; i++) {
+            hash = Math.imul(hash ^ row.c.charCodeAt(i), 0x01000193);
+          }
+          hash = Math.imul(hash ^ 0xff, 0x01000193);
+        }
       } catch {
-        return 0;
+        hash = Math.imul(hash ^ table.length, 0x01000193);
       }
     };
-    return `${probe('local_files')}:${probe('local_sources')}:${probe('downloads')}`;
+    mix('local_files', "COALESCE(file_id,'') || char(31) || COALESCE(doc_id,'')");
+    mix('local_sources', "COALESCE(source_id,'') || char(31) || COALESCE(tree_uri,'')");
+    mix('downloads', "COALESCE(file_path,'') || char(31) || COALESCE(state,'')");
+    return String(hash >>> 0);
   }
 
   /**
@@ -372,7 +380,12 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
       return cached;
     }
     const allowed = await gateLocalPath(db, abs, real);
-    gateCache.set(uri, allowed);
+    // An index write mid-evaluation voids the verdict — only cache
+    // when the stamp still matches, so an in-flight scan can never
+    // repopulate the table with pre-mutation answers.
+    if (indexStamp(db) === stamp) {
+      gateCache.set(uri, allowed);
+    }
     return allowed;
   }
 

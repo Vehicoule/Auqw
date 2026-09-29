@@ -114,7 +114,9 @@ Unit (all passing):
 - `pnpm -C packages/application typecheck && test` — clean.
 - `pnpm -C packages/ui-shared typecheck && test` — clean.
 
-Live (Electron 44, dev harness, `DISPLAY=:0`, test-only `--no-sandbox`):
+Live — **provisional** (Electron 44, dev harness, `DISPLAY=:0`,
+test-only `--no-sandbox`; dev-server evidence, no real-target audio
+device exists on this VM):
 
 - Provider `local (file://)` + `file:///tmp/tone.wav` (8 s PCM WAV) →
   event log `prepared lf-2 (audio/wav)`.

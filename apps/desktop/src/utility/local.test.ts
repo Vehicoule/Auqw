@@ -342,6 +342,28 @@ export async function run(): Promise<void> {
         unmanagedRead.error?.kind === 'permission-denied',
       'an unmanaged media-dir read is permission-denied',
     );
+    // UPDATEs move the freshness stamp too — a download leaving
+    // 'available' revokes its cached allow on the next call.
+    db.prepare(`UPDATE downloads SET state = 'removing'
+                WHERE download_id = 'd-1'`).run();
+    const revokedResolve = await call(CHANNELS.localResolve, {
+      uri: dlUri,
+    });
+    assert(
+      revokedResolve.ok &&
+        (revokedResolve.result as { uri: string | null }).uri === null,
+      'a download leaving available loses its verdict',
+    );
+    db.prepare(`UPDATE downloads SET state = 'available'
+                WHERE download_id = 'd-1'`).run();
+    const restoredResolve = await call(CHANNELS.localResolve, {
+      uri: dlUri,
+    });
+    assert(
+      restoredResolve.ok &&
+        (restoredResolve.result as { uri: string | null }).uri !== null,
+      'restoring available re-arms the verdict',
+    );
 
     // `local:read` — ranged bytes over the same grant gate.
     const read = await call(CHANNELS.localRead, {
