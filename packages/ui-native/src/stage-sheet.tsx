@@ -30,7 +30,7 @@ import Svg, {
   Stop,
 } from 'react-native-svg';
 import { schemes } from '@auqw/design-tokens';
-import { ThemeProvider, useTheme } from './theme.tsx';
+import { DarkThemeScope, ThemeProvider, useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
 import {
   Artwork,
@@ -557,7 +557,14 @@ export function StageSheet({
   style,
 }: StageSheetProps) {
   const theme = useTheme();
-  const { width: windowWidth } = useWindowDimensions();
+  const { width: windowWidth, height: windowHeight, fontScale } =
+    useWindowDimensions();
+  // Row frames move on width and font scale; the scroll viewport's
+  // own frame moves on width and height. Tracked separately so a
+  // height-only change can't strand row measurements, and a stale
+  // viewport height can't settle the owed scroll.
+  const lyricRowGeom = `${windowWidth}:${fontScale}`;
+  const lyricViewGeom = `${windowWidth}x${windowHeight}`;
   const [height, setHeight] = useState(0);
   const internalProgress = useSharedValue(expanded ? 1 : 0);
   // One progress drives the morph: the pill's rise drag writes it from
@@ -575,9 +582,27 @@ export function StageSheet({
     onModeChange,
     expanded,
   );
+  // All three panes stay mounted — display:none keeps scroll position
+  // and fetched state, so a mode switch never remounts a list. The
+  // a11y pair keeps a hidden pane unreachable to screen readers.
+  const paneProps = (
+    m: StageMode,
+  ): {
+    readonly accessibilityElementsHidden: boolean;
+    readonly importantForAccessibility: 'auto' | 'no-hide-descendants';
+    readonly style: StyleProp<ViewStyle>;
+  } => ({
+    accessibilityElementsHidden: activeMode !== m,
+    importantForAccessibility:
+      activeMode === m ? 'auto' : 'no-hide-descendants',
+    style: [{ flex: 1 }, activeMode !== m && { display: 'none' }],
+  });
   const meta = stageMetaView(player);
   const lyricsHeader = lyricsHeaderView(player, lyrics);
-  const lyricsPane = lyricsPaneView(lyrics, onRetryLyrics);
+  const lyricsPane = useMemo(
+    () => lyricsPaneView(lyrics, onRetryLyrics),
+    [lyrics, onRetryLyrics],
+  );
   const radioRow = radioRowView(radio, onStartRadio, onStopRadio);
   const queueReorder = queueReorderButton(
     queueReordering,
@@ -641,9 +666,11 @@ export function StageSheet({
   // The gesture factory is stable across renders — a fresh Pan() per
   // render would cancel an in-flight sheet drag on the next tick. Each
   // detector needs its own instance (a gesture object attaches to a
-  // single detector), so the grab strip and each pane's non-scrollable
-  // chrome get identical recognizers — the dismiss drag works from any
-  // mode while the scrollable lists keep their own scroll gesture.
+  // single detector), and kept-alive panes mount their chrome
+  // detectors concurrently — so the grab strip and each pane's
+  // non-scrollable chrome get dedicated recognizers: the dismiss drag
+  // works from any mode while the scrollable lists keep their own
+  // scroll gesture.
   const makeSheetPan = useCallback(
     () =>
       Gesture.Pan()
@@ -709,7 +736,8 @@ export function StageSheet({
     ],
   );
   const pan = useMemo(makeSheetPan, [makeSheetPan]);
-  const chromePan = useMemo(makeSheetPan, [makeSheetPan]);
+  const lyricsChromePan = useMemo(makeSheetPan, [makeSheetPan]);
+  const queueChromePan = useMemo(makeSheetPan, [makeSheetPan]);
 
   const restCorner = theme.radius.float;
   const animatedStyle = useAnimatedStyle(() => {
@@ -879,6 +907,13 @@ export function StageSheet({
     [],
   );
   const lyricScrolledKey = useRef<string | null>(null);
+  // The row geometry the stored lyric measurements belong to —
+  // invalidated on re-entry when width/font-scale moved while
+  // hidden. The scroller stamps its own viewport geometry so a
+  // scroll only settles against a height measured for the current
+  // window.
+  const lyricMeasuredGeom = useRef<string | null>(null);
+  const lyricViewMeasuredGeom = useRef<string | null>(null);
   // Layouts live in refs — a counter re-runs the owed-scroll effect
   // when the active row or the scroller itself first measures in.
   const [lyricLayoutTick, bumpLyricLayout] = useState(0);
@@ -901,7 +936,11 @@ export function StageSheet({
       // A zero scroller height means its own layout has not landed —
       // scrollTo against uncommitted content clamps and loses, so
       // the owed key must stay unsettled rather than mark a miss.
-      if (line === undefined || lyricsScrollH.current <= 0) {
+      if (
+        line === undefined ||
+        lyricsScrollH.current <= 0 ||
+        lyricViewMeasuredGeom.current !== lyricViewGeom
+      ) {
         return false;
       }
       lyricsScrollRef.current?.scrollTo({
@@ -910,17 +949,26 @@ export function StageSheet({
       });
       return true;
     },
-    [theme.reducedMotion],
+    [theme.reducedMotion, lyricViewGeom],
   );
   useEffect(() => {
-    if (lyricScrollKey === null || activeMode !== 'lyrics') {
-      // Leaving the pane resets the owed key AND the measurements —
-      // the ScrollView unmounts with them, so a re-entry must not
-      // scroll against the previous scroller's height before the new
-      // one has measured itself and its lines.
-      lyricScrolledKey.current = null;
-      lyricsScrollH.current = 0;
+    if (
+      activeMode === 'lyrics' &&
+      lyricMeasuredGeom.current !== lyricRowGeom
+    ) {
+      // The pane was hidden while row geometry moved — mounted
+      // rows still hold pre-change frames until the next layout
+      // pass refires them, so their stored offsets must not
+      // settle the owed scroll.
+      lyricMeasuredGeom.current = lyricRowGeom;
       lyricLayouts.current = [];
+    }
+    if (lyricScrollKey === null || activeMode !== 'lyrics') {
+      // Re-entry owes the active line a scroll — the kept-alive
+      // measurements are still valid (mounted rows only refire
+      // onLayout when geometry actually changes), so only the owed
+      // key resets.
+      lyricScrolledKey.current = null;
       return;
     }
     if (
@@ -936,6 +984,7 @@ export function StageSheet({
     lyricScrollKey,
     scrollToLyricLine,
     lyricLayoutTick,
+    lyricRowGeom,
   ]);
 
   // The lyrics-mode header rides the pane chrome — the same element
@@ -954,6 +1003,85 @@ export function StageSheet({
         {lyricsHeader.subtitle}
       </Text>
     </View>
+  );
+
+  // The two heavy subtrees get element-level memoization: an identical
+  // element bails out of reconciliation, so a mode switch or a
+  // position tick leaves the kept-alive rows/lines untouched.
+  const queueListEl = useMemo(
+    () =>
+      queue === undefined ? null : (
+        <QueueList
+          queue={queue}
+          reordering={queueReordering}
+          scrollEnabled={queueScrollEnabled}
+          contentPaddingBottom={segmentReserve}
+          onPressItem={onPressQueueItem}
+          onRemoveItem={onRemoveQueueItem}
+          onMoveItem={onMoveQueueItem}
+          onMoveItemTo={onMoveQueueItemTo}
+        />
+      ),
+    [
+      queue,
+      queueReordering,
+      queueScrollEnabled,
+      segmentReserve,
+      onPressQueueItem,
+      onRemoveQueueItem,
+      onMoveQueueItem,
+      onMoveQueueItemTo,
+    ],
+  );
+
+  const lyricLineEls = useMemo(
+    () =>
+      lyricsPane.kind === 'lines'
+        ? lyricsPane.lines.map((line, i) => (
+            // Occurrence-keyed: a song swap remounts every row so
+            // unchanged geometries still emit fresh onLayout —
+            // the owed-scroll retry in onLayout depends on it.
+            <View
+              key={`${player.occurrenceId ?? ''}:${i}`}
+              onLayout={(e) => {
+                lyricLayouts.current[i] = {
+                  y: e.nativeEvent.layout.y,
+                  height: e.nativeEvent.layout.height,
+                };
+                // Layout arriving after the scroll effect ran —
+                // first open mid-song, or a swap clearing the
+                // measurements — bumps the owed-scroll effect
+                // once the active line's own measurement exists.
+                if (i === lyricActiveIndex) {
+                  bumpLyricLayout((tick) => tick + 1);
+                }
+              }}
+            >
+              <Text
+                variant="body"
+                color={line.color}
+                style={[
+                  {
+                    paddingVertical: 9,
+                    paddingHorizontal: theme.spacing.sm,
+                    borderRadius: theme.radius.control,
+                  },
+                  line.active && {
+                    fontFamily: theme.fontFamilies.bold,
+                  },
+                ]}
+              >
+                {line.text}
+              </Text>
+            </View>
+          ))
+        : null,
+    [
+      lyricsPane,
+      player.occurrenceId,
+      lyricActiveIndex,
+      theme,
+    ],
   );
 
   const body = (
@@ -1037,8 +1165,7 @@ export function StageSheet({
           </View>
         </View>
       )}
-      {activeMode === 'player' && (
-        <>
+      <View {...paneProps('player')}>
           {/* Title/artist bottom-anchored in the light-frost zone; the
               timeline/transport cluster stays pinned at the bottom. */}
           <ScrollView
@@ -1183,20 +1310,20 @@ export function StageSheet({
               onCycleRepeat={onCycleRepeat}
             />
           </View>
-        </>
-      )}
-      {activeMode === 'lyrics' && (
-        lyricsPane.kind === 'lines' ? (
+        </View>
+      <View {...paneProps('lyrics')}>
+        {lyricsPane.kind === 'lines' ? (
           <>
             {/* The header chrome carries the sheet's dismiss drag —
                 only the lines list keeps a scroll gesture. */}
-            <GestureDetector gesture={chromePan}>
+            <GestureDetector gesture={lyricsChromePan}>
               {lyricsHeaderEl}
             </GestureDetector>
             <ScrollView
               ref={lyricsScrollRef}
               onLayout={(e) => {
                 lyricsScrollH.current = e.nativeEvent.layout.height;
+                lyricViewMeasuredGeom.current = lyricViewGeom;
                 bumpLyricLayout((tick) => tick + 1);
               }}
               style={{ flex: 1, marginTop: theme.spacing.sm }}
@@ -1204,61 +1331,24 @@ export function StageSheet({
               // the last line scroll fully clear of it.
               contentContainerStyle={{ paddingBottom: segmentReserve }}
             >
-              {lyricsPane.lines.map((line, i) => (
-                // Occurrence-keyed: a song swap remounts every row so
-                // unchanged geometries still emit fresh onLayout —
-                // the owed-scroll retry in onLayout depends on it.
-                <View
-                  key={`${player.occurrenceId ?? ''}:${i}`}
-                  onLayout={(e) => {
-                    lyricLayouts.current[i] = {
-                      y: e.nativeEvent.layout.y,
-                      height: e.nativeEvent.layout.height,
-                    };
-                    // Layout arriving after the scroll effect ran —
-                    // first open mid-song, or a swap clearing the
-                    // measurements — bumps the owed-scroll effect
-                    // once the active line's own measurement exists.
-                    if (i === lyricActiveIndex) {
-                      bumpLyricLayout((tick) => tick + 1);
-                    }
-                  }}
-                >
-                  <Text
-                    variant="body"
-                    color={line.color}
-                    style={[
-                      {
-                        paddingVertical: 9,
-                        paddingHorizontal: theme.spacing.sm,
-                        borderRadius: theme.radius.control,
-                      },
-                      line.active && {
-                        fontFamily: theme.fontFamilies.bold,
-                      },
-                    ]}
-                  >
-                    {line.text}
-                  </Text>
-                </View>
-              ))}
+              {lyricLineEls}
             </ScrollView>
           </>
         ) : (
           // No list to scroll — the whole pane is drag chrome.
-          <GestureDetector gesture={chromePan}>
+          <GestureDetector gesture={lyricsChromePan}>
             <View style={{ flex: 1 }}>
               {lyricsHeaderEl}
               <StateFor view={lyricsPane} />
             </View>
           </GestureDetector>
-        )
-      )}
-      {activeMode === 'queue' && (
+        )}
+      </View>
+      <View {...paneProps('queue')}>
         <View style={{ flex: 1, marginTop: theme.spacing.md }}>
           {queue === undefined ? (
             // No list to scroll — the pane is drag chrome.
-            <GestureDetector gesture={chromePan}>
+            <GestureDetector gesture={queueChromePan}>
               <View style={{ flex: 1 }}>
                 <EmptyState title={t('queue.empty')} icon="queue" />
               </View>
@@ -1266,7 +1356,7 @@ export function StageSheet({
           ) : (
             <>
               {queueReorder !== null && (
-                <GestureDetector gesture={chromePan}>
+                <GestureDetector gesture={queueChromePan}>
                   <View
                     style={{
                       flexDirection: 'row',
@@ -1291,20 +1381,11 @@ export function StageSheet({
                   </View>
                 </GestureDetector>
               )}
-              <QueueList
-                queue={queue}
-                reordering={queueReordering}
-                scrollEnabled={queueScrollEnabled}
-                contentPaddingBottom={segmentReserve}
-                onPressItem={onPressQueueItem}
-                onRemoveItem={onRemoveQueueItem}
-                onMoveItem={onMoveQueueItem}
-                onMoveItemTo={onMoveQueueItemTo}
-              />
+              {queueListEl}
             </>
           )}
         </View>
-      )}
+      </View>
       {/* The mode segment floats over the sheet's bottom safe zone —
           it takes no layout space, so lyrics/queue rows and the
           transport never reflow around it or hide beneath it. */}
@@ -1413,17 +1494,10 @@ export function StageSheet({
               <PlayerBackdrop artworkUrl={player.artworkUrl} />
             </View>
           )}
-          {immersive ? (
-            <ThemeProvider
-              theme="dark"
-              textScale={theme.textScale}
-              reducedMotion={theme.reducedMotion}
-            >
-              {content}
-            </ThemeProvider>
-          ) : (
-            content
-          )}
+          {/* The immersive dark scope stays one boundary either way —
+              a provider↔bare swap would remount every kept-alive pane
+              on each switch to or from player mode. */}
+          <DarkThemeScope on={immersive}>{content}</DarkThemeScope>
         </Animated.View>
       </Animated.View>
     </>
