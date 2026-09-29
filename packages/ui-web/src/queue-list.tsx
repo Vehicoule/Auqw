@@ -37,13 +37,10 @@ export function applyPendingMove(
   return next;
 }
 
-function applyMoves(ids: readonly string[], ops: readonly PendingMove[]): readonly string[] {
-  let order = ids;
-  for (const op of ops) {
-    order = applyPendingMove(order, op);
-  }
-  return order;
-}
+const applyMoves = (
+  ids: readonly string[],
+  ops: readonly PendingMove[],
+): readonly string[] => ops.reduce(applyPendingMove, ids);
 
 /**
  * Reconcile a newly published queue order against the dispatched-but-
@@ -233,10 +230,7 @@ export function QueueList({
   // Rows render in the optimistic order too, so the roving index and
   // DOM focus never index into different sequences mid-persist.
   const itemById = new Map(queue.items.map((item) => [item.occurrenceId, item]));
-  const orderedItems = orderedIds.flatMap((id) => {
-    const item = itemById.get(id);
-    return item === undefined ? [] : [item];
-  });
+  const orderedItems = orderedIds.flatMap((id) => itemById.get(id) ?? []);
   const moveItem = (occurrenceId: string, direction: -1 | 1) => {
     const from = orderedIds.indexOf(occurrenceId);
     const to = from + direction;
@@ -305,7 +299,10 @@ export function QueueList({
       data-scroll={scrollEnabled ? 'true' : 'false'}
       onKeyDown={onKeyDown}
     >
-      {orderedItems.map((item, index) => (
+      {orderedItems.map((item, index) => {
+        const canMove =
+          reordering && canReorder && item.section === 'upNext';
+        return (
         <div key={item.occurrenceId}>
           {orderedItems[index - 1]?.section !== item.section && (
             <Text
@@ -357,22 +354,19 @@ export function QueueList({
                 : () => onRemoveItem(item.occurrenceId)
             }
             onMoveUp={
-              reordering && canReorder &&
-              item.section === 'upNext' &&
-              orderedItems[index - 1]?.section === 'upNext'
+              canMove && orderedItems[index - 1]?.section === 'upNext'
                 ? () => moveItem(item.occurrenceId, -1)
                 : undefined
             }
             onMoveDown={
-              reordering && canReorder &&
-              item.section === 'upNext' &&
-              orderedItems[index + 1]?.section === 'upNext'
+              canMove && orderedItems[index + 1]?.section === 'upNext'
                 ? () => moveItem(item.occurrenceId, 1)
                 : undefined
             }
           />
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
