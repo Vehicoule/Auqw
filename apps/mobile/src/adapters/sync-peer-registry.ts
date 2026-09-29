@@ -18,9 +18,10 @@ export function createSyncPeerRegistry(
   keys: SyncClientKeys,
 ): SyncHostRegistry {
   const toHostPeer = (peer: SyncPeer): SyncHostPeer => ({
+    role: 'caller',
     id: peer.deviceId ?? '',
     name: peer.name,
-    pub: '',
+    pub: peer.pub ?? '',
     fp: peer.fp,
     pairedAt: peer.pairedAt,
     lastSeenAt: peer.lastSeenAt,
@@ -41,9 +42,10 @@ export function createSyncPeerRegistry(
       // name/endpoints/id/pub land — a concurrent syncRound's cursor
       // write can't be lost between a read and a write here.
       return keys.peerMerge({
+        role: 'responder',
         fp: peer.fp,
         name: peer.name,
-        endpoints: peer.endpoints,
+        endpoints: peer.endpoints ?? [],
         pairedAt: peer.pairedAt,
         lastSeenAt: peer.lastSeenAt,
         peerCursor: {},
@@ -57,9 +59,10 @@ export function createSyncPeerRegistry(
       // endpoint/id/pub overlays, so no caller-side read races a
       // concurrent syncRound's cursor write (or an unpair).
       const touched = await keys.peerTouch({
+        role: 'responder',
         fp: peer.fp,
         name: peer.name,
-        endpoints: peer.endpoints,
+        endpoints: peer.endpoints ?? [],
         pairedAt: peer.pairedAt,
         lastSeenAt: peer.lastSeenAt,
         peerCursor: {},

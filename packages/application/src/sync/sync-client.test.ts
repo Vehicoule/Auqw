@@ -591,6 +591,7 @@ async function pairRejectMapsError(): Promise<void> {
 async function pinnedFingerprintMismatch(): Promise<void> {
   const { client, server, keys } = await rig();
   keys.seed({
+    role: 'responder',
     fp: 'c'.repeat(64),
     name: 'old',
     endpoints: [ENDPOINT],
@@ -749,6 +750,7 @@ async function unpairMidRoundDropsStagedReport(): Promise<void> {
 async function resumeUnpairedDropsCustody(): Promise<void> {
   const { client, server, keys } = await rig();
   keys.seed({
+    role: 'responder',
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -806,6 +808,7 @@ async function keepalivePings(): Promise<void> {
 async function restartHydratesPeers(): Promise<void> {
   const { client, keys } = await rig();
   keys.seed({
+    role: 'responder',
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -831,6 +834,7 @@ async function restartHydratesPeers(): Promise<void> {
 async function concurrentSyncSharesOneDial(): Promise<void> {
   const { client, server, keys } = await rig();
   keys.seed({
+    role: 'responder',
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -856,6 +860,7 @@ async function coalescedSyncSurvivesPotRefresh(): Promise<void> {
   const { client, server, keys } = await rig();
   server.welcomePot = '10.0.0.4:4000';
   keys.seed({
+    role: 'responder',
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -884,6 +889,7 @@ async function coalescedSyncSurvivesPotRefresh(): Promise<void> {
 async function timeoutKillsSessionAndRedials(): Promise<void> {
   const { client, server, clock, keys } = await rig();
   keys.seed({
+    role: 'responder',
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -926,6 +932,7 @@ async function closeDisposesSocketPort(): Promise<void> {
 async function failedRoundSurfacesLastError(): Promise<void> {
   const { client, keys } = await rig();
   keys.seed({
+    role: 'responder',
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -981,6 +988,7 @@ async function oversizedExportPaginates(): Promise<void> {
 async function incompleteRoundFailsHonest(): Promise<void> {
   const { client, server, keys } = await rig();
   keys.seed({
+    role: 'responder',
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],
@@ -1010,6 +1018,7 @@ async function incompleteRoundFailsHonest(): Promise<void> {
 async function cappedRoundReportsMovedEntries(): Promise<void> {
   const { client, clientEngine, server, keys } = await rig();
   keys.seed({
+    role: 'responder',
     fp: SERVER_FP,
     name: 'auqw-desk',
     endpoints: [ENDPOINT],

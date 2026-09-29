@@ -1,7 +1,9 @@
 import type { CancellationSignal } from '../cancellation.ts';
 import type { Result } from '../errors.ts';
-import type { SyncCursor } from '../sync/sync-engine.ts';
 import type { ClientHello } from '../sync/sync-wire.ts';
+import type { SyncPeer } from '../sync/custody.ts';
+
+export type { SyncPeer } from '../sync/custody.ts';
 
 /**
  * The phone-side LAN-sync transport seams (docs/specs/sync.md, slice
@@ -211,36 +213,6 @@ export interface SyncAdvertiseOpts {
 export interface SyncAdvertiser {
   close(): void;
 }
-
-/**
- * A desktop we have paired with. `fp` pins the server identity on
- * every later dial; `peerCursor` is the desktop's watermark map
- * learned from its last delta — the `since` filter for the phone's
- * next export, and the implicit ack of what it already merged.
- */
-export type SyncPeer = {
-  readonly fp: string;
-  readonly name: string;
-  readonly endpoints: readonly string[];
-  readonly pairedAt: number;
-  readonly lastSeenAt: number;
-  readonly peerCursor: SyncCursor;
-  readonly lastSyncAt?: number;
-  /**
-   * The peer's deviceId — captured when the peer hosted the pairing
-   * (its welcome discloses the responder identity); absent on records
-   * from a responder that never shared it.
-   */
-  readonly deviceId?: string;
-  /** The peer's device public key (SPKI b64) — welcome host field. */
-  readonly pub?: string;
-  /**
-   * The peer's bundled POT service as `host:port`, learned from the
-   * pairing payload — shares `endpoints`' freshness horizon (a
-   * desktop restart rebinds both; the next pair refreshes).
-   */
-  readonly pot?: string;
-};
 
 /**
  * Identity + peer custody. Implementations write through the

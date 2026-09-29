@@ -2,6 +2,7 @@ import { randomInt } from 'node:crypto';
 import { createServer, type Server } from 'node:net';
 import { hostname, networkInterfaces } from 'node:os';
 import {
+  attachSyncPump,
   CancellationSource,
   createSyncResponder,
   DEVICE_NAME_MAX,
@@ -11,6 +12,8 @@ import {
   type SyncDiscoveryPort,
   type SyncEnginePort,
   type SyncResponder,
+  type SyncResponderCrypto,
+  type SyncResponderDeps,
 } from '@auqw/application';
 import {
   hasOnlyKeys,
@@ -29,27 +32,19 @@ import {
   shellError,
 } from '../shared/errors.ts';
 import type { UtilityHandler } from './router.ts';
-import {
-  createNoiseV1Cipher,
-  fingerprintOf,
-  generateIdentity,
-  isClientHello,
-  isUsableIdentity,
-  type SyncCipher,
-  type SyncIdentity,
-} from './sync-crypto.ts';
+import { nodeNoise } from './noise-node.ts';
 import { createSpillJournal } from './sync-journal.ts';
 import { createSyncHandlers } from './sync-handlers.ts';
 import { type SyncDeviceRecord, type SyncKeys } from './sync-keys.ts';
-import { attachWirePump } from './sync-wire.ts';
+import type { SyncIdentity } from '@auqw/application';
 
 /**
  * The desktop half of LAN sync per docs/specs/sync.md: the desktop
  * advertises `_auqw._tcp.local` and listens; the phone dials.
  *
  * Wire phases per connection (frames are `[u32le len][payload]` via
- * sync-wire; payloads are JSON plaintext until the handshake seals
- * them, then AEAD via the SyncCipher's SessionCodec):
+ * the shared sync-wire pump; payloads are JSON plaintext until the
+ * handshake seals them, then AEAD via the shared noise-v1 codec):
  *
  *   C→S hello      {v:1,kind:'hello',deviceId,name,eph,dev}
  *   S→C challenge  {v:1,kind:'challenge',eph,salt,spub,registered}
@@ -135,13 +130,13 @@ export type SyncServiceDeps = {
    * sets `dropped`, honest but lossy.
    */
   readonly appliedSpillPath?: string;
-  /** Cipher seam — defaults to the noise-style node:crypto impl. */
-  readonly cipher?: SyncCipher;
+  /** Cipher seam — defaults to the shared noise-v1 suite on node:crypto. */
+  readonly cipher?: SyncResponderCrypto;
   /**
-   * Wire-pump factory seam — defaults to the framed socket pump.
-   * Tests wrap it to fault-inject send failures on live sessions.
+   * Wire-pump factory seam — defaults to the shared framed socket
+   * pump. Tests wrap it to fault-inject send failures on live sessions.
    */
-  readonly pump?: typeof attachWirePump;
+  readonly pump?: SyncResponderDeps<SyncDeviceRecord>['attach'];
   /** Display name for pairing payloads + mDNS — defaults to hostname. */
   readonly deviceName?: string;
   /**
@@ -335,7 +330,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
 
   // Set inside start() once the identity is loaded — connections only
   // arrive after bind, so the responder never reads it before then.
-  let syncCipher: SyncCipher = deps.cipher ?? {
+  let syncCipher: SyncResponderCrypto = deps.cipher ?? {
     name: 'uninitialized',
     identity: { pub: '', priv: '' },
     accept() {
@@ -552,12 +547,12 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
    */
   const responder: SyncResponder = createSyncResponder<SyncDeviceRecord>({
     crypto: () => syncCipher,
-    attach: deps.pump ?? attachWirePump,
+    attach: deps.pump ?? attachSyncPump,
     name: deviceName,
-    // The desktop's stricter guard — loads the SPKI keys via
-    // node:crypto, never trusted on shape alone.
-    isHello: isClientHello,
-    fingerprintOf,
+    // The strict hello guard — canonical SPKI X25519 material, never
+    // trusted on shape alone.
+    isHello: nodeNoise.isClientHello,
+    fingerprintOf: nodeNoise.fingerprintOf,
     mintCode: () => String(randomInt(0, 1_000_000)).padStart(6, '0'),
     nowMs,
     armTimer: (ms, fire) => {
@@ -609,6 +604,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       },
     },
     buildPeer: (session, kind, now) => ({
+      role: 'caller',
       // 'pair' keeps the caller's claimed id; 'resume' is pinned to
       // the id custody already binds to this key.
       id:
@@ -728,20 +724,20 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
         throw thrown;
       }
     }
-    if (identity !== null && !isUsableIdentity(identity)) {
+    if (identity !== null && !nodeNoise.isUsableIdentity(identity)) {
       identity = null;
       replace = true;
     }
     if (identity === null) {
-      identity = generateIdentity();
+      identity = nodeNoise.createIdentity();
       if (replace) {
         await deps.keys.identityReplace(identity);
       } else {
         await deps.keys.identitySet(identity);
       }
     }
-    syncCipher = deps.cipher ?? createNoiseV1Cipher(identity);
-    fingerprint = fingerprintOf(identity.pub);
+    syncCipher = deps.cipher ?? nodeNoise.responderCrypto(identity);
+    fingerprint = nodeNoise.fingerprintOf(identity.pub);
     ownDeviceId = deps.ownDeviceId === undefined
       ? null
       : await deps.ownDeviceId.catch(() => null);

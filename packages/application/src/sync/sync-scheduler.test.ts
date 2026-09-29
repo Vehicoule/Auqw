@@ -15,6 +15,7 @@ import { assert, assertEqual } from '../testing/assert.ts';
 
 function peer(fp: string): SyncPeer {
   return {
+    role: 'responder',
     fp,
     name: `desktop-${fp}`,
     endpoints: ['192.168.1.2:4123'],

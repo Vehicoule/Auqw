@@ -14,13 +14,19 @@ import {
   assertEqual,
 } from '@auqw/application/testing';
 import {
+  attachSyncPump,
   ok,
   type ApplyResult,
   type Result,
   type SyncDelta,
   type SyncEnginePort,
+  type SyncFrameCodec,
+  type SyncIdentity,
 } from '@auqw/application';
-import { FakeSyncLogStore } from '@auqw/application/testing';
+import {
+  createNoiseTestPeer,
+  FakeSyncLogStore,
+} from '@auqw/application/testing';
 import {
   createClock,
   createIds,
@@ -33,25 +39,30 @@ import {
 import { isShellError, shellError } from '../shared/errors.ts';
 import { isRecord } from '../shared/check.ts';
 import { MAX_SYNC_DOC_BYTES } from '../shared/contract.ts';
-import {
-  createTestPeer,
-  fingerprintOf,
-  type SessionCodec,
-} from './sync-crypto.ts';
+import { nodeNoise } from './noise-node.ts';
 import {
   createMemoryKeys,
   type SyncDeviceRecord,
   type SyncKeys,
 } from './sync-keys.ts';
 import { createSyncService, type SyncService } from './sync-server.ts';
-import { attachWirePump } from './sync-wire.ts';
 
 /**
  * Loopback coverage for the LAN transport: real 127.0.0.1 sockets run
  * hello→pair→delta end-to-end through the same pumps, codec, and
- * registry the app wires. `createTestPeer` is the phone half — marked
- * as a test double in sync-crypto.ts.
+ * registry the app wires. `createTestPeer` is the phone half — the
+ * test-only peer (packages/application/src/testing) driving the SAME
+ * shared noise-v1 suite production wires.
  */
+const fingerprintOf = nodeNoise.fingerprintOf;
+
+const createTestPeer = (opts: {
+  deviceId: string;
+  name: string;
+  identity?: SyncIdentity;
+}) => createNoiseTestPeer(nodeNoise, opts);
+
+type SessionCodec = SyncFrameCodec;
 
 type WireReply =
   | { ok: true; value: unknown }
@@ -59,7 +70,7 @@ type WireReply =
 
 /** A minimal phone-side wire client over one loopback socket. */
 function createClient(socket: Socket): {
-  send(payload: Buffer): void;
+  send(payload: Uint8Array): void;
   recv(): Promise<Buffer>;
   close(): void;
   readonly closed: Promise<string>;
@@ -73,15 +84,15 @@ function createClient(socket: Socket): {
   const closed = new Promise<string>((resolve) => {
     closedResolve = resolve;
   });
-  attachWirePump({
+  attachSyncPump({
     socket,
     maxPayload: 2 * 1_048_576,
     onFrame: (payload) => {
       const waiter = waiters.shift();
       if (waiter !== undefined) {
-        waiter.resolve(payload);
+        waiter.resolve(Buffer.from(payload));
       } else {
-        frames.push(payload);
+        frames.push(Buffer.from(payload));
       }
     },
     onClose: (reason) => {
@@ -133,12 +144,12 @@ async function phoneHandshake(
   return { codec: done.codec, registered: done.registered };
 }
 
-function sealJson(codec: SessionCodec, msg: unknown): Buffer {
+function sealJson(codec: SessionCodec, msg: unknown): Uint8Array {
   return codec.seal(Buffer.from(JSON.stringify(msg), 'utf8'));
 }
 
-function openJson(codec: SessionCodec, frame: Buffer): unknown {
-  return JSON.parse(codec.open(frame).toString('utf8'));
+function openJson(codec: SessionCodec, frame: Uint8Array): unknown {
+  return JSON.parse(Buffer.from(codec.open(frame)).toString('utf8'));
 }
 
 type PairingPayload = {
@@ -731,9 +742,9 @@ export async function run(): Promise<void> {
     let refuseSends = false;
     const { service, port } = await startService({
       pump: (opts) => {
-        const inner = attachWirePump(opts);
+        const inner = attachSyncPump(opts);
         return {
-          send: (payload: Buffer) =>
+          send: (payload: Uint8Array) =>
             refuseSends ? false : inner.send(payload),
           upgrade: (nextMax: number) => inner.upgrade(nextMax),
           get maxPayload() {
