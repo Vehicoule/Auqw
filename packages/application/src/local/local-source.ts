@@ -16,7 +16,7 @@ import type { OperationContext } from '../cancellation.ts';
 import type { StoragePort } from '../ports/storage.ts';
 import type { FileFingerprint, LocalTags, TagReaderPort } from '../ports/tag-reader.ts';
 
-export type ScanReport = {
+type ScanReport = {
   readonly sourceId: string;
   readonly added: number;
   readonly updated: number;
@@ -25,7 +25,7 @@ export type ScanReport = {
   readonly unreadable: number;
 };
 
-export type LocalFileSourceDeps = {
+type LocalFileSourceDeps = {
   readonly storage: StoragePort;
   readonly tagReader: TagReaderPort;
   readonly ids: IdPort;
@@ -64,10 +64,7 @@ function fileIdFor(
   sourceId: string,
   docId?: string,
 ): string {
-  const input =
-    docId === undefined
-      ? `${sourceId}|${fingerprint}`
-      : `${sourceId}|${fingerprint}|${docId}`;
+  const input = `${sourceId}|${fingerprint}${docId === undefined ? '' : `|${docId}`}`;
   const h = createSha256();
   h.update(utf8(input));
   return `lf-${h.digest()}`;
@@ -208,17 +205,10 @@ export class LocalFileSource {
     );
     const map = new Map<string, string>();
     for (const row of this.#files) {
-      if (map.has(row.recordingId)) {
-        continue;
-      }
       const treeUri = treeBySource.get(row.sourceId);
-      if (treeUri === undefined) {
-        continue;
+      if (treeUri !== undefined && !map.has(row.recordingId)) {
+        map.set(row.recordingId, this.#tagReader.docUri(treeUri, row.docId));
       }
-      map.set(
-        row.recordingId,
-        this.#tagReader.docUri(treeUri, row.docId),
-      );
     }
     return map;
   }
@@ -315,7 +305,7 @@ export class LocalFileSource {
     if (!this.#sources.some((s) => s.sourceId === sourceId)) {
       return err(appError('not-found', 'unknown local source'));
     }
-    const committed = await this.#commitSections(
+    return this.#commitSections(
       ({ sources, files }) => {
         if (!sources.some((s) => s.sourceId === sourceId)) {
           return null; // a queued op already dropped the grant
@@ -329,10 +319,6 @@ export class LocalFileSource {
       },
       signal,
     );
-    if (!committed.ok) {
-      return committed;
-    }
-    return ok(undefined);
   }
 
   /**
@@ -498,11 +484,8 @@ export class LocalFileSource {
         continue;
       }
       const queue = rowsByFp.get(f.fingerprint);
-      if (queue === undefined) {
-        rowsByFp.set(f.fingerprint, [f]);
-      } else {
-        queue.push(f);
-      }
+      if (queue === undefined) rowsByFp.set(f.fingerprint, [f]);
+      else queue.push(f);
     }
     const takeByFp = (fingerprint: string): LocalFile | undefined => {
       const queue = rowsByFp.get(fingerprint);
@@ -684,25 +667,20 @@ export class LocalFileSource {
         recordingByRetainedFp.get(row.fingerprint);
       const recordingId = existing ?? this.#ids.next('rec');
       recordingByFp.set(row.fingerprint, recordingId);
-      scanned.push({
-        ...row,
-        recordingId,
+      const fields = {
         title,
         artist: tag?.artist ?? null,
         album: tag?.album ?? null,
         durationMs: tag?.durationMs ?? null,
         genre: tag?.genre ?? null,
-      });
+      };
+      scanned.push({ ...row, recordingId, ...fields });
       added += 1;
       pendingRecordings.push({
         recordingId,
         fileId: row.fileId,
         fingerprint: row.fingerprint,
-        title,
-        artist: tag?.artist ?? null,
-        album: tag?.album ?? null,
-        durationMs: tag?.durationMs ?? null,
-        genre: tag?.genre ?? null,
+        ...fields,
       });
     }
 
