@@ -599,8 +599,15 @@ function Main({
   // Real waveform peaks for the Stage seek — the port borrows the
   // live stream handle; it never owns or closes it.
   const peaksPort = useMemo(
-    () => createWebPeaksPort({ stream: window.auqw.stream }),
-    [],
+    () =>
+      createWebPeaksPort({
+        stream: window.auqw.stream,
+        // `lf-*` handles carry no seam session — local bytes come from
+        // the utility's grant-gated ranged read instead.
+        localUriFor: controller.localUriFor,
+        localRead: window.auqw.local.read,
+      }),
+    [controller],
   );
 
   // The shared shell composition — every state/callback surface the
