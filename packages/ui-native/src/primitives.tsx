@@ -766,43 +766,30 @@ export function Icon({
       accessible={false}
     >
       {glyph.shapes.map((shape, i) => {
+        const common = { key: i, stroke, strokeWidth: strokeW, fill };
         switch (shape.kind) {
           case 'path':
             return (
               <Path
-                key={i}
+                {...common}
                 d={shape.d}
-                stroke={stroke}
-                strokeWidth={strokeW}
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                fill={fill}
               />
             );
           case 'circle':
             return (
-              <Circle
-                key={i}
-                cx={shape.cx}
-                cy={shape.cy}
-                r={shape.r}
-                stroke={stroke}
-                strokeWidth={strokeW}
-                fill={fill}
-              />
+              <Circle {...common} cx={shape.cx} cy={shape.cy} r={shape.r} />
             );
           case 'rect':
             return (
               <Rect
-                key={i}
+                {...common}
                 x={shape.x}
                 y={shape.y}
                 width={shape.w}
                 height={shape.h}
                 rx={shape.rx ?? 0}
-                stroke={stroke}
-                strokeWidth={strokeW}
-                fill={fill}
               />
             );
         }
@@ -837,15 +824,16 @@ export function PlayPauseIcon({
   const leftProps = useAnimatedProps(() => ({ d: leftPath.value }));
   const rightProps = useAnimatedProps(() => ({ d: rightPath.value }));
   const paint = color ?? theme.colors.textPrimary;
+  const morph = morphPlayPause(playing ? 1 : 0);
   return (
     <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" accessible={false}>
       <AnimatedPath
-        d={quadPath(morphPlayPause(playing ? 1 : 0).left)}
+        d={quadPath(morph.left)}
         fill={paint}
         animatedProps={leftProps}
       />
       <AnimatedPath
-        d={quadPath(morphPlayPause(playing ? 1 : 0).right)}
+        d={quadPath(morph.right)}
         fill={paint}
         animatedProps={rightProps}
       />

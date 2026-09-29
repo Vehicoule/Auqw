@@ -49,20 +49,14 @@ type Route = {
 };
 
 function routeFor(item: NavItemModel): Route {
-  const symbol = SF_SYMBOLS[item.key] ?? 'questionmark';
-  if (Platform.OS === 'ios') {
-    return {
-      key: item.key,
-      title: item.label,
-      focusedIcon: { sfSymbol: symbol },
+  const base = { key: item.key, title: item.label };
+  return Platform.OS === 'ios'
+    ? { ...base, focusedIcon: { sfSymbol: SF_SYMBOLS[item.key] ?? 'questionmark' } }
+    : {
+      ...base,
+      focusedIcon: PNG_ICONS[item.key] ?? iconHome,
+      unfocusedIcon: PNG_ICONS_OUTLINE[item.key] ?? iconHomeOutline,
     };
-  }
-  return {
-    key: item.key,
-    title: item.label,
-    focusedIcon: PNG_ICONS[item.key] ?? iconHome,
-    unfocusedIcon: PNG_ICONS_OUTLINE[item.key] ?? iconHomeOutline,
-  };
 }
 
 /**
@@ -176,9 +170,9 @@ export function PlatformTabs({
           </View>
         )}
         onIndexChange={(next) => {
-          const item = items[next];
-          if (item !== undefined && item.key !== activeKey) {
-            onSelect(item.key);
+          const key = items[next]?.key;
+          if (key !== undefined && key !== activeKey) {
+            onSelect(key);
           }
         }}
         tabBarActiveTintColor={theme.colors.accent}
