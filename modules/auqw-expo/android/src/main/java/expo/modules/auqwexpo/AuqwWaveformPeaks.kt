@@ -530,8 +530,9 @@ private class ByteArrayMediaDataSource(
   private val bytes: ByteArray,
 ) : MediaDataSource() {
   override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
-    // position >= size is subsumed by the n <= 0 check below.
-    if (position < 0) return -1
+    if (position < 0 || position >= bytes.size.toLong()) return -1
+    // Long→Int narrowing is safe past this guard: n ≤ size and
+    // position < bytes.size, both under Int.MAX_VALUE.
     val n = minOf(size.toLong(), bytes.size.toLong() - position).toInt()
     if (n <= 0) return -1
     System.arraycopy(bytes, position.toInt(), buffer, offset, n)
