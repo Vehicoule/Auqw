@@ -105,22 +105,6 @@ export interface MseSource {
   destroy(): void;
 }
 
-/**
- * The attach outcome splits URL creation from readiness: `url` must be
- * assigned to the element for `sourceopen` to fire at all, so waiting
- * on first-append readiness before returning it deadlocks the caller.
- * `ready` settles once a segment actually lands (or rejects on
- * MseUnsupported/pump failure → caller takes the loopback leg).
- */
-export interface MseAttach {
-  readonly url: string;
-  readonly ready: Promise<MseSource>;
-  /** Abandon the attach before its URL reaches an element: closes the
-   * pump/port, revokes the object URL, and rejects `ready` with
-   * `MseAborted`. */
-  abort(): void;
-}
-
 type JournalEntry = {
   byteStart: number;
   byteEnd: number;
@@ -182,12 +166,26 @@ const RESYNC_LIMIT = 2 * 1024 * 1024;
 const MAX_UNIT_BYTES = 64 * 1024 * 1024;
 const MAX_UNIT_MSG = `media segment exceeds ${MAX_UNIT_BYTES} bytes`;
 
+/**
+ * The attach outcome splits URL creation from readiness: `url` must be
+ * assigned to the element for `sourceopen` to fire at all, so waiting
+ * on first-append readiness before returning it deadlocks the caller.
+ * `ready` settles once a segment actually lands (or rejects on
+ * MseUnsupported/pump failure → caller takes the loopback leg);
+ * `abort` abandons the attach before its URL reaches an element —
+ * closes the pump/port, revokes the object URL, rejects `ready` with
+ * `MseAborted`.
+ */
 export function attachMseSource(deps: {
   readonly handle: string;
   readonly mime: string;
   readonly channel: (args: { handle: string }) => Promise<StreamPortLike>;
   readonly mse: MseFactories;
-}): Promise<MseAttach> {
+}): Promise<{
+  readonly url: string;
+  readonly ready: Promise<MseSource>;
+  abort(): void;
+}> {
   if (
     deps.mse.isTypeSupported !== undefined &&
     !deps.mse.isTypeSupported(deps.mime)

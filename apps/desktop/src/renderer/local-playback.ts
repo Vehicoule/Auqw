@@ -14,18 +14,14 @@ import { toFileUri } from '../shared/local-paths.ts';
  * - `uriFor` is `LocalFileSource.uriFor` — the engine's in-memory row
  *   → `docUri` string math (also shared), so it stays sync too.
  */
-export type LocalPlaybackDeps = {
+export function createLocalPlayback(deps: {
   /** Managed media dir — `${userDataPath}/media`. */
   readonly mediaDir: string;
   /** `DownloadManager.fileFor` — bare ledger name or null. */
   readonly fileFor: (recordingId: string) => string | null;
   /** `LocalFileSource.uriFor` — playable URI or null. */
   readonly uriFor: (recordingId: string) => string | null;
-};
-
-export function createLocalPlayback(
-  deps: LocalPlaybackDeps,
-): (recordingId: string) => string | null {
+}): (recordingId: string) => string | null {
   const dir = deps.mediaDir.endsWith('/')
     ? deps.mediaDir.slice(0, -1)
     : deps.mediaDir;

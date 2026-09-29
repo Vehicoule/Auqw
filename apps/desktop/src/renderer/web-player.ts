@@ -241,17 +241,22 @@ export function createWebPlayerPort(deps: {
     return ok({ handle, mime });
   }
 
+  /** Drop the `lf-req-*` → handle entry an adopted local prepare left. */
+  function reapLocalPrepare(handle: string): void {
+    for (const [requestId, minted] of localPrepares) {
+      if (minted === handle) {
+        localPrepares.delete(requestId);
+        break;
+      }
+    }
+  }
+
   /** Reap a handle an attach leg minted but must not keep — `lf-*`
    * drops locally, anything else rides the seam's release. */
   function releaseMinted(handle: string): void {
     if (localHandles.delete(handle)) {
       handleMimes.delete(handle);
-      for (const [requestId, minted] of localPrepares) {
-        if (minted === handle) {
-          localPrepares.delete(requestId);
-          break;
-        }
-      }
+      reapLocalPrepare(handle);
       return;
     }
     void stream.release({ handle }).catch(() => undefined);
@@ -1136,16 +1141,15 @@ export function createWebPlayerPort(deps: {
           }
           pendingAttaches.delete(gen);
           installMse(input.handle, settled.source);
+          // Read live: a seek during the settle await updates `pending`
+          // (the pending slot, not the element, holds it mid-flight).
+          const startMs = pending?.positionMs ?? input.positionMs ?? 0;
           if (settled.url !== first.url) {
             audio.src = settled.url;
-            audio.currentTime =
-              (pending?.positionMs ?? input.positionMs ?? 0) / 1000;
+            audio.currentTime = startMs / 1000;
           }
           // The pump always opens at byte 0 — a resume position (or a
-          // mid-flight seek, which only updated the pending slot) must
-          // re-anchor the source. Read live: a seek during the await
-          // updates `pending`.
-          const startMs = pending?.positionMs ?? input.positionMs ?? 0;
+          // mid-flight seek) must re-anchor the source.
           if (startMs > 0) {
             settled.source?.seekTo(startMs);
           }
@@ -1257,12 +1261,7 @@ export function createWebPlayerPort(deps: {
       // an already-dropped stream and audio resumes post-teardown.
       dropPendingPlay(input.handle);
       if (localHandles.delete(input.handle)) {
-        for (const [requestId, minted] of localPrepares) {
-          if (minted === input.handle) {
-            localPrepares.delete(requestId);
-            break;
-          }
-        }
+        reapLocalPrepare(input.handle);
         // The seam never saw this handle — nothing to release.
         return ok(undefined);
       }

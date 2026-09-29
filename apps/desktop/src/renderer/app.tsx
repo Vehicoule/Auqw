@@ -399,21 +399,20 @@ function Main({
       void window.auqw.sync
         .pairing()
         .then((offer) => {
-          if (opts?.inFlight === true) {
-            pairMintInFlight.current = false;
-          }
           if (alive()) {
             setPairing(offer);
             opts?.onOk?.();
           }
         })
         .catch((thrown: unknown) => {
-          if (opts?.inFlight === true) {
-            pairMintInFlight.current = false;
-          }
           opts?.onFail?.(thrown);
           if (alive()) {
             setPairing(null);
+          }
+        })
+        .finally(() => {
+          if (opts?.inFlight === true) {
+            pairMintInFlight.current = false;
           }
         });
     },
@@ -1203,9 +1202,9 @@ function Main({
                   onNext={() => advance('next')}
                   onPrevious={() => advance('previous')}
                   onToggleLike={onToggleLike}
-                  shuffle={state.type === 'ready' ? state.shuffle : false}
+                  shuffle={state.shuffle}
                   onToggleShuffle={() => void session.toggleShuffle()}
-                  repeat={state.type === 'ready' ? state.repeat : 'off'}
+                  repeat={state.repeat}
                   onCycleRepeat={() => void session.cycleRepeat()}
                   download={stageDownload}
                   onDownload={onStageDownload}

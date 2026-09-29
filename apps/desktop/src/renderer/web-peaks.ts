@@ -19,7 +19,7 @@ export type DecodedAudio = {
 };
 
 /** Decode container bytes to PCM — tests inject a fake. */
-export type PeaksDecoder = (bytes: Uint8Array) => Promise<DecodedAudio>;
+type PeaksDecoder = (bytes: Uint8Array) => Promise<DecodedAudio>;
 
 const READ_CHUNK = 1024 * 1024; // matches the stream:read MAX_READ_LEN
 /** Decoration, not analysis — never pull more than this for a bar row. */
@@ -34,13 +34,12 @@ const MAX_PEAK_BYTES = 24 * 1024 * 1024;
  */
 const MAX_DECODE_MS = PEAKS_MAX_DECODE_MS;
 /**
- * Lowest plausible music bitrate — the bound for streams whose
- * `durationMs` is unknown. At this floor, this many encoded bytes
- * can't decode past the 8-minute PCM gate; anything denser is shorter.
+ * Bound for streams whose `durationMs` is unknown: at the lowest
+ * plausible music bitrate (64 kbps), this many encoded bytes can't
+ * decode past the PCM gate; anything denser is shorter.
  */
-const BITRATE_FLOOR_BPS = 64_000;
 const MAX_UNKNOWN_DURATION_BYTES =
-  (MAX_DECODE_MS / 1000) * (BITRATE_FLOOR_BPS / 8);
+  (MAX_DECODE_MS / 1000) * (64_000 / 8);
 /**
  * Post-decode belt for the gate: multichannel/high-rate outliers (or a
  * container whose declared duration lies) bail instead of bucketing a

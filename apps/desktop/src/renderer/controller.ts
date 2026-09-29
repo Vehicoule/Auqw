@@ -91,10 +91,10 @@ function defaultSettings(
     'youtube-music',
   );
   const missing = [
-    ...(catalog === null ? (['catalog.search'] as const) : []),
-    ...(playback === null ? (['playback.resolve'] as const) : []),
+    ...(catalog === null ? ['catalog.search'] : []),
+    ...(playback === null ? ['playback.resolve'] : []),
   ];
-  if (catalog === null || playback === null) {
+  if (missing.length > 0) {
     throw new Error(
       `no provider declares ${missing.join(' / ')} — the plugin set cannot serve a session`,
     );
@@ -319,6 +319,9 @@ export async function createSessionController(
   const clock = options?.clock ?? createClock();
   const ids = options?.ids ?? createIds();
   const log = options?.log ?? createLog();
+  const warn = (message: string): void => {
+    void log.write({ level: 'warn', message, atMs: clock.nowMs() });
+  };
 
   // The file plane: the transfer port is the download sink, the tag
   // reader enumerates granted folders, and the net monitor doubles
@@ -467,6 +470,9 @@ export async function createSessionController(
   // removal/integrity drop) must re-project or the player keeps a
   // stale remote ref — or attaches a file that no longer exists.
   let ownedIds = new Set<string>();
+  // Re-band pending downloads when the queue moves: a track that
+  // becomes now-playing jumps the line.
+  let queueRevision = readyOr((s) => s.queue.revision, 0);
   mediaUnsubs.push(
     downloads.subscribe(() => {
       const nowOwned = new Set(
@@ -483,11 +489,6 @@ export async function createSessionController(
         session.connectivityChanged();
       }
     }),
-  );
-  // Re-band pending downloads when the queue moves: a track that
-  // becomes now-playing jumps the line.
-  let queueRevision = readyOr((s) => s.queue.revision, 0);
-  mediaUnsubs.push(
     session.subscribe((next) => {
       if (
         next.type !== 'ready' ||
@@ -514,11 +515,7 @@ export async function createSessionController(
       signal,
     });
     if (!loaded.ok || signal.cancelled) {
-      void log.write({
-        level: 'warn',
-        message: 'media rehydrate skipped: storage load failed',
-        atMs: clock.nowMs(),
-      });
+      warn('media rehydrate skipped: storage load failed');
       return;
     }
     localSource = new LocalFileSource(
@@ -531,11 +528,7 @@ export async function createSessionController(
     );
     const inited = await downloads.init(loaded.value.downloads, signal);
     if (!inited.ok) {
-      void log.write({
-        level: 'warn',
-        message: `download init failed: ${inited.error.kind}`,
-        atMs: clock.nowMs(),
-      });
+      warn(`download init failed: ${inited.error.kind}`);
       return;
     }
     // Imported recordings replace prior local rows — the session
@@ -657,11 +650,7 @@ export async function createSessionController(
           return false;
         }
         if (!applied.ok) {
-          void log.write({
-            level: 'warn',
-            message: `sync reconcile failed: ${applied.error.kind}`,
-            atMs: clock.nowMs(),
-          });
+          warn(`sync reconcile failed: ${applied.error.kind}`);
           return false;
         }
         if (applied.value.rehydrateMedia) {
@@ -693,10 +682,7 @@ export async function createSessionController(
     const run = reconcileTail.then(() =>
       disposed ? false : reconcilePass(emitDiff),
     );
-    reconcileTail = run.then(
-      () => undefined,
-      () => undefined,
-    );
+    reconcileTail = run.then(() => undefined, () => undefined);
     return run;
   };
   const drainApplied = async (): Promise<void> => {
@@ -712,12 +698,9 @@ export async function createSessionController(
         const batch = await api.sync.drainApplied();
         if (batch.dropped) {
           reconcileNeeded = true;
-          void log.write({
-            level: 'warn',
-            message:
-              'sync applied outbox reported dropped outcomes; reconciling from the materialized log view',
-            atMs: clock.nowMs(),
-          });
+          warn(
+            'sync applied outbox reported dropped outcomes; reconciling from the materialized log view',
+          );
         }
         if (batch.outcomes.length > 0) {
           // A failed projection stays in the session's pending, so
@@ -737,11 +720,7 @@ export async function createSessionController(
             return;
           }
           if (!applied.ok) {
-            void log.write({
-              level: 'warn',
-              message: `sync apply failed: ${applied.error.kind}`,
-              atMs: clock.nowMs(),
-            });
+            warn(`sync apply failed: ${applied.error.kind}`);
             return;
           }
           if (applied.value.rehydrateMedia) {
@@ -868,11 +847,7 @@ export async function createSessionController(
       const priorRows = downloads.records();
       const stopped = await downloads.stop(signal);
       if (!stopped.ok) {
-        void log.write({
-          level: 'warn',
-          message: `pre-import stop failed: ${stopped.error.kind}`,
-          atMs: clock.nowMs(),
-        });
+        warn(`pre-import stop failed: ${stopped.error.kind}`);
         return err(stopped.error);
       }
       try {
@@ -884,11 +859,9 @@ export async function createSessionController(
           for (const row of priorRows) {
             const removed = await transfer.removeFile(row.filePath, signal);
             if (!removed.ok) {
-              void log.write({
-                level: 'warn',
-                message: `post-import file delete failed for ${row.filePath}: ${removed.error.kind}`,
-                atMs: clock.nowMs(),
-              });
+              warn(
+                `post-import file delete failed for ${row.filePath}: ${removed.error.kind}`,
+              );
             }
           }
         }

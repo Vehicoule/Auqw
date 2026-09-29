@@ -138,6 +138,14 @@ async function boot(): Promise<void> {
     earlyPrepares.clear();
   }
 
+  /** Once no prepare call can still claim an unmatched outcome, every
+   * buffered entry belongs to a superseded generation. */
+  function drainIfIdle(): void {
+    if (pendingRegistrations === 0) {
+      drainEarlyPrepares();
+    }
+  }
+
   function renderState(): void {
     const el = document.getElementById('player-state');
     if (el !== null) {
@@ -301,9 +309,7 @@ async function boot(): Promise<void> {
       });
       pendingRegistrations -= 1;
       if (gen !== prepSeq) {
-        if (pendingRegistrations === 0) {
-          drainEarlyPrepares();
-        }
+        drainIfIdle();
         return;
       }
       if (res.ok) {
@@ -318,15 +324,11 @@ async function boot(): Promise<void> {
           renderState();
         }
         // Whatever stayed buffered belongs to superseded generations.
-        if (pendingRegistrations === 0) {
-          drainEarlyPrepares();
-        }
+        drainIfIdle();
       } else {
         state = 'failed';
         logEvent(`prepare failed — ${res.error.kind}: ${res.error.message}`);
-        if (pendingRegistrations === 0) {
-          drainEarlyPrepares();
-        }
+        drainIfIdle();
         renderState();
       }
     })();

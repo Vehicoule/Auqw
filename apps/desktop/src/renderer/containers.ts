@@ -571,12 +571,7 @@ export function resyncScan(
   container: 'webm' | 'mp4',
 ): number {
   if (container === 'webm') {
-    for (let i = 0; i + 4 <= buf.length; i++) {
-      if (isClusterAt(buf, i)) {
-        return i;
-      }
-    }
-    return -1;
+    return findClusterSig(buf, 0);
   }
   for (let i = 0; i + 8 <= buf.length; i++) {
     const type = asciiType(buf, i + 4);
