@@ -1,154 +1,175 @@
-# Prepared-session claim + re-mint cancel hygiene — REPORT
+# Warm-adoption coverage — REPORT
 
-Branch `devin/pb-race`. Fixes the delivered-but-unattached kill race:
-a `Prepared{handle}` in flight could be terminated between delivery
-and the consumer's attach, because every teardown keyed on
-`attached` alone.
+Branch `devin/pb-warm`. Widen the hit rate of the advisory stream
+warm (`#streamWarm`) so the common forward paths adopt a minted
+session instead of cold-resolving, without growing steady-state
+provider resolve volume.
 
 ## What changed
 
-### Task 1 — atomic claim (`auqw-stream`, `host-surface`)
+All engine changes are in `packages/application/src/session/playback-engine.ts`;
+tests in `packages/application/src/session/session.test.ts`; the warm-policy
+row in `docs/decisions.md` was amended to match.
 
-- `crates/auqw-stream/src/session.rs`: `Shared.claimed: bool` beside
-  `attached` under the same mutex; `SessionInner::is_claimed()` and
-  `SessionInner::claim()` (monotonic — never cleared, including across
-  `close`; a claimed session keeps its owner through detach).
-- `crates/auqw-stream/src/registry.rs`: `StreamRegistry::claim(handle)`
-  plus the two predicate changes below.
-- `crates/host-surface/src/stream.rs`: `stream.claim(...)` runs inside
-  the `PreparedSlot` commit critical section at **both** commit sites —
-  the adoption fast-path (`admission.prepared`, ~line 408) and the
-  invoke-path delivery commit (`prepared_handles`, ~line 589). Claim is
-  written **before** the slot insert: a supersede scan doesn't hold
-  `prepared_handles`, so the session must already read claimed before
-  its slot is ever visible to `cancel`. A `cancel` (which holds
-  `prepared_handles`) can therefore never observe a slot whose session
-  is unclaimed.
-- `crates/host-surface/src/lib.rs` `cancel`: the delivered-request
-  path removes the request's slot, keeps the existing co-owner check
-  (`m.values().any(|v| v.handle == slot.handle)`), and now calls
-  `stream.release(&handle)` instead of `cancel_if_unattached`. Once
-  the slot is gone the session is ownerless — and claimed, so the
-  unattached-only predicate could never fire. The `is_live` rechecks,
-  mid-delivery `await_idle`, tombstone logic, and generation guards
-  are unchanged.
+### 1. Queue-side want widened (`#warmWant`, `#successorWarmRef`, `#queueRowRef`)
 
-### Exact predicates touched
+Previously the queue-origin warm existed only while `playback.type === 'playing'`
+and targeted `walk[pos + 1]` unconditionally. Now:
 
-| Site | Before | After |
-| --- | --- | --- |
-| `supersede_unattached` scan filter (`registry.rs`) | `!s.is_attached() && !s.is_terminal()` | `!s.is_attached() && !s.is_claimed() && !s.is_terminal()` |
-| `supersede_unattached` terminal transition | `terminate_if(Superseded, \|sh\| !sh.attached)` | `terminate_if(Superseded, \|sh\| !sh.attached && !sh.claimed)` |
-| `cancel_if_unattached` (`registry.rs`) | `terminate_if(Cancelled, \|sh\| !sh.attached)` | `terminate_if(Cancelled, \|sh\| !sh.attached && !sh.claimed)` |
-| delivered-request `cancel` (`lib.rs`) | `stream.cancel_if_unattached(&handle)` | `stream.release(&handle)` |
+- **Settled stretches mint the `next()` target.** `buffering`, `playing`, and
+  `paused` all want the row a forward move lands on — the first **unmarked**
+  dealt successor, head-wrapped under `repeat=all`. `#successorWarmRef` mirrors
+  `advance()`/`#wrapToHead` exactly (same walk, same `isUnplayable` skip, same
+  wrap rule), so the minted session is the one `next()`/ended attaches.
+- **Parked cursor warms under an idle paused queue.** When playback is `idle`
+  but the queue mode is `paused` with a cursor — a `next()`/`previous()` taken
+  while paused idles the player, and a restored session boots into exactly this
+  shape — the want is the cursor row itself, because the resume/play press is
+  that row's attempt. Flagged (`isUnplayable`) cursor rows mint nothing: that's
+  a retry the user owes, not a spend the warm owes.
+- **Unmarked-only everywhere.** Both the dealt-window candidates pass
+  (`#nextWarmTarget`) and the successor pick step over `isUnplayable` rows —
+  previously the window pass could still buy a mapping for a row every forward
+  move skips.
+- `#queueRowRef` is the shared pick: occurrence pin, owned bytes, mapping,
+  unvetoed `sourceRef`, gated to a remote ref on the active playback provider —
+  candidate-less rows stay the candidates pass's job.
+- `StreamWarm.origin` doc updated: `'queue'` now means any queue-side want.
 
-### Unchanged on purpose (verified)
+### 2. Early waste release
 
-- `attach()` checks only `terminal` and `stale_prepare` — a claimed
-  session attaches normally (covered by
-  `claimed_session_survives_unattached_teardowns_and_attaches`).
-- `detached_since`/`attach_ms`/pump priority/`stale_prepare` semantics
-  untouched; `claimed` does not gate the detached reaper — a claimed
-  session still reaps at `prepare_ttl` (120 s bound). An ownerless
-  attach is handled by `abandon` instead: the session is marked, and
-  its `close` drops `claimed` so supersede/reaper can retire the
-  detach — never a kill on a playing stream.
-- `reusable()` still ignores `claimed` — a claimed warm is still
-  adoptable by a real attempt (co-ownership; decision-log warm-adopt
-  row). The tombstone and `was_cancelled`/`dead` abandoned paths in
-  `start_prepare`'s delivery still call `cancel_if_unattached` —
-  those sessions were never slot-committed, so they are unclaimed and
-  still die.
-- `stream_release` is unchanged (still unconditional by handle + slot
-  prune): it is owner-explicit teardown, not a kill path the claim
-  covers — see "Notes" below.
+- **Adoption-time margin check** in `startAttempt`: the mint-side
+  `WARM_EXPIRY_MARGIN_MS` check now runs again at adopt. A warm whose URL lands
+  inside the attach margin — or a dead `safeNow()` clock that can't prove
+  otherwise — is released via `#dropStreamWarm` and the attempt falls through
+  to a cold prepare, instead of riding a doomed handle into the dead-outcome
+  re-prepare hop (#197's path stays the fallback, not the plan).
+- Mutation/stop invalidation was already complete (queue-mutation re-eval,
+  `setShuffleRetargetsStreamWarm`, revision keys); new tests pin the
+  release-on-removal and release-on-stop behavior.
+- **Idle-transitional keep**: `resume()`/`play()` flips a paused queue to
+  `'playing'` one derived tick before `startAttempt` runs — the want reads null
+  in that tick and used to drop the just-needed warm. A warm matching the
+  cursor row now survives the gap, the same keep-rule `'playing'` already used
+  for a just-landed select.
 
-### Task 2 — re-mint cancellation (`Remint` trait)
+### 3. Tick-driven re-eval on every settled status
 
-- `Remint::remint(cancel: CancellationToken)` — the pump passes
-  `session.cancel.child_token()`; `PluginRemint` hands it to `invoke`
-  (replacing the detached `CancellationToken::new()`), so session
-  teardown reaches the re-mint's own cancel checks/in-flight HTTP
-  promptly. `mint_deadline` remains the outer bound, and the pump's
-  own `select!` cancel arm still drops the future on teardown — the
-  token additionally keeps detached guest work from finishing blind.
-- All impls updated: `PluginRemint`, `DevRemint`, `StaticRemint`
-  (testkit), `CountingRemint`/`HangingRemint`/`WatchingRemint` (pump
-  tests), `NeverRemint`/`OkRemint` (seam), `HangRemint` (host tests).
+`#handleEvent` re-evaluates `#maybeWarmStream` on every accepted mapped tick
+(was: `playing` only). Buffering and paused ticks now derive the want too —
+the successor mint starts while the current row's first bytes land, and a
+paused session keeps its warm instead of waiting for the next mutation.
 
-## Tests added
-
-- `auqw-stream` seam (`tests/seam.rs`):
-  - `claimed_session_survives_unattached_teardowns_and_attaches`
-  - `unclaimed_session_still_dies_to_unattached_teardowns`
-  - `claimed_session_stays_claimed_across_detach`
-- `auqw-stream` pump (`src/pump.rs` tests):
-  - `session_cancel_reaches_in_flight_remint` — a re-mint parked on
-    the handed token wakes on session teardown (detached watcher
-    proves the child token fired, not just the pump's select arm).
-- `host-surface` (`src/lib.rs` tests):
-  - `adopted_session_is_claimed_against_supersede` — the adoption's
-    slot commit claims the session.
-  - `delivered_owner_cancel_releases_only_at_last_owner` — co-owner
-    survives first owner's cancel; last owner's cancel releases.
-
-Existing tests already covering the fixed behavior now exercise the
-new path: `prepare_adopts_a_live_warm_session`'s tail (`cancel`
-unwinds the adopted warm — now via `release`, which the claimed
-session requires) and `cancel_racing_adoption_never_kills_the_new_owner`.
-
-## Contradictions / notes vs the analysis
-
-- **None found against the race analysis.** The three kill paths were
-  as described; the `is_live` rechecks narrow but don't close the gap.
-- The delivered-cancel swap from `cancel_if_unattached` to `release`
-  drops the old "a playing consumer is never cancelled" guard *for the
-  owning request's cancel*: an attached session whose last owner is
-  cancelled now ends `Released`. That is the intended ownership model —
-  once the request's slot is removed nothing else can end the session
-  (attached sessions are exempt from the detached reaper, so an
-  ownerless attached session would leak); player-side attached
-  teardown is `releaseStream`/`stream_release` by handle. The `cancel`
-  doc comment was updated to say so.
-- `stream_release`'s unconditional-by-handle kill of a co-adopted
-  handle (the third listed path) is not closed by this diff — per the
-  expected-diff scope it stays caller-discipline: the bindings only
-  release handles they own (`markReleased` ordering in
-  `AuqwExpoModule.kt`), and `stream_release` prunes co-owners' slots.
-  The claim prevents the *unattached-only* kills; explicit release
-  remains terminal.
-- Invoke-path `Prepared` can't be driven in host-surface tests (no
-  conformance guest emits a contract-valid `playbackResolveResult`
-  under `start_prepare`'s payload — echo echoes the step input,
-  scenario requires `payload.scenario`). The invoke-path claim commit
-  is covered by the registry-level claim tests plus the identical
-  adopt-path test; the diff is the same two-statement commit order.
-
-## Gate evidence
-
-Workspace package names are `auqw-stream`/`auqw-host-surface` (the
-`-p host-surface` spelling in the task doesn't resolve — same
-packages).
+## Verification
 
 ```text
-$ cargo fmt --all -- --check
-(clean — FMT_CLEAN)
-
-$ cargo test -p auqw-stream -p auqw-host-surface
-host-surface lib: 19 passed, 0 failed   (incl. adopted_session_is_claimed_against_supersede,
-                                       delivered_owner_cancel_releases_only_at_last_owner)
-auqw-stream lib:  70 passed, 0 failed   (incl. session_cancel_reaches_in_flight_remint)
-auqw-stream seam: 46 passed, 0 failed   (incl. claimed_session_survives_unattached_teardowns_and_attaches,
-                                       unclaimed_session_still_dies_to_unattached_teardowns,
-                                       claimed_session_stays_claimed_across_detach)
-
-$ cargo build -p auqw-stream -p auqw-host-surface
-Finished `dev` profile — clean
-
-$ cargo clippy -p auqw-stream -p auqw-host-surface --all-targets -- -D warnings
-Finished `dev` profile — clean
-
-$ cargo check -p auqw-mobile-bindings -p auqw-node-bindings
-Finished `dev` profile — clean (bindings unaffected by the internal
-Remint signature change)
+pnpm install --frozen-lockfile          ok
+pnpm -C packages/application typecheck  ok
+pnpm -C packages/application test       ok (all session suites incl. 8 new tests)
+pnpm -C packages/app-shell typecheck    ok
+pnpm -C packages/app-shell test         ok ("app-shell tests passed")
+pnpm -C apps/mobile typecheck           ok
+pnpm -C apps/desktop typecheck          ok
+pnpm typecheck (workspace)              ok
 ```
+
+New `session.test.ts` coverage:
+
+- `streamWarmDuringBuffering` — successor mint issues on a buffering tick.
+- `streamWarmPausedNextAdoptsOnResume` — warm survives pause, survives the
+  paused-`next()` idle hop (`release` count for the warm handle stays zero),
+  and `resume()` adopts it (`prepare` count unchanged at 1).
+- `streamWarmWrapsRepeatAllTail` — tail row warms the dealt head under
+  `repeat=all`; `next()` wraps and adopts (prepare count unchanged).
+- `streamWarmSkipsUnplayableSuccessor` — a permanently-failed row is skipped;
+  the warm targets the next unmarked row.
+- `streamWarmReleasedOnSuccessorRemoval` — removing the warmed row releases
+  its session handle and retargets to the new successor.
+- `streamWarmDropOnStop` — `stop()` releases the mint.
+- `streamWarmStaleAdoptionRepairs` — a warm minted outside the attach margin
+  is released at adoption and the tap mints fresh (prepare count = 1).
+- `streamWarmDenyCapEvicts` — 17 denies through the 16-cap LRU evict the
+  oldest; a re-hand re-fires.
+- `restartRestore` reworked — restore on a paused queue mints the cursor warm
+  (asserted `prewarm` on the persisted ref, never a saved URL), and `resume()`
+  adopts it with zero `prepare` calls. `restorePlayingSnapshot`/`settingsFlow`
+  filters now exclude advisory ops (`prewarm`/`cancelPrepare`/`release`) from
+  the "never starts playback" invariant — the invariant itself is unchanged.
+
+## Hit-rate delta per flow (estimated, engine-level)
+
+No device measurement exists for this slice — these are structural deltas
+derived from the want-space diff, not measured TTFS numbers.
+
+| Flow | Before | After |
+| --- | --- | --- |
+| tap-in-queue (cursor/successor row) | adopt only if minted under `playing` | + adoptable after a paused cursor hop and after restore (parked-cursor mint) |
+| `next()` while playing | warm-adopted (existing) | unchanged; mint now also issues during `buffering`, so it's likelier to be delivered by the time `next()` lands |
+| `next()`/`previous()` while paused | always cold (want was null under `idle`/`paused`) | parked-cursor mint — resume/play adopts, zero `prepare` |
+| `next()` at repeat=all tail | always cold (`walk[pos+1]` only) | head-wrapped mint — wrap adopts |
+| resume after restore on paused queue | always cold | boot-minted cursor warm adopted on `resume()` |
+| `next()` past a flagged row | warm could target the dead row | warm targets the row `next()` lands on |
+
+## Resolve-volume delta per change
+
+- Successor want under `buffering`/`paused`: **+1 advisory `prewarm`** per
+  settled stretch with a resolved successor (was +0 under paused, issued only
+  on playing ticks under buffering). Bounded by the single warm slot,
+  `prefetch`+online+unmetered gates, the 16-key deny-LRU, and `WARM_SEEN`
+  dedupe on the window pass. The mint replaces the cold resolve `next()` would
+  have paid — adopted ⇒ net ≤0; abandoned ⇒ +1, same bound as before.
+- Parked-cursor want under idle+paused: **+1 `prewarm`** per paused-idle
+  stretch (once per cursor; re-issues only on want change). On resume it is
+  the resolve the press needed anyway ⇒ adopted = net 0, and resume-on-boot
+  is the single most common cold path so the trade is favorable.
+- Unmarked-skip (window + successor): **−1 wasted resolve** per flagged row in
+  the walk — strictly saves traffic.
+- Adoption-time stale release: **0** — converts a guaranteed dead-handle
+  outcome (dead attach + #197 re-prepare) into one clean cold prepare; same
+  resolve count, one fewer failed attach.
+- Steady-state ceiling unchanged: ≤1 outstanding speculative stream mint at
+  any time; no new periodic or per-tick provider calls (all mints still want-
+  driven and deduped).
+
+## Deliberately not done
+
+- **Press-intent warm (candidate 2): no new signal invented.** The only
+  prewarm callers are the search-results effect in `packages/app-shell` (first
+  9 visible rows → `session.prewarm`) and the catalog labeled-match path.
+  Neither desktop nor mobile has a hover/long-press/dwell/scroll-settle
+  signal; inventing one (timers, pointer listeners, row lifecycle hooks) is a
+  heavier shell change than this task's blast radius. The existing
+  surface-hand path already covers the "user is looking at it" case.
+- **No TTL/deny tuning (candidate 3).** No evidence of starvation:
+  `STREAM_DENY_CAP=16` counts distinct failing keys per session — a bound
+  real sessions can't plausibly reach (proven by `streamWarmDenyCapEvicts`);
+  `WARM_ROW_TTL_MS=120s` matches the URL-attach horizon. Left as-is.
+- **`'preparing'` still parks the warm slot (candidate 4).** Verified against
+  main post-#198: `claim` lands inside the prepared-slot commit, so a
+  **delivered** warm is immune to `supersede_unattached`/`cancel_if_unattached`,
+  but an **in-flight** warm minted alongside an attempt's prepare is not yet
+  claimed and could be killed by that attempt's supersede scan. The park stays
+  — it is precisely the "don't supersede-kill an unclaimed warm" rule. Warm
+  mints resume the moment the attempt commits (`buffering` want).
+- **Second-deep successor warming** (`walk[pos+2]`): rejected — the single
+  warm slot is the resolve-volume bound; a second speculative mint doubles the
+  per-action ceiling for a much lower-probability target.
+- **`next()`-while-paused to a non-adjacent row / arbitrary `playOccurrence`
+  tap** on an unwarmed row still cold-resolves — only cursor/successor/surface
+  rows warm. Widening to "any queue row" would explode resolve volume with no
+  hit-rate evidence.
+
+## Diffstat
+
+```text
+$ git diff --stat origin/main...HEAD
+ .agent-started                                     |   0
+ PROMPT.md                                          |  87 ++++-
+ docs/decisions.md                                  |   2 +-
+ packages/application/src/session/playback-engine.ts | 238 ++++++++-----
+ packages/application/src/session/session.test.ts   | 372 +++++++++++++++++++--
+ 5 files changed, 580 insertions(+), 119 deletions(-)
+```
+
+(`PROMPT.md`/`.agent-started` are harness artifacts committed separately at
+`38c76c8`; the implementation is `b9e520a`.)
