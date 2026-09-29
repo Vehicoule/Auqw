@@ -241,7 +241,9 @@ export function ArtworkRing({
 
 function useSeekGesture(
   durationMs: number | null,
-  onSeek: ((ms: number) => void) | undefined,
+  onSeek:
+    | ((ms: number, expectedTrackKey?: string) => void)
+    | undefined,
   onPreview: ((ms: number | null) => void) | undefined,
 ): {
   readonly gesture: ReturnType<typeof Gesture.Pan>;
@@ -342,7 +344,9 @@ function progressOf(positionMs: number, durationMs: number | null): number {
 export type LinearScrubberProps = {
   readonly positionMs: number;
   readonly durationMs: number | null;
-  readonly onSeek?: ((ms: number) => void) | undefined;
+  readonly onSeek?:
+    | ((ms: number, expectedTrackKey?: string) => void)
+    | undefined;
   /** Identity of the track on the player — scopes the optimistic
    *  hold so a track change never displays the previous track's
    *  committed position. */
@@ -404,9 +408,10 @@ export function LinearScrubber({
       // A track change since the pan began abandons the release —
       // it must not seek the new track to a position the preview
       // only ever showed on the old one.
+      const begunOn = gestureKey.current;
       if (
-        gestureKey.current !== undefined &&
-        gestureKey.current !== trackKeyRef.current
+        begunOn !== undefined &&
+        begunOn !== trackKeyRef.current
       ) {
         gestureKey.current = undefined;
         setPreviewMs(null);
@@ -424,7 +429,10 @@ export function LinearScrubber({
         heldTimer.current = null;
         setHeldMs(null);
       }, 800);
-      onSeek?.(ms);
+      // The begun-on key rides to the session too — the ref compare
+      // covers flips React already rendered; the session guard
+      // covers the sub-frame window before it.
+      onSeek?.(ms, begunOn ?? undefined);
     },
     [onSeek],
   );

@@ -2712,9 +2712,9 @@ function Main({
   // while the lyrics pane is actually on screen.
   const [seekGeneration, bumpSeekGeneration] = useState(0);
   const seekToPosition = useCallback(
-    (ms: number): Promise<Result<void>> => {
+    (ms: number, expectedOccurrenceId?: string): Promise<Result<void>> => {
       bumpSeekGeneration((n) => n + 1);
-      return session.seekTo(ms);
+      return session.seekTo(ms, expectedOccurrenceId);
     },
     [session],
   );

@@ -2471,8 +2471,11 @@ export class Session {
     return this.#playback.resume();
   }
 
-  async seekTo(positionMs: number): Promise<Result<void>> {
-    return this.#playback.seekTo(positionMs);
+  async seekTo(
+    positionMs: number,
+    expectedOccurrenceId?: string,
+  ): Promise<Result<void>> {
+    return this.#playback.seekTo(positionMs, expectedOccurrenceId);
   }
 
   async retryCurrent(): Promise<Result<void>> {
