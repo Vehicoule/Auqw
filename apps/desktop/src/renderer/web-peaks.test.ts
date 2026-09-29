@@ -384,4 +384,42 @@ export async function run(): Promise<void> {
     assert(!result.ok && result.error.kind === 'budget-exceeded');
     assertEqual(stream.calls.length, 0, 'no stream calls past the gate');
   }
+
+  // An `lf-*` handle reads through `local:read`, not the seam — the
+  // resolved file:// URI keys the request and stream:read never runs.
+  {
+    const pcm = new Float32Array(256);
+    pcm[10] = 1;
+    const stream = fakeStream({});
+    const fileBytes = new Uint8Array(128).fill(3);
+    const reads: { uri: string; position: number }[] = [];
+    const port = createWebPeaksPort({
+      stream,
+      decode: fakeDecode([pcm]),
+      localUriFor: (handle) =>
+        handle === 'lf-1' ? 'file:///music/rip.flac' : null,
+      localRead: (args) => {
+        reads.push({ uri: args.uri, position: args.position });
+        const slice = fileBytes.subarray(
+          args.position,
+          args.position + args.maxLen,
+        );
+        return Promise.resolve({ data: toBase64(slice) });
+      },
+    });
+    const result = await port.peaks(
+      { handle: 'lf-1', durationMs: 60_000 },
+      context(),
+    );
+    assert(result.ok, 'local extraction succeeds');
+    assert(
+      stream.calls.length === 0,
+      'a local handle never touches stream:read',
+    );
+    assert(
+      reads.length >= 1 &&
+        reads.every((r) => r.uri === 'file:///music/rip.flac'),
+      'reads key to the resolved file:// URI',
+    );
+  }
 }

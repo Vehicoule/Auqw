@@ -27,6 +27,7 @@ import type {
 } from '@auqw/application';
 import { SqliteStorage } from '@auqw/storage-sqlite';
 import type { AuqwApi } from '../shared/contract.ts';
+import { toFileUri } from '../shared/local-paths.ts';
 import { createDesktopConnectivity } from './connectivity.ts';
 import { createLocalPlayback } from './local-playback.ts';
 import { createDesktopTagReader } from './tag-reader.ts';
@@ -47,7 +48,7 @@ import {
 } from '@auqw/application';
 import { shellToAppError } from './ipc-errors.ts';
 import { createWebPlayerPort } from './web-player.ts';
-import type { MediaSessionLike } from './web-player.ts';
+import type { MediaSessionLike, WebPlayerPort } from './web-player.ts';
 
 /**
  * The provider-slot → routing-capability map mirrored from the app's
@@ -237,6 +238,12 @@ export type SessionController = {
    */
   readonly localPlaybackFor: (recordingId: string) => string | null;
   /**
+   * `lf-*` handle → its resolved `file://` URI (renderer-local map on
+   * the web player) — the peaks port reads local bytes through
+   * `local:read` with this. Null for a test-double player.
+   */
+  readonly localUriFor: (handle: string) => string | null;
+  /**
    * Re-loads persisted state into the media owners after a
    * whole-library replace (import): rebuilds the local source and
    * re-inits the download ledger so their rows can't go stale.
@@ -310,17 +317,47 @@ export async function createSessionController(
   const storage =
     options?.storage ??
     new SqliteStorage(createSqliteDriver(api.storage), defaults);
-  const player =
-    options?.player ??
-    createWebPlayerPort({
-      stream: api.stream,
-      audio: new Audio(),
-      mediaSession:
-        'mediaSession' in navigator
-          ? (navigator.mediaSession as MediaSessionLike)
-          : null,
-      mse: browserMse(),
-    });
+  const webPlayer =
+    options?.player === undefined
+      ? createWebPlayerPort({
+          stream: api.stream,
+          audio: new Audio(),
+          mediaSession:
+            'mediaSession' in navigator
+              ? (navigator.mediaSession as MediaSessionLike)
+              : null,
+          mse: browserMse(),
+          // Extensionless `dl-*` names carry their container mime in the
+          // download ledger — a `file://` URI under the media dir resolves
+          // its row back. Reads `mediaDir`/`downloads` live: both fill in
+          // after construction (meta round-trip, ledger restore) and only
+          // attach-time probes ever call this.
+          localMime: (uri) => {
+            if (mediaDir === null) {
+              return null;
+            }
+            const prefix = `${toFileUri(mediaDir)}/`;
+            if (!uri.startsWith(prefix)) {
+              return null;
+            }
+            const name = uri.slice(prefix.length);
+            return (
+              downloads
+                .records()
+                .find(
+                  (d) => d.filePath === name && d.state === 'available',
+                )
+                ?.mime ?? null
+            );
+          },
+          // `local:resolve` — the utility's realpath + grant confinement
+          // on the URI a local prepare is about to attach; a null answer
+          // fails 'unavailable' so a lexical URI can't escape the roots.
+          localResolve: async (uri) =>
+            (await api.local.resolve({ uri })).uri,
+        })
+      : null;
+  const player = options?.player ?? (webPlayer as WebPlayerPort);
 
   const clock = options?.clock ?? createClock();
   const ids = options?.ids ?? createIds();
@@ -351,6 +388,12 @@ export async function createSessionController(
         fileFor: (id) => downloads.fileFor(id),
         uriFor: uriForHook,
       });
+      // The projection already ran with a null probe — owned downloads
+      // whose only ref is on-disk were marked unattachable then. The
+      // same re-derive a connectivity edge triggers re-reads the seam
+      // now that `probe` can answer. `session` is initialized by the
+      // time this async closure runs.
+      session.connectivityChanged();
     })
     .catch(() => {
       // meta() failed — owned downloads can't form file:// URIs and
@@ -362,13 +405,18 @@ export async function createSessionController(
   // the fallback seed. Every transition re-runs the session's
   // connectivity reconciliation.
   let lastOnline = true;
-  // The web player rejects every `provider:'local'` prepare — until the
-  // Phase-4 adapter lands the probe must answer null: otherwise the
-  // session picks refs the player refuses and offline marks advertise
-  // presses that can only fail. Flip once web-player gains the route.
-  const localPlaybackCapable = false;
+  // The web player now attaches `provider:'local'` as `file://` on the
+  // element, so the probe answers the real URI: managed downloads once
+  // `probe` lands with the meta round-trip, imported files through the
+  // source's docUri math. A null answer still means "cannot attach" —
+  // the session's offline-marking reads that distinction separately
+  // from ownership (`fileFor`/`uriMap().has`), which must not move.
   const localPlaybackFor = (id: string): string | null =>
-    localPlaybackCapable ? (probe?.(id) ?? uriForHook(id)) : null;
+    probe?.(id) ?? uriForHook(id);
+  /** `lf-*` handle → resolved `file://` URI — null when the player is
+   * a test double (it mints no local handles). */
+  const localUriFor = (handle: string): string | null =>
+    webPlayer?.localUriFor(handle) ?? null;
   const session = new Session({
     storage,
     player,
@@ -864,6 +912,7 @@ export async function createSessionController(
     isOnline: () => lastOnline,
     subscribeOnline,
     localPlaybackFor,
+    localUriFor,
     rehydrateMedia,
     async replaceLibrary(text, signal) {
       // Validate BEFORE the drain: a malformed document must not

@@ -86,6 +86,8 @@ export const CHANNELS = {
   chromeScheme: 'chrome:scheme',
   localAdd: 'local:add',
   localProbe: 'local:probe',
+  localResolve: 'local:resolve',
+  localRead: 'local:read',
   localList: 'local:list',
   localPlayback: 'local:playback',
   localSweep: 'local:sweep',

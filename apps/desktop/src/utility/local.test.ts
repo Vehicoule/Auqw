@@ -1,5 +1,12 @@
 import { mkdtempSync, rmSync } from 'node:fs';
-import { chmod, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -21,11 +28,17 @@ export async function run(): Promise<void> {
   const mediaDir = join(userData, 'media');
   const dbPath = join(userData, 'auqw.db');
   await mkdir(mediaDir, { recursive: true });
+  // Two connections mirror production: the services read through
+  // `db` (the indexDb accessor role) while every table write goes
+  // through `dbW` (the SqliteStorage role) — cross-connection commits
+  // are what PRAGMA data_version reports, so the gate's freshness
+  // stamp only behaves correctly under the two-handle shape.
   const db = new DatabaseSync(dbPath);
-  db.exec('PRAGMA foreign_keys = ON');
+  const dbW = new DatabaseSync(dbPath);
+  dbW.exec('PRAGMA foreign_keys = ON');
   for (const migration of MIGRATIONS) {
     for (const sql of migration) {
-      db.exec(sql);
+      dbW.exec(sql);
     }
   }
   const local = createLocalService({ database: () => db, mediaDir });
@@ -44,7 +57,7 @@ export async function run(): Promise<void> {
     return route({ id, channel, args });
   };
   const insertRecording = (id: string, provenance = 'provider'): void => {
-    db.prepare(
+    dbW.prepare(
       `INSERT INTO recordings (id, title, artwork_json, version_labels_json, provenance)
        VALUES (?, 'x', '[]', '[]', ?)`,
     ).run(id, provenance);
@@ -68,7 +81,7 @@ export async function run(): Promise<void> {
 
     // The engine commits the source row through storage:* — here the
     // insert stands in for SqliteStorage's write path.
-    db.prepare(
+    dbW.prepare(
       'INSERT INTO local_sources (source_id, tree_uri, label, added_ms) VALUES (?, ?, ?, ?)',
     ).run('src-1', pick?.treeUri ?? '', pick?.label ?? '', 1);
 
@@ -81,7 +94,7 @@ export async function run(): Promise<void> {
     assertEqual(docs[0]?.docId, 'demo.wav', 'picked dir lists the doc');
 
     insertRecording('rec-1', 'local');
-    db.prepare(
+    dbW.prepare(
       `INSERT INTO local_files
        (file_id, source_id, doc_id, size, fingerprint, recording_id)
        VALUES ('lf-1', 'src-1', 'demo.wav', 2048, 'fp', 'rec-1')`,
@@ -105,7 +118,7 @@ export async function run(): Promise<void> {
     // Downloads win over local rows — stored bytes are the owner.
     await writeFile(join(mediaDir, 'dl-1'), Buffer.alloc(64, 2));
     insertRecording('rec-2');
-    db.prepare(
+    dbW.prepare(
       `INSERT INTO downloads
        (download_id, recording_id, provider, source_ref_json, file_path,
         bytes, state, committed_offset, priority, requested_ms)
@@ -123,7 +136,7 @@ export async function run(): Promise<void> {
 
     // A download row that claims bytes but has none falls through.
     insertRecording('rec-3');
-    db.prepare(
+    dbW.prepare(
       `INSERT INTO downloads
        (download_id, recording_id, provider, source_ref_json, file_path,
         bytes, state, committed_offset, priority, requested_ms)
@@ -142,7 +155,7 @@ export async function run(): Promise<void> {
     // A download row carrying a separator can never resolve outside
     // the media dir — a non-bare file_path yields no playable bytes.
     insertRecording('rec-4');
-    db.prepare(
+    dbW.prepare(
       `INSERT INTO downloads
        (download_id, recording_id, provider, source_ref_json, file_path,
         bytes, state, committed_offset, priority, requested_ms)
@@ -244,10 +257,200 @@ export async function run(): Promise<void> {
       !relative.ok && relative.error?.kind === 'invalid-request',
       'relative path refused',
     );
+
+    // `local:resolve` — an indexed file's file:// URI comes back
+    // realpath'd; escapes, unindexed files, ungranted paths, and
+    // non-file URIs refuse. The gate needs a `local_files` row — the
+    // picked dir is granted, but only indexed bytes are readable.
+    const granted = join(folder, 'again.wav');
+    await writeFile(granted, Buffer.alloc(32, 7));
+    dbW.prepare(
+      `INSERT INTO local_files
+       (file_id, source_id, doc_id, size, fingerprint, recording_id)
+       VALUES ('lf-2', 'src-1', 'again.wav', 32, 'fp2', 'rec-1')`,
+    ).run();
+    const grantedUri = pathToFileURL(granted).href;
+    const resolved = await call(CHANNELS.localResolve, {
+      uri: grantedUri,
+    });
+    assert(
+      resolved.ok &&
+        (resolved.result as { uri: string | null }).uri ===
+          pathToFileURL(await realpath(granted)).href,
+      'resolve returns the realpath URI for an indexed file',
+    );
+    const unindexed = join(folder, 'unindexed.wav');
+    await writeFile(unindexed, Buffer.alloc(8, 3));
+    const skipped = await call(CHANNELS.localResolve, {
+      uri: pathToFileURL(unindexed).href,
+    });
+    assert(
+      skipped.ok &&
+        (skipped.result as { uri: string | null }).uri === null,
+      'an unindexed file inside the granted folder refuses',
+    );
+    const outside = await call(CHANNELS.localResolve, {
+      uri: pathToFileURL(join(root, 'notes.txt')).href,
+    });
+    assert(
+      outside.ok &&
+        (outside.result as { uri: string | null }).uri === null,
+      'a path outside every root refuses',
+    );
+    const evil = join(root, 'evil.wav');
+    await writeFile(evil, Buffer.alloc(8, 0));
+    const swap = join(folder, 'swap.wav');
+    await symlink(evil, swap);
+    // Index the swap name so the refusal must come from the realpath
+    // gate — not merely from the file missing the index.
+    dbW.prepare(
+      `INSERT INTO local_files
+       (file_id, source_id, doc_id, size, fingerprint, recording_id)
+       VALUES ('lf-3', 'src-1', 'swap.wav', 8, 'fp3', 'rec-1')`,
+    ).run();
+    const escaped = await call(CHANNELS.localResolve, {
+      uri: pathToFileURL(swap).href,
+    });
+    assert(
+      escaped.ok &&
+        (escaped.result as { uri: string | null }).uri === null,
+      'a symlink escape refuses at attach time',
+    );
+    // The media dir counts as a root for managed-download URIs.
+    const dlUri = pathToFileURL(join(mediaDir, 'dl-1')).href;
+    const resolvedDl = await call(CHANNELS.localResolve, {
+      uri: dlUri,
+    });
+    assert(
+      resolvedDl.ok &&
+        (resolvedDl.result as { uri: string | null }).uri !== null,
+      'a media-dir URI resolves',
+    );
+    // …but only for ledger-owned bytes — an unmanaged file beside the
+    // downloads stays denied.
+    const unmanaged = join(mediaDir, 'not-a-download.wav');
+    await writeFile(unmanaged, Buffer.alloc(8, 9));
+    const unmanagedResolve = await call(CHANNELS.localResolve, {
+      uri: pathToFileURL(unmanaged).href,
+    });
+    assert(
+      unmanagedResolve.ok &&
+        (unmanagedResolve.result as { uri: string | null }).uri === null,
+      'an unmanaged file inside the media dir refuses',
+    );
+    const unmanagedRead = await call(CHANNELS.localRead, {
+      uri: pathToFileURL(unmanaged).href,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !unmanagedRead.ok &&
+        unmanagedRead.error?.kind === 'permission-denied',
+      'an unmanaged media-dir read is permission-denied',
+    );
+    // UPDATEs move the freshness stamp too — a download leaving
+    // 'available' revokes its cached allow on the next call.
+    dbW.prepare(`UPDATE downloads SET state = 'removing'
+                WHERE download_id = 'd-1'`).run();
+    const revokedResolve = await call(CHANNELS.localResolve, {
+      uri: dlUri,
+    });
+    assert(
+      revokedResolve.ok &&
+        (revokedResolve.result as { uri: string | null }).uri === null,
+      'a download leaving available loses its verdict',
+    );
+    dbW.prepare(`UPDATE downloads SET state = 'available'
+                WHERE download_id = 'd-1'`).run();
+    const restoredResolve = await call(CHANNELS.localResolve, {
+      uri: dlUri,
+    });
+    assert(
+      restoredResolve.ok &&
+        (restoredResolve.result as { uri: string | null }).uri !== null,
+      'restoring available re-arms the verdict',
+    );
+
+    // `local:read` — ranged bytes over the same grant gate.
+    const read = await call(CHANNELS.localRead, {
+      uri: grantedUri,
+      position: 0,
+      maxLen: 16,
+    });
+    assert(
+      read.ok &&
+        (read.result as { data: string }).data ===
+          Buffer.alloc(16, 7).toString('base64'),
+      'read serves granted bytes',
+    );
+    const tail = await call(CHANNELS.localRead, {
+      uri: grantedUri,
+      position: 30,
+      maxLen: 16,
+    });
+    assert(
+      tail.ok &&
+        (tail.result as { data: string }).data ===
+          Buffer.alloc(2, 7).toString('base64'),
+      'read clips at EOF',
+    );
+    const eof = await call(CHANNELS.localRead, {
+      uri: grantedUri,
+      position: 32,
+      maxLen: 16,
+    });
+    assert(
+      eof.ok && (eof.result as { data: string }).data === '',
+      'read past EOF returns empty',
+    );
+    const denied = await call(CHANNELS.localRead, {
+      uri: pathToFileURL(evil).href,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !denied.ok && denied.error?.kind === 'permission-denied',
+      'an ungranted read is permission-denied',
+    );
+    const unindexedRead = await call(CHANNELS.localRead, {
+      uri: pathToFileURL(unindexed).href,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !unindexedRead.ok &&
+        unindexedRead.error?.kind === 'permission-denied',
+      'an unindexed file under the root is permission-denied',
+    );
+    // A file deleted between resolve and open reads as a typed
+    // 'unavailable' — never a malformed null result.
+    const gone = join(folder, 'gone.wav');
+    await writeFile(gone, Buffer.alloc(8, 5));
+    dbW.prepare(
+      `INSERT INTO local_files
+       (file_id, source_id, doc_id, size, fingerprint, recording_id)
+       VALUES ('lf-4', 'src-1', 'gone.wav', 8, 'fp4', 'rec-1')`,
+    ).run();
+    const goneUri = pathToFileURL(gone).href;
+    const goneResolve = await call(CHANNELS.localResolve, {
+      uri: goneUri,
+    });
+    assert(goneResolve.ok, 'gone file resolves while present');
+    rmSync(gone);
+    const goneRead = await call(CHANNELS.localRead, {
+      uri: goneUri,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !goneRead.ok && goneRead.error?.kind !== 'invalid-response',
+      'a vanished file reads a typed failure',
+    );
   } finally {
     local.close();
     tags.close();
     db.close();
+    dbW.close();
     rmSync(root, { recursive: true, force: true });
   }
 }
