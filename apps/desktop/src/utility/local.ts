@@ -322,7 +322,15 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
   // download leaving 'available' re-opens the scan). O(1) per call.
   // If the pragma is unavailable the stamp falls back to a content
   // hash over the gate-relevant columns (string work, still no fs).
-  const gateCache = new Map<string, string | null>();
+  // The verdict belongs to the PATH the URI resolved to, not the URI
+  // string — a re-pointed symlink keeps its URI while moving the
+  // target, so a hit must match the realpath computed this call. `real`
+  // is re-derived fresh above on every call; only the index scan is
+  // memoized.
+  const gateCache = new Map<
+    string,
+    { readonly real: string; readonly allowed: string | null }
+  >();
   let gateStamp = '';
   function indexStamp(db: DatabaseSync): string {
     try {
@@ -389,15 +397,15 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
       gateStamp = stamp;
     }
     const cached = gateCache.get(uri);
-    if (cached !== undefined) {
-      return cached;
+    if (cached !== undefined && cached.real === real) {
+      return cached.allowed;
     }
     const allowed = await gateLocalPath(db, abs, real);
     // An index write mid-evaluation voids the verdict — only cache
     // when the stamp still matches, so an in-flight scan can never
     // repopulate the table with pre-mutation answers.
     if (indexStamp(db) === stamp) {
-      gateCache.set(uri, allowed);
+      gateCache.set(uri, { real, allowed });
     }
     return allowed;
   }

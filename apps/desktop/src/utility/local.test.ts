@@ -371,6 +371,51 @@ export async function run(): Promise<void> {
       'restoring available re-arms the verdict',
     );
 
+    // The verdict belongs to the resolved PATH, not the URI string —
+    // a symlink re-point moves the target without touching the index
+    // (the freshness stamp stays put), so a cached answer must still
+    // match the realpath computed on THIS call. Prime a denial with
+    // `swap` still pointing at the unowned `evil`, then re-point it.
+    const swapUri = pathToFileURL(swap).href;
+    const primed = await call(CHANNELS.localResolve, { uri: swapUri });
+    assert(
+      primed.ok &&
+        (primed.result as { uri: string | null }).uri === null,
+      'the pre-swap denial is the one being primed',
+    );
+    await rm(swap);
+    await symlink(granted, swap);
+    const repointAllow = await call(CHANNELS.localResolve, {
+      uri: swapUri,
+    });
+    assert(
+      repointAllow.ok &&
+        (repointAllow.result as { uri: string | null }).uri ===
+          pathToFileURL(await realpath(granted)).href,
+      'a re-pointed symlink re-evaluates against its new target',
+    );
+    // …and the allowed direction: a verdict minted while the link
+    // named owned bytes dies the moment the link names anything else.
+    const turncoat = join(folder, 'turncoat.wav');
+    await symlink(granted, turncoat);
+    const turnUri = pathToFileURL(turncoat).href;
+    const firstLook = await call(CHANNELS.localResolve, { uri: turnUri });
+    assert(
+      firstLook.ok &&
+        (firstLook.result as { uri: string | null }).uri !== null,
+      'a link to owned bytes resolves',
+    );
+    await rm(turncoat);
+    await symlink(evil, turncoat);
+    const secondLook = await call(CHANNELS.localResolve, {
+      uri: turnUri,
+    });
+    assert(
+      secondLook.ok &&
+        (secondLook.result as { uri: string | null }).uri === null,
+      'a stale allow dies with the target it was minted for',
+    );
+
     // `local:read` — ranged bytes over the same grant gate.
     const read = await call(CHANNELS.localRead, {
       uri: grantedUri,
