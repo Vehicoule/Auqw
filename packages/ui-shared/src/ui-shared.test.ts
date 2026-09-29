@@ -18,6 +18,7 @@ import {
   setLocale,
   settingsGroups,
   t,
+  toAuthSheetModel,
   toHomeModel,
   toLibraryModel,
   toQueueModel,
@@ -1392,6 +1393,77 @@ const tap = (s: string) => {
     'synced lyrics highlight the active line',
   );
   assertEqual(lyricsPaneView(undefined, undefined).kind, 'empty');
+}
+
+// ---- auth sheet model ---------------------------------------------------
+{
+  // 'authorizing' surfaces the user-facing device pair; every other
+  // state strips it — a stale code must never linger on a retry.
+  const authorizing = toAuthSheetModel({
+    state: 'authorizing',
+    userCode: 'ABCD-EFGH',
+    verificationUrl: 'https://www.google.com/device',
+    expiresAtMs: 9_999,
+  });
+  assertEqual(authorizing.state, 'authorizing');
+  assertEqual(authorizing.userCode, 'ABCD-EFGH');
+  assertEqual(authorizing.verificationUrl, 'https://www.google.com/device');
+  assertEqual(authorizing.errorMessage, null);
+  const failed = toAuthSheetModel({
+    state: 'failed',
+    error: appError('permission-denied', 'oauth: denied'),
+  });
+  assertEqual(failed.state, 'failed');
+  assert(
+    failed.errorMessage !== null && failed.errorMessage.length > 0,
+    'failed state carries the localized reason',
+  );
+  assertEqual(failed.userCode, null);
+  const signedIn = toAuthSheetModel({ state: 'signed-in' });
+  assertEqual(signedIn.userCode, null);
+  assertEqual(signedIn.errorMessage, null);
+}
+
+// ---- settings auth rows --------------------------------------------------
+{
+  // No auth seam → the account rows omit themselves entirely
+  // (behavior-identical anonymous settings).
+  const bare = toSettingsModel(fixtureSettings, fixtureDiagnostics, {});
+  assert(
+    !bare.rows.some(
+      (r) =>
+        r.key === 'googleAuth' ||
+        r.key === 'authSignOut' ||
+        r.key === 'authClientId',
+    ),
+    'auth rows leaked into a no-auth settings model',
+  );
+  const signedOut = toSettingsModel(fixtureSettings, fixtureDiagnostics, {
+    auth: { state: 'signed-out', clientId: null },
+  });
+  const keys = signedOut.rows.map((r) => r.key);
+  assert(keys.includes('googleAuth'), 'sign-in row missing');
+  assert(keys.includes('authClientId'), 'client-id row missing');
+  assert(!keys.includes('authSignOut'), 'signed-out shows sign-out');
+  const grouped = settingsGroups(signedOut.rows);
+  assert(
+    grouped.some((g) => g.key === 'googleAuth' && g.label === 'account'),
+    'account section missing',
+  );
+  const signedIn = toSettingsModel(fixtureSettings, fixtureDiagnostics, {
+    auth: { state: 'signed-in', clientId: 'custom-id' },
+  });
+  const signOutRow = signedIn.rows.find((r) => r.key === 'authSignOut');
+  assert(signOutRow !== undefined, 'signed-in hides sign-out');
+  assert(signOutRow.destructive === true, 'sign-out not destructive');
+  assertEqual(
+    signedIn.rows.find((r) => r.key === 'googleAuth')?.value,
+    'linked',
+  );
+  assertEqual(
+    signedIn.rows.find((r) => r.key === 'authClientId')?.value,
+    'custom-id',
+  );
 }
 
 

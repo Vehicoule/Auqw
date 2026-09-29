@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { PairingModel } from '@auqw/ui-shared';
+import type { AuthSheetModel, PairingModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
 import type { ProviderPickerOption } from '@auqw/ui-shared';
 import { Artwork, DiagPressRow, Icon, Pressable, Text } from './primitives.tsx';
@@ -757,6 +757,159 @@ export function PairingSheet({
           </Text>
         )}
       </div>
+    </SheetScaffold>
+  );
+}
+
+/**
+ * OAuth device-flow sheet — the shared shell drives the poll; this
+ * renders the status union. 'authorizing' shows the user code +
+ * verification link (copy/open are platform callbacks); 'signed-in'
+ * carries the sign-out affordance; 'failed' pairs the localized
+ * reason with retry. Dismissal is the caller's cancel — the sheet
+ * owns no flow state itself.
+ */
+export function AuthSheet({
+  model,
+  onCopyCode,
+  onOpenLink,
+  onRetry,
+  onSignOut,
+  onDismiss,
+}: {
+  readonly model: AuthSheetModel;
+  readonly onCopyCode?: ((code: string) => void) | undefined;
+  readonly onOpenLink?: ((url: string) => void) | undefined;
+  readonly onRetry?: (() => void) | undefined;
+  readonly onSignOut?: (() => void) | undefined;
+  readonly onDismiss?: (() => void) | undefined;
+}) {
+  const code = model.userCode;
+  const [copied, setCopied] = useState(false);
+  useEffect(() => setCopied(false), [code]);
+  useEffect(() => {
+    if (!copied) {
+      return;
+    }
+    const timer = window.setTimeout(() => setCopied(false), 1_500);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+  return (
+    <SheetScaffold title={t('auth.sheet.title')} onDismiss={onDismiss}>
+      {model.state === 'signed-out' && (
+        <Text variant="body" color="secondary">
+          {t('auth.sheet.intro')}
+        </Text>
+      )}
+      {model.state === 'starting' && (
+        <div className="uw-sheet-row" data-state="busy">
+          <Icon name="spinner" size={15} color="var(--accent)" />
+          <Text variant="body" color="secondary">
+            {t('auth.sheet.starting')}
+          </Text>
+        </div>
+      )}
+      {model.state === 'authorizing' && (
+        <>
+          <Text variant="body" color="secondary">
+            {t('auth.sheet.codeHint')}
+          </Text>
+          {code !== null && (
+            <div className="uw-auth-code" aria-label={code}>
+              <Text variant="heading" color="bright">
+                {code}
+              </Text>
+            </div>
+          )}
+          {code !== null && onCopyCode !== undefined && (
+            <SheetRow
+              onPress={() => {
+                onCopyCode(code);
+                setCopied(true);
+              }}
+              ariaLabel={t('auth.sheet.copyCode')}
+            >
+              <Icon
+                name={copied ? 'check' : 'note'}
+                size={15}
+                color={
+                  copied ? 'var(--accent)' : 'var(--text-secondary)'
+                }
+              />
+              <Text
+                variant="body"
+                color={copied ? 'accent' : 'primary'}
+              >
+                {copied ? t('auth.sheet.copied') : t('auth.sheet.copyCode')}
+              </Text>
+            </SheetRow>
+          )}
+          {model.verificationUrl !== null && onOpenLink !== undefined && (
+            <SheetRow
+              onPress={() => onOpenLink(model.verificationUrl as string)}
+              ariaLabel={t('auth.sheet.openLink')}
+            >
+              <Icon
+                name="chevron-right"
+                size={15}
+                color="var(--text-secondary)"
+              />
+              <Text variant="body" color="primary">
+                {t('auth.sheet.openLink')}
+              </Text>
+            </SheetRow>
+          )}
+          <div className="uw-sheet-row" data-state="busy">
+            <Icon name="spinner" size={15} color="var(--accent)" />
+            <Text variant="metadata" color="secondary">
+              {t('auth.sheet.waiting')}
+            </Text>
+          </div>
+        </>
+      )}
+      {model.state === 'signed-in' && (
+        <>
+          <div className="uw-sheet-row">
+            <Icon name="check" size={15} color="var(--accent)" />
+            <Text variant="body" color="secondary">
+              {t('auth.sheet.linked')}
+            </Text>
+          </div>
+          {onSignOut !== undefined && (
+            <SheetRow
+              onPress={onSignOut}
+              ariaLabel={t('auth.sheet.signOut')}
+            >
+              <Icon name="close" size={15} color="var(--warn)" />
+              <Text variant="body" color="warn">
+                {t('auth.sheet.signOut')}
+              </Text>
+            </SheetRow>
+          )}
+        </>
+      )}
+      {model.state === 'failed' && (
+        <>
+          <div className="uw-sheet-row" data-state="unavailable">
+            <Icon name="warn" size={15} color="var(--warn)" />
+            <Text variant="body" color="warn">
+              {model.errorMessage ?? t('error.generic')}
+            </Text>
+          </div>
+          {onRetry !== undefined && (
+            <SheetRow onPress={onRetry} ariaLabel={t('auth.sheet.retry')}>
+              <Icon
+                name="spinner"
+                size={15}
+                color="var(--text-secondary)"
+              />
+              <Text variant="body" color="primary">
+                {t('auth.sheet.retry')}
+              </Text>
+            </SheetRow>
+          )}
+        </>
+      )}
     </SheetScaffold>
   );
 }

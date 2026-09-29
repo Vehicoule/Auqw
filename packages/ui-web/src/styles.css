@@ -1812,6 +1812,21 @@
   border-color: var(--fg40);
 }
 
+.uw-auth-code {
+  display: flex;
+  justify-content: center;
+  padding: var(--spacing-md);
+  border-radius: var(--radius-float);
+  background: var(--fg08);
+  letter-spacing: var(--tracking-loose, 0.12em);
+  text-align: center;
+}
+
+.uw-auth-code .uw-text {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.12em;
+}
+
 .uw-namefield {
   display: flex;
   align-items: center;
@@ -2035,6 +2050,20 @@
   display: flex;
   align-items: center;
   gap: var(--spacing-xs);
+}
+
+.uw-stage__recovery {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  min-height: var(--size-touch-min, 28px);
+  margin-top: var(--spacing-xxs);
+  padding: 0 var(--spacing-sm);
+  border-radius: var(--radius-control);
+}
+
+.uw-stage__recovery:hover {
+  background: var(--uw-hover);
 }
 
 .uw-stage__meta--lyrics {

@@ -31,6 +31,7 @@ import {
 import type {
   AppError,
   AttemptTrace,
+  AuthSnapshot,
   EntityRef,
   ImportPreview,
   LocalFileSource,
@@ -216,6 +217,9 @@ const dismissSheet =
     set(false);
   };
 
+/** Absent-auth unsubscribe — `useSyncExternalStore` needs a stable noop. */
+const NOOP_UNSUBSCRIBE = (): void => {};
+
 // The storefront/quality flavor: the save reports even when stale —
 // only the sheet close waits on the epoch.
 function commitSetting(
@@ -277,6 +281,100 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const qualityEpoch = useRef(0);
   const themeEpoch = useRef(0);
   const languageEpoch = useRef(0);
+
+  // ---- auth (OAuth session trust) -----------------------------------
+  // The seam is optional: reduced harnesses (and any platform without
+  // the OAuth surface) pass no `ports.auth` — the account rows and the
+  // wall CTA omit themselves with it. Only status + the user-facing
+  // device pair cross the port; token material never does.
+  const authPort = ports.auth;
+  const authSnapshot = useSyncExternalStore(
+    useCallback(
+      (l: () => void) => authPort?.subscribe(l) ?? NOOP_UNSUBSCRIBE,
+      [authPort],
+    ),
+    useCallback(
+      (): AuthSnapshot | null => authPort?.snapshot() ?? null,
+      [authPort],
+    ),
+  );
+  const [authSheetOpen, setAuthSheetOpen] = useState(false);
+  const [authClientSheetOpen, setAuthClientSheetOpen] = useState(false);
+  const [authClientDraft, setAuthClientDraft] = useState('');
+  const authClientEpoch = useRef(0);
+
+  // Settings row + wall CTA share this opener: signed-in lands on the
+  // account pane, a live flow just re-shows its code, and idle/failed
+  // starts the device flow (the port's own duplicate-guard covers a
+  // racing second tap).
+  const openAuthSheet = useCallback(() => {
+    if (authPort === undefined) {
+      return;
+    }
+    setAuthSheetOpen(true);
+    const state = authPort.snapshot().status.state;
+    if (state === 'signed-out' || state === 'failed') {
+      authPort.beginSignIn();
+    }
+  }, [authPort]);
+  // Sheet dismissal cancels the poll — a closed sheet never leaves a
+  // zombie loop. On 'failed' it also resets the row to signed-out.
+  const closeAuthSheet = useCallback(() => {
+    setAuthSheetOpen(false);
+    authPort?.cancelSignIn();
+  }, [authPort]);
+  // In-sheet retry after a terminal verdict (denied/expired/error).
+  const retryAuthFlow = useCallback(() => {
+    authPort?.beginSignIn();
+  }, [authPort]);
+  const onAuthSignOut = useCallback(() => {
+    if (authPort === undefined) {
+      return;
+    }
+    void authPort.signOut().then((r) => {
+      reportResult('action.signOutGoogle', r);
+      if (r.ok) {
+        setAuthSheetOpen(false);
+      }
+    });
+  }, [authPort]);
+  // The advanced client_id override — epoch-gated like the storefront
+  // commit: a save resolving after dismiss+reopen must not close the
+  // newer sheet.
+  const onSubmitAuthClient = useCallback(
+    (value: string) => {
+      if (authPort === undefined) {
+        return;
+      }
+      const opening = (authClientEpoch.current += 1);
+      const clientId = value.trim();
+      void authPort
+        .setClientOverride(clientId === '' ? null : clientId)
+        .then((r) => {
+          reportResult('action.authClientId', r);
+          if (r.ok && opening === authClientEpoch.current) {
+            setAuthClientSheetOpen(false);
+          }
+        });
+    },
+    [authPort],
+  );
+  const onClearAuthClient = useCallback(() => {
+    if (authPort === undefined) {
+      return;
+    }
+    const opening = (authClientEpoch.current += 1);
+    void authPort.setClientOverride(null).then((r) => {
+      reportResult('action.clearAuthClientId', r);
+      if (r.ok && opening === authClientEpoch.current) {
+        setAuthClientSheetOpen(false);
+      }
+    });
+  }, [authPort]);
+  const closeAuthClient = useCallback(() => {
+    authClientEpoch.current += 1;
+    setAuthClientSheetOpen(false);
+  }, []);
 
   // ---- locale -----------------------------------------------------
   // setLocale mutates module state and never notifies React — every
@@ -839,6 +937,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
       likes: state.likes,
       repeat: state.repeat,
       shuffleOrder: state.shuffleOrder,
+      // The wall CTA only exists on a signed-out auth seam — `null`
+      // snapshot (no port) maps to undefined: no auth surface at all.
+      authSignedIn:
+        authSnapshot === null
+          ? undefined
+          : authSnapshot.status.state === 'signed-in',
     });
     // The model's position is a publish-time read — overlay the live
     // tick value so the transport position moves between publishes.
@@ -860,6 +964,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     state.repeat,
     state.shuffleOrder,
     positionMs,
+    authSnapshot,
     localeTick,
   ]);
 
@@ -1353,6 +1458,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
       downloadCount: downloadLedgerCount(downloads),
       syncSupported: extras.syncSupported,
       syncLabel: extras.syncLabel,
+      // No auth port → no account rows at all.
+      auth:
+        authSnapshot === null
+          ? undefined
+          : {
+              state: authSnapshot.status.state,
+              clientId: authSnapshot.clientId,
+            },
     });
     // Row omits are the platform's — desktop drops the artwork-cache
     // budget row: the renderer has no application artwork cache
@@ -1373,6 +1486,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     downloads,
     ports.settingsExtras,
     ports.omitSettingsRows,
+    authSnapshot,
     localTick,
     localeTick,
   ]);
@@ -1776,6 +1890,19 @@ export function useAppShell<E extends { readonly type: string } = never>(
         case 'artworkCacheBytes':
           setArtworkCachePickerOpen(true);
           return;
+        // OAuth session trust — the row opens the device-flow sheet;
+        // sign-out commits immediately (no nested sheet needed), and
+        // the client-id override is its own ValueFieldSheet.
+        case 'googleAuth':
+          openAuthSheet();
+          return;
+        case 'authSignOut':
+          onAuthSignOut();
+          return;
+        case 'authClientId':
+          open(authClientEpoch, setAuthClientSheetOpen);
+          setAuthClientDraft(authSnapshot?.clientId ?? '');
+          return;
         case 'addLocalFolder':
           localMutate('settings.addLocalFolder', (l) =>
             l.addFolder(freshSignal()),
@@ -1806,6 +1933,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
       refreshUsage,
       pushOverlay,
       ports,
+      authSnapshot,
+      openAuthSheet,
+      onAuthSignOut,
     ],
   );
 
@@ -3125,6 +3255,20 @@ export function useAppShell<E extends { readonly type: string } = never>(
     artworkCachePickerOpen,
     onPickArtworkCache,
     closeArtworkCache,
+    // auth — the OAuth device-flow sheet + the advanced client-id
+    // editor. `authSnapshot` is null where the platform has no auth
+    // seam (the sheets stay closed, the rows omit themselves).
+    authSnapshot,
+    authSheetOpen,
+    openAuthSheet,
+    closeAuthSheet,
+    retryAuthFlow,
+    onAuthSignOut,
+    authClientSheetOpen,
+    authClientDraft,
+    onSubmitAuthClient,
+    onClearAuthClient,
+    closeAuthClient,
     // settings + misc ops
     onSettingsSelect,
     onSettingsToggle,

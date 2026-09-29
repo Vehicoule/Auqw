@@ -2,6 +2,7 @@ import type { ThemeName } from '@auqw/design-tokens';
 import type {
   AppError,
   ArtworkRef,
+  AuthStatus,
   DownloadProgress,
   Entity,
   EntityKind,
@@ -30,6 +31,7 @@ import type {
 } from '@auqw/application';
 import {
   ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
+  isBotCheckWall,
   matchDisplayKey,
   topPlayed,
 } from '@auqw/application';
@@ -89,6 +91,14 @@ export type PlayerModel = {
   readonly canPrevious: boolean;
   readonly canNext: boolean;
   readonly errorMessage: string | null;
+  /**
+   * Recovery affordance on a failed attempt — 'sign-in' only when the
+   * verdict is a provider bot wall AND the caller reported a signed-out
+   * auth seam. `authSignedIn: undefined` (no auth surface at all) hides
+   * it: there is nothing to offer. It's a CTA, not a modal — the error
+   * line itself is unchanged.
+   */
+  readonly recovery: 'sign-in' | null;
 };
 
 /**
@@ -808,6 +818,13 @@ type PlayerModelInput = {
   readonly repeat: RepeatMode;
   /** The dealt play order under shuffle (occurrence ids); canonical when null. */
   readonly shuffleOrder: readonly string[] | null;
+  /**
+   * The platform's auth-seam read: `false` = OAuth surface exists and
+   * the user is signed out (the wall CTA may offer sign-in), `true`
+   * suppresses it (a token is already applied — re-pairing wouldn't
+   * fix this wall), `undefined` = no auth seam on this platform.
+   */
+  readonly authSignedIn?: boolean | undefined;
 };
 
 function indexById(
@@ -894,7 +911,8 @@ const PLAYER_ERROR_SILENT: ReadonlySet<ErrorKind> = new Set([
 ]);
 
 export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
-  const { playback, queue, recordings, likes, repeat, shuffleOrder } = input;
+  const { playback, queue, recordings, likes, repeat, shuffleOrder } =
+    input;
   if (playback.type === 'idle') {
     return null;
   }
@@ -947,6 +965,14 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
           !PLAYER_ERROR_SILENT.has(playback.error.kind)
             ? errorText(playback.error)
             : null,
+        // The wall CTA rides the same failed attempt — a signed-in
+        // user (or a platform with no auth seam) gets no offer.
+        recovery:
+          playback.type === 'failed' &&
+          input.authSignedIn === false &&
+          isBotCheckWall(playback.error)
+            ? 'sign-in'
+            : null,
       };
     case 'buffering':
     case 'playing':
@@ -958,6 +984,7 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
         positionMs: playback.positionMs,
         durationMs: playback.durationMs ?? recording?.durationMs ?? null,
         errorMessage: null,
+        recovery: null,
       };
   }
 }
@@ -1620,6 +1647,17 @@ export function toSettingsModel(
     readonly syncSupported?: boolean;
     /** 'not paired' / 'N connected' / 'N paired' — the row's value. */
     readonly syncLabel?: string | null;
+    /**
+     * The OAuth session-trust seam — `undefined` on harnesses with no
+     * auth surface: the account rows omit themselves entirely, keeping
+     * signed-out settings identical to before the slice.
+     */
+    readonly auth?:
+      | {
+          readonly state: AuthStatus['state'];
+          readonly clientId: string | null;
+        }
+      | undefined;
   } = {},
 ): SettingsModel {
   const nav = (
@@ -1661,6 +1699,41 @@ export function toSettingsModel(
       nav('lyricsProvider', t('settings.lyricsProvider'), settings.lyricsProvider ?? t('settings.value.auto')),
       nav('radioProvider', t('settings.radioProvider'), settings.radioProvider ?? t('settings.value.auto')),
       nav('storefront', t('settings.storefront'), settings.storefront ?? t('settings.value.notSet')),
+      // OAuth session trust — the sign-in sheet opens off 'googleAuth';
+      // 'authSignOut' shows only while linked, and 'authClientId' is the
+      // advanced override row (its own ValueFieldSheet).
+      ...(media.auth === undefined
+        ? []
+        : [
+            nav(
+              'googleAuth',
+              t('settings.googleAuth'),
+              media.auth.state === 'signed-in'
+                ? t('settings.googleAuthValue.linked')
+                : media.auth.state === 'starting' ||
+                    media.auth.state === 'authorizing'
+                  ? t('settings.googleAuthValue.working')
+                  : media.auth.state === 'failed'
+                    ? t('settings.googleAuthValue.failed')
+                    : null,
+            ),
+            ...(media.auth.state === 'signed-in'
+              ? [
+                  nav(
+                    'authSignOut',
+                    t('settings.googleAuthSignOut'),
+                    null,
+                    true,
+                    true,
+                  ),
+                ]
+              : []),
+            nav(
+              'authClientId',
+              t('settings.authClientId'),
+              media.auth.clientId ?? t('settings.value.auto'),
+            ),
+          ]),
       nav('qualityKbps', t('settings.quality'), t('settings.qualityUnit', { value: settings.qualityKbps })),
       tog('prefetch', t('settings.prefetch'), settings.prefetch),
       tog('downloadMetered', t('settings.downloadMetered'), settings.downloadMetered === true),
@@ -1735,9 +1808,50 @@ type SettingsGroup = {
   readonly rows: readonly SettingsRowModel[];
 };
 
+/**
+ * The device-flow sheet's view — the auth status union flattened to
+ * display fields so the UI packages never import the application's
+ * `AuthStatus` (and `AppError` collapses to its errorText line).
+ */
+export type AuthSheetModel = {
+  readonly state: AuthStatus['state'];
+  /** The user-facing device pair — only present while 'authorizing'. */
+  readonly userCode: string | null;
+  readonly verificationUrl: string | null;
+  /** Localized failure line on 'failed'; null elsewhere. */
+  readonly errorMessage: string | null;
+};
+
+export function toAuthSheetModel(status: AuthStatus): AuthSheetModel {
+  switch (status.state) {
+    case 'authorizing':
+      return {
+        state: 'authorizing',
+        userCode: status.userCode,
+        verificationUrl: status.verificationUrl,
+        errorMessage: null,
+      };
+    case 'failed':
+      return {
+        state: 'failed',
+        userCode: null,
+        verificationUrl: null,
+        errorMessage: errorText(status.error),
+      };
+    default:
+      return {
+        state: status.state,
+        userCode: null,
+        verificationUrl: null,
+        errorMessage: null,
+      };
+  }
+}
+
 const SETTINGS_GROUP_STARTS: readonly (readonly [string, MessageId])[] = [
   ['theme', 'settings.section.appearance'],
   ['catalogProvider', 'settings.section.providers'],
+  ['googleAuth', 'settings.section.account'],
   ['qualityKbps', 'settings.section.playback'],
   ['downloadMetered', 'settings.section.downloads'],
   ['localSources', 'settings.section.localFiles'],

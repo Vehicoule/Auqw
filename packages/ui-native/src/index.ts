@@ -93,6 +93,7 @@ export type { EntityScreenProps } from './entity-screen.tsx';
 
 export {
     AddToPlaylistSheet,
+    AuthSheet,
     LanguagePickerSheet,
     NameField,
     ProviderPickerSheet,

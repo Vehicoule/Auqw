@@ -262,6 +262,7 @@ export function NowPlayingScreen({
   onDownload,
   onAddToPlaylist,
   onStopPlayback,
+  onRecovery,
   onSeek,
   peaks,
   onRetryLyrics,
@@ -448,6 +449,18 @@ export function NowPlayingScreen({
                       {meta.errorMessage}
                     </Text>
                   )}
+                  {meta.recovery === 'sign-in' &&
+                    onRecovery !== undefined && (
+                      <Pressable
+                        className="uw-stage__recovery"
+                        ariaLabel={t('auth.wall.ctaA11y')}
+                        onPress={onRecovery}
+                      >
+                        <Text variant="label" color="accent">
+                          {t('auth.wall.cta')}
+                        </Text>
+                      </Pressable>
+                    )}
                 </div>
                 {/* Ownership actions hug the right edge of the meta
                     line — download state icon first, then the
