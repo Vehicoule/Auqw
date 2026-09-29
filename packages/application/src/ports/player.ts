@@ -1,4 +1,10 @@
-import { isSafeNonNegative, isString } from '../domain.ts';
+import {
+  hasExactKeys,
+  hasKeys,
+  isRecord,
+  isSafeNonNegative,
+  isString,
+} from '../domain.ts';
 import type { AppError, Result } from '../errors.ts';
 
 export type PlaybackIdentity = {
@@ -40,22 +46,6 @@ export type AttemptTrace = {
   readonly guestLog: readonly GuestLogEntry[];
 };
 
-function isTraceRecord(value: unknown): value is Record<string, unknown> {
-  return (
-    typeof value === 'object' && value !== null && !Array.isArray(value)
-  );
-}
-
-function hasExactTraceKeys(
-  value: Record<string, unknown>,
-  keys: readonly string[],
-): boolean {
-  const own = Object.keys(value);
-  return (
-    own.length === keys.length && keys.every((k) => Object.hasOwn(value, k))
-  );
-}
-
 /**
  * The trace entry the host writes in place of a pot-provider URL — the
  * provider is an operator LAN address that must not reach diagnostics,
@@ -87,15 +77,8 @@ const TRACE_LEVELS: ReadonlySet<string> = new Set([
 
 function isHttpTraceEntry(value: unknown): value is HttpTraceEntry {
   if (
-    !isTraceRecord(value) ||
-    !(hasExactTraceKeys(value, [
-      'method',
-      'url',
-      'status',
-      'bytes',
-      'elapsedMs',
-    ]) ||
-      hasExactTraceKeys(value, ['method', 'url', 'bytes', 'elapsedMs']))
+    !isRecord(value) ||
+    !hasKeys(value, ['method', 'url', 'bytes', 'elapsedMs'], ['status'])
   ) {
     return false;
   }
@@ -111,8 +94,8 @@ function isHttpTraceEntry(value: unknown): value is HttpTraceEntry {
 
 function isGuestLogEntry(value: unknown): value is GuestLogEntry {
   return (
-    isTraceRecord(value) &&
-    hasExactTraceKeys(value, ['level', 'message']) &&
+    isRecord(value) &&
+    hasExactKeys(value, ['level', 'message']) &&
     typeof value['level'] === 'string' &&
     TRACE_LEVELS.has(value['level']) &&
     typeof value['message'] === 'string' &&
@@ -126,8 +109,8 @@ function isGuestLogEntry(value: unknown): value is GuestLogEntry {
  */
 export function isAttemptTrace(value: unknown): value is AttemptTrace {
   return (
-    isTraceRecord(value) &&
-    hasExactTraceKeys(value, [
+    isRecord(value) &&
+    hasExactKeys(value, [
       'requestId',
       'steps',
       'httpCalls',
