@@ -235,6 +235,18 @@ const SLOT_META: Record<
   },
 };
 
+// The capability slice alone — the app shells' boot-time provider
+// picking and settings repair route by it without the picker labels.
+export const SLOT_CAPABILITIES: Record<
+  ProviderSlot,
+  readonly ProviderCapability[]
+> = {
+  catalogProvider: SLOT_META.catalogProvider.capabilities,
+  playbackProvider: SLOT_META.playbackProvider.capabilities,
+  lyricsProvider: SLOT_META.lyricsProvider.capabilities,
+  radioProvider: SLOT_META.radioProvider.capabilities,
+};
+
 export type ProviderPickerModel = {
   readonly title: string;
   readonly options: readonly ProviderPickerOption[];
