@@ -25,6 +25,7 @@ import type {
   Session,
   SourceRef,
   StoragePort,
+  TrackMetadata,
 } from '@auqw/application';
 import {
   nextQueueDestination,
