@@ -1416,6 +1416,70 @@ async function unplayableFailure(): Promise<void> {
   assert('identity' in playback, 'successor attempt begins on resume');
 }
 
+async function unplayableRollbackRestoresMarks(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('itunes', 'a')]),
+        recording('rB', [ref('itunes', 'b')]),
+      ],
+      queue: {
+        revision: 2,
+        occurrences: [occurrence('oA', 'rA'), occurrence('oB', 'rB')],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  r.player.emit(
+    statusEvent(
+      lastPrepareIdentity(r),
+      'h-oA',
+      'failed',
+      0,
+      appError('unavailable', 'not playable'),
+    ),
+  );
+  await pump();
+  assert(readyOf(r).queue.blockedError !== undefined, 'oA marked blocked');
+  // A failed retry commit rolls the mutation back — the failed marks
+  // banked BEFORE it must survive, and any clears it made must revert.
+  r.storage.holdNextCommit();
+  const retry = r.session.retryCurrent();
+  await pump();
+  assert(
+    r.storage.settleCommit({
+      ok: false,
+      error: appError('transient', 'disk gone'),
+    }),
+    'retry write held',
+  );
+  assert(!(await retry).ok, 'racing retry reports the failed commit');
+  await pump();
+  assert(
+    readyOf(r).queue.blockedError !== undefined,
+    'rollback restores the blocked row',
+  );
+  // The mark lives outside the snapshot — the projection walk is the
+  // observable: oA marked and BEHIND the cursor stays reachable for
+  // media-control previous; only a marked row ahead drops out.
+  assert((await r.session.skipCurrent()).ok);
+  await pump();
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oB', 'skip lands on oB');
+  assertDeepEqual(
+    r.player.projections.at(-1)?.order,
+    [0, 1],
+    'the projection keeps failed history for previous',
+  );
+  assert(
+    r.player.projections.at(-1)?.items[0]?.skipsForward === true,
+    'the failed row carries the forward-skip flag',
+  );
+}
+
 async function restartRestore(): Promise<void> {
   const r = rig(
     persisted({
@@ -2076,6 +2140,79 @@ async function repeatAllTailTransitionWraps(): Promise<void> {
   );
 }
 
+async function repeatAllWrapSkipsMarkedHead(): Promise<void> {
+  const r = repeatRig();
+  await restoreOk(r);
+  await pump();
+  // oA fails: every later projection flags it skipsForward.
+  await playThrough(r, 'oA');
+  r.player.emit(
+    statusEvent(
+      lastPrepareIdentity(r),
+      'h-oA',
+      'failed',
+      0,
+      appError('unavailable', 'not playable'),
+    ),
+  );
+  await pump();
+  assert((await r.session.setRepeatMode('all')).ok);
+  await pump();
+  const identity = (id: string): PlaybackIdentity => ({
+    attemptId: `svc-${id}`,
+    queueRev: r.player.projections.at(-1)!.queueRev,
+  });
+  // Walk the service cursor to the tail through remote presses.
+  for (const [from, to] of [['oA', 'oB'], ['oB', 'oC']] as const) {
+    r.player.emit(
+      transitionEvent(r, {
+        from,
+        to,
+        reason: 'remote-next',
+        positionMs: 0,
+        identity: identity(to),
+        handle: `h-${to}`,
+      }),
+    );
+    await pump();
+  }
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oC', 'at the tail');
+  // The wrap must step over the marked head — an edge onto oA is
+  // illegal; the legal wrap lands on the first unflagged row.
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oC',
+      to: 'oA',
+      reason: 'ended',
+      positionMs: 0,
+      identity: identity('oA'),
+      handle: 'h-oA',
+    }),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oC',
+    'wrapping onto the marked head is rejected',
+  );
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oC',
+      to: 'oB',
+      reason: 'ended',
+      positionMs: 0,
+      identity: identity('oB'),
+      handle: 'h-oB',
+    }),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oB',
+    'repeat=all wraps to the first unmarked row',
+  );
+}
+
 async function repeatAllHeadPrevWraps(): Promise<void> {
   const r = repeatRig();
   await restoreOk(r);
@@ -2457,6 +2594,63 @@ async function shuffleToggleDealsOrder(): Promise<void> {
     [0, 1, 2],
     'off walks the canonical identity',
   );
+}
+
+async function shuffleMoveEditsDeal(): Promise<void> {
+  // Move slots are display slots — under shuffle that is the dealt
+  // walk. Dragging the tail up between the cursor and the middle row
+  // rewires the deal, and the canonical order follows the same
+  // predecessor even when the engine move itself is a no-op.
+  const r = shuffleRig([0.8, 0.1]);
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assertDeepEqual(readyOf(r).shuffleOrder, ['oA', 'oC', 'oB']);
+  // Display slot 1 = right after now playing: oB lands before oC in
+  // the deal. The canonical mirror puts oB after oA — the order it
+  // already has — so only the deal changes; the projection still
+  // re-walks to the new permutation.
+  assert((await r.session.moveOccurrence('oB', 1)).ok);
+  await pump();
+  assertDeepEqual(
+    readyOf(r).shuffleOrder,
+    ['oA', 'oB', 'oC'],
+    'the deal reorders around the cursor',
+  );
+  assertDeepEqual(
+    readyOf(r).queue.occurrences.map((o) => o.occurrenceId),
+    ['oA', 'oB', 'oC'],
+    'canonical order already matched',
+  );
+  assertDeepEqual(
+    r.player.projections.at(-1)?.order,
+    [0, 1, 2],
+    'a deal-only move still re-projects',
+  );
+  // Display slot 1 again for oC: back in front of oB — and this time
+  // the canonical mirror is a real move (oC ahead of oB).
+  assert((await r.session.moveOccurrence('oC', 1)).ok);
+  await pump();
+  assertDeepEqual(
+    readyOf(r).shuffleOrder,
+    ['oA', 'oC', 'oB'],
+    'moving back restores the dealt walk',
+  );
+  assertDeepEqual(
+    readyOf(r).queue.occurrences.map((o) => o.occurrenceId),
+    ['oA', 'oC', 'oB'],
+    'canonical order follows the dealt predecessor',
+  );
+  // Canonical caught up with the deal, so the walk is the identity
+  // again — but over the reordered item list.
+  const moved = r.player.projections.at(-1);
+  assertDeepEqual(
+    moved?.items.map((i) => i.occurrenceId),
+    ['oA', 'oC', 'oB'],
+    'the projection carries the mirrored order',
+  );
+  assertDeepEqual(moved?.order, [0, 1, 2], 'identity over mirrored items');
 }
 
 async function shuffleNextFollowsDeal(): Promise<void> {
@@ -5785,6 +5979,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['stopCommitKeepsPlayback', stopCommitKeepsPlayback],
   ['previousSemantics', previousSemantics],
   ['unplayableFailure', unplayableFailure],
+  ['unplayableRollbackRestoresMarks', unplayableRollbackRestoresMarks],
   ['restartRestore', restartRestore],
   ['likesFlow', likesFlow],
   ['settingsFlow', settingsFlow],
@@ -5795,6 +5990,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['repeatCycle', repeatCycle],
   ['repeatOneEndedTransition', repeatOneEndedTransition],
   ['repeatAllTailTransitionWraps', repeatAllTailTransitionWraps],
+  ['repeatAllWrapSkipsMarkedHead', repeatAllWrapSkipsMarkedHead],
   ['repeatAllHeadPrevWraps', repeatAllHeadPrevWraps],
   ['repeatOffSameIdRejected', repeatOffSameIdRejected],
   ['repeatAllManualWraps', repeatAllManualWraps],
@@ -5805,6 +6001,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['repeatLongOccurrenceIdCounts', repeatLongOccurrenceIdCounts],
   ['repeatOneEndedFallback', repeatOneEndedFallback],
   ['shuffleToggleDealsOrder', shuffleToggleDealsOrder],
+  ['shuffleMoveEditsDeal', shuffleMoveEditsDeal],
   ['shuffleNextFollowsDeal', shuffleNextFollowsDeal],
   ['shufflePreviousFollowsDeal', shufflePreviousFollowsDeal],
   ['shufflePreviousPastWindowRestarts', shufflePreviousPastWindowRestarts],

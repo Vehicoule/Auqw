@@ -5,6 +5,7 @@ import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import type { QueueItemModel, QueueModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
+import { queueSectionLabel } from '@auqw/ui-shared/controllers';
 
 // Shared fallback (web/desktop + any platform without gesture-handler):
 // reorder uses paired chevron controls; the native variant swaps this
@@ -35,33 +36,71 @@ export function QueueList({
   onPressItem,
   onRemoveItem,
   onMoveItem,
+  onMoveItemTo,
 }: QueueListProps) {
   const theme = useTheme();
   if (queue.items.length === 0) {
     return <EmptyState title={t('queue.empty')} icon="queue" />;
   }
+  // Display order (nowPlaying → upNext → history) is the order the
+  // session's move contract indexes — under shuffle it is the dealt
+  // walk, so display slots, not canonical `item.index`, drive moves.
+  const items = queue.sections.flatMap((section) => section.items);
+  const canMove = onMoveItem !== undefined || onMoveItemTo !== undefined;
+  const move = (item: QueueItemModel, from: number, neighborIndex: number) => {
+    const neighbor = items[neighborIndex];
+    if (
+      item.section !== 'upNext' ||
+      neighbor === undefined ||
+      neighbor.section !== 'upNext'
+    ) {
+      return;
+    }
+    const direction: -1 | 1 = neighborIndex < from ? -1 : 1;
+    if (onMoveItem !== undefined) {
+      onMoveItem(item.occurrenceId, direction);
+    } else {
+      onMoveItemTo?.(item.occurrenceId, neighborIndex);
+    }
+  };
   return (
     <FlatList
-      data={queue.items}
+      data={items}
       keyExtractor={(item) => item.occurrenceId}
       scrollEnabled={scrollEnabled}
       initialNumToRender={15}
       contentContainerStyle={{ paddingBottom: contentPaddingBottom }}
       renderItem={({ item, index }) => (
         <View>
-          {item.current && (
+          {items[index - 1]?.section !== item.section && (
             <Text
               variant="label"
-              color="accent"
+              color={item.section === 'nowPlaying' ? 'accent' : 'secondary'}
               style={{ paddingHorizontal: theme.spacing.sm, marginBottom: 2 }}
               uppercase
             >
-              {t('queue.nowPlaying')}
+              {queueSectionLabel(item.section)}
             </Text>
+          )}
+          {item.duplicate && (
+            <View
+              style={{
+                alignSelf: 'flex-start',
+                marginHorizontal: theme.spacing.sm,
+                marginTop: theme.spacing.xs,
+                paddingHorizontal: 7,
+                borderRadius: theme.radius.pill,
+                borderWidth: theme.strokes.hairline,
+                borderColor: theme.colors.hairline,
+              }}
+            >
+              <Text variant="label" color="secondary" uppercase>
+                {t('queue.badge.repeat')}
+              </Text>
+            </View>
           )}
           <TrackRow
             row={item.row}
-            badge={item.duplicate ? t('queue.badge.repeat') : null}
             reorderControls={reordering ? 'buttons' : 'none'}
             onPress={
               onPressItem === undefined || reordering
@@ -74,15 +113,17 @@ export function QueueList({
                 : () => onRemoveItem(item.occurrenceId)
             }
             onMoveUp={
-              reordering && index > 0 && onMoveItem !== undefined
-                ? () => onMoveItem(item.occurrenceId, -1)
+              reordering && canMove &&
+              item.section === 'upNext' &&
+              items[index - 1]?.section === 'upNext'
+                ? () => move(item, index, index - 1)
                 : undefined
             }
             onMoveDown={
-              reordering &&
-                index < queue.items.length - 1 &&
-                onMoveItem !== undefined
-                ? () => onMoveItem(item.occurrenceId, 1)
+              reordering && canMove &&
+              item.section === 'upNext' &&
+              items[index + 1]?.section === 'upNext'
+                ? () => move(item, index, index + 1)
                 : undefined
             }
           />

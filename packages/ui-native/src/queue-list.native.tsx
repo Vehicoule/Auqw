@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react';
 import { FlatList, View } from 'react-native';
 import DraggableFlatList, {
   ScaleDecorator,
@@ -10,6 +11,7 @@ import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import type { QueueItemModel, QueueModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
+import { queueSectionLabel } from '@auqw/ui-shared/controllers';
 
 // Reorder mode swaps the FlatList for a DraggableFlatList: rows get a
 // drag handle, the lift animation comes from ScaleDecorator, and a
@@ -44,33 +46,66 @@ export function QueueList({
   onMoveItemTo,
 }: QueueListProps) {
   const theme = useTheme();
+  // The draggable list animates to the raw drop slot; a drop outside
+  // up-next is clamped on write, so the list remounts to re-render
+  // from the model — otherwise it keeps showing the rejected landing.
+  const [dragRemount, bumpDragRemount] = useState(0);
+  // The remount's fresh list starts at the top — carry the last
+  // scroll offset across so deep-queue reordering stays put. Both
+  // list variants feed the ref and mount at it, so offset survives
+  // mode switches too.
+  const listScrollY = useRef(0);
   if (queue.items.length === 0) {
     return <EmptyState title={t('queue.empty')} icon="queue" />;
   }
+  // Display order (nowPlaying → upNext → history) is not the canonical
+  // order the engine indexes — move calls translate through
+  // `item.index` / the displaced neighbor's slot.
+  const items = queue.sections.flatMap((section) => section.items);
+  const upNextStart = items.findIndex((item) => item.section === 'upNext');
+  const upNextEnd = items.findLastIndex((item) => item.section === 'upNext');
   const renderItem = ({
     item,
     index,
     onDragStart,
+    controls,
   }: {
     item: QueueItemModel;
     index: number;
     onDragStart?: (() => void) | undefined;
+    controls: 'none' | 'buttons' | 'drag';
   }) => (
     <View>
-      {item.current && (
+      {items[index - 1]?.section !== item.section && (
         <Text
           variant="label"
-          color="accent"
+          color={item.section === 'nowPlaying' ? 'accent' : 'secondary'}
           style={{ paddingHorizontal: theme.spacing.sm, marginBottom: 2 }}
           uppercase
         >
-          {t('queue.nowPlaying')}
+          {queueSectionLabel(item.section)}
         </Text>
+      )}
+      {item.duplicate && (
+        <View
+          style={{
+            alignSelf: 'flex-start',
+            marginHorizontal: theme.spacing.sm,
+            marginTop: theme.spacing.xs,
+            paddingHorizontal: 7,
+            borderRadius: theme.radius.pill,
+            borderWidth: theme.strokes.hairline,
+            borderColor: theme.colors.hairline,
+          }}
+        >
+          <Text variant="label" color="secondary" uppercase>
+            {t('queue.badge.repeat')}
+          </Text>
+        </View>
       )}
       <TrackRow
         row={item.row}
-        badge={item.duplicate ? t('queue.badge.repeat') : null}
-        reorderControls={reordering ? 'drag' : 'none'}
+        reorderControls={controls}
         onDragStart={onDragStart}
         onPress={
           onPressItem === undefined || reordering
@@ -83,12 +118,16 @@ export function QueueList({
             : () => onRemoveItem(item.occurrenceId)
         }
         onMoveUp={
-          reordering && index > 0 && onMoveItem !== undefined
+          reordering && onMoveItem !== undefined &&
+          item.section === 'upNext' &&
+          items[index - 1]?.section === 'upNext'
             ? () => onMoveItem(item.occurrenceId, -1)
             : undefined
         }
         onMoveDown={
-          reordering && index < queue.items.length - 1 && onMoveItem !== undefined
+          reordering && onMoveItem !== undefined &&
+          item.section === 'upNext' &&
+          items[index + 1]?.section === 'upNext'
             ? () => onMoveItem(item.occurrenceId, 1)
             : undefined
         }
@@ -98,14 +137,34 @@ export function QueueList({
   if (reordering && onMoveItemTo !== undefined) {
     return (
       <DraggableFlatList
-        data={queue.items.slice()}
+        key={dragRemount}
+        data={items.slice()}
         keyExtractor={(item) => item.occurrenceId}
         scrollEnabled={scrollEnabled}
+        scrollEventThrottle={64}
+        onScroll={(event) => {
+          listScrollY.current = event.nativeEvent.contentOffset.y;
+        }}
+        contentOffset={{ x: 0, y: listScrollY.current }}
         contentContainerStyle={{ paddingBottom: contentPaddingBottom }}
         onDragEnd={({ from, to }) => {
-          const item = queue.items[from];
-          if (item !== undefined) {
-            onMoveItemTo(item.occurrenceId, to);
+          const item = items[from];
+          // Reorder is confined to up-next: the drop clamps into the
+          // section — and the clamped display slot is the destination
+          // the session's move contract indexes. An out-of-bounds drop
+          // remounts the list so it can't keep showing the slot the
+          // write rejected.
+          const destination =
+            upNextStart === -1
+              ? undefined
+              : Math.max(upNextStart, Math.min(to, upNextEnd));
+          if (item?.section === 'upNext' && destination !== undefined) {
+            if (destination !== to) {
+              bumpDragRemount((x) => x + 1);
+            }
+            onMoveItemTo(item.occurrenceId, destination);
+          } else if (item?.section === 'upNext') {
+            bumpDragRemount((x) => x + 1);
           }
         }}
         renderItem={({
@@ -117,10 +176,18 @@ export function QueueList({
             {renderItem({
               item,
               index: getIndex() ?? 0,
-              onDragStart: () => {
-                void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                drag();
-              },
+              controls: 'drag',
+              // Only up-next rows lift — outside the section the
+              // handle dims to disabled instead of faking it.
+              onDragStart:
+                item.section === 'upNext'
+                  ? () => {
+                    void Haptics.impactAsync(
+                      Haptics.ImpactFeedbackStyle.Light,
+                    );
+                    drag();
+                  }
+                  : undefined,
             })}
           </ScaleDecorator>
         )}
@@ -129,11 +196,25 @@ export function QueueList({
   }
   return (
     <FlatList
-      data={queue.items}
+      data={items}
       keyExtractor={(item) => item.occurrenceId}
-      renderItem={({ item, index }) => renderItem({ item, index })}
+      renderItem={({ item, index }) =>
+        renderItem({
+          item,
+          index,
+          // Reorder without an absolute handler falls back to paired
+          // chevrons (relative moves) instead of a dead drag handle.
+          controls:
+            reordering && onMoveItem !== undefined ? 'buttons' : 'none',
+        })
+      }
       scrollEnabled={scrollEnabled}
       initialNumToRender={15}
+      scrollEventThrottle={64}
+      onScroll={(event) => {
+        listScrollY.current = event.nativeEvent.contentOffset.y;
+      }}
+      contentOffset={{ x: 0, y: listScrollY.current }}
       contentContainerStyle={{ paddingBottom: contentPaddingBottom }}
     />
   );

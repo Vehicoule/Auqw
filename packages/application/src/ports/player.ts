@@ -161,6 +161,13 @@ export type QueueProjectionItem = {
   readonly title: string;
   readonly artist: string | null;
   readonly artworkUrl: string | null;
+  /**
+   * The session marked this row failed — forward moves (ended,
+   * remote-next, repeat=all wrap) step over it the way the engine's
+   * next() does; backward moves still land on it the way previous()
+   * does. Absent means unmarked.
+   */
+  readonly skipsForward?: boolean | undefined;
 };
 
 export type QueueProjection = {
@@ -176,9 +183,13 @@ export type QueueProjection = {
    */
   readonly repeat: RepeatMode;
   /**
-   * The dealt walk order: a permutation of `items` indices the cursor
-   * steps through — the identity under shuffle=off. Canonical item
-   * order never changes; only the walk does (decisions.md).
+   * The dealt walk order: a unique subsequence of `items` indices the
+   * cursor steps through — the identity under shuffle=off. Failed rows
+   * stay in the walk flagged `skipsForward` — forward moves (ended,
+   * remote-next, wrap) must step over them while backward moves still
+   * reach them; the current row always stays so the cursor can locate
+   * itself. Canonical item order never changes; only the walk does
+   * (decisions.md).
    */
   readonly order: readonly number[];
   readonly items: readonly QueueProjectionItem[];

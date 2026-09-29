@@ -651,7 +651,8 @@ export class Session {
         enqueueStorage: (fn) => this.#enqueueStorage(fn),
         persist: (batch) => this.#persist(batch),
         commitStaged: (stage) => this.#commitStaged(stage),
-        persistQueue: (r, before) => this.#persistQueue(r, before),
+        persistQueue: (r, before, beforeMarks) =>
+          this.#persistQueue(r, before, beforeMarks),
         call: (fn) => this.#call(fn),
         bounded: (fn) => this.#bounded(fn),
         safeNow: () => this.#safeNow(),
@@ -1150,7 +1151,11 @@ export class Session {
    * the mutation is derived inside the segment and the engine swaps
    * in only after a successful commit.)
    */
-  async #persistQueue(r: Ready, before: QueueSnapshot): Promise<Result<void>> {
+  async #persistQueue(
+    r: Ready,
+    before: QueueSnapshot,
+    beforeMarks: ReadonlySet<string>,
+  ): Promise<Result<void>> {
     const epoch = r.queueEpoch;
     // This command's own post-mutation state — captured at call time,
     // never the live engine at segment time. Committing `after` keeps
@@ -1199,7 +1204,10 @@ export class Session {
         );
         if (!committed.ok) {
           r.queueEpoch += 1;
-          r.queue = new QueueEngine(before);
+          r.queue = new QueueEngine(
+            before,
+            new Set([...beforeMarks, ...r.queue.unplayableIds]),
+          );
           // Restore the pre-edit deal only when shuffle intent hasn't
           // moved — a toggle during this pending commit already dealt
           // against the (then-current) queue and must survive; the
@@ -1440,7 +1448,7 @@ export class Session {
         this.#ids.next('rec'),
       );
       const occurrenceId = this.#ids.next('occ');
-      const draft = new QueueEngine(r.queue.snapshot());
+      const draft = r.queue.fork();
       draft.enqueue({
         occurrenceId,
         recordingId: up.recording.id,
@@ -1587,7 +1595,7 @@ export class Session {
         return err(appError('not-found', 'unknown recording'));
       }
       const occurrenceId = this.#ids.next('occ');
-      const draft = new QueueEngine(cur.queue.snapshot());
+      const draft = cur.queue.fork();
       draft.enqueue({
         occurrenceId,
         recordingId,
@@ -1689,7 +1697,7 @@ export class Session {
       resolved.push({ recordingId: recording.id, ref: item.selectedRef });
     }
     const staged = await this.#commitStaged((r) => {
-      const draft = new QueueEngine(r.queue.snapshot());
+      const draft = r.queue.fork();
       const occurrenceIds: string[] = [];
       for (const item of resolved) {
         const occurrenceId = this.#ids.next('occ');
@@ -1749,7 +1757,7 @@ export class Session {
         : items;
     const staged = await this.#commitStaged((r) => {
       let recordings = r.recordings;
-      const draft = new QueueEngine(r.queue.snapshot());
+      const draft = r.queue.fork();
       const occurrenceIds: string[] = [];
       for (const metadata of ordered) {
         const up = upsertRecordingIn(
@@ -2242,6 +2250,7 @@ export class Session {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     if (!before.occurrences.some((o) => o.occurrenceId === occurrenceId)) {
       return err(appError('not-found', 'unknown occurrence'));
     }
@@ -2250,7 +2259,7 @@ export class Session {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
-    const persisted = await this.#persistQueue(r, before);
+    const persisted = await this.#persistQueue(r, before, beforeMarks);
     if (!persisted.ok) {
       return persisted;
     }
@@ -2282,6 +2291,7 @@ export class Session {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     if (before.currentOccurrenceId === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
     }
@@ -2299,7 +2309,7 @@ export class Session {
     // teardown: a failed commit rolls the engine back to playing and
     // leaves the live attempt untouched — the caller's error is
     // honest and playback genuinely continues.
-    const persisted = await this.#persistQueue(r, before);
+    const persisted = await this.#persistQueue(r, before, beforeMarks);
     if (!persisted.ok) {
       // The queue stays live, so a tail whose fetch already landed
       // can ride on; a cancelled mid-flight fetch can't be
@@ -2485,6 +2495,7 @@ export class Session {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     const current = before.currentOccurrenceId;
     if (current === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
@@ -2494,7 +2505,7 @@ export class Session {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
-    const persisted = await this.#persistQueue(r, before);
+    const persisted = await this.#persistQueue(r, before, beforeMarks);
     if (!persisted.ok) {
       return persisted;
     }
@@ -2509,6 +2520,7 @@ export class Session {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     const wasCurrent = before.currentOccurrenceId === id;
     const radioBefore = r.radio;
     // Under shuffle the item after a removed current is the dealt
@@ -2535,7 +2547,7 @@ export class Session {
     // Commit the removal before superseding the removed occurrence's
     // attempt: on a failed commit the engine rollback restores the
     // item and the still-live attempt keeps it playing honestly.
-    const persisted = await this.#persistQueue(r, before);
+    const persisted = await this.#persistQueue(r, before, beforeMarks);
     if (!persisted.ok) {
       return persisted;
     }
@@ -2575,6 +2587,14 @@ export class Session {
     return ok(undefined);
   }
 
+  /**
+   * Reorder by display slot — the index inside the sectioned queue
+   * model (now-playing row first, then up-next, then history). UI
+   * reorder stays confined to up-next, so the destination lands in
+   * the walk right behind the cursor: canonical index `cursor + slot`
+   * when shuffle is off, dealt position `cursor + slot` when on —
+   * where the dealt move also re-writes the playback walk itself.
+   */
   async moveOccurrence(id: string, toIndex: number): Promise<Result<void>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -2582,8 +2602,39 @@ export class Session {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
+    const dealt = this.#dealtOrder(r);
+    // The deal this move writes — remembered so a commit failure can
+    // roll it back only while no later mutation owns the field.
+    let movedDeal: string[] | null = null;
     try {
-      r.queue.move(id, toIndex);
+      if (dealt === null) {
+        const cursor =
+          before.currentOccurrenceId === null
+            ? -1
+            : before.occurrences.findIndex(
+                (o) => o.occurrenceId === before.currentOccurrenceId,
+              );
+        r.queue.move(id, cursor === -1 ? toIndex : cursor + toIndex);
+      } else {
+        // The rendered order under shuffle IS the deal: move the row
+        // inside it so playback follows, and write the same sequence
+        // into the canonical order — a later shuffle-off keeps the
+        // user's layout instead of partially reverting it.
+        const cursor =
+          before.currentOccurrenceId === null
+            ? -1
+            : dealt.indexOf(before.currentOccurrenceId);
+        const order = dealt.filter((x) => x !== id);
+        const dest = Math.min(
+          Math.max(cursor === -1 ? toIndex : cursor + toIndex, 0),
+          order.length,
+        );
+        order.splice(dest, 0, id);
+        r.queue.reorder(order);
+        r.shuffleOrder = order;
+        movedDeal = order;
+      }
     } catch (thrown) {
       return err(
         thrown instanceof TypeError
@@ -2591,12 +2642,29 @@ export class Session {
           : fromUnknown(thrown),
       );
     }
-    const persisted = await this.#persistQueue(r, before);
+    const persisted = await this.#persistQueue(r, before, beforeMarks);
     if (!persisted.ok) {
+      // The queue snapshot rolled back; the session-side deal must
+      // too — but only while it still IS this move's write (a shuffle
+      // toggle that raced the commit owns the field now). The restored
+      // deal is pruned to the rolled-back membership, same reconcile
+      // rule #dealtOrder applies.
+      if (dealt !== null && r.shuffleOrder === movedDeal) {
+        const snap = r.queue.snapshot();
+        const live = new Set(
+          snap.occurrences.map((o) => o.occurrenceId),
+        );
+        r.shuffleOrder = dealt.filter((x) => live.has(x));
+      }
       return persisted;
     }
     this.#derived();
     this.#publish();
+    if (dealt !== null) {
+      // A deal-only edit may leave the queue revision untouched — the
+      // player still needs the re-walked order.
+      await this.#playback.projectQueue();
+    }
     return ok(undefined);
   }
 

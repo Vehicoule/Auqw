@@ -172,6 +172,9 @@ export type QueueProjectionItem = {
   title: string;
   artist: string | null;
   artworkUrl: string | null;
+  /** Session failed-mark — forward moves skip this row, backward
+   * moves still reach it. Absent means unmarked. */
+  skipsForward?: boolean | undefined;
 };
 
 /**

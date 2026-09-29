@@ -318,6 +318,7 @@ export type PlaybackHost = {
   readonly persistQueue: (
     r: Ready,
     before: QueueSnapshot,
+    beforeMarks: ReadonlySet<string>,
   ) => Promise<Result<void>>;
   /** Port calls never throw by contract; throws map to internal. */
   readonly call: <T>(fn: () => Promise<Result<T>>) => Promise<Result<T>>;
@@ -629,6 +630,7 @@ export class PlaybackEngine {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     // The drain authorization belongs to the tail armed when the move
     // started — a reseed during the persist swaps in a fresh record
     // whose own flag already reflects its queue state.
@@ -641,13 +643,16 @@ export class PlaybackEngine {
       if (method === 'next') {
         if (dealt === null) {
           r.queue.next();
-          // repeat=all: a move that ran off the tail wraps to the head
-          // instead of stopping — the same rule the service cursor uses.
+          // repeat=all: a move that ran off the tail wraps to the first
+          // unmarked head — wrapping onto a known-dead row just retries
+          // it, so all-failed ends the same as the dealt branch.
           if (r.repeat === 'all') {
             const tail = r.queue.snapshot();
             const head =
               tail.currentOccurrenceId === null
-                ? tail.occurrences[0]
+                ? tail.occurrences.find(
+                    (o) => !r.queue.isUnplayable(o.occurrenceId),
+                  )
                 : undefined;
             if (head !== undefined) {
               r.queue.select(head.occurrenceId, before.mode === 'playing');
@@ -658,13 +663,17 @@ export class PlaybackEngine {
           // Under shuffle the walk is the dealt order: `next` steps to
           // the dealt successor, wraps dealt tail→head under repeat=all,
           // or runs off the dealt end into the same stopped state a
-          // canonical tail move produces.
+          // canonical tail move produces. Failed rows are skipped the
+          // same way the canonical next() walks past unplayable marks.
           const pos = dealt.indexOf(before.currentOccurrenceId);
-          const nextId = pos >= 0 ? dealt[pos + 1] : undefined;
+          const nextId =
+            pos >= 0
+              ? dealt.slice(pos + 1).find((id) => !r.queue.isUnplayable(id))
+              : undefined;
           if (nextId !== undefined) {
             r.queue.select(nextId, before.mode === 'playing');
           } else if (r.repeat === 'all' && dealt.length > 0) {
-            const head = dealt[0];
+            const head = dealt.find((id) => !r.queue.isUnplayable(id));
             if (head !== undefined) {
               // A lone dealt item wraps onto itself — select() no-ops on
               // a same-id zero-position pick, so run off the end first:
@@ -681,9 +690,14 @@ export class PlaybackEngine {
         }
       } else if (dealt !== null) {
         const pos = dealt.indexOf(before.currentOccurrenceId);
+        // A blocked row's retained position isn't resumable progress —
+        // it reads as 0 for the restart-window rules the same way the
+        // engine's previous() treats it.
+        const prevPosMs =
+          before.blockedError !== undefined ? 0 : before.positionMs;
         if (
           pos === 0 &&
-          before.positionMs <= 3000 &&
+          prevPosMs <= 3000 &&
           r.repeat === 'all' &&
           dealt.length > 1
         ) {
@@ -694,7 +708,7 @@ export class PlaybackEngine {
             r.queue.select(tail, before.mode === 'playing');
             bumpListenCycle(r, tail);
           }
-        } else if (pos > 0 && before.positionMs <= 3000) {
+        } else if (pos > 0 && prevPosMs <= 3000) {
           const prev = dealt[pos - 1];
           if (prev !== undefined) {
             r.queue.select(prev, before.mode === 'playing');
@@ -709,7 +723,7 @@ export class PlaybackEngine {
         r.repeat === 'all' &&
         before.currentOccurrenceId === before.occurrences[0]?.occurrenceId &&
         before.occurrences.length > 1 &&
-        before.positionMs <= 3000
+        (before.blockedError !== undefined ? 0 : before.positionMs) <= 3000
       ) {
         // repeat=all at the head, within the restart threshold: the
         // move wraps to the tail — the same rule the service cursor
@@ -735,7 +749,7 @@ export class PlaybackEngine {
       after.currentOccurrenceId === before.currentOccurrenceId
     ) {
       // Restart the same item: seek natively, keep the attempt.
-      const restarted = await this.#host.persistQueue(r, before);
+      const restarted = await this.#host.persistQueue(r, before, beforeMarks);
       if (!restarted.ok) {
         return restarted;
       }
@@ -770,7 +784,7 @@ export class PlaybackEngine {
       this.#host.publish();
       return ok(undefined);
     }
-    const moved = await this.#host.persistQueue(r, before);
+    const moved = await this.#host.persistQueue(r, before, beforeMarks);
     if (!moved.ok) {
       // A rolled-back move must not leave playback on a cursor the
       // store no longer holds — converge onto the durable tip (this
@@ -837,6 +851,7 @@ export class PlaybackEngine {
       return err(appError('unavailable', 'no active playback to pause'));
     }
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     try {
       r.queue.pause();
     } catch (thrown) {
@@ -844,7 +859,7 @@ export class PlaybackEngine {
     }
     // Commit the intent before touching transport: a failed commit
     // rolls the engine back and the native pause is never issued.
-    const persisted = await this.#host.persistQueue(r, before);
+    const persisted = await this.#host.persistQueue(r, before, beforeMarks);
     if (!persisted.ok) {
       return persisted;
     }
@@ -897,6 +912,7 @@ export class PlaybackEngine {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     if (before.currentOccurrenceId === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
     }
@@ -905,7 +921,7 @@ export class PlaybackEngine {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
-    const persisted = await this.#host.persistQueue(r, before);
+    const persisted = await this.#host.persistQueue(r, before, beforeMarks);
     if (!persisted.ok) {
       return persisted;
     }
@@ -978,6 +994,7 @@ export class PlaybackEngine {
       );
     }
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     if (before.currentOccurrenceId === null) {
       return err(appError('unavailable', 'no active playback to seek'));
     }
@@ -996,7 +1013,7 @@ export class PlaybackEngine {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
-    const persisted = await this.#host.persistQueue(r, before);
+    const persisted = await this.#host.persistQueue(r, before, beforeMarks);
     if (!persisted.ok) {
       return persisted;
     }
@@ -1446,7 +1463,7 @@ export class PlaybackEngine {
           ? current.sourceRefs
           : [...current.sourceRefs, ref],
       };
-      const draft = new QueueEngine(ready.queue.snapshot());
+      const draft = ready.queue.fork();
       try {
         draft.setSelectedRef(occurrenceId, ref);
       } catch (thrown) {
@@ -1754,6 +1771,7 @@ export class PlaybackEngine {
       return;
     }
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     if (before.currentOccurrenceId === attempt.occurrenceId) {
       try {
         r.queue.markUnplayable(error);
@@ -1769,7 +1787,7 @@ export class PlaybackEngine {
       error,
     };
     this.#host.publish();
-    await this.#host.persistQueue(r, before);
+    await this.#host.persistQueue(r, before, beforeMarks);
     this.#host.derived();
   }
 
@@ -1940,6 +1958,7 @@ export class PlaybackEngine {
       active.timer?.cancel();
       this.#active = null;
       const before = r.queue.snapshot();
+      const beforeMarks = r.queue.unplayableIds;
       const dealt = this.#host.dealtOrder(r);
       try {
         // repeat=one replays the cursor item; repeat=all wraps a tail
@@ -1953,7 +1972,9 @@ export class PlaybackEngine {
             const tail = r.queue.snapshot();
             const head =
               tail.currentOccurrenceId === null
-                ? tail.occurrences[0]
+                ? tail.occurrences.find(
+                    (o) => !r.queue.isUnplayable(o.occurrenceId),
+                  )
                 : undefined;
             if (head !== undefined) {
               r.queue.select(head.occurrenceId, true);
@@ -1961,17 +1982,21 @@ export class PlaybackEngine {
             }
           }
         } else {
-          // Under shuffle the fallback walks the dealt order: dealt
-          // successor, dealt head under repeat=all, else run off.
+          // Under shuffle the fallback walks the dealt order with the
+          // same mark-skips advance() applies: dealt successor, first
+          // unmarked dealt head under repeat=all, else run off.
           const pos =
             before.currentOccurrenceId === null
               ? -1
               : dealt.indexOf(before.currentOccurrenceId);
-          const nextId = pos >= 0 ? dealt[pos + 1] : undefined;
+          const nextId =
+            pos >= 0
+              ? dealt.slice(pos + 1).find((id) => !r.queue.isUnplayable(id))
+              : undefined;
           if (nextId !== undefined) {
             r.queue.select(nextId, true);
           } else if (r.repeat === 'all' && dealt.length > 0) {
-            const head = dealt[0];
+            const head = dealt.find((id) => !r.queue.isUnplayable(id));
             if (head !== undefined) {
               r.queue.select(head, true);
               bumpListenCycle(r, head);
@@ -1983,7 +2008,7 @@ export class PlaybackEngine {
       } catch {
         return;
       }
-      const advanced = await this.#host.persistQueue(r, before);
+      const advanced = await this.#host.persistQueue(r, before, beforeMarks);
       this.#host.derived();
       const snap = r.queue.snapshot();
       // A failed advance rolls the queue back onto the ended item —
@@ -2003,6 +2028,7 @@ export class PlaybackEngine {
     // Remote pause/play reconciles queue intent with the service.
     if (event.state === 'paused' && r.queue.snapshot().mode === 'playing') {
       const before = r.queue.snapshot();
+      const beforeMarks = r.queue.unplayableIds;
       try {
         r.queue.pause();
       } catch {
@@ -2013,7 +2039,7 @@ export class PlaybackEngine {
         attemptId: active.identity.attemptId,
         queueRev: r.queue.snapshot().revision,
       };
-      const synced = await this.#host.persistQueue(r, before);
+      const synced = await this.#host.persistQueue(r, before, beforeMarks);
       if (!synced.ok && this.#active === active) {
         // Rolled back — the live engine is at `before`'s revision.
         active.identity = priorIdentity;
@@ -2024,6 +2050,7 @@ export class PlaybackEngine {
       r.queue.snapshot().mode === 'paused'
     ) {
       const before = r.queue.snapshot();
+      const beforeMarks = r.queue.unplayableIds;
       try {
         r.queue.play();
       } catch {
@@ -2034,7 +2061,7 @@ export class PlaybackEngine {
         attemptId: active.identity.attemptId,
         queueRev: r.queue.snapshot().revision,
       };
-      const synced = await this.#host.persistQueue(r, before);
+      const synced = await this.#host.persistQueue(r, before, beforeMarks);
       if (!synced.ok && this.#active === active) {
         active.identity = priorIdentity;
       }
@@ -2259,11 +2286,19 @@ export class PlaybackEngine {
           title: recording?.title ?? 'Unknown',
           artist: recording?.artist ?? null,
           artworkUrl: artwork?.url ?? null,
+          skipsForward: r.queue.isUnplayable(occurrence.occurrenceId)
+            ? true
+            : undefined,
         };
       },
     );
     // The walk the cursor steps through: the dealt order under shuffle,
-    // the identity otherwise — `items` itself stays canonical.
+    // the identity otherwise — `items` itself stays canonical. Rows the
+    // engine marked failed stay IN the walk flagged `skipsForward`:
+    // forward moves (ended / remote-next / repeat wrap) must step over
+    // them the way next() does, while media-control previous still
+    // reaches them the way previous() does. A single order carries both
+    // rules — dropping them would silently strand backward moves.
     const dealt = this.#host.dealtOrder(r);
     const indexOfId = new Map(
       snap.occurrences.map((o, i) => [o.occurrenceId, i] as const),
@@ -2272,8 +2307,8 @@ export class PlaybackEngine {
       dealt === null
         ? snap.occurrences.map((_, i) => i)
         : dealt
-          .map((id) => indexOfId.get(id))
-          .filter((i): i is number => i !== undefined);
+            .map((id) => indexOfId.get(id))
+            .filter((i): i is number => i !== undefined);
     return {
       projectionId: this.#ids.next('projection'),
       queueRev: snap.revision,
@@ -2389,8 +2424,11 @@ export class PlaybackEngine {
     // legality below; the identity/revision checks still apply.
     const edgeUnverifiable = recorded === undefined;
     const execItems = executed?.items ?? [];
+    // The walk is a subsequence — failed rows drop out while `items`
+    // keeps them, so a shorter order is the intended skip, not
+    // malformation; only an absent walk falls back to identity.
     const execOrder =
-      executed === null || executed.order.length !== execItems.length
+      executed === null || executed.order.length === 0
         ? execItems.map((_, i) => i)
         : executed.order;
     const execCursor =
@@ -2402,6 +2440,20 @@ export class PlaybackEngine {
     const orderPos = execCursor < 0 ? -1 : execOrder.indexOf(execCursor);
     const atWalk = (pos: number): string | null =>
       execItems[execOrder[pos] ?? -1]?.occurrenceId ?? null;
+    // Forward moves step over `skipsForward` rows — the same skip the
+    // cursors and engine next() apply. The wrap target is the first
+    // unflagged entry from the walk's head; a flagged row behind the
+    // cursor stays legal only for backward moves.
+    const forwardAt = (fromPos: number): string | null => {
+      for (let i = fromPos + 1; i < execOrder.length; i += 1) {
+        const item = execItems[execOrder[i] ?? -1];
+        if (item !== undefined && item.skipsForward !== true) {
+          return item.occurrenceId;
+        }
+      }
+      return null;
+    };
+    const firstUnflagged = (): string | null => forwardAt(-1);
     // A service move emits the projection it captured at move-start,
     // which can lag one JS install. Its identity echoes that captured
     // rev (a fresh attach keys to proj.queueRev) while a same-item
@@ -2429,7 +2481,7 @@ export class PlaybackEngine {
     // starts a fresh listen, which the play dedup counts as a new loop.
     let repeatEdge = false;
     if (event.reason === 'ended' || event.reason === 'remote-next') {
-      const successor = orderPos >= 0 ? atWalk(orderPos + 1) : null;
+      const successor = orderPos >= 0 ? forwardAt(orderPos) : null;
       legal = edgeUnverifiable || event.toOccurrenceId === successor;
       // repeat=one replays the cursor item on `ended` — a same-item
       // edge is legal only there (remote-next still advances). The
@@ -2445,13 +2497,16 @@ export class PlaybackEngine {
         legal = true;
         repeatEdge = true;
       }
-      // repeat=all wraps a dealt-tail move back to the dealt head.
+      // repeat=all wraps a stalled walk back to its first unflagged
+      // entry — the cursor wraps wherever forward skipping ran out,
+      // not only at the literal tail.
       if (
         !legal &&
         executed?.repeat === 'all' &&
-        orderPos === execOrder.length - 1 &&
-        execOrder.length > 0 &&
-        event.toOccurrenceId === atWalk(0)
+        orderPos >= 0 &&
+        successor === null &&
+        event.toOccurrenceId !== null &&
+        event.toOccurrenceId === firstUnflagged()
       ) {
         legal = true;
         repeatEdge = true;
@@ -2842,7 +2897,7 @@ export class PlaybackEngine {
           return err(internalError());
         }
         const adopted = adoptAutomaticMapping(current, ref, automatic);
-        const draft = new QueueEngine(ready3.queue.snapshot());
+        const draft = ready3.queue.fork();
         try {
           draft.setSelectedRef(occurrenceId, ref);
         } catch {
@@ -3378,7 +3433,7 @@ export class PlaybackEngine {
         occurrence.recordingId === adopted.id &&
         occurrence.selectedRef === null &&
         ready3.settings.playbackProvider === provider.id;
-      const draft = shouldPin ? new QueueEngine(snapNow) : null;
+      const draft = shouldPin ? ready3.queue.fork() : null;
       if (draft !== null) {
         try {
           draft.setSelectedRef(occurrenceId ?? '', ref);

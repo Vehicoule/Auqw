@@ -4,11 +4,13 @@
 // prove the package resolves cleanly for a plain node consumer: the
 // mappers import nothing react-native and fixtures stay coherent.
 import { assert, assertEqual } from '@auqw/application/testing';
+import { appError } from '@auqw/application';
 import {
   createSerializedWrite,
   formatAgo,
   getLocale,
   languageOptionKey,
+  nextQueueDestination,
   overlayReducer,
   resolveLocale,
   setLocale,
@@ -79,6 +81,7 @@ import {
   librarySortedCards,
   lyricsPaneView,
   queueReorderButton,
+  queueSectionLabel,
   radioRowView,
   stageMetaView,
   stageModeTabs,
@@ -121,6 +124,221 @@ assertEqual(queue.items.length, fixtureQueueModel.items.length);
 assert(
   queue.items.some((item) => item.current),
   'queue keeps its current marker through the shared mapper',
+);
+
+// Sections: the display grouping is nowPlaying → upNext → history,
+// built around the cursor while `items` stays canonical.
+assertEqual(
+  queue.sections.map((section) => section.key).join(','),
+  'nowPlaying,upNext',
+);
+assertEqual(
+  queue.sections[0]?.items[0]?.occurrenceId,
+  'occ-1',
+  'the current item leads the display order',
+);
+assert(
+  queue.sections[1]?.items.every((item) => item.section === 'upNext') === true,
+  'upNext members carry their section',
+);
+const currentItem = queue.items.find((item) => item.current);
+assert(currentItem !== undefined, 'current item exists');
+assertEqual(
+  queue.items[currentItem.index]?.occurrenceId,
+  currentItem.occurrenceId,
+  'item.index is the canonical slot',
+);
+assertEqual(queue.ended, false, 'a running queue is not ended');
+
+// A mid-queue cursor puts already-played entries in a trailing
+// history section after the pending list.
+const midQueue = toQueueModel({
+  queue: {
+    ...fixtureQueue,
+    currentOccurrenceId: 'occ-4',
+    mode: 'paused',
+    positionMs: 0,
+  },
+  recordings: fixtureRecordings,
+  likes: fixtureLikes,
+});
+assertEqual(
+  midQueue.sections.map((section) => section.key).join(','),
+  'nowPlaying,upNext,history',
+);
+assertEqual(
+  midQueue.sections
+    .flatMap((section) => section.items.map((item) => item.occurrenceId))
+    .join(','),
+  'occ-4,occ-5,occ-6,occ-7,occ-8,occ-1,occ-2,occ-3',
+  'display order is current → pending → earlier',
+);
+
+// A queue with no cursor holds its items as ended/up-next — a surface
+// can keep showing it instead of collapsing to empty.
+const endedQueue = toQueueModel({
+  queue: {
+    ...fixtureQueue,
+    currentOccurrenceId: null,
+    mode: 'stopped',
+    positionMs: 0,
+  },
+  recordings: fixtureRecordings,
+});
+assertEqual(endedQueue.ended, true, 'items with no cursor is an ended queue');
+assertEqual(
+  endedQueue.sections.map((section) => section.key).join(','),
+  'upNext',
+  'an ended queue lists everything as up next',
+);
+
+// Failed occurrences mark their row 'error'; the engine's
+// blockedError counts even without an explicit id set.
+const failedQueue = toQueueModel({
+  queue: fixtureQueue,
+  recordings: fixtureRecordings,
+  failedOccurrenceIds: new Set(['occ-5']),
+});
+const failedItem = failedQueue.items.find((i) => i.occurrenceId === 'occ-5');
+assertEqual(failedItem?.row.state, 'error', 'failed occurrence marks the row');
+assertEqual(failedItem?.row.note, t('queue.failed'));
+const blockedQueue = toQueueModel({
+  queue: {
+    ...fixtureQueue,
+    mode: 'paused',
+    blockedError: appError('unavailable', 'gone'),
+  },
+  recordings: fixtureRecordings,
+});
+assertEqual(
+  blockedQueue.items.find((i) => i.current)?.row.state,
+  'error',
+  'a blocked current marks itself failed',
+);
+assertEqual(queueSectionLabel('upNext'), t('queue.upNext'));
+assertEqual(queueSectionLabel('history'), t('queue.history'));
+
+// Under shuffle sections follow the dealt walk, not canonical order:
+// rows after the current deal position are up next even when they
+// sit earlier in the queue array, and each section lists its rows in
+// walk order.
+const shuffledQueue = toQueueModel({
+  queue: {
+    ...fixtureQueue,
+    currentOccurrenceId: 'occ-4',
+    mode: 'paused',
+    positionMs: 0,
+  },
+  recordings: fixtureRecordings,
+  dealtOrder: ['occ-2', 'occ-4', 'occ-7', 'occ-1', 'occ-8'],
+});
+assertEqual(
+  shuffledQueue.sections
+    .flatMap((section) => section.items.map((item) => item.occurrenceId))
+    .join(','),
+  'occ-4,occ-7,occ-1,occ-8,occ-3,occ-5,occ-6,occ-2',
+  'dealt order drives sections: undealt rows trail up next',
+);
+assertEqual(
+  shuffledQueue.sections.find((s) => s.key === 'history')?.items.length,
+  1,
+  'deal positions before current are history',
+);
+
+// A deal that lost the current id falls back to canonical order.
+const staleDeal = toQueueModel({
+  queue: fixtureQueue,
+  recordings: fixtureRecordings,
+  dealtOrder: ['occ-5', 'occ-6'],
+});
+assertEqual(
+  staleDeal.sections
+    .flatMap((s) => s.items.map((i) => i.occurrenceId))
+    .join(','),
+  'occ-1,occ-2,occ-3,occ-4,occ-5,occ-6,occ-7,occ-8',
+  'current missing from the deal: canonical partitioning',
+);
+
+// ---- nextQueueDestination ----------------------------------------------
+// Mirrors the engine's mark-skipping walk so offline/availability gates
+// test the row the cursor actually plays, not the next walk slot.
+const failed = new Set(['occ-3', 'occ-8']);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-2' },
+    repeat: 'off',
+    failedIds: failed,
+  }),
+  'occ-4',
+  'canonical next steps over the marked row',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-7' },
+    repeat: 'off',
+    failedIds: failed,
+  }),
+  null,
+  'tail row marked + no repeat: nowhere to land',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-7' },
+    repeat: 'all',
+    failedIds: failed,
+  }),
+  'occ-1',
+  'repeat=all wraps canonical to the head row',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-7' },
+    repeat: 'all',
+    failedIds: new Set(['occ-1', 'occ-8']),
+  }),
+  'occ-2',
+  'canonical wrap skips a marked head',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-7' },
+    repeat: 'all',
+    failedIds: new Set(
+      fixtureQueue.occurrences.map((o) => o.occurrenceId),
+    ),
+  }),
+  null,
+  'all-failed canonical wrap ends the walk',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-4' },
+    dealtOrder: ['occ-2', 'occ-8', 'occ-4'],
+    repeat: 'all',
+    failedIds: failed,
+  }),
+  'occ-2',
+  'dealt tail wraps to the first unmarked row',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-4' },
+    dealtOrder: ['occ-2', 'occ-4', 'occ-8', 'occ-1'],
+    repeat: 'all',
+    failedIds: failed,
+  }),
+  'occ-1',
+  'dealt next skips the marked successor',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-4' },
+    dealtOrder: ['occ-2', 'occ-4', 'occ-8'],
+    repeat: 'all',
+    failedIds: new Set(['occ-2', 'occ-4', 'occ-8']),
+  }),
+  null,
+  'a fully-marked deal has no destination even under repeat=all',
 );
 
 const settings = toSettingsModel(fixtureSettings, fixtureDiagnostics, {});

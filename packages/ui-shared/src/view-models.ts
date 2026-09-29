@@ -94,19 +94,47 @@ export type PlayerModel = {
   readonly errorMessage: string | null;
 };
 
+/**
+ * Display section of a queue row: the current track first, then the
+ * pending entries it leads into, then what already played — the
+ * standard player queue anatomy.
+ */
+export type QueueSectionKey = 'nowPlaying' | 'upNext' | 'history';
+
 export type QueueItemModel = {
   readonly occurrenceId: string;
   readonly recordingId: string;
+  /** Canonical occurrence index — move calls index into this order. */
+  readonly index: number;
+  readonly section: QueueSectionKey;
   readonly current: boolean;
   readonly duplicate: boolean;
   readonly row: TrackRowModel;
 };
 
-export type QueueModel = {
+export type QueueSection = {
+  readonly key: QueueSectionKey;
   readonly items: readonly QueueItemModel[];
+};
+
+export type QueueModel = {
+  /** Canonical occurrence order — the order the engine walks. */
+  readonly items: readonly QueueItemModel[];
+  /**
+   * Display order, grouped: nowPlaying, upNext, history — only
+   * non-empty sections appear. Reorder interactions are confined to
+   * `upNext` items.
+   */
+  readonly sections: readonly QueueSection[];
   readonly mode: QueueSnapshot['mode'];
   readonly positionMs: number;
   readonly currentOccurrenceId: string | null;
+  /**
+   * Items remain but nothing is current — the drained (or
+   * never-started) queue a surface may keep showing instead of
+   * dropping to an empty state.
+   */
+  readonly ended: boolean;
 };
 
 type SearchPhase =
@@ -855,6 +883,63 @@ function likedIds(likes: readonly Like[]): ReadonlySet<string> {
   );
 }
 
+/**
+ * The occurrence `session.next()` would land on — mirrors the
+ * engine's mark-skipping walk so a UI gate (offline ownership,
+ * availability) tests the same row the cursor actually plays. The
+ * dealt order is the walk under shuffle, the canonical occurrence
+ * order otherwise; rows already marked failed drop out of both.
+ * Under repeat=all an exhausted forward walk wraps to the first
+ * unmarked row in both walks — matching the cursor's own wrap rules.
+ */
+export function nextQueueDestination(input: {
+  readonly queue: {
+    readonly occurrences: readonly { readonly occurrenceId: string }[];
+    readonly currentOccurrenceId: string | null;
+  };
+  /** The dealt play order under shuffle; canonical when null/absent. */
+  readonly dealtOrder?: readonly string[] | null;
+  /** Occurrence ids marked failed this session. */
+  readonly failedIds?: ReadonlySet<string>;
+  readonly repeat: RepeatMode;
+}): string | null {
+  const { queue, repeat, failedIds } = input;
+  const ids = queue.occurrences.map((o) => o.occurrenceId);
+  const unmarked = (id: string): boolean => failedIds?.has(id) !== true;
+  if (input.dealtOrder != null) {
+    const walk = input.dealtOrder;
+    const pos =
+      queue.currentOccurrenceId === null
+        ? -1
+        : walk.indexOf(queue.currentOccurrenceId);
+    const next =
+      pos >= 0 ? walk.slice(pos + 1).find(unmarked) : undefined;
+    if (next !== undefined) {
+      return next;
+    }
+    if (repeat !== 'all') {
+      return null;
+    }
+    return walk.find(unmarked) ?? null;
+  }
+  const pos =
+    queue.currentOccurrenceId === null
+      ? -1
+      : ids.indexOf(queue.currentOccurrenceId);
+  const next =
+    pos >= 0 ? ids.slice(pos + 1).find(unmarked) : undefined;
+  if (next !== undefined) {
+    return next;
+  }
+  if (repeat !== 'all') {
+    return null;
+  }
+  // The canonical wrap picks the first unmarked head — the same edge
+  // the engine makes after `next()` stops at the tail; all-failed
+  // ends the walk instead of replaying a known-dead row.
+  return ids.find(unmarked) ?? null;
+}
+
 export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
   const { playback, queue, recordings, likes, repeat, shuffleOrder } = input;
   if (playback.type === 'idle') {
@@ -941,6 +1026,21 @@ type QueueModelInput = {
   readonly recordings: readonly Recording[];
   readonly likes?: readonly Like[];
   readonly unavailableRecordingIds?: ReadonlySet<string> | undefined;
+  /**
+   * Occurrences whose playback attempt failed — marked 'error' so the
+   * queue doesn't silently retry them on the way through (advance
+   * already steps over the blocked current; the row makes it visible).
+   */
+  readonly failedOccurrenceIds?: ReadonlySet<string> | undefined;
+  /**
+   * The playback walk under shuffle — the dealt order the service
+   * cursor follows. Section membership and ordering follow it (the
+   * next row after current really is "up next"); occurrences absent
+   * from the deal — enqueued after it — trail the up-next tail in
+   * canonical order. Omitted or a deal that lost the current id falls
+   * back to canonical partitioning.
+   */
+  readonly dealtOrder?: readonly string[] | undefined;
 };
 
 export function toQueueModel(input: QueueModelInput): QueueModel {
@@ -948,59 +1048,126 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
   const byId = indexById(recordings);
   const liked = likedIds(input.likes ?? []);
   const unavailable = input.unavailableRecordingIds ?? new Set<string>();
+  const currentIndex = queue.occurrences.findIndex(
+    (o) => o.occurrenceId === queue.currentOccurrenceId,
+  );
+  const dealt = input.dealtOrder;
+  const dealIndex = new Map<string, number>();
+  dealt?.forEach((id, i) => {
+    if (!dealIndex.has(id)) {
+      dealIndex.set(id, i);
+    }
+  });
+  const useWalk =
+    dealt !== undefined &&
+    queue.currentOccurrenceId !== null &&
+    dealIndex.has(queue.currentOccurrenceId);
+  // Position in the playback walk; undealt rows sit past the dealt
+  // tail in canonical order so a fresh enqueue can't land in history.
+  const walkPos = (occurrenceId: string, canonicalIndex: number): number =>
+    useWalk
+      ? (dealIndex.get(occurrenceId) ?? dealt.length + canonicalIndex)
+      : canonicalIndex;
+  const currentWalk =
+    queue.currentOccurrenceId === null
+      ? -1
+      : walkPos(queue.currentOccurrenceId, currentIndex);
+  const failed = new Set(input.failedOccurrenceIds ?? []);
+  // A blocked current is a failed current — mark it even when the
+  // caller didn't pass the playback state through.
+  if (queue.blockedError !== undefined && queue.currentOccurrenceId !== null) {
+    failed.add(queue.currentOccurrenceId);
+  }
   const occurrencesByRecording = new Map<string, number>();
   for (const occurrence of queue.occurrences) {
     const count = occurrencesByRecording.get(occurrence.recordingId) ?? 0;
     occurrencesByRecording.set(occurrence.recordingId, count + 1);
   }
-  const items: QueueItemModel[] = queue.occurrences.map((occurrence) => {
-    const recording = byId.get(occurrence.recordingId);
-    const current = occurrence.occurrenceId === queue.currentOccurrenceId;
-    const row: TrackRowModel =
-      recording === undefined
-        ? {
-          key: occurrence.occurrenceId,
-          title: t('track.unknown'),
-          versionLabel: null,
-          artist: null,
-          durationMs: null,
-          artworkUrl: null,
-          liked: false,
-          playing: current && queue.mode === 'playing',
-          state: 'unavailable',
-          note: t('common.unavailable'),
-          download: null,
-        }
-        : {
-          key: occurrence.occurrenceId,
-          title: recording.title,
-          versionLabel:
-            recording.versionLabels.length === 0
-              ? null
-              : recording.versionLabels.join(' · '),
-          artist: recording.artist,
-          durationMs: recording.durationMs,
-          artworkUrl: pickArtworkUrl(recording.artwork),
-          liked: liked.has(recording.id),
-          playing: current && queue.mode === 'playing',
-          state: unavailable.has(recording.id) ? 'unavailable' : 'available',
-          note: unavailable.has(recording.id) ? t('common.unavailable') : null,
-          download: null,
-        };
-    return {
-      occurrenceId: occurrence.occurrenceId,
-      recordingId: occurrence.recordingId,
-      current,
-      duplicate:
-        (occurrencesByRecording.get(occurrence.recordingId) ?? 0) > 1,
-      row,
-    };
+  const items: QueueItemModel[] = queue.occurrences.map(
+    (occurrence, index) => {
+      const recording = byId.get(occurrence.recordingId);
+      const current = occurrence.occurrenceId === queue.currentOccurrenceId;
+      const isFailed = failed.has(occurrence.occurrenceId);
+      const pos = walkPos(occurrence.occurrenceId, index);
+      const section: QueueSectionKey =
+        currentIndex === -1
+          ? 'upNext'
+          : current
+            ? 'nowPlaying'
+            : pos > currentWalk
+              ? 'upNext'
+              : 'history';
+      const row: TrackRowModel =
+        recording === undefined
+          ? {
+            key: occurrence.occurrenceId,
+            title: t('track.unknown'),
+            versionLabel: null,
+            artist: null,
+            durationMs: null,
+            artworkUrl: null,
+            liked: false,
+            playing: current && queue.mode === 'playing',
+            state: 'unavailable',
+            note: t('common.unavailable'),
+            download: null,
+          }
+          : {
+            key: occurrence.occurrenceId,
+            title: recording.title,
+            versionLabel:
+              recording.versionLabels.length === 0
+                ? null
+                : recording.versionLabels.join(' · '),
+            artist: recording.artist,
+            durationMs: recording.durationMs,
+            artworkUrl: pickArtworkUrl(recording.artwork),
+            liked: liked.has(recording.id),
+            playing: current && queue.mode === 'playing',
+            state: isFailed
+              ? 'error'
+              : unavailable.has(recording.id)
+                ? 'unavailable'
+                : 'available',
+            note: isFailed
+              ? t('queue.failed')
+              : unavailable.has(recording.id)
+                ? t('common.unavailable')
+                : null,
+            download: null,
+          };
+      return {
+        occurrenceId: occurrence.occurrenceId,
+        recordingId: occurrence.recordingId,
+        index,
+        section,
+        current,
+        duplicate:
+          (occurrencesByRecording.get(occurrence.recordingId) ?? 0) > 1,
+        row,
+      };
+    },
+  );
+  const sections: QueueSection[] = (
+    ['nowPlaying', 'upNext', 'history'] as const
+  ).flatMap((key) => {
+    // Within a section rows follow the playback walk — under shuffle
+    // the dealt order, otherwise canonical.
+    const sectionItems = items
+      .filter((item) => item.section === key)
+      .sort(
+        (a, b) =>
+          walkPos(a.occurrenceId, a.index) - walkPos(b.occurrenceId, b.index),
+      );
+    return sectionItems.length === 0 ? [] : [{ key, items: sectionItems }];
   });
   return {
     items,
+    sections,
     mode: queue.mode,
     positionMs: queue.positionMs,
     currentOccurrenceId: queue.currentOccurrenceId,
+    ended: items.length > 0 && queue.currentOccurrenceId === null,
   };
 }
 

@@ -1,6 +1,6 @@
 import type { AppError } from '../errors.ts';
 import { isSafeNonNegative, isSourceRef } from '../domain.ts';
-import type { QueueOccurrence, SourceRef } from '../domain.ts';
+import type { QueueOccurrence, Recording, SourceRef } from '../domain.ts';
 
 export type QueueMode = 'stopped' | 'paused' | 'playing';
 
@@ -75,6 +75,72 @@ function sameRef(a: SourceRef | null, b: SourceRef | null): boolean {
 }
 
 /**
+ * Which queued occurrence answers a "play now" tap: the first match
+ * at or after the cursor (a pending play wins — replaying it lands
+ * the tap where the queue is headed); when the track only sits
+ * behind the cursor the nearest history entry wins so the replay
+ * rewinds as little as possible. A queue with no cursor is all
+ * pending — the earliest match returns.
+ */
+function pickOccurrence(
+  queue: QueueSnapshot,
+  match: (occurrence: QueueOccurrence) => boolean,
+): string | null {
+  const currentIndex =
+    queue.currentOccurrenceId === null
+      ? 0
+      : queue.occurrences.findIndex(
+          (o) => o.occurrenceId === queue.currentOccurrenceId,
+        );
+  let lastHistory: string | null = null;
+  for (const [index, occurrence] of queue.occurrences.entries()) {
+    if (!match(occurrence)) {
+      continue;
+    }
+    if (index >= currentIndex) {
+      return occurrence.occurrenceId;
+    }
+    lastHistory = occurrence.occurrenceId;
+  }
+  return lastHistory;
+}
+
+/**
+ * Tap-to-play dedupe: a play tap on a recording the queue already
+ * holds reuses its occurrence instead of minting a duplicate —
+ * `pickOccurrence` picks which one. Returns null when the recording
+ * isn't queued at all (the caller enqueues). Deliberate
+ * "add to queue" calls stay additive: repeat entries are a legal
+ * queue shape the row model marks `duplicate`.
+ */
+export function queuedOccurrenceFor(
+  queue: QueueSnapshot,
+  recordingId: string,
+): string | null {
+  return pickOccurrence(queue, (o) => o.recordingId === recordingId);
+}
+
+/**
+ * The same dedupe for a metadata row (search/entity/home card taps):
+ * the tap's source ref matches a queued occurrence's selected ref or
+ * any source ref on its recording.
+ */
+export function queuedOccurrenceForRef(
+  queue: QueueSnapshot,
+  recordings: readonly Recording[],
+  ref: SourceRef,
+): string | null {
+  const byId = new Map(recordings.map((r) => [r.id, r]));
+  return pickOccurrence(
+    queue,
+    (o) =>
+      sameRef(o.selectedRef, ref) ||
+      (byId.get(o.recordingId)?.sourceRefs.some((s) => sameRef(s, ref)) ??
+        false),
+  );
+}
+
+/**
  * Owns the playback queue. Snapshots are immutable; `revision`
  * identifies intent — every intent-changing command ticks exactly
  * once, true no-ops and observed positions do not tick. Ticks are
@@ -88,6 +154,16 @@ export class QueueEngine {
   #positionMs: number;
   #mode: QueueMode;
   #blockedError: AppError | undefined;
+  /**
+   * Occurrences that failed playback this engine lifetime —
+   * `markUnplayable` flags the failed current; a fresh play intent
+   * (autoplaying `select`, `play`, a playing reconcile) clears it so
+   * a retry's verdict decides again; `remove` prunes it. `next()`
+   * steps over flagged rows instead of parking the walk on a
+   * known-dead entry; `previous()` keeps honoring backward intent.
+   * Internal only — availability is a session-scoped observation.
+   */
+  #unplayable = new Set<string>();
   /** Frozen occurrence clones keyed to the revision they were taken at. */
   #occurrenceCache:
     | {
@@ -98,7 +174,7 @@ export class QueueEngine {
   /** Last snapshot — (revision, positionMs) fully determines it. */
   #snapshotCache: QueueSnapshot | undefined;
 
-  constructor(initial?: QueueSnapshot) {
+  constructor(initial?: QueueSnapshot, unplayable?: ReadonlySet<string>) {
     const occurrences = initial?.occurrences ?? [];
     const revision = initial?.revision ?? 0;
     const currentId = initial?.currentOccurrenceId ?? null;
@@ -152,6 +228,37 @@ export class QueueEngine {
     this.#positionMs = positionMs;
     this.#mode = mode;
     this.#blockedError = cloneError(blockedError);
+    // Carried marks are pruned to live members — a mark for an id the
+    // snapshot doesn't hold would never get removed() to clean it up.
+    for (const id of unplayable ?? []) {
+      if (ids.has(id)) {
+        this.#unplayable.add(id);
+      }
+    }
+  }
+
+  /**
+   * Session-scoped failed marks — queue edits draft on `fork()` (or
+   * pass the ids through) so a snapshot rebuild can't erase them;
+   * a restore intentionally constructs without them.
+   */
+  get unplayableIds(): ReadonlySet<string> {
+    // A snapshot — callers bank it next to `snapshot()` for rollback
+    // and must not alias the live set into a stale reference.
+    return new Set(this.#unplayable);
+  }
+
+  isUnplayable(occurrenceId: string): boolean {
+    return this.#unplayable.has(occurrenceId);
+  }
+
+  /**
+   * A mutable copy carrying the transient failed set — the snapshot
+   * round-trip drops it, so draft-replacing queue edits go through
+   * here rather than `new QueueEngine(snapshot())`.
+   */
+  fork(): QueueEngine {
+    return new QueueEngine(this.snapshot(), this.#unplayable);
   }
 
   /** Observed playback position — the snapshot field without a clone. */
@@ -251,6 +358,12 @@ export class QueueEngine {
       return;
     }
     this.#requireTick();
+    if (autoplay) {
+      // A play-intent landing clears the failed mark — the attempt's
+      // own verdict decides whether it flags again. It stays below
+      // the capacity check so a rejected select can't mutate marks.
+      this.#unplayable.delete(id);
+    }
     this.#currentId = id;
     this.#positionMs = 0;
     this.#mode = mode;
@@ -266,7 +379,17 @@ export class QueueEngine {
     }
     this.#requireTick();
     const index = this.#indexOf(this.#currentId);
-    const nextIndex = index + 1;
+    // Step over entries already failed this session instead of
+    // parking the walk on a known-dead row; an explicit select()
+    // still lands on them — a flagged row is retryable, not gone.
+    let nextIndex = index + 1;
+    while (nextIndex < this.#occurrences.length) {
+      const next = this.#occurrences[nextIndex];
+      if (next === undefined || !this.#unplayable.has(next.occurrenceId)) {
+        break;
+      }
+      nextIndex += 1;
+    }
     if (nextIndex >= this.#occurrences.length) {
       this.#currentId = null;
       this.#positionMs = 0;
@@ -310,7 +433,10 @@ export class QueueEngine {
     if (index < 0) {
       return;
     }
-    if (this.#positionMs > 3000) {
+    // The >3s restart applies to live playback — a blocked row's
+    // retained position isn't progress it can resume from, so prev
+    // steps to the predecessor instead of consuming the press.
+    if (this.#positionMs > 3000 && this.#blockedError === undefined) {
       this.#requireTick();
       this.#positionMs = 0;
       this.#tick();
@@ -343,6 +469,7 @@ export class QueueEngine {
     this.#requireTick();
     const wasCurrent = this.#currentId === id;
     this.#occurrences.splice(index, 1);
+    this.#unplayable.delete(id);
     if (wasCurrent) {
       this.#blockedError = undefined;
       const successor = this.#occurrences[index];
@@ -381,6 +508,39 @@ export class QueueEngine {
     this.#tick();
   }
 
+  /**
+   * Rewrites the canonical sequence — `order` must be a permutation
+   * of the live occurrence ids. Cursor, marks, and position ride on
+   * ids, so a full re-layout needs nothing else; a reorder that
+   * changes nothing skips the tick like `move` does.
+   */
+  reorder(order: readonly string[]): void {
+    if (order.length !== this.#occurrences.length) {
+      throw new TypeError('reorder must cover every occurrence');
+    }
+    if (new Set(order).size !== order.length) {
+      // Same length + known ids isn't enough — a duplicate silently
+      // drops the occurrence it displaced.
+      throw new TypeError('reorder must not repeat an occurrence');
+    }
+    const byId = new Map(
+      this.#occurrences.map((o) => [o.occurrenceId, o] as const),
+    );
+    const next = order.map((id) => {
+      const occurrence = byId.get(id);
+      if (occurrence === undefined) {
+        throw new TypeError('reorder carries an unknown occurrence');
+      }
+      return occurrence;
+    });
+    if (next.every((o, i) => o === this.#occurrences[i])) {
+      return;
+    }
+    this.#requireTick();
+    this.#occurrences = next.map(cloneOccurrence);
+    this.#tick();
+  }
+
   /** Replaces an occurrence's selected source ref. */
   setSelectedRef(occurrenceId: string, ref: SourceRef | null): void {
     const index = this.#requireIndex(occurrenceId);
@@ -407,8 +567,11 @@ export class QueueEngine {
     if (this.#mode === 'playing' && this.#blockedError === undefined) {
       return;
     }
-    // play() on a blocked item is the explicit Retry action.
+    // play() on a blocked item is the explicit Retry action — the
+    // same fresh-attempt intent select(id, true) carries, so the
+    // failed mark clears with it.
     this.#requireTick();
+    this.#unplayable.delete(this.#currentId);
     this.#blockedError = undefined;
     this.#mode = 'playing';
     this.#tick();
@@ -461,6 +624,7 @@ export class QueueEngine {
     this.#requireTick();
     this.#mode = 'paused';
     this.#blockedError = cloneError(error);
+    this.#unplayable.add(this.#currentId);
     this.#tick();
   }
 
@@ -498,6 +662,10 @@ export class QueueEngine {
     this.#positionMs = position;
     this.#mode = mode;
     this.#blockedError = undefined;
+    if (playing && occurrenceId !== null) {
+      // The service reports the row playing — its failed mark is stale.
+      this.#unplayable.delete(occurrenceId);
+    }
     this.#tick();
   }
 

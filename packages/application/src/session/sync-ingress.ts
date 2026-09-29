@@ -907,7 +907,7 @@ export class SyncIngress {
       r.settings = { ...batch.settings };
     }
     if (batch.queue !== undefined) {
-      r.queue = new QueueEngine(batch.queue);
+      r.queue = new QueueEngine(batch.queue, r.queue.unplayableIds);
       r.queueCommittedRev = Math.max(
         r.queueCommittedRev,
         batch.queue.revision,
