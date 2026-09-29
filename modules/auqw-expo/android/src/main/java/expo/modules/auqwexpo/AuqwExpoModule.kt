@@ -142,6 +142,11 @@ class ProjectionItemInput : Record {
 
   @Field
   var artworkUrl: String? = null
+
+  /** Session failed-mark — forward moves skip this row, backward
+   * moves still reach it. Absent from older JS bundles = unmarked. */
+  @Field
+  var skipsForward: Boolean? = null
 }
 
 /**
@@ -172,9 +177,10 @@ class QueueProjectionInput : Record {
   var repeat: String = "off"
 
   /** The dealt walk order: a permutation of `items` indices the
-   * cursor steps through (shuffle). Canonical item order never
-   * changes — only the walk does. Absent from older JS bundles =
-   * the identity order. */
+   * cursor steps through (shuffle). Failed rows stay in the walk
+   * flagged `skipsForward` — forward moves skip them, backward moves
+   * still reach them. Canonical item order never changes — only the
+   * walk does. Absent from older JS bundles = the identity order. */
   @Field
   var order: List<Int> = emptyList()
 
@@ -1629,11 +1635,23 @@ class AuqwExpoModule : Module() {
       )
       return
     }
-    var next = order.getOrNull(pos + 1)?.let { proj.items.getOrNull(it) }
+    // Forward moves step over `skipsForward` rows — the same skip the
+    // engine's next() applies; backward moves above still reach them.
+    fun unflaggedAfter(walkPos: Int): QueueProjectionItem? {
+      for (i in walkPos + 1 until order.size) {
+        val item = proj.items.getOrNull(order[i])
+        if (item != null && item.skipsForward != true) {
+          return item
+        }
+      }
+      return null
+    }
+    var next = unflaggedAfter(pos)
     if (next == null && proj.repeat == "all" && order.isNotEmpty()) {
-      // Walk's tail under repeat=all wraps to its head — a single-item
-      // queue lands back on itself and becomes an in-place restart.
-      next = proj.items[order.first()]
+      // A stalled walk under repeat=all wraps to its first unflagged
+      // entry — a single-item queue lands back on itself and becomes
+      // an in-place restart.
+      next = unflaggedAfter(-1)
     }
     if (next != null && next.occurrenceId == from) {
       p.seekTo(0)

@@ -1474,6 +1474,10 @@ async function unplayableRollbackRestoresMarks(): Promise<void> {
     [0, 1],
     'the projection keeps failed history for previous',
   );
+  assert(
+    r.player.projections.at(-1)?.items[0]?.skipsForward === true,
+    'the failed row carries the forward-skip flag',
+  );
 }
 
 async function restartRestore(): Promise<void> {

@@ -2268,43 +2268,29 @@ export class PlaybackEngine {
           title: recording?.title ?? 'Unknown',
           artist: recording?.artist ?? null,
           artworkUrl: artwork?.url ?? null,
+          skipsForward: r.queue.isUnplayable(occurrence.occurrenceId)
+            ? true
+            : undefined,
         };
       },
     );
     // The walk the cursor steps through: the dealt order under shuffle,
     // the identity otherwise — `items` itself stays canonical. Rows the
-    // engine marked failed drop out only AHEAD of the cursor — player
-    // cursors walk this order on track end / remote next, so they must
-    // see the same forward skip the engine applies, while a marked row
-    // at or behind the cursor stays reachable for media-control
-    // previous (the engine's previous() deliberately steps onto them).
-    // The current row always stays — a cursor that can't locate it has
-    // no position to advance from.
+    // engine marked failed stay IN the walk flagged `skipsForward`:
+    // forward moves (ended / remote-next / repeat wrap) must step over
+    // them the way next() does, while media-control previous still
+    // reaches them the way previous() does. A single order carries both
+    // rules — dropping them would silently strand backward moves.
     const dealt = this.#host.dealtOrder(r);
     const indexOfId = new Map(
       snap.occurrences.map((o, i) => [o.occurrenceId, i] as const),
     );
-    const walkIndices =
+    const order =
       dealt === null
         ? snap.occurrences.map((_, i) => i)
         : dealt
             .map((id) => indexOfId.get(id))
             .filter((i): i is number => i !== undefined);
-    const cursorWalkPos =
-      snap.currentOccurrenceId === null
-        ? -1
-        : walkIndices.findIndex(
-            (i) => snap.occurrences[i]?.occurrenceId === snap.currentOccurrenceId,
-          );
-    const order = walkIndices.filter((i, walkPos) => {
-      const id = snap.occurrences[i]?.occurrenceId;
-      return (
-        id !== undefined &&
-        (!r.queue.isUnplayable(id) ||
-          id === snap.currentOccurrenceId ||
-          walkPos <= cursorWalkPos)
-      );
-    });
     return {
       projectionId: this.#ids.next('projection'),
       queueRev: snap.revision,
@@ -2436,6 +2422,20 @@ export class PlaybackEngine {
     const orderPos = execCursor < 0 ? -1 : execOrder.indexOf(execCursor);
     const atWalk = (pos: number): string | null =>
       execItems[execOrder[pos] ?? -1]?.occurrenceId ?? null;
+    // Forward moves step over `skipsForward` rows — the same skip the
+    // cursors and engine next() apply. The wrap target is the first
+    // unflagged entry from the walk's head; a flagged row behind the
+    // cursor stays legal only for backward moves.
+    const forwardAt = (fromPos: number): string | null => {
+      for (let i = fromPos + 1; i < execOrder.length; i += 1) {
+        const item = execItems[execOrder[i] ?? -1];
+        if (item !== undefined && item.skipsForward !== true) {
+          return item.occurrenceId;
+        }
+      }
+      return null;
+    };
+    const firstUnflagged = (): string | null => forwardAt(-1);
     // A service move emits the projection it captured at move-start,
     // which can lag one JS install. Its identity echoes that captured
     // rev (a fresh attach keys to proj.queueRev) while a same-item
@@ -2463,7 +2463,7 @@ export class PlaybackEngine {
     // starts a fresh listen, which the play dedup counts as a new loop.
     let repeatEdge = false;
     if (event.reason === 'ended' || event.reason === 'remote-next') {
-      const successor = orderPos >= 0 ? atWalk(orderPos + 1) : null;
+      const successor = orderPos >= 0 ? forwardAt(orderPos) : null;
       legal = edgeUnverifiable || event.toOccurrenceId === successor;
       // repeat=one replays the cursor item on `ended` — a same-item
       // edge is legal only there (remote-next still advances). The
@@ -2479,13 +2479,16 @@ export class PlaybackEngine {
         legal = true;
         repeatEdge = true;
       }
-      // repeat=all wraps a dealt-tail move back to the dealt head.
+      // repeat=all wraps a stalled walk back to its first unflagged
+      // entry — the cursor wraps wherever forward skipping ran out,
+      // not only at the literal tail.
       if (
         !legal &&
         executed?.repeat === 'all' &&
-        orderPos === execOrder.length - 1 &&
-        execOrder.length > 0 &&
-        event.toOccurrenceId === atWalk(0)
+        orderPos >= 0 &&
+        successor === null &&
+        event.toOccurrenceId !== null &&
+        event.toOccurrenceId === firstUnflagged()
       ) {
         legal = true;
         repeatEdge = true;

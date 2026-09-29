@@ -624,8 +624,8 @@ export function createWebPlayerPort(deps: {
       return;
     }
     // The cursor walks `order` positions — the dealt play order under
-    // shuffle, with failed rows dropped out of the walk; an absent
-    // list reads as canonical identity.
+    // shuffle, failed rows still in it flagged `skipsForward`; an
+    // absent list reads as canonical identity.
     const order =
       p.order.length === 0
         ? p.items.map((_, i) => i)
@@ -681,17 +681,27 @@ export function createWebPlayerPort(deps: {
       return;
     }
     // repeat=one replays the cursor item on a natural end (manual
-    // remote-next still advances); repeat=all wraps the walk's tail
-    // to its head — a single-item queue lands back on itself, handled
-    // by the same in-place restart as any same-item target.
+    // remote-next still advances); repeat=all wraps the walk to its
+    // first unflagged entry — a single-item queue lands back on
+    // itself, handled by the same in-place restart as any same-item
+    // target. `skipsForward` rows are stepped over exactly like the
+    // engine's next(); backward moves above still reach them.
+    const unflagged = (walkPos: number): (typeof p.items)[number] | undefined => {
+      for (let i = walkPos + 1; i < order.length; i += 1) {
+        const item = p.items[order[i] ?? -1];
+        if (item !== undefined && item.skipsForward !== true) {
+          return item;
+        }
+      }
+      return undefined;
+    };
     const successor =
       reason === 'ended' && p.repeat === 'one'
         ? p.items[idx]
-        : pos + 1 < order.length
-          ? p.items[order[pos + 1] ?? -1]
-          : p.repeat === 'all' && order.length > 0
-            ? p.items[order[0] ?? -1]
-            : undefined;
+        : (unflagged(pos) ??
+          (p.repeat === 'all' && order.length > 0
+            ? unflagged(-1)
+            : undefined));
     if (successor === undefined) {
       const tailPositionMs = posMs();
       if (reason !== 'ended') {
