@@ -559,9 +559,12 @@ export function StageSheet({
   const theme = useTheme();
   const { width: windowWidth, height: windowHeight, fontScale } =
     useWindowDimensions();
-  // Window geometry that invalidates hidden-pane measurements —
-  // rotation and font-scale moves every row's frame.
-  const lyricGeom = `${windowWidth}x${windowHeight}:${fontScale}`;
+  // Row frames move on width and font scale; the scroll viewport's
+  // own frame moves on width and height. Tracked separately so a
+  // height-only change can't strand row measurements, and a stale
+  // viewport height can't settle the owed scroll.
+  const lyricRowGeom = `${windowWidth}:${fontScale}`;
+  const lyricViewGeom = `${windowWidth}x${windowHeight}`;
   const [height, setHeight] = useState(0);
   const internalProgress = useSharedValue(expanded ? 1 : 0);
   // One progress drives the morph: the pill's rise drag writes it from
@@ -904,10 +907,13 @@ export function StageSheet({
     [],
   );
   const lyricScrolledKey = useRef<string | null>(null);
-  // The geometry the stored lyric measurements belong to — the
-  // scroller's layout event stamps it so a hidden relayout
-  // (rotation, font scale) is detected on re-entry.
+  // The row geometry the stored lyric measurements belong to —
+  // invalidated on re-entry when width/font-scale moved while
+  // hidden. The scroller stamps its own viewport geometry so a
+  // scroll only settles against a height measured for the current
+  // window.
   const lyricMeasuredGeom = useRef<string | null>(null);
+  const lyricViewMeasuredGeom = useRef<string | null>(null);
   // Layouts live in refs — a counter re-runs the owed-scroll effect
   // when the active row or the scroller itself first measures in.
   const [lyricLayoutTick, bumpLyricLayout] = useState(0);
@@ -930,7 +936,11 @@ export function StageSheet({
       // A zero scroller height means its own layout has not landed —
       // scrollTo against uncommitted content clamps and loses, so
       // the owed key must stay unsettled rather than mark a miss.
-      if (line === undefined || lyricsScrollH.current <= 0) {
+      if (
+        line === undefined ||
+        lyricsScrollH.current <= 0 ||
+        lyricViewMeasuredGeom.current !== lyricViewGeom
+      ) {
         return false;
       }
       lyricsScrollRef.current?.scrollTo({
@@ -939,16 +949,18 @@ export function StageSheet({
       });
       return true;
     },
-    [theme.reducedMotion],
+    [theme.reducedMotion, lyricViewGeom],
   );
   useEffect(() => {
-    if (activeMode === 'lyrics' && lyricMeasuredGeom.current !== lyricGeom) {
-      // The pane was hidden while geometry moved — mounted rows
-      // still hold pre-change frames until the next layout pass
-      // refires them, so their stored offsets must not settle the
-      // owed scroll. The scroller height self-corrects on its own
-      // refire when its frame changed.
-      lyricMeasuredGeom.current = lyricGeom;
+    if (
+      activeMode === 'lyrics' &&
+      lyricMeasuredGeom.current !== lyricRowGeom
+    ) {
+      // The pane was hidden while row geometry moved — mounted
+      // rows still hold pre-change frames until the next layout
+      // pass refires them, so their stored offsets must not
+      // settle the owed scroll.
+      lyricMeasuredGeom.current = lyricRowGeom;
       lyricLayouts.current = [];
     }
     if (lyricScrollKey === null || activeMode !== 'lyrics') {
@@ -972,7 +984,7 @@ export function StageSheet({
     lyricScrollKey,
     scrollToLyricLine,
     lyricLayoutTick,
-    lyricGeom,
+    lyricRowGeom,
   ]);
 
   // The lyrics-mode header rides the pane chrome — the same element
@@ -1311,7 +1323,7 @@ export function StageSheet({
               ref={lyricsScrollRef}
               onLayout={(e) => {
                 lyricsScrollH.current = e.nativeEvent.layout.height;
-                lyricMeasuredGeom.current = lyricGeom;
+                lyricViewMeasuredGeom.current = lyricViewGeom;
                 bumpLyricLayout((tick) => tick + 1);
               }}
               style={{ flex: 1, marginTop: theme.spacing.sm }}
