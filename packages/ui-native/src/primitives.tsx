@@ -46,22 +46,16 @@ export type TextColor =
   | 'canvas';
 
 function textColor(theme: Theme, color: TextColor): string {
-  switch (color) {
-    case 'primary':
-      return theme.colors.textPrimary;
-    case 'bright':
-      return theme.colors.textBright;
-    case 'secondary':
-      return theme.colors.textSecondary;
-    case 'accent':
-      return theme.colors.accent;
-    case 'warn':
-      return theme.colors.warn;
-    case 'liked':
-      return theme.colors.liked;
-    case 'canvas':
-      return theme.colors.canvas;
-  }
+  const colors: Record<TextColor, string> = {
+    primary: theme.colors.textPrimary,
+    bright: theme.colors.textBright,
+    secondary: theme.colors.textSecondary,
+    accent: theme.colors.accent,
+    warn: theme.colors.warn,
+    liked: theme.colors.liked,
+    canvas: theme.colors.canvas,
+  };
+  return colors[color];
 }
 
 export type TextProps = {
@@ -99,11 +93,10 @@ export function Text({
         ...base,
         fontSize: base.fontSize * theme.textScale,
         lineHeight: base.lineHeight * theme.textScale,
-        ...(letterSpacing === undefined
-          ? undefined
-          : {
-            letterSpacing: letterSpacing * theme.textScale,
-          }),
+        letterSpacing:
+          letterSpacing === undefined
+            ? undefined
+            : letterSpacing * theme.textScale,
       };
   return (
     <RNText
@@ -140,14 +133,45 @@ export function Hairline({
       style={[
         {
           backgroundColor: theme.colors.hairline,
+          alignSelf: 'stretch',
           ...(vertical
-            ? { width: theme.strokes.hairline, alignSelf: 'stretch' as const }
-            : { height: theme.strokes.hairline, alignSelf: 'stretch' as const }),
+            ? { width: theme.strokes.hairline }
+            : { height: theme.strokes.hairline }),
         },
         style,
       ]}
     />
   );
+}
+
+// The detail-screen chrome button — every pushed screen's chevron.
+export function BackButton({
+  onPress,
+  accessibilityLabel,
+}: {
+  readonly onPress?: (() => void) | undefined;
+  readonly accessibilityLabel: string;
+}) {
+  const theme = useTheme();
+  return (
+    <Pressable
+      compact
+      onPress={onPress}
+      accessibilityLabel={accessibilityLabel}
+      style={{ padding: theme.spacing.xs }}
+    >
+      <Icon name="chevron-left" size={16} color={theme.colors.textSecondary} />
+    </Pressable>
+  );
+}
+
+// Curry an optional handler — undefined stays undefined so the control
+// stays honest-inert instead of shipping a dead press.
+export function bind<A>(
+  fn: ((arg: A) => void) | undefined,
+  arg: A,
+): (() => void) | undefined {
+  return fn === undefined ? undefined : () => fn(arg);
 }
 
 export type PressableProps = {
@@ -686,6 +710,9 @@ export function Icon({
   const glyph = GLYPHS[name];
   const useFill = filled ?? glyph.filled;
   const paint = color ?? theme.colors.textPrimary;
+  const stroke = useFill ? 'none' : paint;
+  const strokeW = strokeWidth ?? theme.strokes.progress;
+  const fill = useFill ? paint : 'none';
   return (
     <Svg
       width={size}
@@ -701,11 +728,11 @@ export function Icon({
               <Path
                 key={i}
                 d={shape.d}
-                stroke={useFill ? 'none' : paint}
-                strokeWidth={strokeWidth ?? theme.strokes.progress}
+                stroke={stroke}
+                strokeWidth={strokeW}
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                fill={useFill ? paint : 'none'}
+                fill={fill}
               />
             );
           case 'circle':
@@ -715,9 +742,9 @@ export function Icon({
                 cx={shape.cx}
                 cy={shape.cy}
                 r={shape.r}
-                stroke={useFill ? 'none' : paint}
-                strokeWidth={strokeWidth ?? theme.strokes.progress}
-                fill={useFill ? paint : 'none'}
+                stroke={stroke}
+                strokeWidth={strokeW}
+                fill={fill}
               />
             );
           case 'rect':
@@ -729,9 +756,9 @@ export function Icon({
                 width={shape.w}
                 height={shape.h}
                 rx={shape.rx ?? 0}
-                stroke={useFill ? 'none' : paint}
-                strokeWidth={strokeWidth ?? theme.strokes.progress}
-                fill={useFill ? paint : 'none'}
+                stroke={stroke}
+                strokeWidth={strokeW}
+                fill={fill}
               />
             );
         }
