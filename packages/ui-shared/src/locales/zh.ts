@@ -421,6 +421,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'settings.downloadStorage': '下载存储',
   'settings.artworkCache': '封面缓存',
   'settings.removeAllDownloads': '移除所有下载',
+  'settings.confirmAction': '确认{action}',
   'settings.localFolders': '本地文件夹',
   'settings.removeSource': '移除“{label}”',
   'settings.addLocalFolder': '添加本地文件夹',

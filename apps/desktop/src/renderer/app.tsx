@@ -883,7 +883,14 @@ function Main({
     [syncRefresh],
   );
   const onSyncNow = useCallback(() => {
-    void window.auqw.sync.trigger().then(syncRefresh);
+    void window.auqw.sync
+      .trigger()
+      .then(syncRefresh)
+      // A rejected kick resolved nothing — surface it on the toast
+      // like every other session op instead of clicking dead.
+      .catch((thrown: unknown) => {
+        reportResult('sync.syncNow', err(shellToAppError(thrown)));
+      });
   }, [syncRefresh]);
   // Every dial path settles the same: success retires the sheet like
   // a dismiss (generation bump so an in-flight offer mint can't land

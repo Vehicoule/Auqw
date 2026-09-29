@@ -451,6 +451,7 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'settings.downloadStorage': 'almacenamiento de descargas',
   'settings.artworkCache': 'caché de carátulas',
   'settings.removeAllDownloads': 'eliminar todas las descargas',
+  'settings.confirmAction': 'confirmar: {action}',
   'settings.localFolders': 'carpetas locales',
   'settings.removeSource': 'quitar “{label}”',
   'settings.addLocalFolder': 'añadir carpeta local',
