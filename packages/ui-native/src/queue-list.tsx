@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { FlatList, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Text } from './primitives.tsx';
@@ -6,6 +7,51 @@ import { EmptyState } from './states.tsx';
 import type { QueueItemModel, QueueModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
 import { queueSectionLabel } from '@auqw/ui-shared/controllers';
+
+/** Section-header + repeat-badge chrome shared by both QueueList variants. */
+export function QueueRowChrome({
+  item,
+  sectionStart,
+  children,
+}: {
+  readonly item: QueueItemModel;
+  readonly sectionStart: boolean;
+  readonly children: ReactNode;
+}) {
+  const theme = useTheme();
+  return (
+    <View>
+      {sectionStart && (
+        <Text
+          variant="label"
+          color={item.section === 'nowPlaying' ? 'accent' : 'secondary'}
+          style={{ paddingHorizontal: theme.spacing.sm, marginBottom: 2 }}
+          uppercase
+        >
+          {queueSectionLabel(item.section)}
+        </Text>
+      )}
+      {item.duplicate && (
+        <View
+          style={{
+            alignSelf: 'flex-start',
+            marginHorizontal: theme.spacing.sm,
+            marginTop: theme.spacing.xs,
+            paddingHorizontal: 7,
+            borderRadius: theme.radius.pill,
+            borderWidth: theme.strokes.hairline,
+            borderColor: theme.colors.hairline,
+          }}
+        >
+          <Text variant="label" color="secondary" uppercase>
+            {t('queue.badge.repeat')}
+          </Text>
+        </View>
+      )}
+      {children}
+    </View>
+  );
+}
 
 // Shared fallback (web/desktop + any platform without gesture-handler):
 // reorder uses paired chevron controls; the native variant swaps this
@@ -38,7 +84,6 @@ export function QueueList({
   onMoveItem,
   onMoveItemTo,
 }: QueueListProps) {
-  const theme = useTheme();
   if (queue.items.length === 0) {
     return <EmptyState title={t('queue.empty')} icon="queue" />;
   }
@@ -71,34 +116,10 @@ export function QueueList({
       initialNumToRender={15}
       contentContainerStyle={{ paddingBottom: contentPaddingBottom }}
       renderItem={({ item, index }) => (
-        <View>
-          {items[index - 1]?.section !== item.section && (
-            <Text
-              variant="label"
-              color={item.section === 'nowPlaying' ? 'accent' : 'secondary'}
-              style={{ paddingHorizontal: theme.spacing.sm, marginBottom: 2 }}
-              uppercase
-            >
-              {queueSectionLabel(item.section)}
-            </Text>
-          )}
-          {item.duplicate && (
-            <View
-              style={{
-                alignSelf: 'flex-start',
-                marginHorizontal: theme.spacing.sm,
-                marginTop: theme.spacing.xs,
-                paddingHorizontal: 7,
-                borderRadius: theme.radius.pill,
-                borderWidth: theme.strokes.hairline,
-                borderColor: theme.colors.hairline,
-              }}
-            >
-              <Text variant="label" color="secondary" uppercase>
-                {t('queue.badge.repeat')}
-              </Text>
-            </View>
-          )}
+        <QueueRowChrome
+          item={item}
+          sectionStart={items[index - 1]?.section !== item.section}
+        >
           <TrackRow
             row={item.row}
             reorderControls={reordering ? 'buttons' : 'none'}
@@ -127,7 +148,7 @@ export function QueueList({
                 : undefined
             }
           />
-        </View>
+        </QueueRowChrome>
       )}
     />
   );

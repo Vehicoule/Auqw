@@ -1,39 +1,23 @@
 import { useRef, useState } from 'react';
-import { FlatList, View } from 'react-native';
+import { FlatList } from 'react-native';
 import DraggableFlatList, {
   ScaleDecorator,
 } from 'react-native-draggable-flatlist';
 import type { RenderItemParams } from 'react-native-draggable-flatlist';
 import * as Haptics from 'expo-haptics';
-import { useTheme } from './theme.tsx';
-import { Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
-import type { QueueItemModel, QueueModel } from '@auqw/ui-shared';
+import { QueueRowChrome } from './queue-list.tsx';
+import type { QueueListProps } from './queue-list.tsx';
+import type { QueueItemModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
-import { queueSectionLabel } from '@auqw/ui-shared/controllers';
+
+export type { QueueListProps };
 
 // Reorder mode swaps the FlatList for a DraggableFlatList: rows get a
 // drag handle, the lift animation comes from ScaleDecorator, and a
 // light haptic marks the grab. The committed order is still session
 // state — onDragEnd reports indices, the caller issues moveOccurrence.
-export type QueueListProps = {
-  readonly queue: QueueModel;
-  readonly reordering?: boolean | undefined;
-  readonly scrollEnabled?: boolean | undefined;
-  /** Bottom inset inside the scroll content — the stage's floating
-      mode segment overlays this zone; the pad lets the last row
-      scroll fully clear of it. */
-  readonly contentPaddingBottom?: number | undefined;
-  readonly onPressItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onRemoveItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onMoveItem?:
-  | ((occurrenceId: string, direction: -1 | 1) => void)
-  | undefined;
-  readonly onMoveItemTo?:
-  | ((occurrenceId: string, toIndex: number) => void)
-  | undefined;
-};
 
 export function QueueList({
   queue,
@@ -45,7 +29,6 @@ export function QueueList({
   onMoveItem,
   onMoveItemTo,
 }: QueueListProps) {
-  const theme = useTheme();
   // The draggable list animates to the raw drop slot; a drop outside
   // up-next is clamped on write, so the list remounts to re-render
   // from the model — otherwise it keeps showing the rejected landing.
@@ -75,34 +58,10 @@ export function QueueList({
     onDragStart?: (() => void) | undefined;
     controls: 'none' | 'buttons' | 'drag';
   }) => (
-    <View>
-      {items[index - 1]?.section !== item.section && (
-        <Text
-          variant="label"
-          color={item.section === 'nowPlaying' ? 'accent' : 'secondary'}
-          style={{ paddingHorizontal: theme.spacing.sm, marginBottom: 2 }}
-          uppercase
-        >
-          {queueSectionLabel(item.section)}
-        </Text>
-      )}
-      {item.duplicate && (
-        <View
-          style={{
-            alignSelf: 'flex-start',
-            marginHorizontal: theme.spacing.sm,
-            marginTop: theme.spacing.xs,
-            paddingHorizontal: 7,
-            borderRadius: theme.radius.pill,
-            borderWidth: theme.strokes.hairline,
-            borderColor: theme.colors.hairline,
-          }}
-        >
-          <Text variant="label" color="secondary" uppercase>
-            {t('queue.badge.repeat')}
-          </Text>
-        </View>
-      )}
+    <QueueRowChrome
+      item={item}
+      sectionStart={items[index - 1]?.section !== item.section}
+    >
       <TrackRow
         row={item.row}
         reorderControls={controls}
@@ -132,7 +91,7 @@ export function QueueList({
             : undefined
         }
       />
-    </View>
+    </QueueRowChrome>
   );
   if (reordering && onMoveItemTo !== undefined) {
     return (
