@@ -3013,6 +3013,173 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
   const openRowActions = setActionsFor;
   const openPlaylistPicker = setPickerFor;
+  const closeRowActions = useCallback(() => setActionsFor(null), []);
+  const closePlaylistPicker = useCallback(() => setPickerFor(null), []);
+  const closeProviderPicker = useCallback(() => setProviderSlot(null), []);
+
+  // ---- picker sheets (epoch-gated serialized writes) ---------------
+  // These handlers feed dep arrays (mobile's BackHandler chain) — they
+  // must be referentially stable, not per-render closures.
+  const openThemePicker = useCallback(() => {
+    themeEpoch.current += 1;
+    setThemePickerOpen(true);
+  }, []);
+  const onPickTheme = useCallback(
+    (key: string) => {
+      // Each pick claims a fresh epoch — a save from an earlier pick
+      // must not close this sheet.
+      themeEpoch.current += 1;
+      const opening = themeEpoch.current;
+      const theme = THEME_ORDER.find((tag) => tag === key) ?? 'system';
+      // Report a failed save and keep the sheet open so an unapplied
+      // pick still reads unselected.
+      void queueSettingsWrite({ theme }).then((saved) => {
+        if (opening !== themeEpoch.current) {
+          // A newer pick or a dismissal superseded this save — reject
+          // the stale result outright: it must not close the sheet nor
+          // report an outcome over the newer pick.
+          return;
+        }
+        reportResult('settings.theme', saved);
+        if (saved.ok) {
+          setThemePickerOpen(false);
+        }
+      });
+    },
+    [queueSettingsWrite],
+  );
+  const closeThemePicker = useCallback(() => {
+    themeEpoch.current += 1;
+    setThemePickerOpen(false);
+  }, []);
+  const openLanguagePicker = useCallback(() => {
+    languageEpoch.current += 1;
+    setLanguagePickerOpen(true);
+  }, []);
+  const onPickLanguage = useCallback(
+    (key: string) => {
+      const language = key === 'system' ? null : key;
+      // Each pick claims a fresh epoch — a save from an earlier pick
+      // must neither apply its locale nor close this sheet.
+      languageEpoch.current += 1;
+      const opening = languageEpoch.current;
+      // Apply the locale only once the save landed — a failed save
+      // must not leave the UI on a selection storage never recorded.
+      // On failure the sheet stays open: the pick still reads
+      // unselected, so the failure is visible without the toast.
+      void queueSettingsWrite({ language }).then((saved) => {
+        if (opening !== languageEpoch.current) {
+          // A newer pick or a dismissal superseded this save — reject
+          // the stale result outright: it must not apply a stale
+          // locale, close the sheet, nor report over the newer pick.
+          return;
+        }
+        reportResult('settings.language', saved);
+        if (saved.ok) {
+          applyLocale(language);
+          setLanguagePickerOpen(false);
+        }
+      });
+    },
+    [queueSettingsWrite, applyLocale],
+  );
+  const closeLanguagePicker = useCallback(() => {
+    languageEpoch.current += 1;
+    setLanguagePickerOpen(false);
+  }, []);
+  const openStorefront = useCallback(() => {
+    storefrontEpoch.current += 1;
+    setStorefrontDraft(state.settings.storefront ?? '');
+    setStorefrontSheetOpen(true);
+  }, [state.settings.storefront]);
+  const onSubmitStorefront = useCallback(
+    (value: string) => {
+      const code = value.toUpperCase();
+      // The domain bound: ISO-3166 alpha-2, or null for
+      // system-locale resolution.
+      if (!/^[A-Z]{2}$/.test(code)) {
+        setToast(t('toast.storefrontCode'));
+        return;
+      }
+      // Dismiss only on commit — a failed save shows the toast, not
+      // a closed sheet over an unchanged row.
+      const opening = storefrontEpoch.current;
+      void queueSettingsWrite({ storefront: code }).then((saved) => {
+        reportResult('action.saveStorefront', saved);
+        if (saved.ok && opening === storefrontEpoch.current) {
+          setStorefrontSheetOpen(false);
+        }
+      });
+    },
+    [queueSettingsWrite],
+  );
+  const onClearStorefront = useCallback(() => {
+    const opening = storefrontEpoch.current;
+    void queueSettingsWrite({ storefront: null }).then((saved) => {
+      reportResult('action.clearStorefront', saved);
+      if (saved.ok && opening === storefrontEpoch.current) {
+        setStorefrontSheetOpen(false);
+      }
+    });
+  }, [queueSettingsWrite]);
+  const closeStorefront = useCallback(
+    () => setStorefrontSheetOpen(false),
+    [],
+  );
+  const openQualityPicker = useCallback(() => {
+    qualityEpoch.current += 1;
+    setQualityPickerOpen(true);
+  }, []);
+  const onPickQuality = useCallback(
+    (key: string) => {
+      const qualityKbps = Number(key);
+      if (!Number.isSafeInteger(qualityKbps)) {
+        return;
+      }
+      const opening = qualityEpoch.current;
+      void queueSettingsWrite({ qualityKbps }).then((saved) => {
+        reportResult('action.saveQuality', saved);
+        if (saved.ok && opening === qualityEpoch.current) {
+          setQualityPickerOpen(false);
+        }
+      });
+    },
+    [queueSettingsWrite],
+  );
+  const closeQualityPicker = useCallback(
+    () => setQualityPickerOpen(false),
+    [],
+  );
+  const onPickArtworkCache = useCallback(
+    (key: string) => {
+      setArtworkCachePickerOpen(false);
+      const mib = Number(key);
+      if (!Number.isSafeInteger(mib)) {
+        return;
+      }
+      const artworkCacheBytes = mib * 1024 * 1024;
+      let shrinking = false;
+      void queueSettingsWrite((latest) => {
+        shrinking =
+          artworkCacheBytes <
+          (latest.artworkCacheBytes ??
+            ARTWORK_CACHE_BUDGET_DEFAULT_BYTES);
+        return { artworkCacheBytes };
+      }).then((updated) => {
+        // A shrunken cap takes effect only once rows over it are
+        // evicted — sweep after the commit lands. The cache itself
+        // is the app's (desktop has no artwork-cache surface).
+        if (updated.ok && shrinking) {
+          ports.sweepArtworkCache?.();
+        }
+      });
+    },
+    [queueSettingsWrite, ports.sweepArtworkCache],
+  );
+  const closeArtworkCache = useCallback(
+    () => setArtworkCachePickerOpen(false),
+    [],
+  );
 
   return {
     // passthroughs the app's seams still read
@@ -3113,161 +3280,40 @@ export function useAppShell<E extends { readonly type: string } = never>(
     actionsFor,
     openRowActions,
     setActionsFor,
-    closeRowActions: () => setActionsFor(null),
+    closeRowActions,
     rowActions,
     onRowAction,
     pickerFor,
     openPlaylistPicker,
     setPickerFor,
-    closePlaylistPicker: () => setPickerFor(null),
+    closePlaylistPicker,
     onPickPlaylist,
     onCreateAndPick,
     providerSlot,
     providerPicker,
     onPickProvider,
-    closeProviderPicker: () => setProviderSlot(null),
+    closeProviderPicker,
     themePickerOpen,
-    openThemePicker: () => {
-      themeEpoch.current += 1;
-      setThemePickerOpen(true);
-    },
-    onPickTheme: (key: string) => {
-      // Each pick claims a fresh epoch — a save from an earlier pick
-      // must not close this sheet.
-      themeEpoch.current += 1;
-      const opening = themeEpoch.current;
-      const theme = THEME_ORDER.find((tag) => tag === key) ?? 'system';
-      // Report a failed save and keep the sheet open so an unapplied
-      // pick still reads unselected.
-      void queueSettingsWrite({ theme }).then((saved) => {
-        if (opening !== themeEpoch.current) {
-          // A newer pick or a dismissal superseded this save — reject
-          // the stale result outright: it must not close the sheet nor
-          // report an outcome over the newer pick.
-          return;
-        }
-        reportResult('settings.theme', saved);
-        if (saved.ok) {
-          setThemePickerOpen(false);
-        }
-      });
-    },
-    closeThemePicker: () => {
-      themeEpoch.current += 1;
-      setThemePickerOpen(false);
-    },
+    openThemePicker,
+    onPickTheme,
+    closeThemePicker,
     languagePickerOpen,
-    openLanguagePicker: () => {
-      languageEpoch.current += 1;
-      setLanguagePickerOpen(true);
-    },
-    onPickLanguage: (key: string) => {
-      const language = key === 'system' ? null : key;
-      // Each pick claims a fresh epoch — a save from an earlier pick
-      // must neither apply its locale nor close this sheet.
-      languageEpoch.current += 1;
-      const opening = languageEpoch.current;
-      // Apply the locale only once the save landed — a failed save
-      // must not leave the UI on a selection storage never recorded.
-      // On failure the sheet stays open: the pick still reads
-      // unselected, so the failure is visible without the toast.
-      void queueSettingsWrite({ language }).then((saved) => {
-        if (opening !== languageEpoch.current) {
-          // A newer pick or a dismissal superseded this save — reject
-          // the stale result outright: it must not apply a stale
-          // locale, close the sheet, nor report over the newer pick.
-          return;
-        }
-        reportResult('settings.language', saved);
-        if (saved.ok) {
-          applyLocale(language);
-          setLanguagePickerOpen(false);
-        }
-      });
-    },
-    closeLanguagePicker: () => {
-      languageEpoch.current += 1;
-      setLanguagePickerOpen(false);
-    },
+    openLanguagePicker,
+    onPickLanguage,
+    closeLanguagePicker,
     storefrontSheetOpen,
     storefrontDraft,
-    openStorefront: () => {
-      storefrontEpoch.current += 1;
-      setStorefrontDraft(state.settings.storefront ?? '');
-      setStorefrontSheetOpen(true);
-    },
-    onSubmitStorefront: (value: string) => {
-      const code = value.toUpperCase();
-      // The domain bound: ISO-3166 alpha-2, or null for
-      // system-locale resolution.
-      if (!/^[A-Z]{2}$/.test(code)) {
-        setToast(t('toast.storefrontCode'));
-        return;
-      }
-      // Dismiss only on commit — a failed save shows the toast, not
-      // a closed sheet over an unchanged row.
-      const opening = storefrontEpoch.current;
-      void queueSettingsWrite({ storefront: code }).then((saved) => {
-        reportResult('action.saveStorefront', saved);
-        if (saved.ok && opening === storefrontEpoch.current) {
-          setStorefrontSheetOpen(false);
-        }
-      });
-    },
-    onClearStorefront: () => {
-      const opening = storefrontEpoch.current;
-      void queueSettingsWrite({ storefront: null }).then((saved) => {
-        reportResult('action.clearStorefront', saved);
-        if (saved.ok && opening === storefrontEpoch.current) {
-          setStorefrontSheetOpen(false);
-        }
-      });
-    },
-    closeStorefront: () => setStorefrontSheetOpen(false),
+    openStorefront,
+    onSubmitStorefront,
+    onClearStorefront,
+    closeStorefront,
     qualityPickerOpen,
-    openQualityPicker: () => {
-      qualityEpoch.current += 1;
-      setQualityPickerOpen(true);
-    },
-    onPickQuality: (key: string) => {
-      const qualityKbps = Number(key);
-      if (!Number.isSafeInteger(qualityKbps)) {
-        return;
-      }
-      const opening = qualityEpoch.current;
-      void queueSettingsWrite({ qualityKbps }).then((saved) => {
-        reportResult('action.saveQuality', saved);
-        if (saved.ok && opening === qualityEpoch.current) {
-          setQualityPickerOpen(false);
-        }
-      });
-    },
-    closeQualityPicker: () => setQualityPickerOpen(false),
+    openQualityPicker,
+    onPickQuality,
+    closeQualityPicker,
     artworkCachePickerOpen,
-    onPickArtworkCache: (key: string) => {
-      setArtworkCachePickerOpen(false);
-      const mib = Number(key);
-      if (!Number.isSafeInteger(mib)) {
-        return;
-      }
-      const artworkCacheBytes = mib * 1024 * 1024;
-      let shrinking = false;
-      void queueSettingsWrite((latest) => {
-        shrinking =
-          artworkCacheBytes <
-          (latest.artworkCacheBytes ??
-            ARTWORK_CACHE_BUDGET_DEFAULT_BYTES);
-        return { artworkCacheBytes };
-      }).then((updated) => {
-        // A shrunken cap takes effect only once rows over it are
-        // evicted — sweep after the commit lands. The cache itself
-        // is the app's (desktop has no artwork-cache surface).
-        if (updated.ok && shrinking) {
-          ports.sweepArtworkCache?.();
-        }
-      });
-    },
-    closeArtworkCache: () => setArtworkCachePickerOpen(false),
+    onPickArtworkCache,
+    closeArtworkCache,
     // settings + misc ops
     onSettingsSelect,
     onSettingsToggle,
