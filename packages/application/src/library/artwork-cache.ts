@@ -120,9 +120,7 @@ export type ArtworkCache = {
 
 /** Resolves the active byte budget: the setting or the spec default. */
 export function artworkCacheBudgetBytes(settings: Settings): number {
-  return (
-    settings.artworkCacheBytes ?? ARTWORK_CACHE_BUDGET_DEFAULT_BYTES
-  );
+  return settings.artworkCacheBytes ?? ARTWORK_CACHE_BUDGET_DEFAULT_BYTES;
 }
 
 function isArtworkUrl(url: unknown): url is string {
@@ -281,14 +279,10 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
   /** Fire-and-forget promises still get an owner. */
   function own(work: Promise<unknown>): void {
     owned.add(work);
-    void work.then(
-      () => {
-        owned.delete(work);
-      },
-      () => {
-        owned.delete(work);
-      },
-    );
+    const done = (): void => {
+      owned.delete(work);
+    };
+    void work.then(done, done);
   }
 
   /** Bounded, nonfatal, sanitized logging: never urls or paths. */
@@ -408,9 +402,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         break;
       }
       if (signal.cancelled) {
-        if (firstError === null) {
-          firstError = appError('cancelled', 'cancelled');
-        }
+        firstError ??= appError('cancelled', 'cancelled');
         break;
       }
       const removed = await call(() =>
@@ -493,6 +485,8 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         ),
       );
     }
+    const removeDest = (): Promise<Result<void>> =>
+      call(() => deps.paths.remove(destPath, context.signal));
     // Transient verdicts retry once inside the record's deadline —
     // the live max over its waiters, not just the leader's, so a
     // joined caller's budget keeps the shared transfer alive; a
@@ -543,7 +537,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     }
     const bytes = downloaded.value.bytes;
     if (!isSafeNonNegative(bytes)) {
-      await call(() => deps.paths.remove(destPath, context.signal));
+      await removeDest();
       return err(
         appError(
           'invalid-response',
@@ -553,7 +547,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     }
     const now = safeNow();
     if (now === null) {
-      await call(() => deps.paths.remove(destPath, context.signal));
+      await removeDest();
       return err(
         appError('internal', 'clock returned an unsafe timestamp'),
       );
@@ -577,7 +571,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         // An entry larger than the whole budget is rejected, not
         // inserted-then-evicted: caching it would still exceed the
         // budget and returning its path would dangle after cleanup.
-        await call(() => deps.paths.remove(destPath, context.signal));
+        await removeDest();
         return err(
           appError(
             'budget-exceeded',
@@ -600,9 +594,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       }
       for (const other of entries.values()) {
         if (other.filePath === destPath) {
-          await call(() =>
-            deps.paths.remove(destPath, context.signal),
-          );
+          await removeDest();
           return err(
             appError(
               'invalid-response',
@@ -626,7 +618,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       const committed = await commitSection(entries, context);
       if (!committed.ok) {
         // Without its row the new file is orphaned; remove it.
-        await call(() => deps.paths.remove(destPath, context.signal));
+        await removeDest();
         return committed;
       }
       return ok({ hit: false, filePath: destPath });
@@ -681,18 +673,19 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       // Each waiter's own deadline bounds its wait — a caller whose
       // budget dies while others remain leaves without cancelling
       // the shared work.
+      const timedOut = err(
+        appError('timeout', 'operation deadline exceeded'),
+      );
       const now = safeNow();
       const remaining = now === null ? 0 : mine - now;
       if (remaining <= 0) {
-        finish(err(appError('timeout', 'operation deadline exceeded')));
+        finish(timedOut);
       } else {
         void deps.clock
           .sleep(remaining, deadline.signal)
           .then((slept) => {
             if (slept.ok) {
-              finish(
-                err(appError('timeout', 'operation deadline exceeded')),
-              );
+              finish(timedOut);
             }
           });
       }
@@ -790,18 +783,14 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         let firstError: AppError | null = null;
         for (const entry of [...entries.values()]) {
           if (context.signal.cancelled) {
-            if (firstError === null) {
-              firstError = appError('cancelled', 'cancelled');
-            }
+            firstError ??= appError('cancelled', 'cancelled');
             break;
           }
           const present = await call(() =>
             deps.paths.exists(entry.filePath, context.signal),
           );
           if (!present.ok) {
-            if (firstError === null) {
-              firstError = present.error;
-            }
+            firstError ??= present.error;
             warn('artwork cache stat failed');
             continue;
           }
@@ -820,9 +809,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
           null,
           context.signal,
         );
-        if (firstError === null) {
-          firstError = eviction.firstError;
-        }
+        firstError ??= eviction.firstError;
         if (reaped > 0 || eviction.evicted > 0) {
           const committed = await commitSection(entries, context);
           if (!committed.ok) {
@@ -840,10 +827,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         // A stat/removal failure is honest: achieved reaps and
         // evictions are already committed, but the sweep reports the
         // error it hit.
-        if (firstError !== null) {
-          return err(firstError);
-        }
-        return ok(report);
+        return firstError === null ? ok(report) : err(firstError);
       },
     );
   }
