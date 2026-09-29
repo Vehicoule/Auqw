@@ -889,12 +889,8 @@ export function createSyncResponder<
       );
       sessions.add(session);
     },
-    mintOffer() {
-      return pairing.offer();
-    },
-    expireOffer() {
-      pairing.expire();
-    },
+    mintOffer: () => pairing.offer(),
+    expireOffer: () => pairing.expire(),
     get sessions() {
       return sessions;
     },
