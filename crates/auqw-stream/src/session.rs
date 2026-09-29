@@ -324,10 +324,13 @@ impl SessionInner {
     /// for. The retry loop closes the mark-vs-attach race: a failed
     /// `terminate_if` means the session attached under the predicate,
     /// so the next pass records `abandoned` under the same lock the
-    /// attach took.
+    /// attach took. `shared` is recovered like `claim` — a poisoned
+    /// guard must not turn the loop into a livelock under the host's
+    /// `prepared_handles`.
     pub(crate) fn abandon(&self) {
         loop {
-            if let Ok(mut sh) = lock(&self.shared) {
+            {
+                let mut sh = self.shared.lock().unwrap_or_else(|p| p.into_inner());
                 if sh.terminal.is_some() {
                     return;
                 }
