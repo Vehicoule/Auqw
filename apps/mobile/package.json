@@ -17,6 +17,7 @@
     }
   },
   "dependencies": {
+    "@auqw/app-shell": "workspace:*",
     "@auqw/application": "workspace:*",
     "@auqw/storage-sqlite": "workspace:*",
     "@auqw/ui-native": "workspace:*",

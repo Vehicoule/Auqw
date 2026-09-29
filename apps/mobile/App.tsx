@@ -1,3 +1,27 @@
+// Mobile app entry — boot, shell chrome, and the native seams.
+//
+// The shared shell composition (models, overlay/sheet state machines,
+// search, queue/playback ops, downloads UI, transfer, settings
+// surfaces, toasts) lives in @auqw/app-shell's useAppShell; Main wires
+// it up through `ports` and renders what it returns. What stays here
+// is what is genuinely native:
+//
+//   - boot + fonts + the session restore gate (createSessionController
+//     over auqw-expo, retry counter)
+//   - ThemeSource from the system tonal palette + color scheme
+//   - connectivity (edge-then-snapshot with the stale-snapshot guard),
+//     haptics, IME dismissal on search commit — passed as ports
+//   - SAF/document file ops: folder-pick export, pickFileAsync import
+//   - the sync engine surface: pairing mint/remint, share offers,
+//     mDNS nearby peers, clipboard delta import/export
+//   - stage gesture state (the shared morph progress/travel/anchor
+//     values the sheet and mini-player pill write during drags)
+//   - the Android hardware-back chain, the artwork-cache sweep, the
+//     __DEV__ auqw:// journey harness, and the screen JSX itself
+//
+// Everything behavioral above the platform boundary is shared — a fix
+// in the hook fixes both shells.
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppState,
@@ -31,39 +55,24 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import {
   ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
   CancellationSource,
-  ProviderRouter,
-  SearchSession,
   appError,
-  appErrorKind,
   collectSyncDeltaDocs,
-  effectiveMapping,
   err,
   exportFittedDeltaDoc,
   formatEndpoint,
   fromUnknown,
-  isMatchGate,
-  isRefRejected,
   parseSyncDeltaDocs,
-  previewImport,
-  queuedOccurrenceFor,
   queuedOccurrenceForRef,
-  selectionFromSettings,
   serializeSyncDeltaDocs,
 } from '@auqw/application';
 import type {
   AppError,
-  AttemptTrace,
   EntityRef,
-  ImportPreview,
-  OperationContext,
   ReadySession,
   Result,
-  SearchState,
   SessionState,
   Settings,
-  SourceRef,
   SyncClientStatus,
-  TrackMetadata,
 } from '@auqw/application';
 import {
   AddToPlaylistSheet,
@@ -103,78 +112,32 @@ import {
   systemLocaleTag,
   t,
   toCollectionModel,
-  toCorrectionsModel,
-  toEntityModel,
-  toImportPreviewModel,
-  toLibraryModel,
-  toHomeModel,
-  toLyricsModel,
-  toPlayerModel,
-  toPlaylistModel,
-  toQueueModel,
-  toRadioModel,
-  toSearchRowModel,
-  toSettingsModel,
-  formatExpiry,
   toSyncModel,
-  toTrackRowModel,
+  formatExpiry,
   useTheme,
 } from '@auqw/ui-native';
 import type {
   ArtworkResolver,
-  CollectionRowModel,
-  CorrectionsFilter,
-  DownloadChip,
-  DiagnosticsModel,
-  LyricsModel,
   MessageId,
-  PlayerModel,
   ProviderPickerOption,
-  StageMode,
   ThemeSource,
-  TrackRowModel,
-  TransferModel,
 } from '@auqw/ui-native';
 import {
-  DIAGNOSTICS_LIMIT,
-  IDLE_TRANSFER,
   SEARCH_LIMIT,
-  THEME_ORDER,
-  attemptLabel,
-  downloadChipsByRecording,
-  downloadLedgerCount,
   entityRefKey,
   errorText,
-  formatBytes,
-  greeting,
   navItems,
-  nextQueueDestination,
-  providerPickerModel,
   qualityOptions,
   reportResult,
-  setToastSink,
   themeOptions,
-  toSearchModel,
-  useOverlayStack,
-  useSerializedWrite,
-  useSmoothedPosition,
 } from '@auqw/ui-shared';
-import type {
-  ActionTarget,
-  Boot,
-  EntityFetch,
-  LyricsFetch,
-  OverlayEntry,
-  ProviderSlot,
-  ReviewFetch,
-} from '@auqw/ui-shared';
+import type { Boot, OverlayEntry } from '@auqw/ui-shared';
 import { createSessionController } from './src/session/controller.ts';
 import type { SessionController } from './src/session/controller.ts';
-import { activateHomeCard } from './src/session/home-card.ts';
+import { useAppShell } from '@auqw/app-shell';
+import type { AppShellPorts } from '@auqw/app-shell';
 import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
 import { createExpoPeaksPort } from './src/adapters/expo-peaks.ts';
-import { useWaveformPeaks } from '@auqw/ui-shared';
-import type { PeaksTarget } from '@auqw/ui-shared';
 import { discoveredPotProviderUrl } from './src/adapters/pot-provider-discovery.ts';
 import { potProviderUrlFromPeers } from './src/adapters/pot-provider.ts';
 import { createClock, createIds } from '@auqw/application';
@@ -582,22 +545,6 @@ function Main({
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const { session } = controller;
-  // Playback position rides the session's light channel — status
-  // ticks that only move position no longer publish whole state, so
-  // the position read subscribes here instead of through `state`.
-  const [positionMs, setPositionMs] = useState(() =>
-    session.positionMs(),
-  );
-  useEffect(() => {
-    const unsubscribe = session.subscribePosition(setPositionMs);
-    // Re-read after subscribing — the channel doesn't replay, so a
-    // tick landing between the render-time read and this effect
-    // would otherwise be missed.
-    setPositionMs(session.positionMs());
-    return unsubscribe;
-  }, [session]);
-  const [tab, setTab] = useState('home');
-  const [expanded, setExpanded] = useState(false);
   // Shared 0..1 morph progress between the mini-player pill and the
   // stage sheet — drags write it directly so the sheet tracks the
   // finger; `expanded` only flips once a gesture commits.
@@ -610,422 +557,6 @@ function Main({
   // writes its committed anchor here so the sheet's `expanded`-flip
   // effect doesn't restart the spring and drop the flick velocity.
   const stageAnchor = useSharedValue(-1);
-  const [showGallery, setShowGallery] = useState(false);
-  const [stageMode, setStageMode] = useState<StageMode>('player');
-  const [reordering, setReordering] = useState(false);
-  const [query, setQuery] = useState('');
-  // Recent searches: session-scoped, newest first — persisting them
-  // would be a storage-schema decision, so they die with the app.
-  const [searchRecents, setSearchRecents] = useState<readonly string[]>([]);
-  const [themePickerOpen, setThemePickerOpen] = useState(false);
-  const [languagePickerOpen, setLanguagePickerOpen] = useState(false);
-  // setLocale mutates module state and never notifies React — every
-  // apply bumps localeTick so the localized model memos below rebuild
-  // their t() strings in the new language (they carry it as a dep).
-  const [localeTick, setLocaleTick] = useState(0);
-  const applyLocale = useCallback(
-    (setting: string | null | undefined) => {
-      setLocale(resolveLocale(setting, systemLocaleTag()));
-      setLocaleTick((tick) => tick + 1);
-    },
-    [],
-  );
-  // Every settings write serializes through the shared chain —
-  // updateSettings persists a complete snapshot, so each patch merges
-  // onto the session's latest committed settings at execution time
-  // (snapshot(), not React state, is the merge base; the live
-  // settings are the fallback while it isn't ready).
-  const queueSettingsWrite = useSerializedWrite(
-    (next: Settings) => session.updateSettings(next),
-    () => {
-      const snap = session.snapshot();
-      return snap.type === 'ready' ? snap.settings : null;
-    },
-    state.settings,
-  );
-  // A persisted language (or 'system' resolution) applies once the
-  // ready settings arrive — never during render. The ready UI stays
-  // gated until that apply has landed: an ungated effect commits one
-  // ready frame in the system language and only flips afterwards.
-  const [localeApplied, setLocaleApplied] = useState(false);
-  useEffect(() => {
-    applyLocale(state.settings.language);
-    setLocaleApplied(true);
-  }, [applyLocale, state.settings.language]);
-  const [artworkCachePickerOpen, setArtworkCachePickerOpen] =
-    useState(false);
-  const [storefrontSheetOpen, setStorefrontSheetOpen] = useState(false);
-  const [storefrontDraft, setStorefrontDraft] = useState('');
-  const [qualityPickerOpen, setQualityPickerOpen] = useState(false);
-  // Sheet openings are epoch-tagged — a save that resolves after the
-  // user dismissed and reopened the sheet must not close the new one.
-  const storefrontEpoch = useRef(0);
-  const qualityEpoch = useRef(0);
-  // Theme and language also bump on dismiss and on each pick, so a
-  // late save from an earlier pick can neither close the sheet nor
-  // apply a stale locale over a newer pick.
-  const themeEpoch = useRef(0);
-  const languageEpoch = useRef(0);
-  // Transient failure pill: reportResult routes its text here through
-  // the module-level sink (installed on mount), and it self-clears.
-  const [toast, setToast] = useState<string | null>(null);
-  useEffect(() => {
-    setToastSink(setToast);
-    return () => {
-      setToastSink(null);
-    };
-  }, []);
-  useEffect(() => {
-    if (toast === null) {
-      return undefined;
-    }
-    const timer = setTimeout(() => setToast(null), 4_000);
-    return () => clearTimeout(timer);
-  }, [toast]);
-  const [attempts, setAttempts] = useState<readonly AttemptTrace[]>([]);
-  const resultMeta = useRef(new Map<string, TrackMetadata>());
-  // Library-world overlay stack: pushed routes — collection list,
-  // playlist editor, provider entity page — rendered as native push
-  // screens above the tab shell. Entity pages keep a fetch per ref so
-  // popping back to a deeper screen restores its loaded content.
-  const {
-    stack: overlayStack,
-    top: overlay,
-    push: pushOverlay,
-    reset: resetOverlay,
-    close: closeOverlay,
-    dismiss: dismissOverlay,
-    clear: clearOverlayStack,
-  } = useOverlayStack<Overlay>();
-  const [entityFetches, setEntityFetches] = useState<
-    Readonly<Record<string, EntityFetch>>
-  >({});
-  const clearOverlays = useCallback(() => {
-    clearOverlayStack();
-    setEntityFetches({});
-  }, [clearOverlayStack]);
-  const entityMeta = useRef(new Map<string, TrackMetadata>());
-  const [actionsFor, setActionsFor] = useState<ActionTarget | null>(null);
-  // Live download ledger — subscribed once; chips + the downloads
-  // collection + the stage action all read it.
-  const [downloads, setDownloads] = useState(
-    () => controller.downloads.list(),
-  );
-  // Progress events stream per chunk — trailing-throttle the
-  // list() pull to ~1Hz so a large queue doesn't re-list on every
-  // chunk tick.
-  const downloadsLast = useRef(0);
-  const downloadsTimer = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const refreshDownloads = useCallback(() => {
-    const now = Date.now();
-    const gap = now - downloadsLast.current;
-    if (gap < 1_000) {
-      if (downloadsTimer.current === null) {
-        downloadsTimer.current = setTimeout(() => {
-          downloadsTimer.current = null;
-          downloadsLast.current = Date.now();
-          setDownloads(controller.downloads.list());
-        }, 1_000 - gap);
-      }
-      return;
-    }
-    downloadsLast.current = now;
-    setDownloads(controller.downloads.list());
-  }, [controller]);
-  // null = connectivity unknown (no baseline yet) — the offline
-  // banner renders only on an explicit false.
-  const [online, setOnline] = useState<boolean | null>(null);
-  // Bumped after a local-folder mutation so the model re-reads
-  // `local.recordings()` — the source is storage-backed, not
-  // evented, and scans here are user-initiated only.
-  const [localTick, setLocalTick] = useState(0);
-
-  // Raw usage — formatted per render so the storage line follows the
-  // UI language instead of freezing the phrasing at probe time.
-  const [storageUsage, setStorageUsage] = useState<{
-    readonly bytes: number;
-    readonly free: number;
-  } | null>(null);
-  const storageText =
-    storageUsage === null
-      ? null
-      : formatBytes(storageUsage.bytes, storageUsage.free);
-  // Transfer events can outpace the statfs probe — each read stamps a
-  // sequence, and only a success newer than the last applied success
-  // lands. A failed probe advances nothing, so it can't knock out an
-  // older success still in flight.
-  const usageSeq = useRef(0);
-  const usageApplied = useRef(0);
-  const usageLastProbe = useRef(0);
-  const usageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const refreshUsage = useCallback(() => {
-    // The subscribe path fires per progress chunk — a statfs probe on
-    // each one is hundreds of scans per download. Throttle to ~1 Hz
-    // with a trailing call so the settled value still lands.
-    const now = Date.now();
-    const gap = now - usageLastProbe.current;
-    if (gap < 1_000) {
-      if (usageTimer.current === null) {
-        usageTimer.current = setTimeout(() => {
-          usageTimer.current = null;
-          refreshUsage();
-        }, 1_000 - gap);
-      }
-      return;
-    }
-    usageLastProbe.current = now;
-    usageSeq.current += 1;
-    const seq = usageSeq.current;
-    void controller.downloads
-      .usage(new CancellationSource().signal)
-      .then((u) => {
-        if (u.ok && seq > usageApplied.current) {
-          usageApplied.current = seq;
-          setStorageUsage({ bytes: u.value.bytes, free: u.value.free });
-        }
-      });
-  }, [controller]);
-  useEffect(() => {
-    setDownloads(controller.downloads.list());
-    refreshUsage();
-    const unsubscribe = controller.downloads.subscribe(() => {
-      refreshDownloads();
-      refreshUsage();
-    });
-    return () => {
-      unsubscribe();
-      if (usageTimer.current !== null) {
-        clearTimeout(usageTimer.current);
-        usageTimer.current = null;
-      }
-      if (downloadsTimer.current !== null) {
-        clearTimeout(downloadsTimer.current);
-        downloadsTimer.current = null;
-      }
-    };
-  }, [controller, refreshDownloads, refreshUsage]);
-
-  const refreshLocal = useCallback(() => {
-    setLocalTick((t) => t + 1);
-  }, []);
-
-  useEffect(() => {
-    let disposed = false;
-    // Subscribe BEFORE the snapshot request: once any callback edge
-    // has landed, a delayed snapshot resolving later is stale and
-    // must not overwrite it.
-    let edged = false;
-    // Registration itself can throw (e.g. Android's callback quota) —
-    // a failed watch must not take the mounted shell down; the
-    // snapshot path below still seeds `online`.
-    let unsub: () => void = () => {};
-    try {
-      unsub = controller.connectivity.subscribe((snap) => {
-        edged = true;
-        setOnline(snap.online);
-      });
-    } catch {
-      // Edge-less mode: snapshot-only honesty.
-    }
-    void controller.connectivity.snapshot().then((snap) => {
-      if (!disposed && !edged && snap.ok) {
-        setOnline(snap.value.online);
-      }
-    });
-    return () => {
-      disposed = true;
-      unsub();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controller]);
-
-  // One chip map for every row surface — off `list()` so a
-  // mid-delete 'removing' row reads busy, not failed-or-hidden.
-  const chipsByRecording = useMemo(
-    () => downloadChipsByRecording(downloads),
-    [downloads],
-  );
-  const downloadChipFor = useCallback(
-    (recordingId: string): DownloadChip | null =>
-      chipsByRecording.get(recordingId) ?? null,
-    [chipsByRecording],
-  );
-
-  // A download needs a playable provider ref — recordings carrying
-  // only a `local` ref are already owned bytes; the action hides.
-  const downloadRefFor = useCallback(
-    (recordingId: string): SourceRef | null => {
-      // The session resolves owned bytes through `localPlaybackFor`
-      // only where the player can attach them — the iOS provisional
-      // player has no local path, so a downloaded file there could
-      // never play. Hide every creation affordance rather than
-      // promise unplayable bytes; existing rows still surface in
-      // Settings (removal works).
-      if (Platform.OS === 'ios') {
-        return null;
-      }
-      const recording = state.recordings.find((r) => r.id === recordingId);
-      if (recording === undefined) {
-        return null;
-      }
-      // Mirrors Session.#pickRef's provider path — a download is
-      // resolved by the active playback provider, so only a mapping
-      // verdict or a non-rejected ref it owns can produce a stream.
-      // Other providers' refs would fail resolvePlayback: hide them.
-      const provider = state.settings.playbackProvider;
-      const mapped = effectiveMapping(recording, provider);
-      if (mapped !== null) {
-        return mapped.ref;
-      }
-      return (
-        recording.sourceRefs.find(
-          (r) =>
-            r.provider === provider &&
-            r.kind === 'track' &&
-            !isRefRejected(recording.mappings, r),
-        ) ?? null
-      );
-    },
-    [state.recordings, state.settings.playbackProvider],
-  );
-
-  // Bytes on disk — a stored download or a scanned local file. Used
-  // to drop provider pins (owned wins) and to roll download state up.
-  const isOwned = useCallback(
-    (recordingId: string): boolean =>
-      controller.downloads.fileFor(recordingId) !== null ||
-      (controller.local()?.uriMap().has(recordingId) ?? false),
-    [controller],
-  );
-
-  // Offline honesty: rows render 'unavailable' when offline and
-  // unowned — their play affordances must not fire a remote attempt.
-  const canPlay = useCallback(
-    (recordingId: string): boolean =>
-      online !== false || isOwned(recordingId),
-    [online, isOwned],
-  );
-
-  // Single download affordance: absent → request; queued/downloading
-  // → cancel; failed → retry; stored → remove. The sheet label says
-  // which it is.
-  const onDownloadAction = useCallback(
-    (recordingId: string) => {
-      const signal = new CancellationSource().signal;
-      const existing = controller.downloads.recordFor(recordingId);
-      if (existing === null) {
-        const sourceRef = downloadRefFor(recordingId);
-        if (sourceRef === null) {
-          return;
-        }
-        void controller.downloads
-          .request({ recordingId, sourceRef }, signal)
-          .then((r) => reportResult('action.download', r));
-        return;
-      }
-      switch (existing.state) {
-        case 'requested':
-        case 'transferring':
-          void controller.downloads
-            .cancel(existing.downloadId, signal)
-            .then((r) => reportResult('action.cancelDownload', r));
-          return;
-        case 'failed_with_retry':
-          // The row kept why it failed — toast that kind before the
-          // retry so the tap is never a silent ↓→⚠→↓ loop.
-          if (existing.error !== null) {
-            reportResult(
-              'action.download',
-              err(
-                appError(
-                  appErrorKind(existing.error.kind),
-                  existing.error.message,
-                ),
-              ),
-            );
-          }
-          void controller.downloads
-            .retry(existing.downloadId)
-            .then((r) => reportResult('action.retryDownload', r));
-          return;
-        case 'available':
-          // The 'removing' transition fires before the file is gone —
-          // refresh usage again once removal settles so Settings
-          // doesn't display the freed bytes until the next event.
-          void controller.downloads
-            .remove(existing.downloadId, signal)
-            .then((r) => {
-              reportResult('action.removeDownload', r);
-              refreshUsage();
-            });
-          return;
-        default:
-          return;
-      }
-    },
-    [controller, downloadRefFor, refreshUsage],
-  );
-  const [pickerFor, setPickerFor] = useState<ActionTarget | null>(null);
-  // Lyrics are a live read off the Stage's lyrics mode, not session
-  // state — the fetch is keyed to the playing recording and canceled
-  // when superseded.
-  const [lyricsFetch, setLyricsFetch] = useState<LyricsFetch | null>(null);
-  const lyricsSource = useRef<CancellationSource | null>(null);
-  // Corrections are live reads too (session.listMatchReviews); the
-  // queue reloads after every op so a verdict renders immediately.
-  const [reviewFetch, setReviewFetch] = useState<ReviewFetch>({
-    reviews: null,
-    error: null,
-  });
-  const [reviewFilter, setReviewFilter] =
-    useState<CorrectionsFilter>('pending');
-  // Export/import state lives in the transfer overlay; the picked
-  // file's text is stashed between preview and confirm.
-  const [transfer, setTransfer] = useState<TransferModel>(IDLE_TRANSFER);
-  const importText = useRef<string | null>(null);
-  // The staged import preview is a localized snapshot — its row
-  // labels freeze at file-choice time. The raw document is kept
-  // beside it so the model can be rebuilt in the current language
-  // whenever the locale changes (localeTick effect below).
-  const importPreviewRaw = useRef<{
-    preview: ImportPreview;
-    sourceLabel: string;
-  } | null>(null);
-  // The applied-import summary is also a localized string frozen into
-  // transfer state — keep its counts beside the preview so the
-  // localeTick effect can re-derive it too. Only read while
-  // importPhase is 'done'; error details carry typed messages, which
-  // are not localized.
-  const importSummaryCounts = useRef<{
-    tracks: number;
-    likes: number;
-    playlists: number;
-  } | null>(null);
-  useEffect(() => {
-    const raw = importPreviewRaw.current;
-    const counts = importSummaryCounts.current;
-    if (raw === null && counts === null) {
-      return;
-    }
-    setTransfer((prev) => ({
-      ...prev,
-      preview:
-        raw === null
-          ? prev.preview
-          : toImportPreviewModel(raw.preview, raw.sourceLabel),
-      importDetail:
-        prev.importPhase === 'done' && counts !== null
-          ? t('transfer.importSummary', {
-              tracks: counts.tracks,
-              likes: counts.likes,
-              playlists: counts.playlists,
-            })
-          : prev.importDetail,
-    }));
-  }, [localeTick]);
-  const [providerSlot, setProviderSlot] = useState<ProviderSlot | null>(null);
 
   // Slice-4 sync surface — null on iOS or when bring-up failed. The
   // client's own subscription feeds status; a failed bring-up leaves
@@ -1108,224 +639,6 @@ function Main({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controller]);
 
-  const catalogProvider =
-    controller.providers.find(
-      (p) => p.id === state.settings.catalogProvider,
-    ) ?? controller.providers[0];
-
-  const search = useMemo(
-    () =>
-      catalogProvider === undefined
-        ? null
-        : new SearchSession(catalogProvider, createClock(), createIds()),
-    [catalogProvider],
-  );
-  const [searchState, setSearchState] = useState<SearchState>(() =>
-    search === null
-      ? { type: 'idle', revision: 0 }
-      : search.snapshot(),
-  );
-  useEffect(() => {
-    if (search === null) {
-      setSearchState({ type: 'idle', revision: 0 });
-      return undefined;
-    }
-    setSearchState(search.snapshot());
-    return search.subscribe(setSearchState);
-  }, [search]);
-
-  // Suggestions are capability-routed, not catalog-routed: any loaded
-  // provider declaring `catalog.suggest` serves the draft pane, so the
-  // typing experience is identical whatever catalog provider is set.
-  const providerRouter = useMemo(
-    () => new ProviderRouter(controller.providers),
-    [controller.providers],
-  );
-  const [suggestions, setSuggestions] = useState<readonly string[]>([]);
-  const suggestSource = useRef<CancellationSource | null>(null);
-  const suggestSeq = useRef(0);
-
-  const runSearch = useCallback(
-    (q: string) => {
-      // A committed search replaces the draft surface with results —
-      // the IME has no work left and would just cover the list.
-      Keyboard.dismiss();
-      const trimmed = q.trim();
-      // A committed search supersedes the suggest stream — the draft
-      // pane closes and in-flight completions are dropped.
-      suggestSource.current?.cancel();
-      suggestSource.current = null;
-      suggestSeq.current += 1;
-      setSuggestions([]);
-      if (trimmed === '') {
-        search?.cancel();
-        return;
-      }
-      void search?.search({
-        query: trimmed,
-        limit: SEARCH_LIMIT,
-        storefront: state.settings.storefront,
-      });
-    },
-    [search, state.settings.storefront],
-  );
-
-  const recordRecentSearch = useCallback((q: string) => {
-    const trimmed = q.trim();
-    if (trimmed === '') {
-      return;
-    }
-    setSearchRecents((prev) =>
-      [trimmed, ...prev.filter((r) => r !== trimmed)].slice(0, 8),
-    );
-  }, []);
-
-  // `state` republishes a fresh `settings` object on every tick, and
-  // `searchState` swaps identity on every revision — both would
-  // re-fire this effect (and cancel the debounce) without an actual
-  // change underneath. Depend on the derived values instead: the
-  // provider selection is stable across publishes, and the committed
-  // query is the only searchState field the gate reads.
-  const suggestSelection = useMemo(
-    () => selectionFromSettings(state.settings),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [
-      state.settings.catalogProvider,
-      state.settings.playbackProvider,
-      state.settings.lyricsProvider,
-      state.settings.radioProvider,
-    ],
-  );
-  const committedQuery =
-    searchState.type === 'idle' ? '' : searchState.query;
-  // Keystrokes debounce into `catalog.suggest` completions routed over
-  // declaring providers — the typing surface is suggestions, not live
-  // result pages, so the debounce runs tighter than a catalog search
-  // ever could. Only a commit (Enter or a row tap) runs catalog.search.
-  useEffect(() => {
-    const trimmed = query.trim();
-    // An edit invalidates the prior burst at once — a completion that
-    // lands mid-debounce belongs to old text and must never paint.
-    suggestSource.current?.cancel();
-    suggestSource.current = null;
-    suggestSeq.current += 1;
-    if (trimmed === '') {
-      setSuggestions([]);
-      search?.cancel();
-      return undefined;
-    }
-    // Committed text is no draft, and inputs past the payload cap
-    // (256) can't be served — neither earns a fetch.
-    if (trimmed === committedQuery || [...trimmed].length > 256) {
-      setSuggestions([]);
-      return undefined;
-    }
-    const timer = setTimeout(() => {
-      const source = new CancellationSource();
-      suggestSource.current = source;
-      const seq = suggestSeq.current;
-      const context: OperationContext = {
-        requestId: createIds().next('suggest'),
-        deadlineMs: Date.now() + 10_000,
-        signal: source.signal,
-      };
-      void providerRouter
-        .suggest(suggestSelection, { input: trimmed }, context)
-        .then((result) => {
-          if (suggestSeq.current === seq && !source.signal.cancelled) {
-            setSuggestions(result.ok ? result.value : []);
-          }
-        });
-    }, 150);
-    return () => clearTimeout(timer);
-  }, [query, committedQuery, search, providerRouter, suggestSelection]);
-
-  // Keep the row→metadata map in sync so a tap can recover the
-  // TrackMetadata the session needs for addAndPlay.
-  useEffect(() => {
-    const map = resultMeta.current;
-    map.clear();
-    if (searchState.type === 'content') {
-      searchState.page.items.forEach((meta, index) => {
-        map.set(toSearchRowModel(meta, index).key, meta);
-      });
-      // Visible rows are the ones the user can tap — hand the refs to
-      // the session's advisory warm; prefetch/connectivity gates own
-      // the honesty policy inside the session.
-      session.prewarm({
-        sourceRefs: searchState.page.items
-          .slice(0, 9)
-          .map((meta) => meta.sourceRef),
-        tracks: searchState.page.items.slice(0, 9),
-      });
-    }
-  }, [searchState, session]);
-
-  const [pendingReviews, setPendingReviews] = useState<number | null>(null);
-
-  // Diagnostics: attempt traces are persisted by the session; load a
-  // page whenever the settings tab becomes active. The pending-review
-  // count is a live read on the same visit.
-  useEffect(() => {
-    if (tab !== 'settings') {
-      return;
-    }
-    const source = new CancellationSource();
-    const context: OperationContext = {
-      requestId: createIds().next('diag'),
-      deadlineMs: Date.now() + 15_000,
-      signal: source.signal,
-    };
-    void controller.storage.loadAttempts(DIAGNOSTICS_LIMIT, context).then(
-      (result) => {
-        if (!source.signal.cancelled && result.ok) {
-          setAttempts(result.value);
-        }
-      },
-    );
-    void session.listMatchReviews().then((result) => {
-      if (!source.signal.cancelled) {
-        setPendingReviews(result.ok ? result.value.length : null);
-      }
-    });
-    return () => source.cancel();
-  }, [tab, controller, session]);
-
-  // Published snapshots keep stable refs for unchanged sections, so
-  // model memos key on the slices they read — a queue-only publish
-  // no longer rebuilds the library model, and position-only ticks
-  // (which skip the state channel entirely) flow through positionMs.
-  const player = useMemo(() => {
-    const model = toPlayerModel({
-      playback: state.playback,
-      queue: state.queue,
-      recordings: state.recordings,
-      likes: state.likes,
-      repeat: state.repeat,
-      shuffleOrder: state.shuffleOrder,
-    });
-    // The model's position is a publish-time read — overlay the live
-    // tick value so the transport position moves between publishes.
-    if (
-      model !== null &&
-      (model.status === 'buffering' ||
-        model.status === 'playing' ||
-        model.status === 'paused') &&
-      model.positionMs !== positionMs
-    ) {
-      return { ...model, positionMs };
-    }
-    return model;
-  }, [
-    state.playback,
-    state.queue,
-    state.recordings,
-    state.likes,
-    state.repeat,
-    state.shuffleOrder,
-    positionMs,
-    localeTick,
-  ]);
   // Real waveform peaks for the Stage seek — lazy, cached per
   // recordingId|attemptId (a re-prepared stream never inherits the
   // attempt it replaced). The port borrows the live stream handle;
@@ -1336,730 +649,91 @@ function Main({
       Platform.OS === 'android' ? createExpoPeaksPort(AuqwExpo) : null,
     [],
   );
-  // Queue end drops `player` to null (playback → idle) — ripping the
-  // mount out from under an expanded sheet would vanish it mid-view.
-  // While expanded the mount is held on the last model until the user
-  // collapses; release then waits out the settle spring so the slide
-  // lands before unmount, and the morph re-seed happens at rest so a
-  // fresh player starts collapsed, not mid-morph. The snapshot sits
-  // in a ref — mirroring the live model into state would double the
-  // per-tick render.
-  const lastPlayerRef = useRef<PlayerModel | null>(null);
-  const [endHold, setEndHold] = useState(false);
-  useEffect(() => {
-    if (player !== null) {
-      lastPlayerRef.current = player;
-      setEndHold(false);
-      return;
-    }
-    if (expanded && lastPlayerRef.current !== null) {
-      setEndHold(true);
-      return;
-    }
-    const release = setTimeout(() => {
-      stageProgress.value = 0;
-      stageTravel.value = 0;
-      lastPlayerRef.current = null;
-      setEndHold(false);
-    }, STAGE_RELEASE_MS);
-    return () => clearTimeout(release);
-  }, [player, expanded, stageProgress, stageTravel]);
-  // A held mount renders the ended pose — paused at the last
-  // published position — not a frozen 'playing' snapshot. `expanded`
-  // covers the transition render itself (endHold lands an effect
-  // later); `endHold` then carries the mount through the collapse
-  // slide's settle window.
-  const sheetPlayer =
-    player ??
-    ((expanded || endHold) && lastPlayerRef.current !== null
-      ? {
-          ...lastPlayerRef.current,
-          status: 'paused' as const,
-          intentPlaying: false,
-        }
-      : null);
-  // Held pose (queue ended): live transport ops have no current
-  // occurrence — play/seek taps replay the held track instead.
-  const heldOccurrenceId =
-    player === null ? (sheetPlayer?.occurrenceId ?? null) : null;
-  // playback.type names only the latest failure — the app carries the
-  // set so a row the cursor moved past keeps its 'error' mark; a
-  // fresh attempt for the occurrence clears it, removals prune.
-  const failedQueueIds = useRef(new Set<string>());
-  const queueModel = useMemo(() => {
-    const playback = state.playback;
-    if (playback.type === 'failed') {
-      if (playback.occurrenceId !== null) {
-        failedQueueIds.current.add(playback.occurrenceId);
-      }
-    } else if (playback.type !== 'idle') {
-      failedQueueIds.current.delete(playback.occurrenceId);
-    }
-    const live = new Set(state.queue.occurrences.map((o) => o.occurrenceId));
-    for (const id of failedQueueIds.current) {
-      if (!live.has(id)) {
-        failedQueueIds.current.delete(id);
-      }
-    }
-    // Same honesty rule as the library rows: offline + unowned marks
-    // 'unavailable' so a dead press isn't a surprise.
-    const unavailable =
-      online === false
-        ? new Set(
-            state.queue.occurrences
-              .map((o) => o.recordingId)
-              .filter((id) => !isOwned(id)),
-          )
-        : undefined;
-    return toQueueModel({
-      queue: state.queue,
-      recordings: state.recordings,
-      likes: state.likes,
-      unavailableRecordingIds: unavailable,
-      failedOccurrenceIds:
-        failedQueueIds.current.size === 0 ? undefined : failedQueueIds.current,
-      dealtOrder: state.shuffleOrder ?? undefined,
-    });
-    // isOwned re-reads downloads/local after their mutations.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    state.queue,
-    state.recordings,
-    state.likes,
-    state.playback,
-    state.shuffleOrder,
-    online,
-    isOwned,
-    downloads,
-    localTick,
-    localeTick,
-  ]);
-  const libraryModel = useMemo(() => {
-    // Local index rows (provenance 'local') are authoritative over
-    // the session's in-memory copies — a scan commits fresher tags
-    // than restore loaded. Session stays authoritative for every
-    // other row.
-    const local = controller.local();
-    const recordings = (() => {
-      if (local === null) {
-        return state.recordings;
-      }
-      const byId = new Map(state.recordings.map((r) => [r.id, r]));
-      for (const r of local.recordings()) {
-        if (r.provenance === 'local') {
-          byId.set(r.id, r);
-        }
-      }
-      return [...byId.values()];
-    })();
-    const model = toLibraryModel({
-      recordings,
-      likes: state.likes,
-      playlists: state.playlists,
-      playlistEntries: state.playlistEntries,
-      playHistory: state.playHistory,
-      playCounts: state.playCounts,
-      entities: state.entities,
-      entitySourceRefs: state.entitySourceRefs,
-      downloads,
-    });
-    const playingId =
-      state.playback.type === 'idle' ||
-      state.playback.type === 'paused' ||
-      state.playback.type === 'failed'
-        ? null
-        : state.playback.recordingId;
-    const chipByRecording = chipsByRecording;
-    const localUris = local?.uriMap();
-    // Honest-offline: with connectivity explicitly down, a row plays
-    // only from owned bytes (stored download or local file) — remote
-    // streams degrade to 'unavailable' instead of spinning.
-    const offline = online === false;
-    const decorate = (
-      row: TrackRowModel,
-      recordingId: string,
-    ): TrackRowModel => {
-      const chip = chipByRecording.get(recordingId) ?? row.download;
-      const owned =
-        chip === 'stored' || localUris?.has(recordingId) === true;
-      const offlineRow =
-        offline && !owned
-          ? { state: 'unavailable' as const, note: t('note.offline') }
-          : {};
-      return {
-        ...row,
-        playing: recordingId === playingId ? true : row.playing,
-        download: chip ?? null,
-        ...offlineRow,
-      };
-    };
-    const mark = (row: CollectionRowModel): CollectionRowModel => ({
-      ...row,
-      row: decorate(row.row, row.recordingId),
-    });
-    return {
-      ...model,
-      items: model.items.map((row) => decorate(row, row.key)),
-      recentlyAdded: model.recentlyAdded.map((row) =>
-        decorate(row, row.key),
-      ),
-      collectionRows: {
-        liked: model.collectionRows.liked.map(mark),
-        top50: model.collectionRows.top50.map(mark),
-        history: model.collectionRows.history.map(mark),
-        downloads: model.collectionRows.downloads.map(mark),
-      },
-    };
-    // localTick re-reads local.recordings() after a folder mutation.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    state.recordings,
-    state.likes,
-    state.playlists,
-    state.playlistEntries,
-    state.playHistory,
-    state.playCounts,
-    state.entities,
-    state.entitySourceRefs,
-    state.playback,
-    downloads,
-    chipsByRecording,
-    online,
-    controller,
-    localTick,
-    localeTick,
-  ]);
-  const playlistModelFor = useCallback(
-    (playlistId: string) => {
-      const model = toPlaylistModel({
-        playlistId,
-        playlists: state.playlists,
-        playlistEntries: state.playlistEntries,
-        recordings: state.recordings,
-        likes: state.likes,
-      });
-      const playingId =
-        state.playback.type === 'idle' ||
-        state.playback.type === 'paused' ||
-        state.playback.type === 'failed'
-          ? null
-          : state.playback.recordingId;
-      if (model === null) {
-        return model;
-      }
-      const local = controller.local();
-      const localUris = local?.uriMap();
-      const offline = online === false;
-      return {
-        ...model,
-        entries: model.entries.map((entry) => {
-          const chip =
-            downloadChipFor(entry.recordingId) ?? entry.row.download;
-          const owned =
-            chip === 'stored' ||
-            localUris?.has(entry.recordingId) === true;
-          const offlineRow =
-            offline && !owned
-              ? { state: 'unavailable' as const, note: t('note.offline') }
-              : {};
-          return {
-            ...entry,
-            row: {
-              ...entry.row,
-              playing:
-                entry.recordingId === playingId
-                  ? true
-                  : entry.row.playing,
-              download: chip,
-              ...offlineRow,
-            },
-          };
-        }),
-      };
-    },
-    // localTick re-reads local.uriMap after a folder mutation.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [
-      state.playlists,
-      state.playlistEntries,
-      state.recordings,
-      state.likes,
-      state.playback,
-      downloads,
-      downloadChipFor,
-      online,
-      controller,
-      localTick,
-      localeTick,
-    ],
-  );
-  // The ref the player actually resolved for the live attempt —
-  // published on the playback snapshot, so a pin, a verdict, or
-  // owned bytes each mark exactly the row they resolved to (local
-  // picks match no catalog row). A failed gate is not 'playing'.
-  const playingRef = useMemo((): SourceRef | null => {
-    const playback = state.playback;
-    // Only an engaged attempt marks — paused keeps its loaded ref but
-    // is not 'playing' (the queue surface drops its mark on the same
-    // moment); a failed gate never marked at all.
-    if (
-      playback.type === 'idle' ||
-      playback.type === 'paused' ||
-      playback.type === 'failed'
-    ) {
-      return null;
-    }
-    return playback.ref ?? null;
-  }, [state.playback]);
-
-  const entityModelFor = useCallback(
-    (fetch: EntityFetch | null) =>
-      toEntityModel({
-        page: fetch?.page ?? null,
-        error: fetch?.error ?? null,
-        likes: state.likes,
-        entitySourceRefs: state.entitySourceRefs,
-        loadingMore: fetch?.loadingMore ?? false,
-        playingRef,
-      }),
-    [state.likes, state.entitySourceRefs, playingRef, localeTick],
-  );
-  // Row-key → TrackMetadata map for entity items, same contract as
-  // resultMeta for search results — namespaced per stack entry so two
-  // entity screens in the stack never collide.
-  useEffect(() => {
-    const map = entityMeta.current;
-    map.clear();
-    for (const entry of overlayStack) {
-      if (entry.overlay.type !== 'entity') {
-        continue;
-      }
-      const fetch = entityFetches[entityRefKey(entry.overlay.ref)];
-      fetch?.page?.items.forEach((meta, index) => {
-        map.set(`${entry.key}:${toSearchRowModel(meta, index).key}`, meta);
-      });
-    }
-  }, [overlayStack, entityFetches]);
-
-  const pickerItems = useMemo(
-    () =>
-      libraryModel.cards
-        .filter(
-          (card): card is typeof card & { playlistId: string } =>
-            card.playlistId !== null,
-        )
-        .map((card) => ({
-          playlistId: card.playlistId,
-          name: card.title,
-          count: card.count ?? 0,
-          artworkUrl: card.artworkUrl,
-        })),
-    [libraryModel],
-  );
-  // Local recordings join search results application-side (never
-  // provider routing): match the submitted query against
-  // provenance-local rows. Keys are `local:<recordingId>` so a press
-  // routes to the owned-bytes path, not addAndPlay.
-  const localResults = useMemo(() => {
-    const query = searchState.type === 'idle' ? '' : searchState.query;
-    const terms = query
-      .trim()
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((t) => t.length > 0);
-    if (terms.length === 0) {
-      return [];
-    }
-    const liked = new Set(
-      state.likes
-        .filter((l) => l.entityKind === 'track')
-        .map((l) => l.targetId),
-    );
-    const local = controller.local();
-    const localUris = local?.uriMap();
-    const rows: TrackRowModel[] = [];
-    for (const rec of state.recordings) {
-      // Folder removal keeps the recording but drops its file row —
-      // the uri index is the owned-bytes truth; orphans never surface.
-      if (rec.provenance !== 'local' || localUris?.has(rec.id) !== true) {
-        continue;
-      }
-      const haystack =
-        `${rec.title} ${rec.artist ?? ''} ${rec.album ?? ''}`.toLowerCase();
-      if (terms.every((t) => haystack.includes(t))) {
-        rows.push(
-          toTrackRowModel(rec, {
-            key: `local:${rec.id}`,
-            liked: liked.has(rec.id),
-            note: t('note.local'),
-            playing:
-              state.playback.type !== 'idle' &&
-              state.playback.type !== 'paused' &&
-              state.playback.type !== 'failed' &&
-              state.playback.recordingId === rec.id,
-          }),
-        );
-        if (rows.length >= 25) {
-          break;
-        }
-      }
-    }
-    return rows;
-    // localTick re-reads local.uriMap after a folder mutation — a
-    // removed folder's recordings persist but must stop matching.
-    // state.playback is read for the per-row playing mark.
-  }, [
-    searchState,
-    state.recordings,
-    state.likes,
-    state.playback,
-    controller,
-    localTick,
-    localeTick,
-  ]);
-  const searchModel = useMemo(() => {
-    const base = toSearchModel(searchState, playingRef);
-    if (localResults.length === 0 || base.phase === 'idle') {
-      return base;
-    }
-    const results = [...localResults, ...base.results];
-    if (base.phase === 'ready' || base.phase === 'loading') {
-      return { ...base, results };
-    }
-    // Provider empty/error/unavailable but local files matched — the
-    // rows still play (owned bytes), so surface them instead of the
-    // bare failure.
-    return { ...base, phase: 'ready' as const, results };
-  }, [searchState, localResults, playingRef, localeTick]);
-  const homeModel = useMemo(() => {
-    return toHomeModel({
-      recordings: state.recordings,
-      likes: state.likes,
-      playback: state.playback,
-      suggestions:
-        searchState.type === 'content' ? searchState.page.items : [],
-
-      greeting: greeting(new Date()),
-      subline:
-        state.likes.length === 0
-          ? t('home.subline.empty')
-          : t('home.subline.likes', { count: state.likes.length }),
-    });
-  }, [
-    state.recordings,
-    state.likes,
-    state.playback,
-    searchState,
-    localeTick,
-  ]);
-  const diagnostics: DiagnosticsModel = useMemo(
+  const ports = useMemo<AppShellPorts<Overlay>>(
     () => ({
-      providerIds: controller.providers.map((p) => p.id),
-      attemptCount: attempts.length,
-      lastAttemptLabel:
-        attempts[0] === undefined ? null : attemptLabel(attempts[0]),
-      persistence:
-        state.persistenceError === undefined
-          ? 'ok'
-          : state.persistenceError.kind === 'internal'
-            ? 'failed'
-            : 'degraded',
-      persistenceDetail: state.persistenceError?.message ?? null,
-      pendingReviews,
-    }),
-    [
-      state.persistenceError,
-      controller,
-      attempts,
-      pendingReviews,
-      localeTick,
-    ],
-  );
-  const syncModel = useMemo(
-    () =>
-      toSyncModel({
-        available: syncSurface !== null,
-        status: syncStatus,
-      }),
-    // syncSurface is stable per controller — syncStatus carries the
-    // updates.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [syncStatus, controller, localeTick],
-  );
-  const settingsModel = useMemo(
-    () =>
-      toSettingsModel(state.settings, diagnostics, {
-        storageText,
-        // The tag-reader surface is Android-only — iOS's auqw-expo
-        // build has no tag* functions, so those rows must not act live.
-        localSupported: AuqwExpo.hasTagReader?.() === true,
-        localFolderCount: controller.local()?.list().length,
-        localSources: controller
-          .local()
-          ?.list()
-          .map((s) => ({ sourceId: s.sourceId, label: s.label })),
-        // Kept ledger rows — same rule as the downloads collection:
-        // failed-but-kept counts, mid-delete 'removing' doesn't.
-        downloadCount: downloadLedgerCount(downloads),
-        syncSupported: syncSurface !== null,
-        syncLabel: syncModel.statusLabel,
-      }),
-    [
-      state.settings,
-      diagnostics,
-      storageText,
-      localTick,
-      controller,
-      downloads,
-      syncModel,
-      localeTick,
-    ],
-  );
-
-  // ---- play actions ------------------------------------------------
-
-  const loadReviews = useCallback(() => {
-    setReviewFetch({ reviews: null, error: null });
-    void session.listMatchReviews({ status: 'all' }).then((result) => {
-      setReviewFetch(
-        result.ok
-          ? { reviews: result.value, error: null }
-          : { reviews: null, error: result.error },
-      );
-    });
-  }, [session]);
-
-  // The ambiguous-match gate parks candidates in a review the user
-  // must resolve — retrying the press only fails the same way, so a
-  // play that hits the gate opens the review surface instead of
-  // dying quietly on a dead queue item.
-  const reportPlay = useCallback(
-    (action: MessageId, result: Result<unknown>) => {
-      reportResult(action, result);
-      if (!result.ok && isMatchGate(result.error)) {
-        // Land the user on the fresh pending row: a stale 'resolved'
-        // filter or an already-open screen would hide it, so the
-        // route always selects pending and reloads.
-        setReviewFilter('pending');
-        loadReviews();
-        if (overlay?.type !== 'corrections') {
-          pushOverlay({ type: 'corrections' });
+      // Mobile's connectivity port is edge+snapshot: subscribe first
+      // — a delayed snapshot resolving after an edge is stale and
+      // must not overwrite it; a failed watch degrades to
+      // snapshot-only honesty (Android's callback quota can refuse
+      // registration outright).
+      subscribeOnline: (listener) => {
+        let dead = false;
+        let edged = false;
+        let unsub: () => void = () => {};
+        try {
+          unsub = controller.connectivity.subscribe((snap) => {
+            edged = true;
+            listener(snap.online);
+          });
+        } catch {
+          // Edge-less mode: snapshot-only honesty.
         }
-      }
-    },
-    [pushOverlay, overlay, loadReviews],
-  );
-
-  const playRecording = useCallback(
-    async (recordingId: string) => {
-      if (!canPlay(recordingId)) {
-        return;
-      }
-      // Tap-to-play dedupe: a queued track jumps to its occurrence
-      // instead of minting a repeat — 'add to queue' stays additive.
-      const queued = queuedOccurrenceFor(state.queue, recordingId);
-      if (queued !== null) {
-        reportPlay('common.play', await session.playOccurrence(queued));
-        return;
-      }
-      const enqueued = await session.enqueueRecording(recordingId);
-      if (!enqueued.ok) {
-        reportResult('action.enqueueTrack', enqueued);
-        return;
-      }
-      reportPlay('common.play', await session.playOccurrence(enqueued.value));
-    },
-    [session, state.queue, canPlay, reportPlay],
-  );
-
-  // Queue presses and transport follow the same offline rule as
-  // library rows: an unowned target must not start a remote attempt.
-  const playQueueOccurrence = useCallback(
-    (occurrenceId: string) => {
-      const occurrence = state.queue.occurrences.find(
-        (o) => o.occurrenceId === occurrenceId,
-      );
-      if (occurrence !== undefined && !canPlay(occurrence.recordingId)) {
-        return;
-      }
-      void session
-        .playOccurrence(occurrenceId)
-        .then((r) => reportPlay('common.play', r));
-    },
-    [session, state.queue, canPlay, reportPlay],
-  );
-
-  // Mirrors the cursor's targeting in walk space — the dealt order
-  // under shuffle, canonical otherwise: next → walk position+1,
-  // wrapping to walk[0] under repeat=all at the tail; previous →
-  // restart current when positionMs>3s, wrap to the walk's tail at
-  // its head under repeat=all (len>1), restart at the head, else
-  // position−1. The gate sees the same target the engine would land
-  // on — a wrap to an unowned item must not slip through offline.
-  const advance = useCallback(
-    (method: 'next' | 'previous') => {
-      if (online === false) {
-        const { occurrences, currentOccurrenceId } = state.queue;
-        // Position ticks ride the light channel now — read it live,
-        // not the (possibly position-stale) published snapshot.
-        const positionMs = session.positionMs();
-        const walk =
-          state.shuffleOrder ?? occurrences.map((o) => o.occurrenceId);
-        const pos =
-          currentOccurrenceId === null
-            ? -1
-            : walk.indexOf(currentOccurrenceId);
-        const wrapAll = state.repeat === 'all';
-        const targetId =
-          method === 'next'
-            ? // The same mark-skipping destination the engine
-              // computes — a gate one walk slot ahead would test the
-              // failed row the cursor is about to skip.
-              nextQueueDestination({
-                queue: { occurrences, currentOccurrenceId },
-                dealtOrder: state.shuffleOrder,
-                failedIds: failedQueueIds.current,
-                repeat: state.repeat,
-              })
-            : positionMs > 3000
-              ? walk[pos]
-              : pos === 0 && wrapAll && walk.length > 1
-                ? walk[walk.length - 1]
-                : pos <= 0
-                  ? walk[pos]
-                  : walk[pos - 1];
-        const target = occurrences.find(
-          (o) => o.occurrenceId === targetId,
-        );
-        if (target !== undefined && !isOwned(target.recordingId)) {
-          return;
+        void controller.connectivity.snapshot().then((snap) => {
+          if (!dead && !edged && snap.ok) {
+            listener(snap.value.online);
+          }
+        });
+        return () => {
+          dead = true;
+          unsub();
+        };
+      },
+      // localPlayable stays unset: on native the owned-bytes check IS
+      // the attachable set — the player plays downloads and scanned
+      // local files directly. (Desktop passes its capability probe
+      // instead — the web player has no provider:'local' route yet.)
+      // The iOS provisional player has no local-attach path, so a
+      // stored download there could never play — hide every create
+      // affordance; existing rows still surface for removal.
+      downloadsEnabled: Platform.OS !== 'ios',
+      // Mobile's playlist-entry play resolves owned bytes first —
+      // selectedRef drops to null so the session picks the local
+      // file over the pinned provider ref.
+      preferOwnedRef: true,
+      // Home-card keys: only the recents surface may carry a
+      // recording id — a suggestion miss must not try playing the
+      // key as one.
+      strictHomeCardKeys: true,
+      // Local index rows merge into the catalog search surface —
+      // provenance 'local' hits rank ahead of provider results.
+      localCatalog: true,
+      // Entity + search rows mark the actually-resolved playing ref.
+      markPlayingRef: true,
+      // The stage sheet morph owns the mount lifecycle — a queue end
+      // holds the last player until the sheet settles collapsed.
+      holdEndedPlayer: true,
+      resetStageMorph: () => {
+        stageProgress.value = 0;
+        stageTravel.value = 0;
+      },
+      // Lyrics prefetch while the Stage is open in any mode — one
+      // provider call per track — so switching to the lyrics tab is
+      // instant.
+      lyricsWhileOpen: true,
+      // A new track under an open sheet returns it to player mode —
+      // the playing item is what the sheet exists to show.
+      resetModeOnTrack: true,
+      openSyncOverlay: { type: 'sync' },
+      haptic: (style) => {
+        if (style === 'warning') {
+          void Haptics.notificationAsync(
+            Haptics.NotificationFeedbackType.Warning,
+          );
+        } else {
+          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         }
-      }
-      void (method === 'next' ? session.next() : session.previous()).then(
-        (r) =>
-          reportPlay(
-            method === 'next' ? 'common.next' : 'common.previous',
-            r,
-          ),
-      );
-    },
-    [
-      online,
-      state.queue,
-      state.shuffleOrder,
-      state.repeat,
-      isOwned,
-      session,
-      reportPlay,
-    ],
-  );
-
-  // Offline honesty for metadata paths (cached search/entity rows):
-  // the materialized recording is playable offline only when owned —
-  // a provider ref alone would start a remote attempt the UI says
-  // waits for connectivity.
-  const canPlayMeta = useCallback(
-    (meta: TrackMetadata): boolean => {
-      if (online !== false) {
-        return true;
-      }
-      const ref = meta.sourceRef;
-      const recording = state.recordings.find((r) =>
-        r.sourceRefs.some(
-          (s) =>
-            s.provider === ref.provider && s.kind === ref.kind && s.id === ref.id,
-        ),
-      );
-      return recording !== undefined && isOwned(recording.id);
-    },
-    [online, state.recordings, isOwned],
-  );
-
-  // Same dedupe as playRecording for metadata taps (search results,
-  // entity rows, home cards): the tap's source ref can match a queued
-  // occurrence or one of its recording's refs before it materializes.
-  const playMeta = useCallback(
-    (meta: TrackMetadata) => {
-      const queued = queuedOccurrenceForRef(
-        state.queue,
-        state.recordings,
-        meta.sourceRef,
-      );
-      return queued === null
-        ? session.addAndPlay(meta)
-        : session.playOccurrence(queued);
-    },
-    [session, state.queue, state.recordings],
-  );
-
-  const onResultPress = useCallback(
-    (row: TrackRowModel) => {
-      // Local merged rows are existing recordings — play through the
-      // owned-bytes path rather than re-ingesting provider metadata.
-      if (row.key.startsWith('local:')) {
-        void playRecording(row.key.slice('local:'.length));
-        return;
-      }
-      const meta = resultMeta.current.get(row.key);
-      if (meta !== undefined && canPlayMeta(meta)) {
-        recordRecentSearch(query);
-        void playMeta(meta).then((r) => reportPlay('action.playResult', r));
-      }
-    },
-    [canPlayMeta, playMeta, playRecording, query, recordRecentSearch, reportPlay],
-  );
-
-  const onSettingsSelect = useCallback(
-    (key: string) => {
-      if (key === 'theme') {
-        themeEpoch.current += 1;
-        setThemePickerOpen(true);
-        return;
-      }
-      if (key === 'language') {
-        languageEpoch.current += 1;
-        setLanguagePickerOpen(true);
-        return;
-      }
-      if (
-        key === 'catalogProvider' ||
-        key === 'playbackProvider' ||
-        key === 'lyricsProvider' ||
-        key === 'radioProvider'
-      ) {
-        setProviderSlot(key);
-        return;
-      }
-      if (key === 'exportLibrary' || key === 'importLibrary') {
-        importText.current = null;
-        importPreviewRaw.current = null;
-        setTransfer(IDLE_TRANSFER);
-        pushOverlay({ type: 'transfer' });
-        return;
-      }
-      if (key === 'sync') {
-        pushOverlay({ type: 'sync' });
-        return;
-      }
-      if (key === 'storefront') {
-        storefrontEpoch.current += 1;
-        setStorefrontDraft(state.settings.storefront ?? '');
-        setStorefrontSheetOpen(true);
-        return;
-      }
-      if (key === 'qualityKbps') {
-        qualityEpoch.current += 1;
-        setQualityPickerOpen(true);
-        return;
-      }
-      // A committed mutation lands on the instance the op ran on —
-      // a mid-flight rehydrate swaps `localSource`, and projecting the
-      // live replacement's pre-commit snapshot hides the committed
-      // rows. When the instance swapped, persisted storage holds the
-      // commit: rehydrate rebuilds the live source from it (and
-      // projects itself). When it is the same instance, its rows ARE
-      // post-commit — project them directly.
-      const syncCommittedLocal = (mutated: NonNullable<ReturnType<typeof controller.local>>): void => {
+      },
+      // A committed search replaces the draft surface with results —
+      // the IME has no work left and would just cover the list.
+      onSearchCommit: () => Keyboard.dismiss(),
+      afterLocalMutation: (mutated, refreshLocal) => {
+        // A committed mutation lands on the instance the op ran on —
+        // a mid-flight rehydrate swaps the local source, and
+        // projecting the live replacement's pre-commit snapshot hides
+        // the committed rows. When the instance swapped, persisted
+        // storage holds the commit: rehydrate rebuilds the live source
+        // from it (and projects itself). Same instance → its rows ARE
+        // post-commit — project them directly.
         const live = controller.local();
         if (live === null) {
           return;
@@ -2074,96 +748,217 @@ function Main({
         }
         session.syncLocalRecordings(live.recordings());
         refreshLocal();
-      };
-      if (key === 'addLocalFolder') {
-        const local = controller.local();
-        if (local === null) {
-          return;
-        }
-        void local
-          .addFolder(new CancellationSource().signal)
-          .then((added) => {
-            reportResult('settings.addLocalFolder', added);
-            if (added.ok) {
-              syncCommittedLocal(local);
-            }
-          });
-        return;
-      }
-      if (key === 'removeAllDownloads') {
-        void controller.downloads
-          .removeAll(new CancellationSource().signal)
-          .then((removed) => {
-            reportResult('settings.removeAllDownloads', removed);
-            refreshUsage();
-          });
-        return;
-      }
-      if (key.startsWith('localSourceRemove:')) {
-        const local = controller.local();
-        if (local === null) {
-          return;
-        }
-        const sourceId = key.slice('localSourceRemove:'.length);
-        void local
-          .removeSource(sourceId, new CancellationSource().signal)
-          .then((removed) => {
-            reportResult('action.removeLocalFolder', removed);
-            if (removed.ok) {
-              syncCommittedLocal(local);
-            }
-          });
-        return;
-      }
-      if (key === 'rescanLocal' || key === 'localSources') {
-        const local = controller.local();
-        if (local === null) {
-          return;
-        }
-        void local
-          .rescan(undefined, new CancellationSource().signal)
-          .then((scanned) => {
-            reportResult('settings.rescanLocal', scanned);
-            if (scanned.ok) {
-              syncCommittedLocal(local);
-            }
-          });
-        return;
-      }
-      if (key === 'artworkCacheBytes') {
-        setArtworkCachePickerOpen(true);
-        return;
-      }
-      // downloadStorage is display-only.
-    },
-    [session, state.settings, controller, refreshLocal, refreshUsage],
-  );
-
-  const onSettingsToggle = useCallback(
-    (key: string) => {
-      // Function patches: the flip reads the committed value at
-      // execution time, so rapid successive taps toggle per tap.
-      if (key === 'prefetch') {
-        void queueSettingsWrite((latest) => ({
-          prefetch: !latest.prefetch,
-        }));
-      }
-      if (key === 'downloadMetered') {
-        void queueSettingsWrite((latest) => ({
-          downloadMetered: latest.downloadMetered !== true,
-        })).then((updated) => {
-          // Re-derive only after the setting commits — toggling ON
-          // unblocks waiting rows, toggling OFF pauses an active
-          // cellular transfer; kick() can't demote mid-flight work.
-          if (updated.ok) {
-            void controller.downloads.reevaluateEligibility();
-          }
+      },
+      sweepArtworkCache: () => {
+        void controller.artworkCache.sweep({
+          requestId: createIds().next('artwork-sweep'),
+          deadlineMs: createClock().nowMs() + 60_000,
+          signal: new CancellationSource().signal,
         });
-      }
-    },
-    [queueSettingsWrite, controller],
+      },
+      settingsExtras: () => ({
+        // The tag-reader surface is Android-only — iOS's auqw-expo
+        // build has no tag* functions, so those rows must not act
+        // live.
+        localSupported: AuqwExpo.hasTagReader?.() === true,
+        syncSupported: syncSurface !== null,
+        // toSyncModel is pure — derive the label inside the thunk so
+        // the hook's settings memo can run before syncModel exists
+        // below (both localize through localeTick deps).
+        syncLabel: toSyncModel({
+          available: syncSurface !== null,
+          status: syncStatus,
+        }).statusLabel,
+      }),
+      peaksPort,
+      // SAF folder pick on Android — the export lands where the user
+      // can reach it (Downloads and friends), not app-private storage;
+      // iOS writes into the documents root.
+      exportJson: async (json, name) => {
+        try {
+          let file: File;
+          if (Platform.OS === 'android') {
+            const dir = await Directory.pickDirectoryAsync();
+            file = dir.createFile(name, 'application/json');
+          } else {
+            file = new File(Paths.document, name);
+            if (file.exists) {
+              file.delete();
+            }
+            file.create();
+          }
+          file.write(json);
+          return {
+            kind: 'done' as const,
+            detail: () => exportDestinationLabel(file.uri),
+          };
+        } catch (thrown) {
+          if (
+            thrown instanceof Error &&
+            'code' in thrown &&
+            thrown.code === 'ERR_PICKER_CANCELLED'
+          ) {
+            return { kind: 'cancelled' as const };
+          }
+          return { kind: 'error' as const };
+        }
+      },
+    }),
+    [controller, session, peaksPort, syncSurface, syncStatus],
   );
 
+  // The shared shell composition — every state/callback surface the
+  // desktop shell builds identically lives in useAppShell; this file
+  // keeps only the platform seams (connectivity edge+snapshot, SAF
+  // folder/file ops, the artwork cache, haptics, the sync engine
+  // surface, gesture morph values, IME dismissal, deep links) wired
+  // through ports.
+  const shell = useAppShell<Overlay>({ controller, state, ports });
+  const {
+    localeApplied,
+    localeTick,
+    online,
+    toast,
+    tab,
+    setTab,
+    selectTab,
+    overlay,
+    overlayStack,
+    pushOverlay,
+    resetOverlay,
+    closeOverlay,
+    dismissOverlay,
+    clearOverlays,
+    stageOpen: expanded,
+    setStageOpen: setExpanded,
+    setStageOpenFor,
+    stageMode,
+    setStageMode,
+    reordering,
+    toggleReordering,
+    player,
+    stagePlayer: sheetPlayer,
+    heldOccurrenceId,
+    queueModel,
+    peaks,
+    onPlayPause,
+    onToggleLike,
+    advance,
+    playQueueOccurrence,
+    onMoveQueueItem,
+    onMoveQueueItemTo,
+    seekToPosition,
+    canPlay,
+    playRecording,
+    onResultPress,
+    onHomeCardPress,
+    playCollectionRows,
+    playPlaylist,
+    playPlaylistEntry,
+    entityPlayAll,
+    onEntityRowPress,
+    entityRowMeta,
+    reportPlay,
+    queueSettingsWrite,
+    downloadRefFor,
+    searchState,
+    searchSession: search,
+    query,
+    setQuery,
+    submitSearch,
+    retrySearch,
+    cancelSearch,
+    applySearchText,
+    searchRecents,
+    suggestions,
+    resultMetaFor,
+    libraryModel,
+    playlistModelFor,
+    entityModelFor,
+    entityFetches,
+    homeModel,
+    searchModel,
+    settingsModel,
+    correctionsModel,
+    radioModel,
+    lyricsModel,
+    transfer,
+    pickerItems,
+    actionsFor,
+    setActionsFor,
+    closeRowActions,
+    rowActions,
+    onRowAction,
+    pickerFor,
+    closePlaylistPicker,
+    onPickPlaylist,
+    onCreateAndPick,
+    providerSlot,
+    providerPicker,
+    onPickProvider,
+    closeProviderPicker,
+    themePickerOpen,
+    onPickTheme,
+    closeThemePicker,
+    languagePickerOpen,
+    onPickLanguage,
+    closeLanguagePicker,
+    storefrontSheetOpen,
+    storefrontDraft,
+    onSubmitStorefront,
+    onClearStorefront,
+    closeStorefront,
+    qualityPickerOpen,
+    onPickQuality,
+    closeQualityPicker,
+    artworkCachePickerOpen,
+    onPickArtworkCache,
+    closeArtworkCache,
+    onSettingsSelect,
+    onSettingsToggle,
+    stageDownload,
+    onStageDownload,
+    onStageAddToPlaylist,
+    playlistDownloadFor,
+    onPlaylistDownloadAll,
+    onStartRadioGated,
+    onStopRadio,
+    onRetryLyrics,
+    setReviewFilter,
+    loadReviews,
+    reviewOp,
+    loadEntityPage,
+    openEntity,
+    onLoadMore,
+    onExport,
+    beginImportRead,
+    onImportText,
+    cancelImportRead,
+    failImportRead,
+    onApplyImport,
+    onResetImport,
+    resetTransfer,
+    renamePlaylist,
+    deletePlaylist,
+    removePlaylistEntry,
+    movePlaylistEntry,
+    onOpenCard,
+    onCreatePlaylist,
+  } = shell;
+
+  const syncModel = useMemo(
+    () =>
+      toSyncModel({
+        available: syncSurface !== null,
+        status: syncStatus,
+      }),
+    // syncSurface is stable per controller — syncStatus carries the
+    // updates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [syncStatus, controller, localeTick],
+  );
+
+  const [showGallery, setShowGallery] = useState(false);
   // ---- slice-4 LAN sync ------------------------------------------------
   // Both pair paths and every peer op guard on the live client — the
   // surface can be null (iOS / failed bring-up) behind an enabled row.
@@ -2640,510 +1435,25 @@ function Main({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controller]);
 
-  const playback = state.playback;
-  const peaksTarget: PeaksTarget | null =
-    playback.type === 'buffering' ||
-    playback.type === 'playing' ||
-    playback.type === 'paused'
-      ? {
-          id: `${playback.recordingId}|${playback.identity.attemptId}`,
-          handle: playback.handle,
-          durationMs: playback.durationMs ?? null,
-        }
-      : null;
-  const peaks = useWaveformPeaks(peaksPort, peaksTarget);
-  const playing = playback.type === 'playing';
-  const currentRecordingId =
-    playback.type === 'idle' ? null : playback.recordingId;
-  const onPlayPause = useCallback(() => {
-    // Pause is always allowed; resuming an unowned remote track while
-    // offline would start a prepare that cannot finish. The intent
-    // is the queue's mode, not transport: during a retry backoff
-    // playback publishes 'preparing' with no handle, and the tap
-    // must still pause. A transport 'paused' that arrived natively
-    // (queue still 'playing') means the tap resumes, not re-pauses.
-    const intentPlaying =
-      state.queue.mode === 'playing' && state.playback.type !== 'paused';
-    if (
-      !intentPlaying &&
-      currentRecordingId !== null &&
-      !canPlay(currentRecordingId)
-    ) {
-      return;
-    }
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    void (intentPlaying ? session.pause() : session.resume()).then((r) =>
-      reportPlay(intentPlaying ? 'common.pause' : 'action.resume', r),
-    );
-  }, [session, state.queue.mode, state.playback.type, currentRecordingId, canPlay, reportPlay]);
-  const onToggleLike = useCallback(() => {
-    if (currentRecordingId !== null) {
-      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      void session.toggleLike(currentRecordingId);
-    }
-  }, [session, currentRecordingId]);
-  const onMoveQueueItem = useCallback(
-    (occurrenceId: string, direction: -1 | 1) => {
-      // Move slots are display slots — the session translates them to
-      // canonical/dealt positions itself.
-      const index = queueModel.sections
-        .flatMap((s) => s.items)
-        .findIndex((i) => i.occurrenceId === occurrenceId);
-      if (index >= 0) {
-        void session.moveOccurrence(occurrenceId, index + direction);
-      }
-    },
-    [session, queueModel],
-  );
-
-  const onMoveQueueItemTo = useCallback(
-    (occurrenceId: string, toIndex: number) => {
-      void session.moveOccurrence(occurrenceId, toIndex);
-    },
-    [session],
-  );
-
-  // ---- lyrics (Stage lyrics mode — live read, cancel superseded) --
-
-  const fetchLyrics = useCallback(
-    (recordingId: string) => {
-      lyricsSource.current?.cancel();
-      const source = new CancellationSource();
-      lyricsSource.current = source;
-      setLyricsFetch({
-        recordingId,
-        sheet: null,
-        error: null,
-        loading: true,
-      });
-      const context: OperationContext = {
-        requestId: createIds().next('lyrics'),
-        deadlineMs: Date.now() + 15_000,
-        signal: source.signal,
-      };
-      void session.getLyrics(recordingId, context).then((result) => {
-        setLyricsFetch((prev) =>
-          prev === null ||
-            prev.recordingId !== recordingId ||
-            source.signal.cancelled
-            ? prev
-            : result.ok
-              ? {
-                recordingId,
-                sheet: result.value,
-                error: null,
-                loading: false,
-              }
-              : {
-                recordingId,
-                sheet: null,
-                error: result.error,
-                loading: false,
-              },
-        );
-      });
-    },
-    [session],
-  );
-
-  // Lyrics prefetch while the Stage is open in any mode — one provider
-  // call per track — so switching to the lyrics tab is instant. Leaving
-  // lyrics mode (or the sheet) keeps the last sheet cached.
-  useEffect(() => {
-    if (!expanded || currentRecordingId === null) {
-      return;
-    }
-    if (lyricsFetch?.recordingId === currentRecordingId) {
-      return;
-    }
-    fetchLyrics(currentRecordingId);
-  }, [expanded, currentRecordingId, lyricsFetch, fetchLyrics]);
-
-  // A new track under an open sheet returns it to player mode — the
-  // playing item is what the sheet exists to show. Explicit opens
-  // (deep links, menus) set the mode before expanding, so this only
-  // listens for the track change, not the expand flip.
-  const expandedForMode = useRef(expanded);
-  useEffect(() => {
-    expandedForMode.current = expanded;
-  }, [expanded]);
-  useEffect(() => {
-    if (currentRecordingId !== null && expandedForMode.current) {
-      setStageMode('player');
-    }
-  }, [currentRecordingId]);
-
-  // Lyrics highlight rides a smoothed clock so the active line tracks
-  // playback between the engine's sparse position ticks; it only ticks
-  // while the lyrics pane is actually on screen.
-  const [seekGeneration, bumpSeekGeneration] = useState(0);
-  const seekToPosition = useCallback(
-    (ms: number, expectedOccurrenceId?: string): Promise<Result<void>> => {
-      bumpSeekGeneration((n) => n + 1);
-      return session.seekTo(ms, expectedOccurrenceId);
-    },
-    [session],
-  );
-  const lyricsPositionMs = useSmoothedPosition(
-    sheetPlayer?.positionMs ?? 0,
-    playing,
-    expanded && stageMode === 'lyrics',
-    seekGeneration,
-  );
-  const lyricsModel: LyricsModel | undefined = useMemo(() => {
-    if (currentRecordingId === null) {
-      return undefined;
-    }
-    const fetch =
-      lyricsFetch !== null && lyricsFetch.recordingId === currentRecordingId
-        ? lyricsFetch
-        : null;
-    return toLyricsModel({
-      sheet: fetch?.sheet ?? null,
-      error: fetch?.error ?? null,
-      loading: fetch === null ? true : fetch.loading,
-      positionMs: lyricsPositionMs,
-    });
-  }, [lyricsFetch, currentRecordingId, lyricsPositionMs, localeTick]);
-
-  const onRetryLyrics = useCallback(() => {
-    if (currentRecordingId !== null) {
-      fetchLyrics(currentRecordingId);
-    }
-  }, [fetchLyrics, currentRecordingId]);
-
-  // ---- radio (session.radio tail — start from the playing ref) ---
-
-  const radioModel = useMemo(() => toRadioModel(state.radio), [
-    state.radio,
-    localeTick,
-  ]);
-  // Radio seeds route by the seed reference's own provider — a track
-  // is only seedable when THAT provider declares radio.seed, not just
-  // any loaded one.
-  const radioSeedable = useCallback(
-    (ref: SourceRef | null): boolean =>
-      ref !== null &&
-      controller.providers.some(
-        (p) => p.id === ref.provider && p.capabilities.includes('radio.seed'),
-      ),
-    [controller],
-  );
-
-  // The stage radio control seeds from the playing occurrence's
-  // selected ref, falling back to the recording's first source ref —
-  // the same derivation the seed op uses, kept shared so the gate
-  // mirrors the action exactly.
-  const radioSeedRef = useMemo((): SourceRef | null => {
-    const current = state.queue.occurrences.find(
-      (o) => o.occurrenceId === state.queue.currentOccurrenceId,
-    );
-    const recording =
-      currentRecordingId === null
-        ? undefined
-        : state.recordings.find((r) => r.id === currentRecordingId);
-    return current?.selectedRef ?? recording?.sourceRefs[0] ?? null;
-  }, [state.queue, state.recordings, currentRecordingId]);
-
-  // The row-action seed: a metadata row seeds its own ref; a library
-  // row seeds its first source ref. Gate matches the op's target.
-  const actionRadioRef = useMemo((): SourceRef | null => {
-    if (actionsFor === null) {
-      return null;
-    }
-    return actionsFor.kind === 'metadata'
-      ? actionsFor.meta.sourceRef
-      : (state.recordings.find((r) => r.id === actionsFor.recordingId)
-          ?.sourceRefs[0] ?? null);
-  }, [actionsFor, state.recordings]);
-
-  const onStartRadio = useCallback(() => {
-    const ref = radioSeedRef;
-    if (ref !== null && radioSeedable(ref)) {
-      void session
-        .startRadio(ref)
-        .then((r) => reportResult('stage.radio.start', r));
-    }
-  }, [session, radioSeedRef, radioSeedable]);
-
-  const onStopRadio = useCallback(() => {
-    reportResult('action.stopRadio', session.stopRadio());
-  }, [session]);
-
-  // ---- corrections (live read + serialized review ops) -----------
-
-  // The queue reloads whenever the corrections overlay opens — the
-  // rows are live reads, never stale session state.
-  useEffect(() => {
-    if (overlay?.type === 'corrections') {
-      loadReviews();
-    }
-  }, [overlay, loadReviews]);
-
-  const correctionsModel = useMemo(
-    () =>
-      toCorrectionsModel({
-        reviews: reviewFetch.reviews,
-        error: reviewFetch.error,
-        recordings: state.recordings,
-        filter: reviewFilter,
-      }),
-    [reviewFetch, state.recordings, reviewFilter, localeTick],
-  );
-
-  // A failed op surfaces its typed error as the screen's error state;
-  // a landed verdict reloads the queue so the row resolves in place.
-  const reviewOp = useCallback(
-    (op: () => ReturnType<typeof session.confirmReview>) => {
-      void op().then((result) => {
-        if (result.ok) {
-          loadReviews();
-        } else {
-          setReviewFetch({ reviews: null, error: result.error });
-        }
-      });
-    },
-    [session, loadReviews],
-  );
-
-  // ---- library transfer (export file write · import preview) -----
-
-  const onExport = useCallback(() => {
-    setTransfer((prev) => ({
-      ...prev,
-      exportPhase: 'working',
-      exportDetail: null,
-    }));
-    void session.exportLibrary().then(async (result) => {
-      if (!result.ok) {
-        setTransfer((prev) => ({
-          ...prev,
-          exportPhase: 'error',
-          exportDetail: errorText(result.error),
-        }));
-        return;
-      }
-      try {
-        const name = `auqw-library-${new Date().toISOString().slice(0, 10)}.json`;
-        let file: File;
-        if (Platform.OS === 'android') {
-          // SAF folder pick — the export lands where the user can
-          // reach it (Downloads and friends), not app-private storage.
-          const dir = await Directory.pickDirectoryAsync();
-          file = dir.createFile(name, 'application/json');
-        } else {
-          file = new File(Paths.document, name);
-          if (file.exists) {
-            file.delete();
-          }
-          file.create();
-        }
-        file.write(result.value.json);
-        setTransfer((prev) => ({
-          ...prev,
-          exportPhase: 'done',
-          exportDetail: exportDestinationLabel(file.uri),
-        }));
-      } catch (thrown) {
-        if (
-          thrown instanceof Error &&
-          'code' in thrown &&
-          thrown.code === 'ERR_PICKER_CANCELLED'
-        ) {
-          setTransfer((prev) => ({ ...prev, exportPhase: 'idle' }));
-          return;
-        }
-        setTransfer((prev) => ({
-          ...prev,
-          exportPhase: 'error',
-          exportDetail: t('transfer.exportWriteFailed'),
-        }));
-      }
-    });
-  }, [session]);
-
   const onPickImportFile = useCallback(() => {
-    importPreviewRaw.current = null;
-    setTransfer((prev) => ({
-      ...prev,
-      importPhase: 'reading',
-      importDetail: null,
-      preview: null,
-    }));
+    beginImportRead();
     void (async () => {
       try {
         const picked = await File.pickFileAsync({
           mimeTypes: ['application/json', 'text/*'],
         });
         if (picked.canceled) {
-          setTransfer((prev) => ({ ...prev, importPhase: 'idle' }));
+          cancelImportRead();
           return;
         }
         const file = picked.result;
         const text = await file.text();
-        // Preview validates without mutating — a typed error here is
-        // the honest reject; nothing was applied.
-        const preview = previewImport(text);
-        if (!preview.ok) {
-          importPreviewRaw.current = null;
-          setTransfer((prev) => ({
-            ...prev,
-            importPhase: 'error',
-            importDetail: t('error.importInvalid'),
-            preview: null,
-          }));
-          return;
-        }
-        const sourceLabel = file.uri.split('/').pop() ?? file.uri;
-        importText.current = text;
-        importPreviewRaw.current = { preview: preview.value, sourceLabel };
-        setTransfer((prev) => ({
-          ...prev,
-          importPhase: 'preview',
-          preview: toImportPreviewModel(preview.value, sourceLabel),
-        }));
+        onImportText(text, file.uri.split('/').pop() ?? file.uri);
       } catch {
-        importPreviewRaw.current = null;
-        setTransfer((prev) => ({
-          ...prev,
-          importPhase: 'error',
-          importDetail: t('transfer.readFailed'),
-          preview: null,
-        }));
+        failImportRead();
       }
     })();
-  }, []);
-
-  const onApplyImport = useCallback(() => {
-    const text = importText.current;
-    if (text === null) {
-      return;
-    }
-    setTransfer((prev) => ({ ...prev, importPhase: 'applying' }));
-    // replaceLibrary drains the download manager (live runners and
-    // finalized files) before session.importLibrary swaps sections,
-    // then rehydrates the media owners off the new snapshot. The
-    // returned preview doubles as the applied-summary counts.
-    void controller
-      .replaceLibrary(text, new CancellationSource().signal)
-      .then((result) => {
-        if (!result.ok) {
-          setTransfer((prev) => ({
-            ...prev,
-            importPhase: 'error',
-            importDetail: errorText(result.error),
-          }));
-          return;
-        }
-        importText.current = null;
-        const counts = result.value.counts;
-        importSummaryCounts.current = {
-          tracks: counts.recordings,
-          likes: counts.likes,
-          playlists: counts.playlists,
-        };
-        setTransfer((prev) => ({
-          ...prev,
-          importPhase: 'done',
-          importDetail: t('transfer.importSummary', {
-            tracks: counts.recordings,
-            likes: counts.likes,
-            playlists: counts.playlists,
-          }),
-        }));
-      });
-  }, [session, controller]);
-
-  const onResetImport = useCallback(() => {
-    importText.current = null;
-    importPreviewRaw.current = null;
-    setTransfer((prev) => ({
-      ...prev,
-      importPhase: 'idle',
-      importDetail: null,
-      preview: null,
-    }));
-  }, []);
-
-  // ---- provider pickers (capability-gated manifest options) -------
-
-  const providerPicker = useMemo(
-    () =>
-      providerPickerModel(
-        providerSlot,
-        controller.providers,
-        state.settings,
-      ),
-    [providerSlot, controller, state.settings, localeTick],
-  );
-
-  const onPickProvider = useCallback(
-    (key: string) => {
-      const slot = providerSlot;
-      setProviderSlot(null);
-      if (slot === null) {
-        return;
-      }
-      const patch: Partial<Settings> = {};
-      if (slot === 'lyricsProvider' || slot === 'radioProvider') {
-        patch[slot] = key === 'auto' ? null : key;
-      } else {
-        patch[slot] = key;
-      }
-      void queueSettingsWrite(patch);
-    },
-    [providerSlot, queueSettingsWrite],
-  );
-
-  // ---- library world: entity fetch ----------------------------------
-
-  const loadEntityPage = useCallback(
-    (ref: EntityRef) => {
-      const key = entityRefKey(ref);
-      setEntityFetches((prev) => ({
-        ...prev,
-        [key]: {
-          ref,
-          page: null,
-          error: null,
-          loading: true,
-          loadingMore: false,
-        },
-      }));
-      void session.getEntityPage(ref).then((result) => {
-        setEntityFetches((prev) => {
-          const cur = prev[key];
-          if (cur === undefined || cur.ref !== ref) {
-            return prev;
-          }
-          return {
-            ...prev,
-            [key]: result.ok
-              ? { ...cur, page: result.value, error: null, loading: false }
-              : { ...cur, page: null, error: result.error, loading: false },
-          };
-        });
-      });
-    },
-    [session],
-  );
-
-  const openEntity = useCallback(
-    (ref: EntityRef) => {
-      // Re-opening the entity already on top just reloads it.
-      const top = overlayStack[overlayStack.length - 1]?.overlay;
-      if (
-        top?.type === 'entity' &&
-        entityRefKey(top.ref) === entityRefKey(ref)
-      ) {
-        loadEntityPage(ref);
-        return;
-      }
-      pushOverlay({ type: 'entity', ref });
-      loadEntityPage(ref);
-    },
-    [overlayStack, pushOverlay, loadEntityPage],
-  );
+  }, [beginImportRead, cancelImportRead, onImportText, failImportRead]);
 
   // Android hardware back: native stack items dismiss themselves
   // (nativeBackButtonDismissalEnabled) and sync state via onDismissed;
@@ -3155,15 +1465,15 @@ function Main({
     }
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       if (actionsFor !== null) {
-        setActionsFor(null);
+        closeRowActions();
         return true;
       }
       if (pickerFor !== null) {
-        setPickerFor(null);
+        closePlaylistPicker();
         return true;
       }
       if (providerSlot !== null) {
-        setProviderSlot(null);
+        closeProviderPicker();
         return true;
       }
       if (overlayStack.length > 0) {
@@ -3189,336 +1499,10 @@ function Main({
     expanded,
     tab,
     closeOverlay,
+    closeRowActions,
+    closePlaylistPicker,
+    closeProviderPicker,
   ]);
-
-  const onLoadMore = useCallback(() => {
-    const top = overlay?.type === 'entity' ? overlay.ref : null;
-    const key = top === null ? null : entityRefKey(top);
-    const cur = key === null ? null : entityFetches[key] ?? null;
-    const continuation = cur?.page?.continuation;
-    if (
-      key === null ||
-      cur === null ||
-      cur.page === null ||
-      continuation == null ||
-      cur.loadingMore
-    ) {
-      return;
-    }
-    /*
-     * The port's only entity request is an EntityRef — there is no
-     * continuation payload on the catalog.entity wire (ABI 0.3.0),
-     * and shipped providers never mint one. The token is carried
-     * back as the ref id: ref-scoped routing returns it to the
-     * provider that minted it, which is the only honest
-     * interpretation the port supports.
-     */
-    const more: EntityRef = {
-      provider: cur.ref.provider,
-      kind: cur.ref.kind,
-      id: continuation,
-    };
-    setEntityFetches((prev) => ({
-      ...prev,
-      [key]: { ...cur, loadingMore: true },
-    }));
-    void session.getEntityPage(more).then((result) => {
-      setEntityFetches((prev) => {
-        const latest = prev[key];
-        if (
-          latest === undefined ||
-          latest.ref !== cur.ref ||
-          latest.page === null
-        ) {
-          return prev;
-        }
-        if (!result.ok) {
-          return {
-            ...prev,
-            [key]: { ...latest, error: result.error, loadingMore: false },
-          };
-        }
-        const seen = new Set(
-          latest.page.items.map(
-            (m) =>
-              `${m.sourceRef.provider} ${m.sourceRef.kind} ${m.sourceRef.id}`,
-          ),
-        );
-        const fresh = result.value.items.filter(
-          (m) =>
-            !seen.has(
-              `${m.sourceRef.provider} ${m.sourceRef.kind} ${m.sourceRef.id}`,
-            ),
-        );
-        return {
-          ...prev,
-          [key]: {
-            ...latest,
-            page: {
-              ...result.value,
-              items: [...latest.page.items, ...fresh],
-            },
-            error: null,
-            loadingMore: false,
-          },
-        };
-      });
-    });
-  }, [session, overlay, entityFetches]);
-
-  const playCollectionRows = useCallback(
-    (rows: readonly { recordingId: string }[]) => {
-      const playable = rows.filter((row) => canPlay(row.recordingId));
-      if (playable.length === 0) {
-        return;
-      }
-      void session
-        .playRecordings(
-          playable.map((row) => ({
-            recordingId: row.recordingId,
-            selectedRef: null,
-          })),
-        )
-        .then((r) => reportPlay('action.playCollection', r));
-    },
-    [session, canPlay, reportPlay],
-  );
-
-  const playPlaylist = useCallback(
-    (model: ReturnType<typeof playlistModelFor>) => {
-      if (model === null) {
-        return;
-      }
-      const playable = model.entries.filter((entry) =>
-        canPlay(entry.recordingId),
-      );
-      if (playable.length === 0) {
-        return;
-      }
-      void session
-        .playRecordings(
-          playable.map((entry) => ({
-            recordingId: entry.recordingId,
-            // A provider pin beats owned bytes in #pickRef — drop it
-            // when bytes exist so downloads actually get played.
-            selectedRef: isOwned(entry.recordingId)
-              ? null
-              : entry.selectedRef,
-          })),
-        )
-        .then((r) => reportPlay('action.playPlaylist', r));
-    },
-    [session, isOwned, canPlay, reportPlay],
-  );
-
-  const playlistDownloadFor = useCallback(
-    (model: ReturnType<typeof playlistModelFor>) => {
-      if (model === null) {
-        return { state: 'none' as const, requests: [] };
-      }
-      // Only MISSING entries: requesting an already-owned recording
-      // with a changed mapping would delete its stored file first —
-      // 'download missing' must never cost offline playback.
-      const requests = model.entries
-        .filter((entry) => !isOwned(entry.recordingId))
-        .flatMap((entry) => {
-          const sourceRef = downloadRefFor(entry.recordingId);
-          return sourceRef === null
-            ? []
-            : [{ recordingId: entry.recordingId, sourceRef }];
-        });
-      // 'all' means every entry is owned — a stored download or a
-      // local file both count; only-downloadable entries gate it.
-      const allStored =
-        model.entries.length > 0 &&
-        model.entries.every((entry) => isOwned(entry.recordingId));
-      const anyTracked = model.entries.some(
-        (entry) =>
-          controller.downloads.recordFor(entry.recordingId) !== null ||
-          isOwned(entry.recordingId),
-      );
-      return {
-        state: allStored
-          ? ('all' as const)
-          : anyTracked
-            ? ('partial' as const)
-            : ('none' as const),
-        requests,
-      };
-    },
-    // downloads/localTick bump re-derives ownership; downloadRefFor and
-    // isOwned already capture the pieces they read.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [downloads, localTick, controller, downloadRefFor, isOwned],
-  );
-
-  const onPlaylistDownloadAll = useCallback(
-    (requests: readonly { recordingId: string; sourceRef: SourceRef }[]) => {
-      if (requests.length === 0) {
-        return;
-      }
-      void controller.downloads
-        .requestAll(requests, new CancellationSource().signal)
-        .then((r) => reportResult('action.download', r));
-    },
-    [controller],
-  );
-
-  const addToPlaylist = useCallback(
-    async (playlistId: string, target: ActionTarget) => {
-      const recordingId =
-        target.kind === 'recording'
-          ? target.recordingId
-          : await session
-            .ensureRecording(target.meta)
-            .then((r) => {
-              if (!r.ok) {
-                reportResult('action.prepareTrack', r);
-              }
-              return r.ok ? r.value : null;
-            });
-      if (recordingId === null) {
-        return;
-      }
-      reportResult(
-        'sheets.addToPlaylist',
-        await session.addPlaylistEntry(
-          playlistId,
-          recordingId,
-          target.kind === 'metadata' ? target.meta.sourceRef : null,
-        ),
-      );
-    },
-    [session],
-  );
-
-  const onPickPlaylist = useCallback(
-    (playlistId: string) => {
-      const target = pickerFor;
-      setPickerFor(null);
-      if (target !== null) {
-        void addToPlaylist(playlistId, target);
-      }
-    },
-    [pickerFor, addToPlaylist],
-  );
-
-  const onCreateAndPick = useCallback(
-    (name: string) => {
-      const target = pickerFor;
-      void session.createPlaylist(name).then((created) => {
-        if (!created.ok) {
-          reportResult('action.createPlaylist', created);
-          return;
-        }
-        if (target !== null) {
-          void addToPlaylist(created.value, target);
-        }
-      });
-      setPickerFor(null);
-    },
-    [session, pickerFor, addToPlaylist],
-  );
-
-  const onRowAction = useCallback(
-    (key: string) => {
-      const target = actionsFor;
-      setActionsFor(null);
-      if (target === null) {
-        return;
-      }
-      switch (key) {
-        case 'like':
-          if (target.kind === 'recording') {
-            void session
-              .toggleLike(target.recordingId)
-              .then((r) => reportResult('action.toggleLike', r));
-          }
-          break;
-        case 'enqueue':
-          void (target.kind === 'recording'
-            ? session.enqueueRecording(target.recordingId)
-            : session.enqueueMetadata(target.meta)
-          ).then((r) => reportResult('action.addToQueue', r));
-          break;
-        case 'add':
-          setPickerFor(target);
-          break;
-        case 'download':
-          if (target.kind === 'recording') {
-            onDownloadAction(target.recordingId);
-          }
-          break;
-        case 'removeDownload':
-          if (target.kind === 'recording') {
-            const row = controller.downloads.recordFor(target.recordingId);
-            if (row !== null) {
-              void controller.downloads
-                .remove(row.downloadId, new CancellationSource().signal)
-                .then((r) => {
-                  reportResult('action.removeDownload', r);
-                  refreshUsage();
-                });
-            }
-          }
-          break;
-        case 'radio': {
-          // Track-seeded at this release: a metadata row seeds its own
-          // ref; a library row seeds its first source ref. The action
-          // only renders when the seed's provider declares radio.seed,
-          // but guard the op too — state may shift between the two.
-          const ref =
-            target.kind === 'metadata'
-              ? target.meta.sourceRef
-              : (state.recordings.find((r) => r.id === target.recordingId)
-                ?.sourceRefs[0] ?? null);
-          if (ref !== null && radioSeedable(ref)) {
-            void session
-              .startRadio(ref)
-              .then((r) => reportResult('stage.radio.start', r));
-          }
-          break;
-        }
-        case 'album':
-          if (target.kind === 'metadata' && target.meta.albumRef) {
-            openEntity(target.meta.albumRef);
-          }
-          break;
-        case 'artist':
-          if (target.kind === 'metadata' && target.meta.artistRef) {
-            openEntity(target.meta.artistRef);
-          }
-          break;
-        default:
-          break;
-      }
-    },
-    [actionsFor, session, openEntity, state.recordings, downloadRefFor, onDownloadAction, radioSeedable, controller, refreshUsage],
-  );
-
-  const onOpenCard = useCallback(
-    (card: { playlistId: string | null; entityRef: EntityRef | null }) => {
-      if (card.playlistId !== null) {
-        pushOverlay({ type: 'playlist', playlistId: card.playlistId });
-      } else if (card.entityRef !== null) {
-        openEntity(card.entityRef);
-      }
-    },
-    [openEntity],
-  );
-
-  const onCreatePlaylist = useCallback(
-    (name: string) => {
-      void session.createPlaylist(name).then((created) => {
-        if (!created.ok) {
-          reportResult('action.createPlaylist', created);
-          return;
-        }
-        pushOverlay({ type: 'playlist', playlistId: created.value });
-      });
-    },
-    [session],
-  );
 
   // __DEV__-only gate instrumentation: `auqw://` links drive the real
   // session methods so emulator/simulator journeys are scriptable.
@@ -3919,8 +1903,6 @@ function Main({
           resetOverlay({ type: 'transfer' });
           const importPath = params.get('import');
           if (importPath !== null) {
-            importText.current = null;
-            importPreviewRaw.current = null;
             // A deep link must not read outside the app's own
             // document/cache roots — anywhere else is a file-read
             // primitive reachable by any intent sender. The fence
@@ -3931,53 +1913,29 @@ function Main({
               console.log('[journey] transfer import refused: outside app dirs');
               break;
             }
-            setTransfer({ ...IDLE_TRANSFER, importPhase: 'reading' });
+            resetTransfer();
+            beginImportRead();
             void (async () => {
               try {
                 const uri = importPath.startsWith('file://')
                   ? importPath
                   : `file://${importPath}`;
                 const text = await new File(uri).text();
-                const preview = previewImport(text);
-                if (!preview.ok) {
-                  importPreviewRaw.current = null;
-                  setTransfer((prev) => ({
-                    ...prev,
-                    importPhase: 'error',
-                    importDetail: t('error.importInvalid'),
-                    preview: null,
-                  }));
-                  return;
-                }
-                const sourceLabel = importPath.split('/').pop() ?? importPath;
-                importText.current = text;
-                importPreviewRaw.current = { preview: preview.value, sourceLabel };
-                setTransfer((prev) => ({
-                  ...prev,
-                  importPhase: 'preview',
-                  preview: toImportPreviewModel(preview.value, sourceLabel),
-                }));
+                onImportText(
+                  text,
+                  importPath.split('/').pop() ?? importPath,
+                );
               } catch {
-                importPreviewRaw.current = null;
-                setTransfer((prev) => ({
-                  ...prev,
-                  importPhase: 'error',
-                  importDetail: t('transfer.readFailed'),
-                  preview: null,
-                }));
+                failImportRead();
               }
             })();
           } else if (params.has('apply-import')) {
             onApplyImport();
           } else if (params.has('export')) {
-            importText.current = null;
-            importPreviewRaw.current = null;
-            setTransfer(IDLE_TRANSFER);
+            resetTransfer();
             onExport();
           } else {
-            importText.current = null;
-            importPreviewRaw.current = null;
-            setTransfer(IDLE_TRANSFER);
+            resetTransfer();
           }
           break;
         }
@@ -4039,34 +1997,20 @@ function Main({
             query={query}
             topInset={topInset}
             onQueryChange={setQuery}
-            onSubmit={() => {
-              recordRecentSearch(query);
-              runSearch(query);
-            }}
-            onCancel={() => {
-              setQuery('');
-              search?.cancel();
-            }}
-            onRetry={() => runSearch(searchModel.query)}
+            onSubmit={submitSearch}
+            onCancel={cancelSearch}
+            onRetry={retrySearch}
             onResultPress={onResultPress}
             onContext={(row) => {
-              const meta = resultMeta.current.get(row.key);
+              const meta = resultMetaFor(row.key);
               if (meta !== undefined) {
                 setActionsFor({ kind: 'metadata', meta });
               }
             }}
             recents={searchRecents}
-            onRecentPress={(recent) => {
-              setQuery(recent);
-              recordRecentSearch(recent);
-              runSearch(recent);
-            }}
+            onRecentPress={applySearchText}
             suggestions={suggestions}
-            onSuggestionPress={(suggestion) => {
-              setQuery(suggestion);
-              recordRecentSearch(suggestion);
-              runSearch(suggestion);
-            }}
+            onSuggestionPress={applySearchText}
           />
         );
       case 'library':
@@ -4111,27 +2055,7 @@ function Main({
           <HomeScreen
             model={homeModel}
             topInset={topInset}
-            onPressCard={(card) =>
-              activateHomeCard(
-                card,
-                homeModel.recents,
-                searchState.type === 'content' ? searchState.page.items : [],
-                {
-                  canPlayMetadata: canPlayMeta,
-                  playMetadata: (meta) => {
-                    if (searchState.type === 'content') {
-                      recordRecentSearch(searchState.query);
-                    }
-                    void playMeta(meta).then((result) =>
-                      reportPlay('action.playResult', result),
-                    );
-                  },
-                  playRecording: (id) => {
-                    void playRecording(id);
-                  },
-                },
-              )
-            }
+            onPressCard={onHomeCardPress}
             onResume={() =>
               void session.resume().then((r) => reportPlay('action.resume', r))
             }
@@ -4171,35 +2095,12 @@ function Main({
               onPlaylistDownloadAll(playlistDownloadFor(playlistModel).requests)
             }
             downloadAllState={playlistDownloadFor(playlistModel).state}
-            onRename={(name) =>
-              void session
-                .renamePlaylist(current.playlistId, name)
-                .then((r) => reportResult('action.renamePlaylist', r))
-            }
+            onRename={(name) => renamePlaylist(current.playlistId, name)}
             onDelete={() => {
-              void Haptics.notificationAsync(
-                Haptics.NotificationFeedbackType.Warning,
-              );
-              void session
-                .deletePlaylist(current.playlistId)
-                .then((r) => reportResult('action.deletePlaylist', r));
+              deletePlaylist(current.playlistId);
               dismissOverlay(entry.key);
             }}
-            onPressEntry={(entry) => {
-              if (!canPlay(entry.recordingId)) {
-                return;
-              }
-              void session
-                .playRecordings([
-                  {
-                    recordingId: entry.recordingId,
-                    selectedRef: isOwned(entry.recordingId)
-                      ? null
-                      : entry.selectedRef,
-                  },
-                ])
-                .then((r) => reportPlay('action.playPlaylistEntry', r));
-            }}
+            onPressEntry={playPlaylistEntry}
             onToggleLike={(entry) => void session.toggleLike(entry.recordingId)}
             onContext={(entry) =>
               setActionsFor({
@@ -4207,31 +2108,10 @@ function Main({
                 recordingId: entry.recordingId,
               })
             }
-            onRemoveEntry={(entry) =>
-              void session
-                .removePlaylistEntry(entry.entryId)
-                .then((r) => reportResult('action.removeTrack', r))
+            onRemoveEntry={(entry) => removePlaylistEntry(entry.entryId)}
+            onMoveEntry={(move, direction) =>
+              movePlaylistEntry(playlistModel, move, direction)
             }
-            onMoveEntry={(move, direction) => {
-              if (playlistModel === null) {
-                return;
-              }
-              const index = playlistModel.entries.findIndex(
-                (e) => e.entryId === move.entryId,
-              );
-              const sibling = playlistModel.entries[index + direction];
-              if (sibling === undefined) {
-                return;
-              }
-              void session
-                .reorderPlaylistEntry(
-                  move.entryId,
-                  direction === -1
-                    ? { before: sibling.entryId }
-                    : { after: sibling.entryId },
-                )
-                .then((r) => reportResult('action.reorderPlaylist', r));
-            }}
           />
         );
       }
@@ -4241,49 +2121,22 @@ function Main({
           state.entitySourceRefs,
           current.ref,
         );
-        const metaFor = (row: TrackRowModel) =>
-          entityMeta.current.get(`${entry.key}:${row.key}`);
         return (
           <EntityScreen
             model={entityModelFor(fetch)}
             topInset={topInset}
             onBack={closeOverlay}
-            onPlayAll={() => {
-              const metas = entityModelFor(fetch)
-                .items.map((row) => metaFor(row))
-                .filter(
-                  (m): m is TrackMetadata => m !== undefined,
-                );
-              void session
-                .playMetadata(metas)
-                .then((r) => reportPlay('collection.playAll', r));
-            }}
-            onShuffleAll={() => {
-              const metas = entityModelFor(fetch)
-                .items.map((row) => metaFor(row))
-                .filter(
-                  (m): m is TrackMetadata => m !== undefined,
-                );
-              void session
-                .playMetadata(metas, { shuffle: true })
-                .then((r) => reportPlay('action.shuffleAll', r));
-            }}
+            onPlayAll={() => entityPlayAll(fetch, entry.key, false)}
+            onShuffleAll={() => entityPlayAll(fetch, entry.key, true)}
             onToggleLike={
               entityId === null
                 ? undefined
                 : () =>
                   void session.toggleEntityLike(current.ref.kind, entityId)
             }
-            onPressItem={(row) => {
-              const meta = metaFor(row);
-              if (meta !== undefined && canPlayMeta(meta)) {
-                void playMeta(meta).then((r) =>
-                  reportPlay('action.playResult', r),
-                );
-              }
-            }}
+            onPressItem={(row) => onEntityRowPress(entry.key, row)}
             onContext={(row) => {
-              const meta = metaFor(row);
+              const meta = entityRowMeta(entry.key, row);
               if (meta !== undefined) {
                 setActionsFor({ kind: 'metadata', meta });
               }
@@ -4432,10 +2285,7 @@ function Main({
             items={navItems()}
             activeKey={tab}
             tabBarHidden={expanded}
-            onSelect={(key) => {
-              setTab(key);
-              clearOverlays();
-            }}
+            onSelect={selectTab}
             renderTab={renderTabScreen}
             accessory={
               // The pill stays mounted through the morph — its own
@@ -4448,10 +2298,7 @@ function Main({
                   travel={stageTravel}
                   anchor={stageAnchor}
                   interactive={!expanded}
-                  onPress={() => {
-                    setStageMode('player');
-                    setExpanded(true);
-                  }}
+                  onPress={() => setStageOpenFor(true)}
                   onCollapse={() => setExpanded(false)}
                   onPlayPause={onPlayPause}
                   onNext={() => advance('next')}
@@ -4469,10 +2316,7 @@ function Main({
               progress={stageProgress}
               travel={stageTravel}
               anchor={stageAnchor}
-              onExpandChange={(value) => {
-                if (value) setStageMode('player');
-                setExpanded(value);
-              }}
+              onExpandChange={setStageOpenFor}
               mode={stageMode}
               onModeChange={setStageMode}
               queue={queueModel}
@@ -4508,28 +2352,9 @@ function Main({
               onToggleShuffle={() => void session.toggleShuffle()}
               repeat={state.type === 'ready' ? state.repeat : 'off'}
               onCycleRepeat={() => void session.cycleRepeat()}
-              download={
-                currentRecordingId !== null &&
-                (controller.downloads.recordFor(currentRecordingId) !==
-                  null ||
-                  downloadRefFor(currentRecordingId) !== null)
-                  ? (downloadChipFor(currentRecordingId) ?? 'idle')
-                  : null
-              }
-              onDownload={
-                currentRecordingId !== null
-                  ? () => onDownloadAction(currentRecordingId)
-                  : undefined
-              }
-              onAddToPlaylist={
-                currentRecordingId !== null
-                  ? () =>
-                      setPickerFor({
-                        kind: 'recording',
-                        recordingId: currentRecordingId,
-                      })
-                  : undefined
-              }
+              download={stageDownload}
+              onDownload={onStageDownload}
+              onAddToPlaylist={onStageAddToPlaylist}
               onSeek={
                 heldOccurrenceId !== null
                   ? (ms) => {
@@ -4563,13 +2388,11 @@ function Main({
               }
               peaks={peaks}
               onRetryLyrics={onRetryLyrics}
-              onStartRadio={
-                radioSeedable(radioSeedRef) ? onStartRadio : undefined
-              }
+              onStartRadio={onStartRadioGated}
               onStopRadio={onStopRadio}
               onPressQueueItem={playQueueOccurrence}
               onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
-              onToggleQueueReorder={() => setReordering((v) => !v)}
+              onToggleQueueReorder={toggleReordering}
               onMoveQueueItem={onMoveQueueItem}
               onMoveQueueItemTo={onMoveQueueItemTo}
             />
@@ -4642,245 +2465,77 @@ function Main({
             </PushScreen>
           );
         })}
-        {actionsFor !== null && (
+        {rowActions !== null && (
           <SheetScreen
             stackKey="sheet-actions"
-            onDismissed={() => setActionsFor(null)}
+            onDismissed={closeRowActions}
           >
             <RowActionsSheet
-              title={
-                actionsFor.kind === 'recording'
-                  ? (state.recordings.find(
-                    (r) => r.id === actionsFor.recordingId,
-                  )?.title ?? t('track.fallbackTitle'))
-                  : actionsFor.meta.title
-              }
-              actions={[
-                // Like lives in the sheet for recording targets — the
-                // row itself keeps the heart icon only as an indicator.
-                ...(actionsFor.kind === 'recording'
-                  ? [
-                    {
-                      key: 'like',
-                      label: state.likes.some(
-                        (l) =>
-                          l.entityKind === 'track' &&
-                          l.targetId === actionsFor.recordingId,
-                      )
-                        ? t('common.unlike')
-                        : t('common.like'),
-                      icon: 'heart' as const,
-                    },
-                  ]
-                  : []),
-                {
-                  key: 'enqueue',
-                  label: t('action.addToQueue'),
-                  icon: 'queue' as const,
-                },
-                {
-                  key: 'add',
-                  label: t('sheets.addToPlaylist'),
-                  icon: 'list-plus' as const,
-                },
-                // Download affordance where a provider ref can mint a
-                // stream — OR a ledger row already exists (cancel/retry/
-                // remove don't need a resolvable ref).
-                ...(actionsFor.kind === 'recording' &&
-                (controller.downloads.recordFor(actionsFor.recordingId) !==
-                  null ||
-                  downloadRefFor(actionsFor.recordingId) !== null)
-                  ? [
-                      {
-                        key: 'download',
-                        label: (() => {
-                          const row = controller.downloads.recordFor(
-                            actionsFor.recordingId,
-                          );
-                          return row === null
-                            ? t('action.download')
-                            : row.state === 'available'
-                              ? t('action.removeDownload')
-                              : row.state === 'failed_with_retry'
-                                ? t('action.retryDownload')
-                                : t('action.cancelDownload');
-                        })(),
-                        icon: 'download' as const,
-                      },
-                      // A failed row needs an out that isn't retry —
-                      // keep vs. delete are both honest offers.
-                      ...(controller.downloads.recordFor(
-                        actionsFor.recordingId,
-                      )?.state === 'failed_with_retry'
-                        ? [
-                            {
-                              key: 'removeDownload',
-                              label: t('action.removeDownload'),
-                              icon: 'close' as const,
-                            },
-                          ]
-                        : []),
-                    ]
-                  : []),
-                // Only offer the seed affordance when the seed's own
-                // provider declares radio.seed — routing is ref-scoped,
-                // so another provider's support is a dead end.
-                ...(radioSeedable(actionRadioRef)
-                  ? [
-                    {
-                      key: 'radio',
-                      label: t('stage.radio.start'),
-                      icon: 'radio' as const,
-                    },
-                  ]
-                  : []),
-                ...(actionsFor.kind === 'metadata' &&
-                  actionsFor.meta.albumRef != null
-                  ? [
-                    {
-                      key: 'album',
-                      label: t('action.openAlbum'),
-                      icon: 'note' as const,
-                    },
-                  ]
-                  : []),
-                ...(actionsFor.kind === 'metadata' &&
-                  actionsFor.meta.artistRef != null
-                  ? [
-                    {
-                      key: 'artist',
-                      label: t('action.openArtist'),
-                      icon: 'library' as const,
-                    },
-                  ]
-                  : []),
-              ]}
+              title={rowActions.title}
+              actions={rowActions.actions}
               onAction={onRowAction}
-              onDismiss={() => setActionsFor(null)}
+              onDismiss={closeRowActions}
             />
           </SheetScreen>
         )}
         {pickerFor !== null && (
           <SheetScreen
             stackKey="sheet-add-playlist"
-            onDismissed={() => setPickerFor(null)}
+            onDismissed={closePlaylistPicker}
           >
             <AddToPlaylistSheet
               playlists={pickerItems}
               onPick={onPickPlaylist}
               onCreate={onCreateAndPick}
-              onDismiss={() => setPickerFor(null)}
+              onDismiss={closePlaylistPicker}
             />
           </SheetScreen>
         )}
         {providerPicker !== null && (
           <SheetScreen
             stackKey="sheet-provider"
-            onDismissed={() => setProviderSlot(null)}
+            onDismissed={closeProviderPicker}
           >
             <ProviderPickerSheet
               title={providerPicker.title}
               options={providerPicker.options}
               selectedKey={providerPicker.selectedKey}
               onPick={onPickProvider}
-              onDismiss={() => setProviderSlot(null)}
+              onDismiss={closeProviderPicker}
             />
           </SheetScreen>
         )}
         {themePickerOpen && (
           <SheetScreen
             stackKey="sheet-theme"
-            onDismissed={() => {
-              themeEpoch.current += 1;
-              setThemePickerOpen(false);
-            }}
+            onDismissed={closeThemePicker}
           >
             <ProviderPickerSheet
               title={t('settings.theme')}
               options={themeOptions()}
               selectedKey={state.settings.theme}
-              onPick={(key) => {
-                // Each pick claims a fresh epoch — a save from an
-                // earlier pick must not close this sheet.
-                themeEpoch.current += 1;
-                const opening = themeEpoch.current;
-                const theme =
-                  THEME_ORDER.find((tag) => tag === key) ?? 'system';
-                // Same contract as the language picker: report a
-                // failed save and keep the sheet open so an unapplied
-                // pick still reads unselected.
-                void queueSettingsWrite({ theme })
-                  .then((saved) => {
-                    if (opening !== themeEpoch.current) {
-                      // A newer pick or a dismissal superseded this
-                      // save — reject the stale result outright: it
-                      // must not close the sheet nor report an outcome
-                      // over the newer pick.
-                      return;
-                    }
-                    reportResult('settings.theme', saved);
-                    if (saved.ok) {
-                      setThemePickerOpen(false);
-                    }
-                  });
-              }}
-              onDismiss={() => {
-                themeEpoch.current += 1;
-                setThemePickerOpen(false);
-              }}
+              onPick={onPickTheme}
+              onDismiss={closeThemePicker}
             />
           </SheetScreen>
         )}
         {languagePickerOpen && (
           <SheetScreen
             stackKey="sheet-language"
-            onDismissed={() => {
-              languageEpoch.current += 1;
-              setLanguagePickerOpen(false);
-            }}
+            onDismissed={closeLanguagePicker}
           >
             <LanguagePickerSheet
               options={languageOptions()}
               selectedKey={languageOptionKey(state.settings.language)}
-              onPick={(key) => {
-                const language = key === 'system' ? null : key;
-                // Each pick claims a fresh epoch — a save from an
-                // earlier pick must neither apply its locale nor
-                // close this sheet.
-                languageEpoch.current += 1;
-                const opening = languageEpoch.current;
-                // Apply the locale only once the save landed — a
-                // failed save must not leave the UI on a selection
-                // storage never recorded. On failure the sheet stays
-                // open: the pick still reads unselected, so the
-                // failure is visible without relying on the toast.
-                void queueSettingsWrite({ language })
-                  .then((saved) => {
-                    if (opening !== languageEpoch.current) {
-                      // A newer pick or a dismissal superseded this
-                      // save — reject the stale result outright: it
-                      // must not apply a stale locale, close the sheet,
-                      // nor report an outcome over the newer pick.
-                      return;
-                    }
-                    reportResult('settings.language', saved);
-                    if (saved.ok) {
-                      applyLocale(language);
-                      setLanguagePickerOpen(false);
-                    }
-                  });
-              }}
-              onDismiss={() => {
-                languageEpoch.current += 1;
-                setLanguagePickerOpen(false);
-              }}
+              onPick={onPickLanguage}
+              onDismiss={closeLanguagePicker}
             />
           </SheetScreen>
         )}
         {storefrontSheetOpen && (
           <SheetScreen
             stackKey="sheet-storefront"
-            onDismissed={() => setStorefrontSheetOpen(false)}
+            onDismissed={closeStorefront}
           >
             <ValueFieldSheet
               title={t('settings.storefront')}
@@ -4888,71 +2543,30 @@ function Main({
               placeholder={t('sheets.countryCodePlaceholder')}
               submitLabel={t('common.save')}
               clearLabel={t('sheets.autoClear')}
-              onSubmit={(value) => {
-                const code = value.toUpperCase();
-                // The domain bound: ISO-3166 alpha-2, or null for
-                // system-locale resolution.
-                if (!/^[A-Z]{2}$/.test(code)) {
-                  setToast(t('toast.storefrontCode'));
-                  return;
-                }
-                // Dismiss only on commit — a failed save shows the
-                // toast, not a closed sheet over an unchanged row.
-                const opening = storefrontEpoch.current;
-                void queueSettingsWrite({ storefront: code }).then(
-                  (saved) => {
-                    reportResult('action.saveStorefront', saved);
-                    if (saved.ok && opening === storefrontEpoch.current) {
-                      setStorefrontSheetOpen(false);
-                    }
-                  },
-                );
-              }}
-              onClear={() => {
-                const opening = storefrontEpoch.current;
-                void queueSettingsWrite({ storefront: null }).then(
-                  (saved) => {
-                    reportResult('action.clearStorefront', saved);
-                    if (saved.ok && opening === storefrontEpoch.current) {
-                      setStorefrontSheetOpen(false);
-                    }
-                  },
-                );
-              }}
-              onDismiss={() => setStorefrontSheetOpen(false)}
+              onSubmit={onSubmitStorefront}
+              onClear={onClearStorefront}
+              onDismiss={closeStorefront}
             />
           </SheetScreen>
         )}
         {qualityPickerOpen && (
           <SheetScreen
             stackKey="sheet-quality"
-            onDismissed={() => setQualityPickerOpen(false)}
+            onDismissed={closeQualityPicker}
           >
             <ProviderPickerSheet
               title={t('settings.quality')}
               options={qualityOptions()}
               selectedKey={`${state.settings.qualityKbps}`}
-              onPick={(key) => {
-                const qualityKbps = Number(key);
-                if (!Number.isSafeInteger(qualityKbps)) {
-                  return;
-                }
-                const opening = qualityEpoch.current;
-                void queueSettingsWrite({ qualityKbps }).then((saved) => {
-                  reportResult('action.saveQuality', saved);
-                  if (saved.ok && opening === qualityEpoch.current) {
-                    setQualityPickerOpen(false);
-                  }
-                });
-              }}
-              onDismiss={() => setQualityPickerOpen(false)}
+              onPick={onPickQuality}
+              onDismiss={closeQualityPicker}
             />
           </SheetScreen>
         )}
         {artworkCachePickerOpen && (
           <SheetScreen
             stackKey="sheet-artwork-cache"
-            onDismissed={() => setArtworkCachePickerOpen(false)}
+            onDismissed={closeArtworkCache}
           >
             <ProviderPickerSheet
               title={t('settings.artworkCache')}
@@ -4962,33 +2576,8 @@ function Main({
                   ARTWORK_CACHE_BUDGET_DEFAULT_BYTES) /
                   (1024 * 1024),
               )}`}
-              onPick={(key) => {
-                setArtworkCachePickerOpen(false);
-                const mib = Number(key);
-                if (!Number.isSafeInteger(mib)) {
-                  return;
-                }
-                const artworkCacheBytes = mib * 1024 * 1024;
-                let shrinking = false;
-                void queueSettingsWrite((latest) => {
-                  shrinking =
-                    artworkCacheBytes <
-                    (latest.artworkCacheBytes ??
-                      ARTWORK_CACHE_BUDGET_DEFAULT_BYTES);
-                  return { artworkCacheBytes };
-                }).then((updated) => {
-                  // A shrunken cap takes effect only once rows over
-                  // it are evicted — sweep after the commit lands.
-                  if (updated.ok && shrinking) {
-                    void controller.artworkCache.sweep({
-                      requestId: createIds().next('artwork-sweep'),
-                      deadlineMs: createClock().nowMs() + 60_000,
-                      signal: new CancellationSource().signal,
-                    });
-                  }
-                });
-              }}
-              onDismiss={() => setArtworkCachePickerOpen(false)}
+              onPick={onPickArtworkCache}
+              onDismiss={closeArtworkCache}
             />
           </SheetScreen>
         )}

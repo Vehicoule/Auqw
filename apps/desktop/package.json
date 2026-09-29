@@ -2,7 +2,7 @@
   "name": "auqw-desktop",
   "version": "0.0.1-alpha.1",
   "private": true,
-  "description": "auqw desktop shell — plugin-resolved audio client",
+  "description": "auqw desktop shell \u2014 plugin-resolved audio client",
   "type": "module",
   "main": "dist/main/index.js",
   "desktopName": "auqw",
@@ -28,6 +28,7 @@
     "typescript": "~6.0.3"
   },
   "dependencies": {
+    "@auqw/app-shell": "workspace:*",
     "@auqw/design-tokens": "workspace:*",
     "@auqw/ui-web": "workspace:*",
     "bgutils-js": "4.0.3",

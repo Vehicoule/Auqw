@@ -115,6 +115,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@auqw/app-shell':
+        specifier: workspace:*
+        version: link:../../packages/app-shell
       '@auqw/design-tokens':
         specifier: workspace:*
         version: link:../../packages/design-tokens
@@ -176,6 +179,9 @@ importers:
 
   apps/mobile:
     dependencies:
+      '@auqw/app-shell':
+        specifier: workspace:*
+        version: link:../../packages/app-shell
       '@auqw/application':
         specifier: workspace:*
         version: link:../../packages/application
@@ -291,6 +297,28 @@ importers:
       react:
         specifier: 19.2.3
         version: 19.2.3
+
+  packages/app-shell:
+    dependencies:
+      '@auqw/application':
+        specifier: workspace:*
+        version: link:../application
+      '@auqw/ui-shared':
+        specifier: workspace:*
+        version: link:../ui-shared
+    devDependencies:
+      '@types/node':
+        specifier: 26.6.2
+        version: 26.6.2
+      '@types/react':
+        specifier: ~19.2.2
+        version: 19.2.18
+      react:
+        specifier: 19.2.3
+        version: 19.2.3
+      typescript:
+        specifier: ~6.0.3
+        version: 6.0.3
 
   packages/application: {}
 
