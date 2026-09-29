@@ -53,21 +53,21 @@ import { runTransfer } from './transfer-policy.ts';
  */
 
 /** The queue-derived band a download sorts into; lower runs first. */
-export const BAND_NOW_PLAYING = 0;
-export const BAND_IN_QUEUE = 1;
-export const BAND_EXPLICIT = 2;
+const BAND_NOW_PLAYING = 0;
+const BAND_IN_QUEUE = 1;
+const BAND_EXPLICIT = 2;
 
 const MAX_ACTIVE = 1;
 const RESOLVE_DEADLINE_MS = 30_000;
 /** Persist the resume offset every N committed bytes, not per chunk. */
 const OFFSET_CHECKPOINT_BYTES = 4 * 1024 * 1024;
 
-export type DownloadRequest = {
+type DownloadRequest = {
   readonly recordingId: string;
   readonly sourceRef: SourceRef;
 };
 
-export type DownloadManagerDeps = {
+type DownloadManagerDeps = {
   readonly storage: StoragePort;
   readonly transfer: MediaTransferPort;
   readonly connectivity: ConnectivityPort;
@@ -878,18 +878,16 @@ export class DownloadManager {
       },
       ctx,
     );
+    // A row gone, 'removing', or back to 'requested' is no longer this
+    // runner's — the remove path owns the file or an orderly demotion
+    // (stop / ineligible connectivity edge) already reset it.
+    const unowned = (r: DownloadRecord | undefined): r is undefined =>
+      r === undefined || r.state === 'removing' || r.state === 'requested';
     if (!minted.ok) {
       const latest = this.#rows.get(row.downloadId);
-      if (
-        latest === undefined ||
-        latest.state === 'removing' ||
-        latest.state === 'requested'
-      ) {
-        // Removed mid-mint, or an orderly demotion (stop / ineligible
-        // connectivity edge) already returned the row to 'requested' —
-        // don't overwrite the intent. A user cancel() on a row still
-        // 'requested' (pre-claim window) writes the cancelled fail on
-        // the cancel path itself, not here.
+      // A user cancel() on a row still 'requested' (pre-claim window)
+      // writes the cancelled fail on the cancel path itself, not here.
+      if (unowned(latest)) {
         return;
       }
       await this.#fail(
@@ -906,13 +904,7 @@ export class DownloadManager {
     // re-reading guards against resurrecting 'transferring' over it
     // (the live `row` handle is stale by construction).
     const fresh = this.#rows.get(row.downloadId);
-    if (
-      fresh === undefined ||
-      fresh.state === 'removing' ||
-      fresh.state === 'requested'
-    ) {
-      // A demotion that landed during the mint (stop / connectivity
-      // edge) is honoured — never resurrect 'transferring' over it.
+    if (unowned(fresh)) {
       return;
     }
 
@@ -979,12 +971,7 @@ export class DownloadManager {
       });
 
       const after = this.#rows.get(live.downloadId);
-      if (after === undefined || after.state === 'removing') {
-        return; // the remove path owns the file now
-      }
-      if (after.state === 'requested') {
-        // An orderly demotion (stop / ineligible connectivity edge)
-        // already reset the row — leave it resumable at its offset.
+      if (unowned(after)) {
         return;
       }
       if (!outcome.ok) {
