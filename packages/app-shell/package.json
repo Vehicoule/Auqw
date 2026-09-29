@@ -1,0 +1,26 @@
+{
+  "name": "@auqw/app-shell",
+  "private": true,
+  "version": "0.0.1-alpha.1",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types src/app-shell.test.ts"
+  },
+  "dependencies": {
+    "@auqw/application": "workspace:*",
+    "@auqw/ui-shared": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "@types/react": "~19.2.2",
+    "react": "19.2.3",
+    "typescript": "~6.0.3"
+  }
+}
