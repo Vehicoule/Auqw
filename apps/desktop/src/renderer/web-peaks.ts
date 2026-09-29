@@ -126,6 +126,22 @@ function fromBase64(data: string): Uint8Array {
  */
 export function createWebPeaksPort(deps: {
   readonly stream: StreamClient;
+  /**
+   * `lf-*` handle → its resolved `file://` URI (the web player's
+   * local map). A non-null answer switches `pullBytes` off
+   * `stream:read` — local handles have no seam session — onto
+   * `localRead`, the utility's realpath-gated ranged file read.
+   */
+  readonly localUriFor?: (handle: string) => string | null;
+  /**
+   * `local:read` — `{uri, position, maxLen} → {data: base64}`, empty
+   * data at EOF. Same contract as `stream:read`'s result shape.
+   */
+  readonly localRead?: (args: {
+    uri: string;
+    position: number;
+    maxLen: number;
+  }) => Promise<{ data: string }>;
   readonly decode?: PeaksDecoder;
   readonly maxBytes?: number;
   readonly maxDecodeMs?: number;
@@ -170,7 +186,7 @@ export function createWebPeaksPort(deps: {
     });
 
   async function readWithDeadline(
-    args: { handle: string; position: number; maxLen: number },
+    read: () => Promise<{ data: string }>,
     timeoutMs: number,
     context_: OperationContext,
   ): Promise<Result<{ data: string }>> {
@@ -184,7 +200,7 @@ export function createWebPeaksPort(deps: {
     if (remainingMs <= 0) {
       return err(appError('timeout', 'peak extraction deadline'));
     }
-    const timed = guard(() => deps.stream.read(args));
+    const timed = guard(read);
     let timer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<'timeout'>((resolve) => {
       timer = setTimeout(() => resolve('timeout'), remainingMs);
@@ -222,14 +238,40 @@ export function createWebPeaksPort(deps: {
     // and chasing holes steals the pump's demand priority from the
     // element mid-track.
     let timeoutMs = firstReadTimeoutMs;
+    // `lf-*` handles are element-attached files — bytes come from a
+    // grant-gated ranged `local:read`, not the seam. Both legs share
+    // the deadline machinery; a local read parks only on slow disk,
+    // never on a demand hole, so the park bound is decorative there.
+    const localUri = deps.localUriFor?.(handle) ?? null;
+    const localRead = deps.localRead;
     // `<=` so an exactly-`cap` stream still reaches its EOF read.
     while (total <= cap) {
-      const chunk = await readWithDeadline(
-        { handle, position, maxLen: READ_CHUNK },
-        timeoutMs,
-        context,
-      );
-      timeoutMs = parkTimeoutMs;
+      const chunk =
+        localUri !== null && localRead !== undefined
+          ? await readWithDeadline(
+              () =>
+                localRead({
+                  uri: localUri,
+                  position,
+                  maxLen: READ_CHUNK,
+                }),
+              timeoutMs,
+              context,
+            )
+          : await readWithDeadline(
+              () =>
+                deps.stream.read({
+                  handle,
+                  position,
+                  maxLen: READ_CHUNK,
+                }),
+              timeoutMs,
+              context,
+            );
+      // The park bound exists to stop hole-chasing on the seam — a
+      // local:read parks only on slow disk, so local reads keep the
+      // cold-start patience every round.
+      timeoutMs = localUri !== null ? firstReadTimeoutMs : parkTimeoutMs;
       if (!chunk.ok) {
         // A park-timeout is not a failure worth caching hard —
         // 'unavailable' reads as "not buffered yet" to the caller.

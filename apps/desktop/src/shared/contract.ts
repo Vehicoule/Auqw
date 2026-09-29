@@ -1296,6 +1296,34 @@ export const isLocalProbeArgs = v.object({
   recordingId: v.boundedString(512),
 });
 
+const MAX_LOCAL_URI = 8192;
+
+export type LocalResolveArgs = v.Guarded<typeof isLocalResolveArgs>;
+
+export const isLocalResolveArgs = v.object({
+  uri: v.boundedString(MAX_LOCAL_URI),
+});
+
+export type LocalResolveResult = v.Guarded<typeof isLocalResolveResult>;
+
+export const isLocalResolveResult = v.object({
+  uri: v.nullable(v.boundedString(MAX_LOCAL_URI)),
+});
+
+export type LocalReadArgs = v.Guarded<typeof isLocalReadArgs>;
+
+export const isLocalReadArgs = v.object({
+  uri: v.boundedString(MAX_LOCAL_URI),
+  position: v.refine(v.int(), (n) => n >= 0),
+  maxLen: v.refine(v.int(), (n) => n > 0 && n <= MAX_READ_LEN),
+});
+
+export type LocalReadResult = v.Guarded<typeof isLocalReadResult>;
+
+export const isLocalReadResult = v.object({
+  data: v.string(MAX_READ_LEN * 2),
+});
+
 export type LocalProbeResult = v.Guarded<typeof isLocalProbeResult>;
 
 export const isLocalProbeResult = v.object({
@@ -1468,6 +1496,10 @@ export type AuqwApi = {
   readonly local: {
     readonly add: (args: LocalAddArgs) => Promise<LocalAddResult>;
     readonly probe: (args: LocalProbeArgs) => Promise<LocalProbeResult>;
+    readonly resolve: (
+      args: LocalResolveArgs,
+    ) => Promise<LocalResolveResult>;
+    readonly read: (args: LocalReadArgs) => Promise<LocalReadResult>;
     readonly list: () => Promise<LocalListResult>;
     readonly playback: () => Promise<LocalPlaybackResult>;
     readonly sweep: () => Promise<LocalSweepResult>;

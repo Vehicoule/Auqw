@@ -305,6 +305,39 @@ export async function run(): Promise<void> {
     });
     assert(!badWrites.ok && badWrites.error.kind === 'invalid-request');
 
+    // The local file legs the renderer's provider:'local' playback
+    // depends on — resolve gates the attach URI, read feeds peaks.
+    const resolved = await invoke(CHANNELS.localResolve, {
+      uri: 'file:///music/track.flac',
+    });
+    assert(resolved.ok, 'local:resolve is registered');
+    assertDeepEqual(resolved.result, {
+      routed: 'local:resolve',
+      args: { uri: 'file:///music/track.flac' },
+    });
+    const read = await invoke(CHANNELS.localRead, {
+      uri: 'file:///music/track.flac',
+      position: 0,
+      maxLen: 4096,
+    });
+    assert(read.ok, 'local:read is registered');
+    assertDeepEqual(read.result, {
+      routed: 'local:read',
+      args: {
+        uri: 'file:///music/track.flac',
+        position: 0,
+        maxLen: 4096,
+      },
+    });
+    const badResolve = await invoke(CHANNELS.localResolve, { uri: 4 });
+    assert(!badResolve.ok && badResolve.error.kind === 'invalid-request');
+    const badReadArgs = await invoke(CHANNELS.localRead, {
+      uri: 'file:///music/track.flac',
+      position: -1,
+      maxLen: 4096,
+    });
+    assert(!badReadArgs.ok && badReadArgs.error.kind === 'invalid-request');
+
     // Renderer dies mid-handshake: postMessage throws after port1
     // already attached the utility pump. The still-owned peer must be
     // closed — the peer 'close' is the pump's own detach path, so
