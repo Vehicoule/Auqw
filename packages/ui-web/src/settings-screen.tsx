@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Hairline, Icon, Pressable, Text } from './primitives.tsx';
+import { focusTargetAfterRemoval } from './settings-focus.ts';
 import { settingsGroups, t } from '@auqw/ui-shared';
 import type {
   SettingsModel,
@@ -45,10 +46,21 @@ function SettingsRow({
   row,
   onSelectRow,
   onToggleRow,
+  onConfirmed,
+  registerRowEl,
 }: {
   readonly row: SettingsRowModel;
   readonly onSelectRow?: ((key: string) => void) | undefined;
   readonly onToggleRow?: ((key: string) => void) | undefined;
+  /**
+   * The armed pair committed a destructive action — the screen marks
+   * the key so it can hand focus to a neighbor if the row goes away.
+   */
+  readonly onConfirmed?: ((key: string) => void) | undefined;
+  /** Registers the row's button element for focus recovery. */
+  readonly registerRowEl?:
+    | ((key: string, el: HTMLButtonElement | null) => void)
+    | undefined;
 }) {
   const [armed, setArmed] = useState(false);
   // Focus follows the slot: arming replaces the row's button with the
@@ -92,6 +104,7 @@ function SettingsRow({
           ref={confirmRef}
           onPress={() => {
             setArmed(false);
+            onConfirmed?.(row.key);
             onSelectRow?.(row.key);
           }}
           ariaLabel={confirmLabel}
@@ -157,7 +170,10 @@ function SettingsRow({
   }
   return (
     <Pressable
-      ref={rowRef}
+      ref={(el) => {
+        rowRef.current = el;
+        registerRowEl?.(row.key, el);
+      }}
       onPress={
         !interactive
           ? undefined
@@ -190,6 +206,50 @@ export function SettingsScreen({
 }: SettingsScreenProps) {
   const diagnostics = model.diagnostics;
   const syncSectionRef = useRef<HTMLElement | null>(null);
+  const screenRef = useRef<HTMLDivElement | null>(null);
+  // Confirmed destructive rows can vanish with their focused control —
+  // remember which key committed, then hand focus to its nearest
+  // still-focusable neighbor (or the screen when none survives).
+  const rowEls = useRef(new Map<string, HTMLButtonElement>());
+  const rowOrderRef = useRef<readonly string[]>([]);
+  const pendingFocus = useRef<{ key: string; before: readonly string[] } | null>(
+    null,
+  );
+  const groups = settingsGroups(model.rows);
+  const rowOrder = groups.flatMap((group) => group.rows.map((row) => row.key));
+  useEffect(() => {
+    const pending = pendingFocus.current;
+    rowOrderRef.current = rowOrder;
+    if (pending === null) {
+      return;
+    }
+    const stillThere = model.rows.find(
+      (row) => row.key === pending.key && row.enabled,
+    );
+    if (stillThere !== undefined) {
+      // The action kept the row — stand down only once focus actually
+      // landed back on it; an async removal can lag a render behind
+      // the confirm press.
+      const el = rowEls.current.get(pending.key);
+      if (el !== undefined && el.contains(document.activeElement)) {
+        pendingFocus.current = null;
+      }
+      return;
+    }
+    const focusable = new Set(
+      model.rows.filter((row) => row.enabled).map((row) => row.key),
+    );
+    const target = focusTargetAfterRemoval(
+      pending.before,
+      focusable,
+      pending.key,
+    );
+    pendingFocus.current = null;
+    const el =
+      (target === null ? undefined : rowEls.current.get(target)) ??
+      screenRef.current;
+    el?.focus({ preventScroll: true });
+  });
   useEffect(() => {
     if (syncFocusTick === 0) {
       return;
@@ -207,13 +267,15 @@ export function SettingsScreen({
     diagnostics.persistence === 'ok' ? 'secondary' : 'warn';
   return (
     <div
+      ref={screenRef}
+      tabIndex={-1}
       className="uw-screen uw-settings"
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
       <Text variant="display" color="bright">
         {t('nav.settings')}
       </Text>
-      {settingsGroups(model.rows).map((group) => (
+      {groups.map((group) => (
         <section key={group.key} className="uw-settings__group">
           <Text
             variant="label"
@@ -231,6 +293,19 @@ export function SettingsScreen({
                   row={row}
                   onSelectRow={onSelectRow}
                   onToggleRow={onToggleRow}
+                  onConfirmed={(key) => {
+                    pendingFocus.current = {
+                      key,
+                      before: rowOrderRef.current,
+                    };
+                  }}
+                  registerRowEl={(key, el) => {
+                    if (el === null) {
+                      rowEls.current.delete(key);
+                    } else {
+                      rowEls.current.set(key, el);
+                    }
+                  }}
                 />
               </div>
             ))}

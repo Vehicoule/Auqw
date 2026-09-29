@@ -635,6 +635,38 @@ function render(node: ReactNode): string {
   check('provider emits t-dark class', dark.includes('t-dark'));
 }
 
+// ---- destructive-row focus recovery -------------------------------------------------
+
+{
+  const { focusTargetAfterRemoval } = await import('./settings-focus.ts');
+  const order = [
+    'language',
+    'sources.music',
+    'sources.videos',
+    'downloads.clear',
+    'sync',
+  ];
+  const minusMusic = new Set(order.filter((k) => k !== 'sources.music'));
+  check(
+    'focus recovery: next live row after a middle removal',
+    focusTargetAfterRemoval(order, minusMusic, 'sources.music') ===
+      'sources.videos',
+  );
+  const minusTail = new Set(order.filter((k) => k !== 'sync'));
+  check(
+    'focus recovery: previous row when the tail is removed',
+    focusTargetAfterRemoval(order, minusTail, 'sync') === 'downloads.clear',
+  );
+  check(
+    'focus recovery: container fallback when nothing focusable survives',
+    focusTargetAfterRemoval(order, new Set(), 'sources.music') === null,
+  );
+  check(
+    'focus recovery: unknown key is a no-op',
+    focusTargetAfterRemoval(order, minusMusic, 'never-existed') === null,
+  );
+}
+
 // ---- source-scan guards -----------------------------------------------------------
 
 {
