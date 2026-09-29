@@ -205,7 +205,7 @@ export type ProviderSlot =
   | 'lyricsProvider'
   | 'radioProvider';
 
-const SLOT_META: Record<
+export const SLOT_META: Record<
   ProviderSlot,
   {
     readonly label: MessageId;
