@@ -138,6 +138,7 @@ import type { ThemeSource } from '@auqw/design-tokens/adaptive';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { createClock, createIds } from '@auqw/application';
+import { shellToAppError } from './ipc-errors.ts';
 import { createWebPeaksPort } from './web-peaks.ts';
 import { useWaveformPeaks } from '@auqw/ui-shared';
 import type { PeaksTarget } from '@auqw/ui-shared';
