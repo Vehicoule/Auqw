@@ -71,47 +71,23 @@ export function EntityScreen({
   model,
   scrollEnabled = true,
   onBack,
-  onPlayAll,
-  onShuffleAll,
-  onToggleLike,
-  onPressItem,
-  onAddToPlaylist,
-  onContext,
-  onLoadMore,
-  onRetry,
+  ...handlers
 }: EntityScreenProps) {
-  const view = useEntityScreenController({
-    model,
-    onPlayAll,
-    onShuffleAll,
-    onToggleLike,
-    onPressItem,
-    onAddToPlaylist,
-    onContext,
-    onLoadMore,
-    onRetry,
-  });
+  const view = useEntityScreenController({ model, ...handlers });
   const items = model.phase === 'ready' ? model.items : [];
+  const byRow = (fn: ((row: (typeof items)[number]) => void) | undefined) =>
+    fn === undefined
+      ? undefined
+      : (index: number) => {
+          const row = items[index];
+          if (row !== undefined) {
+            fn(row);
+          }
+        };
   const list = useTrackList({
     count: items.length,
-    onActivate:
-      onPressItem === undefined
-        ? undefined
-        : (index) => {
-            const row = items[index];
-            if (row !== undefined) {
-              onPressItem(row);
-            }
-          },
-    onContext:
-      onContext === undefined
-        ? undefined
-        : (index) => {
-            const row = items[index];
-            if (row !== undefined) {
-              onContext(row);
-            }
-          },
+    onActivate: byRow(handlers.onPressItem),
+    onContext: byRow(handlers.onContext),
   });
   if (view.kind === 'loading') {
     return (
