@@ -270,6 +270,7 @@
 .ui-web:not([data-reduced-motion='true']) .uw-resume,
 .ui-web:not([data-reduced-motion='true']) .uw-artist,
 .ui-web:not([data-reduced-motion='true']) .uw-libcard--grid,
+.ui-web:not([data-reduced-motion='true']) .uw-libcard--list,
 .ui-web:not([data-reduced-motion='true']) .uw-rail__card,
 .ui-web:not([data-reduced-motion='true']) .uw-segment__item,
 .ui-web:not([data-reduced-motion='true']) .uw-chip,
@@ -1234,6 +1235,19 @@
   display: flex;
   flex-direction: column;
   gap: var(--spacing-xs);
+}
+
+.uw-libcard--list {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  min-height: var(--size-track-row);
+  padding: 0 var(--spacing-sm);
+  border-radius: var(--radius-control);
+}
+
+.uw-libcard--list:hover:not(:disabled) {
+  background: var(--uw-hover);
 }
 
 .uw-libcard--grid:hover:not(:disabled) .uw-text--body {
