@@ -222,6 +222,31 @@ function factories(media: FakeMediaSource): MseFactories & {
 const settle = (): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, 0));
 
+function beginAttach(
+  handle: string,
+  mime = 'audio/webm',
+): {
+  attach: ReturnType<typeof attachMseSource>;
+  media: FakeMediaSource;
+  port: FakePort;
+  mse: ReturnType<typeof factories>;
+} {
+  const media = new FakeMediaSource();
+  const port = new FakePort();
+  const mse = factories(media);
+  return {
+    attach: attachMseSource({
+      handle,
+      mime,
+      channel: () => Promise.resolve(port),
+      mse,
+    }),
+    media,
+    port,
+    mse,
+  };
+}
+
 /** Push `bytes` as stream data starting at absolute position `at`. */
 function feedData(
   port: FakePort,
@@ -247,15 +272,7 @@ function feedData(
 export async function run(): Promise<void> {
   // Attach → sourceopen → grant → carved appends land on boundaries.
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const mse = factories(media);
-    const attach = attachMseSource({
-      handle: 'h-1',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse,
-    });
+    const { attach, media, port, mse } = beginAttach('h-1');
     await settle(); // channel resolves → sourceopen listener lands
     media.fireSourceopen();
     assert(port.grants() === 1, 'initial credit grant');
@@ -278,14 +295,7 @@ export async function run(): Promise<void> {
   // covering unit's byte start. (A still-buffered target is an
   // element-only rewind — no pump frame.)
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const attach = attachMseSource({
-      handle: 'h-2',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse: factories(media),
-    });
+    const { attach, media, port, mse } = beginAttach('h-2');
     await settle();
     media.fireSourceopen();
     feedData(port, webmFixture(), 0);
@@ -341,14 +351,7 @@ export async function run(): Promise<void> {
   // A second quota hit on a different unit recovers again (retry state
   // is per-append, not per-session).
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const attach = attachMseSource({
-      handle: 'h-4',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse: factories(media),
-    });
+    const { attach, media, port, mse } = beginAttach('h-4');
     await settle();
     media.fireSourceopen();
     // Enough appends that the journal anchor clears the keep-behind
@@ -390,14 +393,7 @@ export async function run(): Promise<void> {
   // boundary sit in ingest, and a grant that only replenished on
   // append-completion would starve a segment larger than the window.
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const attach = attachMseSource({
-      handle: 'h-4a',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse: factories(media),
-    });
+    const { attach, media, port, mse } = beginAttach('h-4a');
     await settle();
     media.fireSourceopen();
     const grantsAtOpen = port.grants();
@@ -418,14 +414,7 @@ export async function run(): Promise<void> {
   // flush would re-send nearly the whole window — grants are additive
   // on the pump side and memory would grow unbounded).
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const attach = attachMseSource({
-      handle: 'h-4b0',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse: factories(media),
-    });
+    const { attach, media, port, mse } = beginAttach('h-4b0');
     await settle();
     media.fireSourceopen();
     feedData(port, webmFixture(), 0);
@@ -445,14 +434,7 @@ export async function run(): Promise<void> {
   // terminating boundary is upstream), so the pump keeps pulling
   // credit until it closes — bounded only by MAX_UNIT_BYTES.
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const attach = attachMseSource({
-      handle: 'h-4c0',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse: factories(media),
-    });
+    const { attach, media, port, mse } = beginAttach('h-4c0');
     await settle();
     media.fireSourceopen();
     // EBML head + Segment header (reused from the fixture) + one
@@ -481,15 +463,7 @@ export async function run(): Promise<void> {
   // A segment past the 64MiB cap is refused — the open unit is exempt
   // from the credit window but not unbounded.
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const mse = factories(media);
-    const attach = attachMseSource({
-      handle: 'h-4c1',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse,
-    });
+    const { attach, media, port, mse } = beginAttach('h-4c1');
     await settle();
     media.fireSourceopen();
     const payload = 65 * 1024 * 1024;
@@ -509,14 +483,7 @@ export async function run(): Promise<void> {
   // merged range per append would double-count durations and push the
   // estimate's byte too early.
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const attach = attachMseSource({
-      handle: 'h-4c2',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse: factories(media),
-    });
+    const { attach, media, port, mse } = beginAttach('h-4c2');
     await settle();
     media.fireSourceopen();
     const sb = media.sourceBuffer;
@@ -542,14 +509,7 @@ export async function run(): Promise<void> {
   // append re-opens the source per the MSE spec (sourceopen refires
   // with the existing SourceBuffer — not a second addSourceBuffer).
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const attach = attachMseSource({
-      handle: 'h-4d0',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse: factories(media),
-    });
+    const { attach, media, port, mse } = beginAttach('h-4d0');
     await settle();
     media.fireSourceopen();
     // No Cues tail — all coverage lands in the journal.
@@ -596,14 +556,7 @@ export async function run(): Promise<void> {
   // Quota eviction anchors at the reported playhead — a download far
   // ahead of playback must not evict the media about to play.
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const attach = attachMseSource({
-      handle: 'h-4d1',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse: factories(media),
-    });
+    const { attach, media, port, mse } = beginAttach('h-4d1');
     await settle();
     media.fireSourceopen();
     feedData(port, webmFixture(), 0);
@@ -626,14 +579,8 @@ export async function run(): Promise<void> {
   // abort() settles `ready` with MseAborted — a killed attach must
   // not leave a caller suspended on first.settle forever.
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const attach = await attachMseSource({
-      handle: 'h-4e',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse: factories(media),
-    });
+    const { attach: attachP, media, port, mse } = beginAttach('h-4e');
+    const attach = await attachP;
     attach.abort();
     const outcome = await attach.ready.then(
       () => 'resolved',
@@ -647,14 +594,7 @@ export async function run(): Promise<void> {
   // resolution fires the source's onFail listeners (the element's own
   // error event never fires for a dead MSE feed).
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const attach = attachMseSource({
-      handle: 'h-4b1',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse: factories(media),
-    });
+    const { attach, media, port, mse } = beginAttach('h-4b1');
     await settle();
     media.fireSourceopen();
     feedData(port, webmFixture(), 0);
@@ -677,14 +617,7 @@ export async function run(): Promise<void> {
   // longer names the live session, so it must not fail the re-anchored
   // source the way a current-epoch error does.
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const attach = attachMseSource({
-      handle: 'h-4b2',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse: factories(media),
-    });
+    const { attach, media, port, mse } = beginAttach('h-4b2');
     await settle();
     media.fireSourceopen();
     feedData(port, webmFixture(), 0);
@@ -719,14 +652,7 @@ export async function run(): Promise<void> {
   // produces no `buffered` range, so a head-only stream stays pending
   // and can still fall back; the first media-bearing append resolves.
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const attach = attachMseSource({
-      handle: 'h-4b',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse: factories(media),
-    });
+    const { attach, media, port, mse } = beginAttach('h-4b');
     await settle();
     media.fireSourceopen();
     let settled = false;
@@ -751,15 +677,8 @@ export async function run(): Promise<void> {
   // abort() before the URL reaches an element closes the pump port and
   // revokes the object URL — no fallback leg is minted for a dead op.
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const mse = factories(media);
-    const attach = await attachMseSource({
-      handle: 'h-4c',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse,
-    });
+    const { attach: attachP, media, port, mse } = beginAttach('h-4c');
+    const attach = await attachP;
     await settle();
     attach.abort();
     assert(
@@ -772,15 +691,7 @@ export async function run(): Promise<void> {
 
   // destroy() closes the pump port and revokes the object URL.
   {
-    const media = new FakeMediaSource();
-    const port = new FakePort();
-    const mse = factories(media);
-    const attach = attachMseSource({
-      handle: 'h-5',
-      mime: 'audio/webm',
-      channel: () => Promise.resolve(port),
-      mse,
-    });
+    const { attach, media, port, mse } = beginAttach('h-5');
     await settle();
     media.fireSourceopen();
     feedData(port, webmFixture(), 0);
