@@ -40,6 +40,7 @@ const SHELL_TO_APP: Readonly<Record<ShellErrorKind, ErrorKind>> = {
   transient: 'transient',
   'rate-limit': 'rate-limit',
   'auth-required': 'auth-required',
+  'streams-capped': 'streams-capped',
   'permission-denied': 'permission-denied',
   'storage-full': 'storage-full',
   internal: 'internal',

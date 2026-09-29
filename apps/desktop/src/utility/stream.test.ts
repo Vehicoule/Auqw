@@ -104,7 +104,12 @@ export async function run(): Promise<void> {
   // Seam kinds pass through under their own names — laundering them
   // into `io-error`/`unavailable` dropped retryability and made the
   // two renderer maps disagree on one failure.
-  for (const slug of ['transient', 'rate-limit', 'auth-required'] as const) {
+  for (const slug of [
+    'transient',
+    'rate-limit',
+    'auth-required',
+    'streams-capped',
+  ] as const) {
     const seamError = new Error('x');
     (seamError as { cause?: unknown }).cause = {
       message: `{"code":"${slug}","kind":"${slug}","detail":"d"}`,

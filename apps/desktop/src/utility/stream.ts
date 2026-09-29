@@ -41,7 +41,7 @@ const SLUG_KIND: Readonly<Record<string, ShellErrorKind>> = {
   superseded: 'released',
   cancelled: 'cancelled',
   unavailable: 'unavailable',
-  'streams-capped': 'unavailable',
+  'streams-capped': 'streams-capped',
   'rate-limit': 'rate-limit',
   transient: 'transient',
   'auth-required': 'auth-required',

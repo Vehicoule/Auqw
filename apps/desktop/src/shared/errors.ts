@@ -15,6 +15,7 @@ const ERROR_KINDS = [
   'transient',
   'rate-limit',
   'auth-required',
+  'streams-capped',
   'permission-denied',
   'storage-full',
   'internal',
@@ -36,6 +37,7 @@ const RETRYABLE: ReadonlySet<ShellErrorKind> = new Set([
   'io-error',
   'transient',
   'rate-limit',
+  'streams-capped',
   'internal',
 ]);
 
