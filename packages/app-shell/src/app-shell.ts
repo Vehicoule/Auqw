@@ -1705,21 +1705,33 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // any unmatched key through the recording path.
   const onHomeCardPress = useCallback(
     (card: { readonly key: string }) => {
+      // strictHomeCardKeys (mobile): a recents-rail card is a recording
+      // first — a key collision with a suggestion still plays the
+      // recording, matching the pre-extraction activateHomeCard order.
+      if (
+        ports.strictHomeCardKeys === true &&
+        homeModel.recents.some((liked) => liked.key === card.key)
+      ) {
+        void playRecording(card.key);
+        return;
+      }
       const meta = suggestionMeta.get(card.key);
       if (meta !== undefined) {
         if (!canPlayMeta(meta)) {
           return;
         }
-        if (searchState.type === 'content') {
+        // Only desktop's card press fed the committed query into
+        // search recents — mobile's suggestion cards never did.
+        if (
+          ports.strictHomeCardKeys !== true &&
+          searchState.type === 'content'
+        ) {
           recordRecentSearch(searchState.query);
         }
         void dispatchPlay('action.playResult', playMeta(meta));
         return;
       }
-      if (
-        ports.strictHomeCardKeys === true &&
-        !homeModel.recents.some((liked) => liked.key === card.key)
-      ) {
+      if (ports.strictHomeCardKeys === true) {
         return;
       }
       void playRecording(card.key);
