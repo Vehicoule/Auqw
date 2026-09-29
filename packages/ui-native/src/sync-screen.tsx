@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
 import { useState } from 'react';
 import { ScrollView, TextInput, View } from 'react-native';
-import type { ViewStyle } from 'react-native';
 import { useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
 import { Hairline, Icon, PillButton, Pressable, Text } from './primitives.tsx';
@@ -87,12 +86,12 @@ export type SyncScreenProps = {
   readonly onImportDelta?: (() => void) | undefined;
 };
 
-function fieldBox(theme: Theme): ViewStyle {
+function fieldBox(theme: Theme) {
   return {
     borderRadius: theme.radius.control,
     borderWidth: theme.strokes.hairline,
     borderColor: theme.colors.hairline,
-    overflow: 'hidden',
+    overflow: 'hidden' as const,
   };
 }
 
