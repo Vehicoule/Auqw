@@ -1,4 +1,3 @@
-import { CancellationSource } from '../cancellation.ts';
 import type {
   CancellationSignal,
   OperationContext,
@@ -7,6 +6,7 @@ import type { Result } from '../errors.ts';
 import { appError, err, ok } from '../errors.ts';
 import type {
   EntityKind,
+  Like,
   Recording,
   SourceRef,
 } from '../domain.ts';
@@ -41,65 +41,25 @@ import {
 import type { EntryMove, PlaylistState } from '../library/playlists.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { IdPort } from '../ports/runtime.ts';
-import type {
-  PersistedState,
-  StorageBatch,
-  StoragePort,
-} from '../ports/storage.ts';
+import type { StoragePort } from '../ports/storage.ts';
 import type { LocalWrite } from '../sync/sync-engine.ts';
 import {
   importEmissionWrites,
   recordingUpsertWrites,
   reviewSyncWrites,
 } from '../sync/sync-projection.ts';
-import type { Ready } from './ready.ts';
+import type { Ready, SessionHostCore } from './ready.ts';
 import { syncEmitInput } from './ready.ts';
 import { Serializer } from './serializer.ts';
-import { internalError } from './util.ts';
+import {
+  boundedLoad,
+  boundedOp,
+  internalError,
+  supersededError,
+  withSource,
+} from './util.ts';
 
-/**
- * The session seams a domain service runs against — each is a thin
- * delegation into Session's own machinery (the storage serializer,
- * the op bookkeeping, the publish/derived hooks). Services never
- * reach into session internals; this contract is the whole boundary.
- */
-export type LibraryHost = {
-  /** The live mirror — null while unhydrated or mid-import. */
-  readonly ready: () => Ready | null;
-  /** Ready, or the shared not-ready error (covers dispose). */
-  readonly requireReady: () => Result<Ready>;
-  readonly publish: () => void;
-  /** Queue/settings projections re-derived after a commit lands. */
-  readonly derived: () => void;
-  /** One serialized storage segment — the session's commit lane. */
-  readonly enqueueStorage: <T>(
-    fn: () => Promise<Result<T>>,
-  ) => Promise<Result<T>>;
-  /** Bounded, nonfatal persistence against the current generation. */
-  readonly persist: (
-    batch: StorageBatch | (() => StorageBatch),
-  ) => Promise<Result<void>>;
-  /** Post-commit best-effort sync emission. */
-  readonly emitSync: (writes: readonly LocalWrite[]) => void;
-  /** Fire-and-forget op work drain() and dispose() wait on. */
-  readonly own: (work: Promise<unknown>) => void;
-  /**
-   * Track an op CancellationSource for dispose-time cancel; the
-   * returned function untracks it.
-   */
-  readonly trackSource: (source: CancellationSource) => () => void;
-  readonly safeNow: () => number | null;
-  readonly deadline: () => number;
-  readonly newContext: (
-    prefix: string,
-    deadlineMs: number,
-    signal: OperationContext['signal'],
-  ) => OperationContext;
-  readonly withDeadline: <T>(
-    operation: () => Promise<Result<T>>,
-    absoluteDeadlineMs: number,
-    operationSource: CancellationSource,
-  ) => Promise<Result<T>>;
+export type LibraryHost = SessionHostCore & {
   /**
    * A gated play attempt parked this review and left playback
    * failed — the confirm IS the retry, so resume the blocked
@@ -178,15 +138,7 @@ export class LibraryService {
     if (now === null) {
       return err(internalError());
     }
-    const next = toggleTrackLike(r.likes, recordingId, now);
-    const persisted = await this.#host.persist({ likes: next });
-    if (!persisted.ok) {
-      // Commit-first semantics: the in-memory like set is unchanged.
-      return err(persisted.error);
-    }
-    r.likes = [...next];
-    this.#host.publish();
-    return ok(undefined);
+    return this.#persistLikes(r, toggleTrackLike(r.likes, recordingId, now));
   }
 
   toggleEntityLike(
@@ -218,9 +170,20 @@ export class LibraryService {
     if (now === null) {
       return err(internalError());
     }
-    const next = toggleEntityLike(r.likes, kind, entityId, now);
+    return this.#persistLikes(
+      r,
+      toggleEntityLike(r.likes, kind, entityId, now),
+    );
+  }
+
+  /** Commit-first like write: persist, then mirror and publish. */
+  async #persistLikes(
+    r: Ready,
+    next: readonly Like[],
+  ): Promise<Result<void>> {
     const persisted = await this.#host.persist({ likes: next });
     if (!persisted.ok) {
+      // Commit-first semantics: the in-memory like set is unchanged.
       return err(persisted.error);
     }
     r.likes = [...next];
@@ -532,9 +495,7 @@ export class LibraryService {
       // otherwise apply an old-generation verdict to the imported
       // database — same guard as a persist/commitStaged segment.
       if (this.#host.ready() !== r) {
-        return err(
-          appError('superseded', 'session state was replaced'),
-        );
+        return err(supersededError());
       }
       const result = await op(context?.signal);
       if (!result.ok) {
@@ -543,26 +504,15 @@ export class LibraryService {
       // The reload is bounded like every storage call — a hanging
       // load fails the segment instead of wedging the lane — and the
       // bound and the operation context share a single deadline.
-      const reloadSource = new CancellationSource();
-      const untrack = this.#host.trackSource(reloadSource);
-      let reloaded: Result<PersistedState>;
-      try {
-        const deadlineMs = this.#host.deadline();
-        reloaded = await this.#host.withDeadline(
-          () =>
-            this.#storage.load(
-              this.#host.newContext(
-                'reload',
-                deadlineMs,
-                context?.signal ?? reloadSource.signal,
-              ),
-            ),
-          deadlineMs,
+      const reloaded = await withSource(this.#host, (reloadSource) =>
+        boundedLoad(
+          this.#host,
+          this.#storage,
           reloadSource,
-        );
-      } finally {
-        untrack();
-      }
+          'reload',
+          context?.signal,
+        ),
+      );
       const affectedId = result.value.recordingId;
       const prevRec = r.recordings.find((rec) => rec.id === affectedId);
       if (reloaded.ok && isPersistedState(reloaded.value)) {
@@ -621,23 +571,11 @@ export class LibraryService {
 
   /** Serialize the owned library to export-document JSON text. */
   async exportLibrary(): Promise<Result<ExportResult>> {
-    const source = new CancellationSource();
-    const untrack = this.#host.trackSource(source);
-    try {
-      const deadlineMs = this.#host.deadline();
-      const context = this.#host.newContext(
-        'export',
-        deadlineMs,
-        source.signal,
-      );
-      return await this.#host.withDeadline(
-        () => exportLibrary(this.#storage, this.#clock, context),
-        deadlineMs,
-        source,
-      );
-    } finally {
-      untrack();
-    }
+    return withSource(this.#host, (source) =>
+      boundedOp(this.#host, source, 'export', (ctx) =>
+        exportLibrary(this.#storage, this.#clock, ctx),
+      ),
+    );
   }
 
   /**
@@ -651,9 +589,7 @@ export class LibraryService {
     if (!preview.ok) {
       return preview;
     }
-    const source = new CancellationSource();
-    const untrack = this.#host.trackSource(source);
-    try {
+    return withSource(this.#host, async (source) => {
       await this.#host.prepareImport();
       const deadlineMs = this.#host.deadline();
       const context = this.#host.newContext(
@@ -702,8 +638,6 @@ export class LibraryService {
       }
       this.#host.emitSync(importWrites);
       return ok(preview.value);
-    } finally {
-      untrack();
-    }
+    });
   }
 }

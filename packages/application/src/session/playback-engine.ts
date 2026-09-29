@@ -1,5 +1,4 @@
 import { CancellationSource } from '../cancellation.ts';
-import type { OperationContext } from '../cancellation.ts';
 import type { AppError, ErrorKind, Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type {
@@ -9,6 +8,7 @@ import type {
   TrackMetadata,
 } from '../domain.ts';
 import {
+  isSafeNonNegative,
   isString,
   isTrackMetadata,
   isTrackRef,
@@ -19,7 +19,10 @@ import { retryBounded } from '../retry.ts';
 import type { Corrections } from '../library/corrections.ts';
 import { MATCH_GATE_MESSAGE } from '../library/corrections.ts';
 import { MatchingEngine } from '../matching/matching-engine.ts';
-import type { MatchOutcome } from '../matching/matching-engine.ts';
+import type {
+  MatchCandidate,
+  MatchOutcome,
+} from '../matching/matching-engine.ts';
 import { extractVersionLabels } from '../matching/matching-engine.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { IdPort } from '../ports/runtime.ts';
@@ -32,7 +35,7 @@ import type {
   QueueProjection,
   QueueProjectionItem,
 } from '../ports/player.ts';
-import type { RecordingQuery } from '../ports/provider.ts';
+import type { ProviderPort, RecordingQuery } from '../ports/provider.ts';
 import type { ProviderRouter } from '../providers/provider-router.ts';
 import { selectionFromSettings } from '../providers/provider-router.ts';
 import type { StorageBatch } from '../ports/storage.ts';
@@ -40,11 +43,12 @@ import { QueueEngine } from '../queue/queue-engine.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import type { RadioTailRecord } from '../queue/radio-tail.ts';
 import { Serializer } from './serializer.ts';
-import type { Ready } from './ready.ts';
+import type { Ready, SessionHostCore } from './ready.ts';
 import type { SessionPlayback } from './session.ts';
 import {
+  boundedCall,
+  boundedOp,
   internalError,
-  isSafeNonNegative,
   sameRef,
   saturatingAdd,
   timeoutError,
@@ -140,6 +144,78 @@ function winningMapping(
     }
   }
   return best;
+}
+
+/**
+ * A settled attempt reports its sealed verdict; a cancellation with
+ * no seal reports superseded.
+ */
+function sealedOrSuperseded(terminalError: AppError | undefined): AppError {
+  return terminalError ?? appError('superseded', 'play superseded');
+}
+
+/** A warm record's playback identity mints from its own ids. */
+function warmIdentity(warm: {
+  readonly attemptId: string;
+  readonly queueRev: number;
+}): PlaybackIdentity {
+  return { attemptId: warm.attemptId, queueRev: warm.queueRev };
+}
+
+/** The query every candidates/resolve path builds from a recording. */
+function recordingQuery(recording: Recording): RecordingQuery {
+  return {
+    title: recording.title,
+    artist: recording.artist,
+    album: recording.album,
+    durationMs: recording.durationMs,
+    versionLabels: recording.versionLabels,
+    isrc: recording.isrc,
+  };
+}
+
+/** Reinsert at the LRU tail, evicting oldest entries past cap. */
+function lruSet(
+  map: Map<string, number>,
+  key: string,
+  at: number,
+  cap: number,
+): void {
+  map.delete(key);
+  map.set(key, at);
+  while (map.size > cap) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    map.delete(oldest);
+  }
+}
+
+/**
+ * TTL check on an LRU map: `now === null` (clock unavailable) reads
+ * as fresh; `touch` LRU-bumps a hit.
+ */
+function lruFresh(
+  map: Map<string, number>,
+  key: string,
+  ttl: number,
+  now: number | null,
+  touch: boolean,
+): boolean {
+  const at = map.get(key);
+  if (at === undefined) {
+    return false;
+  }
+  if (now === null || now - at < ttl) {
+    if (touch) {
+      map.delete(key);
+      map.set(key, at);
+    }
+    return true;
+  }
+  map.delete(key);
+  return false;
 }
 
 type ActiveAttempt = {
@@ -266,28 +342,15 @@ type ProjectionMarker = {
   done: Promise<void>;
 };
 /**
- * The session seams the playback engine runs against — each is a
- * thin delegation into Session's own machinery (the storage lane, the
- * op bookkeeping, the publish/derived hooks, the radio tail's
- * triggers). The engine never reaches into session internals; this
- * contract is the whole boundary.
+ * The playback engine's per-service seams over SessionHostCore —
+ * publishPosition, the pick/deal reads, the staged-commit and queue
+ * lanes, the port-call wrappers, timer tracking, and the radio-tail
+ * hooks the transition reconcile kicks.
  */
-export type PlaybackHost = {
-  /** The live mirror — null while unhydrated or mid-import. */
-  readonly ready: () => Ready | null;
-  /** Ready, or the shared not-ready error (covers dispose). */
-  readonly requireReady: () => Result<Ready>;
-  readonly publish: () => void;
+export type PlaybackHost = SessionHostCore & {
   /** Position-only publish — the light channel that skips
    * whole-state subscribers. */
   readonly publishPosition: () => void;
-  /** Queue/settings projections re-derived after a commit lands. */
-  readonly derived: () => void;
-  /** Fire-and-forget op work drain() and dispose() wait on. */
-  readonly own: (work: Promise<unknown>, deadline?: boolean) => void;
-  readonly disposed: () => boolean;
-  /** Bounded, nonfatal, sanitized internal logging. */
-  readonly logWarn: (message: string) => void;
   /** Ref selection for an occurrence — the shared pick precedence. */
   readonly pickRef: (
     recording: Recording,
@@ -302,14 +365,6 @@ export type PlaybackHost = {
    * user may be paying for. Playback-intent calls never consult it.
    */
   readonly isMetered: () => boolean;
-  /** One serialized storage segment — the session's commit lane. */
-  readonly enqueueStorage: <T>(
-    fn: () => Promise<Result<T>>,
-  ) => Promise<Result<T>>;
-  /** Bounded, nonfatal persistence; failures publish persistenceError. */
-  readonly persist: (
-    batch: StorageBatch | (() => StorageBatch),
-  ) => Promise<Result<void>>;
   /** Commit-first mutation against the freshest committed mirror. */
   readonly commitStaged: <T>(
     stage: (r: Ready) => Result<PlaybackStage<T>>,
@@ -320,23 +375,17 @@ export type PlaybackHost = {
     before: QueueSnapshot,
     beforeMarks: ReadonlySet<string>,
   ) => Promise<Result<void>>;
+  /** Snapshot → mutate → commit-with-rollback; the caller ticks
+   * `derived` itself so it lands in the caller's continuation. */
+  readonly mutateQueue: (
+    r: Ready,
+    mutate: (queue: QueueEngine) => void,
+  ) => Promise<Result<void>>;
   /** Port calls never throw by contract; throws map to internal. */
   readonly call: <T>(fn: () => Promise<Result<T>>) => Promise<Result<T>>;
   /** Every player/storage port call is bounded and cancellable. */
   readonly bounded: <T>(
     fn: () => Promise<Result<T>>,
-  ) => Promise<Result<T>>;
-  readonly safeNow: () => number | null;
-  readonly deadline: () => number;
-  readonly newContext: (
-    prefix: string,
-    deadlineMs: number,
-    signal: OperationContext['signal'],
-  ) => OperationContext;
-  readonly withDeadline: <T>(
-    operation: () => Promise<Result<T>>,
-    absoluteDeadlineMs: number,
-    operationSource: CancellationSource,
   ) => Promise<Result<T>>;
   /**
    * Track a timer CancellationSource for dispose-time cancel; the
@@ -647,17 +696,7 @@ export class PlaybackEngine {
           // unmarked head — wrapping onto a known-dead row just retries
           // it, so all-failed ends the same as the dealt branch.
           if (r.repeat === 'all') {
-            const tail = r.queue.snapshot();
-            const head =
-              tail.currentOccurrenceId === null
-                ? tail.occurrences.find(
-                    (o) => !r.queue.isUnplayable(o.occurrenceId),
-                  )
-                : undefined;
-            if (head !== undefined) {
-              r.queue.select(head.occurrenceId, before.mode === 'playing');
-              bumpListenCycle(r, head.occurrenceId);
-            }
+            this.#wrapToHead(r, before.mode === 'playing');
           }
         } else {
           // Under shuffle the walk is the dealt order: `next` steps to
@@ -760,11 +799,7 @@ export class PlaybackEngine {
         active.handle !== undefined &&
         active.occurrenceId === after.currentOccurrenceId
       ) {
-        const identity = {
-          attemptId: active.identity.attemptId,
-          queueRev: after.revision,
-        };
-        active.identity = identity;
+        const identity = this.#rekeyIdentity(active, after.revision);
         // Publish the re-keyed identity before the transport call: if
         // a supersede lands during the await the post-call publish is
         // skipped, and an unpublished identity must never reach the
@@ -777,8 +812,7 @@ export class PlaybackEngine {
           this.#player.seekTo({ positionMs: 0, identity }),
         );
         if (!result.ok) {
-          await this.#failAttempt(active, result.error);
-          return result;
+          return this.#failWith(active, result.error);
         }
       }
       this.#host.publish();
@@ -840,6 +874,21 @@ export class PlaybackEngine {
     return ok(undefined);
   }
 
+  /** A move off the tail under repeat=all wraps to the first unmarked row. */
+  #wrapToHead(r: Ready, playing: boolean): void {
+    const tail = r.queue.snapshot();
+    const head =
+      tail.currentOccurrenceId === null
+        ? tail.occurrences.find(
+            (o) => !r.queue.isUnplayable(o.occurrenceId),
+          )
+        : undefined;
+    if (head !== undefined) {
+      r.queue.select(head.occurrenceId, playing);
+      bumpListenCycle(r, head.occurrenceId);
+    }
+  }
+
   async pause(): Promise<Result<void>> {
     const ready = this.#host.requireReady();
     if (!ready.ok) {
@@ -850,16 +899,9 @@ export class PlaybackEngine {
     if (active === null) {
       return err(appError('unavailable', 'no active playback to pause'));
     }
-    const before = r.queue.snapshot();
-    const beforeMarks = r.queue.unplayableIds;
-    try {
-      r.queue.pause();
-    } catch (thrown) {
-      return err(fromUnknown(thrown));
-    }
     // Commit the intent before touching transport: a failed commit
     // rolls the engine back and the native pause is never issued.
-    const persisted = await this.#host.persistQueue(r, before, beforeMarks);
+    const persisted = await this.#host.mutateQueue(r, (q) => q.pause());
     if (!persisted.ok) {
       return persisted;
     }
@@ -875,11 +917,10 @@ export class PlaybackEngine {
       this.#host.publish();
       return ok(undefined);
     }
-    const identity = {
-      attemptId: active.identity.attemptId,
-      queueRev: r.queue.snapshot().revision,
-    };
-    active.identity = identity;
+    const identity = this.#rekeyIdentity(
+      active,
+      r.queue.snapshot().revision,
+    );
     // Same ordering rule as play/seek: the re-keyed identity must be
     // published before the transport call carries it.
     this.#setPlaybackFromStatus(active, 'paused');
@@ -895,8 +936,7 @@ export class PlaybackEngine {
         this.#host.publish();
         return ok(undefined);
       }
-      await this.#failAttempt(active, result.error);
-      return result;
+      return this.#failWith(active, result.error);
     }
     if (!this.#isStale(active)) {
       this.#setPlaybackFromStatus(active, 'paused');
@@ -912,16 +952,10 @@ export class PlaybackEngine {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
-    const beforeMarks = r.queue.unplayableIds;
     if (before.currentOccurrenceId === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
     }
-    try {
-      r.queue.play();
-    } catch (thrown) {
-      return err(fromUnknown(thrown));
-    }
-    const persisted = await this.#host.persistQueue(r, before, beforeMarks);
+    const persisted = await this.#host.mutateQueue(r, (q) => q.play());
     if (!persisted.ok) {
       return persisted;
     }
@@ -938,11 +972,10 @@ export class PlaybackEngine {
         this.#host.publish();
         return ok(undefined);
       }
-      const identity = {
-        attemptId: active.identity.attemptId,
-        queueRev: r.queue.snapshot().revision,
-      };
-      active.identity = identity;
+      const identity = this.#rekeyIdentity(
+        active,
+        r.queue.snapshot().revision,
+      );
       // Same ordering rule: the identity the transport call carries
       // must already be observable in the published record, in case a
       // supersede during the await skips the post-call publish.
@@ -965,8 +998,7 @@ export class PlaybackEngine {
         ) {
           return this.startAttempt(active.occurrenceId);
         }
-        await this.#failAttempt(active, result.error);
-        return result;
+        return this.#failWith(active, result.error);
       }
       if (!this.#isStale(active)) {
         this.#setPlaybackFromStatus(active, 'playing');
@@ -994,7 +1026,6 @@ export class PlaybackEngine {
       );
     }
     const before = r.queue.snapshot();
-    const beforeMarks = r.queue.unplayableIds;
     if (before.currentOccurrenceId === null) {
       return err(appError('unavailable', 'no active playback to seek'));
     }
@@ -1008,12 +1039,9 @@ export class PlaybackEngine {
     ) {
       return ok(undefined);
     }
-    try {
-      r.queue.seekTo(positionMs);
-    } catch (thrown) {
-      return err(fromUnknown(thrown));
-    }
-    const persisted = await this.#host.persistQueue(r, before, beforeMarks);
+    const persisted = await this.#host.mutateQueue(r, (q) =>
+      q.seekTo(positionMs),
+    );
     if (!persisted.ok) {
       return persisted;
     }
@@ -1028,11 +1056,10 @@ export class PlaybackEngine {
       this.#host.publish();
       return ok(undefined);
     }
-    const identity = {
-      attemptId: active.identity.attemptId,
-      queueRev: r.queue.snapshot().revision,
-    };
-    active.identity = identity;
+    const identity = this.#rekeyIdentity(
+      active,
+      r.queue.snapshot().revision,
+    );
     // Publish the re-keyed identity before the transport call so a
     // supersede during the await can't leave a play/seek carrying an
     // identity no snapshot ever showed.
@@ -1053,8 +1080,7 @@ export class PlaybackEngine {
       ) {
         return this.startAttempt(active.occurrenceId);
       }
-      await this.#failAttempt(active, result.error);
-      return result;
+      return this.#failWith(active, result.error);
     }
     if (!this.#isStale(active)) {
       const mode = r.queue.snapshot().mode === 'paused' ? 'paused' : 'playing';
@@ -1140,12 +1166,10 @@ export class PlaybackEngine {
     // stream attach — both spend the network it doesn't have.
     const online = this.#host.isOnline();
     if (!online && (ref === null || ref.provider !== LOCAL_PROVIDER)) {
-      const error = appError(
-        'unavailable',
-        'offline — no local bytes for this recording',
+      return this.#failWith(
+        attempt,
+        appError('unavailable', 'offline — no local bytes for this recording'),
       );
-      await this.#failAttempt(attempt, error);
-      return err(error);
     }
     if (ref === null) {
       const resolved = await this.#resolveViaCandidates(
@@ -1160,9 +1184,10 @@ export class PlaybackEngine {
       ref = resolved.value;
     }
     if (ref === null) {
-      const error = appError('no-result', 'no playable source for recording');
-      await this.#failAttempt(attempt, error);
-      return err(error);
+      return this.#failWith(
+        attempt,
+        appError('no-result', 'no playable source for recording'),
+      );
     }
     // The pick is final here — consumers read `playback.ref` to mark
     // the catalog row the player actually resolved (a local pick
@@ -1181,9 +1206,7 @@ export class PlaybackEngine {
     // attempt was still resolving can seed the real version.
     this.#host.maybeArmRadio();
     if (this.#isStale(attempt) || attempt.source.signal.cancelled) {
-      return err(
-        attempt.terminalError ?? appError('superseded', 'play superseded'),
-      );
+      return err(sealedOrSuperseded(attempt.terminalError));
     }
 
     // A provider:'local' pick bypasses the plugin router — the adapter
@@ -1194,8 +1217,7 @@ export class PlaybackEngine {
         selectionFromSettings(r.settings),
       );
       if (!routed.ok) {
-        await this.#failAttempt(attempt, routed.error);
-        return err(routed.error);
+        return this.#failWith(attempt, routed.error);
       }
     }
     // A warm session issued for this exact ref may still be live in
@@ -1247,9 +1269,7 @@ export class PlaybackEngine {
         this.#host.publish();
       }
       if (this.#isStale(attempt) || attempt.source.signal.cancelled) {
-        return err(
-          attempt.terminalError ?? appError('superseded', 'play superseded'),
-        );
+        return err(sealedOrSuperseded(attempt.terminalError));
       }
       return this.#adoptPrepared(attempt, stream, warm.attempt, true);
     }
@@ -1265,7 +1285,11 @@ export class PlaybackEngine {
       ),
       call: () => {
         attempt.preparesUsed += 1;
-        return this.#host.withDeadline(
+        // Every call shares the attempt's source — a supersede
+        // aborts whichever prepare is in flight.
+        return boundedCall(
+          this.#host,
+          attempt.source,
           () =>
             this.#player.prepare({
               provider: ref.provider,
@@ -1273,32 +1297,21 @@ export class PlaybackEngine {
               identity: attempt.identity,
             }),
           deadlineMs,
-          // Every call shares the attempt's source — a supersede
-          // aborts whichever prepare is in flight.
-          attempt.source,
         );
       },
     });
     if (this.#isStale(attempt)) {
-      return err(
-        attempt.terminalError ?? appError('superseded', 'play superseded'),
-      );
+      return err(sealedOrSuperseded(attempt.terminalError));
     }
     if (!prepared.ok) {
       // terminalError is set before a retry handoff or supersede
       // cancels the source — the early wake is bookkeeping, not a
       // fresh failure to publish. A bare deadline-cancelled call has
       // no seal: its own verdict stands.
-      if (attempt.terminalError !== undefined) {
-        return err(attempt.terminalError);
-      }
-      await this.#failAttempt(attempt, prepared.error);
-      return prepared;
+      return this.#failUnlessSealed(attempt, prepared);
     }
     if (attempt.source.signal.cancelled) {
-      return err(
-        attempt.terminalError ?? appError('superseded', 'play superseded'),
-      );
+      return err(sealedOrSuperseded(attempt.terminalError));
     }
     attempt.requestId = prepared.value;
     const ready2 = this.#host.ready();
@@ -1338,53 +1351,37 @@ export class PlaybackEngine {
       return err(routed.error);
     }
     const provider = routed.value;
-    const query: RecordingQuery = {
-      title: recording.title,
-      artist: recording.artist,
-      album: recording.album,
-      durationMs: recording.durationMs,
-      versionLabels: recording.versionLabels,
-      isrc: recording.isrc,
-    };
+    const query = recordingQuery(recording);
     const result = await retryBounded({
       deadlineMs,
       signal: attempt.source.signal,
       clock: this.#clock,
       call: (signal) =>
-        this.#host.withDeadline(
-          () =>
-            provider.candidates(
-              { query, limit: CANDIDATE_LIMIT },
-              this.#host.newContext('cand', deadlineMs, signal),
-            ),
-          deadlineMs,
+        boundedOp(
+          this.#host,
           attempt.source,
+          'cand',
+          (ctx) => provider.candidates({ query, limit: CANDIDATE_LIMIT }, ctx),
+          signal,
+          deadlineMs,
         ),
     });
     if (this.#isStale(attempt)) {
       // A newer intent owns playback — the loser reports
       // 'superseded' whatever its in-flight call resolved to.
-      return err(
-        attempt.terminalError ?? appError('superseded', 'play superseded'),
-      );
+      return err(sealedOrSuperseded(attempt.terminalError));
     }
     if (!result.ok) {
       // terminalError is set before a retry handoff or supersede
       // cancels the source — the early wake is bookkeeping, not a
       // fresh failure to publish. A bare deadline-cancelled call has
       // no seal: its own verdict stands.
-      if (attempt.terminalError !== undefined) {
-        return err(attempt.terminalError);
-      }
       // A source cancelled by the deadline or a retry handoff still
       // publishes the real verdict, not a bare 'superseded'.
-      await this.#failAttempt(attempt, result.error);
-      return result;
+      return this.#failUnlessSealed(attempt, result);
     }
     if (attempt.source.signal.cancelled) {
-      return err(
-        attempt.terminalError ?? appError('superseded', 'play superseded'),
-      );
+      return err(sealedOrSuperseded(attempt.terminalError));
     }
     // Malformed provider candidates can throw inside match — that
     // must fail the attempt honestly, not wedge it unwound.
@@ -1396,9 +1393,7 @@ export class PlaybackEngine {
         recording.mappings,
       );
     } catch (thrown) {
-      const error = fromUnknown(thrown);
-      await this.#failAttempt(attempt, error);
-      return err(error);
+      return this.#failWith(attempt, fromUnknown(thrown));
     }
     if (outcome.type === 'ambiguous') {
       // Park the candidates for user resolution; the attempt still
@@ -1418,24 +1413,17 @@ export class PlaybackEngine {
       );
       if (!enqueued.ok) {
         this.#host.logWarn(`match review enqueue failed: ${enqueued.error.kind}`);
-        await this.#failAttempt(attempt, enqueued.error);
-        return err(enqueued.error);
+        return this.#failWith(attempt, enqueued.error);
       }
-      const error = appError('unavailable', MATCH_GATE_MESSAGE);
-      await this.#failAttempt(attempt, error);
-      return err(error);
+      return this.#failWith(attempt, appError('unavailable', MATCH_GATE_MESSAGE));
     }
     if (outcome.type === 'unavailable') {
-      const error = appError('no-result', outcome.reason);
-      await this.#failAttempt(attempt, error);
-      return err(error);
+      return this.#failWith(attempt, appError('no-result', outcome.reason));
     }
     const ref = outcome.candidate.sourceRef;
     const matchedAt = this.#host.safeNow();
     if (matchedAt === null) {
-      const error = internalError();
-      await this.#failAttempt(attempt, error);
-      return err(error);
+      return this.#failWith(attempt, internalError());
     }
     const mapping: SourceMapping = {
       ref,
@@ -1522,24 +1510,14 @@ export class PlaybackEngine {
         }
         attempt.source.cancel();
         if (attempt.requestId !== undefined) {
-          await this.#host.bounded(() =>
-            this.#player.cancelPrepare({
-              requestId: attempt.requestId ?? '',
-              identity: attempt.identity,
-            }),
-          );
+          await this.#cancelPrepare(attempt.requestId, attempt.identity);
         }
         await this.#failAttempt(attempt, internalError());
         return;
       }
       attempt.source.cancel();
       if (attempt.requestId !== undefined) {
-        await this.#host.bounded(() =>
-          this.#player.cancelPrepare({
-            requestId: attempt.requestId ?? '',
-            identity: attempt.identity,
-          }),
-        );
+        await this.#cancelPrepare(attempt.requestId, attempt.identity);
       }
       await this.#failAttempt(attempt, timeoutError());
     })();
@@ -1549,13 +1527,8 @@ export class PlaybackEngine {
   async #teardownAttempt(attempt: ActiveAttempt): Promise<void> {
     attempt.source.cancel();
     attempt.timer?.cancel();
-    if (attempt.requestId !== undefined && !attempt.preparedHandled) {
-      await this.#host.bounded(() =>
-        this.#player.cancelPrepare({
-          requestId: attempt.requestId ?? '',
-          identity: attempt.identity,
-        }),
-      );
+    if (!attempt.preparedHandled && attempt.requestId !== undefined) {
+      await this.#cancelPrepare(attempt.requestId, attempt.identity);
     }
     if (attempt.handle !== undefined) {
       await this.#releaseHandle(attempt.handle, attempt.identity);
@@ -1791,6 +1764,54 @@ export class PlaybackEngine {
     this.#host.derived();
   }
 
+  /** Fail the attempt, propagating the verdict as the result. */
+  async #failWith(
+    attempt: ActiveAttempt,
+    error: AppError,
+  ): Promise<Result<never>> {
+    await this.#failAttempt(attempt, error);
+    return err(error);
+  }
+
+  /**
+   * A settled call's failure fails the attempt — unless a seal owns
+   * the verdict already (a retry handoff or supersede cancelled the
+   * source; the early wake is bookkeeping, not a fresh failure).
+   */
+  async #failUnlessSealed(
+    attempt: ActiveAttempt,
+    settled: { readonly ok: false; readonly error: AppError },
+  ): Promise<Result<never>> {
+    if (attempt.terminalError !== undefined) {
+      return err(attempt.terminalError);
+    }
+    await this.#failAttempt(attempt, settled.error);
+    return settled;
+  }
+
+  /** cancelPrepare on an issued request slot. */
+  async #cancelPrepare(
+    requestId: string,
+    identity: PlaybackIdentity,
+  ): Promise<void> {
+    await this.#host.bounded(() =>
+      this.#player.cancelPrepare({ requestId, identity }),
+    );
+  }
+
+  /** Re-key the attempt to the live queue revision. */
+  #rekeyIdentity(
+    attempt: ActiveAttempt,
+    queueRev: number,
+  ): PlaybackIdentity {
+    const identity: PlaybackIdentity = {
+      attemptId: attempt.identity.attemptId,
+      queueRev,
+    };
+    attempt.identity = identity;
+    return identity;
+  }
+
   #setPlaybackFromStatus(
     attempt: ActiveAttempt,
     state: 'buffering' | 'playing' | 'paused',
@@ -1969,17 +1990,7 @@ export class PlaybackEngine {
         } else if (dealt === null) {
           r.queue.next();
           if (r.repeat === 'all') {
-            const tail = r.queue.snapshot();
-            const head =
-              tail.currentOccurrenceId === null
-                ? tail.occurrences.find(
-                    (o) => !r.queue.isUnplayable(o.occurrenceId),
-                  )
-                : undefined;
-            if (head !== undefined) {
-              r.queue.select(head.occurrenceId, true);
-              bumpListenCycle(r, head.occurrenceId);
-            }
+            this.#wrapToHead(r, true);
           }
         } else {
           // Under shuffle the fallback walks the dealt order with the
@@ -2026,46 +2037,34 @@ export class PlaybackEngine {
       return;
     }
     // Remote pause/play reconciles queue intent with the service.
-    if (event.state === 'paused' && r.queue.snapshot().mode === 'playing') {
+    const remoteMode =
+      event.state === 'paused'
+        ? 'playing'
+        : event.state === 'playing'
+          ? 'paused'
+          : null;
+    if (remoteMode !== null) {
       const before = r.queue.snapshot();
-      const beforeMarks = r.queue.unplayableIds;
-      try {
-        r.queue.pause();
-      } catch {
-        return;
+      if (before.mode === remoteMode) {
+        const beforeMarks = r.queue.unplayableIds;
+        try {
+          if (event.state === 'paused') {
+            r.queue.pause();
+          } else {
+            r.queue.play();
+          }
+        } catch {
+          return;
+        }
+        const priorIdentity = active.identity;
+        this.#rekeyIdentity(active, r.queue.snapshot().revision);
+        const synced = await this.#host.persistQueue(r, before, beforeMarks);
+        if (!synced.ok && this.#active === active) {
+          // Rolled back — the live engine is at `before`'s revision.
+          active.identity = priorIdentity;
+        }
+        this.#host.derived();
       }
-      const priorIdentity = active.identity;
-      active.identity = {
-        attemptId: active.identity.attemptId,
-        queueRev: r.queue.snapshot().revision,
-      };
-      const synced = await this.#host.persistQueue(r, before, beforeMarks);
-      if (!synced.ok && this.#active === active) {
-        // Rolled back — the live engine is at `before`'s revision.
-        active.identity = priorIdentity;
-      }
-      this.#host.derived();
-    } else if (
-      event.state === 'playing' &&
-      r.queue.snapshot().mode === 'paused'
-    ) {
-      const before = r.queue.snapshot();
-      const beforeMarks = r.queue.unplayableIds;
-      try {
-        r.queue.play();
-      } catch {
-        return;
-      }
-      const priorIdentity = active.identity;
-      active.identity = {
-        attemptId: active.identity.attemptId,
-        queueRev: r.queue.snapshot().revision,
-      };
-      const synced = await this.#host.persistQueue(r, before, beforeMarks);
-      if (!synced.ok && this.#active === active) {
-        active.identity = priorIdentity;
-      }
-      this.#host.derived();
     }
     if (this.#isStale(active)) {
       return;
@@ -2218,9 +2217,7 @@ export class PlaybackEngine {
       }),
     );
     if (this.#isStale(active)) {
-      return err(
-        active.terminalError ?? appError('superseded', 'play superseded'),
-      );
+      return err(sealedOrSuperseded(active.terminalError));
     }
     if (!playResult.ok) {
       if (
@@ -2329,7 +2326,7 @@ export class PlaybackEngine {
     }
     const active = this.#active;
     if (active !== null && active.occurrenceId === projection.currentOccurrenceId) {
-      active.identity = { ...active.identity, queueRev: projection.queueRev };
+      this.#rekeyIdentity(active, projection.queueRev);
     }
     const marker: ProjectionMarker = {
       projection,
@@ -2694,12 +2691,7 @@ export class PlaybackEngine {
         await this.#releaseHandle(prev.handle, prev.identity);
       }
       if (prev.requestId !== undefined && !prev.preparedHandled) {
-        await this.#host.bounded(() =>
-          this.#player.cancelPrepare({
-            requestId: prev.requestId ?? '',
-            identity: prev.identity,
-          }),
-        );
+        await this.#cancelPrepare(prev.requestId, prev.identity);
       }
     }
     const queueWritten = await queueWrite;
@@ -2743,7 +2735,6 @@ export class PlaybackEngine {
    * unavailable) and a fixed diagnostic.
    */
   maybeMapSuccessor(): void {
-    // eslint-disable-next-line no-console
     const r = this.#host.ready();
     if (
       r === null ||
@@ -2755,15 +2746,9 @@ export class PlaybackEngine {
     ) {
       return;
     }
-    const snap = r.queue.snapshot();
     // The cursor's real successor is the dealt one under shuffle —
     // prefetch what the service will actually attach next.
-    const dealt = this.#host.dealtOrder(r);
-    const walk = dealt ?? snap.occurrences.map((o) => o.occurrenceId);
-    const pos =
-      snap.currentOccurrenceId === null
-        ? -1
-        : walk.indexOf(snap.currentOccurrenceId);
+    const { snap, walk, pos } = this.#dealtWalk(r);
     const successorId = pos >= 0 ? walk[pos + 1] : undefined;
     const successor = snap.occurrences.find(
       (o) => o.occurrenceId === successorId,
@@ -2806,21 +2791,14 @@ export class PlaybackEngine {
     this.#noteWarmSeen(recordingId);
     const work = (async () => {
       const deadlineMs = this.#host.deadline();
-      const query: RecordingQuery = {
-        title: recording.title,
-        artist: recording.artist,
-        album: recording.album,
-        durationMs: recording.durationMs,
-        versionLabels: recording.versionLabels,
-        isrc: recording.isrc,
-      };
-      const context = this.#host.newContext('map', deadlineMs, source.signal);
-      const result = await this.#host.withDeadline(
-        () => {
-          return provider.candidates({ query, limit: CANDIDATE_LIMIT }, context);
-        },
-        deadlineMs,
+      const query = recordingQuery(recording);
+      const result = await boundedOp(
+        this.#host,
         source,
+        'map',
+        (ctx) => provider.candidates({ query, limit: CANDIDATE_LIMIT }, ctx),
+        undefined,
+        deadlineMs,
       );
       if (
         source.signal.cancelled ||
@@ -2840,28 +2818,16 @@ export class PlaybackEngine {
       if (rec === undefined) {
         return;
       }
-      let outcome: MatchOutcome;
-      try {
-        outcome = MatchingEngine.match(rec, result.value, rec.mappings);
-      } catch {
-        this.#host.logWarn('successor mapping threw on malformed candidates');
+      const automatic = this.#warmMatch(
+        rec,
+        result.value,
+        'successor mapping threw on malformed candidates',
+        'successor mapping unresolved',
+      );
+      if (automatic === null) {
         return;
       }
-      if (outcome.type !== 'matched') {
-        this.#host.logWarn('successor mapping unresolved');
-        return;
-      }
-      const ref = outcome.candidate.sourceRef;
-      const matchedAt = this.#host.safeNow();
-      if (matchedAt === null) {
-        return;
-      }
-      const automatic: SourceMapping = {
-        ref,
-        status: 'automatic',
-        matchedAtMs: matchedAt,
-        evidence: outcome.evidence,
-      };
+      const ref = automatic.ref;
       const updated = adoptAutomaticMapping(rec, ref, automatic);
       // Recheck it is still the immediate successor of the same
       // current under the same playback provider, and that the
@@ -3040,34 +3006,56 @@ export class PlaybackEngine {
     );
   }
 
+  /**
+   * The match → automatic-mapping tail a warm resolve runs: a match
+   * earns the mapping; malformed candidates, a non-match, or a dead
+   * clock return null. The caller supplies its warn wording.
+   */
+  #warmMatch(
+    rec: Recording,
+    candidates: readonly MatchCandidate[],
+    throwLabel: string,
+    unmatchedLabel: string | null,
+  ): SourceMapping | null {
+    let outcome: MatchOutcome;
+    try {
+      outcome = MatchingEngine.match(rec, candidates, rec.mappings);
+    } catch {
+      this.#host.logWarn(throwLabel);
+      return null;
+    }
+    if (outcome.type !== 'matched') {
+      if (unmatchedLabel !== null) {
+        this.#host.logWarn(unmatchedLabel);
+      }
+      return null;
+    }
+    const matchedAt = this.#host.safeNow();
+    if (matchedAt === null) {
+      return null;
+    }
+    return {
+      ref: outcome.candidate.sourceRef,
+      status: 'automatic',
+      matchedAtMs: matchedAt,
+      evidence: outcome.evidence,
+    };
+  }
+
   /** A row counts as attempted recently — suppresses re-warm. */
   #warmSeenFresh(recordingId: string): boolean {
-    const at = this.#warmSeen.get(recordingId);
-    if (at === undefined) {
-      return false;
-    }
-    const now = this.#host.safeNow();
-    if (now === null || now - at < WARM_ROW_TTL_MS) {
-      // LRU touch — a hot row keeps its slot.
-      this.#warmSeen.delete(recordingId);
-      this.#warmSeen.set(recordingId, at);
-      return true;
-    }
-    this.#warmSeen.delete(recordingId);
-    return false;
+    // LRU touch — a hot row keeps its slot.
+    return lruFresh(
+      this.#warmSeen,
+      recordingId,
+      WARM_ROW_TTL_MS,
+      this.#host.safeNow(),
+      true,
+    );
   }
 
   #noteWarmSeen(recordingId: string): void {
-    const now = this.#host.safeNow();
-    this.#warmSeen.delete(recordingId);
-    this.#warmSeen.set(recordingId, now ?? 0);
-    while (this.#warmSeen.size > WARM_SEEN_CAP) {
-      const oldest = this.#warmSeen.keys().next().value;
-      if (oldest === undefined) {
-        break;
-      }
-      this.#warmSeen.delete(oldest);
-    }
+    lruSet(this.#warmSeen, recordingId, this.#host.safeNow() ?? 0, WARM_SEEN_CAP);
   }
 
   /**
@@ -3088,29 +3076,17 @@ export class PlaybackEngine {
 
   /** A failed stream warm is denied briefly — bounded list. */
   #denyStreamWarm(key: string): void {
-    const now = this.#host.safeNow();
-    this.#streamWarmDenied.delete(key);
-    this.#streamWarmDenied.set(key, now ?? 0);
-    while (this.#streamWarmDenied.size > STREAM_DENY_CAP) {
-      const oldest = this.#streamWarmDenied.keys().next().value;
-      if (oldest === undefined) {
-        break;
-      }
-      this.#streamWarmDenied.delete(oldest);
-    }
+    lruSet(this.#streamWarmDenied, key, this.#host.safeNow() ?? 0, STREAM_DENY_CAP);
   }
 
   #streamWarmDeniedFresh(key: string): boolean {
-    const at = this.#streamWarmDenied.get(key);
-    if (at === undefined) {
-      return false;
-    }
-    const now = this.#host.safeNow();
-    if (now === null || now - at < WARM_ROW_TTL_MS) {
-      return true;
-    }
-    this.#streamWarmDenied.delete(key);
-    return false;
+    return lruFresh(
+      this.#streamWarmDenied,
+      key,
+      WARM_ROW_TTL_MS,
+      this.#host.safeNow(),
+      false,
+    );
   }
 
   /**
@@ -3123,16 +3099,7 @@ export class PlaybackEngine {
     if (requestId === null) {
       return;
     }
-    const identity: PlaybackIdentity = {
-      attemptId: warm.attemptId,
-      queueRev: warm.queueRev,
-    };
-    const work = (async () => {
-      await this.#host.bounded(() =>
-        this.#player.cancelPrepare({ requestId, identity }),
-      );
-    })();
-    this.#host.own(work);
+    this.#host.own(this.#cancelPrepare(requestId, warmIdentity(warm)));
   }
 
   /**
@@ -3222,6 +3189,22 @@ export class PlaybackEngine {
     }
   }
 
+  /** The dealt walk + cursor position — canonical order when shuffle is off. */
+  #dealtWalk(r: Ready): {
+    snap: QueueSnapshot;
+    walk: readonly string[];
+    pos: number;
+  } {
+    const snap = r.queue.snapshot();
+    const walk =
+      this.#host.dealtOrder(r) ?? snap.occurrences.map((o) => o.occurrenceId);
+    const pos =
+      snap.currentOccurrenceId === null
+        ? -1
+        : walk.indexOf(snap.currentOccurrenceId);
+    return { snap, walk, pos };
+  }
+
   /**
    * The next row still needing a ref: surface-handed ids first (the
    * viewport is the freshest intent), then the dealt window past the
@@ -3270,15 +3253,12 @@ export class PlaybackEngine {
     if (ptype === 'idle' || ptype === 'preparing') {
       return null;
     }
-    const snap = r.queue.snapshot();
+    const { snap, walk, pos } = this.#dealtWalk(r);
     if (snap.currentOccurrenceId === null) {
       // No cursor: 'beyond the cursor' is empty — a queue with nothing
       // selected warms only what surfaces hand in via prewarm().
       return null;
     }
-    const dealt = this.#host.dealtOrder(r);
-    const walk = dealt ?? snap.occurrences.map((o) => o.occurrenceId);
-    const pos = walk.indexOf(snap.currentOccurrenceId);
     for (let i = pos + 1; i < walk.length && i <= pos + WARM_WINDOW; i++) {
       const occurrence = snap.occurrences.find(
         (o) => o.occurrenceId === walk[i],
@@ -3305,6 +3285,65 @@ export class PlaybackEngine {
   }
 
   /**
+   * The shared head of a warm-batch row: seen-mark, route, bounded
+   * candidates call, stale check. `queryFor` runs against the same
+   * Ready the mark was taken under — null bails the pass. `onStale`
+   * runs the caller's own requeue when the pass was superseded.
+   */
+  async #warmCandidates(
+    key: string,
+    source: CancellationSource,
+    queryFor: (r: Ready) => RecordingQuery | null,
+    onStale: () => void,
+  ): Promise<{
+    readonly provider: ProviderPort;
+    readonly candidates: readonly MatchCandidate[];
+  } | null> {
+    const r = this.#host.ready();
+    if (r === null) {
+      return null;
+    }
+    this.#noteWarmSeen(key);
+    const query = queryFor(r);
+    if (query === null) {
+      return null;
+    }
+    const routed = this.#router.providerFor(
+      'playback.candidates',
+      selectionFromSettings(r.settings),
+    );
+    if (!routed.ok) {
+      return null;
+    }
+    const provider = routed.value;
+    if (this.#warmBatchTarget === key) {
+      this.#warmBatchProvider = provider.id;
+    }
+    const result = await boundedOp(
+      this.#host,
+      source,
+      'warm',
+      (ctx) =>
+        provider.candidates({ query, limit: CANDIDATE_LIMIT }, ctx),
+      undefined,
+      this.#host.deadline(),
+    );
+    if (
+      source.signal.cancelled ||
+      this.#host.disposed() ||
+      this.#warmBatchSource !== source
+    ) {
+      onStale();
+      return null;
+    }
+    if (!result.ok) {
+      this.#host.logWarn('row warm failed');
+      return null;
+    }
+    return { provider, candidates: result.value };
+  }
+
+  /**
    * Candidates-resolve one window row: identical contract to
    * `#maybeMapSuccessor` — a matched ref commits as an `automatic`
    * mapping and pins the occurrence when it is still unmapped;
@@ -3315,53 +3354,19 @@ export class PlaybackEngine {
     target: { recordingId: string; occurrenceId: string | null },
     source: CancellationSource,
   ): Promise<void> {
-    const r = this.#host.ready();
-    if (r === null) {
-      return;
-    }
-    this.#noteWarmSeen(target.recordingId);
-    const recording = r.recordings.find((x) => x.id === target.recordingId);
-    if (recording === undefined) {
-      return;
-    }
-    const routed = this.#router.providerFor(
-      'playback.candidates',
-      selectionFromSettings(r.settings),
-    );
-    if (!routed.ok) {
-      return;
-    }
-    const provider = routed.value;
-    if (this.#warmBatchTarget === target.recordingId) {
-      this.#warmBatchProvider = provider.id;
-    }
-    const deadlineMs = this.#host.deadline();
-    const query: RecordingQuery = {
-      title: recording.title,
-      artist: recording.artist,
-      album: recording.album,
-      durationMs: recording.durationMs,
-      versionLabels: recording.versionLabels,
-      isrc: recording.isrc,
-    };
-    const context = this.#host.newContext('warm', deadlineMs, source.signal);
-    const result = await this.#host.withDeadline(
-      () => provider.candidates({ query, limit: CANDIDATE_LIMIT }, context),
-      deadlineMs,
+    const warmed = await this.#warmCandidates(
+      target.recordingId,
       source,
+      (r) => {
+        const rec = r.recordings.find((x) => x.id === target.recordingId);
+        return rec === undefined ? null : recordingQuery(rec);
+      },
+      () => this.#unseeWarmTarget(target),
     );
-    if (
-      source.signal.cancelled ||
-      this.#host.disposed() ||
-      this.#warmBatchSource !== source
-    ) {
-      this.#unseeWarmTarget(target);
+    if (warmed === null) {
       return;
     }
-    if (!result.ok) {
-      this.#host.logWarn('row warm failed');
-      return;
-    }
+    const { provider, candidates } = warmed;
     const ready2 = this.#host.ready();
     if (ready2 === null || this.#host.disposed() || this.#warmBatchSource !== source) {
       this.#unseeWarmTarget(target);
@@ -3371,29 +3376,18 @@ export class PlaybackEngine {
     if (rec === undefined) {
       return;
     }
-    let outcome: MatchOutcome;
-    try {
-      outcome = MatchingEngine.match(rec, result.value, rec.mappings);
-    } catch {
-      this.#host.logWarn('row warm threw on malformed candidates');
+    // 'ambiguous' parks on the row, not in a review — the tap's own
+    // resolve produces the review honestly.
+    const automatic = this.#warmMatch(
+      rec,
+      candidates,
+      'row warm threw on malformed candidates',
+      null,
+    );
+    if (automatic === null) {
       return;
     }
-    if (outcome.type !== 'matched') {
-      // 'ambiguous' parks on the row, not in a review — the tap's own
-      // resolve produces the review honestly.
-      return;
-    }
-    const ref = outcome.candidate.sourceRef;
-    const matchedAt = this.#host.safeNow();
-    if (matchedAt === null) {
-      return;
-    }
-    const automatic: SourceMapping = {
-      ref,
-      status: 'automatic',
-      matchedAtMs: matchedAt,
-      evidence: outcome.evidence,
-    };
+    const ref = automatic.ref;
     const occurrenceId = target.occurrenceId;
     const staged = await this.#host.commitStaged((ready3) => {
       // The storage tail can queue this write behind another one —
@@ -3485,46 +3479,31 @@ export class PlaybackEngine {
     target: { query: RecordingQuery; key: string },
     source: CancellationSource,
   ): Promise<void> {
-    const r = this.#host.ready();
-    if (r === null) {
-      return;
-    }
-    this.#noteWarmSeen(target.key);
-    const routed = this.#router.providerFor(
-      'playback.candidates',
-      selectionFromSettings(r.settings),
-    );
-    if (!routed.ok) {
-      return;
-    }
-    const provider = routed.value;
-    if (this.#warmBatchTarget === target.key) {
-      this.#warmBatchProvider = provider.id;
-    }
-    const deadlineMs = this.#host.deadline();
-    const context = this.#host.newContext('warm', deadlineMs, source.signal);
-    const result = await this.#host.withDeadline(
-      () =>
-        provider.candidates(
-          { query: target.query, limit: CANDIDATE_LIMIT },
-          context,
-        ),
-      deadlineMs,
+    const onStale = () => {
+      this.#warmSeen.delete(target.key);
+      this.#warmPendingQueries.unshift(target);
+    };
+    const warmed = await this.#warmCandidates(
+      target.key,
       source,
+      () => target.query,
+      onStale,
     );
+    if (warmed === null) {
+      return;
+    }
+    // A provider switch can land between the helper's check and this
+    // continuation — the pass restarted under a new source must not
+    // see a stale seen-mark or process the old provider's candidates.
     if (
       source.signal.cancelled ||
       this.#host.disposed() ||
       this.#warmBatchSource !== source
     ) {
-      this.#warmSeen.delete(target.key);
-      this.#warmPendingQueries.unshift(target);
+      onStale();
       return;
     }
-    if (!result.ok) {
-      this.#host.logWarn('row warm failed');
-      return;
-    }
+    const { provider, candidates } = warmed;
     // The match needs a recording's fields — the query itself is the
     // probe; nothing here persists.
     const probe: Recording = {
@@ -3545,7 +3524,7 @@ export class PlaybackEngine {
     };
     let outcome: MatchOutcome;
     try {
-      outcome = MatchingEngine.match(probe, result.value, []);
+      outcome = MatchingEngine.match(probe, candidates, []);
     } catch {
       this.#host.logWarn('row warm threw on malformed candidates');
       return;
@@ -3681,13 +3660,7 @@ export class PlaybackEngine {
       if (surface !== null) {
         return { ...surface, origin: 'surface' };
       }
-      const snap = r.queue.snapshot();
-      const dealt = this.#host.dealtOrder(r);
-      const walk = dealt ?? snap.occurrences.map((o) => o.occurrenceId);
-      const pos =
-        snap.currentOccurrenceId === null
-          ? -1
-          : walk.indexOf(snap.currentOccurrenceId);
+      const { snap, walk, pos } = this.#dealtWalk(r);
       const successorId = pos >= 0 ? walk[pos + 1] : undefined;
       const successor = snap.occurrences.find(
         (o) => o.occurrenceId === successorId,
@@ -3844,18 +3817,12 @@ export class PlaybackEngine {
     this.#streamWarm = record;
     const issueSource = new CancellationSource();
     const work = (async () => {
-      const issued = await this.#host.withDeadline(
-        () =>
-          this.#player.prewarm({
-            provider: want.provider,
-            sourceRef: want.sourceRef,
-            identity: {
-              attemptId: record.attemptId,
-              queueRev: record.queueRev,
-            },
-          }),
-        this.#host.deadline(),
-        issueSource,
+      const issued = await boundedCall(this.#host, issueSource, () =>
+        this.#player.prewarm({
+          provider: want.provider,
+          sourceRef: want.sourceRef,
+          identity: warmIdentity(record),
+        }),
       );
       if (this.#streamWarm !== record) {
         // The record was dropped while the port request was in
@@ -3872,15 +3839,7 @@ export class PlaybackEngine {
           if (record.adoptedAttempt !== null) {
             record.adoptedAttempt.requestId = requestId;
           } else {
-            await this.#host.bounded(() =>
-              this.#player.cancelPrepare({
-                requestId,
-                identity: {
-                  attemptId: record.attemptId,
-                  queueRev: record.queueRev,
-                },
-              }),
-            );
+            await this.#cancelPrepare(requestId, warmIdentity(record));
           }
         }
         return;
@@ -3909,21 +3868,9 @@ export class PlaybackEngine {
     }
     const work = (async () => {
       if (warm.stream !== null) {
-        await this.#releaseHandle(warm.stream.handle, {
-          attemptId: warm.attemptId,
-          queueRev: warm.queueRev,
-        });
+        await this.#releaseHandle(warm.stream.handle, warmIdentity(warm));
       } else if (warm.requestId !== null) {
-        const requestId = warm.requestId;
-        await this.#host.bounded(() =>
-          this.#player.cancelPrepare({
-            requestId,
-            identity: {
-              attemptId: warm.attemptId,
-              queueRev: warm.queueRev,
-            },
-          }),
-        );
+        await this.#cancelPrepare(warm.requestId, warmIdentity(warm));
       }
       this.#maybeWarmStream();
     })();
@@ -3972,10 +3919,7 @@ export class PlaybackEngine {
       // release it and suppress the re-warm this row would earn.
       this.#streamWarm = null;
       this.#denyStreamWarm(`${warm.provider} ${warm.sourceRef}`);
-      await this.#releaseHandle(stream.handle, {
-        attemptId: warm.attemptId,
-        queueRev: warm.queueRev,
-      });
+      await this.#releaseHandle(stream.handle, warmIdentity(warm));
     }
   }
 }

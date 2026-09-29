@@ -108,13 +108,17 @@ import { RadioCoordinator } from './radio-coordinator.ts';
 import { SyncIngress } from './sync-ingress.ts';
 import { PlaybackEngine } from './playback-engine.ts';
 import {
+  boundedCommit,
+  boundedLoad,
+  boundedOp,
   internalError,
   sameRef,
   saturatingAdd,
+  supersededError,
   timeoutError,
 } from './util.ts';
 import { syncEmitInput } from './ready.ts';
-import type { Ready } from './ready.ts';
+import type { Ready, SessionHostCore } from './ready.ts';
 
 export type SessionPlayback =
   | { readonly type: 'idle' }
@@ -462,6 +466,40 @@ export class Session {
   readonly #isMetered: () => boolean;
   readonly #sync: SyncEmitPort | undefined;
   #restorePromise: Promise<Result<void>> | null = null;
+  /**
+   * The shared half of every service host — thin delegations into
+   * Session's own machinery (the storage lane, the op bookkeeping,
+   * the publish/derived hooks). Each service's host literal spreads
+   * this and adds its per-service seams.
+   */
+  readonly #hostCore: SessionHostCore = {
+    ready: () => this.#ready,
+    requireReady: () => this.#requireReady(),
+    publish: () => this.#publish(),
+    derived: () => this.#derived(),
+    own: (work, deadline) => this.#own(work, deadline),
+    disposed: () => this.#disposed,
+    logWarn: (message) => this.#logWarn(message),
+    enqueueStorage: (fn, options) => this.#enqueueStorage(fn, options),
+    persist: (batch) => this.#persist(batch),
+    emitSync: (writes) => this.#syncIngress.emit(writes),
+    trackSource: (source) => {
+      this.#opSources.add(source);
+      return () => {
+        this.#opSources.delete(source);
+      };
+    },
+    safeNow: () => this.#safeNow(),
+    deadline: () => this.#deadline(),
+    newContext: (prefix, deadlineMs, signal) =>
+      this.#newContext(prefix, deadlineMs, signal),
+    withDeadline: (operation, absoluteDeadlineMs, operationSource) =>
+      this.#withDeadline(
+        operation,
+        absoluteDeadlineMs,
+        operationSource,
+      ),
+  };
 
   constructor(deps: SessionDeps) {
     if (!isSettings(deps.defaults)) {
@@ -512,30 +550,7 @@ export class Session {
       clock: deps.clock,
       corrections: this.#corrections,
       host: {
-        ready: () => this.#ready,
-        requireReady: () => this.#requireReady(),
-        publish: () => this.#publish(),
-        derived: () => this.#derived(),
-        enqueueStorage: (fn) => this.#enqueueStorage(fn),
-        persist: (batch) => this.#persist(batch),
-        emitSync: (writes) => this.#syncIngress.emit(writes),
-        own: (work) => this.#own(work),
-        trackSource: (source) => {
-          this.#opSources.add(source);
-          return () => {
-            this.#opSources.delete(source);
-          };
-        },
-        safeNow: () => this.#safeNow(),
-        deadline: () => this.#deadline(),
-        newContext: (prefix, deadlineMs, signal) =>
-          this.#newContext(prefix, deadlineMs, signal),
-        withDeadline: (operation, absoluteDeadlineMs, operationSource) =>
-          this.#withDeadline(
-            operation,
-            absoluteDeadlineMs,
-            operationSource,
-          ),
+        ...this.#hostCore,
         resumeGatedPlayback: (recordingId) =>
           this.#resumeGatedPlayback(recordingId),
         prepareImport: () => this.#prepareImport(),
@@ -555,12 +570,7 @@ export class Session {
       storage: deps.storage,
       sync: deps.sync,
       host: {
-        ready: () => this.#ready,
-        requireReady: () => this.#requireReady(),
-        publish: () => this.#publish(),
-        derived: () => this.#derived(),
-        own: (work) => this.#own(work),
-        logWarn: (message) => this.#logWarn(message),
+        ...this.#hostCore,
         hasProvider: (id) => this.#providers.has(id),
         providerDeclares: (id, capabilities) => {
           const provider = this.#providers.get(id);
@@ -571,22 +581,6 @@ export class Session {
             )
           );
         },
-        enqueueStorage: (fn, options) => this.#enqueueStorage(fn, options),
-        trackSource: (source) => {
-          this.#opSources.add(source);
-          return () => {
-            this.#opSources.delete(source);
-          };
-        },
-        deadline: () => this.#deadline(),
-        newContext: (prefix, deadlineMs, signal) =>
-          this.#newContext(prefix, deadlineMs, signal),
-        withDeadline: (operation, absoluteDeadlineMs, operationSource) =>
-          this.#withDeadline(
-            operation,
-            absoluteDeadlineMs,
-            operationSource,
-          ),
       },
     });
     this.#radio = new RadioCoordinator({
@@ -594,12 +588,7 @@ export class Session {
       ids: deps.ids,
       router: this.#router,
       host: {
-        ready: () => this.#ready,
-        requireReady: () => this.#requireReady(),
-        publish: () => this.#publish(),
-        derived: () => this.#derived(),
-        own: (work) => this.#own(work),
-        disposed: () => this.#disposed,
+        ...this.#hostCore,
         dealtOrder: (r) => this.#dealtOrder(r),
         isOnline: () => this.#isOnline(),
         localPlaybackFor: (recordingId) =>
@@ -607,25 +596,6 @@ export class Session {
         activeAttempt: () => this.#playback.activeAttempt(),
         playOccurrence: (occurrenceId) =>
           this.playOccurrence(occurrenceId),
-        logWarn: (message) => this.#logWarn(message),
-        enqueueStorage: (fn) => this.#enqueueStorage(fn),
-        emitSync: (writes) => this.#syncIngress.emit(writes),
-        trackSource: (source) => {
-          this.#opSources.add(source);
-          return () => {
-            this.#opSources.delete(source);
-          };
-        },
-        safeNow: () => this.#safeNow(),
-        deadline: () => this.#deadline(),
-        newContext: (prefix, deadlineMs, signal) =>
-          this.#newContext(prefix, deadlineMs, signal),
-        withDeadline: (operation, absoluteDeadlineMs, operationSource) =>
-          this.#withDeadline(
-            operation,
-            absoluteDeadlineMs,
-            operationSource,
-          ),
       },
     });
     this.#playback = new PlaybackEngine({
@@ -635,36 +605,19 @@ export class Session {
       router: this.#router,
       corrections: this.#corrections,
       host: {
-        ready: () => this.#ready,
-        requireReady: () => this.#requireReady(),
-        publish: () => this.#publish(),
+        ...this.#hostCore,
         publishPosition: () => this.#publishPosition(),
-        derived: () => this.#derived(),
-        own: (work, deadline) => this.#own(work, deadline),
-        disposed: () => this.#disposed,
-        logWarn: (message) => this.#logWarn(message),
         pickRef: (recording, occurrenceSelected) =>
           this.#pickRef(recording, occurrenceSelected),
         dealtOrder: (r) => this.#dealtOrder(r),
         isOnline: () => this.#isOnline(),
         isMetered: () => this.#isMetered(),
-        enqueueStorage: (fn) => this.#enqueueStorage(fn),
-        persist: (batch) => this.#persist(batch),
         commitStaged: (stage) => this.#commitStaged(stage),
         persistQueue: (r, before, beforeMarks) =>
           this.#persistQueue(r, before, beforeMarks),
+        mutateQueue: (r, mutate) => this.#mutateQueue(r, mutate),
         call: (fn) => this.#call(fn),
         bounded: (fn) => this.#bounded(fn),
-        safeNow: () => this.#safeNow(),
-        deadline: () => this.#deadline(),
-        newContext: (prefix, deadlineMs, signal) =>
-          this.#newContext(prefix, deadlineMs, signal),
-        withDeadline: (operation, absoluteDeadlineMs, operationSource) =>
-          this.#withDeadline(
-            operation,
-            absoluteDeadlineMs,
-            operationSource,
-          ),
         trackTimer: (timer) => {
           this.#timers.add(timer);
           return () => {
@@ -763,40 +716,37 @@ export class Session {
         ? src.dealt
         : this.#dealtOrder(ready);
     const radio = publishRadio(ready.radio);
+    /** A shared section reuses the prior frozen array; changed data refreezes. */
+    const section = <T>(
+      live: readonly T[],
+      priorLive: readonly T[] | undefined,
+      priorPublished: readonly T[] | undefined,
+    ): readonly T[] =>
+      shared && live === priorLive && priorPublished !== undefined
+        ? priorPublished
+        : deepFreeze([...live]);
     const base: ReadySession = {
       type: 'ready',
-      recordings:
-        shared && ready.recordings === src.recordings
-          ? prev.recordings
-          : deepFreeze([...ready.recordings]),
-      likes:
-        shared && ready.likes === src.likes
-          ? prev.likes
-          : deepFreeze([...ready.likes]),
-      entities:
-        shared && ready.entities === src.entities
-          ? prev.entities
-          : deepFreeze([...ready.entities]),
-      entitySourceRefs:
-        shared && ready.entitySourceRefs === src.entitySourceRefs
-          ? prev.entitySourceRefs
-          : deepFreeze([...ready.entitySourceRefs]),
-      playlists:
-        shared && ready.playlists === src.playlists
-          ? prev.playlists
-          : deepFreeze([...ready.playlists]),
-      playlistEntries:
-        shared && ready.playlistEntries === src.playlistEntries
-          ? prev.playlistEntries
-          : deepFreeze([...ready.playlistEntries]),
-      playHistory:
-        shared && ready.playHistory === src.playHistory
-          ? prev.playHistory
-          : deepFreeze([...ready.playHistory]),
-      playCounts:
-        shared && ready.playCounts === src.playCounts
-          ? prev.playCounts
-          : deepFreeze([...ready.playCounts]),
+      recordings: section(ready.recordings, src?.recordings, prev?.recordings),
+      likes: section(ready.likes, src?.likes, prev?.likes),
+      entities: section(ready.entities, src?.entities, prev?.entities),
+      entitySourceRefs: section(
+        ready.entitySourceRefs,
+        src?.entitySourceRefs,
+        prev?.entitySourceRefs,
+      ),
+      playlists: section(ready.playlists, src?.playlists, prev?.playlists),
+      playlistEntries: section(
+        ready.playlistEntries,
+        src?.playlistEntries,
+        prev?.playlistEntries,
+      ),
+      playHistory: section(
+        ready.playHistory,
+        src?.playHistory,
+        prev?.playHistory,
+      ),
+      playCounts: section(ready.playCounts, src?.playCounts, prev?.playCounts),
       queue: queueSnap,
       settings:
         shared && ready.settings === src.settings
@@ -1035,18 +985,15 @@ export class Session {
     try {
       result = await this.#enqueueStorage(async () => {
         if (generation === null || generation !== this.#ready) {
-          return err(
-            appError('superseded', 'session state was replaced'),
-          );
+          return err(supersededError());
         }
-        const deadlineMs = this.#deadline();
-        const context = this.#newContext('persist', deadlineMs, source.signal);
         // A thunk batch evaluates inside the segment so it commits
         // the freshest mirror, not the state captured at call time.
         const evaluated = typeof batch === 'function' ? batch() : batch;
-        const committed = await this.#withDeadline(
-          () => this.#storage.commit(evaluated, context),
-          deadlineMs,
+        const committed = await boundedCommit(
+          this.#hostCore,
+          this.#storage,
+          evaluated,
           source,
         );
         if (committed.ok && evaluated.queue !== undefined) {
@@ -1090,9 +1037,7 @@ export class Session {
       return await this.#enqueueStorage(async () => {
         const r = this.#ready;
         if (generation === null || r !== generation) {
-          return err(
-            appError('superseded', 'session state was replaced'),
-          );
+          return err(supersededError());
         }
         const staged = stage(r);
         if (!staged.ok) {
@@ -1100,15 +1045,10 @@ export class Session {
         }
         const { batch, apply } = staged.value;
         if (batch !== undefined) {
-          const deadlineMs = this.#deadline();
-          const context = this.#newContext(
-            'persist',
-            deadlineMs,
-            source.signal,
-          );
-          const committed = await this.#withDeadline(
-            () => this.#storage.commit(batch, context),
-            deadlineMs,
+          const committed = await boundedCommit(
+            this.#hostCore,
+            this.#storage,
+            batch,
             source,
           );
           if (!committed.ok) {
@@ -1136,6 +1076,15 @@ export class Session {
     }
   }
 
+  /** `#commitStaged` plus the post-commit derive every caller ticks. */
+  async #commitAndDerive<T>(
+    stage: (r: Ready) => Result<CommitStage<T>>,
+  ): Promise<Result<T>> {
+    const staged = await this.#commitStaged(stage);
+    this.#derived();
+    return staged;
+  }
+
   /**
    * Queue commit with a caller-visible failure contract. `before` is
    * the pre-mutation snapshot; the mutation itself stays synchronous
@@ -1151,6 +1100,24 @@ export class Session {
    * the mutation is derived inside the segment and the engine swaps
    * in only after a successful commit.)
    */
+  /** The shared tail of a queue mutation command: capture the
+   * pre-edit snapshot + marks, run the mutation, then commit with
+   * rollback. The caller ticks `#derived` itself — it must run in the
+   * caller's continuation, ahead of whatever follows the commit. */
+  async #mutateQueue(
+    r: Ready,
+    mutate: (queue: QueueEngine) => void,
+  ): Promise<Result<void>> {
+    const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
+    try {
+      mutate(r.queue);
+    } catch (thrown) {
+      return err(fromUnknown(thrown));
+    }
+    return this.#persistQueue(r, before, beforeMarks);
+  }
+
   async #persistQueue(
     r: Ready,
     before: QueueSnapshot,
@@ -1177,9 +1144,7 @@ export class Session {
       return await this.#enqueueStorage(async () => {
         const ready = this.#ready;
         if (generation === null || ready !== generation) {
-          return err(
-            appError('superseded', 'session state was replaced'),
-          );
+          return err(supersededError());
         }
         if (epoch !== r.queueEpoch) {
           // An earlier queue commit failed and rolled the engine back
@@ -1195,11 +1160,10 @@ export class Session {
           // re-committing the earlier revision would regress the store.
           return ok(undefined);
         }
-        const deadlineMs = this.#deadline();
-        const context = this.#newContext('persist', deadlineMs, source.signal);
-        const committed = await this.#withDeadline(
-          () => this.#storage.commit({ queue: after }, context),
-          deadlineMs,
+        const committed = await boundedCommit(
+          this.#hostCore,
+          this.#storage,
+          { queue: after },
           source,
         );
         if (!committed.ok) {
@@ -1356,42 +1320,31 @@ export class Session {
     this.#opSources.add(source);
     let loaded: Result<PersistedState>;
     try {
-      const deadlineMs = this.#deadline();
-      const context = this.#newContext('load', deadlineMs, source.signal);
-      loaded = await this.#withDeadline(
-        () => this.#storage.load(context),
-        deadlineMs,
+      loaded = await boundedLoad(
+        this.#hostCore,
+        this.#storage,
         source,
+        'load',
       );
     } finally {
       this.#opSources.delete(source);
     }
     if (!loaded.ok) {
-      this.#state = { type: 'restore-failed', error: loaded.error };
-      this.#publish();
-      return err(loaded.error);
+      return this.#restoreFailed(loaded.error);
     }
     if (!isPersistedState(loaded.value)) {
-      const error = appError(
-        'invalid-response',
-        'persisted state failed validation',
+      return this.#restoreFailed(
+        appError('invalid-response', 'persisted state failed validation'),
       );
-      this.#state = { type: 'restore-failed', error };
-      this.#publish();
-      return err(error);
     }
     const data = loaded.value;
     let queue: QueueEngine;
     try {
       queue = new QueueEngine(data.queue);
     } catch {
-      const error = appError(
-        'invalid-response',
-        'persisted queue failed validation',
+      return this.#restoreFailed(
+        appError('invalid-response', 'persisted queue failed validation'),
       );
-      this.#state = { type: 'restore-failed', error };
-      this.#publish();
-      return err(error);
     }
     this.#ready = {
       recordings: [...data.recordings],
@@ -1431,6 +1384,12 @@ export class Session {
     return ok(undefined);
   }
 
+  #restoreFailed(error: AppError): Result<never> {
+    this.#state = { type: 'restore-failed', error };
+    this.#publish();
+    return err(error);
+  }
+
   // ---- library ----------------------------------------------------
 
   async enqueueMetadata(metadata: TrackMetadata): Promise<Result<string>> {
@@ -1441,7 +1400,7 @@ export class Session {
     if (!isTrackMetadata(metadata)) {
       return err(appError('invalid-response', 'metadata failed validation'));
     }
-    const staged = await this.#commitStaged((r) => {
+    return this.#commitAndDerive((r) => {
       const up = upsertRecordingIn(
         r.recordings,
         metadata,
@@ -1466,11 +1425,6 @@ export class Session {
         },
       });
     });
-    this.#derived();
-    if (!staged.ok) {
-      return err(staged.error);
-    }
-    return ok(staged.value);
   }
 
   /**
@@ -1589,7 +1543,7 @@ export class Session {
     if (!r.recordings.some((rec) => rec.id === recordingId)) {
       return err(appError('not-found', 'unknown recording'));
     }
-    const staged = await this.#commitStaged((cur) => {
+    return this.#commitAndDerive((cur) => {
       const live = cur.recordings.find((rec) => rec.id === recordingId);
       if (live === undefined) {
         return err(appError('not-found', 'unknown recording'));
@@ -1609,11 +1563,6 @@ export class Session {
         },
       });
     });
-    this.#derived();
-    if (!staged.ok) {
-      return err(staged.error);
-    }
-    return ok(staged.value);
   }
 
   async addAndPlay(metadata: TrackMetadata): Promise<Result<void>> {
@@ -1639,7 +1588,7 @@ export class Session {
     if (!isTrackMetadata(metadata)) {
       return err(appError('invalid-response', 'metadata failed validation'));
     }
-    const staged = await this.#commitStaged((r) => {
+    return this.#commitAndDerive((r) => {
       const up = upsertRecordingIn(
         r.recordings,
         metadata,
@@ -1653,11 +1602,6 @@ export class Session {
         },
       });
     });
-    this.#derived();
-    if (!staged.ok) {
-      return err(staged.error);
-    }
-    return ok(staged.value);
   }
 
   /**
@@ -1838,14 +1782,13 @@ export class Session {
         signal: source.signal,
         clock: this.#clock,
         call: (signal) =>
-          this.#withDeadline(
-            () =>
-              this.#router.getEntity(
-                ref,
-                this.#newContext('entity', deadlineMs, signal),
-              ),
-            deadlineMs,
+          boundedOp(
+            this.#hostCore,
             source,
+            'entity',
+            (ctx) => this.#router.getEntity(ref, ctx),
+            signal,
+            deadlineMs,
           ),
       });
     } finally {
@@ -2093,14 +2036,13 @@ export class Session {
         signal: source.signal,
         clock: this.#clock,
         call: (signal) =>
-          this.#withDeadline(
-            () =>
-              provider.getLyrics(
-                { query, prefer: 'synced' },
-                this.#newContext('lyrics', deadlineMs, signal),
-              ),
-            deadlineMs,
+          boundedOp(
+            this.#hostCore,
             source,
+            'lyrics',
+            (ctx) => provider.getLyrics({ query, prefer: 'synced' }, ctx),
+            signal,
+            deadlineMs,
           ),
       });
       if (!fetched.ok) {
@@ -2250,16 +2192,12 @@ export class Session {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
-    const beforeMarks = r.queue.unplayableIds;
     if (!before.occurrences.some((o) => o.occurrenceId === occurrenceId)) {
       return err(appError('not-found', 'unknown occurrence'));
     }
-    try {
-      r.queue.select(occurrenceId, true);
-    } catch (thrown) {
-      return err(fromUnknown(thrown));
-    }
-    const persisted = await this.#persistQueue(r, before, beforeMarks);
+    const persisted = await this.#mutateQueue(r, (q) =>
+      q.select(occurrenceId, true),
+    );
     if (!persisted.ok) {
       return persisted;
     }
@@ -2494,18 +2432,11 @@ export class Session {
       return ready;
     }
     const r = ready.value;
-    const before = r.queue.snapshot();
-    const beforeMarks = r.queue.unplayableIds;
-    const current = before.currentOccurrenceId;
+    const current = r.queue.snapshot().currentOccurrenceId;
     if (current === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
     }
-    try {
-      r.queue.play();
-    } catch (thrown) {
-      return err(fromUnknown(thrown));
-    }
-    const persisted = await this.#persistQueue(r, before, beforeMarks);
+    const persisted = await this.#mutateQueue(r, (q) => q.play());
     if (!persisted.ok) {
       return persisted;
     }
@@ -2723,27 +2654,17 @@ export class Session {
   // ---- lifecycle ----------------------------------------------------
 
   async drain(): Promise<void> {
-    for (; ;) {
-      await this.#playback.eventsIdle();
-      const pending = [
-        ...this.#ownedWork,
-        ...this.#playback.releaseWork(),
-      ];
-      if (pending.length === 0) {
-        return;
-      }
-      await Promise.allSettled(pending);
-    }
+    return this.#drainAll(false);
   }
 
   /** Full drain including armed deadline work; used by dispose. */
-  async #drainAll(): Promise<void> {
+  async #drainAll(includeDeadlineWork = true): Promise<void> {
     for (; ;) {
       await this.#playback.eventsIdle();
       const pending = [
         ...this.#ownedWork,
         ...this.#playback.releaseWork(),
-        ...this.#deadlineWork,
+        ...(includeDeadlineWork ? this.#deadlineWork : []),
       ];
       if (pending.length === 0) {
         return;
