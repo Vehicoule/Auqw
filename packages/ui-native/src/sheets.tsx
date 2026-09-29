@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { ScrollView, TextInput, useWindowDimensions, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
+import { Artwork, bind, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { t } from '@auqw/ui-shared';
 import type {
@@ -67,6 +67,51 @@ function SheetScaffold({
       </View>
       {children}
     </View>
+  );
+}
+
+// Every sheet row shares this frame: touch-height row, pressed bg,
+// optional dashed outline for "reset/create" affordances.
+function SheetRow({
+  onPress,
+  accessibilityLabel,
+  selected,
+  dashed,
+  children,
+}: {
+  readonly onPress?: (() => void) | undefined;
+  readonly accessibilityLabel: string;
+  readonly selected?: boolean | undefined;
+  readonly dashed?: boolean | undefined;
+  readonly children: ReactNode;
+}) {
+  const theme = useTheme();
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={
+        selected === undefined ? undefined : { selected }
+      }
+      style={({ pressed }) => [
+        {
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: theme.spacing.md,
+          minHeight: theme.sizes.touch,
+          paddingHorizontal: theme.spacing.sm,
+          borderRadius: theme.radius.control,
+        },
+        dashed === true && {
+          borderWidth: theme.strokes.hairline,
+          borderStyle: 'dashed',
+          borderColor: theme.colors.fg25,
+        },
+        pressed && { backgroundColor: theme.colors.fg08 },
+      ]}
+    >
+      {children}
+    </Pressable>
   );
 }
 
@@ -200,29 +245,12 @@ export function ValueFieldSheet({
         onCancel={onDismiss}
       />
       {clearLabel !== undefined && onClear !== undefined && (
-        <Pressable
-          onPress={onClear}
-          accessibilityLabel={clearLabel}
-          style={({ pressed }) => [
-            {
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: theme.spacing.md,
-              minHeight: theme.sizes.touch,
-              paddingHorizontal: theme.spacing.sm,
-              borderRadius: theme.radius.control,
-              borderWidth: theme.strokes.hairline,
-              borderStyle: 'dashed',
-              borderColor: theme.colors.fg25,
-            },
-            pressed && { backgroundColor: theme.colors.fg08 },
-          ]}
-        >
+        <SheetRow onPress={onClear} accessibilityLabel={clearLabel} dashed>
           <Icon name="close" size={15} color={theme.colors.textSecondary} />
           <Text variant="body" color="secondary">
             {clearLabel}
           </Text>
-        </Pressable>
+        </SheetRow>
       )}
     </SheetScaffold>
   );
@@ -243,23 +271,10 @@ export function RowActionsSheet({
   return (
     <SheetScaffold title={title} onDismiss={onDismiss}>
       {actions.map((action) => (
-        <Pressable
+        <SheetRow
           key={action.key}
-          onPress={
-            onAction === undefined ? undefined : () => onAction(action.key)
-          }
+          onPress={bind(onAction, action.key)}
           accessibilityLabel={action.label}
-          style={({ pressed }) => [
-            {
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: theme.spacing.md,
-              minHeight: theme.sizes.touch,
-              paddingHorizontal: theme.spacing.sm,
-              borderRadius: theme.radius.control,
-            },
-            pressed && { backgroundColor: theme.colors.fg08 },
-          ]}
         >
           <Icon
             name={action.icon}
@@ -276,7 +291,7 @@ export function RowActionsSheet({
           >
             {action.label}
           </Text>
-        </Pressable>
+        </SheetRow>
       ))}
     </SheetScaffold>
   );
@@ -324,24 +339,11 @@ export function ProviderPickerSheet({
         options.map((option) => {
           const selected = option.key === selectedKey;
           return (
-            <Pressable
+            <SheetRow
               key={option.key}
-              onPress={
-                onPick === undefined ? undefined : () => onPick(option.key)
-              }
+              onPress={bind(onPick, option.key)}
               accessibilityLabel={option.label}
-              accessibilityState={{ selected }}
-              style={({ pressed }) => [
-                {
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: theme.spacing.md,
-                  minHeight: theme.sizes.touch,
-                  paddingHorizontal: theme.spacing.sm,
-                  borderRadius: theme.radius.control,
-                },
-                pressed && { backgroundColor: theme.colors.fg08 },
-              ]}
+              selected={selected}
             >
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text
@@ -360,7 +362,7 @@ export function ProviderPickerSheet({
               {selected && (
                 <Icon name="check" size={14} color={theme.colors.accent} />
               )}
-            </Pressable>
+            </SheetRow>
           );
         })
       )}
@@ -398,25 +400,11 @@ export function LanguagePickerSheet({
         {options.map((option) => {
           const selected = option.key === selectedKey;
           return (
-            <Pressable
+            <SheetRow
               key={option.key}
-              onPress={
-                onPick === undefined ? undefined : () => onPick(option.key)
-              }
+              onPress={bind(onPick, option.key)}
               accessibilityLabel={option.label}
-              accessibilityRole="button"
-              accessibilityState={{ selected }}
-              style={({ pressed }) => [
-                {
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: theme.spacing.md,
-                  minHeight: theme.sizes.touch,
-                  paddingHorizontal: theme.spacing.sm,
-                  borderRadius: theme.radius.control,
-                },
-                pressed && { backgroundColor: theme.colors.fg08 },
-              ]}
+              selected={selected}
             >
               <Text
                 variant="body"
@@ -429,7 +417,7 @@ export function LanguagePickerSheet({
               {selected && (
                 <Icon name="check" size={14} color={theme.colors.accent} />
               )}
-            </Pressable>
+            </SheetRow>
           );
         })}
       </ScrollView>
@@ -463,28 +451,13 @@ export function AddToPlaylistSheet({
   return (
     <SheetScaffold title={title} onDismiss={onDismiss}>
       {playlists.map((playlist) => (
-        <Pressable
+        <SheetRow
           key={playlist.playlistId}
-          onPress={
-            onPick === undefined
-              ? undefined
-              : () => onPick(playlist.playlistId)
-          }
+          onPress={bind(onPick, playlist.playlistId)}
           accessibilityLabel={t('sheets.itemA11y', {
             name: playlist.name,
             count: playlist.count,
           })}
-          style={({ pressed }) => [
-            {
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: theme.spacing.md,
-              minHeight: theme.sizes.touch,
-              paddingHorizontal: theme.spacing.sm,
-              borderRadius: theme.radius.control,
-            },
-            pressed && { backgroundColor: theme.colors.fg08 },
-          ]}
         >
           <Artwork url={playlist.artworkUrl} size={40} />
           <View style={{ flex: 1, minWidth: 0 }}>
@@ -495,7 +468,7 @@ export function AddToPlaylistSheet({
               {t('common.trackCount', { count: playlist.count })}
             </Text>
           </View>
-        </Pressable>
+        </SheetRow>
       ))}
       {creating ? (
         <NameField
@@ -518,29 +491,18 @@ export function AddToPlaylistSheet({
           }}
         />
       ) : (
-        <Pressable
-          onPress={onCreate === undefined ? undefined : () => setCreating(true)}
+        <SheetRow
+          onPress={
+            onCreate === undefined ? undefined : () => setCreating(true)
+          }
           accessibilityLabel={t('common.newPlaylist')}
-          style={({ pressed }) => [
-            {
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: theme.spacing.md,
-              minHeight: theme.sizes.touch,
-              paddingHorizontal: theme.spacing.sm,
-              borderRadius: theme.radius.control,
-              borderWidth: theme.strokes.hairline,
-              borderStyle: 'dashed',
-              borderColor: theme.colors.fg25,
-            },
-            pressed && { backgroundColor: theme.colors.fg08 },
-          ]}
+          dashed
         >
           <Icon name="list-plus" size={15} color={theme.colors.textSecondary} />
           <Text variant="body" color="secondary">
             {t('common.newPlaylist')}
           </Text>
-        </Pressable>
+        </SheetRow>
       )}
     </SheetScaffold>
   );
