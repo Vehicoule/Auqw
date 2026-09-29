@@ -2,6 +2,7 @@ import type {
   AppError,
   Entity,
   EntityPage,
+  EntityRef,
   EntitySourceRef,
   ExportDocument,
   ImportPreview,
@@ -39,6 +40,7 @@ import {
 } from './view-models.ts';
 import type {
   CollectionModel,
+  CorrectionsFilter,
   CorrectionsModel,
   DiagnosticsModel,
   EntityScreenModel,
@@ -132,6 +134,38 @@ function recording(partial: {
   };
 }
 
+function trackMeta(partial: {
+  provider: string;
+  id: string;
+  title: string;
+  artist: string | null;
+  durationMs: number | null;
+  album?: string | null;
+  releaseYear?: number | null;
+  artSeed?: string;
+  explicit?: boolean | null;
+  albumRef?: EntityRef;
+  artistRef?: EntityRef;
+}): TrackMetadata {
+  return {
+    sourceRef: { provider: partial.provider, kind: 'track', id: partial.id },
+    title: partial.title,
+    artist: partial.artist,
+    album: partial.album ?? null,
+    durationMs: partial.durationMs,
+    releaseYear: partial.releaseYear ?? null,
+    artwork:
+      partial.artSeed === undefined
+        ? []
+        : [{ url: art(partial.artSeed), width: 300, height: 300 }],
+    explicit: partial.explicit ?? null,
+    genre: null,
+    storefront: 'AU',
+    ...(partial.albumRef === undefined ? {} : { albumRef: partial.albumRef }),
+    ...(partial.artistRef === undefined ? {} : { artistRef: partial.artistRef }),
+  };
+}
+
 export const fixtureRecordings: readonly Recording[] = [
   recording({
     id: 'rec-self-aware',
@@ -220,183 +254,138 @@ export const fixtureRecordings: readonly Recording[] = [
   }),
 ];
 
+const like = (
+  entityKind: Like['entityKind'],
+  targetId: string,
+  likedAtMs: number,
+): Like => ({ entityKind, targetId, likedAtMs });
+
 export const fixtureLikes: readonly Like[] = [
-  {
-    entityKind: 'track',
-    targetId: 'rec-self-aware',
-    likedAtMs: 1_700_000_300_000,
-  },
-  {
-    entityKind: 'track',
-    targetId: 'rec-petit',
-    likedAtMs: 1_700_000_200_000,
-  },
-  { entityKind: 'track', targetId: 'rec-roads', likedAtMs: 1_700_000_100_000 },
-  {
-    entityKind: 'album',
-    targetId: 'entity-deadbeat',
-    likedAtMs: 1_700_000_180_000,
-  },
-  {
-    entityKind: 'artist',
-    targetId: 'entity-portishead',
-    likedAtMs: 1_700_000_160_000,
-  },
-  {
-    entityKind: 'album',
-    targetId: 'entity-orphan',
-    likedAtMs: 1_700_000_120_000,
-  },
+  like('track', 'rec-self-aware', 1_700_000_300_000),
+  like('track', 'rec-petit', 1_700_000_200_000),
+  like('track', 'rec-roads', 1_700_000_100_000),
+  like('album', 'entity-deadbeat', 1_700_000_180_000),
+  like('artist', 'entity-portishead', 1_700_000_160_000),
+  like('album', 'entity-orphan', 1_700_000_120_000),
 ];
+
+const ownedEntity = (
+  entityId: string,
+  kind: Entity['kind'],
+  title: string,
+  artistName: string | null,
+  artSeed: string | null,
+  createdMs: number,
+): Entity => ({
+  entityId,
+  kind,
+  title,
+  artistName,
+  artwork:
+    artSeed === null ? [] : [{ url: art(artSeed), width: 300, height: 300 }],
+  createdMs,
+});
 
 // Owned album/artist entities — the ownable grid renders the liked
 // ones as cards and the artist in the followed rail.
 export const fixtureEntities: readonly Entity[] = [
-  {
-    entityId: 'entity-deadbeat',
-    kind: 'album',
-    title: 'Deadbeat',
-    artistName: 'Tame Impala',
-    artwork: [{ url: art('dracula'), width: 300, height: 300 }],
-    createdMs: 1_700_000_050_000,
-  },
-  {
-    entityId: 'entity-portishead',
-    kind: 'artist',
-    title: 'Portishead',
-    artistName: null,
-    artwork: [{ url: art('roads'), width: 300, height: 300 }],
-    createdMs: 1_700_000_040_000,
-  },
+  ownedEntity('entity-deadbeat', 'album', 'Deadbeat', 'Tame Impala', 'dracula', 1_700_000_050_000),
+  ownedEntity('entity-portishead', 'artist', 'Portishead', null, 'roads', 1_700_000_040_000),
   // Owned but unreferenced: no provider ref means the card renders
   // unopenable — an honest absence, not a fake link.
-  {
-    entityId: 'entity-orphan',
-    kind: 'album',
-    title: 'Orphaned Pressing',
-    artistName: 'Lost & Found',
-    artwork: [],
-    createdMs: 1_699_000_000_000,
-  },
+  ownedEntity('entity-orphan', 'album', 'Orphaned Pressing', 'Lost & Found', null, 1_699_000_000_000),
 ];
+
+const DZ_ALBUM_DEADBEAT: EntityRef = {
+  provider: 'deezer',
+  kind: 'album',
+  id: 'dz-album-deadbeat',
+};
+const DZ_ARTIST_TAME: EntityRef = {
+  provider: 'deezer',
+  kind: 'artist',
+  id: 'dz-artist-tame',
+};
+const DZ_ARTIST_PORTISHEAD: EntityRef = {
+  provider: 'deezer',
+  kind: 'artist',
+  id: 'dz-artist-portishead',
+};
 
 export const fixtureEntitySourceRefs: readonly EntitySourceRef[] = [
   {
     entityId: 'entity-deadbeat',
     provider: 'deezer',
-    ref: { provider: 'deezer', kind: 'album', id: 'dz-album-deadbeat' },
+    ref: DZ_ALBUM_DEADBEAT,
   },
   {
     entityId: 'entity-portishead',
     provider: 'deezer',
-    ref: { provider: 'deezer', kind: 'artist', id: 'dz-artist-portishead' },
+    ref: DZ_ARTIST_PORTISHEAD,
   },
 ];
 
 // The orphan entity is liked but carries no EntitySourceRef — its
 // card must render unopenable (honest absence, never a fake link).
 
+const playlist = (
+  playlistId: string,
+  name: string,
+  createdMs: number,
+  updatedMs: number,
+): Playlist => ({ playlistId, name, createdMs, updatedMs });
+
 export const fixturePlaylists: readonly Playlist[] = [
-  {
-    playlistId: 'pl-late-night',
-    name: 'late night drives',
-    createdMs: 1_699_000_000_000,
-    updatedMs: 1_700_000_250_000,
-  },
-  {
-    playlistId: 'pl-morning',
-    name: 'morning slow',
-    createdMs: 1_699_500_000_000,
-    updatedMs: 1_700_000_150_000,
-  },
-  {
-    playlistId: 'pl-fresh',
-    name: 'fresh ideas',
-    createdMs: 1_700_000_400_000,
-    updatedMs: 1_700_000_400_000,
-  },
+  playlist('pl-late-night', 'late night drives', 1_699_000_000_000, 1_700_000_250_000),
+  playlist('pl-morning', 'morning slow', 1_699_500_000_000, 1_700_000_150_000),
+  playlist('pl-fresh', 'fresh ideas', 1_700_000_400_000, 1_700_000_400_000),
 ];
+
+const playlistEntry = (
+  entryId: string,
+  playlistId: string,
+  recordingId: string,
+  position: number,
+  addedMs: number,
+  selectedRef: PlaylistEntry['selectedRef'] = null,
+): PlaylistEntry => ({
+  entryId,
+  playlistId,
+  recordingId,
+  position,
+  selectedRef,
+  addedMs,
+});
 
 // `pe-3` repeats `pe-1`'s recording — duplicates are occurrences and
 // must keep entryId row identity; `pe-3` also pins a selectedRef.
 export const fixturePlaylistEntries: readonly PlaylistEntry[] = [
-  {
-    entryId: 'pe-1',
-    playlistId: 'pl-late-night',
-    recordingId: 'rec-dracula',
-    position: 1,
-    selectedRef: null,
-    addedMs: 1_700_000_210_000,
-  },
-  {
-    entryId: 'pe-2',
-    playlistId: 'pl-late-night',
-    recordingId: 'rec-roads',
-    position: 2,
-    selectedRef: null,
-    addedMs: 1_700_000_220_000,
-  },
-  {
-    entryId: 'pe-3',
-    playlistId: 'pl-late-night',
-    recordingId: 'rec-dracula',
-    position: 3,
-    selectedRef: {
-      provider: 'youtube-music',
-      kind: 'track',
-      id: 'ytm-dracula-pinned',
-    },
-    addedMs: 1_700_000_250_000,
-  },
-  {
-    entryId: 'pe-4',
-    playlistId: 'pl-morning',
-    recordingId: 'rec-petit',
-    position: 1,
-    selectedRef: null,
-    addedMs: 1_700_000_160_000,
-  },
-  {
-    entryId: 'pe-5',
-    playlistId: 'pl-morning',
-    recordingId: 'rec-cjk',
-    position: 2,
-    selectedRef: null,
-    addedMs: 1_700_000_170_000,
-  },
+  playlistEntry('pe-1', 'pl-late-night', 'rec-dracula', 1, 1_700_000_210_000),
+  playlistEntry('pe-2', 'pl-late-night', 'rec-roads', 2, 1_700_000_220_000),
+  playlistEntry('pe-3', 'pl-late-night', 'rec-dracula', 3, 1_700_000_250_000, {
+    provider: 'youtube-music',
+    kind: 'track',
+    id: 'ytm-dracula-pinned',
+  }),
+  playlistEntry('pe-4', 'pl-morning', 'rec-petit', 1, 1_700_000_160_000),
+  playlistEntry('pe-5', 'pl-morning', 'rec-cjk', 2, 1_700_000_170_000),
 ];
+
+const playEvent = (
+  eventId: string,
+  recordingId: string,
+  occurrenceId: string | null,
+  playedMs: number,
+  listenedMs: number,
+): PlayEvent => ({ eventId, recordingId, occurrenceId, playedMs, listenedMs });
 
 // Deliberately unordered — the model must sort newest-first, and
 // `pev-1`/`pev-3` repeat one recording as separate event rows.
 export const fixturePlayHistory: readonly PlayEvent[] = [
-  {
-    eventId: 'pev-4',
-    recordingId: 'rec-petit',
-    occurrenceId: null,
-    playedMs: 1_700_000_700_000,
-    listenedMs: 200_000,
-  },
-  {
-    eventId: 'pev-1',
-    recordingId: 'rec-dracula',
-    occurrenceId: 'occ-3',
-    playedMs: 1_700_001_000_000,
-    listenedMs: 240_000,
-  },
-  {
-    eventId: 'pev-3',
-    recordingId: 'rec-dracula',
-    occurrenceId: 'occ-9',
-    playedMs: 1_700_000_800_000,
-    listenedMs: 240_000,
-  },
-  {
-    eventId: 'pev-2',
-    recordingId: 'rec-self-aware',
-    occurrenceId: 'occ-1',
-    playedMs: 1_700_000_900_000,
-    listenedMs: 180_000,
-  },
+  playEvent('pev-4', 'rec-petit', null, 1_700_000_700_000, 200_000),
+  playEvent('pev-1', 'rec-dracula', 'occ-3', 1_700_001_000_000, 240_000),
+  playEvent('pev-3', 'rec-dracula', 'occ-9', 1_700_000_800_000, 240_000),
+  playEvent('pev-2', 'rec-self-aware', 'occ-1', 1_700_000_900_000, 180_000),
 ];
 
 // `pc-ghost` counts a deleted recording — topPlayed drops it honestly.
@@ -412,17 +401,26 @@ export const fixtureUnavailableIds: ReadonlySet<string> = new Set([
   'rec-roads',
 ]);
 
+const occ = (
+  occurrenceId: string,
+  recordingId: string,
+): QueueSnapshot['occurrences'][number] => ({
+  occurrenceId,
+  recordingId,
+  selectedRef: null,
+});
+
 export const fixtureQueue: QueueSnapshot = {
   revision: 7,
   occurrences: [
-    { occurrenceId: 'occ-1', recordingId: 'rec-self-aware', selectedRef: null },
-    { occurrenceId: 'occ-2', recordingId: 'rec-petit', selectedRef: null },
-    { occurrenceId: 'occ-3', recordingId: 'rec-dracula', selectedRef: null },
-    { occurrenceId: 'occ-4', recordingId: 'rec-maladie', selectedRef: null },
-    { occurrenceId: 'occ-5', recordingId: 'rec-roads', selectedRef: null },
-    { occurrenceId: 'occ-6', recordingId: 'rec-self-aware', selectedRef: null },
-    { occurrenceId: 'occ-7', recordingId: 'rec-cjk', selectedRef: null },
-    { occurrenceId: 'occ-8', recordingId: 'rec-noart', selectedRef: null },
+    occ('occ-1', 'rec-self-aware'),
+    occ('occ-2', 'rec-petit'),
+    occ('occ-3', 'rec-dracula'),
+    occ('occ-4', 'rec-maladie'),
+    occ('occ-5', 'rec-roads'),
+    occ('occ-6', 'rec-self-aware'),
+    occ('occ-7', 'rec-cjk'),
+    occ('occ-8', 'rec-noart'),
   ],
   currentOccurrenceId: 'occ-1',
   positionMs: 97_200,
@@ -431,24 +429,25 @@ export const fixtureQueue: QueueSnapshot = {
 
 export const fixtureIdentity = { attemptId: 'attempt-7', queueRev: 7 };
 
-export const fixturePlaybackPlaying: SessionPlayback = {
-  type: 'playing',
+const SELF_AWARE_PLAYBACK = {
   recordingId: 'rec-self-aware',
   occurrenceId: 'occ-1',
   identity: fixtureIdentity,
   handle: 'handle-1',
-  positionMs: 97_200,
+  positionMs: 0,
   durationMs: 180_000,
+};
+
+export const fixturePlaybackPlaying: SessionPlayback = {
+  type: 'playing',
+  ...SELF_AWARE_PLAYBACK,
+  positionMs: 97_200,
 };
 
 export const fixturePlaybackPaused: SessionPlayback = {
   type: 'paused',
-  recordingId: 'rec-self-aware',
-  occurrenceId: 'occ-1',
-  identity: fixtureIdentity,
-  handle: 'handle-1',
+  ...SELF_AWARE_PLAYBACK,
   positionMs: 61_000,
-  durationMs: 180_000,
 };
 
 export const fixturePlaybackBuffering: SessionPlayback = {
@@ -500,54 +499,45 @@ export const fixtureDiagnosticsDegraded: DiagnosticsModel = {
 };
 
 export const fixtureSearchResults: readonly TrackMetadata[] = [
-  {
-    sourceRef: { provider: 'youtube-music', kind: 'track', id: 'ytm-roads-live' },
+  trackMeta({
+    provider: 'youtube-music',
+    id: 'ytm-roads-live',
     title: 'Roads (live at roskilde ’94)',
     artist: 'Portishead',
     album: 'Roskilde ’94',
     durationMs: 297_000,
     releaseYear: 1994,
-    artwork: [{ url: art('roads-live'), width: 300, height: 300 }],
-    explicit: null,
-    genre: null,
-    storefront: 'AU',
-  },
-  {
-    sourceRef: { provider: 'youtube-music', kind: 'track', id: 'ytm-roads' },
+    artSeed: 'roads-live',
+  }),
+  trackMeta({
+    provider: 'youtube-music',
+    id: 'ytm-roads',
     title: 'Roads',
     artist: 'Portishead',
     album: 'Dummy',
     durationMs: 302_000,
     releaseYear: 1994,
-    artwork: [{ url: art('roads'), width: 300, height: 300 }],
-    explicit: null,
-    genre: null,
-    storefront: 'AU',
-  },
-  {
-    sourceRef: { provider: 'youtube-music', kind: 'track', id: 'ytm-glory' },
+    artSeed: 'roads',
+  }),
+  trackMeta({
+    provider: 'youtube-music',
+    id: 'ytm-glory',
     title: 'Glory Box',
     artist: 'Portishead',
     album: 'Dummy',
     durationMs: 306_000,
     releaseYear: 1994,
-    artwork: [{ url: art('glory'), width: 300, height: 300 }],
-    explicit: null,
-    genre: null,
-    storefront: 'AU',
-  },
-  {
-    sourceRef: { provider: 'youtube-music', kind: 'track', id: 'ytm-mysterons' },
+    artSeed: 'glory',
+  }),
+  trackMeta({
+    provider: 'youtube-music',
+    id: 'ytm-mysterons',
     title: 'Mysterons',
     artist: 'Portishead',
     album: 'Dummy',
     durationMs: 302_000,
     releaseYear: 1994,
-    artwork: [],
-    explicit: null,
-    genre: null,
-    storefront: 'AU',
-  },
+  }),
 ];
 
 function rec(id: string): Recording {
@@ -607,117 +597,99 @@ export const fixturePlayerFailed: PlayerModel = {
   errorMessage: 'stream unavailable in this storefront',
 };
 
-export const fixtureQueueModel: QueueModel = toQueueModel({
-  queue: fixtureQueue,
+const queueModelInput = {
   recordings: fixtureRecordings,
   likes: fixtureLikes,
   unavailableRecordingIds: fixtureUnavailableIds,
+};
+
+export const fixtureQueueModel: QueueModel = toQueueModel({
+  queue: fixtureQueue,
+  ...queueModelInput,
 });
 
 export const fixtureQueueModelPaused: QueueModel = toQueueModel({
   queue: { ...fixtureQueue, mode: 'paused' },
-  recordings: fixtureRecordings,
-  likes: fixtureLikes,
-  unavailableRecordingIds: fixtureUnavailableIds,
+  ...queueModelInput,
+});
+
+const searchState = (
+  phase: SearchStateModel['phase'],
+  query: string,
+  extra?: Partial<Omit<SearchStateModel, 'phase' | 'query'>>,
+): SearchStateModel => ({
+  phase,
+  query,
+  results: [],
+  providerId: 'youtube-music',
+  message: null,
+  retryable: false,
+  ...extra,
 });
 
 export const fixtureSearchStates: readonly SearchStateModel[] = [
-  { phase: 'idle', query: '', results: [], providerId: null, message: null, retryable: false },
-  {
-    phase: 'loading',
-    query: 'roads portishead',
-    results: [],
-    providerId: 'youtube-music',
-    message: null,
-    retryable: false,
-  },
-  {
-    phase: 'ready',
-    query: 'roads portishead',
+  searchState('idle', '', { providerId: null }),
+  searchState('loading', 'roads portishead'),
+  searchState('ready', 'roads portishead', {
     results: fixtureSearchResults.map((meta, index) =>
       toSearchRowModel(meta, index),
     ),
-    providerId: 'youtube-music',
-    message: null,
-    retryable: false,
-  },
-  {
-    phase: 'empty',
-    query: 'zkq dlpwmx',
-    results: [],
-    providerId: 'youtube-music',
-    message: null,
-    retryable: false,
-  },
-  {
-    phase: 'error',
-    query: 'roads portishead',
-    results: [],
-    providerId: 'youtube-music',
+  }),
+  searchState('empty', 'zkq dlpwmx'),
+  searchState('error', 'roads portishead', {
     message: 'rate limited by provider',
     retryable: true,
-  },
-  {
-    phase: 'unavailable',
-    query: 'roads portishead',
-    results: [],
-    providerId: 'youtube-music',
+  }),
+  searchState('unavailable', 'roads portishead', {
     message: 'provider unavailable in this storefront',
-    retryable: false,
-  },
+  }),
 ];
 
 // Entity-page fixtures: one complete album page, one degraded artist
 // page (`complete:false` + a continuation token), mirroring what the
 // deezer `catalog.entity` shape degrades to when a section truncates.
 export const fixtureEntityItems: readonly TrackMetadata[] = [
-  {
-    sourceRef: { provider: 'deezer', kind: 'track', id: 'dz-t-nope' },
+  trackMeta({
+    provider: 'deezer',
+    id: 'dz-t-nope',
     title: 'Nope',
     artist: 'Tame Impala',
     album: 'Deadbeat',
     durationMs: 251_000,
     releaseYear: 2025,
-    artwork: [{ url: art('dracula'), width: 300, height: 300 }],
-    explicit: null,
-    genre: null,
-    storefront: 'AU',
-    albumRef: { provider: 'deezer', kind: 'album', id: 'dz-album-deadbeat' },
-    artistRef: { provider: 'deezer', kind: 'artist', id: 'dz-artist-tame' },
-  },
-  {
-    sourceRef: { provider: 'deezer', kind: 'track', id: 'dz-t-dracula' },
+    artSeed: 'dracula',
+    albumRef: DZ_ALBUM_DEADBEAT,
+    artistRef: DZ_ARTIST_TAME,
+  }),
+  trackMeta({
+    provider: 'deezer',
+    id: 'dz-t-dracula',
     title: 'Dracula',
     artist: 'Tame Impala',
     album: 'Deadbeat',
     durationMs: 242_000,
     releaseYear: 2025,
-    artwork: [{ url: art('dracula'), width: 300, height: 300 }],
+    artSeed: 'dracula',
     explicit: false,
-    genre: null,
-    storefront: 'AU',
-    albumRef: { provider: 'deezer', kind: 'album', id: 'dz-album-deadbeat' },
-    artistRef: { provider: 'deezer', kind: 'artist', id: 'dz-artist-tame' },
-  },
-  {
-    sourceRef: { provider: 'deezer', kind: 'track', id: 'dz-t-loser' },
+    albumRef: DZ_ALBUM_DEADBEAT,
+    artistRef: DZ_ARTIST_TAME,
+  }),
+  trackMeta({
+    provider: 'deezer',
+    id: 'dz-t-loser',
     title: 'Loser',
     artist: 'Tame Impala',
     album: 'Deadbeat',
     durationMs: 228_000,
     releaseYear: 2025,
-    artwork: [],
-    explicit: null,
-    genre: null,
-    storefront: 'AU',
-    albumRef: { provider: 'deezer', kind: 'album', id: 'dz-album-deadbeat' },
-    artistRef: { provider: 'deezer', kind: 'artist', id: 'dz-artist-tame' },
-  },
+    albumRef: DZ_ALBUM_DEADBEAT,
+    artistRef: DZ_ARTIST_TAME,
+  }),
 ];
 
 export const fixtureEntityPage: EntityPage = {
   entity: {
-    sourceRef: { provider: 'deezer', kind: 'album', id: 'dz-album-deadbeat' },
+    sourceRef: DZ_ALBUM_DEADBEAT,
     kind: 'album',
     title: 'Deadbeat',
     subtitle: 'Tame Impala',
@@ -729,49 +701,33 @@ export const fixtureEntityPage: EntityPage = {
 };
 
 export const fixtureEntityItemsPartial: readonly TrackMetadata[] = [
-  {
-    sourceRef: { provider: 'deezer', kind: 'track', id: 'dz-t-roads' },
+  trackMeta({
+    provider: 'deezer',
+    id: 'dz-t-roads',
     title: 'Roads',
     artist: 'Portishead',
     album: 'Dummy',
     durationMs: 302_000,
     releaseYear: 1994,
-    artwork: [{ url: art('roads'), width: 300, height: 300 }],
-    explicit: null,
-    genre: null,
-    storefront: 'AU',
-    artistRef: {
-      provider: 'deezer',
-      kind: 'artist',
-      id: 'dz-artist-portishead',
-    },
-  },
-  {
-    sourceRef: { provider: 'deezer', kind: 'track', id: 'dz-t-sour' },
+    artSeed: 'roads',
+    artistRef: DZ_ARTIST_PORTISHEAD,
+  }),
+  trackMeta({
+    provider: 'deezer',
+    id: 'dz-t-sour',
     title: 'Sour Times',
     artist: 'Portishead',
     album: 'Dummy',
     durationMs: 252_000,
     releaseYear: 1994,
-    artwork: [{ url: art('roads'), width: 300, height: 300 }],
-    explicit: null,
-    genre: null,
-    storefront: 'AU',
-    artistRef: {
-      provider: 'deezer',
-      kind: 'artist',
-      id: 'dz-artist-portishead',
-    },
-  },
+    artSeed: 'roads',
+    artistRef: DZ_ARTIST_PORTISHEAD,
+  }),
 ];
 
 export const fixtureEntityPagePartial: EntityPage = {
   entity: {
-    sourceRef: {
-      provider: 'deezer',
-      kind: 'artist',
-      id: 'dz-artist-portishead',
-    },
+    sourceRef: DZ_ARTIST_PORTISHEAD,
     kind: 'artist',
     title: 'Portishead',
     subtitle: '15 albums',
@@ -799,7 +755,7 @@ export const fixtureLibraryModel: LibraryModel = toLibraryModel({
   entitySourceRefs: fixtureEntitySourceRefs,
 });
 
-export const fixtureLibraryModelEmpty: LibraryModel = toLibraryModel({
+const NO_LIBRARY = {
   recordings: [],
   likes: [],
   playlists: [],
@@ -808,7 +764,9 @@ export const fixtureLibraryModelEmpty: LibraryModel = toLibraryModel({
   playCounts: [],
   entities: [],
   entitySourceRefs: [],
-});
+};
+
+export const fixtureLibraryModelEmpty: LibraryModel = toLibraryModel(NO_LIBRARY);
 
 export const fixtureCollectionModels: readonly CollectionModel[] = [
   toCollectionModel(fixtureLibraryModel, 'liked'),
@@ -816,50 +774,42 @@ export const fixtureCollectionModels: readonly CollectionModel[] = [
   toCollectionModel(fixtureLibraryModel, 'history'),
 ];
 
-export const fixturePlaylistModel: PlaylistModel | null = toPlaylistModel({
-  playlistId: 'pl-late-night',
-  playlists: fixturePlaylists,
-  playlistEntries: fixturePlaylistEntries,
-  recordings: fixtureRecordings,
-  likes: fixtureLikes,
-});
-
-export const fixturePlaylistModelEmpty: PlaylistModel | null =
+const playlistModelFor = (playlistId: string): PlaylistModel | null =>
   toPlaylistModel({
-    playlistId: 'pl-fresh',
+    playlistId,
     playlists: fixturePlaylists,
     playlistEntries: fixturePlaylistEntries,
     recordings: fixtureRecordings,
     likes: fixtureLikes,
   });
 
-export const fixtureEntityModel: EntityScreenModel = toEntityModel({
-  page: fixtureEntityPage,
-  error: null,
-  likes: fixtureLikes,
-  entitySourceRefs: fixtureEntitySourceRefs,
-});
+export const fixturePlaylistModel: PlaylistModel | null =
+  playlistModelFor('pl-late-night');
+export const fixturePlaylistModelEmpty: PlaylistModel | null =
+  playlistModelFor('pl-fresh');
 
-export const fixtureEntityModelPartial: EntityScreenModel = toEntityModel({
-  page: fixtureEntityPagePartial,
-  error: null,
-  likes: fixtureLikes,
-  entitySourceRefs: fixtureEntitySourceRefs,
-});
+const entityModel = (
+  page: EntityPage | null,
+  error: AppError | null = null,
+): EntityScreenModel =>
+  toEntityModel({
+    page,
+    error,
+    likes: fixtureLikes,
+    entitySourceRefs: fixtureEntitySourceRefs,
+  });
 
-export const fixtureEntityModelLoading: EntityScreenModel = toEntityModel({
-  page: null,
-  error: null,
-  likes: fixtureLikes,
-  entitySourceRefs: fixtureEntitySourceRefs,
-});
-
-export const fixtureEntityModelError: EntityScreenModel = toEntityModel({
-  page: null,
-  error: fixtureEntityError,
-  likes: fixtureLikes,
-  entitySourceRefs: fixtureEntitySourceRefs,
-});
+export const fixtureEntityModel: EntityScreenModel = entityModel(
+  fixtureEntityPage,
+);
+export const fixtureEntityModelPartial: EntityScreenModel = entityModel(
+  fixtureEntityPagePartial,
+);
+export const fixtureEntityModelLoading: EntityScreenModel = entityModel(null);
+export const fixtureEntityModelError: EntityScreenModel = entityModel(
+  null,
+  fixtureEntityError,
+);
 
 export const fixtureSettingsModel = toSettingsModel(
   fixtureSettings,
@@ -914,34 +864,30 @@ const fixtureSyncStatusPaired: SyncClientStatus = {
   ],
 };
 
-export const fixtureSyncModelPaired: SyncModel = toSyncModel({
-  available: true,
-  status: fixtureSyncStatusPaired,
+const syncModel = (status: SyncClientStatus | null): SyncModel =>
+  toSyncModel({ available: status !== null, status });
+
+export const fixtureSyncModelPaired: SyncModel = syncModel(
+  fixtureSyncStatusPaired,
+);
+
+export const fixtureSyncModelSyncing: SyncModel = syncModel({
+  deviceId: fixtureSyncStatusPaired.deviceId,
+  peers: [
+    {
+      peer: fixtureSyncStatusPaired.peers[0]!.peer,
+      state: 'open',
+      syncing: true,
+    },
+  ],
 });
 
-export const fixtureSyncModelSyncing: SyncModel = toSyncModel({
-  available: true,
-  status: {
-    deviceId: fixtureSyncStatusPaired.deviceId,
-    peers: [
-      {
-        peer: fixtureSyncStatusPaired.peers[0]!.peer,
-        state: 'open',
-        syncing: true,
-      },
-    ],
-  },
+export const fixtureSyncModelUnpaired: SyncModel = syncModel({
+  deviceId: 'phone-fixture-1',
+  peers: [],
 });
 
-export const fixtureSyncModelUnpaired: SyncModel = toSyncModel({
-  available: true,
-  status: { deviceId: 'phone-fixture-1', peers: [] },
-});
-
-export const fixtureSyncModelUnavailable: SyncModel = toSyncModel({
-  available: false,
-  status: null,
-});
+export const fixtureSyncModelUnavailable: SyncModel = syncModel(null);
 
 export const fixtureHomeModel: HomeModel = {
   greeting: 'good evening',
@@ -951,23 +897,8 @@ export const fixtureHomeModel: HomeModel = {
     positionMs: 83_000,
     durationMs: 214_000,
   },
-  recents: [
-    fixtureRecordings[0],
-    fixtureRecordings[1],
-    fixtureRecordings[2],
-    fixtureRecordings[3],
-    fixtureRecordings[4],
-  ]
-    .filter((r): r is Recording => r !== undefined)
-    .map(toRailCard),
-  suggestions: [
-    fixtureRecordings[5],
-    fixtureRecordings[6],
-    fixtureRecordings[7],
-    fixtureRecordings[8],
-  ]
-    .filter((r): r is Recording => r !== undefined)
-    .map(toRailCard),
+  recents: fixtureRecordings.slice(0, 5).map(toRailCard),
+  suggestions: fixtureRecordings.slice(5, 9).map(toRailCard),
 };
 
 // Mirrors NAV_ITEMS in apps/mobile/App.tsx — the gallery must preview the
@@ -999,47 +930,41 @@ export const fixtureLyricsSynced: LyricsModel = {
   message: null,
 };
 
+const LYRICS_EMPTY = {
+  lines: [],
+  activeIndex: null,
+  syncLabel: null,
+} satisfies Partial<LyricsModel>;
+
+const lyricsState = (
+  state: LyricsModel['state'],
+  message: string | null,
+): LyricsModel => ({ ...LYRICS_EMPTY, state, message });
+
 // Plain text never earns synced treatment: no activeIndex, no
 // accent — the sync label says `unsynced` and names the provider.
 export const fixtureLyricsPlain: LyricsModel = {
-  state: 'plain',
+  ...lyricsState('plain', null),
   lines: SYNCED_LINES,
-  activeIndex: null,
   syncLabel: 'unsynced · lyrics-lrclib',
-  message: null,
 };
 
-export const fixtureLyricsInstrumental: LyricsModel = {
-  state: 'instrumental',
-  lines: [],
-  activeIndex: null,
-  syncLabel: null,
-  message: 'this track is instrumental',
-};
+export const fixtureLyricsInstrumental: LyricsModel = lyricsState(
+  'instrumental',
+  'this track is instrumental',
+);
 
-export const fixtureLyricsUnavailable: LyricsModel = {
-  state: 'unavailable',
-  lines: [],
-  activeIndex: null,
-  syncLabel: null,
-  message: 'no lyrics matched this recording',
-};
+export const fixtureLyricsUnavailable: LyricsModel = lyricsState(
+  'unavailable',
+  'no lyrics matched this recording',
+);
 
-export const fixtureLyricsError: LyricsModel = {
-  state: 'error',
-  lines: [],
-  activeIndex: null,
-  syncLabel: null,
-  message: 'rate limited by provider',
-};
+export const fixtureLyricsError: LyricsModel = lyricsState(
+  'error',
+  'rate limited by provider',
+);
 
-export const fixtureLyricsLoading: LyricsModel = {
-  state: 'loading',
-  lines: [],
-  activeIndex: null,
-  syncLabel: null,
-  message: null,
-};
+export const fixtureLyricsLoading: LyricsModel = lyricsState('loading', null);
 
 export const fixtureLyricsStates: readonly LyricsModel[] = [
   fixtureLyricsSynced,
@@ -1092,31 +1017,15 @@ export const fixtureRadioModels: readonly RadioModel[] = [
 
 // ---- corrections --------------------------------------------------
 
-function reviewCandidate(
-  metadata: TrackMetadata,
-): MatchReview['candidates'][number] {
-  return { metadata, ref: metadata.sourceRef };
-}
-
-function candidateMeta(partial: {
+function candidate(partial: {
   provider: string;
   id: string;
   title: string;
   artist: string | null;
   durationMs: number | null;
-}): TrackMetadata {
-  return {
-    sourceRef: { provider: partial.provider, kind: 'track', id: partial.id },
-    title: partial.title,
-    artist: partial.artist,
-    album: null,
-    durationMs: partial.durationMs,
-    releaseYear: null,
-    artwork: [],
-    explicit: null,
-    genre: null,
-    storefront: 'AU',
-  };
+}): MatchReview['candidates'][number] {
+  const metadata = trackMeta(partial);
+  return { metadata, ref: metadata.sourceRef };
 }
 
 export const fixtureMatchReviews: readonly MatchReview[] = [
@@ -1124,24 +1033,20 @@ export const fixtureMatchReviews: readonly MatchReview[] = [
     reviewId: 'rev-roads',
     recordingId: 'rec-roads',
     candidates: [
-      reviewCandidate(
-        candidateMeta({
-          provider: 'deezer',
-          id: 'dz-roads',
-          title: 'Roads',
-          artist: 'Portishead',
-          durationMs: 302_000,
-        }),
-      ),
-      reviewCandidate(
-        candidateMeta({
-          provider: 'youtube-music',
-          id: 'ytm-roads',
-          title: 'Roads',
-          artist: 'Portishead',
-          durationMs: 297_000,
-        }),
-      ),
+      candidate({
+        provider: 'deezer',
+        id: 'dz-roads',
+        title: 'Roads',
+        artist: 'Portishead',
+        durationMs: 302_000,
+      }),
+      candidate({
+        provider: 'youtube-music',
+        id: 'ytm-roads',
+        title: 'Roads',
+        artist: 'Portishead',
+        durationMs: 297_000,
+      }),
     ],
     status: 'pending',
     resolution: null,
@@ -1152,15 +1057,13 @@ export const fixtureMatchReviews: readonly MatchReview[] = [
     reviewId: 'rev-religion',
     recordingId: 'rec-religion',
     candidates: [
-      reviewCandidate(
-        candidateMeta({
-          provider: 'deezer',
-          id: 'dz-religion',
-          title: 'New Religion',
-          artist: null,
-          durationMs: 211_000,
-        }),
-      ),
+      candidate({
+        provider: 'deezer',
+        id: 'dz-religion',
+        title: 'New Religion',
+        artist: null,
+        durationMs: 211_000,
+      }),
     ],
     status: 'confirmed',
     resolution: {
@@ -1173,15 +1076,13 @@ export const fixtureMatchReviews: readonly MatchReview[] = [
     reviewId: 'rev-cjk',
     recordingId: 'rec-cjk',
     candidates: [
-      reviewCandidate(
-        candidateMeta({
-          provider: 'itunes',
-          id: 'it-cjk',
-          title: '夜のドライブ',
-          artist: 'metropolitan echo',
-          durationMs: 196_000,
-        }),
-      ),
+      candidate({
+        provider: 'itunes',
+        id: 'it-cjk',
+        title: '夜のドライブ',
+        artist: 'metropolitan echo',
+        durationMs: 196_000,
+      }),
     ],
     status: 'rejected',
     resolution: { ref: null },
@@ -1190,43 +1091,35 @@ export const fixtureMatchReviews: readonly MatchReview[] = [
   },
 ];
 
-export const fixtureCorrectionsModel: CorrectionsModel =
+const correctionsFixture = (input: {
+  reviews: readonly MatchReview[] | null;
+  filter: CorrectionsFilter;
+  error?: AppError | null;
+}): CorrectionsModel =>
   toCorrectionsModel({
-    reviews: fixtureMatchReviews,
     error: null,
     recordings: fixtureRecordings,
-    filter: 'all',
+    ...input,
   });
+
+export const fixtureCorrectionsModel: CorrectionsModel = correctionsFixture({
+  reviews: fixtureMatchReviews,
+  filter: 'all',
+});
 
 export const fixtureCorrectionsModelPending: CorrectionsModel =
-  toCorrectionsModel({
-    reviews: fixtureMatchReviews,
-    error: null,
-    recordings: fixtureRecordings,
-    filter: 'pending',
-  });
+  correctionsFixture({ reviews: fixtureMatchReviews, filter: 'pending' });
 
 export const fixtureCorrectionsModelEmpty: CorrectionsModel =
-  toCorrectionsModel({
-    reviews: [],
-    error: null,
-    recordings: fixtureRecordings,
-    filter: 'pending',
-  });
+  correctionsFixture({ reviews: [], filter: 'pending' });
 
 export const fixtureCorrectionsModelLoading: CorrectionsModel =
-  toCorrectionsModel({
-    reviews: null,
-    error: null,
-    recordings: fixtureRecordings,
-    filter: 'pending',
-  });
+  correctionsFixture({ reviews: null, filter: 'pending' });
 
 export const fixtureCorrectionsModelError: CorrectionsModel =
-  toCorrectionsModel({
+  correctionsFixture({
     reviews: null,
     error: fixtureEntityError,
-    recordings: fixtureRecordings,
     filter: 'pending',
   });
 
@@ -1272,21 +1165,23 @@ export const fixtureImportPreview: ImportPreview = {
 export const fixtureImportPreviewModel: ImportPreviewModel =
   toImportPreviewModel(fixtureImportPreview, 'auqw-library.json');
 
-export const fixtureTransferModel: TransferModel = {
+const transferModel = (partial: Partial<TransferModel>): TransferModel => ({
   exportPhase: 'idle',
   exportDetail: null,
   importPhase: 'idle',
   importDetail: null,
   preview: null,
-};
+  ...partial,
+});
 
-export const fixtureTransferModelPreview: TransferModel = {
+export const fixtureTransferModel: TransferModel = transferModel({});
+
+export const fixtureTransferModelPreview: TransferModel = transferModel({
   exportPhase: 'done',
   exportDetail: 'auqw-library-2023-11-14.json',
   importPhase: 'preview',
-  importDetail: null,
   preview: fixtureImportPreviewModel,
-};
+});
 
 export const fixtureTransferModelDone: TransferModel = {
   ...fixtureTransferModelPreview,
@@ -1294,13 +1189,10 @@ export const fixtureTransferModelDone: TransferModel = {
   importDetail: 'imported 3 tracks · 3 likes · 2 playlists',
 };
 
-export const fixtureTransferModelError: TransferModel = {
-  exportPhase: 'idle',
-  exportDetail: null,
+export const fixtureTransferModelError: TransferModel = transferModel({
   importPhase: 'error',
   importDetail: 'import document failed validation',
-  preview: null,
-};
+});
 
 export const fixtureRowStates: readonly TrackRowModel[] = [
   toTrackRowModel(rec('rec-self-aware'), { playing: true, liked: true }),
