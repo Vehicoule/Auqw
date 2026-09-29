@@ -1,5 +1,9 @@
-import { QueueEngine } from './queue-engine.ts';
-import type { QueueOccurrence } from '../domain.ts';
+import {
+  QueueEngine,
+  queuedOccurrenceFor,
+  queuedOccurrenceForRef,
+} from './queue-engine.ts';
+import type { QueueOccurrence, Recording } from '../domain.ts';
 import { appError } from '../errors.ts';
 import { assert, assertEqual, assertDeepEqual } from '../testing/assert.ts';
 
@@ -433,6 +437,177 @@ function directTests(): void {
     assertEqual(e.snapshot().currentOccurrenceId, 'x2');
     e.remove('x1');
     assertEqual(e.snapshot().currentOccurrenceId, 'x2');
+  }
+
+  // Tap-to-play dedupe: first occurrence at/after the cursor wins,
+  // else the nearest history entry; not-queued answers null.
+  {
+    const e = new QueueEngine();
+    e.enqueue(occ('h1', 'rA'));
+    e.enqueue(occ('h2', 'rB'));
+    e.enqueue(occ('p1', 'rA'));
+    e.enqueue(occ('p2', 'rC'));
+    // No cursor: the queue is all pending — the earliest match wins.
+    assertEqual(queuedOccurrenceFor(e.snapshot(), 'rA'), 'h1');
+    assertEqual(
+      queuedOccurrenceFor(e.snapshot(), 'rZ'),
+      null,
+      'unqueued recording gets no occurrence',
+    );
+    e.select('h2', true);
+    assertEqual(
+      queuedOccurrenceFor(e.snapshot(), 'rA'),
+      'p1',
+      'a pending occurrence beats the played one',
+    );
+    assertEqual(
+      queuedOccurrenceFor(e.snapshot(), 'rB'),
+      'h2',
+      're-tapping the current track replays its occurrence',
+    );
+    e.select('p2', false);
+    // rA only sits behind the cursor — the nearest entry wins.
+    assertEqual(queuedOccurrenceFor(e.snapshot(), 'rA'), 'p1');
+    assertEqual(queuedOccurrenceFor(e.snapshot(), 'rB'), 'h2');
+    // A drained queue still answers: its entries are pending again.
+    e.next();
+    assertEqual(e.snapshot().currentOccurrenceId, null);
+    assertEqual(queuedOccurrenceFor(e.snapshot(), 'rA'), 'h1');
+    assertEqual(queuedOccurrenceFor(e.snapshot(), 'rB'), 'h2');
+  }
+
+  // Ref dedupe covers metadata taps: a queued selectedRef and a
+  // recording's own sourceRefs both match.
+  {
+    const e = new QueueEngine();
+    const refA = { provider: 'ytm', kind: 'track' as const, id: 'v-a' };
+    e.enqueue({
+      occurrenceId: 'o1',
+      recordingId: 'rA',
+      selectedRef: refA,
+    });
+    const recordings: Recording[] = [
+      {
+        id: 'rB',
+        title: 'B',
+        artist: null,
+        album: null,
+        durationMs: null,
+        releaseYear: null,
+        artwork: [],
+        explicit: null,
+        genre: null,
+        isrc: null,
+        versionLabels: [],
+        sourceRefs: [{ provider: 'ytm', kind: 'track', id: 'v-b' }],
+        mappings: [],
+        provenance: 'provider',
+      },
+    ];
+    e.enqueue(occ('o2', 'rB'));
+    assertEqual(
+      queuedOccurrenceForRef(e.snapshot(), recordings, refA),
+      'o1',
+      'queued selectedRef matches',
+    );
+    assertEqual(
+      queuedOccurrenceForRef(e.snapshot(), recordings, {
+        provider: 'ytm',
+        kind: 'track',
+        id: 'v-b',
+      }),
+      'o2',
+      'a recording source ref matches too',
+    );
+    assertEqual(
+      queuedOccurrenceForRef(e.snapshot(), recordings, {
+        provider: 'ytm',
+        kind: 'track',
+        id: 'v-x',
+      }),
+      null,
+      'an unknown ref stays enqueuing',
+    );
+  }
+
+  // Failed occurrences keep a session mark: next() steps over them,
+  // previous() still lands, a play-intent landing clears the mark,
+  // and remove() prunes it so a fresh occurrence under the id isn't
+  // skipped.
+  {
+    const e = new QueueEngine();
+    for (const id of ['f1', 'f2', 'f3', 'f4']) {
+      e.enqueue(occ(id, `r-${id}`));
+    }
+    const dead = appError('unavailable', 'dead');
+    e.select('f1', true);
+    e.next();
+    e.markUnplayable(dead); // f2 fails → paused + blocked + flagged
+    e.previous();
+    assertEqual(
+      e.snapshot().currentOccurrenceId,
+      'f1',
+      'explicit backward intent still lands on a live row',
+    );
+    e.next();
+    assertEqual(
+      e.snapshot().currentOccurrenceId,
+      'f3',
+      'next() steps over the flagged row instead of parking',
+    );
+    e.previous();
+    assertEqual(
+      e.snapshot().currentOccurrenceId,
+      'f2',
+      'previous() still honors a step back onto the failed row',
+    );
+    e.select('f2', true); // retry intent clears the mark
+    e.next();
+    assertEqual(
+      e.snapshot().currentOccurrenceId,
+      'f3',
+      'a cleared mark lets next() land where it points',
+    );
+    e.markUnplayable(dead); // f3 fails
+    e.select('f4', false); // a paused landing keeps the mark
+    e.select('f1', false);
+    e.next();
+    assertEqual(e.snapshot().currentOccurrenceId, 'f2');
+    e.next();
+    assertEqual(
+      e.snapshot().currentOccurrenceId,
+      'f4',
+      'the mark survives unflagged moves until a play clears it',
+    );
+    // Removing a flagged row prunes the mark — a re-enqueued
+    // occurrence under the same id is a fresh entry.
+    e.remove('f3');
+    e.enqueue(occ('f3', 'r-f3')); // tail: [f1, f2, f4, f3]
+    e.select('f1', true);
+    e.next();
+    e.next();
+    e.next();
+    assertEqual(
+      e.snapshot().currentOccurrenceId,
+      'f3',
+      'a re-enqueued id carries no stale mark',
+    );
+    // play() on a blocked current is the retry path — it clears too.
+    e.markUnplayable(dead); // f3 fails again
+    e.select('f1', true);
+    e.select('f3', false); // land paused — still flagged
+    e.play(); // retry intent on the flagged current
+    e.select('f1', false);
+    e.next();
+    assertEqual(e.snapshot().currentOccurrenceId, 'f2');
+    e.next();
+    assertEqual(e.snapshot().currentOccurrenceId, 'f4');
+    e.next();
+    assertEqual(
+      e.snapshot().currentOccurrenceId,
+      'f3',
+      'play() cleared the mark like any play intent',
+    );
   }
 }
 

@@ -44,6 +44,8 @@ import {
   isRefRejected,
   parseSyncDeltaDocs,
   previewImport,
+  queuedOccurrenceFor,
+  queuedOccurrenceForRef,
   selectionFromSettings,
   serializeSyncDeltaDocs,
 } from '@auqw/application';
@@ -1359,7 +1361,25 @@ function Main({
   // occurrence — play/seek taps replay the held track instead.
   const heldOccurrenceId =
     player === null ? (sheetPlayer?.occurrenceId ?? null) : null;
+  // playback.type names only the latest failure — the app carries the
+  // set so a row the cursor moved past keeps its 'error' mark; a
+  // fresh attempt for the occurrence clears it, removals prune.
+  const failedQueueIds = useRef(new Set<string>());
   const queueModel = useMemo(() => {
+    const playback = state.playback;
+    if (playback.type === 'failed') {
+      if (playback.occurrenceId !== null) {
+        failedQueueIds.current.add(playback.occurrenceId);
+      }
+    } else if (playback.type !== 'idle') {
+      failedQueueIds.current.delete(playback.occurrenceId);
+    }
+    const live = new Set(state.queue.occurrences.map((o) => o.occurrenceId));
+    for (const id of failedQueueIds.current) {
+      if (!live.has(id)) {
+        failedQueueIds.current.delete(id);
+      }
+    }
     // Same honesty rule as the library rows: offline + unowned marks
     // 'unavailable' so a dead press isn't a surprise.
     const unavailable =
@@ -1375,6 +1395,8 @@ function Main({
       recordings: state.recordings,
       likes: state.likes,
       unavailableRecordingIds: unavailable,
+      failedOccurrenceIds:
+        failedQueueIds.current.size === 0 ? undefined : failedQueueIds.current,
     });
     // isOwned re-reads downloads/local after their mutations.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1382,6 +1404,7 @@ function Main({
     state.queue,
     state.recordings,
     state.likes,
+    state.playback,
     online,
     isOwned,
     downloads,
@@ -1819,6 +1842,13 @@ function Main({
       if (!canPlay(recordingId)) {
         return;
       }
+      // Tap-to-play dedupe: a queued track jumps to its occurrence
+      // instead of minting a repeat — 'add to queue' stays additive.
+      const queued = queuedOccurrenceFor(state.queue, recordingId);
+      if (queued !== null) {
+        reportPlay('common.play', await session.playOccurrence(queued));
+        return;
+      }
       const enqueued = await session.enqueueRecording(recordingId);
       if (!enqueued.ok) {
         reportResult('action.enqueueTrack', enqueued);
@@ -1826,7 +1856,7 @@ function Main({
       }
       reportPlay('common.play', await session.playOccurrence(enqueued.value));
     },
-    [session, canPlay, reportPlay],
+    [session, state.queue, canPlay, reportPlay],
   );
 
   // Queue presses and transport follow the same offline rule as
@@ -1926,6 +1956,23 @@ function Main({
     [online, state.recordings, isOwned],
   );
 
+  // Same dedupe as playRecording for metadata taps (search results,
+  // entity rows, home cards): the tap's source ref can match a queued
+  // occurrence or one of its recording's refs before it materializes.
+  const playMeta = useCallback(
+    (meta: TrackMetadata) => {
+      const queued = queuedOccurrenceForRef(
+        state.queue,
+        state.recordings,
+        meta.sourceRef,
+      );
+      return queued === null
+        ? session.addAndPlay(meta)
+        : session.playOccurrence(queued);
+    },
+    [session, state.queue, state.recordings],
+  );
+
   const onResultPress = useCallback(
     (row: TrackRowModel) => {
       // Local merged rows are existing recordings — play through the
@@ -1937,12 +1984,10 @@ function Main({
       const meta = resultMeta.current.get(row.key);
       if (meta !== undefined && canPlayMeta(meta)) {
         recordRecentSearch(query);
-        void session
-          .addAndPlay(meta)
-          .then((r) => reportPlay('action.playResult', r));
+        void playMeta(meta).then((r) => reportPlay('action.playResult', r));
       }
     },
-    [session, canPlayMeta, playRecording, query, recordRecentSearch, reportPlay],
+    [canPlayMeta, playMeta, playRecording, query, recordRecentSearch, reportPlay],
   );
 
   const onSettingsSelect = useCallback(
@@ -3574,9 +3619,18 @@ function Main({
               ? searchStateRef.current.page.items[i]
               : undefined;
           if (meta !== undefined) {
-            void s
-              .addAndPlay(meta)
-              .then((r) => reportPlay('action.playResult', r));
+            const queued =
+              st.type === 'ready'
+                ? queuedOccurrenceForRef(
+                    st.queue,
+                    st.recordings,
+                    meta.sourceRef,
+                  )
+                : null;
+            void (queued === null
+              ? s.addAndPlay(meta)
+              : s.playOccurrence(queued)
+            ).then((r) => reportPlay('action.playResult', r));
           }
           break;
         }
@@ -4035,9 +4089,9 @@ function Main({
                     if (searchState.type === 'content') {
                       recordRecentSearch(searchState.query);
                     }
-                    void session
-                      .addAndPlay(meta)
-                      .then((result) => reportPlay('action.playResult', result));
+                    void playMeta(meta).then((result) =>
+                      reportPlay('action.playResult', result),
+                    );
                   },
                   playRecording: (id) => {
                     void playRecording(id);
@@ -4190,9 +4244,9 @@ function Main({
             onPressItem={(row) => {
               const meta = metaFor(row);
               if (meta !== undefined && canPlayMeta(meta)) {
-                void session
-                  .addAndPlay(meta)
-                  .then((r) => reportPlay('action.playResult', r));
+                void playMeta(meta).then((r) =>
+                  reportPlay('action.playResult', r),
+                );
               }
             }}
             onContext={(row) => {

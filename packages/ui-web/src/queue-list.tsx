@@ -5,6 +5,7 @@ import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import { useTrackList } from './track-row.tsx';
 import { t } from '@auqw/ui-shared';
+import { queueSectionLabel } from '@auqw/ui-shared/controllers';
 import type { QueueItemModel, QueueModel } from '@auqw/ui-shared';
 
 // ---- optimistic reorder bookkeeping ----------------------------------
@@ -115,27 +116,31 @@ export function QueueList({
   const trackFocusId = useRef<string | null>(null);
   const seenItems = useRef<QueueModel['items'] | null>(null);
   const [, setPendingTick] = useState(0);
+  // Rows render in section order (nowPlaying → upNext → history),
+  // NOT canonical order — every id sequence below is display space.
+  const displayItems = queue.sections.flatMap((section) => section.items);
+  const displayIds = displayItems.map((item) => item.occurrenceId);
   const list = useTrackList({
-    count: queue.items.length,
+    count: displayItems.length,
     onActivate:
       onPressItem === undefined || reordering
         ? undefined
         : (index) => {
             // Resolve against the live optimistic order — rendered
             // rows and keyboard activation must see one sequence.
-            const ids = pendingIds.current ?? queue.items.map((i) => i.occurrenceId);
+            const ids = pendingIds.current ?? displayIds;
             const id = ids[index];
             const item =
               id === undefined
                 ? undefined
-                : queue.items.find((i) => i.occurrenceId === id);
+                : displayItems.find((i) => i.occurrenceId === id);
             if (item !== undefined) {
               onPressItem(item.occurrenceId);
             }
           },
     onContext: undefined,
   });
-  const authIds = queue.items.map((item) => item.occurrenceId);
+  const authIds = displayIds;
   const useAbsolute = onMoveItemTo !== undefined;
   const stale =
     pendingIds.current !== null && Date.now() - pendingSince.current > PENDING_TTL_MS;
@@ -201,7 +206,7 @@ export function QueueList({
     const id = trackFocusId.current;
     if (id !== null) {
       trackFocusId.current = null;
-      const index = queue.items.findIndex((item) => item.occurrenceId === id);
+      const index = displayItems.findIndex((item) => item.occurrenceId === id);
       if (index >= 0) {
         list.onRowFocus(index);
       }
@@ -235,7 +240,16 @@ export function QueueList({
   const moveItem = (occurrenceId: string, direction: -1 | 1) => {
     const from = orderedIds.indexOf(occurrenceId);
     const to = from + direction;
-    if (from < 0 || to < 0 || to >= orderedIds.length) {
+    const moved = itemById.get(occurrenceId);
+    const neighbor = orderedItems[to];
+    // Reorder is confined to the up-next section — the playing row
+    // and history entries keep their places.
+    if (
+      moved === undefined ||
+      moved.section !== 'upNext' ||
+      neighbor === undefined ||
+      neighbor.section !== 'upNext'
+    ) {
       return;
     }
     const op: PendingMove = { id: occurrenceId, dir: direction };
@@ -247,9 +261,11 @@ export function QueueList({
     setPendingTick((tick) => tick + 1);
     if (useAbsolute) {
       // Absolute destinations carry the optimistic intent — the
-      // caller applies them in order, no stale-index collapse.
+      // caller applies them in order, no stale-index collapse. The
+      // engine indexes canonical order, not display: hand it the
+      // displaced neighbor's canonical slot.
       pendingOps.current = [...pendingOps.current, op];
-      onMoveItemTo(occurrenceId, to);
+      onMoveItemTo(occurrenceId, neighbor.index);
     } else if (
       onMoveItem !== undefined &&
       pendingOps.current.length === 0 &&
@@ -291,19 +307,35 @@ export function QueueList({
     >
       {orderedItems.map((item, index) => (
         <div key={item.occurrenceId}>
-          {item.current && (
+          {orderedItems[index - 1]?.section !== item.section && (
             <Text
               variant="label"
-              color="accent"
+              color={item.section === 'nowPlaying' ? 'accent' : 'secondary'}
               uppercase
               className="uw-now-playing-label"
             >
-              {t('queue.nowPlaying')}
+              {queueSectionLabel(item.section)}
             </Text>
+          )}
+          {item.duplicate && (
+            <span
+              style={{
+                display: 'inline-block',
+                margin: 'var(--spacing-xs) var(--spacing-sm) 0',
+                padding: '0 7px',
+                borderRadius: 'var(--radius-pill)',
+                border: 'var(--stroke-hairline) solid var(--hairline)',
+                color: 'var(--text-secondary)',
+                fontSize: 'calc(var(--font-metadata) * 0.92)',
+                letterSpacing: '0.05em',
+                textTransform: 'uppercase',
+              }}
+            >
+              {t('queue.badge.repeat')}
+            </span>
           )}
           <TrackRow
             row={item.row}
-            badge={item.duplicate ? t('queue.badge.repeat') : null}
             reorderControls={reordering ? 'buttons' : 'none'}
             tabIndex={list.rowTabIndex(index)}
             onFocusRow={() => {
@@ -325,12 +357,16 @@ export function QueueList({
                 : () => onRemoveItem(item.occurrenceId)
             }
             onMoveUp={
-              reordering && index > 0 && canReorder
+              reordering && canReorder &&
+              item.section === 'upNext' &&
+              orderedItems[index - 1]?.section === 'upNext'
                 ? () => moveItem(item.occurrenceId, -1)
                 : undefined
             }
             onMoveDown={
-              reordering && index < queue.items.length - 1 && canReorder
+              reordering && canReorder &&
+              item.section === 'upNext' &&
+              orderedItems[index + 1]?.section === 'upNext'
                 ? () => moveItem(item.occurrenceId, 1)
                 : undefined
             }

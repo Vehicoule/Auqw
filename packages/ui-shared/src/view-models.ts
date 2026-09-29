@@ -94,19 +94,47 @@ export type PlayerModel = {
   readonly errorMessage: string | null;
 };
 
+/**
+ * Display section of a queue row: the current track first, then the
+ * pending entries it leads into, then what already played — the
+ * standard player queue anatomy.
+ */
+export type QueueSectionKey = 'nowPlaying' | 'upNext' | 'history';
+
 export type QueueItemModel = {
   readonly occurrenceId: string;
   readonly recordingId: string;
+  /** Canonical occurrence index — move calls index into this order. */
+  readonly index: number;
+  readonly section: QueueSectionKey;
   readonly current: boolean;
   readonly duplicate: boolean;
   readonly row: TrackRowModel;
 };
 
-export type QueueModel = {
+export type QueueSection = {
+  readonly key: QueueSectionKey;
   readonly items: readonly QueueItemModel[];
+};
+
+export type QueueModel = {
+  /** Canonical occurrence order — the order the engine walks. */
+  readonly items: readonly QueueItemModel[];
+  /**
+   * Display order, grouped: nowPlaying, upNext, history — only
+   * non-empty sections appear. Reorder interactions are confined to
+   * `upNext` items.
+   */
+  readonly sections: readonly QueueSection[];
   readonly mode: QueueSnapshot['mode'];
   readonly positionMs: number;
   readonly currentOccurrenceId: string | null;
+  /**
+   * Items remain but nothing is current — the drained (or
+   * never-started) queue a surface may keep showing instead of
+   * dropping to an empty state.
+   */
+  readonly ended: boolean;
 };
 
 type SearchPhase =
@@ -941,6 +969,12 @@ type QueueModelInput = {
   readonly recordings: readonly Recording[];
   readonly likes?: readonly Like[];
   readonly unavailableRecordingIds?: ReadonlySet<string> | undefined;
+  /**
+   * Occurrences whose playback attempt failed — marked 'error' so the
+   * queue doesn't silently retry them on the way through (advance
+   * already steps over the blocked current; the row makes it visible).
+   */
+  readonly failedOccurrenceIds?: ReadonlySet<string> | undefined;
 };
 
 export function toQueueModel(input: QueueModelInput): QueueModel {
@@ -948,59 +982,97 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
   const byId = indexById(recordings);
   const liked = likedIds(input.likes ?? []);
   const unavailable = input.unavailableRecordingIds ?? new Set<string>();
+  const currentIndex = queue.occurrences.findIndex(
+    (o) => o.occurrenceId === queue.currentOccurrenceId,
+  );
+  const failed = new Set(input.failedOccurrenceIds ?? []);
+  // A blocked current is a failed current — mark it even when the
+  // caller didn't pass the playback state through.
+  if (queue.blockedError !== undefined && queue.currentOccurrenceId !== null) {
+    failed.add(queue.currentOccurrenceId);
+  }
   const occurrencesByRecording = new Map<string, number>();
   for (const occurrence of queue.occurrences) {
     const count = occurrencesByRecording.get(occurrence.recordingId) ?? 0;
     occurrencesByRecording.set(occurrence.recordingId, count + 1);
   }
-  const items: QueueItemModel[] = queue.occurrences.map((occurrence) => {
-    const recording = byId.get(occurrence.recordingId);
-    const current = occurrence.occurrenceId === queue.currentOccurrenceId;
-    const row: TrackRowModel =
-      recording === undefined
-        ? {
-          key: occurrence.occurrenceId,
-          title: t('track.unknown'),
-          versionLabel: null,
-          artist: null,
-          durationMs: null,
-          artworkUrl: null,
-          liked: false,
-          playing: current && queue.mode === 'playing',
-          state: 'unavailable',
-          note: t('common.unavailable'),
-          download: null,
-        }
-        : {
-          key: occurrence.occurrenceId,
-          title: recording.title,
-          versionLabel:
-            recording.versionLabels.length === 0
-              ? null
-              : recording.versionLabels.join(' · '),
-          artist: recording.artist,
-          durationMs: recording.durationMs,
-          artworkUrl: pickArtworkUrl(recording.artwork),
-          liked: liked.has(recording.id),
-          playing: current && queue.mode === 'playing',
-          state: unavailable.has(recording.id) ? 'unavailable' : 'available',
-          note: unavailable.has(recording.id) ? t('common.unavailable') : null,
-          download: null,
-        };
-    return {
-      occurrenceId: occurrence.occurrenceId,
-      recordingId: occurrence.recordingId,
-      current,
-      duplicate:
-        (occurrencesByRecording.get(occurrence.recordingId) ?? 0) > 1,
-      row,
-    };
+  const items: QueueItemModel[] = queue.occurrences.map(
+    (occurrence, index) => {
+      const recording = byId.get(occurrence.recordingId);
+      const current = occurrence.occurrenceId === queue.currentOccurrenceId;
+      const isFailed = failed.has(occurrence.occurrenceId);
+      const section: QueueSectionKey =
+        currentIndex === -1
+          ? 'upNext'
+          : index === currentIndex
+            ? 'nowPlaying'
+            : index > currentIndex
+              ? 'upNext'
+              : 'history';
+      const row: TrackRowModel =
+        recording === undefined
+          ? {
+            key: occurrence.occurrenceId,
+            title: t('track.unknown'),
+            versionLabel: null,
+            artist: null,
+            durationMs: null,
+            artworkUrl: null,
+            liked: false,
+            playing: current && queue.mode === 'playing',
+            state: 'unavailable',
+            note: t('common.unavailable'),
+            download: null,
+          }
+          : {
+            key: occurrence.occurrenceId,
+            title: recording.title,
+            versionLabel:
+              recording.versionLabels.length === 0
+                ? null
+                : recording.versionLabels.join(' · '),
+            artist: recording.artist,
+            durationMs: recording.durationMs,
+            artworkUrl: pickArtworkUrl(recording.artwork),
+            liked: liked.has(recording.id),
+            playing: current && queue.mode === 'playing',
+            state: isFailed
+              ? 'error'
+              : unavailable.has(recording.id)
+                ? 'unavailable'
+                : 'available',
+            note: isFailed
+              ? t('queue.failed')
+              : unavailable.has(recording.id)
+                ? t('common.unavailable')
+                : null,
+            download: null,
+          };
+      return {
+        occurrenceId: occurrence.occurrenceId,
+        recordingId: occurrence.recordingId,
+        index,
+        section,
+        current,
+        duplicate:
+          (occurrencesByRecording.get(occurrence.recordingId) ?? 0) > 1,
+        row,
+      };
+    },
+  );
+  const sections: QueueSection[] = (
+    ['nowPlaying', 'upNext', 'history'] as const
+  ).flatMap((key) => {
+    const sectionItems = items.filter((item) => item.section === key);
+    return sectionItems.length === 0 ? [] : [{ key, items: sectionItems }];
   });
   return {
     items,
+    sections,
     mode: queue.mode,
     positionMs: queue.positionMs,
     currentOccurrenceId: queue.currentOccurrenceId,
+    ended: items.length > 0 && queue.currentOccurrenceId === null,
   };
 }
 

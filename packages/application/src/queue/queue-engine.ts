@@ -1,6 +1,6 @@
 import type { AppError } from '../errors.ts';
 import { isSafeNonNegative, isSourceRef } from '../domain.ts';
-import type { QueueOccurrence, SourceRef } from '../domain.ts';
+import type { QueueOccurrence, Recording, SourceRef } from '../domain.ts';
 
 export type QueueMode = 'stopped' | 'paused' | 'playing';
 
@@ -75,6 +75,72 @@ function sameRef(a: SourceRef | null, b: SourceRef | null): boolean {
 }
 
 /**
+ * Which queued occurrence answers a "play now" tap: the first match
+ * at or after the cursor (a pending play wins — replaying it lands
+ * the tap where the queue is headed); when the track only sits
+ * behind the cursor the nearest history entry wins so the replay
+ * rewinds as little as possible. A queue with no cursor is all
+ * pending — the earliest match returns.
+ */
+function pickOccurrence(
+  queue: QueueSnapshot,
+  match: (occurrence: QueueOccurrence) => boolean,
+): string | null {
+  const currentIndex =
+    queue.currentOccurrenceId === null
+      ? 0
+      : queue.occurrences.findIndex(
+          (o) => o.occurrenceId === queue.currentOccurrenceId,
+        );
+  let lastHistory: string | null = null;
+  for (const [index, occurrence] of queue.occurrences.entries()) {
+    if (!match(occurrence)) {
+      continue;
+    }
+    if (index >= currentIndex) {
+      return occurrence.occurrenceId;
+    }
+    lastHistory = occurrence.occurrenceId;
+  }
+  return lastHistory;
+}
+
+/**
+ * Tap-to-play dedupe: a play tap on a recording the queue already
+ * holds reuses its occurrence instead of minting a duplicate —
+ * `pickOccurrence` picks which one. Returns null when the recording
+ * isn't queued at all (the caller enqueues). Deliberate
+ * "add to queue" calls stay additive: repeat entries are a legal
+ * queue shape the row model marks `duplicate`.
+ */
+export function queuedOccurrenceFor(
+  queue: QueueSnapshot,
+  recordingId: string,
+): string | null {
+  return pickOccurrence(queue, (o) => o.recordingId === recordingId);
+}
+
+/**
+ * The same dedupe for a metadata row (search/entity/home card taps):
+ * the tap's source ref matches a queued occurrence's selected ref or
+ * any source ref on its recording.
+ */
+export function queuedOccurrenceForRef(
+  queue: QueueSnapshot,
+  recordings: readonly Recording[],
+  ref: SourceRef,
+): string | null {
+  const byId = new Map(recordings.map((r) => [r.id, r]));
+  return pickOccurrence(
+    queue,
+    (o) =>
+      sameRef(o.selectedRef, ref) ||
+      (byId.get(o.recordingId)?.sourceRefs.some((s) => sameRef(s, ref)) ??
+        false),
+  );
+}
+
+/**
  * Owns the playback queue. Snapshots are immutable; `revision`
  * identifies intent — every intent-changing command ticks exactly
  * once, true no-ops and observed positions do not tick. Ticks are
@@ -88,6 +154,16 @@ export class QueueEngine {
   #positionMs: number;
   #mode: QueueMode;
   #blockedError: AppError | undefined;
+  /**
+   * Occurrences that failed playback this engine lifetime —
+   * `markUnplayable` flags the failed current; a fresh play intent
+   * (autoplaying `select`, `play`, a playing reconcile) clears it so
+   * a retry's verdict decides again; `remove` prunes it. `next()`
+   * steps over flagged rows instead of parking the walk on a
+   * known-dead entry; `previous()` keeps honoring backward intent.
+   * Internal only — availability is a session-scoped observation.
+   */
+  #unplayable = new Set<string>();
   /** Frozen occurrence clones keyed to the revision they were taken at. */
   #occurrenceCache:
     | {
@@ -241,6 +317,11 @@ export class QueueEngine {
 
   select(id: string, autoplay: boolean): void {
     this.#requireIndex(id);
+    if (autoplay) {
+      // A play-intent landing clears the failed mark — the attempt's
+      // own verdict decides whether it flags again.
+      this.#unplayable.delete(id);
+    }
     const mode: QueueMode = autoplay ? 'playing' : 'paused';
     if (
       this.#currentId === id &&
@@ -266,7 +347,17 @@ export class QueueEngine {
     }
     this.#requireTick();
     const index = this.#indexOf(this.#currentId);
-    const nextIndex = index + 1;
+    // Step over entries already failed this session instead of
+    // parking the walk on a known-dead row; an explicit select()
+    // still lands on them — a flagged row is retryable, not gone.
+    let nextIndex = index + 1;
+    while (nextIndex < this.#occurrences.length) {
+      const next = this.#occurrences[nextIndex];
+      if (next === undefined || !this.#unplayable.has(next.occurrenceId)) {
+        break;
+      }
+      nextIndex += 1;
+    }
     if (nextIndex >= this.#occurrences.length) {
       this.#currentId = null;
       this.#positionMs = 0;
@@ -343,6 +434,7 @@ export class QueueEngine {
     this.#requireTick();
     const wasCurrent = this.#currentId === id;
     this.#occurrences.splice(index, 1);
+    this.#unplayable.delete(id);
     if (wasCurrent) {
       this.#blockedError = undefined;
       const successor = this.#occurrences[index];
@@ -407,8 +499,11 @@ export class QueueEngine {
     if (this.#mode === 'playing' && this.#blockedError === undefined) {
       return;
     }
-    // play() on a blocked item is the explicit Retry action.
+    // play() on a blocked item is the explicit Retry action — the
+    // same fresh-attempt intent select(id, true) carries, so the
+    // failed mark clears with it.
     this.#requireTick();
+    this.#unplayable.delete(this.#currentId);
     this.#blockedError = undefined;
     this.#mode = 'playing';
     this.#tick();
@@ -461,6 +556,7 @@ export class QueueEngine {
     this.#requireTick();
     this.#mode = 'paused';
     this.#blockedError = cloneError(error);
+    this.#unplayable.add(this.#currentId);
     this.#tick();
   }
 
@@ -498,6 +594,10 @@ export class QueueEngine {
     this.#positionMs = position;
     this.#mode = mode;
     this.#blockedError = undefined;
+    if (playing && occurrenceId !== null) {
+      // The service reports the row playing — its failed mark is stale.
+      this.#unplayable.delete(occurrenceId);
+    }
     this.#tick();
   }
 

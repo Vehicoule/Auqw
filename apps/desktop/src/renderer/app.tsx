@@ -21,6 +21,8 @@ import {
   ok,
   parseSyncDeltaDocs,
   previewImport,
+  queuedOccurrenceFor,
+  queuedOccurrenceForRef,
   selectionFromSettings,
   serializeSyncDeltaDocs,
 } from '@auqw/application';
@@ -55,6 +57,7 @@ import {
   PlaylistScreen,
   ProviderPickerSheet,
   PushScreen,
+  QueueScreen,
   RowActionsSheet,
   SearchScreen,
   SettingsScreen,
@@ -1224,39 +1227,56 @@ function Main({
     positionMs,
     localeTick,
   ]);
-  const queueModel = useMemo(
-    () =>
-      toQueueModel({
-        queue: state.queue,
-        recordings: state.recordings,
-        likes: state.likes,
-        // Same honesty rule as the library rows: offline + unowned
-        // marks 'unavailable' so a dead press isn't a surprise. The
-        // probe is gated in the controller until web-player gains a
-        // `provider:'local'` route — owned rows flip to playable with
-        // it automatically.
-        unavailableRecordingIds:
-          online === false
-            ? new Set(
-                state.queue.occurrences
-                  .map((o) => o.recordingId)
-                  .filter(
-                    (id) => controller.localPlaybackFor(id) === null,
-                  ),
-              )
-            : undefined,
-      }),
-    [
-      state.queue,
-      state.recordings,
-      state.likes,
-      online,
-      controller,
-      downloads,
-      localTick,
-      localeTick,
-    ],
-  );
+  // playback.type names only the latest failure — the app carries
+  // the set so a row the cursor moved past keeps its 'error' mark;
+  // a fresh attempt for the occurrence clears it, removals prune.
+  const failedQueueIds = useRef(new Set<string>());
+  const queueModel = useMemo(() => {
+    const playback = state.playback;
+    if (playback.type === 'failed') {
+      if (playback.occurrenceId !== null) {
+        failedQueueIds.current.add(playback.occurrenceId);
+      }
+    } else if (playback.type !== 'idle') {
+      failedQueueIds.current.delete(playback.occurrenceId);
+    }
+    const live = new Set(state.queue.occurrences.map((o) => o.occurrenceId));
+    for (const id of failedQueueIds.current) {
+      if (!live.has(id)) {
+        failedQueueIds.current.delete(id);
+      }
+    }
+    return toQueueModel({
+      queue: state.queue,
+      recordings: state.recordings,
+      likes: state.likes,
+      // Same honesty rule as the library rows: offline + unowned
+      // marks 'unavailable' so a dead press isn't a surprise. The
+      // probe is gated in the controller until web-player gains a
+      // `provider:'local'` route — owned rows flip to playable with
+      // it automatically.
+      unavailableRecordingIds:
+        online === false
+          ? new Set(
+              state.queue.occurrences
+                .map((o) => o.recordingId)
+                .filter((id) => controller.localPlaybackFor(id) === null),
+            )
+          : undefined,
+      failedOccurrenceIds:
+        failedQueueIds.current.size === 0 ? undefined : failedQueueIds.current,
+    });
+  }, [
+    state.queue,
+    state.recordings,
+    state.likes,
+    state.playback,
+    online,
+    controller,
+    downloads,
+    localTick,
+    localeTick,
+  ]);
   const libraryModel = useMemo(() => {
     const model = toLibraryModel({
       recordings: state.recordings,
@@ -1731,6 +1751,13 @@ function Main({
       if (!canPlay(recordingId)) {
         return;
       }
+      // Tap-to-play dedupe: a queued track jumps to its occurrence
+      // instead of minting a repeat — 'add to queue' stays additive.
+      const queued = queuedOccurrenceFor(state.queue, recordingId);
+      if (queued !== null) {
+        await session.playOccurrence(queued);
+        return;
+      }
       const enqueued = await session.enqueueRecording(recordingId);
       if (!enqueued.ok) {
         reportResult('action.enqueueTrack', enqueued);
@@ -1738,7 +1765,13 @@ function Main({
       }
       await dispatchPlay('common.play', session.playOccurrence(enqueued.value));
     },
+<<<<<<< HEAD
     [session, canPlay, reportPlay],
+||||||| parent of 442a918 (feat(queue): standard player queue order — now playing, up next, history)
+    [session, canPlay],
+=======
+    [session, state.queue, canPlay],
+>>>>>>> 442a918 (feat(queue): standard player queue order — now playing, up next, history)
   );
 
   // Queue presses and transport follow the same offline rule as
@@ -1836,15 +1869,44 @@ function Main({
     [online, state.recordings, canPlay],
   );
 
+  // Same dedupe as playRecording for metadata taps (search results,
+  // entity rows, home cards): the tap's source ref can match a queued
+  // occurrence or one of its recording's refs before it materializes.
+  const playMeta = useCallback(
+    (meta: TrackMetadata) => {
+      const queued = queuedOccurrenceForRef(
+        state.queue,
+        state.recordings,
+        meta.sourceRef,
+      );
+      return queued === null
+        ? session.addAndPlay(meta)
+        : session.playOccurrence(queued);
+    },
+    [session, state.queue, state.recordings],
+  );
+
   const onResultPress = useCallback(
     (row: TrackRowModel) => {
       const meta = resultMeta.current.get(row.key);
       if (meta !== undefined && canPlayMeta(meta)) {
         recordRecentSearch(query);
+<<<<<<< HEAD
         void dispatchPlay('action.playResult', session.addAndPlay(meta));
+||||||| parent of 442a918 (feat(queue): standard player queue order — now playing, up next, history)
+        void session.addAndPlay(meta);
+=======
+        void playMeta(meta);
+>>>>>>> 442a918 (feat(queue): standard player queue order — now playing, up next, history)
       }
     },
+<<<<<<< HEAD
     [session, canPlayMeta, query, recordRecentSearch, reportPlay],
+||||||| parent of 442a918 (feat(queue): standard player queue order — now playing, up next, history)
+    [session, canPlayMeta, query, recordRecentSearch],
+=======
+    [canPlayMeta, playMeta, query, recordRecentSearch],
+>>>>>>> 442a918 (feat(queue): standard player queue order — now playing, up next, history)
   );
 
   const onSettingsSelect = useCallback(
@@ -2902,10 +2964,16 @@ function Main({
                   if (searchState.type === 'content') {
                     recordRecentSearch(searchState.query);
                   }
+<<<<<<< HEAD
                   void dispatchPlay(
                     'action.playResult',
                     session.addAndPlay(meta),
                   );
+||||||| parent of 442a918 (feat(queue): standard player queue order — now playing, up next, history)
+                  void session.addAndPlay(meta);
+=======
+                  void playMeta(meta);
+>>>>>>> 442a918 (feat(queue): standard player queue order — now playing, up next, history)
                 }
                 return;
               }
@@ -3062,10 +3130,16 @@ function Main({
             onPressItem={(row) => {
               const meta = metaFor(row);
               if (meta !== undefined && canPlayMeta(meta)) {
+<<<<<<< HEAD
                 void dispatchPlay(
                   'action.playResult',
                   session.addAndPlay(meta),
                 );
+||||||| parent of 442a918 (feat(queue): standard player queue order — now playing, up next, history)
+                void session.addAndPlay(meta);
+=======
+                void playMeta(meta);
+>>>>>>> 442a918 (feat(queue): standard player queue order — now playing, up next, history)
               }
             }}
             onAddToPlaylist={(row) => {
@@ -3235,6 +3309,19 @@ function Main({
                   onToggleQueueReorder={() => setReordering((v) => !v)}
                   onMoveQueueItem={onMoveQueueItem}
                   onMoveQueueItemTo={onMoveQueueItemTo}
+                />
+              ) : queueModel.ended ? (
+                // An ended queue keeps its surface: the stage column
+                // shows it instead of collapsing to the empty state —
+                // a row press replays through playOccurrence.
+                <QueueScreen
+                  queue={queueModel}
+                  reordering={reordering}
+                  onToggleReorder={() => setReordering((v) => !v)}
+                  onPressItem={playQueueOccurrence}
+                  onRemoveItem={(id) => void session.removeOccurrence(id)}
+                  onMoveItem={onMoveQueueItem}
+                  onMoveItemTo={onMoveQueueItemTo}
                 />
               ) : (
                 <EmptyState

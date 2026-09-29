@@ -134,11 +134,38 @@ function checkQueueModel(queue: QueueModel, label: string): void {
   } else {
     assert(currents.length === 1, `${label}: expected exactly one current`);
   }
+  // Sections partition every item, non-empty, in display order
+  // nowPlaying → upNext → history; item.index is the canonical slot.
+  const rank = { nowPlaying: 0, upNext: 1, history: 2 };
+  let prevRank = -1;
+  const sectioned: string[] = [];
+  for (const section of queue.sections) {
+    assert(section.items.length > 0, `${label}: empty ${section.key} section`);
+    assert(
+      rank[section.key] > prevRank,
+      `${label}: section order broke at ${section.key}`,
+    );
+    prevRank = rank[section.key];
+    for (const item of section.items) {
+      assertEqual(item.section, section.key, `${label}: section mismatch`);
+      sectioned.push(item.occurrenceId);
+    }
+  }
+  assertEqual(
+    new Set(sectioned).size,
+    queue.items.length,
+    `${label}: sections must cover every item once`,
+  );
   for (const item of queue.items) {
     checkTrackRowModel(item.row, `${label} item ${item.occurrenceId}`);
     assert(
       item.row.key === item.occurrenceId,
       `${label}: row key must be occurrenceId for stable list keys`,
+    );
+    assertEqual(
+      queue.items[item.index]?.occurrenceId,
+      item.occurrenceId,
+      `${label}: item.index must be its canonical slot`,
     );
   }
 }
@@ -458,6 +485,55 @@ function testQueueMapper(): void {
   });
   const ghost = sparse.items[0];
   assert(ghost !== undefined && ghost.row.state === 'unavailable');
+  // Sections: current leads, pending follows, earlier entries trail.
+  assertEqual(
+    fixtureQueueModel.sections.map((s) => s.key).join(','),
+    'nowPlaying,upNext',
+    'fixture queue sections',
+  );
+  const mid = toQueueModel({
+    queue: {
+      ...fixtureQueue,
+      currentOccurrenceId: 'occ-4',
+      mode: 'paused',
+      positionMs: 0,
+    },
+    recordings: fixtureRecordings,
+  });
+  assertEqual(
+    mid.sections.map((s) => s.key).join(','),
+    'nowPlaying,upNext,history',
+    'a mid-queue cursor gains a history section',
+  );
+  assertEqual(
+    mid.sections.flatMap((s) => s.items.map((i) => i.occurrenceId)).join(','),
+    'occ-4,occ-5,occ-6,occ-7,occ-8,occ-1,occ-2,occ-3',
+    'display order is current → pending → earlier',
+  );
+  const ended = toQueueModel({
+    queue: {
+      ...fixtureQueue,
+      currentOccurrenceId: null,
+      mode: 'stopped',
+      positionMs: 0,
+    },
+    recordings: fixtureRecordings,
+  });
+  assert(ended.ended, 'items with no cursor is an ended queue');
+  assert(
+    ended.sections.every((s) => s.key === 'upNext'),
+    'an ended queue lists everything as up next',
+  );
+  const failed = toQueueModel({
+    queue: fixtureQueue,
+    recordings: fixtureRecordings,
+    failedOccurrenceIds: new Set(['occ-5']),
+  });
+  assertEqual(
+    failed.items.find((i) => i.occurrenceId === 'occ-5')?.row.state,
+    'error',
+    'a failed occurrence marks its row',
+  );
 }
 
 function testLibraryAndSettings(): void {

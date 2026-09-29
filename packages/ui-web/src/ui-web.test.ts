@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { ReactNode } from 'react';
 import { readdirSync, readFileSync } from 'node:fs';
 import { register } from 'node:module';
+import { toQueueModel } from '@auqw/ui-shared';
 import {
   fixtureCollectionModels,
   fixtureCorrectionsModel,
@@ -10,14 +11,18 @@ import {
   fixtureEntityModelError,
   fixtureHomeModel,
   fixtureLibraryModel,
+  fixtureLikes,
   fixtureLyrics,
   fixtureLyricsPlain,
   fixtureNavItems,
   fixturePlayerFailed,
   fixturePlayerPlaying,
   fixturePlaylistModel,
+  fixtureQueue,
   fixtureQueueModel,
   fixtureRadioModels,
+  fixtureRecordings,
+  fixtureUnavailableIds,
   fixtureRowStates,
   fixtureSearchStates,
   fixtureSettingsModel,
@@ -246,6 +251,56 @@ function render(node: ReactNode): string {
   check('queue renders items in order', ordered);
   check('queue marks current item', markup.includes('now playing'));
   assertIncludes('queue count renders', markup, `${fixtureQueueModel.items.length} tracks`);
+  assertIncludes('queue labels the pending section', markup, 'up next');
+  check(
+    'sections render now-playing then up-next',
+    markup.indexOf('now playing') < markup.indexOf('up next'),
+  );
+  // Repeat occurrences read as a pill, not inline catalog metadata.
+  assertIncludes('repeat renders as a pill', markup, 'repeat');
+  const subline = markup.indexOf('repeat ·');
+  check('repeat stays out of the subtitle', subline === -1);
+}
+{
+  // A mid-queue cursor lists history after the pending entries.
+  const mid = toQueueModel({
+    queue: {
+      ...fixtureQueue,
+      currentOccurrenceId: 'occ-4',
+      mode: 'paused',
+      positionMs: 0,
+    },
+    recordings: fixtureRecordings,
+    likes: fixtureLikes,
+    unavailableRecordingIds: fixtureUnavailableIds,
+  });
+  const markup = render(h(QueueScreen, { queue: mid }));
+  assertIncludes('history section renders', markup, 'history');
+  const displayTitles = mid.sections.flatMap((section) =>
+    section.items.map((item) => item.row.title),
+  );
+  const nowPlayingAt = markup.indexOf('now playing');
+  const upNextAt = markup.indexOf('up next');
+  const historyAt = markup.indexOf('history');
+  check(
+    'section headers order now-playing → up-next → history',
+    nowPlayingAt !== -1 &&
+      upNextAt !== -1 &&
+      historyAt !== -1 &&
+      nowPlayingAt < upNextAt &&
+      upNextAt < historyAt,
+  );
+  let cursor = nowPlayingAt;
+  let sectioned = cursor !== -1;
+  for (const title of displayTitles) {
+    const at = markup.indexOf(title, cursor + 1);
+    if (at === -1) {
+      sectioned = false;
+      break;
+    }
+    cursor = at;
+  }
+  check('queue renders current → pending → history', sectioned);
 }
 {
   const markup = render(

@@ -26,6 +26,7 @@ import type {
   LyricsModel,
   PlayerModel,
   QueueModel,
+  QueueSectionKey,
   RadioModel,
   ReviewRowModel,
   SearchStateModel,
@@ -77,6 +78,18 @@ export type ControlView = {
 };
 
 // ---- queue ------------------------------------------------------------
+
+/** Localized header label for a queue display section. */
+export function queueSectionLabel(key: QueueSectionKey): string {
+  switch (key) {
+    case 'nowPlaying':
+      return t('queue.nowPlaying');
+    case 'upNext':
+      return t('queue.upNext');
+    case 'history':
+      return t('queue.history');
+  }
+}
 
 export type QueueScreenHandlers = {
   readonly onToggleReorder?: (() => void) | undefined;
