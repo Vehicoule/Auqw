@@ -56,7 +56,6 @@ import {
   jsonEquals,
 } from './entry-order.ts';
 import type {
-  ChangeEntry,
   LocalWrite,
   MaterializedRecord,
   MergeOutcome,
