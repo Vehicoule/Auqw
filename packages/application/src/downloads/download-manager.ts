@@ -156,17 +156,15 @@ export class DownloadManager {
 
     // Keep .part files for rows that own resumable bytes — including
     // failed_with_retry, whose explicit retry resumes the prefix.
-    const keep = new Set<string>();
-    for (const row of staged.values()) {
-      if (
-        row.state === 'requested' ||
-        row.state === 'transferring' ||
-        row.state === 'failed_with_retry'
-      ) {
-        keep.add(`${row.filePath}.part`);
-      }
-    }
-    const swept = await this.#deps.transfer.sweepPartials([...keep], signal);
+    const resumable = new Set<DownloadState>([
+      'requested',
+      'transferring',
+      'failed_with_retry',
+    ]);
+    const keep = [...staged.values()]
+      .filter((row) => resumable.has(row.state))
+      .map((row) => `${row.filePath}.part`);
+    const swept = await this.#deps.transfer.sweepPartials(keep, signal);
     if (!swept.ok) {
       return failed(swept);
     }
@@ -252,9 +250,7 @@ export class DownloadManager {
     // just the next row selection.
     try {
       this.#unsubConnectivity = this.#deps.connectivity.subscribe((snap) => {
-        const meteredAllowed =
-          this.#deps.settings().downloadMetered ?? false;
-        if (!snap.online || (snap.metered && !meteredAllowed)) {
+        if (!this.#netEligible(snap)) {
           void this.#demoteActive().then((demoted) => {
             if (!demoted.ok) {
               this.#log(
@@ -339,12 +335,11 @@ export class DownloadManager {
   }
 
   recordFor(recordingId: string): DownloadRecord | null {
-    for (const row of this.#rows.values()) {
-      if (row.recordingId === recordingId && row.state !== 'removing') {
-        return row;
-      }
-    }
-    return null;
+    return (
+      [...this.#rows.values()].find(
+        (row) => row.recordingId === recordingId && row.state !== 'removing',
+      ) ?? null
+    );
   }
 
   /**
@@ -550,10 +545,7 @@ export class DownloadManager {
       return used;
     }
     const free = await this.#deps.transfer.freeBytes(signal);
-    if (!free.ok) {
-      return free;
-    }
-    return ok({ bytes: used.value, free: free.value });
+    return free.ok ? ok({ bytes: used.value, free: free.value }) : free;
   }
 
   /** Settings toggle (e.g. metered opt-in) — re-run the scheduler. */
@@ -571,12 +563,9 @@ export class DownloadManager {
    */
   async reevaluateEligibility(): Promise<void> {
     const snap = await this.#deps.connectivity.snapshot();
-    if (snap.ok) {
-      const meteredAllowed = this.#deps.settings().downloadMetered ?? false;
-      if (!snap.value.online || (snap.value.metered && !meteredAllowed)) {
-        void this.#demoteActive();
-        return;
-      }
+    if (snap.ok && !this.#netEligible(snap.value)) {
+      void this.#demoteActive();
+      return;
     }
     void this.#pump();
   }
@@ -600,13 +589,7 @@ export class DownloadManager {
         changed = true;
       }
     }
-    if (changed) {
-      const persisted = await this.#persist();
-      if (!persisted.ok) {
-        return persisted;
-      }
-    }
-    return ok(undefined);
+    return changed ? this.#persist() : ok(undefined);
   }
 
   // ---- internals -------------------------------------------------------
@@ -617,6 +600,14 @@ export class DownloadManager {
       deadlineMs: this.#deps.clock.nowMs() + RESOLVE_DEADLINE_MS,
       signal,
     };
+  }
+
+  /** online + (unmetered | `downloadMetered`) — shared edge/pump gate. */
+  #netEligible(snap: { readonly online: boolean; readonly metered: boolean }): boolean {
+    return (
+      snap.online &&
+      (!snap.metered || (this.#deps.settings().downloadMetered ?? false))
+    );
   }
 
   #bandFor(recordingId: string): number {
@@ -660,27 +651,27 @@ export class DownloadManager {
    * idempotent (a later commit just repeats the newest data).
    */
   #persist(snapshot?: readonly DownloadRecord[]): Promise<Result<void>> {
-    const run = (): Promise<Result<void>> =>
-      this.#deps.storage.commit(
-        // Callers that pass a snapshot (init staging) commit exactly
-        // that set; the default reads the live map at run time, so a
-        // queued commit carries the newest rows.
-        { downloads: snapshot !== undefined ? [...snapshot] : [...this.#rows.values()] },
-        {
-          requestId: 'persist',
-          deadlineMs: this.#deps.clock.nowMs() + RESOLVE_DEADLINE_MS,
-          signal: NEVER_CANCEL,
-        },
-      );
-    // A throwing commit must not poison the chain — the next persist
-    // still runs and carries the newest rows.
-    const tail = this.#persistTail.then(async () => {
+    // Callers that pass a snapshot (init staging) commit exactly that
+    // set; the default reads the live map at run time, so a queued
+    // commit carries the newest rows. A throwing commit must not
+    // poison the chain — the next persist still runs.
+    const tail = this.#persistTail.then(async (): Promise<Result<void>> => {
       try {
-        return await run();
+        return await this.#deps.storage.commit(
+          { downloads: [...(snapshot ?? this.#rows.values())] },
+          {
+            requestId: 'persist',
+            deadlineMs: this.#deps.clock.nowMs() + RESOLVE_DEADLINE_MS,
+            signal: NEVER_CANCEL,
+          },
+        );
       } catch (thrown) {
-        const message =
-          thrown instanceof Error ? thrown.message : 'persist failed';
-        return err(appError('internal', message));
+        return err(
+          appError(
+            'internal',
+            thrown instanceof Error ? thrown.message : 'persist failed',
+          ),
+        );
       }
     });
     this.#persistTail = tail;
@@ -737,10 +728,7 @@ export class DownloadManager {
     // Serialize per recording: a concurrent request() awaits this
     // promise instead of colliding on UNIQUE(recording_id).
     const key = row.recordingId;
-    const pending = this.#removals.get(key);
-    if (pending !== undefined) {
-      await pending;
-    }
+    await this.#removals.get(key);
     const operation = this.#removeRowInner(row, signal);
     this.#removals.set(key, operation);
     try {
@@ -779,11 +767,7 @@ export class DownloadManager {
     // list() and see the row gone; without this the last event they
     // saw (`removing`) still contained it.
     this.#emit(marked.value);
-    const persisted = await this.#persist();
-    if (!persisted.ok) {
-      return persisted;
-    }
-    return ok(undefined);
+    return this.#persist();
   }
 
   /**
@@ -811,15 +795,10 @@ export class DownloadManager {
           return;
         }
         const net = await this.#deps.connectivity.snapshot();
-        if (!net.ok) {
+        // Offline or metered-gated: honest wait — the row stays
+        // 'requested' for the next edge/kick.
+        if (!net.ok || !this.#netEligible(net.value)) {
           return;
-        }
-        if (!net.value.online) {
-          return; // honest wait — stay 'requested'
-        }
-        const meteredAllowed = this.#deps.settings().downloadMetered ?? false;
-        if (net.value.metered && !meteredAllowed) {
-          return; // metered gate — waits for unmetered or the setting
         }
         // Claim it synchronously before the next await so a re-entrant
         // pump can't double-start the same row.

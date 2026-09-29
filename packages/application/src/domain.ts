@@ -233,6 +233,11 @@ export function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
+/** Membership guard for a string-valued enum set. */
+function isIn(set: ReadonlySet<string>, value: unknown): boolean {
+  return typeof value === 'string' && set.has(value);
+}
+
 function isSimilarity(value: unknown): value is number {
   return typeof value === 'number' && value >= 0 && value <= 1;
 }
@@ -242,7 +247,7 @@ function isVersionLabelArray(value: unknown): value is readonly VersionLabel[] {
     Array.isArray(value) &&
     value.length <= 16 &&
     new Set(value).size === value.length &&
-    value.every((l) => typeof l === 'string' && VERSION_LABELS.has(l))
+    value.every((l) => isIn(VERSION_LABELS, l))
   );
 }
 
@@ -260,11 +265,12 @@ export function isStorefront(value: unknown): value is string | null {
  */
 function httpsHost(url: string): string | null {
   if (!url.startsWith('https://')) return null;
-  const authority = url.slice('https://'.length).split(/[/?#]/)[0];
-  if (authority === undefined || authority === '') return null;
-  if (authority.includes('@') || authority.includes('[')) return null;
-  const host = authority.split(':')[0];
-  return host === undefined || host === '' ? null : host;
+  const authority = url.slice('https://'.length).split(/[/?#]/)[0] ?? '';
+  if (authority === '' || authority.includes('@') || authority.includes('[')) {
+    return null;
+  }
+  const host = authority.split(':')[0] ?? '';
+  return host === '' ? null : host;
 }
 
 const IP_V4_LITERAL = /^\d{1,3}(\.\d{1,3}){3}$/;
@@ -291,33 +297,31 @@ export function isPublicHttpsUrl(url: string): boolean {
   const name = host.toLowerCase();
   // Same public-DNS-name test as the manifest grammar: charset, at
   // least one dot, no empty label, no bare IP, no `.localhost`.
-  if (!/^[a-z0-9.-]+$/.test(name)) return false;
   const labels = name.split('.');
-  if (labels.length < 2) return false;
-  if (labels.some((label) => label === '')) return false;
   const tld = labels[labels.length - 1];
-  if (tld === undefined || /^\d+$/.test(tld)) return false;
-  if (name.endsWith('.localhost')) return false;
-  return !IP_V4_LITERAL.test(name);
+  return (
+    /^[a-z0-9.-]+$/.test(name) &&
+    labels.length >= 2 &&
+    labels.every((label) => label !== '') &&
+    tld !== undefined &&
+    !/^\d+$/.test(tld) &&
+    !name.endsWith('.localhost') &&
+    !IP_V4_LITERAL.test(name)
+  );
 }
 
 export function isArtworkRef(value: unknown): value is ArtworkRef {
-  if (!isRecord(value) || !hasExactKeys(value, ['url', 'width', 'height'])) {
-    return false;
-  }
-  if (!isString(value['url'], 2048) || !isPublicHttpsUrl(value['url'])) {
-    return false;
-  }
-  for (const key of ['width', 'height'] as const) {
-    const dim = value[key];
-    if (
-      dim !== null &&
-      !(typeof dim === 'number' && Number.isSafeInteger(dim) && dim >= 1)
-    ) {
-      return false;
-    }
-  }
-  return true;
+  const isDim = (dim: unknown): boolean =>
+    dim === null ||
+    (typeof dim === 'number' && Number.isSafeInteger(dim) && dim >= 1);
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ['url', 'width', 'height']) &&
+    isString(value['url'], 2048) &&
+    isPublicHttpsUrl(value['url']) &&
+    isDim(value['width']) &&
+    isDim(value['height'])
+  );
 }
 
 export function isSourceRef(value: unknown): value is SourceRef {
@@ -325,8 +329,7 @@ export function isSourceRef(value: unknown): value is SourceRef {
     isRecord(value) &&
     hasExactKeys(value, ['provider', 'kind', 'id']) &&
     isString(value['provider'], 64) &&
-    typeof value['kind'] === 'string' &&
-    SOURCE_REF_KINDS.has(value['kind']) &&
+    isIn(SOURCE_REF_KINDS, value['kind']) &&
     isString(value['id'], 512)
   );
 }
@@ -337,11 +340,7 @@ export function isTrackRef(value: unknown): value is SourceRef {
 }
 
 export function isEntityRef(value: unknown): value is EntityRef {
-  return (
-    isSourceRef(value) &&
-    typeof value.kind === 'string' &&
-    ENTITY_KINDS.has(value.kind)
-  );
+  return isSourceRef(value) && isIn(ENTITY_KINDS, value.kind);
 }
 
 function isMatchEvidence(value: unknown): value is MatchEvidence {
@@ -371,8 +370,7 @@ export function isSourceMapping(value: unknown): value is SourceMapping {
     isRecord(value) &&
     hasExactKeys(value, ['ref', 'status', 'matchedAtMs', 'evidence']) &&
     isTrackRef(value['ref']) &&
-    typeof value['status'] === 'string' &&
-    MAPPING_STATUSES.has(value['status']) &&
+    isIn(MAPPING_STATUSES, value['status']) &&
     isSafeNonNegative(value['matchedAtMs']) &&
     isMatchEvidence(value['evidence'])
   );
@@ -465,30 +463,31 @@ export function isRecording(value: unknown): value is Recording {
     hasUniqueSourceRefs(value['sourceRefs']) &&
     Array.isArray(value['mappings']) &&
     value['mappings'].every(isSourceMapping) &&
-    typeof value['provenance'] === 'string' &&
-    RECORDING_PROVENANCES.has(value['provenance'])
+    isIn(RECORDING_PROVENANCES, value['provenance'])
   );
 }
-
-const SETTINGS_KEYS = [
-  'catalogProvider',
-  'playbackProvider',
-  'storefront',
-  'qualityKbps',
-  'theme',
-  'prefetch',
-];
 
 export function isSettings(value: unknown): value is Settings {
   return (
     isRecord(value) &&
-    hasKeys(value, SETTINGS_KEYS, [
-      'lyricsProvider',
-      'radioProvider',
-      'artworkCacheBytes',
-      'downloadMetered',
-      'language',
-    ]) &&
+    hasKeys(
+      value,
+      [
+        'catalogProvider',
+        'playbackProvider',
+        'storefront',
+        'qualityKbps',
+        'theme',
+        'prefetch',
+      ],
+      [
+        'lyricsProvider',
+        'radioProvider',
+        'artworkCacheBytes',
+        'downloadMetered',
+        'language',
+      ],
+    ) &&
     isString(value['catalogProvider'], 64) &&
     isString(value['playbackProvider'], 64) &&
     isStorefront(value['storefront']) &&
@@ -496,8 +495,7 @@ export function isSettings(value: unknown): value is Settings {
     Number.isSafeInteger(value['qualityKbps']) &&
     value['qualityKbps'] >= 1 &&
     value['qualityKbps'] <= 512 &&
-    typeof value['theme'] === 'string' &&
-    THEMES.has(value['theme']) &&
+    isIn(THEMES, value['theme']) &&
     typeof value['prefetch'] === 'boolean' &&
     (value['lyricsProvider'] === undefined ||
       isOptString(value['lyricsProvider'], 64)) &&
@@ -519,8 +517,7 @@ export function isLike(value: unknown): value is Like {
   return (
     isRecord(value) &&
     hasExactKeys(value, ['entityKind', 'targetId', 'likedAtMs']) &&
-    typeof value['entityKind'] === 'string' &&
-    LIKE_ENTITY_KINDS.has(value['entityKind']) &&
+    isIn(LIKE_ENTITY_KINDS, value['entityKind']) &&
     isString(value['targetId'], 64) &&
     isSafeNonNegative(value['likedAtMs'])
   );
@@ -549,14 +546,14 @@ function isAppErrorLike(value: unknown): boolean {
 
 /** Mirrors the QueueEngine legal-state contract. */
 export function isQueueSnapshot(value: unknown): value is QueueSnapshot {
-  const required = [
-    'revision',
-    'occurrences',
-    'currentOccurrenceId',
-    'positionMs',
-    'mode',
-  ];
-  if (!isRecord(value) || !hasKeys(value, required, ['blockedError'])) {
+  if (
+    !isRecord(value) ||
+    !hasKeys(
+      value,
+      ['revision', 'occurrences', 'currentOccurrenceId', 'positionMs', 'mode'],
+      ['blockedError'],
+    )
+  ) {
     return false;
   }
   const {
@@ -594,12 +591,9 @@ export function isQueueSnapshot(value: unknown): value is QueueSnapshot {
   );
 }
 
-export function recordingFromMetadata(
-  metadata: TrackMetadata,
-  id: string,
-): Recording {
+/** The Recording fields a provider metadata record refreshes. */
+function audioFields(metadata: TrackMetadata) {
   return {
-    id,
     title: metadata.title,
     artist: metadata.artist,
     album: metadata.album,
@@ -608,8 +602,18 @@ export function recordingFromMetadata(
     artwork: metadata.artwork,
     explicit: metadata.explicit,
     genre: metadata.genre,
-    isrc: metadata.isrc ?? null,
     versionLabels: extractVersionLabels(metadata.title, metadata.explicit),
+  };
+}
+
+export function recordingFromMetadata(
+  metadata: TrackMetadata,
+  id: string,
+): Recording {
+  return {
+    id,
+    ...audioFields(metadata),
+    isrc: metadata.isrc ?? null,
     sourceRefs: [metadata.sourceRef],
     mappings: [],
     provenance:
@@ -629,16 +633,8 @@ export function mergeRecordingMetadata(
 ): Recording {
   return {
     ...recording,
-    title: metadata.title,
-    artist: metadata.artist,
-    album: metadata.album,
-    durationMs: metadata.durationMs,
-    releaseYear: metadata.releaseYear,
-    artwork: metadata.artwork,
-    explicit: metadata.explicit,
-    genre: metadata.genre,
+    ...audioFields(metadata),
     isrc: metadata.isrc ?? recording.isrc,
-    versionLabels: extractVersionLabels(metadata.title, metadata.explicit),
   };
 }
 
@@ -751,31 +747,14 @@ const DOWNLOAD_STATES: ReadonlySet<string> = new Set([
 ]);
 
 function isDownloadState(value: unknown): value is DownloadState {
-  return typeof value === 'string' && DOWNLOAD_STATES.has(value);
+  return isIn(DOWNLOAD_STATES, value);
 }
 
 export function isDownloadRecord(value: unknown): value is DownloadRecord {
   if (!isRecord(value)) {
     return false;
   }
-  const {
-    downloadId,
-    recordingId,
-    provider,
-    sourceRef,
-    filePath,
-    bytes,
-    state,
-    committedOffset,
-    checksum,
-    mime,
-    itag,
-    expiresAtMs,
-    error,
-    priority,
-    requestedMs,
-    downloadedMs,
-  } = value;
+  const error = value['error'];
   return (
     hasExactKeys(value, [
       'downloadId',
@@ -795,40 +774,39 @@ export function isDownloadRecord(value: unknown): value is DownloadRecord {
       'requestedMs',
       'downloadedMs',
     ]) &&
-    isString(downloadId, 64) &&
-    isString(recordingId, 64) &&
-    isString(provider, 64) &&
-    isTrackRef(sourceRef) &&
-    isString(filePath, 1024) &&
-    isSafeNonNegative(bytes) &&
-    isDownloadState(state) &&
-    isSafeNonNegative(committedOffset) &&
-    committedOffset <= bytes &&
-    (checksum === null ||
-      (typeof checksum === 'string' && /^[0-9a-f]{64}$/.test(checksum))) &&
-    isOptString(mime, 128) &&
-    (itag === null ||
-      (typeof itag === 'number' && Number.isSafeInteger(itag))) &&
-    isOptSafeNonNegative(expiresAtMs) &&
+    isString(value['downloadId'], 64) &&
+    isString(value['recordingId'], 64) &&
+    isString(value['provider'], 64) &&
+    isTrackRef(value['sourceRef']) &&
+    isString(value['filePath'], 1024) &&
+    isSafeNonNegative(value['bytes']) &&
+    isDownloadState(value['state']) &&
+    isSafeNonNegative(value['committedOffset']) &&
+    value['committedOffset'] <= value['bytes'] &&
+    (value['checksum'] === null ||
+      (typeof value['checksum'] === 'string' &&
+        /^[0-9a-f]{64}$/.test(value['checksum']))) &&
+    isOptString(value['mime'], 128) &&
+    (value['itag'] === null ||
+      (typeof value['itag'] === 'number' &&
+        Number.isSafeInteger(value['itag']))) &&
+    isOptSafeNonNegative(value['expiresAtMs']) &&
     (error === null ||
       (isRecord(error) &&
         hasExactKeys(error, ['kind', 'message']) &&
         isString(error['kind'], 64) &&
         typeof error['message'] === 'string' &&
         error['message'].length <= 2048)) &&
-    isSafeNonNegative(priority) &&
-    isSafeNonNegative(requestedMs) &&
-    isOptSafeNonNegative(downloadedMs) &&
-    (state !== 'available' || downloadedMs !== null)
+    isSafeNonNegative(value['priority']) &&
+    isSafeNonNegative(value['requestedMs']) &&
+    isOptSafeNonNegative(value['downloadedMs']) &&
+    (value['state'] !== 'available' || value['downloadedMs'] !== null)
   );
 }
 
 export function isLocalSource(value: unknown): value is LocalSource {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const { sourceId, treeUri, label, addedMs, lastScanMs } = value;
   return (
+    isRecord(value) &&
     hasExactKeys(value, [
       'sourceId',
       'treeUri',
@@ -836,33 +814,17 @@ export function isLocalSource(value: unknown): value is LocalSource {
       'addedMs',
       'lastScanMs',
     ]) &&
-    isString(sourceId, 64) &&
-    isString(treeUri, 2048) &&
-    isString(label, 512) &&
-    isSafeNonNegative(addedMs) &&
-    isOptSafeNonNegative(lastScanMs)
+    isString(value['sourceId'], 64) &&
+    isString(value['treeUri'], 2048) &&
+    isString(value['label'], 512) &&
+    isSafeNonNegative(value['addedMs']) &&
+    isOptSafeNonNegative(value['lastScanMs'])
   );
 }
 
 export function isLocalFile(value: unknown): value is LocalFile {
-  if (!isRecord(value)) {
-    return false;
-  }
-  const {
-    fileId,
-    sourceId,
-    docId,
-    size,
-    fingerprint,
-    modifiedMs,
-    title,
-    artist,
-    album,
-    durationMs,
-    genre,
-    recordingId,
-  } = value;
   return (
+    isRecord(value) &&
     hasExactKeys(value, [
       'fileId',
       'sourceId',
@@ -877,18 +839,18 @@ export function isLocalFile(value: unknown): value is LocalFile {
       'genre',
       'recordingId',
     ]) &&
-    isString(fileId, 128) &&
-    isString(sourceId, 64) &&
-    isString(docId, 2048) &&
-    isSafeNonNegative(size) &&
-    isString(fingerprint, 128) &&
-    isOptSafeNonNegative(modifiedMs) &&
-    isOptString(title, 512) &&
-    isOptString(artist, 512) &&
-    isOptString(album, 512) &&
-    isOptSafeNonNegative(durationMs) &&
-    isOptString(genre, 512) &&
-    isString(recordingId, 64)
+    isString(value['fileId'], 128) &&
+    isString(value['sourceId'], 64) &&
+    isString(value['docId'], 2048) &&
+    isSafeNonNegative(value['size']) &&
+    isString(value['fingerprint'], 128) &&
+    isOptSafeNonNegative(value['modifiedMs']) &&
+    isOptString(value['title'], 512) &&
+    isOptString(value['artist'], 512) &&
+    isOptString(value['album'], 512) &&
+    isOptSafeNonNegative(value['durationMs']) &&
+    isOptString(value['genre'], 512) &&
+    isString(value['recordingId'], 64)
   );
 }
 
