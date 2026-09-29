@@ -28,7 +28,7 @@ import type {
  * surfaces.
  */
 
-export type ExpoTransferDeps = {
+type ExpoTransferDeps = {
   /** Injectable for tests; defaults to `<Paths.document>/downloads`. */
   readonly directory?: Directory;
 };

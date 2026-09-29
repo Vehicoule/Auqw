@@ -1,5 +1,4 @@
 import type {
-  Result,
   SyncAdvertiseOpts,
   SyncDiscoveredPeer,
   SyncAdvertiser,

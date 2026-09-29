@@ -50,7 +50,7 @@ import { nativeError, type AuqwSyncNative } from './auqw-expo-surface.ts';
  * the identity resolves BEFORE the engine and client exist.
  */
 
-export type ExpoSyncDeps = {
+type ExpoSyncDeps = {
   readonly host: AuqwSyncNative;
   /** Durable sync-log custody — SqliteSyncLogStore on the app DB. */
   readonly logStore: SyncLogStore;
@@ -92,7 +92,7 @@ export type ExpoSyncSurface = {
   } | null;
 };
 
-export type ExpoPairHostSurface = {
+type ExpoPairHostSurface = {
   /** Bind the listener + advertise — resolves the bound port. */
   start(signal?: CancellationSignal): Promise<Result<{ port: number }>>;
   /**

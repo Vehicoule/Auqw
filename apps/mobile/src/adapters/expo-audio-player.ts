@@ -110,7 +110,7 @@ function zeroTrace(requestId: string, elapsedMs: number): AttemptTrace {
   };
 }
 
-export type ExpoAudioPlayerDeps = {
+type ExpoAudioPlayerDeps = {
   readonly providers: ReadonlyMap<string, ProviderPort>;
   readonly ids: IdPort;
   readonly qualityKbps: number;

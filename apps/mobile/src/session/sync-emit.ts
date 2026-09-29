@@ -14,7 +14,7 @@ import type {
  * surface lands — a platform that never becomes syncable (iOS, web
  * build) sheds the tail instead of growing memory forever.
  */
-export type SyncEmit = (
+type SyncEmit = (
   writes: readonly LocalWrite[],
   signal?: CancellationSignal,
 ) => Promise<Result<unknown>>;

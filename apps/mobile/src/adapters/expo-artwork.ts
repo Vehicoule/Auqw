@@ -104,7 +104,7 @@ const guardIo = async <T>(
   }
 };
 
-export type ExpoArtworkDeps = {
+type ExpoArtworkDeps = {
   readonly storage: StoragePort;
   readonly clock: ClockPort;
   readonly ids: IdPort;
