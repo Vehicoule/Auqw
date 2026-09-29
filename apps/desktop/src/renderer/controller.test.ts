@@ -667,9 +667,10 @@ function prepareCalls(player: FakePlayer) {
   return player.calls.filter((c) => c.method === 'prepare');
 }
 
-// 10. An 'available' download row makes the session attach the owned
-// file — `provider:'local'` carrying the media-dir `file://` URI —
-// even online, and even over a provider mapping.
+// 10. An 'available' download row can't reach `provider:'local'` —
+// the web player has no local route, so the probe stays null and the
+// session falls back to the provider ref. Re-point this at the local
+// URI once the Phase-4 adapter lands.
 async function downloadResolvesLocal(): Promise<void> {
   const rig = fakeApi();
   const player = new FakePlayer();
@@ -696,11 +697,11 @@ async function downloadResolvesLocal(): Promise<void> {
     provider?: string;
     sourceRef?: string;
   };
-  assertEqual(input.provider, 'local');
+  assertEqual(input.provider, 'youtube-music');
   assertEqual(
     input.sourceRef,
-    'file:///tmp/auqw-test/media/dl-1',
-    'owned download resolves to the media-dir file URI',
+    'yt-rec-dl',
+    'local gated off — falls back to the provider ref',
   );
   player.settlePrepare(ok('h-1'));
   const played = await pending;
@@ -708,8 +709,9 @@ async function downloadResolvesLocal(): Promise<void> {
   await controller.dispose();
 }
 
-// 11. A scanned local file resolves through the local source's URI
-// math — same `docUriFor` string the utility's `local:probe` mints.
+// 11. A scanned local file has no playable ref on desktop — the
+// player rejects `provider:'local'`, so the play is honest
+// 'unavailable' instead of a guaranteed dead prepare.
 async function localFileResolvesUri(): Promise<void> {
   const rig = fakeApi();
   const player = new FakePlayer();
@@ -733,20 +735,9 @@ async function localFileResolvesUri(): Promise<void> {
   ]);
   await pump();
   const calls = prepareCalls(player);
-  assertEqual(calls.length, 1, 'one prepare');
-  const input = calls[0]?.input as {
-    provider?: string;
-    sourceRef?: string;
-  };
-  assertEqual(input.provider, 'local');
-  assertEqual(
-    input.sourceRef,
-    'file:///music/rips/sub/rip.flac',
-    'local file resolves through docUriFor',
-  );
-  player.settlePrepare(ok('h-1'));
+  assertEqual(calls.length, 0, 'no prepare — the local ref is gated off');
   const played = await pending;
-  assert(played.ok, `playRecordings: ${JSON.stringify(played)}`);
+  assert(!played.ok, 'local-only recording plays as unavailable');
   await controller.dispose();
 }
 
@@ -814,7 +805,9 @@ async function vanishedDownloadHonest(): Promise<void> {
 }
 
 // 14. `localPlaybackFor` is the same probe the session resolves
-// through — the offline play gate reads it directly.
+// through — the offline play gate reads it directly. The web player
+// has no `provider:'local'` route yet, so the probe stays null even
+// for owned bytes; the assertions flip when that leg lands.
 async function localPlaybackProbe(): Promise<void> {
   const rig = fakeApi();
   const player = new FakePlayer();
@@ -835,8 +828,8 @@ async function localPlaybackProbe(): Promise<void> {
   await pump(); // let the meta probe land
   assertEqual(
     controller.localPlaybackFor('rec-dl'),
-    'file:///tmp/auqw-test/media/dl-1',
-    'owned download exposes its file URI',
+    null,
+    'owned download stays unresolvable until the player supports local',
   );
   assertEqual(
     controller.localPlaybackFor('rec-remote'),

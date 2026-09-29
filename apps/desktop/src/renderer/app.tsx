@@ -9,13 +9,13 @@ import {
 import { createRoot } from 'react-dom/client';
 import {
   CancellationSource,
-  LOCAL_PROVIDER,
   ProviderRouter,
   SearchSession,
   appError,
   collectSyncDeltaDocs,
   effectiveMapping,
   err,
+  isMatchGate,
   isRefRejected,
   isSyncDelta,
   ok,
@@ -25,6 +25,7 @@ import {
   serializeSyncDeltaDocs,
 } from '@auqw/application';
 import type {
+  AppError,
   AttemptTrace,
   EntityRef,
   ImportPreview,
@@ -121,6 +122,7 @@ import type {
   Boot,
   EntityFetch,
   LyricsFetch,
+  MessageId,
   OverlayEntry,
   ProviderSlot,
   ReviewFetch,
@@ -136,6 +138,7 @@ import { isShellError } from '../shared/errors.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { createClock, createIds } from '@auqw/application';
+import { shellToAppError } from './ipc-errors.ts';
 import { createWebPeaksPort } from './web-peaks.ts';
 import { useWaveformPeaks } from '@auqw/ui-shared';
 import type { PeaksTarget } from '@auqw/ui-shared';
@@ -1237,12 +1240,32 @@ function Main({
         queue: state.queue,
         recordings: state.recordings,
         likes: state.likes,
+        // Same honesty rule as the library rows: offline + unowned
+        // marks 'unavailable' so a dead press isn't a surprise. The
+        // probe is gated in the controller until web-player gains a
+        // `provider:'local'` route — owned rows flip to playable with
+        // it automatically.
         unavailableRecordingIds:
           online === false
-            ? new Set(state.queue.occurrences.map((o) => o.recordingId))
+            ? new Set(
+                state.queue.occurrences
+                  .map((o) => o.recordingId)
+                  .filter(
+                    (id) => controller.localPlaybackFor(id) === null,
+                  ),
+              )
             : undefined,
       }),
-    [state.queue, state.recordings, state.likes, online, localeTick],
+    [
+      state.queue,
+      state.recordings,
+      state.likes,
+      online,
+      controller,
+      downloads,
+      localTick,
+      localeTick,
+    ],
   );
   const libraryModel = useMemo(() => {
     const model = toLibraryModel({
@@ -1562,6 +1585,10 @@ function Main({
         // strand a partially imported array.
         const docs = parseSyncDeltaDocs(text);
         if (docs === null) {
+          reportResult(
+            'sync.panel.pasteDelta',
+            err(appError('invalid-message', 'clipboard has no delta')),
+          );
           return;
         }
         for (const delta of docs) {
@@ -1569,11 +1596,142 @@ function Main({
         }
       })
       .then(syncRefresh)
-      .catch(() => {
-        // A non-JSON or invalid clipboard payload lands nowhere — the
-        // panel just re-reads status.
+      .catch((thrown: unknown) => {
+        reportResult(
+          'sync.panel.pasteDelta',
+          err(shellToAppError(thrown)),
+        );
       });
   }, [syncRefresh]);
+
+  // ---- play actions ------------------------------------------------
+
+  const loadReviews = useCallback(() => {
+    setReviewFetch({ reviews: null, error: null });
+    void session.listMatchReviews({ status: 'all' }).then((result) => {
+      setReviewFetch(
+        result.ok
+          ? { reviews: result.value, error: null }
+          : { reviews: null, error: result.error },
+      );
+    });
+  }, [session]);
+
+  // The ambiguous-match gate parks candidates in a review the user
+  // must resolve — retrying the press only fails the same way, so a
+  // play that hits the gate opens the review surface instead of
+  // dying quietly on a dead queue item.
+  //
+  // reportPlayError is the single error funnel: the play promise and
+  // the published `playback.failed` state carry the SAME error object,
+  // so identity-dedupe via lastPlayErrorRef reports each failure once
+  // regardless of which channel delivers it first.
+  const lastPlayErrorRef = useRef<AppError | null>(null);
+  // Action labels travel with the ATTEMPT, not the button: a pause
+  // during an in-flight prepare must not steal the play attempt's
+  // name. dispatchPlay records the pending action with a seq; the
+  // playback watcher binds it to the attemptId the moment the new
+  // attempt publishes, and clears it on settle so engine-advanced
+  // attempts (auto-next, queue drain) fall back to the neutral label.
+  const attemptActionsRef = useRef(new Map<string, MessageId>());
+  const pendingAttemptRef = useRef<{
+    seq: number;
+    action: MessageId;
+  } | null>(null);
+  const attemptSeqRef = useRef(0);
+  // The funnel reports whatever the engine published as the attempt's
+  // terminal verdict — superseded attempts never reach playback.failed
+  // (#failAttempt only fires for the live attempt), and a deadline-
+  // cancelled verdict IS the failed state the user needs surfaced.
+  const reportPlayError = useCallback(
+    (action: MessageId, error: AppError) => {
+      if (lastPlayErrorRef.current === error) {
+        return;
+      }
+      lastPlayErrorRef.current = error;
+      reportResult(action, { ok: false, error });
+      if (isMatchGate(error)) {
+        // Land the user on the fresh pending row: a stale 'resolved'
+        // filter or an already-open screen would hide it, so the
+        // route always selects pending and reloads.
+        setReviewFilter('pending');
+        loadReviews();
+        if (overlay?.type !== 'corrections') {
+          pushOverlay({ type: 'corrections' });
+        }
+      }
+    },
+    [pushOverlay, overlay, loadReviews],
+  );
+  const reportPlay = useCallback(
+    (action: MessageId, result: Result<unknown>) => {
+      if (result.ok) {
+        reportResult(action, result);
+        return;
+      }
+      // The promise's 'superseded'/'cancelled' is queue bookkeeping —
+      // superseded attempts never publish a failed state, and a
+      // cancelled terminal verdict arrives through the watcher.
+      // 'released' is NOT silent: a live prepare can resolve it when
+      // the host drops the request, stranding playback silently.
+      if (
+        result.error.kind === 'superseded' ||
+        result.error.kind === 'cancelled'
+      ) {
+        return;
+      }
+      reportPlayError(action, result.error);
+    },
+    [reportPlayError],
+  );
+  const dispatchPlay = useCallback(
+    (action: MessageId, run: Promise<Result<unknown>>): Promise<void> => {
+      const seq = ++attemptSeqRef.current;
+      pendingAttemptRef.current = { seq, action };
+      return run.then((r) => {
+        if (pendingAttemptRef.current?.seq === seq) {
+          pendingAttemptRef.current = null;
+        }
+        reportPlay(action, r);
+      });
+    },
+    [reportPlay],
+  );
+  // A prepare/stream failure that lands after the play promise already
+  // resolved reaches the UI only through `playback.failed` — the
+  // watcher reports it through the same deduped funnel as the promise
+  // path so the failure can't pass silently. Its action comes from
+  // attemptActionsRef: whichever op created the attempt owns its name.
+  useEffect(() => {
+    const playback = state.playback;
+    const attemptId =
+      'identity' in playback ? playback.identity?.attemptId : undefined;
+    if (
+      attemptId !== undefined &&
+      !attemptActionsRef.current.has(attemptId)
+    ) {
+      const actions = attemptActionsRef.current;
+      actions.set(
+        attemptId,
+        pendingAttemptRef.current?.action ?? 'common.play',
+      );
+      // Bound the registry — attempts accumulate for the session's life.
+      if (actions.size > 64) {
+        const oldest = actions.keys().next().value;
+        if (oldest !== undefined) {
+          actions.delete(oldest);
+        }
+      }
+    }
+    if (playback.type === 'failed') {
+      reportPlayError(
+        (attemptId !== undefined &&
+          attemptActionsRef.current.get(attemptId)) ||
+          'common.play',
+        playback.error,
+      );
+    }
+  }, [state.playback, reportPlayError]);
 
   const playRecording = useCallback(
     async (recordingId: string) => {
@@ -1581,11 +1739,13 @@ function Main({
         return;
       }
       const enqueued = await session.enqueueRecording(recordingId);
-      if (enqueued.ok) {
-        await session.playOccurrence(enqueued.value);
+      if (!enqueued.ok) {
+        reportResult('action.enqueueTrack', enqueued);
+        return;
       }
+      await dispatchPlay('common.play', session.playOccurrence(enqueued.value));
     },
-    [session, canPlay],
+    [session, canPlay, reportPlay],
   );
 
   // Queue presses and transport follow the same offline rule as
@@ -1598,9 +1758,9 @@ function Main({
       if (occurrence !== undefined && !canPlay(occurrence.recordingId)) {
         return;
       }
-      void session.playOccurrence(occurrenceId);
+      void dispatchPlay('common.play', session.playOccurrence(occurrenceId));
     },
-    [session, state.queue, canPlay],
+    [session, state.queue, canPlay, reportPlay],
   );
 
   // Mirrors the cursor's targeting in walk space — the dealt order
@@ -1645,7 +1805,10 @@ function Main({
       if (target === undefined || !canPlay(target.recordingId)) {
         return;
       }
-      void (method === 'next' ? session.next() : session.previous());
+      void dispatchPlay(
+        method === 'next' ? 'common.next' : 'common.previous',
+        method === 'next' ? session.next() : session.previous(),
+      );
     },
     [
       session,
@@ -1653,17 +1816,31 @@ function Main({
       state.shuffleOrder,
       state.repeat,
       canPlay,
+      reportPlay,
     ],
   );
 
   // Offline honesty for metadata paths (cached search/entity rows):
-  // the materialized recording plays only when a stream can resolve —
-  // the exception is a meta already file-backed by the 'local'
-  // provider.
+  // the materialized recording is playable offline only when owned —
+  // a provider ref alone would start a remote attempt the UI says
+  // waits for connectivity.
   const canPlayMeta = useCallback(
-    (meta: TrackMetadata): boolean =>
-      online !== false || meta.sourceRef.provider === LOCAL_PROVIDER,
-    [online],
+    (meta: TrackMetadata): boolean => {
+      if (online !== false) {
+        return true;
+      }
+      const ref = meta.sourceRef;
+      const recording = state.recordings.find((r) =>
+        r.sourceRefs.some(
+          (s) =>
+            s.provider === ref.provider &&
+            s.kind === ref.kind &&
+            s.id === ref.id,
+        ),
+      );
+      return recording !== undefined && canPlay(recording.id);
+    },
+    [online, state.recordings, canPlay],
   );
 
   const onResultPress = useCallback(
@@ -1671,10 +1848,10 @@ function Main({
       const meta = resultMeta.current.get(row.key);
       if (meta !== undefined && canPlayMeta(meta)) {
         recordRecentSearch(query);
-        void session.addAndPlay(meta);
+        void dispatchPlay('action.playResult', session.addAndPlay(meta));
       }
     },
-    [session, canPlayMeta, query, recordRecentSearch],
+    [session, canPlayMeta, query, recordRecentSearch, reportPlay],
   );
 
   const onSettingsSelect = useCallback(
@@ -1856,8 +2033,13 @@ function Main({
     ) {
       return;
     }
-    void (intentPlaying ? session.pause() : session.resume());
-  }, [session, state.queue.mode, state.playback.type, currentRecordingId, canPlay]);
+    // pause/resume keep the SAME attempt identity — they never own a
+    // new one, so no pendingAttempt claim; their own promise still
+    // reports with their own action.
+    void (intentPlaying ? session.pause() : session.resume()).then((r) =>
+      reportPlay(intentPlaying ? 'common.pause' : 'action.resume', r),
+    );
+  }, [session, state.queue.mode, state.playback.type, currentRecordingId, canPlay, reportPlay]);
   const onToggleLike = useCallback(() => {
     if (currentRecordingId !== null) {
       void session.toggleLike(currentRecordingId);
@@ -2042,17 +2224,6 @@ function Main({
   }, [session]);
 
   // ---- corrections (live read + serialized review ops) -----------
-
-  const loadReviews = useCallback(() => {
-    setReviewFetch({ reviews: null, error: null });
-    void session.listMatchReviews({ status: 'all' }).then((result) => {
-      setReviewFetch(
-        result.ok
-          ? { reviews: result.value, error: null }
-          : { reviews: null, error: result.error },
-      );
-    });
-  }, [session]);
 
   // The queue reloads whenever the corrections overlay opens — the
   // rows are live reads, never stale session state.
@@ -2458,14 +2629,17 @@ function Main({
       if (playable.length === 0) {
         return;
       }
-      void session.playRecordings(
-        playable.map((row) => ({
-          recordingId: row.recordingId,
-          selectedRef: null,
-        })),
+      void dispatchPlay(
+        'action.playCollection',
+        session.playRecordings(
+          playable.map((row) => ({
+            recordingId: row.recordingId,
+            selectedRef: null,
+          })),
+        ),
       );
     },
-    [session, canPlay],
+    [session, canPlay, reportPlay],
   );
 
   const playPlaylist = useCallback(
@@ -2479,14 +2653,17 @@ function Main({
       if (playable.length === 0) {
         return;
       }
-      void session.playRecordings(
-        playable.map((entry) => ({
-          recordingId: entry.recordingId,
-          selectedRef: entry.selectedRef,
-        })),
+      void dispatchPlay(
+        'action.playPlaylist',
+        session.playRecordings(
+          playable.map((entry) => ({
+            recordingId: entry.recordingId,
+            selectedRef: entry.selectedRef,
+          })),
+        ),
       );
     },
-    [session, canPlay],
+    [session, canPlay, reportPlay],
   );
 
   const addToPlaylist = useCallback(
@@ -2738,7 +2915,10 @@ function Main({
                   if (searchState.type === 'content') {
                     recordRecentSearch(searchState.query);
                   }
-                  void session.addAndPlay(meta);
+                  void dispatchPlay(
+                    'action.playResult',
+                    session.addAndPlay(meta),
+                  );
                 }
                 return;
               }
@@ -2793,12 +2973,15 @@ function Main({
               if (!canPlay(entry.recordingId)) {
                 return;
               }
-              void session.playRecordings([
-                {
-                  recordingId: entry.recordingId,
-                  selectedRef: entry.selectedRef,
-                },
-              ]);
+              void dispatchPlay(
+                'action.playPlaylistEntry',
+                session.playRecordings([
+                  {
+                    recordingId: entry.recordingId,
+                    selectedRef: entry.selectedRef,
+                  },
+                ]),
+              );
             }}
             onToggleLike={(entry) => void session.toggleLike(entry.recordingId)}
             onAddToPlaylist={(entry) =>
@@ -2863,7 +3046,10 @@ function Main({
               if (metas.length === 0) {
                 return;
               }
-              void session.playMetadata(metas);
+              void dispatchPlay(
+                'collection.playAll',
+                session.playMetadata(metas),
+              );
             }}
             onShuffleAll={() => {
               const metas = entityModelFor(fetch)
@@ -2875,7 +3061,10 @@ function Main({
               if (metas.length === 0) {
                 return;
               }
-              void session.playMetadata(metas, { shuffle: true });
+              void dispatchPlay(
+                'action.shuffleAll',
+                session.playMetadata(metas, { shuffle: true }),
+              );
             }}
             onToggleLike={
               entityId === null
@@ -2886,7 +3075,10 @@ function Main({
             onPressItem={(row) => {
               const meta = metaFor(row);
               if (meta !== undefined && canPlayMeta(meta)) {
-                void session.addAndPlay(meta);
+                void dispatchPlay(
+                  'action.playResult',
+                  session.addAndPlay(meta),
+                );
               }
             }}
             onAddToPlaylist={(row) => {
