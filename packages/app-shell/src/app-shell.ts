@@ -44,6 +44,7 @@ import type {
   AttemptTrace,
   EntityRef,
   ImportPreview,
+  LocalFileSource,
   OperationContext,
   Result,
   SearchState,
@@ -140,6 +141,97 @@ function shellOverlayOf<E extends { readonly type: string }>(
     : null;
 }
 
+const freshSignal = () => new CancellationSource().signal;
+
+const refKey = (r: {
+  readonly provider: string;
+  readonly kind: string;
+  readonly id: string;
+}) => `${r.provider}:${r.kind}:${r.id}`;
+
+const opContext = (
+  tag: string,
+  deadlineInMs: number,
+  source: CancellationSource,
+): OperationContext => ({
+  requestId: createIds().next(tag),
+  deadlineMs: Date.now() + deadlineInMs,
+  signal: source.signal,
+});
+
+const reporter =
+  (action: MessageId) =>
+  (result: Result<unknown>) =>
+    reportResult(action, result);
+
+// ~1 Hz trailing throttle for the download progress stream — a
+// statfs/list probe per chunk would be hundreds of scans per
+// download, so a burst settles into one trailing read.
+function trailing(
+  s: { last: number; timer: ReturnType<typeof setTimeout> | null },
+  run: () => void,
+): void {
+  const exec = () => {
+    s.last = Date.now();
+    run();
+  };
+  const gap = Date.now() - s.last;
+  if (gap >= 1_000) {
+    exec();
+    return;
+  }
+  s.timer ??= setTimeout(() => {
+    s.timer = null;
+    exec();
+  }, 1_000 - gap);
+}
+
+// Epoch-tagged sheet saves (theme/language): each pick claims a fresh
+// epoch — a save resolving after a newer pick or a dismissal reports
+// nothing, applies nothing, and closes nothing.
+function pickSetting(
+  epoch: { current: number },
+  patch: (key: string) => Partial<Settings>,
+  write: (p: Partial<Settings>) => Promise<Result<unknown>>,
+  label: MessageId,
+  close: () => void,
+  onApplied?: (p: Partial<Settings>) => void,
+): (key: string) => void {
+  return (key) => {
+    epoch.current += 1;
+    const opening = epoch.current;
+    const p = patch(key);
+    void write(p).then((saved) => {
+      if (opening !== epoch.current) {
+        return;
+      }
+      reportResult(label, saved);
+      if (saved.ok) {
+        onApplied?.(p);
+        close();
+      }
+    });
+  };
+}
+
+// The storefront/quality flavor: the save reports even when stale —
+// only the sheet close waits on the epoch.
+function commitSetting(
+  epoch: { current: number },
+  patch: Partial<Settings>,
+  write: (p: Partial<Settings>) => Promise<Result<unknown>>,
+  label: MessageId,
+  close: () => void,
+): void {
+  const opening = epoch.current;
+  void write(patch).then((saved) => {
+    reportResult(label, saved);
+    if (saved.ok && opening === epoch.current) {
+      close();
+    }
+  });
+}
+
 export function useAppShell<E extends { readonly type: string } = never>(
   deps: AppShellDeps<E>,
 ) {
@@ -150,12 +242,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // Position ticks ride the session's light channel — status ticks
   // that only move position skip the state publish, so the position
   // read subscribes here instead of through `state`.
-  const subscribePosition = useCallback(
-    (listener: () => void) => session.subscribePosition(listener),
-    [session],
-  );
-  const positionMs = useSyncExternalStore(subscribePosition, () =>
-    session.positionMs(),
+  const positionMs = useSyncExternalStore(
+    useCallback((l: () => void) => session.subscribePosition(l), [session]),
+    () => session.positionMs(),
   );
 
   // ---- shell chrome state ----------------------------------------
@@ -186,11 +275,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const [storefrontDraft, setStorefrontDraft] = useState('');
   // Sheet openings are epoch-tagged — a save that resolves after the
   // user dismissed and reopened the sheet must not close the new one.
-  const storefrontEpoch = useRef(0);
-  const qualityEpoch = useRef(0);
   // Theme and language also bump on dismiss and on each pick, so a
   // late save from an earlier pick can neither close the sheet nor
   // apply a stale locale over a newer pick.
+  const storefrontEpoch = useRef(0);
+  const qualityEpoch = useRef(0);
   const themeEpoch = useRef(0);
   const languageEpoch = useRef(0);
 
@@ -296,27 +385,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const [downloads, setDownloads] = useState(
     () => controller.downloads.list(),
   );
-  // Progress events stream per chunk — trailing-throttle the
-  // list() pull to ~1Hz so a large queue doesn't re-list on every
-  // chunk tick.
-  const downloadsLast = useRef(0);
-  const downloadsTimer = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
+  const downloadsThrottle = useRef<{
+    last: number;
+    timer: ReturnType<typeof setTimeout> | null;
+  }>({ last: 0, timer: null });
   const refreshDownloads = useCallback(() => {
-    const now = Date.now();
-    const gap = now - downloadsLast.current;
-    if (gap < 1_000) {
-      if (downloadsTimer.current === null) {
-        downloadsTimer.current = setTimeout(() => {
-          downloadsTimer.current = null;
-          refreshDownloads();
-        }, 1_000 - gap);
-      }
-      return;
-    }
-    downloadsLast.current = now;
-    setDownloads(controller.downloads.list());
+    trailing(downloadsThrottle.current, () =>
+      setDownloads(controller.downloads.list()),
+    );
   }, [controller]);
   // Bumped after a local-folder mutation so the models re-read
   // `local()` — the source is storage-backed, not evented, and scans
@@ -329,44 +405,26 @@ export function useAppShell<E extends { readonly type: string } = never>(
     readonly bytes: number;
     readonly free: number;
   } | null>(null);
-  const storageText =
-    storageUsage === null
-      ? null
-      : formatBytes(storageUsage.bytes, storageUsage.free);
   // Transfer events can outpace the statfs probe — each read stamps a
   // sequence, and only a success newer than the last applied success
   // lands. A failed probe advances nothing, so it can't knock out an
   // older success still in flight.
   const usageSeq = useRef(0);
   const usageApplied = useRef(0);
-  const usageLastProbe = useRef(0);
-  const usageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const usageThrottle = useRef<{
+    last: number;
+    timer: ReturnType<typeof setTimeout> | null;
+  }>({ last: 0, timer: null });
   const refreshUsage = useCallback(() => {
-    // The subscribe path fires per progress chunk — a statfs probe on
-    // each one is hundreds of scans per download. Throttle to ~1 Hz
-    // with a trailing call so the settled value still lands.
-    const now = Date.now();
-    const gap = now - usageLastProbe.current;
-    if (gap < 1_000) {
-      if (usageTimer.current === null) {
-        usageTimer.current = setTimeout(() => {
-          usageTimer.current = null;
-          refreshUsage();
-        }, 1_000 - gap);
-      }
-      return;
-    }
-    usageLastProbe.current = now;
-    usageSeq.current += 1;
-    const seq = usageSeq.current;
-    void controller.downloads
-      .usage(new CancellationSource().signal)
-      .then((u) => {
+    trailing(usageThrottle.current, () => {
+      const seq = (usageSeq.current += 1);
+      void controller.downloads.usage(freshSignal()).then((u) => {
         if (u.ok && seq > usageApplied.current) {
           usageApplied.current = seq;
           setStorageUsage({ bytes: u.value.bytes, free: u.value.free });
         }
       });
+    });
   }, [controller]);
   useEffect(() => {
     setDownloads(controller.downloads.list());
@@ -377,13 +435,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
     });
     return () => {
       unsubscribe();
-      if (usageTimer.current !== null) {
-        clearTimeout(usageTimer.current);
-        usageTimer.current = null;
-      }
-      if (downloadsTimer.current !== null) {
-        clearTimeout(downloadsTimer.current);
-        downloadsTimer.current = null;
+      for (const s of [usageThrottle.current, downloadsThrottle.current]) {
+        if (s.timer !== null) {
+          clearTimeout(s.timer);
+          s.timer = null;
+        }
       }
     };
   }, [controller, refreshUsage, refreshDownloads]);
@@ -484,7 +540,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // → cancel; failed → retry; stored → remove.
   const onDownloadAction = useCallback(
     (recordingId: string) => {
-      const signal = new CancellationSource().signal;
       const existing = controller.downloads.recordFor(recordingId);
       if (existing === null) {
         const sourceRef = downloadRefFor(recordingId);
@@ -492,16 +547,16 @@ export function useAppShell<E extends { readonly type: string } = never>(
           return;
         }
         void controller.downloads
-          .request({ recordingId, sourceRef }, signal)
-          .then((r) => reportResult('action.download', r));
+          .request({ recordingId, sourceRef }, freshSignal())
+          .then(reporter('action.download'));
         return;
       }
       switch (existing.state) {
         case 'requested':
         case 'transferring':
           void controller.downloads
-            .cancel(existing.downloadId, signal)
-            .then((r) => reportResult('action.cancelDownload', r));
+            .cancel(existing.downloadId, freshSignal())
+            .then(reporter('action.cancelDownload'));
           return;
         case 'failed_with_retry':
           // The row kept why it failed — toast that kind before the
@@ -509,14 +564,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
           reportStoredDownloadError(existing.error);
           void controller.downloads
             .retry(existing.downloadId)
-            .then((r) => reportResult('action.retryDownload', r));
+            .then(reporter('action.retryDownload'));
           return;
         case 'available':
           // The 'removing' transition fires before the file is gone —
           // refresh usage again once removal settles so Settings
           // doesn't display the freed bytes until the next event.
           void controller.downloads
-            .remove(existing.downloadId, signal)
+            .remove(existing.downloadId, freshSignal())
             .then((r) => {
               reportResult('action.removeDownload', r);
               refreshUsage();
@@ -570,6 +625,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
     playlists: number;
   } | null>(null);
   const exportDoneDetail = useRef<(() => string) | null>(null);
+  const patchTransfer = useCallback((patch: Partial<TransferModel>) => {
+    setTransfer((prev) => ({ ...prev, ...patch }));
+  }, []);
   useEffect(() => {
     const raw = importPreviewRaw.current;
     const counts = importSummaryCounts.current;
@@ -749,13 +807,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
       const source = new CancellationSource();
       suggestSource.current = source;
       const seq = suggestSeq.current;
-      const context: OperationContext = {
-        requestId: createIds().next('suggest'),
-        deadlineMs: Date.now() + 10_000,
-        signal: source.signal,
-      };
       void providerRouter
-        .suggest(suggestSelection, { input: trimmed }, context)
+        .suggest(
+          suggestSelection,
+          { input: trimmed },
+          opContext('suggest', 10_000, source),
+        )
         .then((result) => {
           if (suggestSeq.current === seq && !source.signal.cancelled) {
             setSuggestions(result.ok ? result.value : []);
@@ -798,18 +855,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
       return;
     }
     const source = new CancellationSource();
-    const context: OperationContext = {
-      requestId: createIds().next('diag'),
-      deadlineMs: Date.now() + 15_000,
-      signal: source.signal,
-    };
-    void controller.storage.loadAttempts(DIAGNOSTICS_LIMIT, context).then(
-      (result) => {
+    void controller.storage
+      .loadAttempts(DIAGNOSTICS_LIMIT, opContext('diag', 15_000, source))
+      .then((result) => {
         if (!source.signal.cancelled && result.ok) {
           setAttempts(result.value);
         }
-      },
-    );
+      });
     void session.listMatchReviews().then((result) => {
       if (!source.signal.cancelled) {
         setPendingReviews(result.ok ? result.value.length : null);
@@ -823,6 +875,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // model memos key on the slices they read — a queue-only publish
   // no longer rebuilds the library model, and position-only ticks
   // (which skip the state channel entirely) flow through positionMs.
+  // The recording an engaged attempt (preparing/buffering/playing)
+  // points at — the "playing" row mark; idle/paused/failed mark none.
+  const activeRecordingId =
+    state.playback.type === 'idle' ||
+    state.playback.type === 'paused' ||
+    state.playback.type === 'failed'
+      ? null
+      : state.playback.recordingId;
   const player = useMemo(() => {
     const model = toPlayerModel({
       playback: state.playback,
@@ -996,12 +1056,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
       entitySourceRefs: state.entitySourceRefs,
       downloads,
     });
-    const playingId =
-      state.playback.type === 'idle' ||
-      state.playback.type === 'paused' ||
-      state.playback.type === 'failed'
-        ? null
-        : state.playback.recordingId;
     const chipByRecording = chipsByRecording;
     // Honest-offline: with connectivity explicitly down, a row plays
     // only from bytes the player can attach — remote streams degrade
@@ -1014,7 +1068,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       const base: TrackRowModel = {
         ...row,
         download: chipByRecording.get(recordingId) ?? row.download,
-        playing: recordingId === playingId ? true : row.playing,
+        playing: recordingId === activeRecordingId ? true : row.playing,
       };
       return offline && !localPlayable(recordingId)
         ? { ...base, state: 'unavailable', note: t('note.offline') }
@@ -1050,7 +1104,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     state.playCounts,
     state.entities,
     state.entitySourceRefs,
-    state.playback,
+    activeRecordingId,
     online,
     downloads,
     chipsByRecording,
@@ -1070,12 +1124,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
         recordings: state.recordings,
         likes: state.likes,
       });
-      const playingId =
-        state.playback.type === 'idle' ||
-        state.playback.type === 'paused' ||
-        state.playback.type === 'failed'
-          ? null
-          : state.playback.recordingId;
       if (model === null) {
         return model;
       }
@@ -1087,20 +1135,18 @@ export function useAppShell<E extends { readonly type: string } = never>(
             downloadChipFor(entry.recordingId) ?? entry.row.download;
           const owned =
             chip === 'stored' || localPlayable(entry.recordingId);
-          const offlineRow =
-            offline && !owned
-              ? { state: 'unavailable' as const, note: t('note.offline') }
-              : {};
           return {
             ...entry,
             row: {
               ...entry.row,
               playing:
-                entry.recordingId === playingId
+                entry.recordingId === activeRecordingId
                   ? true
                   : entry.row.playing,
               download: chip,
-              ...offlineRow,
+              ...(offline && !owned
+                ? { state: 'unavailable' as const, note: t('note.offline') }
+                : {}),
             },
           };
         }),
@@ -1113,7 +1159,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       state.playlistEntries,
       state.recordings,
       state.likes,
-      state.playback,
+      activeRecordingId,
       downloads,
       downloadChipFor,
       online,
@@ -1236,11 +1282,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
             key: `local:${rec.id}`,
             liked: liked.has(rec.id),
             note: t('note.local'),
-            playing:
-              state.playback.type !== 'idle' &&
-              state.playback.type !== 'paused' &&
-              state.playback.type !== 'failed' &&
-              state.playback.recordingId === rec.id,
+            playing: activeRecordingId === rec.id,
           }),
         );
         if (rows.length >= 25) {
@@ -1251,13 +1293,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
     return rows;
     // localTick re-reads local.uriMap after a folder mutation — a
     // removed folder's recordings persist but must stop matching.
-    // state.playback is read for the per-row playing mark.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     searchState,
     state.recordings,
     state.likes,
-    state.playback,
+    activeRecordingId,
     controller,
     ports.localCatalog,
     localTick,
@@ -1350,16 +1391,17 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   const settingsModel = useMemo(() => {
     const extras = ports.settingsExtras();
+    const local = controller.local();
     const model = toSettingsModel(state.settings, diagnostics, {
-      storageText,
-      // The probe surface only exists once rehydrateMedia ran — gate
-      // the rows on it instead of dead-pressing behind a null local().
+      storageText:
+        storageUsage === null
+          ? null
+          : formatBytes(storageUsage.bytes, storageUsage.free),
       // `localSupported` itself is the app's call: desktop probes the
       // live source, mobile asks its tag-reader module.
       localSupported: extras.localSupported,
-      localFolderCount: controller.local()?.list().length,
-      localSources: controller
-        .local()
+      localFolderCount: local?.list().length,
+      localSources: local
         ?.list()
         .map((s) => ({ sourceId: s.sourceId, label: s.label })),
       // Kept ledger rows — same rule as the downloads collection:
@@ -1382,7 +1424,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   }, [
     state.settings,
     diagnostics,
-    storageText,
+    storageUsage,
     controller,
     downloads,
     ports.settingsExtras,
@@ -1626,18 +1668,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       if (online !== false) {
         return true;
       }
-      const ref = meta.sourceRef;
       const recording = state.recordings.find((r) =>
-        r.sourceRefs.some(
-          (s) =>
-            s.provider === ref.provider &&
-            s.kind === ref.kind &&
-            s.id === ref.id,
-        ),
+        r.sourceRefs.some((s) => refKey(s) === refKey(meta.sourceRef)),
       );
-      return (
-        recording !== undefined && localPlayable(recording.id)
-      );
+      return recording !== undefined && localPlayable(recording.id);
     },
     [online, state.recordings, localPlayable],
   );
@@ -1659,6 +1693,17 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [session, state.queue, state.recordings],
   );
 
+  // The shared result-tap funnel: the gate stays per-call so the
+  // recordRecentSearch side effects below fire only on a playable tap.
+  const playCheckedMeta = useCallback(
+    (meta: TrackMetadata) => {
+      if (canPlayMeta(meta)) {
+        void dispatchPlay('action.playResult', playMeta(meta));
+      }
+    },
+    [canPlayMeta, dispatchPlay, playMeta],
+  );
+
   const onResultPress = useCallback(
     (row: TrackRowModel) => {
       // Local merged rows are existing recordings — play through the
@@ -1675,14 +1720,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
       const meta = resultMeta.current.get(row.key);
       if (meta !== undefined && canPlayMeta(meta)) {
         recordRecentSearch(query);
-        void dispatchPlay('action.playResult', playMeta(meta));
+        playCheckedMeta(meta);
       }
     },
     [
       canPlayMeta,
-      playMeta,
+      playCheckedMeta,
       playRecording,
-      dispatchPlay,
       query,
       recordRecentSearch,
       ports.localCatalog,
@@ -1717,7 +1761,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         if (searchState.type === 'content') {
           recordRecentSearch(searchState.query);
         }
-        void dispatchPlay('action.playResult', playMeta(meta));
+        playCheckedMeta(meta);
         return;
       }
       if (ports.strictHomeCardKeys === true) {
@@ -1728,9 +1772,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [
       suggestionMeta,
       canPlayMeta,
-      playMeta,
+      playCheckedMeta,
       playRecording,
-      dispatchPlay,
       searchState,
       recordRecentSearch,
       homeModel,
@@ -1741,116 +1784,95 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // ---- settings handlers -------------------------------------------
   const onSettingsSelect = useCallback(
     (key: string) => {
-      if (key === 'theme') {
-        themeEpoch.current += 1;
-        setThemePickerOpen(true);
-        return;
-      }
-      if (key === 'language') {
-        languageEpoch.current += 1;
-        setLanguagePickerOpen(true);
-        return;
-      }
-      if (
-        key === 'catalogProvider' ||
-        key === 'playbackProvider' ||
-        key === 'lyricsProvider' ||
-        key === 'radioProvider'
-      ) {
-        setProviderSlot(key);
-        return;
-      }
-      if (key === 'exportLibrary' || key === 'importLibrary') {
-        importText.current = null;
-        importPreviewRaw.current = null;
-        setTransfer(IDLE_TRANSFER);
-        pushOverlay({ type: 'transfer' });
-        return;
-      }
-      if (key === 'storefront') {
-        storefrontEpoch.current += 1;
-        setStorefrontDraft(state.settings.storefront ?? '');
-        setStorefrontSheetOpen(true);
-        return;
-      }
-      if (key === 'qualityKbps') {
-        qualityEpoch.current += 1;
-        setQualityPickerOpen(true);
-        return;
-      }
-      if (key === 'removeAllDownloads') {
-        void controller.downloads
-          .removeAll(new CancellationSource().signal)
-          .then((removed) => {
-            reportResult('settings.removeAllDownloads', removed);
-            refreshUsage();
-          });
-        return;
-      }
-      if (key === 'sync') {
-        // The row's destination is the platform's — mobile pushes its
-        // sync overlay; desktop scrolls+focuses the inline section.
-        if (ports.openSyncOverlay !== undefined) {
-          pushOverlay(ports.openSyncOverlay);
-        } else {
-          ports.openSync?.();
-        }
-        return;
-      }
-      if (key === 'artworkCacheBytes') {
-        setArtworkCachePickerOpen(true);
-        return;
-      }
       // A committed mutation lands on the instance the op ran on —
       // ports.afterLocalMutation owns the post-commit projection
       // (the apps disagree on the mid-flight rehydrate swap).
-      if (key === 'addLocalFolder') {
+      const localMutate = (
+        label: MessageId,
+        op: (local: LocalFileSource) => Promise<Result<unknown>>,
+      ) => {
         const local = controller.local();
         if (local === null) {
           return;
         }
-        void local
-          .addFolder(new CancellationSource().signal)
-          .then((added) => {
-            reportResult('settings.addLocalFolder', added);
-            if (added.ok) {
-              ports.afterLocalMutation(local, refreshLocal);
-            }
-          });
-        return;
-      }
-      if (key.startsWith('localSourceRemove:')) {
-        const local = controller.local();
-        if (local === null) {
+        void op(local).then((r) => {
+          reportResult(label, r);
+          if (r.ok) {
+            ports.afterLocalMutation(local, refreshLocal);
+          }
+        });
+      };
+      switch (key) {
+        case 'theme':
+          themeEpoch.current += 1;
+          setThemePickerOpen(true);
           return;
-        }
-        const sourceId = key.slice('localSourceRemove:'.length);
-        void local
-          .removeSource(sourceId, new CancellationSource().signal)
-          .then((removed) => {
-            reportResult('action.removeLocalFolder', removed);
-            if (removed.ok) {
-              ports.afterLocalMutation(local, refreshLocal);
-            }
-          });
-        return;
-      }
-      if (key === 'rescanLocal' || key === 'localSources') {
-        const local = controller.local();
-        if (local === null) {
+        case 'language':
+          languageEpoch.current += 1;
+          setLanguagePickerOpen(true);
           return;
-        }
-        void local
-          .rescan(undefined, new CancellationSource().signal)
-          .then((scanned) => {
-            reportResult('settings.rescanLocal', scanned);
-            if (scanned.ok) {
-              ports.afterLocalMutation(local, refreshLocal);
-            }
+        case 'catalogProvider':
+        case 'playbackProvider':
+        case 'lyricsProvider':
+        case 'radioProvider':
+          setProviderSlot(key);
+          return;
+        case 'exportLibrary':
+        case 'importLibrary':
+          importText.current = null;
+          importPreviewRaw.current = null;
+          setTransfer(IDLE_TRANSFER);
+          pushOverlay({ type: 'transfer' });
+          return;
+        case 'storefront':
+          storefrontEpoch.current += 1;
+          setStorefrontDraft(state.settings.storefront ?? '');
+          setStorefrontSheetOpen(true);
+          return;
+        case 'qualityKbps':
+          qualityEpoch.current += 1;
+          setQualityPickerOpen(true);
+          return;
+        case 'removeAllDownloads':
+          void controller.downloads.removeAll(freshSignal()).then((r) => {
+            reportResult('settings.removeAllDownloads', r);
+            refreshUsage();
           });
-        return;
+          return;
+        case 'sync':
+          // The row's destination is the platform's — mobile pushes
+          // its sync overlay; desktop scrolls+focuses the inline one.
+          if (ports.openSyncOverlay !== undefined) {
+            pushOverlay(ports.openSyncOverlay);
+          } else {
+            ports.openSync?.();
+          }
+          return;
+        case 'artworkCacheBytes':
+          setArtworkCachePickerOpen(true);
+          return;
+        case 'addLocalFolder':
+          localMutate('settings.addLocalFolder', (l) =>
+            l.addFolder(freshSignal()),
+          );
+          return;
+        case 'rescanLocal':
+        case 'localSources':
+          localMutate('settings.rescanLocal', (l) =>
+            l.rescan(undefined, freshSignal()),
+          );
+          return;
+        default:
+          if (key.startsWith('localSourceRemove:')) {
+            localMutate('action.removeLocalFolder', (l) =>
+              l.removeSource(
+                key.slice('localSourceRemove:'.length),
+                freshSignal(),
+              ),
+            );
+          }
+          // downloadStorage is display-only.
       }
-      // downloadStorage is display-only.
     },
     [
       session,
@@ -1966,9 +1988,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
 
   const onMoveQueueItemTo = useCallback(
-    (occurrenceId: string, toIndex: number) => {
-      void session.moveOccurrence(occurrenceId, toIndex);
-    },
+    (occurrenceId: string, toIndex: number) =>
+      void session.moveOccurrence(occurrenceId, toIndex),
     [session],
   );
 
@@ -1985,32 +2006,29 @@ export function useAppShell<E extends { readonly type: string } = never>(
         error: null,
         loading: true,
       });
-      const context: OperationContext = {
-        requestId: createIds().next('lyrics'),
-        deadlineMs: Date.now() + 15_000,
-        signal: source.signal,
-      };
-      void session.getLyrics(recordingId, context).then((result) => {
-        setLyricsFetch((prev) =>
-          prev === null ||
-          prev.recordingId !== recordingId ||
-          source.signal.cancelled
-            ? prev
-            : result.ok
-              ? {
-                  recordingId,
-                  sheet: result.value,
-                  error: null,
-                  loading: false,
-                }
-              : {
-                  recordingId,
-                  sheet: null,
-                  error: result.error,
-                  loading: false,
-                },
-        );
-      });
+      void session
+        .getLyrics(recordingId, opContext('lyrics', 15_000, source))
+        .then((result) => {
+          setLyricsFetch((prev) =>
+            prev === null ||
+            prev.recordingId !== recordingId ||
+            source.signal.cancelled
+              ? prev
+              : result.ok
+                ? {
+                    recordingId,
+                    sheet: result.value,
+                    error: null,
+                    loading: false,
+                  }
+                : {
+                    recordingId,
+                    sheet: null,
+                    error: result.error,
+                    loading: false,
+                  },
+          );
+        });
     },
     [session],
   );
@@ -2148,9 +2166,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const onStartRadio = useCallback(() => {
     const ref = radioSeedRef;
     if (ref !== null && radioSeedable(ref)) {
-      void session
-        .startRadio(ref)
-        .then((r) => reportResult('stage.radio.start', r));
+      void session.startRadio(ref).then(reporter('stage.radio.start'));
     }
   }, [session, radioSeedRef, radioSeedable]);
 
@@ -2191,24 +2207,19 @@ export function useAppShell<E extends { readonly type: string } = never>(
         }
       });
     },
-    [session, loadReviews],
+    [loadReviews],
   );
 
   // ---- library transfer (export write · import preview) -----------
 
   const onExport = useCallback(() => {
-    setTransfer((prev) => ({
-      ...prev,
-      exportPhase: 'working',
-      exportDetail: null,
-    }));
+    patchTransfer({ exportPhase: 'working', exportDetail: null });
     void session.exportLibrary().then(async (result) => {
       if (!result.ok) {
-        setTransfer((prev) => ({
-          ...prev,
+        patchTransfer({
           exportPhase: 'error',
           exportDetail: errorText(result.error),
-        }));
+        });
         return;
       }
       const name = `auqw-library-${new Date().toISOString().slice(0, 10)}.json`;
@@ -2216,33 +2227,26 @@ export function useAppShell<E extends { readonly type: string } = never>(
       try {
         outcome = await ports.exportJson(result.value.json, name);
       } catch {
-        setTransfer((prev) => ({
-          ...prev,
-          exportPhase: 'error',
-          exportDetail: t('transfer.exportWriteFailed'),
-        }));
+        outcome = { kind: 'error' };
+      }
+      if (outcome.kind === 'done') {
+        exportDoneDetail.current = outcome.detail;
+        patchTransfer({
+          exportPhase: 'done',
+          exportDetail: outcome.detail(),
+        });
         return;
       }
-      if (outcome.kind === 'cancelled') {
-        setTransfer((prev) => ({ ...prev, exportPhase: 'idle' }));
-        return;
-      }
-      if (outcome.kind === 'error') {
-        setTransfer((prev) => ({
-          ...prev,
-          exportPhase: 'error',
-          exportDetail: t('transfer.exportWriteFailed'),
-        }));
-        return;
-      }
-      exportDoneDetail.current = outcome.detail;
-      setTransfer((prev) => ({
-        ...prev,
-        exportPhase: 'done',
-        exportDetail: outcome.detail(),
-      }));
+      patchTransfer(
+        outcome.kind === 'cancelled'
+          ? { exportPhase: 'idle' }
+          : {
+              exportPhase: 'error',
+              exportDetail: t('transfer.exportWriteFailed'),
+            },
+      );
     });
-  }, [session, ports.exportJson]);
+  }, [session, ports.exportJson, patchTransfer]);
 
   // The shared side of an import read: beginImportRead arms the
   // 'reading' phase, then the platform's pick hands the file's text +
@@ -2251,13 +2255,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // pick result); failImportRead covers an unreadable file.
   const beginImportRead = useCallback(() => {
     importPreviewRaw.current = null;
-    setTransfer((prev) => ({
-      ...prev,
+    patchTransfer({
       importPhase: 'reading',
       importDetail: null,
       preview: null,
-    }));
-  }, []);
+    });
+  }, [patchTransfer]);
 
   const onImportText = useCallback(
     (text: string, sourceLabel: string) => {
@@ -2266,89 +2269,77 @@ export function useAppShell<E extends { readonly type: string } = never>(
       const preview = previewImport(text);
       if (!preview.ok) {
         importPreviewRaw.current = null;
-        setTransfer((prev) => ({
-          ...prev,
+        patchTransfer({
           importPhase: 'error',
           importDetail: t('error.importInvalid'),
           preview: null,
-        }));
+        });
         return;
       }
       importText.current = text;
       importPreviewRaw.current = { preview: preview.value, sourceLabel };
-      setTransfer((prev) => ({
-        ...prev,
+      patchTransfer({
         importPhase: 'preview',
         preview: toImportPreviewModel(preview.value, sourceLabel),
-      }));
+      });
     },
-    [],
+    [patchTransfer],
   );
 
   const cancelImportRead = useCallback(() => {
-    setTransfer((prev) => ({ ...prev, importPhase: 'idle' }));
-  }, []);
+    patchTransfer({ importPhase: 'idle' });
+  }, [patchTransfer]);
 
   const failImportRead = useCallback(() => {
     importPreviewRaw.current = null;
-    setTransfer((prev) => ({
-      ...prev,
+    patchTransfer({
       importPhase: 'error',
       importDetail: t('transfer.readFailed'),
       preview: null,
-    }));
-  }, []);
+    });
+  }, [patchTransfer]);
 
   const onApplyImport = useCallback(() => {
     const text = importText.current;
     if (text === null) {
       return;
     }
-    setTransfer((prev) => ({ ...prev, importPhase: 'applying' }));
+    patchTransfer({ importPhase: 'applying' });
     // replaceLibrary drains the download manager (live runners and
     // finalized files) before session.importLibrary swaps sections,
     // then rehydrates the media owners off the new snapshot. The
     // returned preview doubles as the applied-summary counts.
-    void controller
-      .replaceLibrary(text, new CancellationSource().signal)
-      .then((result) => {
-        if (!result.ok) {
-          setTransfer((prev) => ({
-            ...prev,
-            importPhase: 'error',
-            importDetail: errorText(result.error),
-          }));
-          return;
-        }
-        importText.current = null;
-        const counts = result.value.counts;
-        importSummaryCounts.current = {
+    void controller.replaceLibrary(text, freshSignal()).then((result) => {
+      if (!result.ok) {
+        patchTransfer({
+          importPhase: 'error',
+          importDetail: errorText(result.error),
+        });
+        return;
+      }
+      importText.current = null;
+      const counts = result.value.counts;
+      importSummaryCounts.current = {
+        tracks: counts.recordings,
+        likes: counts.likes,
+        playlists: counts.playlists,
+      };
+      patchTransfer({
+        importPhase: 'done',
+        importDetail: t('transfer.importSummary', {
           tracks: counts.recordings,
           likes: counts.likes,
           playlists: counts.playlists,
-        };
-        setTransfer((prev) => ({
-          ...prev,
-          importPhase: 'done',
-          importDetail: t('transfer.importSummary', {
-            tracks: counts.recordings,
-            likes: counts.likes,
-            playlists: counts.playlists,
-          }),
-        }));
+        }),
       });
-  }, [controller]);
+    });
+  }, [controller, patchTransfer]);
 
   const onResetImport = useCallback(() => {
     importText.current = null;
     importPreviewRaw.current = null;
-    setTransfer((prev) => ({
-      ...prev,
-      importPhase: 'idle',
-      importDetail: null,
-      preview: null,
-    }));
-  }, []);
+    patchTransfer({ importPhase: 'idle', importDetail: null, preview: null });
+  }, [patchTransfer]);
 
   // Full transfer-surface reset — the deep-link shell wipes the whole
   // phase pair (export AND import) before driving a fresh leg, unlike
@@ -2412,9 +2403,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
           }
           return {
             ...prev,
-            [key]: result.ok
-              ? { ...cur, page: result.value, error: null, loading: false }
-              : { ...cur, page: null, error: result.error, loading: false },
+            [key]: {
+              ...cur,
+              page: result.ok ? result.value : null,
+              error: result.ok ? null : result.error,
+              loading: false,
+            },
           };
         });
       });
@@ -2425,35 +2419,36 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const openEntity = useCallback(
     (ref: EntityRef) => {
       // Re-opening the entity already on top just reloads it.
-      const top = shellOverlayOf(overlayStack[overlayStack.length - 1]?.overlay);
+      const top = shellOverlayOf(
+        overlayStack[overlayStack.length - 1]?.overlay,
+      );
       if (
-        top?.type === 'entity' &&
-        entityRefKey(top.ref) === entityRefKey(ref)
+        top?.type !== 'entity' ||
+        entityRefKey(top.ref) !== entityRefKey(ref)
       ) {
-        loadEntityPage(ref);
-        return;
+        pushOverlay({ type: 'entity', ref });
       }
-      pushOverlay({ type: 'entity', ref });
       loadEntityPage(ref);
     },
     [overlayStack, pushOverlay, loadEntityPage],
   );
 
   const onLoadMore = useCallback(() => {
-    const current = shellOverlayOf(overlay);
-    const top = current?.type === 'entity' ? current.ref : null;
-    const key = top === null ? null : entityRefKey(top);
-    const cur = key === null ? null : entityFetches[key] ?? null;
+    const route = shellOverlayOf(overlay);
+    const cur =
+      route?.type === 'entity'
+        ? entityFetches[entityRefKey(route.ref)]
+        : undefined;
     const continuation = cur?.page?.continuation;
     if (
-      key === null ||
-      cur === null ||
+      cur === undefined ||
       cur.page === null ||
       continuation == null ||
       cur.loadingMore
     ) {
       return;
     }
+    const key = entityRefKey(cur.ref);
     /*
      * The port's only entity request is an EntityRef — there is no
      * continuation payload on the catalog.entity wire (ABI 0.3.0),
@@ -2488,16 +2483,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
           };
         }
         const seen = new Set(
-          latest.page.items.map(
-            (m) =>
-              `${m.sourceRef.provider} ${m.sourceRef.kind} ${m.sourceRef.id}`,
-          ),
+          latest.page.items.map((m) => refKey(m.sourceRef)),
         );
         const fresh = result.value.items.filter(
-          (m) =>
-            !seen.has(
-              `${m.sourceRef.provider} ${m.sourceRef.kind} ${m.sourceRef.id}`,
-            ),
+          (m) => !seen.has(refKey(m.sourceRef)),
         );
         return {
           ...prev,
@@ -2539,14 +2528,20 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // ports.preferOwnedRef: a provider pin beats owned bytes in
   // #pickRef — mobile drops it when bytes exist so downloads
   // actually get played; desktop always forwards the entry pin.
+  const playRefFor = useCallback(
+    (recordingId: string, selectedRef: SourceRef | null): SourceRef | null =>
+      ports.preferOwnedRef === true && isOwned(recordingId)
+        ? null
+        : selectedRef,
+    [isOwned, ports.preferOwnedRef],
+  );
+
   const playPlaylist = useCallback(
     (model: ReturnType<typeof playlistModelFor>) => {
-      if (model === null) {
-        return;
-      }
-      const playable = model.entries.filter((entry) =>
-        canPlay(entry.recordingId),
-      );
+      const playable =
+        model === null
+          ? []
+          : model.entries.filter((entry) => canPlay(entry.recordingId));
       if (playable.length === 0) {
         return;
       }
@@ -2555,16 +2550,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
         session.playRecordings(
           playable.map((entry) => ({
             recordingId: entry.recordingId,
-            selectedRef:
-              ports.preferOwnedRef === true &&
-              isOwned(entry.recordingId)
-                ? null
-                : entry.selectedRef,
+            selectedRef: playRefFor(entry.recordingId, entry.selectedRef),
           })),
         ),
       );
     },
-    [session, isOwned, canPlay, dispatchPlay, ports.preferOwnedRef],
+    [session, canPlay, dispatchPlay, playRefFor],
   );
 
   const playPlaylistEntry = useCallback(
@@ -2580,16 +2571,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
         session.playRecordings([
           {
             recordingId: entry.recordingId,
-            selectedRef:
-              ports.preferOwnedRef === true &&
-              isOwned(entry.recordingId)
-                ? null
-                : entry.selectedRef,
+            selectedRef: playRefFor(entry.recordingId, entry.selectedRef),
           },
         ]),
       );
     },
-    [session, canPlay, isOwned, dispatchPlay, ports.preferOwnedRef],
+    [session, canPlay, playRefFor, dispatchPlay],
   );
 
   const playlistDownloadFor = useCallback(
@@ -2619,8 +2606,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
         return;
       }
       void controller.downloads
-        .requestAll(requests, new CancellationSource().signal)
-        .then((r) => reportResult('action.download', r));
+        .requestAll(requests, freshSignal())
+        .then(reporter('action.download'));
     },
     [controller],
   );
@@ -2632,14 +2619,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
       const recordingId =
         target.kind === 'recording'
           ? target.recordingId
-          : await session
-              .ensureRecording(target.meta)
-              .then((r) => {
-                if (!r.ok) {
-                  reportResult('action.prepareTrack', r);
-                }
-                return r.ok ? r.value : null;
-              });
+          : await session.ensureRecording(target.meta).then((r) => {
+              if (!r.ok) {
+                reportResult('action.prepareTrack', r);
+              }
+              return r.ok ? r.value : null;
+            });
       if (recordingId === null) {
         return;
       }
@@ -2670,12 +2655,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
     (name: string) => {
       const target = pickerFor;
       void session.createPlaylist(name).then((created) => {
-        if (!created.ok) {
+        if (created.ok) {
+          if (target !== null) {
+            void addToPlaylist(created.value, target);
+          }
+        } else {
           reportResult('action.createPlaylist', created);
-          return;
-        }
-        if (target !== null) {
-          void addToPlaylist(created.value, target);
         }
       });
       setPickerFor(null);
@@ -2695,14 +2680,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
           if (target.kind === 'recording') {
             void session
               .toggleLike(target.recordingId)
-              .then((r) => reportResult('action.toggleLike', r));
+              .then(reporter('action.toggleLike'));
           }
           break;
         case 'enqueue':
           void (target.kind === 'recording'
             ? session.enqueueRecording(target.recordingId)
             : session.enqueueMetadata(target.meta)
-          ).then((r) => reportResult('action.addToQueue', r));
+          ).then(reporter('action.addToQueue'));
           break;
         case 'add':
           setPickerFor(target);
@@ -2719,7 +2704,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
             );
             if (row !== null) {
               void controller.downloads
-                .remove(row.downloadId, new CancellationSource().signal)
+                .remove(row.downloadId, freshSignal())
                 .then((r) => {
                   reportResult('action.removeDownload', r);
                   refreshUsage();
@@ -2727,24 +2712,17 @@ export function useAppShell<E extends { readonly type: string } = never>(
             }
           }
           break;
-        case 'radio': {
+        case 'radio':
           // Track-seeded at this release: a metadata row seeds its own
           // ref; a library row seeds its first source ref. The action
           // only renders when the seed's provider declares radio.seed,
           // but guard the op too — state may shift between the two.
-          const ref =
-            target.kind === 'metadata'
-              ? target.meta.sourceRef
-              : (state.recordings.find(
-                  (r) => r.id === target.recordingId,
-                )?.sourceRefs[0] ?? null);
-          if (ref !== null && radioSeedable(ref)) {
+          if (actionRadioRef !== null && radioSeedable(actionRadioRef)) {
             void session
-              .startRadio(ref)
-              .then((r) => reportResult('stage.radio.start', r));
+              .startRadio(actionRadioRef)
+              .then(reporter('stage.radio.start'));
           }
           break;
-        }
         case 'album':
           if (target.kind === 'metadata' && target.meta.albumRef) {
             openEntity(target.meta.albumRef);
@@ -2763,7 +2741,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       actionsFor,
       session,
       openEntity,
-      state.recordings,
+      actionRadioRef,
       radioSeedable,
       onDownloadAction,
       controller,
@@ -2828,11 +2806,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const onCreatePlaylist = useCallback(
     (name: string) => {
       void session.createPlaylist(name).then((created) => {
-        if (!created.ok) {
+        if (created.ok) {
+          pushOverlay({ type: 'playlist', playlistId: created.value });
+        } else {
           reportResult('action.createPlaylist', created);
-          return;
         }
-        pushOverlay({ type: 'playlist', playlistId: created.value });
       });
     },
     [session, pushOverlay],
@@ -2844,7 +2822,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     (playlistId: string, name: string) => {
       void session
         .renamePlaylist(playlistId, name)
-        .then((r) => reportResult('action.renamePlaylist', r));
+        .then(reporter('action.renamePlaylist'));
     },
     [session],
   );
@@ -2853,7 +2831,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       ports.haptic?.('warning');
       void session
         .deletePlaylist(playlistId)
-        .then((r) => reportResult('action.deletePlaylist', r));
+        .then(reporter('action.deletePlaylist'));
     },
     [session, ports.haptic],
   );
@@ -2861,7 +2839,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     (entryId: string) => {
       void session
         .removePlaylistEntry(entryId)
-        .then((r) => reportResult('action.removeTrack', r));
+        .then(reporter('action.removeTrack'));
     },
     [session],
   );
@@ -2888,7 +2866,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
             ? { before: sibling.entryId }
             : { after: sibling.entryId },
         )
-        .then((r) => reportResult('action.reorderPlaylist', r));
+        .then(reporter('action.reorderPlaylist'));
     },
     [session],
   );
@@ -2897,11 +2875,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // gates the desktop's canPlayMeta filter + empty early-return;
   // mobile plays every fetched row.
   const entityPlayAll = useCallback(
-    (
-      fetch: EntityFetch | null,
-      entryKey: string,
-      shuffle: boolean,
-    ) => {
+    (fetch: EntityFetch | null, entryKey: string, shuffle: boolean) => {
       const metas = entityModelFor(fetch)
         .items.map((row) =>
           entityMeta.current.get(`${entryKey}:${row.key}`),
@@ -2920,9 +2894,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       }
       void dispatchPlay(
         shuffle ? 'action.shuffleAll' : 'collection.playAll',
-        shuffle
-          ? session.playMetadata(metas, { shuffle: true })
-          : session.playMetadata(metas),
+        session.playMetadata(
+          metas,
+          shuffle ? { shuffle: true } : undefined,
+        ),
       );
     },
     [
@@ -2943,11 +2918,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const onEntityRowPress = useCallback(
     (entryKey: string, row: TrackRowModel) => {
       const meta = entityMeta.current.get(`${entryKey}:${row.key}`);
-      if (meta !== undefined && canPlayMeta(meta)) {
-        void dispatchPlay('action.playResult', playMeta(meta));
+      if (meta !== undefined) {
+        playCheckedMeta(meta);
       }
     },
-    [canPlayMeta, playMeta, dispatchPlay],
+    [playCheckedMeta],
   );
 
   // ---- shell chrome helpers ----------------------------------------
@@ -2970,10 +2945,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
   }, [clearOverlays]);
   // Every open lands on the player pane — a hidden stage that reopens
   // must not revive the last mode.
-  const openStage = useCallback(() => {
-    setStageMode('player');
-    setStageOpen(true);
-  }, []);
   const setStageOpenFor = useCallback(
     (open: boolean) => {
       if (open) {
@@ -3014,138 +2985,100 @@ export function useAppShell<E extends { readonly type: string } = never>(
     (key: string) => resultMeta.current.get(key),
     [],
   );
+
+  // ---- picker sheets (epoch-gated serialized writes) ---------------
+  // These handlers feed dep arrays (mobile's BackHandler chain) — they
+  // must be referentially stable, not per-render closures.
   const openRowActions = setActionsFor;
   const openPlaylistPicker = setPickerFor;
   const closeRowActions = useCallback(() => setActionsFor(null), []);
   const closePlaylistPicker = useCallback(() => setPickerFor(null), []);
   const closeProviderPicker = useCallback(() => setProviderSlot(null), []);
 
-  // ---- picker sheets (epoch-gated serialized writes) ---------------
-  // These handlers feed dep arrays (mobile's BackHandler chain) — they
-  // must be referentially stable, not per-render closures.
-  const openThemePicker = useCallback(() => {
-    themeEpoch.current += 1;
-    setThemePickerOpen(true);
-  }, []);
-  const onPickTheme = useCallback(
-    (key: string) => {
-      // Each pick claims a fresh epoch — a save from an earlier pick
-      // must not close this sheet.
-      themeEpoch.current += 1;
-      const opening = themeEpoch.current;
-      const theme = THEME_ORDER.find((tag) => tag === key) ?? 'system';
-      // Report a failed save and keep the sheet open so an unapplied
-      // pick still reads unselected.
-      void queueSettingsWrite({ theme }).then((saved) => {
-        if (opening !== themeEpoch.current) {
-          // A newer pick or a dismissal superseded this save — reject
-          // the stale result outright: it must not close the sheet nor
-          // report an outcome over the newer pick.
-          return;
-        }
-        reportResult('settings.theme', saved);
-        if (saved.ok) {
-          setThemePickerOpen(false);
-        }
-      });
-    },
+  // A failed save keeps the sheet open so an unapplied pick still
+  // reads unselected.
+  const onPickTheme = useMemo(
+    () =>
+      pickSetting(
+        themeEpoch,
+        (key) => ({
+          theme: THEME_ORDER.find((tag) => tag === key) ?? 'system',
+        }),
+        queueSettingsWrite,
+        'settings.theme',
+        () => setThemePickerOpen(false),
+      ),
     [queueSettingsWrite],
   );
   const closeThemePicker = useCallback(() => {
     themeEpoch.current += 1;
     setThemePickerOpen(false);
   }, []);
-  const openLanguagePicker = useCallback(() => {
-    languageEpoch.current += 1;
-    setLanguagePickerOpen(true);
-  }, []);
-  const onPickLanguage = useCallback(
-    (key: string) => {
-      const language = key === 'system' ? null : key;
-      // Each pick claims a fresh epoch — a save from an earlier pick
-      // must neither apply its locale nor close this sheet.
-      languageEpoch.current += 1;
-      const opening = languageEpoch.current;
-      // Apply the locale only once the save landed — a failed save
-      // must not leave the UI on a selection storage never recorded.
-      // On failure the sheet stays open: the pick still reads
-      // unselected, so the failure is visible without the toast.
-      void queueSettingsWrite({ language }).then((saved) => {
-        if (opening !== languageEpoch.current) {
-          // A newer pick or a dismissal superseded this save — reject
-          // the stale result outright: it must not apply a stale
-          // locale, close the sheet, nor report over the newer pick.
-          return;
-        }
-        reportResult('settings.language', saved);
-        if (saved.ok) {
-          applyLocale(language);
-          setLanguagePickerOpen(false);
-        }
-      });
-    },
-    [queueSettingsWrite, applyLocale],
+  // The locale applies only once the save landed — a failed save
+  // must not leave the UI on a selection storage never recorded.
+  const onPickLanguage = useMemo(
+    () =>
+      pickSetting(
+        languageEpoch,
+        (key) => ({ language: key === 'system' ? null : key }),
+        queueSettingsWrite,
+        'settings.language',
+        () => setLanguagePickerOpen(false),
+        (p) => applyLocale(p.language),
+      ),
+    [applyLocale, queueSettingsWrite],
   );
   const closeLanguagePicker = useCallback(() => {
     languageEpoch.current += 1;
     setLanguagePickerOpen(false);
   }, []);
-  const openStorefront = useCallback(() => {
-    storefrontEpoch.current += 1;
-    setStorefrontDraft(state.settings.storefront ?? '');
-    setStorefrontSheetOpen(true);
-  }, [state.settings.storefront]);
+  // The domain bound: ISO-3166 alpha-2, or null for system-locale
+  // resolution. Dismiss only on commit — a failed save shows the
+  // toast, not a closed sheet over an unchanged row.
   const onSubmitStorefront = useCallback(
     (value: string) => {
       const code = value.toUpperCase();
-      // The domain bound: ISO-3166 alpha-2, or null for
-      // system-locale resolution.
       if (!/^[A-Z]{2}$/.test(code)) {
         setToast(t('toast.storefrontCode'));
         return;
       }
-      // Dismiss only on commit — a failed save shows the toast, not
-      // a closed sheet over an unchanged row.
-      const opening = storefrontEpoch.current;
-      void queueSettingsWrite({ storefront: code }).then((saved) => {
-        reportResult('action.saveStorefront', saved);
-        if (saved.ok && opening === storefrontEpoch.current) {
-          setStorefrontSheetOpen(false);
-        }
-      });
+      commitSetting(
+        storefrontEpoch,
+        { storefront: code },
+        queueSettingsWrite,
+        'action.saveStorefront',
+        () => setStorefrontSheetOpen(false),
+      );
     },
     [queueSettingsWrite],
   );
-  const onClearStorefront = useCallback(() => {
-    const opening = storefrontEpoch.current;
-    void queueSettingsWrite({ storefront: null }).then((saved) => {
-      reportResult('action.clearStorefront', saved);
-      if (saved.ok && opening === storefrontEpoch.current) {
-        setStorefrontSheetOpen(false);
-      }
-    });
-  }, [queueSettingsWrite]);
+  const onClearStorefront = useCallback(
+    () =>
+      commitSetting(
+        storefrontEpoch,
+        { storefront: null },
+        queueSettingsWrite,
+        'action.clearStorefront',
+        () => setStorefrontSheetOpen(false),
+      ),
+    [queueSettingsWrite],
+  );
   const closeStorefront = useCallback(
     () => setStorefrontSheetOpen(false),
     [],
   );
-  const openQualityPicker = useCallback(() => {
-    qualityEpoch.current += 1;
-    setQualityPickerOpen(true);
-  }, []);
   const onPickQuality = useCallback(
     (key: string) => {
       const qualityKbps = Number(key);
-      if (!Number.isSafeInteger(qualityKbps)) {
-        return;
+      if (Number.isSafeInteger(qualityKbps)) {
+        commitSetting(
+          qualityEpoch,
+          { qualityKbps },
+          queueSettingsWrite,
+          'action.saveQuality',
+          () => setQualityPickerOpen(false),
+        );
       }
-      const opening = qualityEpoch.current;
-      void queueSettingsWrite({ qualityKbps }).then((saved) => {
-        reportResult('action.saveQuality', saved);
-        if (saved.ok && opening === qualityEpoch.current) {
-          setQualityPickerOpen(false);
-        }
-      });
     },
     [queueSettingsWrite],
   );
@@ -3165,8 +3098,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       void queueSettingsWrite((latest) => {
         shrinking =
           artworkCacheBytes <
-          (latest.artworkCacheBytes ??
-            ARTWORK_CACHE_BUDGET_DEFAULT_BYTES);
+          (latest.artworkCacheBytes ?? ARTWORK_CACHE_BUDGET_DEFAULT_BYTES);
         return { artworkCacheBytes };
       }).then((updated) => {
         // A shrunken cap takes effect only once rows over it are
@@ -3177,7 +3109,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         }
       });
     },
-    [queueSettingsWrite, ports.sweepArtworkCache],
+    [ports.sweepArtworkCache, queueSettingsWrite],
   );
   const closeArtworkCache = useCallback(
     () => setArtworkCachePickerOpen(false),
@@ -3185,15 +3117,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
 
   return {
-    // passthroughs the app's seams still read
-    session,
-    controller,
-    state,
     // gate
     localeApplied,
     localeTick,
     // channels
-    positionMs,
     online,
     toast,
     // nav
@@ -3214,7 +3141,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
     stageOpen,
     setStageOpen,
     setStageOpenFor,
-    openStage,
     stageMode,
     setStageMode,
     reordering,
@@ -3230,18 +3156,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
     entityFetches,
     entityRowMeta,
     homeModel,
-    suggestionMeta,
     searchModel,
     settingsModel,
     correctionsModel,
     radioModel,
     lyricsModel,
-    diagnostics,
     transfer,
     pickerItems,
     // transport / playback ops
-    playing,
-    currentRecordingId,
     peaks,
     onPlayPause,
     onToggleLike,
@@ -3251,11 +3173,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     onMoveQueueItemTo,
     seekToPosition,
     canPlay,
-    canPlayMeta,
-    isOwned,
-    localPlayable,
     playRecording,
-    playMeta,
     onResultPress,
     onHomeCardPress,
     playCollectionRows,
@@ -3263,32 +3181,29 @@ export function useAppShell<E extends { readonly type: string } = never>(
     playPlaylistEntry,
     entityPlayAll,
     onEntityRowPress,
-    dispatchPlay,
     reportPlay,
     // search
     query,
     setQuery,
     searchState,
-    runSearch,
     submitSearch,
     retrySearch,
     cancelSearch,
     applySearchText,
-    recordRecentSearch,
     searchRecents,
     suggestions,
     searchSession: search,
     resultMetaFor,
     // sheets
     actionsFor,
-    openRowActions,
     setActionsFor,
+    openRowActions,
     closeRowActions,
     rowActions,
     onRowAction,
     pickerFor,
-    openPlaylistPicker,
     setPickerFor,
+    openPlaylistPicker,
     closePlaylistPicker,
     onPickPlaylist,
     onCreateAndPick,
@@ -3297,21 +3212,20 @@ export function useAppShell<E extends { readonly type: string } = never>(
     onPickProvider,
     closeProviderPicker,
     themePickerOpen,
-    openThemePicker,
     onPickTheme,
     closeThemePicker,
     languagePickerOpen,
-    openLanguagePicker,
     onPickLanguage,
     closeLanguagePicker,
     storefrontSheetOpen,
     storefrontDraft,
-    openStorefront,
+    // The domain bound: ISO-3166 alpha-2, or null for system-locale
+    // resolution. Dismiss only on commit — a failed save shows the
+    // toast, not a closed sheet over an unchanged row.
     onSubmitStorefront,
     onClearStorefront,
     closeStorefront,
     qualityPickerOpen,
-    openQualityPicker,
     onPickQuality,
     closeQualityPicker,
     artworkCachePickerOpen,
@@ -3321,28 +3235,15 @@ export function useAppShell<E extends { readonly type: string } = never>(
     onSettingsSelect,
     onSettingsToggle,
     queueSettingsWrite,
-    applyLocale,
-    storageText,
-    refreshLocal,
-    refreshUsage,
     // lyrics/radio/corrections
-    fetchLyrics,
     onRetryLyrics,
-    radioSeedable,
-    radioSeedRef,
-    actionRadioRef,
-    onStartRadio,
     onStartRadioGated,
     onStopRadio,
-    reviewFilter,
     setReviewFilter,
     loadReviews,
     reviewOp,
     // downloads
-    downloads,
-    downloadChipFor,
     downloadRefFor,
-    onDownloadAction,
     stageDownload,
     onStageDownload,
     onStageAddToPlaylist,
@@ -3353,7 +3254,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
     deletePlaylist,
     removePlaylistEntry,
     movePlaylistEntry,
-    addToPlaylist,
     onOpenCard,
     onCreatePlaylist,
     // entity fetches
@@ -3369,9 +3269,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
     onApplyImport,
     onResetImport,
     resetTransfer,
-    // diagnostics reads
-    attempts,
-    pendingReviews,
   };
 }
 
