@@ -97,24 +97,7 @@ export type LogSink = (entry: {
  */
 export function createLog(sink?: LogSink): LogPort {
   const emit: LogSink =
-    sink ??
-    ((entry) => {
-      const line = `[auqw] ${entry.message}`;
-      switch (entry.level) {
-        case 'debug':
-          console.debug(line);
-          break;
-        case 'info':
-          console.info(line);
-          break;
-        case 'warn':
-          console.warn(line);
-          break;
-        case 'error':
-          console.error(line);
-          break;
-      }
-    });
+    sink ?? ((entry) => console[entry.level](`[auqw] ${entry.message}`));
   return {
     write(entry) {
       try {
