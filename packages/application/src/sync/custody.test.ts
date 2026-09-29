@@ -127,4 +127,30 @@ export function run(): void {
   assert(normalized !== null && isSyncPeer(normalized));
   const normalizedCaller = readSyncPeerRecord(LEGACY_DESKTOP_ROW);
   assert(normalizedCaller !== null && isSyncCallerPeer(normalizedCaller));
+
+  // A TAGGED row carrying loose-reader bounds (an over-max name from
+  // a pre-strict store, or endpoints longer than the write guard
+  // allows) must not drop on reload — reads accept what the shipped
+  // validators could store, strict bounds only govern writes.
+  const looseTaggedResponder = {
+    ...LEGACY_MOBILE_ROW,
+    role: 'responder',
+    name: 'n'.repeat(300),
+    endpoints: ['e'.repeat(400)],
+    deviceId: 'UPPER not-pattern',
+  };
+  assert(!isSyncPeer(looseTaggedResponder), 'strict guard rejects');
+  const looseLoaded = readSyncPeerRecord(looseTaggedResponder);
+  assertEqual(looseLoaded?.name, 'n'.repeat(300), 'tagged loose row loads');
+  const looseTaggedCaller = {
+    ...LEGACY_DESKTOP_ROW,
+    role: 'caller',
+    endpoints: ['e'.repeat(400)],
+  };
+  assert(!isSyncCallerPeer(looseTaggedCaller));
+  assertEqual(
+    readSyncPeerRecord(looseTaggedCaller)?.role,
+    'caller',
+    'tagged loose caller loads',
+  );
 }

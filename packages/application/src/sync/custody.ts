@@ -249,10 +249,13 @@ export function readSyncPeerRecord(
     return null;
   }
   if (value['role'] === 'caller') {
-    return isSyncCallerPeer(value) ? value : null;
+    // Tagged rows still fall back to the loose reader — a legacy row
+    // normalized+retagged with fields the strict write guard rejects
+    // (over-bounds name, unbounded endpoints) must not drop on reload.
+    return isSyncCallerPeer(value) ? value : readCallerRow(value);
   }
   if (value['role'] === 'responder') {
-    return isSyncPeer(value) ? value : null;
+    return isSyncPeer(value) ? value : readResponderRow(value);
   }
   if (value['role'] !== undefined) {
     return null;
