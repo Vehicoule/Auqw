@@ -11,7 +11,7 @@ Two surfaces, two jobs:
 - **Stage** listens — artwork, metadata, seek, transport, and `player | lyrics | queue` sub-modes.
 - **World** browses — home, explore, library, search results, settings.
 
-Omarchy rules, non-negotiable: depth comes from the background ramp only (no shadows); boundaries are hairlines; states are alpha fills; accent is reserved for active/selected/progress; radii are deliberate and small (frames square, controls rounded); type is one sans family (Inter); icons are custom-rendered and move (see Rendering).
+Omarchy rules, non-negotiable: depth comes from the background ramp only (no shadows); boundaries are hairlines; states are alpha fills; accent is reserved for active/selected/progress plus the sub-soft hover wash (see Tokens); radii are deliberate and small (frames square, controls rounded); type is one sans family (Inter); icons are custom-rendered and move (see Rendering).
 
 ## Shell contract — desktop (Electron)
 
@@ -56,7 +56,8 @@ Typed JSON source (DTCG), one authority; generated TS/CSS outputs. Three schemes
 | divider | `#3a352d` | `#d8d1c2` | `#29241e` | seams only |
 | switch.thumb | `#ffffff` | `#ffffff` | `#ffffff` | thumb is constant white |
 | hairline | `fg @ 14%` | `fg @ 15%` | `fg @ 13%` | furniture borders |
-| alpha.fg08/18/25/40 | `fg @ 8/16/26/42%` | `fg @ 6/13/26/42%` | same as dark | hover/selected fills, disabled |
+| alpha.fg08/18/25/40 | `fg @ 8/16/26/42%` | `fg @ 6/13/26/42%` | same as dark | selected fills, disabled |
+| hover | `accent @ 9%` | `accent @ 9%` | `accent @ 9%` | hover wash — inside the accent channel but below accent.soft so selected still reads stronger; the neutral fg08 wash read as "greyed out" and drowned on accent-filled controls |
 
 States carry meaning beyond color: playing = accent text **and** eq overlay on the thumb; liked = filled pink heart; unavailable = dimmed + warn glyph; selected = alpha fill + weight. `playback.active` = `accent.active` (split only if the two meanings differ beyond color). No decorative text below 4.5:1; decorative-only roles (grab handles, hints) may sit below.
 
