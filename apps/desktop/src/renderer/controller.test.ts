@@ -314,6 +314,21 @@ const MANIFESTS: readonly PluginManifestPayload[] = [
   },
 ];
 
+function boot(
+  api: AuqwApi,
+  deps: {
+    storage?: FakeStorage;
+    player?: FakePlayer;
+    providers?: readonly PluginProvider[];
+  } = {},
+): ReturnType<typeof createSessionController> {
+  return createSessionController(api, {
+    storage: deps.storage ?? new FakeStorage(persisted()),
+    player: deps.player ?? new FakePlayer(),
+    ...(deps.providers === undefined ? {} : { providers: deps.providers }),
+  });
+}
+
 // 1. Loaded manifests become providers — capabilities filtered to the
 // ABI set (a bogus manifest capability never reaches ProviderPort).
 async function providersFromManifests(): Promise<void> {
@@ -323,10 +338,7 @@ async function providersFromManifests(): Promise<void> {
     plugins: ['plugin-itunes', 'plugin-ytm'],
     manifests: MANIFESTS,
   };
-  const controller = await createSessionController(rig.api, {
-    storage: new FakeStorage(persisted()),
-    player: new FakePlayer(),
-  });
+  const controller = await boot(rig.api);
   assertEqual(controller.providers.length, 2);
   assertEqual(controller.providers[0]?.id, 'itunes');
   assertDeepEqual(controller.providers[0]?.capabilities, [
@@ -365,10 +377,7 @@ async function unavailableBindings(): Promise<void> {
   };
   let thrown: unknown = null;
   try {
-    await createSessionController(rig.api, {
-      storage: new FakeStorage(persisted()),
-      player: new FakePlayer(),
-    });
+    await boot(rig.api);
   } catch (error) {
     thrown = error;
   }
@@ -381,10 +390,7 @@ async function unavailableBindings(): Promise<void> {
   rig.pluginsResult = { bindings: 'loaded', plugins: [], manifests: [] };
   thrown = null;
   try {
-    await createSessionController(rig.api, {
-      storage: new FakeStorage(persisted()),
-      player: new FakePlayer(),
-    });
+    await boot(rig.api);
   } catch (error) {
     thrown = error;
   }
@@ -399,9 +405,7 @@ async function unavailableBindings(): Promise<void> {
 // injected storage seam, with the desktop defaults as the baseline.
 async function restoreReady(): Promise<void> {
   const rig = fakeApi();
-  const controller = await createSessionController(rig.api, {
-    storage: new FakeStorage(persisted()),
-    player: new FakePlayer(),
+  const controller = await boot(rig.api, {
     providers: defaultProviders(),
   });
   const state = controller.session.snapshot();
@@ -419,9 +423,8 @@ async function restoreFailed(): Promise<void> {
   const rig = fakeApi();
   const storage = new FakeStorage(persisted());
   storage.holdNextLoad();
-  const booting = createSessionController(rig.api, {
+  const booting = boot(rig.api, {
     storage,
-    player: new FakePlayer(),
     providers: defaultProviders(),
   });
   storage.settleLoad(err(appError('internal', 'disk gone')));
@@ -440,9 +443,7 @@ async function restoreFailed(): Promise<void> {
 async function connectivity(): Promise<void> {
   const rig = fakeApi();
   rig.snapshotResult = { online: false };
-  const controller = await createSessionController(rig.api, {
-    storage: new FakeStorage(persisted()),
-    player: new FakePlayer(),
+  const controller = await boot(rig.api, {
     providers: defaultProviders(),
   });
   await Promise.resolve();
@@ -469,9 +470,7 @@ async function connectivity(): Promise<void> {
 async function disposeSeam(): Promise<void> {
   const rig = fakeApi();
   const disposed: string[] = [];
-  const controller = await createSessionController(rig.api, {
-    storage: new FakeStorage(persisted()),
-    player: new FakePlayer(),
+  const controller = await boot(rig.api, {
     providers: defaultProviders(disposed),
   });
   await controller.dispose();
@@ -489,9 +488,7 @@ async function incompleteProviderSet(): Promise<void> {
   const rig = fakeApi();
   let thrown: unknown = null;
   try {
-    await createSessionController(rig.api, {
-      storage: new FakeStorage(persisted()),
-      player: new FakePlayer(),
+    await boot(rig.api, {
       providers: [stubProvider('lyrics-lib', ['lyrics.plain'])],
     });
   } catch (error) {
@@ -505,9 +502,7 @@ async function incompleteProviderSet(): Promise<void> {
 
   thrown = null;
   try {
-    await createSessionController(rig.api, {
-      storage: new FakeStorage(persisted()),
-      player: new FakePlayer(),
+    await boot(rig.api, {
       providers: [stubProvider('itunes', ['catalog.search'])],
     });
   } catch (error) {
@@ -536,9 +531,8 @@ async function restoreRepairsSettings(): Promise<void> {
       },
     }),
   );
-  const controller = await createSessionController(rig.api, {
+  const controller = await boot(rig.api, {
     storage,
-    player: new FakePlayer(),
     providers: [
       stubProvider('itunes', ['catalog.search']),
       stubProvider('deezer', ['playback.resolve', 'lyrics.synced']),
@@ -570,9 +564,7 @@ async function restoreRepairsSettings(): Promise<void> {
 async function onlineBaselineReplay(): Promise<void> {
   const rig = fakeApi();
   rig.snapshotResult = { online: false };
-  const controller = await createSessionController(rig.api, {
-    storage: new FakeStorage(persisted()),
-    player: new FakePlayer(),
+  const controller = await boot(rig.api, {
     providers: defaultProviders(),
   });
   await Promise.resolve();
@@ -676,7 +668,7 @@ async function downloadResolvesLocal(): Promise<void> {
   const rig = fakeApi();
   const player = new FakePlayer();
   rig.transferStat = { exists: true, bytes: 100 };
-  const controller = await createSessionController(rig.api, {
+  const controller = await boot(rig.api, {
     storage: new FakeStorage(
       persisted({
         recordings: [rec('rec-dl', 'provider')],
@@ -717,7 +709,7 @@ async function downloadResolvesLocal(): Promise<void> {
 async function localFileResolvesUri(): Promise<void> {
   const rig = fakeApi();
   const player = new FakePlayer();
-  const controller = await createSessionController(rig.api, {
+  const controller = await boot(rig.api, {
     storage: new FakeStorage(
       persisted({
         recordings: [rec('rec-lf', 'local')],
@@ -760,7 +752,7 @@ async function rehydrateAfterImport(): Promise<void> {
   const rig = fakeApi();
   const player = new FakePlayer();
   const storage = new FakeStorage(persisted());
-  const controller = await createSessionController(rig.api, {
+  const controller = await boot(rig.api, {
     storage,
     player,
     providers: defaultProviders(),
@@ -798,7 +790,7 @@ async function vanishedDownloadHonest(): Promise<void> {
   const rig = fakeApi();
   const player = new FakePlayer();
   rig.transferStat = { exists: false, bytes: null };
-  const controller = await createSessionController(rig.api, {
+  const controller = await boot(rig.api, {
     storage: new FakeStorage(
       persisted({
         recordings: [rec('rec-dl', 'provider')],
@@ -825,7 +817,7 @@ async function localPlaybackProbe(): Promise<void> {
   const rig = fakeApi();
   const player = new FakePlayer();
   rig.transferStat = { exists: true, bytes: 100 };
-  const controller = await createSessionController(rig.api, {
+  const controller = await boot(rig.api, {
     storage: new FakeStorage(
       persisted({
         recordings: [
@@ -859,7 +851,7 @@ async function replaceLibraryDrainsDownloads(): Promise<void> {
   const rig = fakeApi();
   const player = new FakePlayer();
   rig.transferStat = { exists: true, bytes: 100 };
-  const controller = await createSessionController(rig.api, {
+  const controller = await boot(rig.api, {
     storage: new FakeStorage(
       persisted({
         recordings: [rec('rec-dl', 'provider')],
@@ -872,11 +864,10 @@ async function replaceLibraryDrainsDownloads(): Promise<void> {
   assertEqual(controller.downloads.fileFor('rec-dl'), 'dl-1');
   // An import doc minted off an empty library — no downloads section.
   const rigEmpty = fakeApi();
-  const empty = await createSessionController(rigEmpty.api, {
+  const empty = await boot(rigEmpty.api, {
     storage: new FakeStorage(
       persisted({ recordings: [rec('rec-dl', 'provider')] }),
     ),
-    player: new FakePlayer(),
     providers: defaultProviders(),
   });
   const exported = await empty.session.exportLibrary();
