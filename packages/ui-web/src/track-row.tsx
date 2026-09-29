@@ -8,9 +8,24 @@ import {
   Pressable,
   Text,
 } from './primitives.tsx';
+import type { IconButtonProps, IconName } from './primitives.tsx';
 import { formatClock, t } from '@auqw/ui-shared';
-import type { TrackRowModel } from '@auqw/ui-shared';
+import type { DownloadChip, TrackRowModel } from '@auqw/ui-shared';
 import { reconcileFocusIndex, rowKeyAction } from './keyboard.ts';
+
+// The tail cluster's buttons are one build — 30px hit area, 14px glyph.
+function TailBtn(props: IconButtonProps) {
+  return <IconButton size={30} iconSize={14} {...props} />;
+}
+
+const DL_ICON: Record<DownloadChip, IconName> = {
+  idle: 'download',
+  queued: 'download',
+  downloading: 'download',
+  stored: 'check',
+  failed: 'warn',
+  removing: 'spinner',
+};
 
 export type TrackRowProps = {
   readonly row: TrackRowModel;
@@ -77,14 +92,14 @@ export function TrackRow({
             </button>
           ) : (
             <div className="uw-track-row__chevrons">
-              <IconButton
+              <TailBtn
                 icon="chevron-up"
                 size={20}
                 iconSize={10}
                 ariaLabel={t('track.a11y.moveUp')}
                 onPress={onMoveUp}
               />
-              <IconButton
+              <TailBtn
                 icon="chevron-down"
                 size={20}
                 iconSize={10}
@@ -97,7 +112,7 @@ export function TrackRow({
       )}
       <Pressable
         onPress={onPress}
-        onContextMenu={onContext === undefined ? undefined : () => onContext()}
+        onContextMenu={onContext}
         ariaLabel={`${row.title}${row.artist === null ? '' : t('track.a11y.artistSuffix', { artist: row.artist })}${unavailable ? t('track.a11y.unavailableSuffix') : ''}${row.playing ? t('track.a11y.playingSuffix') : ''}${row.liked ? t('track.a11y.likedSuffix') : ''}${row.download === null ? '' : t('track.a11y.downloadSuffix', { state: row.download === 'stored' ? t('track.download.complete') : t(`track.download.${row.download}`) })}`}
         ariaSelected={row.playing}
         className="uw-track-row__main"
@@ -139,15 +154,7 @@ export function TrackRow({
             title={row.download === 'stored' ? t('playlist.downloaded') : t('track.download.tooltip', { state: t(`track.download.${row.download}`) })}
           >
             <Icon
-              name={
-                row.download === 'stored'
-                  ? 'check'
-                  : row.download === 'failed'
-                    ? 'warn'
-                    : row.download === 'removing'
-                      ? 'spinner'
-                      : 'download'
-              }
+              name={DL_ICON[row.download]}
               size={13}
               color={
                 row.download === 'failed'
@@ -170,40 +177,32 @@ export function TrackRow({
           </span>
         )}
         {onAddToPlaylist !== undefined && (
-          <IconButton
+          <TailBtn
             icon="list-plus"
-            size={30}
-            iconSize={14}
             ariaLabel={t('track.a11y.addToPlaylist')}
             onPress={onAddToPlaylist}
             className="uw-track-row__add"
           />
         )}
         {onContext !== undefined && (
-          <IconButton
+          <TailBtn
             icon="menu"
-            size={30}
-            iconSize={14}
             ariaLabel={t('track.a11y.rowActions')}
             onPress={onContext}
             className="uw-track-row__menu"
           />
         )}
         {onToggleLike !== undefined && (
-          <IconButton
+          <TailBtn
             icon={row.liked ? 'heart-filled' : 'heart'}
-            size={30}
-            iconSize={14}
             color={row.liked ? 'var(--liked)' : undefined}
             ariaLabel={row.liked ? t('common.unlike') : t('common.like')}
             onPress={onToggleLike}
           />
         )}
         {onRemove !== undefined && (
-          <IconButton
+          <TailBtn
             icon="close"
-            size={30}
-            iconSize={14}
             ariaLabel={t('track.a11y.remove')}
             onPress={onRemove}
           />

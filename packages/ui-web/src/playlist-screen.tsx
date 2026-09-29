@@ -83,26 +83,19 @@ export function PlaylistScreen({
   const [draft, setDraft] = useState('');
   const [confirming, setConfirming] = useState(false);
   const entries = model?.entries ?? [];
+  const byEntry = (fn: ((entry: PlaylistEntryModel) => void) | undefined) =>
+    fn === undefined
+      ? undefined
+      : (index: number) => {
+          const entry = entries[index];
+          if (entry !== undefined) {
+            fn(entry);
+          }
+        };
   const list = useTrackList({
     count: entries.length,
-    onActivate:
-      onPressEntry === undefined
-        ? undefined
-        : (index) => {
-            const entry = entries[index];
-            if (entry !== undefined) {
-              onPressEntry(entry);
-            }
-          },
-    onContext:
-      onContext === undefined
-        ? undefined
-        : (index) => {
-            const entry = entries[index];
-            if (entry !== undefined) {
-              onContext(entry);
-            }
-          },
+    onActivate: byEntry(onPressEntry),
+    onContext: byEntry(onContext),
   });
   if (model === null) {
     return (
@@ -241,49 +234,35 @@ export function PlaylistScreen({
           className="uw-list"
           onKeyDown={list.listProps.onKeyDown}
         >
-          {model.entries.map((entry, index) => (
-            <TrackRow
-              key={entry.entryId}
-              row={entry.row}
-              badge={entry.duplicate ? t('queue.badge.repeat') : null}
-              reorderControls="buttons"
-              tabIndex={list.rowTabIndex(index)}
-              onFocusRow={() => list.onRowFocus(index)}
-              onMoveUp={
-                index > 0 && onMoveEntry !== undefined
-                  ? () => onMoveEntry(entry, -1)
-                  : undefined
-              }
-              onMoveDown={
-                index < model.entries.length - 1 && onMoveEntry !== undefined
-                  ? () => onMoveEntry(entry, 1)
-                  : undefined
-              }
-              onPress={
-                onPressEntry === undefined
-                  ? undefined
-                  : () => onPressEntry(entry)
-              }
-              onToggleLike={
-                onToggleLike === undefined
-                  ? undefined
-                  : () => onToggleLike(entry)
-              }
-              onAddToPlaylist={
-                onAddToPlaylist === undefined
-                  ? undefined
-                  : () => onAddToPlaylist(entry)
-              }
-              onContext={
-                onContext === undefined ? undefined : () => onContext(entry)
-              }
-              onRemove={
-                onRemoveEntry === undefined
-                  ? undefined
-                  : () => onRemoveEntry(entry)
-              }
-            />
-          ))}
+          {model.entries.map((entry, index) => {
+            const bind = (fn: ((e: PlaylistEntryModel) => void) | undefined) =>
+              fn === undefined ? undefined : () => fn(entry);
+            return (
+              <TrackRow
+                key={entry.entryId}
+                row={entry.row}
+                badge={entry.duplicate ? t('queue.badge.repeat') : null}
+                reorderControls="buttons"
+                tabIndex={list.rowTabIndex(index)}
+                onFocusRow={() => list.onRowFocus(index)}
+                onMoveUp={
+                  index > 0 && onMoveEntry !== undefined
+                    ? () => onMoveEntry(entry, -1)
+                    : undefined
+                }
+                onMoveDown={
+                  index < model.entries.length - 1 && onMoveEntry !== undefined
+                    ? () => onMoveEntry(entry, 1)
+                    : undefined
+                }
+                onPress={bind(onPressEntry)}
+                onToggleLike={bind(onToggleLike)}
+                onAddToPlaylist={bind(onAddToPlaylist)}
+                onContext={bind(onContext)}
+                onRemove={bind(onRemoveEntry)}
+              />
+            );
+          })}
         </div>
       )}
     </div>
