@@ -69,6 +69,29 @@ import {
 import { isExportDocument, isPersistedState } from '../library/library.ts';
 import type { ExportDocument } from '../library/library.ts';
 
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function cancelled(): Result<never> {
+  return err(appError('cancelled', 'cancelled'));
+}
+
+/** Settles the deferred at queue index (shift at 0); false when absent. */
+function settleQueue<T>(
+  queue: Deferred<T>[],
+  index: number,
+  result: T,
+): boolean {
+  const deferred = queue[index];
+  if (deferred === undefined) {
+    return false;
+  }
+  queue.splice(index, 1);
+  deferred.resolve(result);
+  return true;
+}
+
 export class SequenceIds implements IdPort {
   #next = 0;
   next(prefix: string): string {
@@ -123,10 +146,7 @@ export class FakeClock implements ClockPort {
       throw new TypeError('ms must be a safe nonnegative integer');
     }
     if (signal.cancelled) {
-      return Promise.resolve({
-        ok: false,
-        error: appError('cancelled', 'cancelled'),
-      });
+      return Promise.resolve(cancelled());
     }
     const wakeAtMs = Math.min(this.#now + ms, Number.MAX_SAFE_INTEGER);
     return new Promise<Result<void>>((resolve) => {
@@ -147,7 +167,7 @@ export class FakeClock implements ClockPort {
       };
       sleeper.done = finish;
       sleeper.unsubscribe = signal.subscribe(() => {
-        finish({ ok: false, error: appError('cancelled', 'cancelled') });
+        finish(cancelled());
       });
       this.#sleepers.push(sleeper);
     });
@@ -222,7 +242,7 @@ export class Deferred<T> {
   }
 }
 
-export type RecordedCall = {
+type RecordedCall = {
   readonly method: string;
   readonly input: unknown;
   readonly context?: OperationContext;
@@ -298,12 +318,24 @@ export class FakeProvider implements ProviderPort {
     this.#queues[method].push(deferred);
     context.signal.subscribe(() => {
       this.cancelledSignals.push(context.signal);
-      deferred.resolve({
-        ok: false,
-        error: appError('cancelled', 'cancelled'),
-      });
+      deferred.resolve(cancelled());
     });
     return deferred.promise as Promise<Result<T>>;
+  }
+
+  /** Record call → capability gate → deferred queue. */
+  #invoke<T>(
+    method: ProviderMethod,
+    callName: string,
+    input: unknown,
+    capability: ProviderCapability,
+    context: OperationContext,
+  ): Promise<Result<T>> {
+    this.calls.push({ method: callName, input, context });
+    if (!this.capabilities.includes(capability)) {
+      return Promise.resolve(unsupportedCall(capability));
+    }
+    return this.#defer(method, context);
   }
 
   #settle<T>(
@@ -311,25 +343,14 @@ export class FakeProvider implements ProviderPort {
     index: number,
     result: Result<T>,
   ): boolean {
-    const queue = this.#queues[method];
-    const deferred = queue[index];
-    if (deferred === undefined) {
-      return false;
-    }
-    queue.splice(index, 1);
-    deferred.resolve(result);
-    return true;
+    return settleQueue(this.#queues[method], index, result);
   }
 
   search(
     input: { query: string; limit: number; storefront: string | null },
     context: OperationContext,
   ): Promise<Result<SearchPage>> {
-    this.calls.push({ method: 'search', input, context });
-    if (!this.capabilities.includes('catalog.search')) {
-      return Promise.resolve(unsupportedCall('catalog.search'));
-    }
-    return this.#defer('search', context);
+    return this.#invoke('search', 'search', input, 'catalog.search', context);
   }
 
   /** Settles the oldest pending search; false when none pending. */
@@ -346,11 +367,13 @@ export class FakeProvider implements ProviderPort {
     input: { query: RecordingQuery; limit: number },
     context: OperationContext,
   ): Promise<Result<readonly TrackMetadata[]>> {
-    this.calls.push({ method: 'candidates', input, context });
-    if (!this.capabilities.includes('playback.candidates')) {
-      return Promise.resolve(unsupportedCall('playback.candidates'));
-    }
-    return this.#defer('candidates', context);
+    return this.#invoke(
+      'candidates',
+      'candidates',
+      input,
+      'playback.candidates',
+      context,
+    );
   }
 
   settleCandidates(result: Result<readonly TrackMetadata[]>): boolean {
@@ -374,15 +397,13 @@ export class FakeProvider implements ProviderPort {
     },
     context: OperationContext,
   ): Promise<Result<PlayableResource>> {
-    this.calls.push({
-      method: 'resolvePlayback',
-      input: { ref, input },
+    return this.#invoke(
+      'resolve',
+      'resolvePlayback',
+      { ref, input },
+      'playback.resolve',
       context,
-    });
-    if (!this.capabilities.includes('playback.resolve')) {
-      return Promise.resolve(unsupportedCall('playback.resolve'));
-    }
-    return this.#defer('resolve', context);
+    );
   }
 
   settleResolve(result: Result<PlayableResource>): boolean {
@@ -397,22 +418,25 @@ export class FakeProvider implements ProviderPort {
     refs: readonly SourceRef[],
     context: OperationContext,
   ): Promise<Result<readonly TrackMetadata[]>> {
-    this.calls.push({ method: 'getDetails', input: refs, context });
-    if (!this.capabilities.includes('catalog.metadata')) {
-      return Promise.resolve(unsupportedCall('catalog.metadata'));
-    }
-    return this.#defer('details', context);
+    return this.#invoke('details', 'getDetails', refs, 'catalog.metadata', context);
+  }
+
+  settleDetails(result: Result<readonly TrackMetadata[]>): boolean {
+    return this.#settle('details', 0, result);
+  }
+
+  settleDetailsAt(
+    index: number,
+    result: Result<readonly TrackMetadata[]>,
+  ): boolean {
+    return this.#settle('details', index, result);
   }
 
   getEntity(
     ref: EntityRef,
     context: OperationContext,
   ): Promise<Result<EntityPage>> {
-    this.calls.push({ method: 'getEntity', input: ref, context });
-    if (!this.capabilities.includes('catalog.entity')) {
-      return Promise.resolve(unsupportedCall('catalog.entity'));
-    }
-    return this.#defer('entity', context);
+    return this.#invoke('entity', 'getEntity', ref, 'catalog.entity', context);
   }
 
   settleEntity(result: Result<EntityPage>): boolean {
@@ -428,11 +452,13 @@ export class FakeProvider implements ProviderPort {
     input: { size: 600 | 1200 },
     context: OperationContext,
   ): Promise<Result<readonly ArtworkRef[]>> {
-    this.calls.push({ method: 'artwork', input: { ref, input }, context });
-    if (!this.capabilities.includes('catalog.artwork')) {
-      return Promise.resolve(unsupportedCall('catalog.artwork'));
-    }
-    return this.#defer('artwork', context);
+    return this.#invoke(
+      'artwork',
+      'artwork',
+      { ref, input },
+      'catalog.artwork',
+      context,
+    );
   }
 
   settleArtwork(result: Result<readonly ArtworkRef[]>): boolean {
@@ -448,17 +474,14 @@ export class FakeProvider implements ProviderPort {
 
   /** The wire capability the prefer hint maps to under declared caps. */
   #lyricsCapability(prefer: LyricsPreference): ProviderCapability | null {
+    const has = (cap: ProviderCapability) => this.capabilities.includes(cap);
     if (prefer === 'plain') {
-      return this.capabilities.includes('lyrics.plain')
-        ? 'lyrics.plain'
-        : null;
+      return has('lyrics.plain') ? 'lyrics.plain' : null;
     }
-    if (this.capabilities.includes('lyrics.synced')) {
+    if (has('lyrics.synced')) {
       return 'lyrics.synced';
     }
-    return this.capabilities.includes('lyrics.plain')
-      ? 'lyrics.plain'
-      : null;
+    return has('lyrics.plain') ? 'lyrics.plain' : null;
   }
 
   getLyrics(
@@ -489,11 +512,7 @@ export class FakeProvider implements ProviderPort {
     input: RadioSeed,
     context: OperationContext,
   ): Promise<Result<RadioPage>> {
-    this.calls.push({ method: 'radioSeed', input, context });
-    if (!this.capabilities.includes('radio.seed')) {
-      return Promise.resolve(unsupportedCall('radio.seed'));
-    }
-    return this.#defer('radio', context);
+    return this.#invoke('radio', 'radioSeed', input, 'radio.seed', context);
   }
 
   settleRadio(result: Result<RadioPage>): boolean {
@@ -508,11 +527,7 @@ export class FakeProvider implements ProviderPort {
     input: { input: string; limit?: number },
     context: OperationContext,
   ): Promise<Result<readonly string[]>> {
-    this.calls.push({ method: 'suggest', input, context });
-    if (!this.capabilities.includes('catalog.suggest')) {
-      return Promise.resolve(unsupportedCall('catalog.suggest'));
-    }
-    return this.#defer('suggest', context);
+    return this.#invoke('suggest', 'suggest', input, 'catalog.suggest', context);
   }
 
   settleSuggest(result: Result<readonly string[]>): boolean {
@@ -521,17 +536,6 @@ export class FakeProvider implements ProviderPort {
 
   settleSuggestAt(index: number, result: Result<readonly string[]>): boolean {
     return this.#settle('suggest', index, result);
-  }
-
-  settleDetails(result: Result<readonly TrackMetadata[]>): boolean {
-    return this.#settle('details', 0, result);
-  }
-
-  settleDetailsAt(
-    index: number,
-    result: Result<readonly TrackMetadata[]>,
-  ): boolean {
-    return this.#settle('details', index, result);
   }
 
   pendingCount(method: ProviderMethod): number {
@@ -554,23 +558,12 @@ export class FakePlayer implements PlayerPort {
 
   /** Settles the oldest pending prepare; false when none pending. */
   settlePrepare(result: Result<string>): boolean {
-    const deferred = this.#prepareDeferreds.shift();
-    if (deferred === undefined) {
-      return false;
-    }
-    deferred.resolve(result);
-    return true;
+    return settleQueue(this.#prepareDeferreds, 0, result);
   }
 
   /** Settles the pending prepare at queue index. */
   settlePrepareAt(index: number, result: Result<string>): boolean {
-    const deferred = this.#prepareDeferreds[index];
-    if (deferred === undefined) {
-      return false;
-    }
-    this.#prepareDeferreds.splice(index, 1);
-    deferred.resolve(result);
-    return true;
+    return settleQueue(this.#prepareDeferreds, index, result);
   }
 
   get pendingPrepares(): number {
@@ -579,12 +572,7 @@ export class FakePlayer implements PlayerPort {
 
   /** Settles the oldest pending prewarm; false when none pending. */
   settlePrewarm(result: Result<string>): boolean {
-    const deferred = this.#prewarmDeferreds.shift();
-    if (deferred === undefined) {
-      return false;
-    }
-    deferred.resolve(result);
-    return true;
+    return settleQueue(this.#prewarmDeferreds, 0, result);
   }
 
   get pendingPrewarms(): number {
@@ -593,11 +581,11 @@ export class FakePlayer implements PlayerPort {
 
   /** Resolves every pending prepare as cancelled. */
   cancelPendingPrepares(): void {
-    for (const deferred of this.#prepareDeferreds.splice(0)) {
-      deferred.resolve({ ok: false, error: appError('cancelled', 'cancelled') });
-    }
-    for (const deferred of this.#prewarmDeferreds.splice(0)) {
-      deferred.resolve({ ok: false, error: appError('cancelled', 'cancelled') });
+    for (const deferred of [
+      ...this.#prepareDeferreds.splice(0),
+      ...this.#prewarmDeferreds.splice(0),
+    ]) {
+      deferred.resolve(cancelled());
     }
   }
 
@@ -635,9 +623,7 @@ export class FakePlayer implements PlayerPort {
     identity: { attemptId: string; queueRev: number };
   }): Promise<Result<string>> {
     this.calls.push({ method: 'prepare', input });
-    const deferred = new Deferred<Result<string>>();
-    this.#prepareDeferreds.push(deferred);
-    return deferred.promise;
+    return this.#deferInto(this.#prepareDeferreds);
   }
 
   prewarm(input: {
@@ -646,8 +632,12 @@ export class FakePlayer implements PlayerPort {
     identity: { attemptId: string; queueRev: number };
   }): Promise<Result<string>> {
     this.calls.push({ method: 'prewarm', input });
-    const deferred = new Deferred<Result<string>>();
-    this.#prewarmDeferreds.push(deferred);
+    return this.#deferInto(this.#prewarmDeferreds);
+  }
+
+  #deferInto<T>(queue: Deferred<T>[]): Promise<T> {
+    const deferred = new Deferred<T>();
+    queue.push(deferred);
     return deferred.promise;
   }
 
@@ -698,12 +688,7 @@ export class FakePlayer implements PlayerPort {
 
   /** Settles the oldest pending release; false when none pending. */
   settleRelease(result: Result<void>): boolean {
-    const deferred = this.#releaseDeferreds.shift();
-    if (deferred === undefined) {
-      return false;
-    }
-    deferred.resolve(result);
-    return true;
+    return settleQueue(this.#releaseDeferreds, 0, result);
   }
 
   release(input: {
@@ -712,10 +697,8 @@ export class FakePlayer implements PlayerPort {
   }): Promise<Result<void>> {
     if (this.#deferNextRelease) {
       this.#deferNextRelease = false;
-      const deferred = new Deferred<Result<void>>();
-      this.#releaseDeferreds.push(deferred);
       this.calls.push({ method: 'release', input });
-      return deferred.promise;
+      return this.#deferInto(this.#releaseDeferreds);
     }
     return this.#take('release', input, undefined);
   }
@@ -736,12 +719,7 @@ export class FakePlayer implements PlayerPort {
   }
 
   settleProjection(result: Result<void>): boolean {
-    const deferred = this.#projectionDeferreds.shift();
-    if (deferred === undefined) {
-      return false;
-    }
-    deferred.resolve(result);
-    return true;
+    return settleQueue(this.#projectionDeferreds, 0, result);
   }
 
   get pendingProjections(): number {
@@ -757,9 +735,7 @@ export class FakePlayer implements PlayerPort {
       return Promise.resolve({ ok: false, error });
     }
     if (this.#deferProjections) {
-      const deferred = new Deferred<Result<void>>();
-      this.#projectionDeferreds.push(deferred);
-      return deferred.promise;
+      return this.#deferInto(this.#projectionDeferreds);
     }
     return Promise.resolve(ok(undefined));
   }
@@ -775,10 +751,6 @@ export class FakeStorage implements StoragePort {
 
   constructor(initial: PersistedState) {
     this.#state = initial;
-  }
-
-  #clone<T>(value: T): T {
-    return JSON.parse(JSON.stringify(value)) as T;
   }
 
   readonly loads: OperationContext[] = [];
@@ -799,22 +771,12 @@ export class FakeStorage implements StoragePort {
 
   /** Settles the oldest pending commit; false when none pending. */
   settleCommit(result: Result<void>): boolean {
-    const deferred = this.#commitDeferreds.shift();
-    if (deferred === undefined) {
-      return false;
-    }
-    deferred.resolve(result);
-    return true;
+    return settleQueue(this.#commitDeferreds, 0, result);
   }
 
   /** Settles the oldest pending load; false when none pending. */
   settleLoad(result: Result<PersistedState>): boolean {
-    const deferred = this.#loadDeferreds.shift();
-    if (deferred === undefined) {
-      return false;
-    }
-    deferred.resolve(result);
-    return true;
+    return settleQueue(this.#loadDeferreds, 0, result);
   }
 
   load(context: OperationContext): Promise<Result<PersistedState>> {
@@ -822,14 +784,14 @@ export class FakeStorage implements StoragePort {
     const deferred = new Deferred<Result<PersistedState>>();
     this.#loadDeferreds.push(deferred);
     context.signal.subscribe(() => {
-      deferred.resolve({ ok: false, error: appError('cancelled', 'cancelled') });
+      deferred.resolve(cancelled());
     });
     if (this.#deferNextLoad) {
       this.#deferNextLoad = false;
       return deferred.promise;
     }
     // Clone-on-read: callers cannot mutate the stored snapshot.
-    deferred.resolve(ok(this.#clone(this.#state)));
+    deferred.resolve(ok(clone(this.#state)));
     return deferred.promise;
   }
 
@@ -877,9 +839,9 @@ export class FakeStorage implements StoragePort {
   ): Result<void> {
     // The recorded batch is JSON-cloned; a function field survives
     // only as its applied result, so the merge runs on live state.
-    this.commits.push({ batch: this.#clone(batch), context });
+    this.commits.push({ batch: clone(batch), context });
     // Clone-on-write: later caller mutation cannot alter stored state.
-    const staged = this.#clone(batch);
+    const staged = clone(batch);
     const merged: PersistedState = {
       recordings:
         batch.recordingsMerge !== undefined
@@ -929,7 +891,7 @@ export class FakeStorage implements StoragePort {
     }
     void context;
     return Promise.resolve(
-      ok(this.#clone([...this.#attempts].reverse().slice(0, limit))),
+      ok(clone([...this.#attempts].reverse().slice(0, limit))),
     );
   }
 
@@ -942,12 +904,9 @@ export class FakeStorage implements StoragePort {
       throw new TypeError('exportedAtMs must be a safe nonnegative integer');
     }
     if (context.signal.cancelled) {
-      return Promise.resolve({
-        ok: false,
-        error: appError('cancelled', 'cancelled'),
-      });
+      return Promise.resolve(cancelled());
     }
-    const state = this.#clone(this.#state);
+    const state = clone(this.#state);
     const doc: ExportDocument = {
       formatVersion: 1,
       exportedAtMs,
@@ -994,21 +953,14 @@ export class FakeStorage implements StoragePort {
       return Promise.resolve({ ok: false, error });
     }
     if (context.signal.cancelled) {
-      return Promise.resolve({
-        ok: false,
-        error: appError('cancelled', 'cancelled'),
-      });
+      return Promise.resolve(cancelled());
     }
     if (!isExportDocument(doc)) {
-      return Promise.resolve({
-        ok: false,
-        error: appError(
-          'invalid-response',
-          'import document failed validation',
-        ),
-      });
+      return Promise.resolve(
+        err(appError('invalid-response', 'import document failed validation')),
+      );
     }
-    const staged = this.#clone(doc);
+    const staged = clone(doc);
     this.#state = {
       ...this.#state,
       recordings: staged.recordings.map((rec) => ({
@@ -1054,7 +1006,7 @@ export class FakeStorage implements StoragePort {
 // ---- slice 3 ports --------------------------------------------------------
 
 /** One fake sink's scripted outcome, consumed in begin order. */
-export type FakeSinkScript = {
+type FakeSinkScript = {
   /** Bytes the sink "has" pre-resume (the .part prefix length). */
   partialBytes?: number;
   /** Fail `write` calls after this many successful writes. */
@@ -1068,7 +1020,7 @@ export type FakeSinkScript = {
   digest?: string;
 };
 
-export class FakeTransferSink implements TransferSink {
+class FakeTransferSink implements TransferSink {
   #script: Omit<Required<FakeSinkScript>, 'commitError' | 'finalizeError'> & {
     commitError: AppError | null;
     finalizeError: AppError | null;
@@ -1106,9 +1058,16 @@ export class FakeTransferSink implements TransferSink {
     return this.#committed;
   }
 
+  #closedError<T>(): Result<T> | null {
+    return this.#closed
+      ? err(appError('invalid-response', 'sink is closed'))
+      : null;
+  }
+
   async write(bytes: Uint8Array): Promise<Result<void>> {
-    if (this.#closed) {
-      return err(appError('invalid-response', 'sink is closed'));
+    const closed = this.#closedError<void>();
+    if (closed !== null) {
+      return closed;
     }
     this.#writes += 1;
     if (this.#writes > this.#script.failWritesAfter) {
@@ -1120,8 +1079,9 @@ export class FakeTransferSink implements TransferSink {
   }
 
   async commit(): Promise<Result<number>> {
-    if (this.#closed) {
-      return err(appError('invalid-response', 'sink is closed'));
+    const closed = this.#closedError<number>();
+    if (closed !== null) {
+      return closed;
     }
     if (this.#script.commitError !== null) {
       const error = this.#script.commitError;
@@ -1134,8 +1094,9 @@ export class FakeTransferSink implements TransferSink {
   }
 
   async finalize(expected: string | null): Promise<Result<string>> {
-    if (this.#closed) {
-      return err(appError('invalid-response', 'sink is closed'));
+    const closed = this.#closedError<string>();
+    if (closed !== null) {
+      return closed;
     }
     if (this.#script.finalizeError !== null) {
       const error = this.#script.finalizeError;
@@ -1346,7 +1307,7 @@ export class FakeSyncLogStore implements SyncLogStore {
       for (const [sender, marks] of Object.entries(
         initial.peerMarks ?? {},
       )) {
-        this.#peerMarks.set(sender, this.#clone(marks));
+        this.#peerMarks.set(sender, clone(marks));
       }
       this.#divergenceFloor = initial.divergenceFloor ?? 0;
       this.#divergenceReplayOffset = initial.divergenceReplayOffset ?? 0;
@@ -1354,10 +1315,6 @@ export class FakeSyncLogStore implements SyncLogStore {
         this.#divergenceDroppedEmissions.add(ordinal);
       }
     }
-  }
-
-  #clone<T>(value: T): T {
-    return JSON.parse(JSON.stringify(value)) as T;
   }
 
   /** The next append resolves with this error instead of writing. */
@@ -1372,12 +1329,7 @@ export class FakeSyncLogStore implements SyncLogStore {
 
   /** Settles the oldest held append; false when none pending. */
   settleAppend(result: Result<void>): boolean {
-    const deferred = this.#appendDeferreds.shift();
-    if (deferred === undefined) {
-      return false;
-    }
-    deferred.resolve(result);
-    return true;
+    return settleQueue(this.#appendDeferreds, 0, result);
   }
 
   get pendingAppends(): number {
@@ -1385,19 +1337,19 @@ export class FakeSyncLogStore implements SyncLogStore {
   }
 
   get entries(): readonly ChangeEntry[] {
-    return this.#clone(this.#entries);
+    return clone(this.#entries);
   }
 
   get divergenceRows(): readonly DivergenceEntry[] {
-    return this.#clone(this.#divergence);
+    return clone(this.#divergence);
   }
 
   get storedWatermarks(): Readonly<Record<string, number>> {
-    return this.#clone(this.#watermarks);
+    return clone(this.#watermarks);
   }
 
   get storedPeerMarks(): Readonly<Record<string, SyncCursor>> {
-    return this.#clone(Object.fromEntries(this.#peerMarks));
+    return clone(Object.fromEntries(this.#peerMarks));
   }
 
   get storedDivergenceFloor(): number {
@@ -1415,14 +1367,11 @@ export class FakeSyncLogStore implements SyncLogStore {
   load(context: OperationContext): Promise<Result<SyncLogSnapshot>> {
     this.loads.push(context);
     if (context.signal.cancelled) {
-      return Promise.resolve({
-        ok: false,
-        error: appError('cancelled', 'cancelled'),
-      });
+      return Promise.resolve(cancelled());
     }
     return Promise.resolve(
       ok(
-        this.#clone({
+        clone({
           entries: this.#entries,
           divergence: this.#divergence,
           watermarks: this.#watermarks,
@@ -1442,10 +1391,7 @@ export class FakeSyncLogStore implements SyncLogStore {
     context: OperationContext,
   ): Promise<Result<void>> {
     if (context.signal.cancelled) {
-      return Promise.resolve({
-        ok: false,
-        error: appError('cancelled', 'cancelled'),
-      });
+      return Promise.resolve(cancelled());
     }
     if (this.#failNextAppend !== null) {
       const error = this.#failNextAppend;
@@ -1497,7 +1443,7 @@ export class FakeSyncLogStore implements SyncLogStore {
         appError('invalid-response', 'append batch failed validation'),
       );
     }
-    this.writes.push({ write: this.#clone(write), context });
+    this.writes.push({ write: clone(write), context });
     if (write.dropEntries !== undefined) {
       const dropped = new Set(
         write.dropEntries.map(
@@ -1520,10 +1466,10 @@ export class FakeSyncLogStore implements SyncLogStore {
       }
     }
     if (write.entries !== undefined) {
-      this.#entries.push(...this.#clone(write.entries));
+      this.#entries.push(...clone(write.entries));
     }
     if (write.divergence !== undefined) {
-      this.#divergence.push(...this.#clone(write.divergence));
+      this.#divergence.push(...clone(write.divergence));
     }
     if (write.watermarks !== undefined) {
       for (const [device, mark] of Object.entries(write.watermarks)) {
@@ -1535,7 +1481,7 @@ export class FakeSyncLogStore implements SyncLogStore {
     }
     if (write.peerMarks !== undefined) {
       for (const [sender, marks] of Object.entries(write.peerMarks)) {
-        this.#peerMarks.set(sender, this.#clone(marks));
+        this.#peerMarks.set(sender, clone(marks));
       }
     }
     if (write.dropDivergenceBefore !== undefined) {
