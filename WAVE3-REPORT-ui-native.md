@@ -116,6 +116,8 @@ packages/ui-web/src: 9,904 lines total
 Base: `a675a7b` · Branch: `devin/w3-ui-native` · 18 commits.
 
 **Cumulative delta vs base: +978 / −1468 → net −490 LoC across 25 files**
+(counts `packages/ui-native/src` only; the PR diff's −338/−339 nets
+further include this report file's own lines).
 (shard total 12 561 → 12 071 lines).
 
 Gates, green before every commit and at HEAD:
