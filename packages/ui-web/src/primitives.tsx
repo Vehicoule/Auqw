@@ -574,6 +574,48 @@ export function Spinner({
   );
 }
 
+/** One segmented-pill item — icon + label, accent-filled when active. */
+export function SegmentItem({
+  icon,
+  label,
+  active,
+  onPress,
+  iconSize,
+  textVariant = 'metadata',
+  numberOfLines,
+}: {
+  readonly icon: IconName;
+  readonly label: string;
+  readonly active: boolean;
+  readonly onPress?: (() => void) | undefined;
+  readonly iconSize: number;
+  readonly textVariant?: TextVariant | undefined;
+  readonly numberOfLines?: number | undefined;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      ariaLabel={label}
+      ariaSelected={active}
+      className={`uw-segment__item${active ? ' uw-segment__item--on' : ''}`}
+    >
+      <Icon
+        name={icon}
+        size={iconSize}
+        color={active ? 'var(--accent)' : 'var(--text-secondary)'}
+      />
+      <Text
+        variant={textVariant}
+        color={active ? 'accent' : 'secondary'}
+        numberOfLines={numberOfLines}
+        className={active ? 'uw-text--bold' : undefined}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
 /** The back button + display title header of the detail screens. */
 export function ScreenHead({
   a11yLabel,

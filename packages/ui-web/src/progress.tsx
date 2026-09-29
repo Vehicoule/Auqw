@@ -20,7 +20,11 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { KeyboardEvent } from 'react';
+import type {
+  ChangeEvent,
+  KeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from 'react';
 
 // Same squared ring the native 'arc' variant draws — the desktop
 // chrome uses it everywhere (there is no platform split on web).
@@ -167,6 +171,22 @@ function useScrubCommit(
   const gestureKey = useRef<string | null | undefined>(undefined);
   const heldTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // The shared gesture teardown — every abort path (cancel, disable,
+  // track change, dead-pointer drain) drops the same refs+state.
+  const clearDrag = () => {
+    pointerPhase.current = 'none';
+    scrubRef.current = null;
+    gestureKey.current = undefined;
+    setScrubMs(null);
+  };
+  const killDrag = () => {
+    if (activePointer.current !== null) {
+      deadPointers.current.add(activePointer.current);
+      activePointer.current = null;
+    }
+    clearDrag();
+  };
+
   const commit = useCallback(
     (ms: number) => {
       // `step="any"` hands fractional values to the DOM; session
@@ -228,10 +248,7 @@ function useScrubCommit(
       deadPointers.current.delete(event.pointerId);
       if (event.pointerId === activePointer.current) {
         activePointer.current = null;
-        pointerPhase.current = 'none';
-        scrubRef.current = null;
-        gestureKey.current = undefined;
-        setScrubMs(null);
+        clearDrag();
       }
     };
     document.addEventListener('pointerup', release);
@@ -246,14 +263,7 @@ function useScrubCommit(
   // and restore the real fill.
   useEffect(() => {
     if (!enabled && pointerPhase.current === 'drag') {
-      if (activePointer.current !== null) {
-        deadPointers.current.add(activePointer.current);
-        activePointer.current = null;
-      }
-      pointerPhase.current = 'none';
-      scrubRef.current = null;
-      gestureKey.current = undefined;
-      setScrubMs(null);
+      killDrag();
     }
   }, [enabled]);
   // The hold belongs to the track it was committed on — a track
@@ -279,14 +289,7 @@ function useScrubCommit(
       gestureKey.current !== undefined &&
       gestureKey.current !== trackKey
     ) {
-      if (activePointer.current !== null) {
-        deadPointers.current.add(activePointer.current);
-        activePointer.current = null;
-      }
-      pointerPhase.current = 'none';
-      scrubRef.current = null;
-      gestureKey.current = undefined;
-      setScrubMs(null);
+      killDrag();
     }
   }, [trackKey]);
 
@@ -333,10 +336,7 @@ function useScrubCommit(
         (gestureKey.current !== undefined &&
           gestureKey.current !== trackKeyRef.current)
       ) {
-        pointerPhase.current = 'none';
-        scrubRef.current = null;
-        gestureKey.current = undefined;
-        setScrubMs(null);
+        clearDrag();
         return;
       }
       commit(scrubRef.current ?? commitMs);
@@ -512,6 +512,23 @@ export function WaveformSeek({
       event.preventDefault();
     }
   };
+  const scrubHandlers = enabled
+    ? {
+        onPointerDown: (event: ReactPointerEvent<HTMLInputElement>) =>
+          scrub.onScrubStart(event.pointerId),
+        onPointerUp: (event: ReactPointerEvent<HTMLInputElement>) =>
+          scrub.onScrubEnd(
+            Number(event.currentTarget.value),
+            event.pointerId,
+          ),
+        onPointerCancel: (event: ReactPointerEvent<HTMLInputElement>) =>
+          scrub.onScrubEnd(null, event.pointerId),
+        onLostPointerCapture: (event: ReactPointerEvent<HTMLInputElement>) =>
+          scrub.onScrubEnd(null, event.pointerId),
+        onChange: (event: ChangeEvent<HTMLInputElement>) =>
+          scrub.onScrubValue(Number(event.currentTarget.value)),
+      }
+    : {};
   const preview = hover ?? p;
   const bandStart = Math.min(p, preview);
   const bandEnd = Math.max(p, preview);
@@ -627,33 +644,7 @@ export function WaveformSeek({
         value={Math.round(shownMs)}
         disabled={!enabled}
         onKeyDown={onKeyDown}
-        onPointerDown={
-          enabled ? (event) => scrub.onScrubStart(event.pointerId) : undefined
-        }
-        onPointerUp={
-          enabled
-            ? (event) =>
-              scrub.onScrubEnd(
-                Number(event.currentTarget.value),
-                event.pointerId,
-              )
-            : undefined
-        }
-        onPointerCancel={
-          enabled
-            ? (event) => scrub.onScrubEnd(null, event.pointerId)
-            : undefined
-        }
-        onLostPointerCapture={
-          enabled
-            ? (event) => scrub.onScrubEnd(null, event.pointerId)
-            : undefined
-        }
-        onChange={
-          enabled
-            ? (event) => scrub.onScrubValue(Number(event.currentTarget.value))
-            : undefined
-        }
+        {...scrubHandlers}
         onPointerMove={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();
           if (rect.width > 0) {

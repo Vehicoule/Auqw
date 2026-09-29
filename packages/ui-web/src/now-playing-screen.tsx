@@ -5,6 +5,7 @@ import {
   IconButton,
   Pressable,
   PlayPauseIcon,
+  SegmentItem,
   Spinner,
   Text,
 } from './primitives.tsx';
@@ -166,29 +167,17 @@ export function ModeSegment({
       role="tablist"
       aria-label={t('stage.modeTabsA11y')}
     >
+      {/* Tonal pill — same construction as the native segment's
+          m3e fill: accentSoft chip, accent icon + label. */}
       {tabs.map((tab) => (
-        <Pressable
+        <SegmentItem
           key={tab.key}
+          icon={tab.icon}
+          label={tab.label}
+          active={tab.active}
           onPress={tab.onPress}
-          ariaLabel={tab.label}
-          ariaSelected={tab.active}
-          className={`uw-segment__item${tab.active ? ' uw-segment__item--on' : ''}`}
-        >
-          {/* Tonal pill — same construction as the native segment's
-              m3e fill: accentSoft chip, accent icon + label. */}
-          <Icon
-            name={tab.icon}
-            size={12}
-            color={tab.active ? 'var(--accent)' : 'var(--text-secondary)'}
-          />
-          <Text
-            variant="metadata"
-            color={tab.active ? 'accent' : 'secondary'}
-            className={tab.active ? 'uw-text--bold' : undefined}
-          >
-            {tab.label}
-          </Text>
-        </Pressable>
+          iconSize={12}
+        />
       ))}
     </div>
   );
