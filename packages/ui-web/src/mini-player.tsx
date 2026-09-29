@@ -5,9 +5,15 @@ import {
   Spinner,
   Text,
 } from './primitives.tsx';
-import { ArtworkRing } from './progress.tsx';
+import type { IconButtonProps } from './primitives.tsx';
+import { ArtworkRing, progressOf } from './progress.tsx';
 import { t } from '@auqw/ui-shared';
 import type { PlayerModel } from '@auqw/ui-shared';
+
+// The transport cluster's buttons are one build — 30px hit area, 13px glyph.
+function MiniBtn(props: IconButtonProps) {
+  return <IconButton size={30} iconSize={13} {...props} />;
+}
 
 export type MiniPlayerProps = {
   readonly player: PlayerModel;
@@ -31,10 +37,7 @@ export function MiniPlayer({
   onToggleLike,
   onDismiss,
 }: MiniPlayerProps) {
-  const progress =
-    player.durationMs === null || player.durationMs <= 0
-      ? 0
-      : Math.min(1, Math.max(0, player.positionMs / player.durationMs));
+  const progress = progressOf(player.positionMs, player.durationMs);
   const busy = player.status === 'preparing' || player.status === 'buffering';
   return (
     <div className="uw-mini" data-status={player.status}>
@@ -58,10 +61,8 @@ export function MiniPlayer({
         </span>
       </Pressable>
       {onPrevious !== undefined && (
-        <IconButton
+        <MiniBtn
           icon="previous"
-          size={30}
-          iconSize={13}
           ariaLabel={t('common.previous')}
           onPress={onPrevious}
         />
@@ -82,18 +83,11 @@ export function MiniPlayer({
         )}
       </Pressable>
       {onNext !== undefined && (
-        <IconButton
-          icon="next"
-          size={30}
-          iconSize={13}
-          ariaLabel={t('common.next')}
-          onPress={onNext}
-        />
+        <MiniBtn icon="next" ariaLabel={t('common.next')} onPress={onNext} />
       )}
       {onToggleLike !== undefined && (
-        <IconButton
+        <MiniBtn
           icon={player.liked ? 'heart-filled' : 'heart'}
-          size={30}
           iconSize={14}
           color={player.liked ? 'var(--liked)' : 'var(--text-secondary)'}
           ariaLabel={player.liked ? t('common.unlike') : t('common.like')}
@@ -101,9 +95,8 @@ export function MiniPlayer({
         />
       )}
       {onDismiss !== undefined && (
-        <IconButton
+        <MiniBtn
           icon="close"
-          size={30}
           iconSize={12}
           ariaLabel={t('player.a11y.stopDismiss')}
           onPress={onDismiss}

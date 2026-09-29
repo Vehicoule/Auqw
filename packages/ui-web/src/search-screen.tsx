@@ -1,14 +1,14 @@
 import { useRef } from 'react';
 import { Icon, Pressable, Spinner, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
-import { TrackRow, useTrackList } from './track-row.tsx';
+import { TrackRow, indexAdapter, useTrackList } from './track-row.tsx';
 import {
   EmptyState,
   ErrorState,
   LoadingState,
   UnavailableState,
 } from './states.tsx';
-import type { SearchStateModel, TrackRowModel } from '@auqw/ui-shared';
+import type { SearchStateModel } from '@auqw/ui-shared';
 import {
   useSearchScreenController,
   type SearchScreenHandlers,
@@ -65,19 +65,10 @@ export function SearchScreen({
 }: SearchScreenProps) {
   const view = useSearchScreenController(input);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const byRow = (fn: ((row: TrackRowModel) => void) | undefined) =>
-    fn === undefined
-      ? undefined
-      : (index: number) => {
-          const row = input.state.results[index];
-          if (row !== undefined) {
-            fn(row);
-          }
-        };
   const list = useTrackList({
     count: input.state.results.length,
-    onActivate: byRow(input.onResultPress),
-    onContext: byRow(input.onContext),
+    onActivate: indexAdapter(input.state.results, input.onResultPress),
+    onContext: indexAdapter(input.state.results, input.onContext),
   });
   return (
     <div
@@ -208,7 +199,7 @@ export function SearchScreen({
           aria-label={view.results.a11yLabel}
           className="uw-list"
           data-scroll={scrollEnabled ? 'true' : 'false'}
-          onKeyDown={list.listProps.onKeyDown}
+          onKeyDown={list.onKeyDown}
         >
           {view.results.rows.map((row, index) => (
             <TrackRow

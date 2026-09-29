@@ -1,5 +1,5 @@
 import { Icon, Pressable, Text } from './primitives.tsx';
-import { TrackRow, useTrackList } from './track-row.tsx';
+import { TrackRow, bindTo, indexAdapter, useTrackList } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import { t } from '@auqw/ui-shared';
 import type { CollectionModel, CollectionRowModel, MessageId } from '@auqw/ui-shared';
@@ -36,24 +36,8 @@ export function CollectionScreen({
 }: CollectionScreenProps) {
   const list = useTrackList({
     count: model.rows.length,
-    onActivate:
-      onPressItem === undefined
-        ? undefined
-        : (index) => {
-            const row = model.rows[index];
-            if (row !== undefined) {
-              onPressItem(row);
-            }
-          },
-    onContext:
-      onContext === undefined
-        ? undefined
-        : (index) => {
-            const row = model.rows[index];
-            if (row !== undefined) {
-              onContext(row);
-            }
-          },
+    onActivate: indexAdapter(model.rows, onPressItem),
+    onContext: indexAdapter(model.rows, onContext),
   });
   return (
     <div
@@ -94,7 +78,7 @@ export function CollectionScreen({
           role="list"
           aria-label={model.title}
           className="uw-list"
-          onKeyDown={list.listProps.onKeyDown}
+          onKeyDown={list.onKeyDown}
         >
           {model.rows.map((item, index) => (
             <TrackRow
@@ -103,24 +87,10 @@ export function CollectionScreen({
               badge={item.badge}
               tabIndex={list.rowTabIndex(index)}
               onFocusRow={() => list.onRowFocus(index)}
-              onPress={
-                onPressItem === undefined
-                  ? undefined
-                  : () => onPressItem(item)
-              }
-              onToggleLike={
-                onToggleLike === undefined
-                  ? undefined
-                  : () => onToggleLike(item)
-              }
-              onAddToPlaylist={
-                onAddToPlaylist === undefined
-                  ? undefined
-                  : () => onAddToPlaylist(item)
-              }
-              onContext={
-                onContext === undefined ? undefined : () => onContext(item)
-              }
+              onPress={bindTo(onPressItem, item)}
+              onToggleLike={bindTo(onToggleLike, item)}
+              onAddToPlaylist={bindTo(onAddToPlaylist, item)}
+              onContext={bindTo(onContext, item)}
             />
           ))}
         </div>

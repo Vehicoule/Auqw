@@ -6,7 +6,7 @@ import {
   Spinner,
   Text,
 } from './primitives.tsx';
-import { TrackRow, useTrackList } from './track-row.tsx';
+import { TrackRow, indexAdapter, useTrackList } from './track-row.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import type { EntityScreenModel } from '@auqw/ui-shared';
 import {
@@ -75,19 +75,10 @@ export function EntityScreen({
 }: EntityScreenProps) {
   const view = useEntityScreenController({ model, ...handlers });
   const items = model.phase === 'ready' ? model.items : [];
-  const byRow = (fn: ((row: (typeof items)[number]) => void) | undefined) =>
-    fn === undefined
-      ? undefined
-      : (index: number) => {
-          const row = items[index];
-          if (row !== undefined) {
-            fn(row);
-          }
-        };
   const list = useTrackList({
     count: items.length,
-    onActivate: byRow(handlers.onPressItem),
-    onContext: byRow(handlers.onContext),
+    onActivate: indexAdapter(items, handlers.onPressItem),
+    onContext: indexAdapter(items, handlers.onContext),
   });
   if (view.kind === 'loading') {
     return (
@@ -176,7 +167,7 @@ export function EntityScreen({
           role="list"
           aria-label={view.body.listA11yLabel}
           className="uw-list"
-          onKeyDown={list.listProps.onKeyDown}
+          onKeyDown={list.onKeyDown}
         >
           {view.body.rows.map((item, index) => (
             <TrackRow

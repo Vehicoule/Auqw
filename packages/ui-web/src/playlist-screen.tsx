@@ -6,7 +6,7 @@ import {
   Pressable,
   Text,
 } from './primitives.tsx';
-import { TrackRow, useTrackList } from './track-row.tsx';
+import { TrackRow, bindTo, indexAdapter, useTrackList } from './track-row.tsx';
 import { EmptyState, UnavailableState } from './states.tsx';
 import { NameField } from './sheets.tsx';
 import { t } from '@auqw/ui-shared';
@@ -83,19 +83,10 @@ export function PlaylistScreen({
   const [draft, setDraft] = useState('');
   const [confirming, setConfirming] = useState(false);
   const entries = model?.entries ?? [];
-  const byEntry = (fn: ((entry: PlaylistEntryModel) => void) | undefined) =>
-    fn === undefined
-      ? undefined
-      : (index: number) => {
-          const entry = entries[index];
-          if (entry !== undefined) {
-            fn(entry);
-          }
-        };
   const list = useTrackList({
     count: entries.length,
-    onActivate: byEntry(onPressEntry),
-    onContext: byEntry(onContext),
+    onActivate: indexAdapter(entries, onPressEntry),
+    onContext: indexAdapter(entries, onContext),
   });
   if (model === null) {
     return (
@@ -232,37 +223,33 @@ export function PlaylistScreen({
           role="list"
           aria-label={model.name}
           className="uw-list"
-          onKeyDown={list.listProps.onKeyDown}
+          onKeyDown={list.onKeyDown}
         >
-          {model.entries.map((entry, index) => {
-            const bind = (fn: ((e: PlaylistEntryModel) => void) | undefined) =>
-              fn === undefined ? undefined : () => fn(entry);
-            return (
-              <TrackRow
-                key={entry.entryId}
-                row={entry.row}
-                badge={entry.duplicate ? t('queue.badge.repeat') : null}
-                reorderControls="buttons"
-                tabIndex={list.rowTabIndex(index)}
-                onFocusRow={() => list.onRowFocus(index)}
-                onMoveUp={
-                  index > 0 && onMoveEntry !== undefined
-                    ? () => onMoveEntry(entry, -1)
-                    : undefined
-                }
-                onMoveDown={
-                  index < model.entries.length - 1 && onMoveEntry !== undefined
-                    ? () => onMoveEntry(entry, 1)
-                    : undefined
-                }
-                onPress={bind(onPressEntry)}
-                onToggleLike={bind(onToggleLike)}
-                onAddToPlaylist={bind(onAddToPlaylist)}
-                onContext={bind(onContext)}
-                onRemove={bind(onRemoveEntry)}
-              />
-            );
-          })}
+          {model.entries.map((entry, index) => (
+            <TrackRow
+              key={entry.entryId}
+              row={entry.row}
+              badge={entry.duplicate ? t('queue.badge.repeat') : null}
+              reorderControls="buttons"
+              tabIndex={list.rowTabIndex(index)}
+              onFocusRow={() => list.onRowFocus(index)}
+              onMoveUp={
+                index > 0 && onMoveEntry !== undefined
+                  ? () => onMoveEntry(entry, -1)
+                  : undefined
+              }
+              onMoveDown={
+                index < model.entries.length - 1 && onMoveEntry !== undefined
+                  ? () => onMoveEntry(entry, 1)
+                  : undefined
+              }
+              onPress={bindTo(onPressEntry, entry)}
+              onToggleLike={bindTo(onToggleLike, entry)}
+              onAddToPlaylist={bindTo(onAddToPlaylist, entry)}
+              onContext={bindTo(onContext, entry)}
+              onRemove={bindTo(onRemoveEntry, entry)}
+            />
+          ))}
         </div>
       )}
     </div>

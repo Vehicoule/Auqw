@@ -1,5 +1,5 @@
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
-import { TrackRow, useTrackList } from './track-row.tsx';
+import { TrackRow, indexAdapter, useTrackList } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import { NameField } from './sheets.tsx';
 import type { LibraryModel } from '@auqw/ui-shared';
@@ -167,19 +167,11 @@ export function LibraryScreen({
 }: LibraryScreenProps) {
   const view = useLibraryScreenController({ model, ...handlers });
 
-  const byKey = (fn: ((key: string) => void) | undefined) =>
-    fn === undefined
-      ? undefined
-      : (index: number) => {
-          const item = model.recentlyAdded[index];
-          if (item !== undefined) {
-            fn(item.key);
-          }
-        };
+  const recentKeys = model.recentlyAdded.map((item) => item.key);
   const list = useTrackList({
     count: model.recentlyAdded.length,
-    onActivate: byKey(handlers.onPressItem),
-    onContext: byKey(handlers.onContext),
+    onActivate: indexAdapter(recentKeys, handlers.onPressItem),
+    onContext: indexAdapter(recentKeys, handlers.onContext),
   });
 
   return (
@@ -319,7 +311,7 @@ export function LibraryScreen({
             role="list"
             aria-label={view.recent.a11yLabel}
             className="uw-list"
-            onKeyDown={list.listProps.onKeyDown}
+            onKeyDown={list.onKeyDown}
           >
             {view.recent.rows.map((item, index) => (
               <TrackRow

@@ -15,17 +15,9 @@ export function focusTargetAfterRemoval(
   if (at < 0) {
     return null;
   }
-  for (let i = at + 1; i < before.length; i += 1) {
-    const key = before[i];
-    if (key !== undefined && focusable.has(key)) {
-      return key;
-    }
-  }
-  for (let i = at - 1; i >= 0; i -= 1) {
-    const key = before[i];
-    if (key !== undefined && focusable.has(key)) {
-      return key;
-    }
-  }
-  return null;
+  return (
+    before.slice(at + 1).find((key) => focusable.has(key)) ??
+    before.slice(0, at).findLast((key) => focusable.has(key)) ??
+    null
+  );
 }

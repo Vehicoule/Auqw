@@ -216,13 +216,33 @@ export function TrackRow({
 
 export type TrackListController = {
   readonly focusIndex: number;
-  readonly listProps: {
-    readonly role: 'list';
-    readonly onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
-  };
+  readonly onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   readonly rowTabIndex: (index: number) => number;
   readonly onRowFocus: (index: number) => void;
 };
+
+/** Adapt a row handler to the roving list's index-based callbacks. */
+export function indexAdapter<T>(
+  items: readonly T[],
+  fn: ((item: T) => void) | undefined,
+): ((index: number) => void) | undefined {
+  return fn === undefined
+    ? undefined
+    : (index) => {
+        const item = items[index];
+        if (item !== undefined) {
+          fn(item);
+        }
+      };
+}
+
+/** Bind a row handler to its item — undefined stays undefined. */
+export function bindTo<T>(
+  fn: ((item: T) => void) | undefined,
+  item: T,
+): (() => void) | undefined {
+  return fn === undefined ? undefined : () => fn(item);
+}
 
 /**
  * Shared roving-focus controller for every track list (search results,
@@ -274,12 +294,9 @@ export function useTrackList({
   };
   return {
     focusIndex,
-    listProps: {
-      role: 'list',
-      onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
-        listRef.current = event.currentTarget;
-        onKeyDown(event);
-      },
+    onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
+      listRef.current = event.currentTarget;
+      onKeyDown(event);
     },
     rowTabIndex: (index: number) => (focusIndex === -1 ? (index === 0 ? 0 : -1) : index === focusIndex ? 0 : -1),
     onRowFocus: (index: number) => setFocusIndex(index),

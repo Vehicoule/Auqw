@@ -574,6 +574,35 @@ export function Spinner({
   );
 }
 
+/** The back button + display title header of the detail screens. */
+export function ScreenHead({
+  a11yLabel,
+  title,
+  meta,
+  onBack,
+}: {
+  readonly a11yLabel: string;
+  readonly title: string;
+  readonly meta?: string | undefined;
+  readonly onBack?: (() => void) | undefined;
+}) {
+  return (
+    <div className="uw-collection__head">
+      <Pressable onPress={onBack} ariaLabel={a11yLabel} className="uw-back">
+        <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
+      </Pressable>
+      <Text variant="display" color="bright" className="uw-collection__title">
+        {title}
+      </Text>
+      {meta !== undefined && (
+        <Text variant="metadata" color="secondary">
+          {meta}
+        </Text>
+      )}
+    </div>
+  );
+}
+
 const EQ_HEIGHTS = [0.45, 1, 0.65] as const;
 
 export function EqBars({

@@ -113,7 +113,7 @@ export function ArtworkRing({
   );
 }
 
-function progressOf(positionMs: number, durationMs: number | null): number {
+export function progressOf(positionMs: number, durationMs: number | null): number {
   if (durationMs === null || durationMs <= 0) {
     return 0;
   }

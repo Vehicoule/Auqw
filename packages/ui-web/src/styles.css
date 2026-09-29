@@ -1087,6 +1087,18 @@
   min-width: 0;
 }
 
+.uw-dup-badge {
+  display: inline-block;
+  margin: var(--spacing-xs) var(--spacing-sm) 0;
+  padding: 0 7px;
+  border-radius: var(--radius-pill);
+  border: var(--stroke-hairline) solid var(--hairline);
+  color: var(--text-secondary);
+  font-size: calc(var(--font-metadata) * 0.92);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
 /* ---- library ----------------------------------------------------------- */
 
 .uw-library > .uw-text--display {

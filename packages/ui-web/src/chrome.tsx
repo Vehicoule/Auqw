@@ -16,12 +16,6 @@ import type { NavItemModel } from '@auqw/ui-shared';
  * macOS.
  */
 
-export type WorldTabsProps = {
-  readonly tabs: readonly NavItemModel[];
-  readonly activeKey: string;
-  readonly onSelect: (key: string) => void;
-};
-
 /** Same key→glyph map the native navbar resolves items with. */
 const NAV_ICONS: Record<string, IconName> = {
   home: 'home',
@@ -37,7 +31,15 @@ const NAV_ICONS: Record<string, IconName> = {
  * the stage's mode segment (accentSoft tonal fill, accent glyph +
  * label), just sized down for the strip and carrying larger text.
  */
-export function WorldTabs({ tabs, activeKey, onSelect }: WorldTabsProps) {
+function WorldTabs({
+  tabs,
+  activeKey,
+  onSelect,
+}: {
+  readonly tabs: readonly NavItemModel[];
+  readonly activeKey: string;
+  readonly onSelect: (key: string) => void;
+}) {
   return (
     <nav className="uw-tabs" aria-label={t('nav.primaryA11y')}>
       <div className="uw-segment uw-segment--tabs">
@@ -72,12 +74,8 @@ export function WorldTabs({ tabs, activeKey, onSelect }: WorldTabsProps) {
   );
 }
 
-export type WorldMenuProps = {
-  readonly onOpenSettings: () => void;
-};
-
 /** The primary menu — today it only carries settings, GTK-parity. */
-export function WorldMenu({ onOpenSettings }: WorldMenuProps) {
+function WorldMenu({ onOpenSettings }: { readonly onOpenSettings: () => void }) {
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
   useOverlayDismiss(open ? close : undefined);

@@ -1,4 +1,4 @@
-import { Icon, Pressable, Text } from './primitives.tsx';
+import { Icon, Pressable, ScreenHead, Text } from './primitives.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import type { CorrectionsModel } from '@auqw/ui-shared';
 import {
@@ -23,40 +23,20 @@ export function CorrectionsScreen({
   model,
   scrollEnabled = true,
   onBack,
-  onFilter,
-  onConfirm,
-  onReject,
-  onUndo,
-  onRetry,
+  ...handlers
 }: CorrectionsScreenProps) {
-  const view = useCorrectionsScreenController({
-    model,
-    onFilter,
-    onConfirm,
-    onReject,
-    onUndo,
-    onRetry,
-  });
+  const view = useCorrectionsScreenController({ model, ...handlers });
   return (
     <div
       className="uw-screen uw-corrections"
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
-      <div className="uw-collection__head">
-        <Pressable
-          onPress={onBack}
-          ariaLabel={view.backA11yLabel}
-          className="uw-back"
-        >
-          <Icon name="chevron-left" size={16} color="var(--text-secondary)" />
-        </Pressable>
-        <Text variant="display" color="bright" className="uw-collection__title">
-          {view.title}
-        </Text>
-        <Text variant="metadata" color="secondary">
-          {view.countsLabel}
-        </Text>
-      </div>
+      <ScreenHead
+        a11yLabel={view.backA11yLabel}
+        title={view.title}
+        meta={view.countsLabel}
+        onBack={onBack}
+      />
       <div
         className="uw-corrections__filters"
         role="toolbar"
@@ -121,7 +101,7 @@ function ReviewRow({ view }: { readonly view: CorrectionsRowView }) {
           {row.statusLabel}
         </Text>
       </div>
-      {row.artist === null ? null : (
+      {row.artist !== null && (
         <Text variant="metadata" color="secondary" numberOfLines={1}>
           {row.artist}
         </Text>
