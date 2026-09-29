@@ -288,11 +288,15 @@ struct LiveRequest {
     generation: u64,
 }
 
-/// A produced session slot in `prepared_handles`. `delivered` flips
-/// once the `Prepared` outcome is on the wire: `cancel` releases a
-/// delivered handle (the app cancelled an unattached session) but
-/// waits out a mid-delivery one — the `Prepared` never names a
-/// session that died before it arrived. `generation` mirrors
+/// A produced session slot in `prepared_handles`. The slot's commit
+/// is paired with the session's `claimed` flag under the same
+/// critical section (see `StreamRegistry::claim`) — the deliver→attach
+/// window is owned, so unattached-only teardowns skip it. `delivered`
+/// flips once the `Prepared` outcome is on the wire: `cancel`
+/// releases a delivered handle when the cancelled request was its
+/// last owner, but waits out a mid-delivery one — the `Prepared`
+/// never names a session that died before it arrived. `generation`
+/// mirrors
 /// `LiveRequest`'s: a dead slot can be pruned and the id re-admitted
 /// while a stale delivery is still unwinding, so post-delivery
 /// bookkeeping (the `delivered` flip, the adopt path's liveness
@@ -423,8 +427,8 @@ pub struct PluginHost {
     request_generation: AtomicU64,
     /// `prepare` request id → produced session slot, so a
     /// `cancelPrepare` landing after `prepared` can abandon the session
-    /// (only while still unattached AND already delivered — see
-    /// `cancel` and [`PreparedSlot`]).
+    /// (released by handle once delivered, when this request was its
+    /// last owner — see `cancel` and [`PreparedSlot`]).
     prepared_handles: Arc<Mutex<HashMap<String, PreparedSlot>>>,
     /// `cancel` ids that arrived while the prepare was still inside
     /// its window — neither `cancels` nor `prepared_handles` knew it
@@ -727,12 +731,14 @@ impl PluginHost {
     /// handle to orphan, so its cancel leaves no stone for a later
     /// generation of the id. The TTL + 64-entry cap bound unconsumed
     /// tombstones. A `cancelPrepare` landing after `prepared`
-    /// also abandons the produced session — but only while it is
-    /// still unattached: a playing consumer is never cancelled out
-    /// from under playback. And only once the `prepared` outcome is on
-    /// the wire — a slot still mid-delivery is consumed but its handle
-    /// left live, or the listener would get a `Prepared` naming a
-    /// released session.
+    /// abandons the produced session outright: removing the request's
+    /// ownership slot leaves the handle ownerless, so the last owner
+    /// `release`s it by handle — the delivered session is claimed, so
+    /// the unattached-only predicate could never fire, and attached
+    /// teardown is the player's `releaseStream`, not request cancel.
+    /// Only once the `prepared` outcome is on the wire — a slot still
+    /// mid-delivery is consumed but its handle left live, or the
+    /// listener would get a `Prepared` naming a released session.
     ///
     /// Cancellation targets whatever invocation currently owns the id —
     /// the API carries no generation discriminator. Once a settled
@@ -792,15 +798,18 @@ impl PluginHost {
                 Some(slot.handle)
             }
         });
-        // The last-owner verdict and the conditional registry kill run
-        // under the same `m`: dropped between them, an adoption could
-        // commit its ownership slot for this handle — the registry
-        // still reads it unattached — and this kill would then end the
-        // session the new request just received. `prepared_handles`
-        // outermost matches the admission path's lock order, so the
-        // serialization introduces no cycle.
+        // The last-owner verdict and the registry kill run under the
+        // same `m`: dropped between them, an adoption could commit its
+        // ownership slot for this handle — the registry still reads it
+        // unattached — and this kill would then end the session the
+        // new request just received. `prepared_handles` outermost
+        // matches the admission path's lock order, so the
+        // serialization introduces no cycle. Released by handle, not
+        // `cancel_if_unattached`: the delivered session is claimed, so
+        // the conditional predicate would never fire — its only owner
+        // is gone.
         if let (Some(stream), Some(handle)) = (&self.stream, handle) {
-            let _ = stream.cancel_if_unattached(&handle);
+            let _ = stream.release(&handle);
         }
         drop(m);
         // Tombstone when no delivered handle was found AND a race
@@ -1541,6 +1550,7 @@ mod tests {
     impl auqw_stream::Remint for HangRemint {
         fn remint(
             &self,
+            _cancel: tokio_util::sync::CancellationToken,
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<
@@ -2006,6 +2016,116 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The slot commit claims the session seam-side: an adopted,
+    /// delivered-but-unattached session survives a newer prepare's
+    /// supersede scan — the deliver→attach window is owned.
+    #[test]
+    fn adopted_session_is_claimed_against_supersede() {
+        let (host, reg, _dir) = stream_host("adopt-claim");
+        let id = load_echo(&host);
+        let warm = mint_warm(&reg, &id, "vid");
+        let (tx, rx) = deliver_chan();
+        match host.start_prepare(
+            id.clone(),
+            "vid".into(),
+            "req-claim".into(),
+            move |rid, o| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send((rid, o));
+                }
+            },
+        ) {
+            Ok(()) => {}
+            Err(e) => panic!("start: {e}"),
+        }
+        let (_rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        match outcome {
+            PrepareOutcome::Prepared { stream, .. } => {
+                assert_eq!(stream.handle, warm.handle)
+            }
+            PrepareOutcome::Failed { kind, .. } => panic!("expected Prepared, got {kind}"),
+        }
+        // A prepare for another ref runs the supersede scan — the
+        // claimed session must survive its own deliver→attach window.
+        let other = mint_warm(&reg, &id, "other");
+        assert!(
+            reg.is_live(&warm.handle),
+            "the delivered adopted session was superseded mid-window"
+        );
+        assert!(reg.is_live(&other.handle));
+    }
+
+    /// Two requests co-owning one handle: cancelling one leaves the
+    /// session live for the other — the last-owner check carries it,
+    /// not the claim. The last owner's cancel releases by handle:
+    /// the slot is gone and a claimed session is invisible to
+    /// `cancel_if_unattached`, so owner teardown is terminal.
+    #[test]
+    fn delivered_owner_cancel_releases_only_at_last_owner() {
+        let (host, reg, _dir) = stream_host("coown");
+        let id = load_echo(&host);
+        let warm = mint_warm(&reg, &id, "vid");
+        // The minting request's ownership: slot insert + the seam
+        // claim, delivered — mirroring the invoke path's commit.
+        match host.prepared_handles.lock() {
+            Ok(mut m) => {
+                m.insert(
+                    "req-warm".to_string(),
+                    PreparedSlot {
+                        handle: warm.handle.clone(),
+                        delivered: true,
+                        generation: 0,
+                    },
+                );
+            }
+            Err(e) => panic!("handles: {e}"),
+        }
+        reg.claim(&warm.handle)
+            .unwrap_or_else(|e| panic!("claim: {e}"));
+        // A second request co-adopts the same session — two slots,
+        // one handle.
+        let (tx, rx) = deliver_chan();
+        match host.start_prepare(
+            id.clone(),
+            "vid".into(),
+            "req-adopt".into(),
+            move |rid, o| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send((rid, o));
+                }
+            },
+        ) {
+            Ok(()) => {}
+            Err(e) => panic!("start: {e}"),
+        }
+        let (_rid, outcome) = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("outcome: {e}"),
+        };
+        match outcome {
+            PrepareOutcome::Prepared { stream, .. } => assert_eq!(stream.handle, warm.handle),
+            PrepareOutcome::Failed { kind, .. } => panic!("adopt must deliver, got {kind}"),
+        }
+        // Cancelling one owner leaves the session live for the other.
+        host.cancel("req-warm".to_string());
+        assert!(
+            reg.is_live(&warm.handle),
+            "a co-owned session died with its first owner"
+        );
+        // The last owner's cancel releases the handle outright —
+        // ownerless claimed sessions otherwise linger to the reaper.
+        host.cancel("req-adopt".to_string());
+        assert!(
+            !reg.is_live(&warm.handle),
+            "the last owner's cancel must release the session"
+        );
     }
 
     /// The adoption's commit→wire gap: the adopted session stays

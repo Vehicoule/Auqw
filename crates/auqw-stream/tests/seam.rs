@@ -84,7 +84,10 @@ fn err_of<T>(r: Result<T, StreamError>) -> StreamError {
 struct NeverRemint;
 
 impl Remint for NeverRemint {
-    fn remint(&self) -> Pin<Box<dyn Future<Output = Result<PreparedSource, StreamError>> + Send>> {
+    fn remint(
+        &self,
+        _cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<PreparedSource, StreamError>> + Send>> {
         Box::pin(std::future::pending())
     }
 }
@@ -96,7 +99,10 @@ struct OkRemint {
 }
 
 impl Remint for OkRemint {
-    fn remint(&self) -> Pin<Box<dyn Future<Output = Result<PreparedSource, StreamError>> + Send>> {
+    fn remint(
+        &self,
+        _cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<PreparedSource, StreamError>> + Send>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async { Ok(source(1024)) })
     }
@@ -988,6 +994,111 @@ async fn cancel_if_unattached_leaves_attached_sessions_alone() {
         .unwrap_or_else(|e| panic!("cancel_if_unattached2: {e}"));
     let e = err_of(reg.read(&h2, 0, 1));
     assert_eq!(e.kind(), "cancelled", "{e}");
+}
+
+/// A claimed-but-unattached session is inside the deliver→attach
+/// window: both ownerless-unattached teardowns must skip it —
+/// `cancel_if_unattached` (a cancelled *other* request's stale sweep)
+/// and a newer prepare's `supersede_unattached` — and the attach the
+/// `Prepared` promised still lands on the live session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claimed_session_survives_unattached_teardowns_and_attaches() {
+    let d = TestDir::new("claimed");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let a = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    // The host commits the claim with its ownership slot.
+    reg.claim(&a).unwrap_or_else(|e| panic!("claim: {e}"));
+    reg.cancel_if_unattached(&a)
+        .unwrap_or_else(|e| panic!("cancel_if_unattached: {e}"));
+    assert!(
+        reg.is_live(&a),
+        "claimed session died to intent-flip cancel"
+    );
+    let mut sb = source(1024);
+    sb.source_ref = "b".into(); // different ref — no coalescing
+    reg.prepare(sb, Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare b: {e}"));
+    assert!(
+        reg.is_live(&a),
+        "claimed session died to the supersede scan"
+    );
+    // The delivered handle still opens — `attach` only checks
+    // terminal state and `stale_prepare`, never the claim.
+    reg.attach(&a, 0).unwrap_or_else(|e| panic!("attach: {e}"));
+    reg.release(&a).unwrap_or_else(|e| panic!("release: {e}"));
+}
+
+/// Regression guard for the unclaimed half: an ownerless unattached
+/// session still dies to both teardowns — the claim protects only the
+/// window it was minted for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unclaimed_session_still_dies_to_unattached_teardowns() {
+    let d = TestDir::new("unclaimed");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let a = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    reg.cancel_if_unattached(&a)
+        .unwrap_or_else(|e| panic!("cancel_if_unattached: {e}"));
+    let e = err_of(reg.read(&a, 0, 1));
+    assert_eq!(e.kind(), "cancelled", "{e}");
+
+    let a = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare2: {e}"))
+        .handle;
+    let mut sb = source(1024);
+    sb.source_ref = "b".into();
+    reg.prepare(sb, Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare b: {e}"));
+    assert!(!reg.is_live(&a), "unclaimed session survived supersede");
+}
+
+/// The claim is monotonic across `close`: a claimed session that
+/// attached and detached keeps its owner, so it re-enters only the
+/// *detached reaper's* clock — a later prepare's supersede still
+/// skips it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claimed_session_stays_claimed_across_detach() {
+    let d = TestDir::new("claimdetach");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let a = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    reg.claim(&a).unwrap_or_else(|e| panic!("claim: {e}"));
+    reg.attach(&a, 0).unwrap_or_else(|e| panic!("attach: {e}"));
+    reg.close(&a).unwrap_or_else(|e| panic!("close: {e}"));
+    // Attached then detached: `attached` cleared, `claimed` did not —
+    // the next prepare's scan must still skip the owned session.
+    let mut sb = source(1024);
+    sb.source_ref = "b".into();
+    reg.prepare(sb, Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare b: {e}"));
+    assert!(
+        reg.is_live(&a),
+        "a closed session's claim must survive detach"
+    );
+    reg.release(&a).unwrap_or_else(|e| panic!("release: {e}"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
