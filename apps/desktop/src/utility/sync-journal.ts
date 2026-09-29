@@ -56,6 +56,8 @@ export function createSpillJournal(opts: {
   let spillTail: Promise<unknown> = Promise.resolve();
   /** Bytes served by the most recent drain, awaiting ack. */
   let awaitingAckBytes = 0;
+  /** Ends a serialized turn — tails absorb failures so the queue runs on. */
+  const settled = (): undefined => undefined;
 
   /**
    * Incremental line walk over the spill starting at `startOff` —
@@ -358,10 +360,7 @@ export function createSpillJournal(opts: {
         spilledBacklog =
           scan.totalLines - scan.served.length - scan.skippedLines;
       });
-      spillTail = drainFile.then(
-        () => undefined,
-        () => undefined,
-      );
+      spillTail = drainFile.then(settled, settled);
       await drainFile;
     }
     awaitingAckBytes = servedFileBytes;
@@ -419,10 +418,7 @@ export function createSpillJournal(opts: {
       const off = await readSpillOffset(offPath, path);
       await advanceSpillOffset(path, offPath, off + dropBytes);
     });
-    spillTail = rewrite.then(
-      () => undefined,
-      () => undefined,
-    );
+    spillTail = rewrite.then(settled, settled);
     await rewrite.catch(() => {
       throw shellError(
         'io-error',
@@ -436,10 +432,7 @@ export function createSpillJournal(opts: {
     drain: drainAppliedChunk,
     ack: ackApplied,
     settle() {
-      return spillTail.then(
-        () => undefined,
-        () => undefined,
-      );
+      return spillTail.then(settled, settled);
     },
   };
 }

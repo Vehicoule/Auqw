@@ -313,8 +313,7 @@ export function createSupervisor(
           ),
         );
       }
-      const id = nextId;
-      nextId += 1;
+      const id = nextId++;
       return new Promise<unknown>((resolve, reject) => {
         if (live) {
           pending.set(id, { resolve, reject });

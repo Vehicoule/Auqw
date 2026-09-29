@@ -93,33 +93,33 @@ type LoadedWindowState = {
 export async function loadWindowState(
   path: string,
 ): Promise<LoadedWindowState> {
+  const fallback = (error: ShellError | null): LoadedWindowState => ({
+    state: defaultWindowState(),
+    error,
+  });
   let text: string;
   try {
     text = await readFile(path, 'utf8');
   } catch (thrown) {
-    if (errorCode(thrown) === 'ENOENT') {
-      return { state: defaultWindowState(), error: null };
-    }
-    return {
-      state: defaultWindowState(),
-      error: shellError('io-error', 'window state file unreadable'),
-    };
+    return fallback(
+      errorCode(thrown) === 'ENOENT'
+        ? null
+        : shellError('io-error', 'window state file unreadable'),
+    );
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return {
-      state: defaultWindowState(),
-      error: shellError('corrupt-state', 'window state file is not json'),
-    };
+    return fallback(
+      shellError('corrupt-state', 'window state file is not json'),
+    );
   }
   const state = parseWindowState(parsed);
   if (state === null) {
-    return {
-      state: defaultWindowState(),
-      error: shellError('corrupt-state', 'window state shape is invalid'),
-    };
+    return fallback(
+      shellError('corrupt-state', 'window state shape is invalid'),
+    );
   }
   return { state, error: null };
 }
