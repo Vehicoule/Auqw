@@ -335,6 +335,25 @@ export type NoiseSuite = {
 };
 
 export function createNoiseSuite(primitives: NoisePrimitives): NoiseSuite {
+  /**
+   * HKDF-SHA256 over the three DH outputs → the 64-byte directional
+   * key block both handshake halves derive (client seals with the
+   * first half, responder with the second).
+   */
+  function sessionKeys(
+    dh1: Uint8Array,
+    dh2: Uint8Array,
+    dh3: Uint8Array,
+    salt: Uint8Array,
+  ): Uint8Array {
+    return primitives.hkdf(
+      concatBytes(dh1, dh2, dh3),
+      salt,
+      HKDF_INFO,
+      64,
+    );
+  }
+
   function fingerprintOf(pubSpkiB64: string): string {
     const der = base64Decode(pubSpkiB64);
     return der === null ? '' : hexOf(primitives.sha256(der));
@@ -428,12 +447,7 @@ export function createNoiseSuite(primitives: NoisePrimitives): NoiseSuite {
               const dh1 = primitives.x25519(eph.privateKey, ephPubRaw);
               const dh2 = primitives.x25519(devPrivRaw, ephPubRaw);
               const dh3 = primitives.x25519(eph.privateKey, spubRaw);
-              const keys = primitives.hkdf(
-                concatBytes(dh1, dh2, dh3),
-                salt,
-                HKDF_INFO,
-                64,
-              );
+              const keys = sessionKeys(dh1, dh2, dh3, salt);
               const codec = createNoiseCodec(primitives, {
                 sendKey: keys.subarray(0, 32),
                 recvKey: keys.subarray(32, 64),
@@ -482,12 +496,7 @@ export function createNoiseSuite(primitives: NoisePrimitives): NoiseSuite {
         const dh1 = primitives.x25519(eph.privateKey, ephPubRaw);
         const dh2 = primitives.x25519(eph.privateKey, devPubRaw);
         const dh3 = primitives.x25519(devPrivRaw, ephPubRaw);
-        const keys = primitives.hkdf(
-          concatBytes(dh1, dh2, dh3),
-          salt,
-          HKDF_INFO,
-          64,
-        );
+        const keys = sessionKeys(dh1, dh2, dh3, salt);
         const codec = createNoiseCodec(primitives, {
           sendKey: keys.subarray(32, 64),
           recvKey: keys.subarray(0, 32),

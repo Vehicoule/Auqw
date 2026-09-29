@@ -1240,17 +1240,6 @@ export async function createSyncEngine(
     );
   }
 
-  function resolveSignal(signal: CancellationSignal | undefined): {
-    signal: CancellationSignal;
-    cancelled: boolean;
-  } {
-    if (signal !== undefined) {
-      return { signal, cancelled: signal.cancelled };
-    }
-    const source = new CancellationSource();
-    return { signal: source.signal, cancelled: false };
-  }
-
   /**
    * The op envelope every entry point shares: resolve the caller's
    * signal (a fresh never-cancelled source when absent), refuse early
@@ -1267,7 +1256,7 @@ export async function createSyncEngine(
       deadlineMs: number,
     ) => Promise<Result<T>>,
   ): Promise<Result<T>> {
-    const sig = resolveSignal(signal).signal;
+    const sig = signal ?? new CancellationSource().signal;
     if (sig.cancelled) {
       return Promise.resolve(err(appError('cancelled', 'cancelled')));
     }

@@ -212,6 +212,15 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
     }
   };
 
+  /** Unbind the listener + deadvertise — stop() and close() share it. */
+  const dropListener = (): void => {
+    const bound = listener;
+    listener = null;
+    quiet(() => advertiser?.close());
+    advertiser = null;
+    quiet(() => bound?.close());
+  };
+
   /**
    * The endpoints worth redialing for this caller: its own
    * advertised listener addrs first (self-reported, so they survive
@@ -452,11 +461,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         // swap (the pair/resume paths gate on membership).
         await drainWrites();
         if (listenerGen < gen) {
-          const bound = listener;
-          listener = null;
-          quiet(() => advertiser?.close());
-          advertiser = null;
-          quiet(() => bound?.close());
+          dropListener();
         }
       };
       const ran = lifecycle.then(teardown, teardown);
@@ -486,11 +491,7 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
       closed = true;
       responder.teardown();
       await drainWrites();
-      const bound = listener;
-      listener = null;
-      quiet(() => advertiser?.close());
-      advertiser = null;
-      quiet(() => bound?.close());
+      dropListener();
       const started = startPromise;
       startPromise = null;
       await started?.catch(() => undefined);

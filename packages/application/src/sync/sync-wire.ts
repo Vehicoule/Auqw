@@ -183,6 +183,18 @@ export function isFp(value: unknown): value is string {
   return typeof value === 'string' && FINGERPRINT_PATTERN.test(value);
 }
 
+/** A `host:port` string the endpoint parser accepts — the wire bound. */
+function isEndpoint(value: unknown): boolean {
+  return isString(value, 320) && parseEndpoint(value) !== null;
+}
+
+/** The endpoints list bound — ≤16 parseable `host:port`s. */
+function isEndpointList(value: unknown): boolean {
+  return (
+    Array.isArray(value) && value.length <= 16 && value.every(isEndpoint)
+  );
+}
+
 /**
  * Shape-only hello guard — the responder's accept() proves the key
  * material cryptographically (DH throws on junk), so this layer only
@@ -209,11 +221,7 @@ export function isClientHello(value: unknown): value is ClientHello {
         (value['port'] as number) >= 1 &&
         (value['port'] as number) <= 65_535)) &&
     (value['endpoints'] === undefined ||
-      (Array.isArray(value['endpoints']) &&
-        (value['endpoints'] as unknown[]).length <= 16 &&
-        (value['endpoints'] as unknown[]).every(
-          (ep) => isString(ep, 320) && parseEndpoint(ep) !== null,
-        )))
+      isEndpointList(value['endpoints']))
   );
 }
 
@@ -263,8 +271,7 @@ export function isWelcomeMsg(value: unknown): value is WelcomeMsg {
     value['t'] === 'welcome' &&
     isSyncDeviceRecord(value['device']) &&
     isString(value['name'], DEVICE_NAME_MAX) &&
-    (value['pot'] === undefined ||
-      (isString(value['pot'], 320) && parseEndpoint(value['pot']) !== null)) &&
+    (value['pot'] === undefined || isEndpoint(value['pot'])) &&
     (host === undefined ||
       (isRecord(host) &&
         hasKeys(host, ['id', 'name'], ['pub']) &&
@@ -356,13 +363,8 @@ export function isPairingPayload(
     PAIR_CODE_PATTERN.test(String(value['code'])) &&
     isFp(value['fp']) &&
     (value['endpoints'] === undefined ||
-      (Array.isArray(value['endpoints']) &&
-        value['endpoints'].length <= 16 &&
-        (value['endpoints'] as unknown[]).every(
-          (ep) => isString(ep, 320) && parseEndpoint(ep) !== null,
-        ))) &&
-    (value['pot'] === undefined ||
-      (isString(value['pot'], 320) && parseEndpoint(value['pot']) !== null))
+      isEndpointList(value['endpoints'])) &&
+    (value['pot'] === undefined || isEndpoint(value['pot']))
   );
 }
 
