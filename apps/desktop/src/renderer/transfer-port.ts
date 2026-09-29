@@ -6,7 +6,7 @@ import type {
 } from '@auqw/application';
 import { appError, err, ok } from '@auqw/application';
 import type { AuqwApi } from '../shared/contract.ts';
-import { shellToAppError } from './ipc-errors.ts';
+import { ifCancelled, settleIpc, shellToAppError } from './ipc-errors.ts';
 import { raced } from '@auqw/application';
 
 /**
@@ -26,23 +26,7 @@ import { raced } from '@auqw/application';
  * file handle.
  */
 export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
-  const ifCancelled = (signal: CancellationSignal): Result<never> | null =>
-    signal.cancelled ? err(appError('cancelled', 'cancelled')) : null;
-
-  /** Race a read-only IPC call against the caller's signal. */
-  const settle = async <T>(
-    call: Promise<T>,
-    signal: CancellationSignal,
-  ): Promise<Result<T>> => {
-    const outcome = await raced(call, signal);
-    if (outcome.t === 'cancelled') {
-      return err(appError('cancelled', 'cancelled'));
-    }
-    if (outcome.t === 'failed') {
-      return err(shellToAppError(outcome.thrown));
-    }
-    return ok(outcome.value);
-  };
+  const cancelled = () => err(appError('cancelled', 'cancelled'));
 
   class DesktopSink implements TransferSink {
     #id: string;
@@ -97,9 +81,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
 
     /** Cancelled paths settle only after teardown lands. */
     async #afterTeardown(): Promise<void> {
-      if (this.#teardown !== null) {
-        await this.#teardown;
-      }
+      await this.#teardown;
     }
 
     /** The signal's own error beats the released/raw-shell shape. */
@@ -132,22 +114,23 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
         for (let off = 0; off < bytes.length; off += WRITE_CHUNK) {
           if (this.#cancelled) {
             await this.#afterTeardown();
-            return err(appError('cancelled', 'cancelled'));
+            return cancelled();
           }
-          const chunk = bytes.subarray(
-            off,
-            Math.min(off + WRITE_CHUNK, bytes.length),
-          );
           const sent = await raced(
             api.transfer.write({
               sinkId: this.#id,
-              data: toBase64(chunk),
+              data: toBase64(
+                bytes.subarray(
+                  off,
+                  Math.min(off + WRITE_CHUNK, bytes.length),
+                ),
+              ),
             }),
             this.#signal,
           );
           if (sent.t === 'cancelled') {
             await this.#afterTeardown();
-            return err(appError('cancelled', 'cancelled'));
+            return cancelled();
           }
           if (sent.t === 'failed') {
             await this.#afterTeardown();
@@ -168,7 +151,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
       );
       if (result.t === 'cancelled') {
         await this.#afterTeardown();
-        return err(appError('cancelled', 'cancelled'));
+        return cancelled();
       }
       if (result.t === 'failed') {
         await this.#afterTeardown();
@@ -194,10 +177,9 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
           (value) => ({ t: 'ok' as const, value }),
           (thrown) => ({ t: 'failed' as const, thrown }),
         );
-        if (settled.t === 'ok') {
-          return ok(settled.value.digest);
-        }
-        return err(appError('cancelled', 'cancelled'));
+        return settled.t === 'ok'
+          ? ok(settled.value.digest)
+          : cancelled();
       }
       if (result.t === 'failed') {
         await this.#afterTeardown();
@@ -217,26 +199,14 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
     }
   }
 
-  function makeSink(
-    sinkId: string,
-    signal: CancellationSignal,
-  ): TransferSink {
-    return new DesktopSink(sinkId, signal);
-  }
-
   return {
-    async ensureDir(signal) {
-      const cancelled = ifCancelled(signal);
-      if (cancelled !== null) {
-        return cancelled;
-      }
-      return settle(api.transfer.ensureDir(), signal);
-    },
+    ensureDir: async (signal) =>
+      ifCancelled(signal) ?? settleIpc(api.transfer.ensureDir(), signal),
 
     async begin(input, signal) {
-      const cancelled = ifCancelled(signal);
-      if (cancelled !== null) {
-        return cancelled;
+      const cancelledEarly = ifCancelled(signal);
+      if (cancelledEarly !== null) {
+        return cancelledEarly;
       }
       const call = api.transfer.begin({
         destPath: input.destPath,
@@ -253,7 +223,7 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
               .catch(() => undefined),
           () => undefined,
         );
-        return err(appError('cancelled', 'cancelled'));
+        return cancelled();
       }
       if (outcome.t === 'failed') {
         return err(shellToAppError(outcome.thrown));
@@ -265,71 +235,51 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
         await api.transfer
           .abort({ sinkId, keep: false })
           .catch(() => undefined);
-        return err(appError('cancelled', 'cancelled'));
+        return cancelled();
       }
-      return ok(makeSink(sinkId, signal));
+      return ok(new DesktopSink(sinkId, signal));
     },
 
-    async sweepPartials(keepPaths, signal) {
-      const cancelled = ifCancelled(signal);
-      if (cancelled !== null) {
-        return cancelled;
-      }
-      const res = await settle(
-        api.transfer.sweepPartials({ keepPaths }),
-        signal,
-      );
+    sweepPartials: async (keepPaths, signal) => {
+      const res =
+        ifCancelled(signal) ??
+        (await settleIpc(api.transfer.sweepPartials({ keepPaths }), signal));
       return res.ok ? ok(res.value.swept) : res;
     },
 
-    async usage(signal) {
-      const cancelled = ifCancelled(signal);
-      if (cancelled !== null) {
-        return cancelled;
-      }
-      const res = await settle(api.transfer.stats(), signal);
+    usage: async (signal) => {
+      const res =
+        ifCancelled(signal) ??
+        (await settleIpc(api.transfer.stats(), signal));
       return res.ok ? ok(res.value.bytes) : res;
     },
 
-    async freeBytes(signal) {
-      const cancelled = ifCancelled(signal);
-      if (cancelled !== null) {
-        return cancelled;
-      }
-      const res = await settle(api.transfer.stats(), signal);
-      if (!res.ok) {
-        return res;
-      }
-      return res.value.freeBytes === null
-        ? err(appError('unavailable', 'free-bytes probe failed'))
-        : ok(res.value.freeBytes);
+    freeBytes: async (signal) => {
+      const res =
+        ifCancelled(signal) ??
+        (await settleIpc(api.transfer.stats(), signal));
+      return !res.ok
+        ? res
+        : res.value.freeBytes === null
+          ? err(appError('unavailable', 'free-bytes probe failed'))
+          : ok(res.value.freeBytes);
     },
 
-    async removeFile(name, signal) {
-      const cancelled = ifCancelled(signal);
-      if (cancelled !== null) {
-        return cancelled;
-      }
-      return settle(api.transfer.remove({ name }), signal);
-    },
+    removeFile: async (name, signal) =>
+      ifCancelled(signal) ??
+      settleIpc(api.transfer.remove({ name }), signal),
 
-    async stat(name, signal) {
-      const cancelled = ifCancelled(signal);
-      if (cancelled !== null) {
-        return cancelled;
-      }
-      return settle(api.transfer.stat({ name }), signal);
-    },
+    stat: async (name, signal) =>
+      ifCancelled(signal) ??
+      settleIpc(api.transfer.stat({ name }), signal),
   };
 }
 
 /** `transfer:write` accepts ≤4MiB decoded per frame. */
 const WRITE_CHUNK = 4 * 1024 * 1024;
 
-/**
- * Renderer-side base64 for sink bytes — `btoa` handles the narrow
- * range per call so chunk size stays the working bound.
- */
+/** Renderer-side base64 for sink bytes — `btoa` handles the narrow
+ * range per call so chunk size stays the working bound. */
 function toBase64(bytes: Uint8Array): string {
   let binary = '';
   const STEP = 0x8000;

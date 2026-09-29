@@ -1,6 +1,10 @@
 import {
   appError,
   CancellationSource,
+  createClock,
+  createIds,
+  createLog,
+  createRandom,
   DownloadManager,
   err,
   LocalFileSource,
@@ -22,45 +26,28 @@ import type {
   PlayerPort,
   ProviderCapability,
   QueueSnapshot,
+  Result,
   Settings,
   StoragePort,
 } from '@auqw/application';
 import { SqliteStorage } from '@auqw/storage-sqlite';
+import { SLOT_CAPABILITIES } from '@auqw/ui-shared';
 import type { AuqwApi } from '../shared/contract.ts';
 import { toFileUri } from '../shared/local-paths.ts';
 import { createDesktopConnectivity } from './connectivity.ts';
 import { createLocalPlayback } from './local-playback.ts';
 import { createDesktopTagReader } from './tag-reader.ts';
 import { createDesktopTransfer } from './transfer-port.ts';
-import type { MediaSourceLike } from './mse-source.ts';
-import type { MseFactories } from './mse-source.ts';
+import { browserMse } from './mse-source.ts';
 import {
   createPluginProvider,
   manifestCapabilities,
 } from './provider.ts';
 import type { PluginProvider } from './provider.ts';
 import { createSqliteDriver } from './sqlite-driver.ts';
-import {
-  createClock,
-  createIds,
-  createLog,
-  createRandom,
-} from '@auqw/application';
 import { shellToAppError } from './ipc-errors.ts';
 import { createWebPlayerPort } from './web-player.ts';
 import type { MediaSessionLike, WebPlayerPort } from './web-player.ts';
-
-/**
- * The provider-slot → routing-capability map mirrored from the app's
- * settings pickers: a slot value is only meaningful while a provider
- * with that id declares one of the slot's capabilities.
- */
-const SLOT_CAPABILITIES = {
-  catalogProvider: ['catalog.search'],
-  playbackProvider: ['playback.resolve'],
-  lyricsProvider: ['lyrics.synced', 'lyrics.plain'],
-  radioProvider: ['radio.seed'],
-} as const;
 
 /** First provider declaring the slot's capability — the shipped id
  *  preferred, then any declarer; null when nothing can serve it. */
@@ -104,8 +91,8 @@ function defaultSettings(
     'youtube-music',
   );
   const missing = [
-    ...(catalog === null ? (['catalog.search'] as const) : []),
-    ...(playback === null ? (['playback.resolve'] as const) : []),
+    ...(catalog === null ? ['catalog.search'] : []),
+    ...(playback === null ? ['playback.resolve'] : []),
   ];
   if (catalog === null || playback === null) {
     throw new Error(
@@ -139,9 +126,6 @@ function repairedSettings(
     id: string | null | undefined,
     capabilities: readonly ProviderCapability[],
   ): boolean => {
-    if (id === null || id === undefined) {
-      return false;
-    }
     const provider = providers.find((p) => p.id === id);
     return (
       provider !== undefined &&
@@ -152,30 +136,25 @@ function repairedSettings(
   };
   const next = { ...settings };
   let changed = false;
-  if (!declares(settings.catalogProvider, SLOT_CAPABILITIES.catalogProvider)) {
+  const repick = (
+    slot: 'catalogProvider' | 'playbackProvider',
+    preferred: string,
+  ): void => {
+    if (declares(settings[slot], SLOT_CAPABILITIES[slot])) {
+      return;
+    }
     const repaired = pickProvider(
       providers,
-      SLOT_CAPABILITIES.catalogProvider,
-      'deezer',
+      SLOT_CAPABILITIES[slot],
+      preferred,
     );
     if (repaired !== null) {
-      next.catalogProvider = repaired;
+      next[slot] = repaired;
       changed = true;
     }
-  }
-  if (
-    !declares(settings.playbackProvider, SLOT_CAPABILITIES.playbackProvider)
-  ) {
-    const repaired = pickProvider(
-      providers,
-      SLOT_CAPABILITIES.playbackProvider,
-      'youtube-music',
-    );
-    if (repaired !== null) {
-      next.playbackProvider = repaired;
-      changed = true;
-    }
-  }
+  };
+  repick('catalogProvider', 'deezer');
+  repick('playbackProvider', 'youtube-music');
   for (const slot of ['lyricsProvider', 'radioProvider'] as const) {
     if (
       settings[slot] != null &&
@@ -186,26 +165,6 @@ function repairedSettings(
     }
   }
   return changed ? next : null;
-}
-
-/**
- * The MSE factories a real browser context supplies — `MediaSource`
- * plus blob object URLs. Absent under Node/tests the web player keeps
- * only the serve-url leg.
- */
-function browserMse(): MseFactories | null {
-  return typeof MediaSource === 'function'
-    ? {
-        // The DOM types are wider than the portable interface
-        // (BufferSource vs Uint8Array) — narrow them here.
-        createSource: () =>
-          new MediaSource() as unknown as MediaSourceLike,
-        createObjectURL: (source: unknown) =>
-          URL.createObjectURL(source as MediaSource),
-        revokeObjectURL: (url: string) => URL.revokeObjectURL(url),
-        isTypeSupported: (mime: string) => MediaSource.isTypeSupported(mime),
-      }
-    : null;
 }
 
 export type SessionController = {
@@ -261,7 +220,7 @@ export type SessionController = {
   dispose(): Promise<void>;
 };
 
-export type SessionControllerOptions = {
+type SessionControllerOptions = {
   /** Storage seam — tests inject an in-memory port; real boot builds
    *  SqliteStorage over the IPC driver. */
   readonly storage?: StoragePort | undefined;
@@ -288,10 +247,8 @@ export async function createSessionController(
   api: AuqwApi,
   options?: SessionControllerOptions,
 ): Promise<SessionController> {
-  let providers: readonly PluginProvider[];
-  if (options?.providers !== undefined) {
-    providers = options.providers;
-  } else {
+  let providers = options?.providers;
+  if (providers === undefined) {
     const hostResult = await api.host.plugins();
     providers =
       hostResult.bindings === 'loaded'
@@ -362,6 +319,9 @@ export async function createSessionController(
   const clock = options?.clock ?? createClock();
   const ids = options?.ids ?? createIds();
   const log = options?.log ?? createLog();
+  const warn = (message: string): void => {
+    void log.write({ level: 'warn', message, atMs: clock.nowMs() });
+  };
 
   // The file plane: the transfer port is the download sink, the tag
   // reader enumerates granted folders, and the net monitor doubles
@@ -483,12 +443,8 @@ export async function createSessionController(
       );
     },
     resolvePlayback: (ref, input, context) => {
-      const provider = providerMap.get(
-        readyOr(
-          (s) => s.settings.playbackProvider,
-          defaults.playbackProvider,
-        ),
-      );
+      const settings = readyOr((s) => s.settings, defaults);
+      const provider = providerMap.get(settings.playbackProvider);
       if (provider === undefined) {
         return Promise.resolve(
           err(appError('unavailable', 'playback provider not loaded')),
@@ -497,10 +453,7 @@ export async function createSessionController(
       return provider.resolvePlayback(
         ref,
         {
-          targetBitrateKbps: readyOr(
-            (s) => s.settings.qualityKbps,
-            defaults.qualityKbps,
-          ),
+          targetBitrateKbps: settings.qualityKbps,
           prefer: ['audio/webm', 'audio/mp4'],
           pinItag: input.pinItag,
           resumeOffset: input.resumeOffset,
@@ -517,6 +470,9 @@ export async function createSessionController(
   // removal/integrity drop) must re-project or the player keeps a
   // stale remote ref — or attaches a file that no longer exists.
   let ownedIds = new Set<string>();
+  // Re-band pending downloads when the queue moves: a track that
+  // becomes now-playing jumps the line.
+  let queueRevision = readyOr((s) => s.queue.revision, 0);
   mediaUnsubs.push(
     downloads.subscribe(() => {
       const nowOwned = new Set(
@@ -525,19 +481,14 @@ export async function createSessionController(
           .filter((d) => d.state === 'available')
           .map((d) => d.recordingId),
       );
-      const ownershipChanged =
+      if (
         nowOwned.size !== ownedIds.size ||
-        [...nowOwned].some((id) => !ownedIds.has(id));
-      if (ownershipChanged) {
+        [...nowOwned].some((id) => !ownedIds.has(id))
+      ) {
         ownedIds = nowOwned;
         session.connectivityChanged();
       }
     }),
-  );
-  // Re-band pending downloads when the queue moves: a track that
-  // becomes now-playing jumps the line.
-  let queueRevision = readyOr((s) => s.queue.revision, 0);
-  mediaUnsubs.push(
     session.subscribe((next) => {
       if (
         next.type !== 'ready' ||
@@ -564,11 +515,7 @@ export async function createSessionController(
       signal,
     });
     if (!loaded.ok || signal.cancelled) {
-      void log.write({
-        level: 'warn',
-        message: 'media rehydrate skipped: storage load failed',
-        atMs: clock.nowMs(),
-      });
+      warn('media rehydrate skipped: storage load failed');
       return;
     }
     localSource = new LocalFileSource(
@@ -581,11 +528,7 @@ export async function createSessionController(
     );
     const inited = await downloads.init(loaded.value.downloads, signal);
     if (!inited.ok) {
-      void log.write({
-        level: 'warn',
-        message: `download init failed: ${inited.error.kind}`,
-        atMs: clock.nowMs(),
-      });
+      warn(`download init failed: ${inited.error.kind}`);
       return;
     }
     // Imported recordings replace prior local rows — the session
@@ -606,9 +549,7 @@ export async function createSessionController(
     // Emit the settled value — a subscriber that mounts after the
     // baseline edge must not wait for the next transition.
     listener(lastOnline);
-    return () => {
-      onlineListeners.delete(listener);
-    };
+    return () => onlineListeners.delete(listener);
   };
   let unsubscribeNet: () => void = () => {};
   try {
@@ -637,16 +578,10 @@ export async function createSessionController(
   // `sync:applied` push. The drain is a PEEK: served file lines stay
   // durable until `sync:ackApplied` confirms the domain commit landed,
   // so a crash between pull and commit replays instead of losing (the
-  // projector's materialized snapshots make replay idempotent). A
-  // failed projection stays queued in the session's own pending buffer
-  // AND on disk — the retry loop refolds it, or the next drain
-  // re-serves it.
-  // Gate drains until the session is ready: applySyncedEntries runs a
-  // storage segment and keeps failed outcomes only inside `ready` — a
-  // pre-restore apply would drop them, so `sync:applied` pushes that
-  // arrive early simply leave the utility's outbox queued for the
-  // boot drain below. Concurrent drains serialize through `draining` —
-  // two drains must never ack-overlap the same file prefix.
+  // projector's materialized snapshots make replay idempotent). Drains
+  // stay gated until the session is ready — applySyncedEntries keeps
+  // failed outcomes only inside `ready` — and serialize through
+  // `draining`: two drains must never ack-overlap the same file prefix.
   let drainArmed = false;
   let draining = false;
   let drainAgain = false;
@@ -664,6 +599,24 @@ export async function createSessionController(
   const ACK_RETRY_MAX = 3;
   const ACK_RETRY_MS = 800;
   let ackRetries = 0;
+  /** Bounded refold of a served batch/page — the backstop deadline sits
+   * past the call's own internal op deadline so it never abandons a
+   * healthy in-flight commit, only a wedged one. Attempt 1 folds the
+   * fresh payload; later attempts refold the retained pending with []. */
+  const retryApply = <T>(
+    call: (
+      signal: CancellationSignal,
+      attempt: number,
+    ) => Promise<Result<T>>,
+  ): Promise<Result<T>> =>
+    retryBounded({
+      deadlineMs: clock.nowMs() + 300_000,
+      signal: disposeSource.signal,
+      clock,
+      maxAttempts: APPLY_RETRY_MAX + 1,
+      baseBackoffMs: APPLY_RETRY_MS,
+      call,
+    });
   // Resolves true when the pass walked every page — a false return
   // means the materialized view never landed and the caller's
   // reconcile flag must stay armed for the next drain.
@@ -684,34 +637,20 @@ export async function createSessionController(
       if (page.records.length > 0) {
         // A failed apply keeps the served page in the session's
         // retained pending — refold with bounded retries rather than
-        // drop the recovery page until the next reconcile (Review
-        // #46): attempt 1 folds the fresh page, later attempts [].
-        const applied = await retryBounded({
-          // Backstop sized past the call's own internal op
-          // deadline — it must never abandon a healthy in-flight
-          // commit, only a wedged one.
-          deadlineMs: clock.nowMs() + 300_000,
-          signal: disposeSource.signal,
-          clock,
-          maxAttempts: APPLY_RETRY_MAX + 1,
-          baseBackoffMs: APPLY_RETRY_MS,
-          call: (attemptSignal, attempt) =>
-            session.applyMaterializedEntries(
-              attempt === 1
-                ? (page.records as readonly MaterializedRecord[])
-                : [],
-              attemptSignal,
-            ),
-        });
+        // drop the recovery page until the next reconcile (Review #46).
+        const applied = await retryApply((attemptSignal, attempt) =>
+          session.applyMaterializedEntries(
+            attempt === 1
+              ? (page.records as readonly MaterializedRecord[])
+              : [],
+            attemptSignal,
+          ),
+        );
         if (disposed) {
           return false;
         }
         if (!applied.ok) {
-          void log.write({
-            level: 'warn',
-            message: `sync reconcile failed: ${applied.error.kind}`,
-            atMs: clock.nowMs(),
-          });
+          warn(`sync reconcile failed: ${applied.error.kind}`);
           return false;
         }
         if (applied.value.rehydrateMedia) {
@@ -743,10 +682,7 @@ export async function createSessionController(
     const run = reconcileTail.then(() =>
       disposed ? false : reconcilePass(emitDiff),
     );
-    reconcileTail = run.then(
-      () => undefined,
-      () => undefined,
-    );
+    reconcileTail = run.then(() => undefined, () => undefined);
     return run;
   };
   const drainApplied = async (): Promise<void> => {
@@ -762,46 +698,29 @@ export async function createSessionController(
         const batch = await api.sync.drainApplied();
         if (batch.dropped) {
           reconcileNeeded = true;
-          void log.write({
-            level: 'warn',
-            message:
-              'sync applied outbox reported dropped outcomes; reconciling from the materialized log view',
-            atMs: clock.nowMs(),
-          });
+          warn(
+            'sync applied outbox reported dropped outcomes; reconciling from the materialized log view',
+          );
         }
         if (batch.outcomes.length > 0) {
           // A failed projection stays in the session's pending, so
           // refold with bounded retries. The file lines stay unacked
           // — the next drain re-serves them if this never commits.
           // Disposing or exhausting attempts exits; the next
-          // `sync:applied` push re-arms. Attempt 1 folds the fresh
-          // outcomes; later attempts refold the pending with [].
-          const applied = await retryBounded({
-            // Backstop sized past the call's own internal op
-            // deadline — it must never abandon a healthy in-flight
-            // commit, only a wedged one.
-            deadlineMs: clock.nowMs() + 300_000,
-            signal: disposeSource.signal,
-            clock,
-            maxAttempts: APPLY_RETRY_MAX + 1,
-            baseBackoffMs: APPLY_RETRY_MS,
-            call: (attemptSignal, attempt) =>
-              session.applySyncedEntries(
-                attempt === 1
-                  ? (batch.outcomes as readonly MergeOutcome[])
-                  : [],
-                attemptSignal,
-              ),
-          });
+          // `sync:applied` push re-arms.
+          const applied = await retryApply((attemptSignal, attempt) =>
+            session.applySyncedEntries(
+              attempt === 1
+                ? (batch.outcomes as readonly MergeOutcome[])
+                : [],
+              attemptSignal,
+            ),
+          );
           if (disposed) {
             return;
           }
           if (!applied.ok) {
-            void log.write({
-              level: 'warn',
-              message: `sync apply failed: ${applied.error.kind}`,
-              atMs: clock.nowMs(),
-            });
+            warn(`sync apply failed: ${applied.error.kind}`);
             return;
           }
           if (applied.value.rehydrateMedia) {
@@ -881,8 +800,7 @@ export async function createSessionController(
   }
   // Media owners come up after restore — their constructors take the
   // committed rows, which only settle once restore's own writes land.
-  const bootSignal = new CancellationSource().signal;
-  await rehydrateMedia(bootSignal);
+  await rehydrateMedia(new CancellationSource().signal);
   // Final re-derive: the ledger's owned set was empty when restore
   // projected remote refs — replay the truth now that owned files
   // resolve.
@@ -929,11 +847,7 @@ export async function createSessionController(
       const priorRows = downloads.records();
       const stopped = await downloads.stop(signal);
       if (!stopped.ok) {
-        void log.write({
-          level: 'warn',
-          message: `pre-import stop failed: ${stopped.error.kind}`,
-          atMs: clock.nowMs(),
-        });
+        warn(`pre-import stop failed: ${stopped.error.kind}`);
         return err(stopped.error);
       }
       try {
@@ -945,11 +859,9 @@ export async function createSessionController(
           for (const row of priorRows) {
             const removed = await transfer.removeFile(row.filePath, signal);
             if (!removed.ok) {
-              void log.write({
-                level: 'warn',
-                message: `post-import file delete failed for ${row.filePath}: ${removed.error.kind}`,
-                atMs: clock.nowMs(),
-              });
+              warn(
+                `post-import file delete failed for ${row.filePath}: ${removed.error.kind}`,
+              );
             }
           }
         }

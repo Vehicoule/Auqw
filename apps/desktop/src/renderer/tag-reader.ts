@@ -8,67 +8,30 @@ import type {
   TagReaderPort,
 } from '@auqw/application';
 import { appError, err, ok } from '@auqw/application';
-import type { AuqwApi, LocalPickPayload } from '../shared/contract.ts';
+import type { AuqwApi } from '../shared/contract.ts';
 import { MAX_TAGREAD_BATCH } from '../shared/contract.ts';
 import { docUriFor } from '../shared/local-paths.ts';
-import { shellToAppError } from './ipc-errors.ts';
-import { raced } from '@auqw/application';
+import { ifCancelled, settleIpc, shellToAppError } from './ipc-errors.ts';
 
 /**
  * `TagReaderPort` over the `tagread:*` + `local:add` + `dialog` IPC
  * surfaces — the desktop half of the local-files read plane.
  *
- * `pickFolder` is the grant mint: for directories it runs the OS
- * dialog then validates the path through `local:add` (which mints the
- * `treeUri`/`label` descriptor `LocalFileSource.addFolder` commits as
- * the `local_sources` row). Picked FILES use `pickLocalFiles`: each
- * validated path stages one descriptor, then `addFolder` consumes a
- * staged pick instead of opening the dialog — one staged pick per
- * `addFolder` call.
+ * `pickFolder` runs the OS dialog then validates the path through
+ * `local:add` (which mints the `treeUri`/`label` descriptor
+ * `LocalFileSource.addFolder` commits as the `local_sources` row).
  *
  * `docUri` is pure string math (`shared/local-paths.ts`) so
  * `LocalFileSource.uriFor` — and therefore `Session`'s synchronous
  * `localPlaybackFor` hook — never crosses IPC.
  */
-export type DesktopTagReader = TagReaderPort & {
-  /**
-   * Queue a validated pick for the NEXT `pickFolder` call (i.e. the
-   * next `localSource.addFolder`). Used by `pickLocalFiles` for
-   * picked-file grants.
-   */
-  readonly stagePick: (pick: PickedFolder) => void;
-  /**
-   * Picked-file grant flow: opens the OS file dialog, validates every
-   * path through `local:add`, and stages each resulting descriptor.
-   * Returns the staged picks — the caller then invokes
-   * `localSource.addFolder(signal)` once per pick.
-   */
-  readonly pickLocalFiles: (
-    signal: CancellationSignal,
-  ) => Promise<Result<readonly PickedFolder[]>>;
-};
-
-export function createDesktopTagReader(api: AuqwApi): DesktopTagReader {
-  const staged: PickedFolder[] = [];
-
-  const ifCancelled = (signal: CancellationSignal): Result<never> | null =>
-    signal.cancelled ? err(appError('cancelled', 'cancelled')) : null;
-
-  const toPick = (payload: LocalPickPayload): PickedFolder => ({
-    treeUri: payload.treeUri,
-    label: payload.label,
-  });
-
+export function createDesktopTagReader(api: AuqwApi): TagReaderPort {
   async function pickFolder(
     signal: CancellationSignal,
   ): Promise<Result<PickedFolder>> {
     const cancelled = ifCancelled(signal);
     if (cancelled !== null) {
       return cancelled;
-    }
-    const next = staged.shift();
-    if (next !== undefined) {
-      return ok(next);
     }
     try {
       const picked = await api.dialog.pickFolder('Add a local folder');
@@ -94,170 +57,74 @@ export function createDesktopTagReader(api: AuqwApi): DesktopTagReader {
           appError('invalid-response', 'local:add returned no dir pick'),
         );
       }
-      return ok(toPick(first));
+      return ok({ treeUri: first.treeUri, label: first.label });
     } catch (thrown) {
       return err(shellToAppError(thrown));
     }
   }
 
-  async function pickLocalFiles(
+  /**
+   * One `tagread:*` batch call chunked at the channel's MAX bound —
+   * the engine sends every changed docId in one call, so larger sets
+   * ride sequential chunks, in request order, checking cancellation
+   * between them. Payload rows are already the port's row shape.
+   */
+  async function batched<R>(
+    docIds: readonly string[],
     signal: CancellationSignal,
-  ): Promise<Result<readonly PickedFolder[]>> {
-    const cancelled = ifCancelled(signal);
-    if (cancelled !== null) {
-      return cancelled;
+    call: (docIds: readonly string[]) => Promise<readonly (R | null)[]>,
+  ): Promise<Result<readonly (R | null)[]>> {
+    const out: (R | null)[] = [];
+    const initial = ifCancelled(signal);
+    if (initial !== null) {
+      return initial;
     }
-    try {
-      const paths = await api.dialog.pickFiles('Add local files', true);
-      const afterDialog = ifCancelled(signal);
-      if (afterDialog !== null) {
-        return afterDialog;
+    for (let at = 0; at < docIds.length; at += MAX_TAGREAD_BATCH) {
+      const cancelled = ifCancelled(signal);
+      if (cancelled !== null) {
+        return cancelled;
       }
-      if (paths.length === 0) {
-        return err(appError('no-result', 'picker cancelled'));
+      const page = await settleIpc(
+        call(docIds.slice(at, at + MAX_TAGREAD_BATCH)),
+        signal,
+      );
+      if (!page.ok) {
+        return page;
       }
-      const { picks } = await api.local.add({ paths: [...paths] });
-      const afterAdd = ifCancelled(signal);
-      if (afterAdd !== null) {
-        return afterAdd;
-      }
-      const folders = picks.map(toPick);
-      for (const pick of folders) {
-        staged.push(pick);
-      }
-      return ok(folders);
-    } catch (thrown) {
-      return err(shellToAppError(thrown));
+      out.push(...page.value);
     }
+    return ok(out);
   }
 
   return {
     pickFolder,
-    pickLocalFiles,
-    stagePick: (pick) => {
-      staged.push(pick);
-    },
 
     async enumerate(treeUri, signal) {
       const cancelled = ifCancelled(signal);
       if (cancelled !== null) {
         return cancelled;
       }
-      try {
-        // Read-only: a cancel settles the caller early; the parked
-        // utility enumeration's result is simply dropped.
-        const outcome = await raced(
-          api.tagread.enumerate({ treeUri }),
-          signal,
-        );
-        if (outcome.t === 'cancelled') {
-          return err(appError('cancelled', 'cancelled'));
-        }
-        if (outcome.t === 'failed') {
-          return err(shellToAppError(outcome.thrown));
-        }
-        const { entries } = outcome.value;
-        const mapped: LocalEntry[] = entries.map((entry) => ({
-          docId: entry.docId,
-          name: entry.name,
-          size: entry.size,
-          mime: entry.mime,
-          modifiedMs: entry.modifiedMs,
-        }));
-        return ok(mapped);
-      } catch (thrown) {
-        return err(shellToAppError(thrown));
-      }
+      // Read-only: a cancel settles the caller early; the parked
+      // utility enumeration's result is simply dropped.
+      const res = await settleIpc(
+        api.tagread.enumerate({ treeUri }),
+        signal,
+      );
+      return res.ok ? ok(res.value.entries) : res;
     },
 
-    // The engine sends every changed docId in one call — the channel
-    // bound is MAX_TAGREAD_BATCH, so larger sets ride sequential
-    // chunks, in request order, checking cancellation between them.
-    async fingerprint(treeUri, docIds, signal) {
-      const cancelled = ifCancelled(signal);
-      if (cancelled !== null) {
-        return cancelled;
-      }
-      try {
-        const mapped: (FileFingerprint | null)[] = [];
-        for (let at = 0; at < docIds.length; at += MAX_TAGREAD_BATCH) {
-          const between = ifCancelled(signal);
-          if (between !== null) {
-            return between;
-          }
-          const batch = await raced(
-            api.tagread.fingerprint({
-              treeUri,
-              docIds: docIds.slice(at, at + MAX_TAGREAD_BATCH),
-            }),
-            signal,
-          );
-          if (batch.t === 'cancelled') {
-            return err(appError('cancelled', 'cancelled'));
-          }
-          if (batch.t === 'failed') {
-            return err(shellToAppError(batch.thrown));
-          }
-          const { fingerprints } = batch.value;
-          for (const fp of fingerprints) {
-            mapped.push(
-              fp === null
-                ? null
-                : { docId: fp.docId, fingerprint: fp.fingerprint },
-            );
-          }
-        }
-        return ok(mapped);
-      } catch (thrown) {
-        return err(shellToAppError(thrown));
-      }
+    fingerprint(treeUri, docIds, signal) {
+      return batched<FileFingerprint>(docIds, signal, (ids) =>
+        api.tagread
+          .fingerprint({ treeUri, docIds: ids })
+          .then((r) => r.fingerprints),
+      );
     },
 
-    async readTags(treeUri, docIds, signal) {
-      const cancelled = ifCancelled(signal);
-      if (cancelled !== null) {
-        return cancelled;
-      }
-      try {
-        const mapped: (LocalTags | null)[] = [];
-        for (let at = 0; at < docIds.length; at += MAX_TAGREAD_BATCH) {
-          const between = ifCancelled(signal);
-          if (between !== null) {
-            return between;
-          }
-          const batch = await raced(
-            api.tagread.read({
-              treeUri,
-              docIds: docIds.slice(at, at + MAX_TAGREAD_BATCH),
-            }),
-            signal,
-          );
-          if (batch.t === 'cancelled') {
-            return err(appError('cancelled', 'cancelled'));
-          }
-          if (batch.t === 'failed') {
-            return err(shellToAppError(batch.thrown));
-          }
-          const { tags } = batch.value;
-          for (const tag of tags) {
-            mapped.push(
-              tag === null
-                ? null
-                : {
-                    docId: tag.docId,
-                    title: tag.title,
-                    artist: tag.artist,
-                    album: tag.album,
-                    durationMs: tag.durationMs,
-                    genre: tag.genre,
-                  },
-            );
-          }
-        }
-        return ok(mapped);
-      } catch (thrown) {
-        return err(shellToAppError(thrown));
-      }
+    readTags(treeUri, docIds, signal) {
+      return batched<LocalTags>(docIds, signal, (ids) =>
+        api.tagread.read({ treeUri, docIds: ids }).then((r) => r.tags),
+      );
     },
 
     docUri(treeUri, docId) {

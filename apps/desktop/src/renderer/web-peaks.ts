@@ -19,7 +19,7 @@ export type DecodedAudio = {
 };
 
 /** Decode container bytes to PCM — tests inject a fake. */
-export type PeaksDecoder = (bytes: Uint8Array) => Promise<DecodedAudio>;
+type PeaksDecoder = (bytes: Uint8Array) => Promise<DecodedAudio>;
 
 const READ_CHUNK = 1024 * 1024; // matches the stream:read MAX_READ_LEN
 /** Decoration, not analysis — never pull more than this for a bar row. */
@@ -34,13 +34,12 @@ const MAX_PEAK_BYTES = 24 * 1024 * 1024;
  */
 const MAX_DECODE_MS = PEAKS_MAX_DECODE_MS;
 /**
- * Lowest plausible music bitrate — the bound for streams whose
- * `durationMs` is unknown. At this floor, this many encoded bytes
- * can't decode past the 8-minute PCM gate; anything denser is shorter.
+ * Bound for streams whose `durationMs` is unknown: at the lowest
+ * plausible music bitrate (64 kbps), this many encoded bytes can't
+ * decode past the PCM gate; anything denser is shorter.
  */
-const BITRATE_FLOOR_BPS = 64_000;
 const MAX_UNKNOWN_DURATION_BYTES =
-  (MAX_DECODE_MS / 1000) * (BITRATE_FLOOR_BPS / 8);
+  (MAX_DECODE_MS / 1000) * (64_000 / 8);
 /**
  * Post-decode belt for the gate: multichannel/high-rate outliers (or a
  * container whose declared duration lies) bail instead of bucketing a
@@ -59,27 +58,24 @@ const FIRST_READ_TIMEOUT_MS = 15_000;
  */
 const PARK_TIMEOUT_MS = 400;
 
-const DEAD_HANDLE: ReadonlySet<string> = new Set([
-  'released',
-  'evicted',
-  'expired',
-  'superseded',
-  'not-found',
-]);
+/** Stream/local-read failure slugs → the peaks port's app kinds:
+ * dead-handle slugs collapse to 'released', contract violations to
+ * 'invalid-response', anything else reads transient. */
+const ERROR_KIND_BY_SLUG: Readonly<Record<string, ErrorKind>> = {
+  cancelled: 'cancelled',
+  released: 'released',
+  evicted: 'released',
+  expired: 'released',
+  superseded: 'released',
+  'not-found': 'released',
+  'invalid-request': 'invalid-response',
+  'invalid-response': 'invalid-response',
+  'invalid-message': 'invalid-response',
+};
 
 function toError(thrown: unknown): AppError {
   if (isRecord(thrown) && typeof thrown['kind'] === 'string') {
-    const slug = thrown['kind'];
-    const kind: ErrorKind =
-      slug === 'cancelled'
-        ? 'cancelled'
-        : DEAD_HANDLE.has(slug)
-          ? 'released'
-          : slug === 'invalid-request' ||
-              slug === 'invalid-response' ||
-              slug === 'invalid-message'
-            ? 'invalid-response'
-            : 'transient';
+    const kind = ERROR_KIND_BY_SLUG[thrown['kind']] ?? 'transient';
     const message =
       typeof thrown['message'] === 'string' && thrown['message'].length > 0
         ? thrown['message']
@@ -244,30 +240,13 @@ export function createWebPeaksPort(deps: {
     // never on a demand hole, so the park bound is decorative there.
     const localUri = deps.localUriFor?.(handle) ?? null;
     const localRead = deps.localRead;
+    const read =
+      localUri !== null && localRead !== undefined
+        ? () => localRead({ uri: localUri, position, maxLen: READ_CHUNK })
+        : () => deps.stream.read({ handle, position, maxLen: READ_CHUNK });
     // `<=` so an exactly-`cap` stream still reaches its EOF read.
     while (total <= cap) {
-      const chunk =
-        localUri !== null && localRead !== undefined
-          ? await readWithDeadline(
-              () =>
-                localRead({
-                  uri: localUri,
-                  position,
-                  maxLen: READ_CHUNK,
-                }),
-              timeoutMs,
-              context,
-            )
-          : await readWithDeadline(
-              () =>
-                deps.stream.read({
-                  handle,
-                  position,
-                  maxLen: READ_CHUNK,
-                }),
-              timeoutMs,
-              context,
-            );
+      const chunk = await readWithDeadline(read, timeoutMs, context);
       // The park bound exists to stop hole-chasing on the seam — a
       // local:read parks only on slow disk, so local reads keep the
       // cold-start patience every round.

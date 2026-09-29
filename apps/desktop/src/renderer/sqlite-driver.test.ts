@@ -78,6 +78,14 @@ function fakeStorage(overrides: Partial<AuqwStorage> = {}): {
   return { calls, storage };
 }
 
+function rig(overrides: Partial<AuqwStorage> = {}): {
+  calls: Call[];
+  driver: ReturnType<typeof createSqliteDriver>;
+} {
+  const { calls, storage } = fakeStorage(overrides);
+  return { calls, driver: createSqliteDriver(storage) };
+}
+
 function channels(calls: readonly Call[]): string[] {
   return calls.map((c) => c.channel);
 }
@@ -99,8 +107,7 @@ async function throwsWith(
 export async function run(): Promise<void> {
   // happy path: begin → statements → commit, txId pinned on every call
   {
-    const { calls, storage } = fakeStorage();
-    const driver = createSqliteDriver(storage);
+    const { calls, driver } = rig();
     const value = await driver.transaction(async (conn) => {
       const inserted = await conn.execute('INSERT INTO t VALUES (?)', [
         'a',
@@ -131,8 +138,7 @@ export async function run(): Promise<void> {
 
   // a throwing work callback rolls back; the original error propagates
   {
-    const { calls, storage } = fakeStorage();
-    const driver = createSqliteDriver(storage);
+    const { calls, driver } = rig();
     const boom = new Error('work failed');
     await throwsWith(
       driver.transaction(() => Promise.reject(boom)),
@@ -145,13 +151,12 @@ export async function run(): Promise<void> {
   // a failing commit still rolls back; the commit error propagates
   {
     const commitError = shellError('io-error', 'commit failed');
-    const { calls, storage } = fakeStorage({
+    const { calls, driver } = rig({
       commit: (txId) => {
         calls.push({ channel: 'commit', txId });
         return Promise.reject(commitError);
       },
     });
-    const driver = createSqliteDriver(storage);
     await throwsWith(
       driver.transaction(() => Promise.resolve('x')),
       commitError,
@@ -162,13 +167,12 @@ export async function run(): Promise<void> {
 
   // a failing rollback is swallowed; the original error still wins
   {
-    const { calls, storage } = fakeStorage({
+    const { calls, driver } = rig({
       rollback: (txId) => {
         calls.push({ channel: 'rollback', txId });
         return Promise.reject(new Error('rollback broken'));
       },
     });
-    const driver = createSqliteDriver(storage);
     const boom = new Error('work failed');
     await throwsWith(
       driver.transaction(() => Promise.reject(boom)),
@@ -180,8 +184,7 @@ export async function run(): Promise<void> {
 
   // a signal cancelled up front never reaches the wire
   {
-    const { calls, storage } = fakeStorage();
-    const driver = createSqliteDriver(storage);
+    const { calls, driver } = rig();
     const source = new CancellationSource();
     source.cancel();
     await throwsWith(
@@ -194,8 +197,7 @@ export async function run(): Promise<void> {
 
   // mid-transaction cancellation: flag the tx, throw CANCELLED, roll back
   {
-    const { calls, storage } = fakeStorage();
-    const driver = createSqliteDriver(storage);
+    const { calls, driver } = rig();
     const source = new CancellationSource();
     await throwsWith(
       driver.transaction(async (conn) => {
@@ -217,8 +219,7 @@ export async function run(): Promise<void> {
 
   // a cancel landing while work is suspended still flags the tx
   {
-    const { calls, storage } = fakeStorage();
-    const driver = createSqliteDriver(storage);
+    const { calls, driver } = rig();
     const source = new CancellationSource();
     await throwsWith(
       driver.transaction(async (conn) => {
@@ -246,8 +247,7 @@ export async function run(): Promise<void> {
 
   // cancellation observed after work skips commit and rolls back
   {
-    const { calls, storage } = fakeStorage();
-    const driver = createSqliteDriver(storage);
+    const { calls, driver } = rig();
     const source = new CancellationSource();
     await throwsWith(
       driver.transaction(async () => {
@@ -262,8 +262,7 @@ export async function run(): Promise<void> {
 
   // a per-statement signal cancels the statement without poisoning the tx
   {
-    const { calls, storage } = fakeStorage();
-    const driver = createSqliteDriver(storage);
+    const { calls, driver } = rig();
     const source = new CancellationSource();
     await throwsWith(
       driver.transaction(async (conn) => {
@@ -280,13 +279,12 @@ export async function run(): Promise<void> {
   // a cancelled ShellError from the wire propagates untouched
   {
     const cancelled = shellError('cancelled', 'transaction cancelled');
-    const { calls, storage } = fakeStorage({
+    const { calls, driver } = rig({
       execute: (txId, sql, params = []) => {
         calls.push({ channel: 'execute', txId, sql, params });
         return Promise.reject(cancelled);
       },
     });
-    const driver = createSqliteDriver(storage);
     await throwsWith(
       driver.transaction((conn) => conn.execute('INSERT')),
       cancelled,
@@ -298,8 +296,7 @@ export async function run(): Promise<void> {
   // executeAll sends one wire call per ≤2048-statement chunk — a
   // whole commit plan crosses the bridge once, ordered and tx-pinned
   {
-    const { calls, storage } = fakeStorage();
-    const driver = createSqliteDriver(storage);
+    const { calls, driver } = rig();
     await driver.transaction(async (conn) => {
       await conn.executeAll([
         { sql: 'INSERT INTO t VALUES (?)', params: [1] },
@@ -340,8 +337,7 @@ export async function run(): Promise<void> {
   // plans beyond the per-call cap split into sequential chunks with
   // statement order preserved across the boundary
   {
-    const { calls, storage } = fakeStorage();
-    const driver = createSqliteDriver(storage);
+    const { calls, driver } = rig();
     await driver.transaction(async (conn) => {
       await conn.executeAll(
         Array.from({ length: 2049 }, (_, i) => ({
@@ -368,8 +364,7 @@ export async function run(): Promise<void> {
   // a per-call signal cancels the batch without poisoning the tx —
   // nothing reaches the wire
   {
-    const { calls, storage } = fakeStorage();
-    const driver = createSqliteDriver(storage);
+    const { calls, driver } = rig();
     const source = new CancellationSource();
     await throwsWith(
       driver.transaction(async (conn) => {
@@ -388,8 +383,7 @@ export async function run(): Promise<void> {
 
   // backup/dropBackup delegate straight through
   {
-    const { calls, storage } = fakeStorage();
-    const driver = createSqliteDriver(storage);
+    const { calls, driver } = rig();
     await driver.backup('v1');
     await driver.dropBackup('v1');
     assertDeepEqual(channels(calls), ['backup', 'dropBackup']);

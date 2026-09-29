@@ -134,6 +134,19 @@ function collect(player: { subscribe(l: (e: PlayerEvent) => void): () => void })
   return events;
 }
 
+/** The default wiring: stream + audio + a subscribed event tap. */
+function rig(
+  stream: StreamClient,
+  audio: FakeAudio = fakeAudio(),
+): {
+  player: ReturnType<typeof createWebPlayerPort>;
+  audio: FakeAudio;
+  events: PlayerEvent[];
+} {
+  const player = createWebPlayerPort({ stream, audio });
+  return { player, audio, events: collect(player) };
+}
+
 /** The stream handles carried by every prepared outcome, in order. */
 function preparedHandles(events: PlayerEvent[]): string[] {
   const handles: string[] = [];
@@ -189,8 +202,7 @@ export async function run(): Promise<void> {
   // prepare → prepared event with stream + attempt.
   {
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio: fakeAudio() });
-    const events = collect(player);
+    const { player, events } = rig(stream);
     const res = await player.prepare({
       provider: 'deezer',
       sourceRef: 'track:7',
@@ -229,8 +241,7 @@ export async function run(): Promise<void> {
           message: 'slow down',
         }),
     });
-    const player = createWebPlayerPort({ stream, audio: fakeAudio() });
-    const events = collect(player);
+    const { player, events } = rig(stream);
     await player.prepare({ provider: 'deezer', sourceRef: 'x', identity });
     await settle();
     const prepared = events.find((e) => e.type === 'prepare');
@@ -249,8 +260,7 @@ export async function run(): Promise<void> {
       prepare: () =>
         Promise.reject({ kind: 'unavailable', message: 'no bindings' }),
     });
-    const player = createWebPlayerPort({ stream, audio: fakeAudio() });
-    const events = collect(player);
+    const { player, events } = rig(stream);
     const res = await player.prepare({
       provider: 'deezer',
       sourceRef: 'x',
@@ -274,8 +284,7 @@ export async function run(): Promise<void> {
   // extension derives the mime and the stream seam never sees it.
   {
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio: fakeAudio() });
-    const events = collect(player);
+    const { player, events } = rig(stream);
     const res = await player.prepare({
       provider: 'local',
       sourceRef: 'file:///music/rip.flac',
@@ -334,8 +343,7 @@ export async function run(): Promise<void> {
   // unknown, the element sniffs", the mobile adapter's convention.
   {
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio: fakeAudio() });
-    const events = collect(player);
+    const { player, events } = rig(stream);
     await player.prepare({
       provider: 'local',
       sourceRef: 'file:///media/dl-9',
@@ -355,8 +363,7 @@ export async function run(): Promise<void> {
   // A non-file:// sourceRef fails typed and mints no handle.
   {
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio: fakeAudio() });
-    const events = collect(player);
+    const { player, events } = rig(stream);
     await player.prepare({
       provider: 'local',
       sourceRef: 'https://x/y.mp3',
@@ -380,10 +387,8 @@ export async function run(): Promise<void> {
   // serveUrl, no channel, no marks probe; seek/pause/release stay
   // element-local and the host never sees the lf-* handle.
   {
-    const audio = fakeAudio();
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, audio, events } = rig(stream);
     await player.prepare({
       provider: 'local',
       sourceRef: 'file:///music/rip.ogg',
@@ -432,10 +437,8 @@ export async function run(): Promise<void> {
   // inside the port — the seam's cancel is never invoked, and a stray
   // play on the reclaimed handle finds no file:// route left.
   {
-    const audio = fakeAudio();
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, audio, events } = rig(stream);
     const res = await player.prepare({
       provider: 'local',
       sourceRef: 'file:///music/x.mp3',
@@ -470,10 +473,8 @@ export async function run(): Promise<void> {
   // A newer local play supersedes the older one's generation — its
   // late completion never retakes the element.
   {
-    const audio = fakeAudio();
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, audio, events } = rig(stream);
     await player.prepare({
       provider: 'local',
       sourceRef: 'file:///a.mp3',
@@ -505,10 +506,8 @@ export async function run(): Promise<void> {
   // URI itself — the emitted transition carries the lf-* handle and
   // the host prepares nothing.
   {
-    const audio = fakeAudio();
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, audio, events } = rig(stream);
     await player.setQueueProjection(
       twoItemProjection({
         items: [
@@ -655,10 +654,8 @@ export async function run(): Promise<void> {
   // — never the dead-handle kinds that loop re-prepares over a file
   // that cannot play.
   {
-    const audio = fakeAudio();
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, audio, events } = rig(stream);
     await player.prepare({
       provider: 'local',
       sourceRef: 'file:///gone.mp3',
@@ -785,10 +782,8 @@ export async function run(): Promise<void> {
 
   // play → serveUrl, src set, buffering status then playing.
   {
-    const audio = fakeAudio();
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, audio, events } = rig(stream);
     const res = await player.play({
       handle: 'h-1',
       identity,
@@ -843,10 +838,8 @@ export async function run(): Promise<void> {
   // projection: the port prepares+attaches the successor itself and the
   // emitted transition carries its fresh identity + handle.
   {
-    const audio = fakeAudio();
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, audio, events } = rig(stream);
     const projection = twoItemProjection();
     assert((await player.setQueueProjection(projection)).ok);
     await player.play({ handle: 'h-1', identity });
@@ -902,9 +895,8 @@ export async function run(): Promise<void> {
   // identity, so transport calls with the new rev pass and the old rev
   // reads stale. A projection naming another occurrence must not re-key.
   {
-    const audio = fakeAudio();
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio });
+    const { player, audio } = rig(stream);
     collect(player);
     const live = { attemptId: 'attempt-1', queueRev: 4 };
     await player.setQueueProjection(twoItemProjection());
@@ -963,10 +955,8 @@ export async function run(): Promise<void> {
   // Tail of the queue: ended with no successor emits the null-target
   // transition the session reads as stopped.
   {
-    const audio = fakeAudio();
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, audio, events } = rig(stream);
     await player.setQueueProjection(
       twoItemProjection({
         order: [0],
@@ -1008,8 +998,7 @@ export async function run(): Promise<void> {
           message: 'upstream 502',
         }),
     });
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, events } = rig(stream, audio);
     await player.setQueueProjection(twoItemProjection());
     await player.play({ handle: 'h-1', identity });
     audio.fire('ended');
@@ -1031,9 +1020,8 @@ export async function run(): Promise<void> {
 
   // release drops the live element when the current handle dies.
   {
-    const audio = fakeAudio();
     const stream = fakeStream();
-    const player = createWebPlayerPort({ stream, audio });
+    const { player, audio } = rig(stream);
     collect(player);
     await player.play({ handle: 'h-1', identity });
     assert((await player.release({ handle: 'h-1', identity })).ok);
@@ -1057,8 +1045,7 @@ export async function run(): Promise<void> {
           resolvePrepare = resolve;
         }),
     });
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, events } = rig(stream, audio);
     const res = await player.prepare({
       provider: 'deezer',
       sourceRef: 't1',
@@ -1249,8 +1236,7 @@ export async function run(): Promise<void> {
         return Promise.resolve({ url: `http://127.0.0.1:9/s/${handle}` });
       },
     });
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, events } = rig(stream, audio);
     await player.setQueueProjection(twoItemProjection());
     const pendingA = player.play({ handle: 'h-a', identity });
     // Queue mutation bumps the revision — the same trigger that
@@ -1308,8 +1294,7 @@ export async function run(): Promise<void> {
         });
       },
     });
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, events } = rig(stream, audio);
     await player.setQueueProjection(twoItemProjection());
     await player.play({ handle: 'h-1', identity });
     audio.fire('ended');
@@ -1357,8 +1342,7 @@ export async function run(): Promise<void> {
             })
           : Promise.resolve({ url: 'http://127.0.0.1:9/s/h-2' }),
     });
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, events } = rig(stream, audio);
     await player.setQueueProjection(twoItemProjection());
     const playA = player.play({ handle: 'h-1', identity });
     audio.fire('ended');
@@ -1412,8 +1396,7 @@ export async function run(): Promise<void> {
             })
           : Promise.resolve({ url: 'http://127.0.0.1:9/s/h-2' }),
     });
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, events } = rig(stream, audio);
     await player.setQueueProjection(twoItemProjection());
     const playA = player.play({ handle: 'h-1', identity });
     audio.fire('ended');
@@ -1457,8 +1440,7 @@ export async function run(): Promise<void> {
           ? Promise.reject({ kind: 'expired', message: 'gone' })
           : Promise.resolve({ url: 'http://127.0.0.1:9/s/tok' }),
     });
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, events } = rig(stream, audio);
     await player.setQueueProjection(twoItemProjection());
     await player.play({ handle: 'h-1', identity });
     audio.fire('ended');
@@ -1499,8 +1481,7 @@ export async function run(): Promise<void> {
         });
       },
     });
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, events } = rig(stream, audio);
     await player.setQueueProjection(twoItemProjection());
     await player.play({ handle: 'h-1', identity });
     audio.fire('ended');
@@ -1584,8 +1565,7 @@ export async function run(): Promise<void> {
           stream: { handle: 'h-2', mime: 'audio/mp4' },
         }),
     });
-    const player = createWebPlayerPort({ stream, audio });
-    const events = collect(player);
+    const { player, events } = rig(stream, audio);
     await player.setQueueProjection(twoItemProjection());
     await player.play({ handle: 'h-1', identity });
     audio.play = () => Promise.reject(new Error('autoplay blocked'));

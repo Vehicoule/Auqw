@@ -41,10 +41,7 @@ export function createSqliteDriver(storage: AuqwStorage): SqliteDriver {
           cancelSent = true;
           // Fire-and-forget beside the CANCELLED throw; ordering is
           // preserved because the invoke dispatches synchronously.
-          void storage.cancel(txId).then(
-            () => undefined,
-            () => undefined,
-          );
+          void storage.cancel(txId).catch(() => undefined);
         }
       };
       const check = (checkSignal: CancellationSignal | undefined): void => {

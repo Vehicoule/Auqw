@@ -42,6 +42,21 @@ function u32be(buf: Uint8Array, off: number): number {
   ) >>> 0;
 }
 
+/** Leading-set-bit vint width — null when no set bit lands within
+ * `max`; `mask` is the width bit itself (the value keeps the rest). */
+function vintWidth(
+  first: number,
+  max: number,
+): { length: number; mask: number } | null {
+  let length = 1;
+  let mask = 0x80;
+  while (length <= max && (first & mask) === 0) {
+    length += 1;
+    mask >>= 1;
+  }
+  return length > max ? null : { length, mask };
+}
+
 /** EBML variable-width integer: leading-set-bit position = byte count. */
 function readVint(
   buf: Uint8Array,
@@ -50,27 +65,17 @@ function readVint(
   if (off >= buf.length) {
     return null;
   }
-  const first = buf[off] ?? 0;
-  let length = 1;
-  let mask = 0x80;
-  while (length <= 8 && (first & mask) === 0) {
-    length += 1;
-    mask >>= 1;
-  }
-  if (length > 8 || off + length > buf.length) {
+  const width = vintWidth(buf[off] ?? 0, 8);
+  if (width === null || off + width.length > buf.length) {
     return null;
   }
-  let value = first & (mask - 1);
-  for (let i = 1; i < length; i++) {
+  let value = (buf[off] ?? 0) & (width.mask - 1);
+  for (let i = 1; i < width.length; i++) {
     value = value * 256 + (buf[off + i] ?? 0);
   }
   // All data bits 1 = "unknown size" — webm live-muxes use it.
-  const allOnes = length === 1 ? 0x7f : Number.POSITIVE_INFINITY;
-  const unknown =
-    length === 1
-      ? value === allOnes
-      : value === Math.pow(2, 7 * length) - 1;
-  return { value, length, unknown };
+  const unknown = value === Math.pow(2, 7 * width.length) - 1;
+  return { value, length: width.length, unknown };
 }
 
 /** Element id is a vint read without masking the leading bit. */
@@ -81,21 +86,15 @@ function readElementId(
   if (off >= buf.length) {
     return null;
   }
-  const first = buf[off] ?? 0;
-  let length = 1;
-  let mask = 0x80;
-  while (length <= 4 && (first & mask) === 0) {
-    length += 1;
-    mask >>= 1;
-  }
-  if (length > 4 || off + length > buf.length) {
+  const width = vintWidth(buf[off] ?? 0, 4);
+  if (width === null || off + width.length > buf.length) {
     return null;
   }
   let id = 0;
-  for (let i = 0; i < length; i++) {
+  for (let i = 0; i < width.length; i++) {
     id = id * 256 + (buf[off + i] ?? 0);
   }
-  return { id, length };
+  return { id, length: width.length };
 }
 
 export function sniff(buf: Uint8Array): SniffResult {
@@ -334,15 +333,7 @@ function webmWalk(buf: Uint8Array): WebmWalk | null {
       // An open-ended element runs to its parent's end — a Cluster's
       // terminator is the next sibling Cluster. Rescan forward for the
       // next header-shaped cluster signature.
-      let scan = dataStart;
-      let found = -1;
-      while (scan + 4 <= buf.length) {
-        if (isClusterAt(buf, scan)) {
-          found = scan;
-          break;
-        }
-        scan += 1;
-      }
+      const found = findClusterSig(buf, dataStart);
       if (found === -1) {
         break;
       }
@@ -580,12 +571,7 @@ export function resyncScan(
   container: 'webm' | 'mp4',
 ): number {
   if (container === 'webm') {
-    for (let i = 0; i + 4 <= buf.length; i++) {
-      if (isClusterAt(buf, i)) {
-        return i;
-      }
-    }
-    return -1;
+    return findClusterSig(buf, 0);
   }
   for (let i = 0; i + 8 <= buf.length; i++) {
     const type = asciiType(buf, i + 4);
@@ -607,25 +593,15 @@ export function resyncScan(
  */
 export function carve(buf: Uint8Array): CarveResult {
   const sn = sniff(buf);
-  if (sn.kind === 'need-more') {
-    return { kind: 'need-more' };
-  }
-  if (sn.kind === 'unsupported') {
-    return { kind: 'unsupported' };
+  if (sn.kind !== 'ok') {
+    return sn;
   }
   if (sn.container === 'webm') {
     const walk = webmWalk(buf);
     if (walk === null) {
       return { kind: 'need-more' };
     }
-    return {
-      kind: 'ok',
-      container: 'webm',
-      boundaries: walk.boundaries,
-      cues: walk.cues,
-      segDataStart: walk.segDataStart,
-      scaleMs: walk.scaleMs,
-    };
+    return { kind: 'ok', container: 'webm', ...walk };
   }
   const walk = mp4Walk(buf);
   if (walk.kind === 'non-fragmented') {
