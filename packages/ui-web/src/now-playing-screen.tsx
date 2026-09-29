@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Artwork,
   Icon,
@@ -29,6 +29,7 @@ import {
   queueReorderButton,
   radioRowView,
   stageMetaView,
+  STAGE_MODE_ORDER,
   stageModeTabs,
   useStageMode,
   useTransportView,
@@ -168,9 +169,6 @@ export function TransportControls({
   );
 }
 
-/** Desktop tab order: player · lyrics · queue. */
-const STAGE_MODE_ORDER: readonly StageMode[] = ['player', 'lyrics', 'queue'];
-
 export function ModeSegment({
   mode,
   onSelect,
@@ -179,8 +177,15 @@ export function ModeSegment({
   readonly onSelect?: ((mode: StageMode) => void) | undefined;
 }) {
   const tabs = stageModeTabs(STAGE_MODE_ORDER, mode, onSelect);
+  // The floating segment is always dark-scoped — it overlays artwork
+  // or a flat stage in every mode, and the pane scheme's fg08 pill
+  // would wash out grey-on-grey on light stages.
   return (
-    <div className="uw-segment" role="tablist" aria-label={t('stage.modeTabsA11y')}>
+    <div
+      className="uw-segment uw-segment--float t-dark"
+      role="tablist"
+      aria-label={t('stage.modeTabsA11y')}
+    >
       {tabs.map((tab) => (
         <Pressable
           key={tab.key}
@@ -299,7 +304,10 @@ export function NowPlayingScreen({
   const downloadBtn =
     download === null ? null : downloadButtonView(download, onDownload);
   // Player mode is artwork-led — full-bleed art under the bottom
-  // cluster; missing art (and lyrics/queue) keeps the flat stage.
+  // cluster; missing art keeps the flat stage. The backdrop stays
+  // mounted across mode switches (the image resolves once per
+  // artworkUrl — no remount flicker); lyrics/queue modes hide it under
+  // their flat surface — see `.uw-stage__backdrop` in styles.css.
   // A failed request drops to that same flat treatment — the
   // missing-art glyph stands in instead of two broken imgs — but
   // the failure is remembered only for the occurrence that saw it:
@@ -309,17 +317,31 @@ export function NowPlayingScreen({
     readonly occurrence: string | null;
     readonly url: string;
   } | null>(null);
-  const artworkUrl = activeMode === 'player' ? player.artworkUrl : null;
   const liveArtwork =
-    artworkUrl !== null &&
+    player.artworkUrl !== null &&
     (failedArtwork === null ||
-      failedArtwork.url !== artworkUrl ||
+      failedArtwork.url !== player.artworkUrl ||
       failedArtwork.occurrence !== player.occurrenceId)
-      ? artworkUrl
+      ? player.artworkUrl
       : null;
+  const immersive = activeMode === 'player' && liveArtwork !== null;
+  // Lyrics auto-scroll — the synced active line stays in view; the
+  // scroll lands only on an activeIndex change so a manual scroll
+  // between line flips is never yanked back.
+  const lyricsRef = useRef<HTMLDivElement>(null);
+  const lyricActiveIndex =
+    lyricsPane.kind === 'lines' ? lyricsPane.activeIndex : null;
+  useEffect(() => {
+    if (activeMode !== 'lyrics' || lyricActiveIndex === null) {
+      return;
+    }
+    lyricsRef.current
+      ?.querySelector('.uw-lyrics__line--active')
+      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [activeMode, lyricActiveIndex]);
   return (
     <div
-      className={`uw-stage${liveArtwork !== null ? ' uw-stage--immersive t-dark' : ''}`}
+      className={`uw-stage${immersive ? ' uw-stage--immersive t-dark' : ''}`}
       data-mode={activeMode}
     >
       {liveArtwork !== null && (
@@ -507,7 +529,11 @@ export function NowPlayingScreen({
               onRetry={lyricsPane.onRetry}
             />
           ) : (
-            <div className="uw-lyrics" data-state={lyricsPane.state}>
+            <div
+              className="uw-lyrics"
+              data-state={lyricsPane.state}
+              ref={lyricsRef}
+            >
               {lyricsPane.lines.map((line, i) => (
                 <Text
                   key={i}

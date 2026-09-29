@@ -68,6 +68,7 @@ import {
   queueReorderButton,
   radioRowView,
   stageMetaView,
+  STAGE_MODE_ORDER,
   stageModeTabs,
   useStageMode,
   useTransportView,
@@ -76,9 +77,15 @@ import {
 
 // Settle dynamics — the CMP deck's spring (StiffnessLow + no bounce): the
 // release keeps the drag's velocity and lands without overshoot.
-// damping 28 ≈ critically damped at stiffness 200 (ratio ~0.99): the settle
-// carries the release velocity without overshooting past the anchor.
-const STAGE_SETTLE_SPRING = { stiffness: 200, damping: 28 } as const;
+// damping 30 sits just past critical at stiffness 200 (critical ≈ 28.3
+// for mass 1) and overshootClamping pins the value at the anchor, so a
+// velocity-carrying release can never dip past the target and read as a
+// settle bounce.
+const STAGE_SETTLE_SPRING = {
+  stiffness: 200,
+  damping: 30,
+  overshootClamping: true,
+} as const;
 
 // Corner morph: the pill's card radius at rest opening to the shared
 // sheet radius mid-rise, square only at the completed expanded anchor.
@@ -278,11 +285,30 @@ export function TransportControls({
   );
 }
 
-/** Sheet tab order: player · lyrics · queue — same order as the
- *  desktop segment (player leads on both platforms). */
-const STAGE_MODE_ORDER: readonly StageMode[] = ['player', 'lyrics', 'queue'];
-
 export function ModeSegment({
+  mode,
+  onSelect,
+}: {
+  readonly mode: StageMode;
+  readonly onSelect?: ((mode: StageMode) => void) | undefined;
+}) {
+  const outer = useTheme();
+  // The floating segment is dark in every scheme — it overlays artwork
+  // or a flat stage, where the outer scheme's fg08 pill would wash out
+  // grey-on-grey. The nested provider re-scopes colors so labels and
+  // icons keep their role names.
+  return (
+    <ThemeProvider
+      theme="dark"
+      textScale={outer.textScale}
+      reducedMotion={outer.reducedMotion}
+    >
+      <ModeSegmentPill mode={mode} onSelect={onSelect} />
+    </ThemeProvider>
+  );
+}
+
+function ModeSegmentPill({
   mode,
   onSelect,
 }: {
@@ -296,19 +322,28 @@ export function ModeSegment({
       style={{
         flexDirection: 'row',
         gap: 2,
-        backgroundColor: theme.colors.fg08,
+        backgroundColor: theme.colors.raised,
         padding: 3,
         borderRadius: theme.radius.pill,
+        borderWidth: theme.strokes.hairline,
+        borderColor: theme.colors.hairline,
+        shadowColor: theme.colors.scrim,
+        shadowOpacity: 1,
+        shadowRadius: 14,
+        shadowOffset: { width: 0, height: 6 },
+        elevation: 8,
       }}
     >
       {tabs.map((tab) => {
         // M3E segmented-button: the selected segment reads as a tonal
-        // (secondary-container) pill; iOS keeps the raised slab.
+        // (secondary-container) pill; iOS keeps the glass slab.
         // The pill silhouette matches the rounded transport controls —
-        // only the fill differs per platform (tonal on Android, raised
+        // only the fill differs per platform (tonal on Android, glass
         // on iOS).
         const m3e = Platform.OS === 'android';
-        const activeBg = m3e ? theme.colors.accentSoft : theme.colors.raised;
+        const activeBg = m3e
+          ? theme.colors.accentSoft
+          : theme.colors.glassControl;
         const activeColor = m3e ? theme.colors.accent : theme.colors.textBright;
         return (
           <Pressable
@@ -571,7 +606,11 @@ export function StageSheet({
   const internalAnchor = useSharedValue(-1);
   const anchor = anchorProp ?? internalAnchor;
   const dragStart = useSharedValue(0);
-  const { activeMode, select: selectMode } = useStageMode(mode, onModeChange);
+  const { activeMode, select: selectMode } = useStageMode(
+    mode,
+    onModeChange,
+    expanded,
+  );
   const meta = stageMetaView(player);
   const lyricsHeader = lyricsHeaderView(player, lyrics);
   const lyricsPane = lyricsPaneView(lyrics, onRetryLyrics);
@@ -634,9 +673,13 @@ export function StageSheet({
     onExpandChangeRef.current?.(false);
   }, [progress, theme.reducedMotion]);
 
-  // The gesture object is stable across renders — a fresh Pan() per
-  // render would cancel an in-flight sheet drag on the next tick.
-  const pan = useMemo(
+  // The gesture factory is stable across renders — a fresh Pan() per
+  // render would cancel an in-flight sheet drag on the next tick. Each
+  // detector needs its own instance (a gesture object attaches to a
+  // single detector), so the grab strip and each pane's non-scrollable
+  // chrome get identical recognizers — the dismiss drag works from any
+  // mode while the scrollable lists keep their own scroll gesture.
+  const makeSheetPan = useCallback(
     () =>
       Gesture.Pan()
         .activeOffsetY(8)
@@ -704,6 +747,8 @@ export function StageSheet({
       expanded,
     ],
   );
+  const pan = useMemo(makeSheetPan, [makeSheetPan]);
+  const chromePan = useMemo(makeSheetPan, [makeSheetPan]);
 
   const restCorner = theme.radius.float;
   const animatedStyle = useAnimatedStyle(() => {
@@ -739,12 +784,12 @@ export function StageSheet({
   }));
 
   // The floating segment clears the home-indicator zone; its footprint
-  // (lift + touch block + 3px padding each side + a md gap) is the
+  // (lift + touch block + the pill's padding/border + a lg gap) is the
   // reserve pinned content keeps clear of — scrollable modes put the
   // same reserve inside their content so rows/lines glide beneath it.
   const segmentLift = bottomInset + theme.spacing.sm;
   const segmentReserve =
-    segmentLift + theme.sizes.touch + 6 + theme.spacing.md;
+    segmentLift + theme.sizes.touch + 8 + theme.spacing.lg;
 
   const immersive = activeMode === 'player' && player.artworkUrl !== null;
   // StageSheet's own inline colors must follow the sheet's surface —
@@ -798,6 +843,83 @@ export function StageSheet({
     } as const;
   });
   const dismissOn = risenOn || expanded;
+
+  // Tap-to-seek on the waveform: the scrub pan only ever activates on
+  // movement, so a plain tap resolves x→ms through the same commit
+  // path. Callbacks live behind a ref — a deps-listed prop would
+  // rebuild the gesture on every position-tick re-render.
+  const seekTapMeta = useRef({
+    width: 0,
+    durationMs: player.durationMs,
+    onSeek,
+  });
+  useEffect(() => {
+    seekTapMeta.current.onSeek = onSeek;
+    seekTapMeta.current.durationMs = player.durationMs;
+  });
+  const commitSeekTap = useCallback((x: number) => {
+    const { width, durationMs, onSeek: seek } = seekTapMeta.current;
+    if (
+      seek === undefined ||
+      durationMs === null ||
+      durationMs <= 0 ||
+      width <= 0
+    ) {
+      return;
+    }
+    seek(Math.round(Math.min(1, Math.max(0, x / width)) * durationMs));
+  }, []);
+  const seekTap = useMemo(
+    () =>
+      Gesture.Tap().onEnd((e, success) => {
+        if (success) {
+          scheduleOnRN(commitSeekTap, e.x);
+        }
+      }),
+    [commitSeekTap],
+  );
+
+  // Lyrics auto-scroll — the synced active line stays in view; the
+  // scroll lands only on an activeIndex change so a manual scroll
+  // between line flips is never yanked back.
+  const lyricsScrollRef = useRef<ScrollView>(null);
+  const lyricsScrollH = useRef(0);
+  const lyricLayouts = useRef<({ y: number; height: number } | undefined)[]>(
+    [],
+  );
+  const lyricActiveIndex =
+    lyricsPane.kind === 'lines' ? lyricsPane.activeIndex : null;
+  useEffect(() => {
+    if (activeMode !== 'lyrics' || lyricActiveIndex === null) {
+      return;
+    }
+    const line = lyricLayouts.current[lyricActiveIndex];
+    if (line === undefined) {
+      return;
+    }
+    lyricsScrollRef.current?.scrollTo({
+      y: Math.max(0, line.y + line.height / 2 - lyricsScrollH.current / 2),
+      animated: !theme.reducedMotion,
+    });
+  }, [activeMode, lyricActiveIndex, theme.reducedMotion]);
+
+  // The lyrics-mode header rides the pane chrome — the same element
+  // sits above the lines list or the state block.
+  const lyricsHeaderEl = (
+    <View style={{ marginTop: theme.spacing.md }}>
+      <Text variant="title" color="bright" numberOfLines={1}>
+        {lyricsHeader.title}
+      </Text>
+      <Text
+        variant="metadata"
+        color="secondary"
+        numberOfLines={1}
+        style={{ marginTop: 3 }}
+      >
+        {lyricsHeader.subtitle}
+      </Text>
+    </View>
+  );
 
   const body = (
     <>
@@ -990,16 +1112,24 @@ export function StageSheet({
               )}
             </View>
           </ScrollView>
-          <WaveformSeek
-            positionMs={player.positionMs}
-            durationMs={player.durationMs}
-            onSeek={onSeek}
-            trackKey={meta.trackKey}
-            seed={meta.waveformSeed}
-            peaks={peaks}
-            loading={meta.waveformLoading}
-            visible={expanded}
-          />
+          <GestureDetector gesture={seekTap}>
+            <View
+              onLayout={(e) => {
+                seekTapMeta.current.width = e.nativeEvent.layout.width;
+              }}
+            >
+              <WaveformSeek
+                positionMs={player.positionMs}
+                durationMs={player.durationMs}
+                onSeek={onSeek}
+                trackKey={meta.trackKey}
+                seed={meta.waveformSeed}
+                peaks={peaks}
+                loading={meta.waveformLoading}
+                visible={expanded}
+              />
+            </View>
+          </GestureDetector>
           <View style={{ marginTop: theme.spacing.md }}>
             <TransportControls
               variant={platform === 'ios' ? 'ios' : 'm3e'}
@@ -1021,97 +1151,119 @@ export function StageSheet({
         </>
       )}
       {activeMode === 'lyrics' && (
-        <>
-          <View style={{ marginTop: theme.spacing.md }}>
-            <Text variant="title" color="bright" numberOfLines={1}>
-              {lyricsHeader.title}
-            </Text>
-            <Text
-              variant="metadata"
-              color="secondary"
-              numberOfLines={1}
-              style={{ marginTop: 3 }}
-            >
-              {lyricsHeader.subtitle}
-            </Text>
-          </View>
-          {/*
-           * Honest lyrics: only `state === 'synced'` highlights the
-           * active line — plain text never gets synced treatment,
-           * instrumental/unavailable/error are explicit states, and
-           * loading is bounded by the session's own op deadline.
-           */}
-          {lyricsPane.kind === 'empty' ? (
-            <EmptyState
-              title={lyricsPane.title}
-              hint={lyricsPane.hint}
-              icon={lyricsPane.icon}
-            />
-          ) : lyricsPane.kind === 'loading' ? (
-            <LoadingState title={lyricsPane.title} />
-          ) : lyricsPane.kind === 'error' ? (
-            <ErrorState
-              title={lyricsPane.title}
-              hint={lyricsPane.hint}
-              onRetry={lyricsPane.onRetry}
-            />
-          ) : (
+        lyricsPane.kind === 'lines' ? (
+          <>
+            {/* The header chrome carries the sheet's dismiss drag —
+                only the lines list keeps a scroll gesture. */}
+            <GestureDetector gesture={chromePan}>
+              {lyricsHeaderEl}
+            </GestureDetector>
             <ScrollView
+              ref={lyricsScrollRef}
+              onLayout={(e) => {
+                lyricsScrollH.current = e.nativeEvent.layout.height;
+              }}
               style={{ flex: 1, marginTop: theme.spacing.sm }}
               // Lines glide beneath the floating segment; the pad lets
               // the last line scroll fully clear of it.
               contentContainerStyle={{ paddingBottom: segmentReserve }}
             >
               {lyricsPane.lines.map((line, i) => (
-                <Text
+                <View
                   key={i}
-                  variant="body"
-                  color={line.color}
-                  style={[
-                    {
-                      paddingVertical: 9,
-                      paddingHorizontal: theme.spacing.sm,
-                      borderRadius: theme.radius.control,
-                    },
-                    line.active && {
-                      fontFamily: theme.fontFamilies.bold,
-                    },
-                  ]}
+                  onLayout={(e) => {
+                    lyricLayouts.current[i] = {
+                      y: e.nativeEvent.layout.y,
+                      height: e.nativeEvent.layout.height,
+                    };
+                  }}
                 >
-                  {line.text}
-                </Text>
+                  <Text
+                    variant="body"
+                    color={line.color}
+                    style={[
+                      {
+                        paddingVertical: 9,
+                        paddingHorizontal: theme.spacing.sm,
+                        borderRadius: theme.radius.control,
+                      },
+                      line.active && {
+                        fontFamily: theme.fontFamilies.bold,
+                      },
+                    ]}
+                  >
+                    {line.text}
+                  </Text>
+                </View>
               ))}
             </ScrollView>
-          )}
-        </>
+          </>
+        ) : (
+          // No list to scroll — the whole pane is drag chrome.
+          <GestureDetector gesture={chromePan}>
+            <View style={{ flex: 1 }}>
+              {lyricsHeaderEl}
+              {/*
+               * Honest lyrics: only `state === 'synced'` highlights the
+               * active line — plain text never gets synced treatment,
+               * instrumental/unavailable/error are explicit states, and
+               * loading is bounded by the session's own op deadline.
+               */}
+              {lyricsPane.kind === 'empty' ? (
+                <EmptyState
+                  title={lyricsPane.title}
+                  hint={lyricsPane.hint}
+                  icon={lyricsPane.icon}
+                />
+              ) : lyricsPane.kind === 'loading' ? (
+                <LoadingState title={lyricsPane.title} />
+              ) : (
+                <ErrorState
+                  title={lyricsPane.title}
+                  hint={lyricsPane.hint}
+                  onRetry={lyricsPane.onRetry}
+                />
+              )}
+            </View>
+          </GestureDetector>
+        )
       )}
       {activeMode === 'queue' && (
         <View style={{ flex: 1, marginTop: theme.spacing.md }}>
           {queue === undefined ? (
-            <EmptyState title={t('queue.empty')} icon="queue" />
+            // No list to scroll — the pane is drag chrome.
+            <GestureDetector gesture={chromePan}>
+              <View style={{ flex: 1 }}>
+                <EmptyState title={t('queue.empty')} icon="queue" />
+              </View>
+            </GestureDetector>
           ) : (
             <>
               {queueReorder !== null && (
-                <View
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    justifyContent: 'flex-end',
-                    marginBottom: theme.spacing.xs,
-                  }}
-                >
-                  <IconButton
-                    icon={queueReorder.icon}
-                    size={32}
-                    iconSize={14}
-                    color={
-                      queueReorder.active ? colors.accent : colors.textSecondary
-                    }
-                    accessibilityLabel={queueReorder.a11yLabel}
-                    active={queueReorder.active}
-                    onPress={queueReorder.onPress}
-                  />
-                </View>
+                <GestureDetector gesture={chromePan}>
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'flex-end',
+                      marginBottom: theme.spacing.xs,
+                    }}
+                  >
+                    <IconButton
+                      icon={queueReorder.icon}
+                      size={32}
+                      iconSize={14}
+                      color={
+                        queueReorder.active
+                          ? colors.accent
+                          : colors.textSecondary
+                      }
+                      accessibilityLabel={queueReorder.a11yLabel}
+                      active={queueReorder.active}
+                      onPress={queueReorder.onPress}
+                    />
+                  </View>
+                </GestureDetector>
               )}
               <QueueList
                 queue={queue}
@@ -1206,8 +1358,19 @@ export function StageSheet({
             artwork and controls fade in through the pill's fade window
             and are fully present at the input gate. */}
         <Animated.View style={[StyleSheet.absoluteFill, contentStyle]}>
-          {immersive && risenOn && (
-            <PlayerBackdrop artworkUrl={player.artworkUrl} />
+          {/* Keep the backdrop mounted across mode switches — remounting
+              would re-run the artwork resolver and flicker the surface.
+              Non-player modes just hide it under their flat stage. */}
+          {risenOn && player.artworkUrl !== null && (
+            <View
+              style={[
+                StyleSheet.absoluteFill,
+                { display: immersive ? 'flex' : 'none' },
+              ]}
+              pointerEvents="none"
+            >
+              <PlayerBackdrop artworkUrl={player.artworkUrl} />
+            </View>
           )}
           {immersive ? (
             <ThemeProvider

@@ -1765,12 +1765,12 @@
 }
 
 /* The floating segment's footprint — its lg bottom inset + the pill
-   block (size-touch + 6 padding) + a md gap. Pinned content (the
+   block (size-touch + padding/border) + a lg gap. Pinned content (the
    player's bottom cluster) reserves it as padding; scrollable modes
    (lyrics/queue) put it inside their scroll area instead, so rows and
    lines glide beneath the segment. */
 .uw-stage {
-  --uw-segment-reserve: calc(var(--size-touch) + 6px + var(--spacing-lg) + var(--spacing-md));
+  --uw-segment-reserve: calc(var(--size-touch) + 8px + var(--spacing-lg) + var(--spacing-lg));
   position: relative;
   display: flex;
   flex-direction: column;
@@ -1834,6 +1834,13 @@
   position: absolute;
   inset: 0;
   overflow: hidden;
+}
+
+/* Non-player modes keep the flat stage — the backdrop stays mounted
+   across mode switches so the artwork resolves once per url, but it
+   only paints in immersive mode. */
+.uw-stage:not(.uw-stage--immersive) > .uw-stage__backdrop {
+  display: none;
 }
 
 .uw-stage__backdrop-art,
@@ -1981,6 +1988,18 @@
   background: var(--fg08);
   padding: 3px;
   border-radius: var(--radius-pill);
+}
+
+/* The stage's floating mode switch — dark in every scheme (the
+   component carries t-dark so roles resolve dark): a near-solid,
+   frosted pill that stays readable over artwork and flat panes alike.
+   The pane scheme's plain fg08 fill would go grey-on-grey. */
+.uw-segment--float {
+  background: color-mix(in srgb, var(--deep) 88%, transparent);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  border: var(--stroke-hairline) solid var(--hairline);
+  box-shadow: 0 8px 24px var(--scrim);
 }
 
 .uw-segment__item {

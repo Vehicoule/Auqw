@@ -3194,7 +3194,12 @@ function Main({
               setSearchFocusTick((n) => n + 1);
             }}
             stageOpen={stageOpen}
-            onStageOpenChange={setStageOpen}
+            onStageOpenChange={(open) => {
+              // Every open lands on the player pane — a hidden stage
+              // that reopens must not revive the last mode.
+              if (open) setStageMode('player');
+              setStageOpen(open);
+            }}
             stage={
               player !== null ? (
                 <NowPlayingScreen

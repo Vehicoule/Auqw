@@ -1341,7 +1341,14 @@ export type StageScreenHandlers = StageQueueHandlers & {
   readonly onModeChange?: ((mode: StageMode) => void) | undefined;
 };
 
-/** Stage tab metadata — each platform orders them differently. */
+/** Stage tab order — shared by both platforms. */
+export const STAGE_MODE_ORDER: readonly StageMode[] = [
+  'queue',
+  'player',
+  'lyrics',
+];
+
+/** Stage tab metadata — labels and icons per mode. */
 export const STAGE_MODE_META: Readonly<
   Record<StageMode, { readonly label: MessageId; readonly icon: SharedIconName }>
 > = {
@@ -1358,7 +1365,7 @@ export type StageModeTab = {
   readonly onPress: (() => void) | undefined;
 };
 
-/** Resolved tabs in the caller's order — web: player first. */
+/** Resolved tabs in the caller's order — pass `STAGE_MODE_ORDER`. */
 export function stageModeTabs(
   order: readonly StageMode[],
   mode: StageMode,
@@ -1378,16 +1385,28 @@ export function stageModeTabs(
 
 /**
  * Uncontrolled-mode fallback: a host may pin `mode`, else the sheet
- * tracks its own selection and reports through `onModeChange`.
+ * tracks its own selection and reports through `onModeChange`. Every
+ * open lands on the player pane — a false→true flip of `open` resets
+ * the internal selection during render so the rising sheet never
+ * paints the stale mode. Hosts that pin `mode` own the reset
+ * themselves so an explicit open target (deep links) isn't stomped.
  */
 export function useStageMode(
   mode: StageMode | undefined,
   onModeChange: ((mode: StageMode) => void) | undefined,
+  open?: boolean | undefined,
 ): {
   readonly activeMode: StageMode;
   readonly select: (mode: StageMode) => void;
 } {
   const [internalMode, setInternalMode] = useState<StageMode>('player');
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open === true) {
+      setInternalMode('player');
+    }
+  }
   return {
     activeMode: mode ?? internalMode,
     select: (m) => {
@@ -1690,6 +1709,8 @@ export type LyricsPaneView =
   | {
       readonly kind: 'lines';
       readonly state: LyricsModel['state'];
+      /** The synced line to keep in view — null for plain text. */
+      readonly activeIndex: number | null;
       readonly lines: readonly {
         readonly text: string;
         readonly active: boolean;
@@ -1734,6 +1755,7 @@ export function lyricsPaneView(
   return {
     kind: 'lines',
     state: lyrics.state,
+    activeIndex: lyrics.activeIndex,
     lines: lyrics.lines.map((line, i) => ({
       text: line,
       active: i === lyrics.activeIndex,
