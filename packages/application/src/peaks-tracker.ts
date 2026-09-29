@@ -114,7 +114,7 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
         // order eviction walks.
         const value = cache.get(id);
         cache.delete(id);
-        cache.set(id, value === undefined ? null : value);
+        cache.set(id, value ?? null);
         return;
       }
     }

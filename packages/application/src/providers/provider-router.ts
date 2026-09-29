@@ -163,10 +163,9 @@ export class ProviderRouter {
     context: OperationContext,
   ): Promise<Result<EntityPage>> {
     const resolved = this.providerForRef(ref, 'catalog.entity');
-    if (!resolved.ok) {
-      return Promise.resolve(err(resolved.error));
-    }
-    return resolved.value.getEntity(ref, context);
+    return resolved.ok
+      ? resolved.value.getEntity(ref, context)
+      : Promise.resolve(err(resolved.error));
   }
 
   /** `catalog.artwork` dispatches to the ref's own provider. */
@@ -176,10 +175,9 @@ export class ProviderRouter {
     context: OperationContext,
   ): Promise<Result<readonly ArtworkRef[]>> {
     const resolved = this.providerForRef(ref, 'catalog.artwork');
-    if (!resolved.ok) {
-      return Promise.resolve(err(resolved.error));
-    }
-    return resolved.value.artwork(ref, input, context);
+    return resolved.ok
+      ? resolved.value.artwork(ref, input, context)
+      : Promise.resolve(err(resolved.error));
   }
 
   /**
@@ -214,10 +212,9 @@ export class ProviderRouter {
     context: OperationContext,
   ): Promise<Result<LyricsResult>> {
     const resolved = this.lyricsProviderFor(selection, input.prefer);
-    if (!resolved.ok) {
-      return Promise.resolve(err(resolved.error));
-    }
-    return resolved.value.getLyrics(input, context);
+    return resolved.ok
+      ? resolved.value.getLyrics(input, context)
+      : Promise.resolve(err(resolved.error));
   }
 
   /**
@@ -234,10 +231,9 @@ export class ProviderRouter {
       'sourceRef' in input
         ? this.providerForRef(input.sourceRef, 'radio.seed')
         : this.providerFor('radio.seed', selection);
-    if (!resolved.ok) {
-      return Promise.resolve(err(resolved.error));
-    }
-    return resolved.value.radioSeed(input, context);
+    return resolved.ok
+      ? resolved.value.radioSeed(input, context)
+      : Promise.resolve(err(resolved.error));
   }
 
   /**
@@ -251,9 +247,8 @@ export class ProviderRouter {
     context: OperationContext,
   ): Promise<Result<readonly string[]>> {
     const resolved = this.providerFor('catalog.suggest', selection);
-    if (!resolved.ok) {
-      return Promise.resolve(err(resolved.error));
-    }
-    return resolved.value.suggest(input, context);
+    return resolved.ok
+      ? resolved.value.suggest(input, context)
+      : Promise.resolve(err(resolved.error));
   }
 }
