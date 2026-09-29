@@ -318,6 +318,7 @@ export type PlaybackHost = {
   readonly persistQueue: (
     r: Ready,
     before: QueueSnapshot,
+    beforeMarks: ReadonlySet<string>,
   ) => Promise<Result<void>>;
   /** Port calls never throw by contract; throws map to internal. */
   readonly call: <T>(fn: () => Promise<Result<T>>) => Promise<Result<T>>;
@@ -629,6 +630,7 @@ export class PlaybackEngine {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     // The drain authorization belongs to the tail armed when the move
     // started — a reseed during the persist swaps in a fresh record
     // whose own flag already reflects its queue state.
@@ -739,7 +741,7 @@ export class PlaybackEngine {
       after.currentOccurrenceId === before.currentOccurrenceId
     ) {
       // Restart the same item: seek natively, keep the attempt.
-      const restarted = await this.#host.persistQueue(r, before);
+      const restarted = await this.#host.persistQueue(r, before, beforeMarks);
       if (!restarted.ok) {
         return restarted;
       }
@@ -774,7 +776,7 @@ export class PlaybackEngine {
       this.#host.publish();
       return ok(undefined);
     }
-    const moved = await this.#host.persistQueue(r, before);
+    const moved = await this.#host.persistQueue(r, before, beforeMarks);
     if (!moved.ok) {
       // A rolled-back move must not leave playback on a cursor the
       // store no longer holds — converge onto the durable tip (this
@@ -841,6 +843,7 @@ export class PlaybackEngine {
       return err(appError('unavailable', 'no active playback to pause'));
     }
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     try {
       r.queue.pause();
     } catch (thrown) {
@@ -848,7 +851,7 @@ export class PlaybackEngine {
     }
     // Commit the intent before touching transport: a failed commit
     // rolls the engine back and the native pause is never issued.
-    const persisted = await this.#host.persistQueue(r, before);
+    const persisted = await this.#host.persistQueue(r, before, beforeMarks);
     if (!persisted.ok) {
       return persisted;
     }
@@ -901,6 +904,7 @@ export class PlaybackEngine {
     }
     const r = ready.value;
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     if (before.currentOccurrenceId === null) {
       return err(appError('no-result', 'queue has no current occurrence'));
     }
@@ -909,7 +913,7 @@ export class PlaybackEngine {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
-    const persisted = await this.#host.persistQueue(r, before);
+    const persisted = await this.#host.persistQueue(r, before, beforeMarks);
     if (!persisted.ok) {
       return persisted;
     }
@@ -979,6 +983,7 @@ export class PlaybackEngine {
       );
     }
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     if (before.currentOccurrenceId === null) {
       return err(appError('unavailable', 'no active playback to seek'));
     }
@@ -987,7 +992,7 @@ export class PlaybackEngine {
     } catch (thrown) {
       return err(fromUnknown(thrown));
     }
-    const persisted = await this.#host.persistQueue(r, before);
+    const persisted = await this.#host.persistQueue(r, before, beforeMarks);
     if (!persisted.ok) {
       return persisted;
     }
@@ -1745,6 +1750,7 @@ export class PlaybackEngine {
       return;
     }
     const before = r.queue.snapshot();
+    const beforeMarks = r.queue.unplayableIds;
     if (before.currentOccurrenceId === attempt.occurrenceId) {
       try {
         r.queue.markUnplayable(error);
@@ -1760,7 +1766,7 @@ export class PlaybackEngine {
       error,
     };
     this.#host.publish();
-    await this.#host.persistQueue(r, before);
+    await this.#host.persistQueue(r, before, beforeMarks);
     this.#host.derived();
   }
 
@@ -1931,6 +1937,7 @@ export class PlaybackEngine {
       active.timer?.cancel();
       this.#active = null;
       const before = r.queue.snapshot();
+      const beforeMarks = r.queue.unplayableIds;
       const dealt = this.#host.dealtOrder(r);
       try {
         // repeat=one replays the cursor item; repeat=all wraps a tail
@@ -1974,7 +1981,7 @@ export class PlaybackEngine {
       } catch {
         return;
       }
-      const advanced = await this.#host.persistQueue(r, before);
+      const advanced = await this.#host.persistQueue(r, before, beforeMarks);
       this.#host.derived();
       const snap = r.queue.snapshot();
       // A failed advance rolls the queue back onto the ended item —
@@ -1994,6 +2001,7 @@ export class PlaybackEngine {
     // Remote pause/play reconciles queue intent with the service.
     if (event.state === 'paused' && r.queue.snapshot().mode === 'playing') {
       const before = r.queue.snapshot();
+      const beforeMarks = r.queue.unplayableIds;
       try {
         r.queue.pause();
       } catch {
@@ -2004,7 +2012,7 @@ export class PlaybackEngine {
         attemptId: active.identity.attemptId,
         queueRev: r.queue.snapshot().revision,
       };
-      const synced = await this.#host.persistQueue(r, before);
+      const synced = await this.#host.persistQueue(r, before, beforeMarks);
       if (!synced.ok && this.#active === active) {
         // Rolled back — the live engine is at `before`'s revision.
         active.identity = priorIdentity;
@@ -2015,6 +2023,7 @@ export class PlaybackEngine {
       r.queue.snapshot().mode === 'paused'
     ) {
       const before = r.queue.snapshot();
+      const beforeMarks = r.queue.unplayableIds;
       try {
         r.queue.play();
       } catch {
@@ -2025,7 +2034,7 @@ export class PlaybackEngine {
         attemptId: active.identity.attemptId,
         queueRev: r.queue.snapshot().revision,
       };
-      const synced = await this.#host.persistQueue(r, before);
+      const synced = await this.#host.persistQueue(r, before, beforeMarks);
       if (!synced.ok && this.#active === active) {
         active.identity = priorIdentity;
       }
@@ -2254,17 +2263,28 @@ export class PlaybackEngine {
       },
     );
     // The walk the cursor steps through: the dealt order under shuffle,
-    // the identity otherwise — `items` itself stays canonical.
+    // the identity otherwise — `items` itself stays canonical. Rows the
+    // engine marked failed are filtered out: player cursors walk this
+    // order on track end / remote next, so they must see the same skip
+    // the engine applies. The current row always stays — a cursor that
+    // can't locate it has no position to advance from.
     const dealt = this.#host.dealtOrder(r);
     const indexOfId = new Map(
       snap.occurrences.map((o, i) => [o.occurrenceId, i] as const),
     );
-    const order =
+    const order = (
       dealt === null
         ? snap.occurrences.map((_, i) => i)
         : dealt
-          .map((id) => indexOfId.get(id))
-          .filter((i): i is number => i !== undefined);
+            .map((id) => indexOfId.get(id))
+            .filter((i): i is number => i !== undefined)
+    ).filter((i) => {
+      const id = snap.occurrences[i]?.occurrenceId;
+      return (
+        id !== undefined &&
+        (!r.queue.isUnplayable(id) || id === snap.currentOccurrenceId)
+      );
+    });
     return {
       projectionId: this.#ids.next('projection'),
       queueRev: snap.revision,

@@ -42,12 +42,13 @@ export function QueueList({
   if (queue.items.length === 0) {
     return <EmptyState title={t('queue.empty')} icon="queue" />;
   }
-  // Display order (nowPlaying → upNext → history) is not the canonical
-  // order the engine indexes — move calls translate through
-  // `item.index` / the displaced neighbor's slot.
+  // Display order (nowPlaying → upNext → history) is the order the
+  // session's move contract indexes — under shuffle it is the dealt
+  // walk, so display slots, not canonical `item.index`, drive moves.
   const items = queue.sections.flatMap((section) => section.items);
   const canMove = onMoveItem !== undefined || onMoveItemTo !== undefined;
-  const move = (item: QueueItemModel, neighbor: QueueItemModel | undefined) => {
+  const move = (item: QueueItemModel, from: number, neighborIndex: number) => {
+    const neighbor = items[neighborIndex];
     if (
       item.section !== 'upNext' ||
       neighbor === undefined ||
@@ -55,11 +56,11 @@ export function QueueList({
     ) {
       return;
     }
-    const direction = neighbor.index < item.index ? -1 : 1;
+    const direction: -1 | 1 = neighborIndex < from ? -1 : 1;
     if (onMoveItem !== undefined) {
       onMoveItem(item.occurrenceId, direction);
     } else {
-      onMoveItemTo?.(item.occurrenceId, neighbor.index);
+      onMoveItemTo?.(item.occurrenceId, neighborIndex);
     }
   };
   return (
@@ -115,14 +116,14 @@ export function QueueList({
               reordering && canMove &&
               item.section === 'upNext' &&
               items[index - 1]?.section === 'upNext'
-                ? () => move(item, items[index - 1])
+                ? () => move(item, index, index - 1)
                 : undefined
             }
             onMoveDown={
               reordering && canMove &&
               item.section === 'upNext' &&
               items[index + 1]?.section === 'upNext'
-                ? () => move(item, items[index + 1])
+                ? () => move(item, index, index + 1)
                 : undefined
             }
           />

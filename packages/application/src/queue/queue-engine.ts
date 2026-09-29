@@ -243,7 +243,9 @@ export class QueueEngine {
    * a restore intentionally constructs without them.
    */
   get unplayableIds(): ReadonlySet<string> {
-    return this.#unplayable;
+    // A snapshot — callers bank it next to `snapshot()` for rollback
+    // and must not alias the live set into a stale reference.
+    return new Set(this.#unplayable);
   }
 
   isUnplayable(occurrenceId: string): boolean {

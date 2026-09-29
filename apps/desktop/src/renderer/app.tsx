@@ -2086,14 +2086,16 @@ function Main({
   }, [session, currentRecordingId]);
   const onMoveQueueItem = useCallback(
     (occurrenceId: string, direction: -1 | 1) => {
-      const index = state.queue.occurrences.findIndex(
-        (o) => o.occurrenceId === occurrenceId,
-      );
+      // Move slots are display slots — the session translates them to
+      // canonical/dealt positions itself.
+      const index = queueModel.sections
+        .flatMap((s) => s.items)
+        .findIndex((i) => i.occurrenceId === occurrenceId);
       if (index >= 0) {
         void session.moveOccurrence(occurrenceId, index + direction);
       }
     },
-    [session, state.queue],
+    [session, queueModel],
   );
 
   const onMoveQueueItemTo = useCallback(

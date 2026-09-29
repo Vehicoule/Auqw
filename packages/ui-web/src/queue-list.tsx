@@ -262,17 +262,10 @@ export function QueueList({
     if (useAbsolute) {
       // Absolute destinations carry the optimistic intent — the
       // caller applies them in order, no stale-index collapse. The
-      // engine indexes canonical order, not display: `to` is a slot
-      // in the sectioned display order, so translate it into the
-      // moved row's final canonical position — inside up-next that
-      // is (current's canonical index) + to, or `to` itself when
-      // nothing is playing.
-      const currentIndex = displayItems.find((item) => item.current)?.index;
+      // session indexes the display order (sectioned, dealt under
+      // shuffle): `to` is the moved row's final display slot.
       pendingOps.current = [...pendingOps.current, op];
-      onMoveItemTo(
-        occurrenceId,
-        currentIndex === undefined ? to : currentIndex + to,
-      );
+      onMoveItemTo(occurrenceId, to);
     } else if (
       onMoveItem !== undefined &&
       pendingOps.current.length === 0 &&
