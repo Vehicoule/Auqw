@@ -102,19 +102,12 @@ class AuqwMediaSessionService : MediaSessionService() {
   inner class LocalBinder : Binder() {
     // The service is exported (MediaSession controllers bind from
     // SystemUI); the raw player/service handles are same-UID only.
-    fun player(): ExoPlayer? =
-      if (Binder.getCallingUid() == Process.myUid()) {
-        this@AuqwMediaSessionService.player
-      } else {
-        null
-      }
+    private fun <T> sameUid(value: T): T? =
+      if (Binder.getCallingUid() == Process.myUid()) value else null
 
-    fun service(): AuqwMediaSessionService? =
-      if (Binder.getCallingUid() == Process.myUid()) {
-        this@AuqwMediaSessionService
-      } else {
-        null
-      }
+    fun player(): ExoPlayer? = sameUid(this@AuqwMediaSessionService.player)
+
+    fun service(): AuqwMediaSessionService? = sameUid(this@AuqwMediaSessionService)
   }
 
   private val sessionCallback = object : MediaSession.Callback {

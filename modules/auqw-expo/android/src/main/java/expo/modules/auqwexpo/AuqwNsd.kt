@@ -30,8 +30,7 @@ class AuqwNsd(
   private val emitDiscovery: (event: Map<String, Any?>) -> Unit,
 ) {
   private val manager: NsdManager
-    get() =
-      context.getSystemService(Context.NSD_SERVICE) as NsdManager
+    get() = context.getSystemService(Context.NSD_SERVICE) as NsdManager
 
   // Read on NSD's binder thread, written by JS callers — @Volatile so
   // a stale listener's failure check sees the current owner.
@@ -51,13 +50,12 @@ class AuqwNsd(
    * replaces the previous registration silently. */
   fun advertise(name: String, port: Int, fp: String) {
     unadvertise()
-    val info =
-      NsdServiceInfo().apply {
-        serviceName = name
-        serviceType = "_auqw._tcp."
-        this.port = port
-        setAttribute("dev", fp)
-      }
+    val info = NsdServiceInfo().apply {
+      serviceName = name
+      serviceType = "_auqw._tcp."
+      this.port = port
+      setAttribute("dev", fp)
+    }
     val listener =
       object : NsdManager.RegistrationListener {
         override fun onRegistrationFailed(info: NsdServiceInfo, code: Int) {
@@ -105,13 +103,11 @@ class AuqwNsd(
    */
   fun browse() {
     stopBrowse()
-    val wifi =
-      context.applicationContext.getSystemService(Context.WIFI_SERVICE)
-        as? WifiManager
     multicastLock =
-      wifi?.createMulticastLock("auqw-sync")?.apply {
-        setReferenceCounted(true)
-      }
+      (context.applicationContext.getSystemService(Context.WIFI_SERVICE)
+        as? WifiManager)
+        ?.createMulticastLock("auqw-sync")
+        ?.apply { setReferenceCounted(true) }
     try {
       multicastLock?.acquire()
     } catch (e: Exception) {
@@ -147,25 +143,23 @@ class AuqwNsd(
         }
 
         override fun onServiceLost(info: NsdServiceInfo) {
-          if (gen == browseGeneration) {
-            // Attach the lost record's last-resolved generation — the
-            // JS adapter retracts just that generation instead of
-            // wiping every row sharing the (non-unique) service name.
-            val last =
-              synchronized(resolveLock) {
-                lostNames.add(info.serviceName)
-                resolveQueue.removeAll { it.first.serviceName == info.serviceName }
-                lastResolved.remove(info.serviceName)
-              }
-            emitDiscovery(
-              mapOf(
-                "type" to "lost",
-                "name" to info.serviceName,
-                "port" to last?.first,
-                "fp" to last?.second,
-              ),
-            )
+          if (gen != browseGeneration) return
+          // Attach the lost record's last-resolved generation — the
+          // JS adapter retracts just that generation instead of
+          // wiping every row sharing the (non-unique) service name.
+          val last = synchronized(resolveLock) {
+            lostNames.add(info.serviceName)
+            resolveQueue.removeAll { it.first.serviceName == info.serviceName }
+            lastResolved.remove(info.serviceName)
           }
+          emitDiscovery(
+            mapOf(
+              "type" to "lost",
+              "name" to info.serviceName,
+              "port" to last?.first,
+              "fp" to last?.second,
+            ),
+          )
         }
 
         override fun onDiscoveryStopped(serviceType: String) {}
@@ -193,8 +187,10 @@ class AuqwNsd(
     try {
       manager.discoverServices("_auqw._tcp.", NsdManager.PROTOCOL_DNS_SD, listener)
     } catch (e: Exception) {
+      // discovery=null first so stopBrowse skips the never-registered
+      // listener — the rest of its teardown covers lock + executor.
       discovery = null
-      releaseLock(executor)
+      stopBrowse()
       // Raw native messages can carry device/network details — the
       // cause stays in logcat, the JS-facing message stays generic.
       Log.w(TAG, "syncBrowse failed", e)
@@ -214,19 +210,9 @@ class AuqwNsd(
     // before registering `discovery` still owes the release.
     val listener = discovery
     discovery = null
-    if (listener != null) {
-      runCatching { manager.stopServiceDiscovery(listener) }
-    }
+    listener?.let { runCatching { manager.stopServiceDiscovery(it) } }
     resolveExecutor?.shutdown()
     resolveExecutor = null
-    multicastLock?.let { lock ->
-      runCatching { lock.release() }
-    }
-    multicastLock = null
-  }
-
-  private fun releaseLock(executor: ExecutorService) {
-    executor.shutdown()
     multicastLock?.let { runCatching { it.release() } }
     multicastLock = null
   }

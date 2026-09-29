@@ -58,6 +58,9 @@ private const val DEQUEUE_US = 10_000L
 private val DEAD_HANDLE_KINDS = setOf(
   "released", "evicted", "expired", "superseded", "not-found"
 )
+private val INVALID_RESPONSE_KINDS = setOf(
+  "invalid-request", "invalid-response", "invalid-message"
+)
 
 /** A provider:'local' backing for an lf-* handle — the file or content
  *  URI, the Context the extractor needs to open it, and the resolved
@@ -125,9 +128,7 @@ internal class AuqwWaveformPeaks(
   }
 
   fun cancelAll() {
-    for ((_, job) in jobs) {
-      job.cancel()
-    }
+    jobs.values.forEach { it.cancel() }
     jobs.clear()
     cancels.clear()
   }
@@ -289,20 +290,13 @@ internal class AuqwWaveformPeaks(
         )
       }
       pcmOut = FileOutputStream(pcmFile).channel
-      var track = -1
-      var format: MediaFormat? = null
-      for (i in 0 until extractor.trackCount) {
-        val f = extractor.getTrackFormat(i)
-        val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
-        if (mime.startsWith("audio/")) {
-          track = i
-          format = f
-          break
+      val (track, format) = (0 until extractor.trackCount)
+        .firstNotNullOfOrNull { i ->
+          extractor.getTrackFormat(i).takeIf {
+            it.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+          }?.let { i to it }
         }
-      }
-      if (track < 0 || format === null) {
-        throw CodedException("invalid-response", "no audio track", null)
-      }
+        ?: throw CodedException("invalid-response", "no audio track", null)
       extractor.selectTrack(track)
       val mime = format.getString(MediaFormat.KEY_MIME)
         ?: throw CodedException("invalid-response", "audio track has no mime", null)
@@ -406,11 +400,8 @@ internal class AuqwWaveformPeaks(
         channels,
         pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT,
       )
-    } catch (e: CodedException) {
-      throw e
-    } catch (e: CancellationException) {
-      throw e
     } catch (e: Exception) {
+      if (e is CodedException || e is CancellationException) throw e
       throw CodedException(
         "invalid-response", e.message ?: "audio decode failed", e
       )
@@ -524,13 +515,10 @@ internal class AuqwWaveformPeaks(
    *  the desktop port's `toError` applies. */
   private fun seamError(e: StreamException): CodedException {
     val kind = when {
-      e is StreamException.Failed && DEAD_HANDLE_KINDS.contains(e.kind) -> "released"
-      e is StreamException.Failed &&
-        (e.kind == "invalid-request" ||
-          e.kind == "invalid-response" ||
-          e.kind == "invalid-message") -> "invalid-response"
-      e is StreamException.Failed -> "transient"
-      else -> "unavailable"
+      e !is StreamException.Failed -> "unavailable"
+      e.kind in DEAD_HANDLE_KINDS -> "released"
+      e.kind in INVALID_RESPONSE_KINDS -> "invalid-response"
+      else -> "transient"
     }
     return CodedException(kind, e.message, e)
   }
@@ -542,13 +530,10 @@ private class ByteArrayMediaDataSource(
   private val bytes: ByteArray,
 ) : MediaDataSource() {
   override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
-    if (position < 0 || position >= bytes.size.toLong()) {
-      return -1
-    }
+    // position >= size is subsumed by the n <= 0 check below.
+    if (position < 0) return -1
     val n = minOf(size.toLong(), bytes.size.toLong() - position).toInt()
-    if (n <= 0) {
-      return -1
-    }
+    if (n <= 0) return -1
     System.arraycopy(bytes, position.toInt(), buffer, offset, n)
     return n
   }

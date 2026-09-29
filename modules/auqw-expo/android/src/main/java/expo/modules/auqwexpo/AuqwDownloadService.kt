@@ -76,8 +76,8 @@ class AuqwDownloadService : Service() {
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    val reported = intent?.getIntExtra(EXTRA_ACTIVE, -1) ?: -1
-    val active = if (reported >= 0) reported else activeCount
+    val active = intent?.getIntExtra(EXTRA_ACTIVE, -1)?.takeIf { it >= 0 }
+      ?: activeCount
     // Null intent on a sticky restart, or a delivered 0 edge: no
     // in-flight transfer exists in this process. Stop honestly —
     // rows resume from committed offsets on the next app-side init().

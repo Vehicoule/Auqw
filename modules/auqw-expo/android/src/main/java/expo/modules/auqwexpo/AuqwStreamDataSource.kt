@@ -137,12 +137,8 @@ class AuqwStreamDataSource(
   }
 
   override fun read(buffer: ByteArray, offset: Int, readLength: Int): Int {
-    if (readLength == 0) {
-      return 0
-    }
-    if (bytesRemaining == 0L) {
-      return C.RESULT_END_OF_INPUT
-    }
+    if (readLength == 0) return 0
+    if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
     val currentHost = host
     val currentHandle = handle
     if (!opened || currentHost == null || currentHandle == null) {
@@ -155,11 +151,8 @@ class AuqwStreamDataSource(
         null
       )
     }
-    val wanted = if (bytesRemaining == C.LENGTH_UNSET.toLong()) {
-      readLength.toLong()
-    } else {
-      minOf(readLength.toLong(), bytesRemaining)
-    }
+    val wanted = if (bytesRemaining == C.LENGTH_UNSET.toLong()) readLength.toLong()
+      else minOf(readLength.toLong(), bytesRemaining)
     val readT0 = android.os.SystemClock.uptimeMillis()
     val bytes = try {
       currentHost.streamRead(currentHandle, position.toULong(), wanted.toULong())
