@@ -306,6 +306,13 @@ class AuqwNsd(
                 // count a lost attributes on.
                 val record = resolved.port to fp
                 if (gens.lastOrNull() != record) {
+                  // Live generations only: unbounded growth just
+                  // degrades future losts to the safe name-only
+                  // wipe-all, but a hostile re-advertiser shouldn't
+                  // get to accumulate them forever.
+                  if (gens.size >= 16) {
+                    gens.removeFirst()
+                  }
                   gens.addLast(record)
                 }
               }

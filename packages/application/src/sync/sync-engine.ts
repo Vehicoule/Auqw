@@ -2612,8 +2612,16 @@ export async function createSyncEngine(
       // observed peer advertises a seq as held, a dead log row below
       // the floor can never be needed again and is dropped from both
       // the in-memory lanes and durable sync_log.
-      notePeerCursor(doc.senderDeviceId, doc.cursor);
-      const foldedRow = peerMarks.get(doc.senderDeviceId);
+      // A mark claim only folds when the source is authenticated —
+      // an unauthenticated apply (import) merges the entries but a
+      // crafted stamp must not lift the durable compaction floor.
+      if (senderDeviceId !== undefined) {
+        notePeerCursor(doc.senderDeviceId, doc.cursor);
+      }
+      const foldedRow =
+        senderDeviceId === undefined
+          ? undefined
+          : peerMarks.get(doc.senderDeviceId);
       // A cursor-only claim that changed nothing (no fresh entries,
       // no skipped holes, a row already durable) is a pure re-confirm
       // — skip the append so an idle round costs the store no write.

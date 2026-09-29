@@ -1273,6 +1273,14 @@ export class PlaybackEngine {
       }
       return this.#adoptPrepared(attempt, stream, warm.attempt, true);
     }
+    // A spent intent budget fails outright — the maxAttempts floor
+    // would otherwise grant one more call per hop.
+    if (attempt.preparesUsed >= PREPARE_CALL_BUDGET) {
+      return this.#failWith(
+        attempt,
+        appError('budget-exceeded', 'prepare call budget exhausted'),
+      );
+    }
     const prepared = await retryBounded({
       deadlineMs,
       signal: attempt.source.signal,

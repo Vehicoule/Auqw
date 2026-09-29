@@ -74,7 +74,10 @@ async function mustApply(
 ): Promise<ApplyResult> {
   const applied = await engine.applyDelta(
     JSON.parse(JSON.stringify(doc)) as unknown,
-    senderDeviceId,
+    // A bare mustApply models an authenticated wire round — the
+    // doc's own id; pass an explicit sender (or omit it from the
+    // doc) to exercise the unauthenticated path.
+    senderDeviceId ?? doc.senderDeviceId,
   );
   assert(applied.ok, `applyDelta failed: ${JSON.stringify(doc).slice(0, 200)}`);
   return applied.value;
@@ -2400,6 +2403,7 @@ async function failedCompactionKeepsLanes(): Promise<void> {
   a.store.holdNextAppend();
   const pending = a.engine.applyDelta(
     JSON.parse(JSON.stringify(docB.value)) as unknown,
+    docB.value.senderDeviceId,
   );
   for (let i = 0; i < 200 && a.store.pendingAppends === 0; i += 1) {
     await Promise.resolve();
@@ -2419,6 +2423,7 @@ async function failedCompactionKeepsLanes(): Promise<void> {
   // retired emission ordinal lands durably with it.
   const retried = await a.engine.applyDelta(
     JSON.parse(JSON.stringify(docB.value)) as unknown,
+    docB.value.senderDeviceId,
   );
   assert(retried.ok);
   const docA3 = await a.engine.exportDelta();
@@ -2583,10 +2588,13 @@ async function peerMarkWriteRetriesUntilDurable(): Promise<void> {
   // presence still only in memory — after a restart the table would
   // remember nothing about 'b' and compaction could drop entries it
   // still needed to catch up.
-  const refused = await a.engine.applyDelta({
-    ...delta([], 'b'),
-    cursor: { a: 1 },
-  });
+  const refused = await a.engine.applyDelta(
+    {
+      ...delta([], 'b'),
+      cursor: { a: 1 },
+    },
+    'b',
+  );
   assert(!refused.ok, 'apply fails when the mark cannot commit');
   assert(a.store.storedPeerMarks['b'] === undefined);
   await mustApply(a.engine, { ...delta([], 'b'), cursor: { a: 1 } });
@@ -2602,10 +2610,13 @@ async function peerMarkWriteRetriesUntilDurable(): Promise<void> {
   // A mark update that fails to persist stays flagged and re-issues
   // on any later write — even another sender's divergence append.
   armed = true;
-  const refused2 = await a.engine.applyDelta({
-    ...delta([], 'b'),
-    cursor: { a: 2 },
-  });
+  const refused2 = await a.engine.applyDelta(
+    {
+      ...delta([], 'b'),
+      cursor: { a: 2 },
+    },
+    'b',
+  );
   assert(!refused2.ok);
   assertDeepEqual(a.store.storedPeerMarks['b'], { a: 1 });
   await mustApply(a.engine, { ...delta([], 'c'), cursor: { a: 1 } });

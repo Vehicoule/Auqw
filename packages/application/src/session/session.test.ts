@@ -1057,12 +1057,14 @@ async function deadPlayReprepareSharesIntentBudget(): Promise<void> {
   r.clock.advance(10_000);
   deadStatus(idB, 'h-dead-1');
   await pump();
-  assertEqual(calls(r, 'prepare').length, 3, 'second hop re-prepares');
-  // Cross the original intent deadline — the live hop's bounded
-  // prepare must time out and fail the item honestly, not storm on
-  // inside a fresh 15s window.
-  r.clock.advance(6_000);
-  await pump();
+  // The shared intent budget (2 calls) is spent — the second dead
+  // stream fails the item outright instead of minting a third
+  // prepare behind the maxAttempts floor.
+  assertEqual(
+    calls(r, 'prepare').length,
+    2,
+    'spent budget mints no third prepare',
+  );
   const snap = readyOf(r);
   assertEqual(snap.playback.type, 'failed', 'storm fails honestly');
   assertEqual(snap.queue.mode, 'paused', 'blocked item pauses');

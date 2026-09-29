@@ -476,7 +476,9 @@ async function handle(
     }
     const sent = msg as { since?: unknown; delta?: unknown };
     if (sent.delta !== undefined) {
-      const applied = await server.engine.applyDelta(sent.delta);
+      // The wire authenticated the sender at hello — the apply
+      // carries that id, matching the real port's forwarding.
+      const applied = await server.engine.applyDelta(sent.delta, CLIENT_ID);
       if (!applied.ok) {
         pump.send(encodeJson({ t: 'error', code: 'bad-request' }));
         return;

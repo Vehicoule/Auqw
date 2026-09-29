@@ -841,7 +841,7 @@ export function WaveformSeek({
       : null;
   const shownHeld =
     heldMs !== null && heldKey.current === trackKey ? heldMs : null;
-  const shownMs = shownScrub ?? positionMs;
+  const shownMs = shownScrub ?? shownHeld ?? positionMs;
   // AT steps seek through `hold` too — the next increment advances
   // the target it just set while the publish is still pending,
   // the same rule keyboard arrows follow on the web port.
@@ -852,7 +852,7 @@ export function WaveformSeek({
     },
     [hold, onSeek],
   );
-  const { onAccessibilityAction } = useSeekA11y(
+  const onAccessibilityAction = useSeekA11y(
     shownScrub ?? shownHeld ?? positionMs,
     durationMs,
     onSeek === undefined ? undefined : a11ySeek,
