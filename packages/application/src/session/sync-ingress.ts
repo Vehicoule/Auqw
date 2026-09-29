@@ -1,8 +1,5 @@
 import { CancellationSource } from '../cancellation.ts';
-import type {
-  CancellationSignal,
-  OperationContext,
-} from '../cancellation.ts';
+import type { CancellationSignal } from '../cancellation.ts';
 import type { Recording } from '../domain.ts';
 import type { Result } from '../errors.ts';
 import { appError, err, ok } from '../errors.ts';
@@ -22,8 +19,13 @@ import { utf8ByteLength } from '../sync/sync-wire.ts';
 import type { ProviderCapability } from '../ports/provider.ts';
 import type { StorageBatch, StoragePort } from '../ports/storage.ts';
 import { Serializer } from './serializer.ts';
-import type { Ready } from './ready.ts';
+import type { Ready, SessionHostCore } from './ready.ts';
 import { syncEmitInput } from './ready.ts';
+import {
+  boundedCommit,
+  boundedLoad,
+  supersededError,
+} from './util.ts';
 import type {
   SyncApplyReport,
   SyncApplySections,
@@ -148,24 +150,7 @@ function retainMaterializedPending(
   return retained;
 }
 
-/**
- * The session seams the sync boundary runs against — each is a thin
- * delegation into Session's own machinery (the storage lane, the op
- * bookkeeping, the publish/derived hooks). The service never reaches
- * into session internals; this contract is the whole boundary.
- */
-export type SyncHost = {
-  /** The live mirror — null while unhydrated or mid-import. */
-  readonly ready: () => Ready | null;
-  /** Ready, or the shared not-ready error (covers dispose). */
-  readonly requireReady: () => Result<Ready>;
-  readonly publish: () => void;
-  /** Queue/settings projections re-derived after a commit lands. */
-  readonly derived: () => void;
-  /** Fire-and-forget op work drain() and dispose() wait on. */
-  readonly own: (work: Promise<unknown>) => void;
-  /** Bounded, nonfatal, sanitized internal logging. */
-  readonly logWarn: (message: string) => void;
+export type SyncHost = SessionHostCore & {
   /** Whether an injected provider is installed under this id. */
   readonly hasProvider: (id: string) => boolean;
   /** Whether an injected provider DECLARES one of the capabilities —
@@ -174,27 +159,6 @@ export type SyncHost = {
     id: string,
     capabilities: readonly ProviderCapability[],
   ) => boolean;
-  /** One serialized storage segment — the session's commit lane. */
-  readonly enqueueStorage: <T>(
-    fn: () => Promise<Result<T>>,
-    options?: { readonly syncApply?: boolean },
-  ) => Promise<Result<T>>;
-  /**
-   * Track an op CancellationSource for dispose-time cancel; the
-   * returned function untracks it.
-   */
-  readonly trackSource: (source: CancellationSource) => () => void;
-  readonly deadline: () => number;
-  readonly newContext: (
-    prefix: string,
-    deadlineMs: number,
-    signal: OperationContext['signal'],
-  ) => OperationContext;
-  readonly withDeadline: <T>(
-    operation: () => Promise<Result<T>>,
-    absoluteDeadlineMs: number,
-    operationSource: CancellationSource,
-  ) => Promise<Result<T>>;
 };
 
 export type SyncIngressDeps = {
@@ -370,13 +334,13 @@ export class SyncIngress {
     if (r.syncApplyCache !== null) {
       return ok(r.syncApplyCache);
     }
-    const loaded = await this.#host.withDeadline(
-      () =>
-        this.#storage.load(
-          this.#host.newContext('load', deadlineMs, source.signal),
-        ),
-      deadlineMs,
+    const loaded = await boundedLoad(
+      this.#host,
+      this.#storage,
       source,
+      'load',
+      undefined,
+      deadlineMs,
     );
     if (!loaded.ok) {
       return err(loaded.error);
@@ -421,9 +385,7 @@ export class SyncIngress {
       return await this.#host.enqueueStorage(async () => {
         const r = this.#host.ready();
         if (r === null || r !== generation) {
-          return err(
-            appError('superseded', 'session state was replaced'),
-          );
+          return err(supersededError());
         }
         const deadlineMs = this.#host.deadline();
         // One load seeds the whole drain — later pages reuse the
@@ -572,9 +534,7 @@ export class SyncIngress {
       return await this.#host.enqueueStorage(async () => {
         const r = this.#host.ready();
         if (r === null || r !== generation) {
-          return err(
-            appError('superseded', 'session state was replaced'),
-          );
+          return err(supersededError());
         }
         const deadlineMs = this.#host.deadline();
         // Same drain reuse as applySyncedEntries — one seeded load
@@ -704,14 +664,11 @@ export class SyncIngress {
     const source = new CancellationSource();
     const untrack = this.#host.trackSource(source);
     try {
-      const deadlineMs = this.#host.deadline();
-      const loaded = await this.#host.withDeadline(
-        () =>
-          this.#storage.load(
-            this.#host.newContext('load', deadlineMs, source.signal),
-          ),
-        deadlineMs,
+      const loaded = await boundedLoad(
+        this.#host,
+        this.#storage,
         source,
+        'load',
       );
       if (this.#host.ready() !== r) {
         return;
@@ -764,13 +721,13 @@ export class SyncIngress {
       // commit is still queued behind this load would otherwise slip
       // past the `live` check and get its live reviews tombstoned.
       await this.#host.enqueueStorage(async () => {
-        const loaded = await this.#host.withDeadline(
-          () =>
-            this.#storage.load(
-              this.#host.newContext('load', deadlineMs, source.signal),
-            ),
-          deadlineMs,
+        const loaded = await boundedLoad(
+          this.#host,
+          this.#storage,
           source,
+          'load',
+          undefined,
+          deadlineMs,
         );
         // A ready swap between the delete and this load would read a
         // generation's persisted view the delete wasn't staged under —
@@ -862,14 +819,12 @@ export class SyncIngress {
             : (s.radioProvider ?? null),
       };
     }
-    const committed = await this.#host.withDeadline(
-      () =>
-        this.#storage.commit(
-          batch,
-          this.#host.newContext('persist', deadlineMs, source.signal),
-        ),
-      deadlineMs,
+    const committed = await boundedCommit(
+      this.#host,
+      this.#storage,
+      batch,
       source,
+      deadlineMs,
     );
     if (!committed.ok) {
       r.persistenceError = committed.error;

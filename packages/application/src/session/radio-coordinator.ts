@@ -1,5 +1,4 @@
 import { CancellationSource } from '../cancellation.ts';
-import type { OperationContext } from '../cancellation.ts';
 import type { Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type {
@@ -30,31 +29,14 @@ import {
   RADIO_FETCH_AHEAD,
 } from '../queue/radio-tail.ts';
 import type { RadioTailRecord } from '../queue/radio-tail.ts';
-import type { LocalWrite } from '../sync/sync-engine.ts';
 import { emissionWrites } from '../sync/sync-projection.ts';
 import { Serializer } from './serializer.ts';
-import type { Ready } from './ready.ts';
+import type { Ready, SessionHostCore } from './ready.ts';
 import { syncEmitInput } from './ready.ts';
 import { internalError } from './util.ts';
 
-/**
- * The session seams the radio coordinator runs against — each is a
- * thin delegation into Session's own machinery (the storage lane, the
- * op bookkeeping, the publish/derived hooks). The coordinator never
- * reaches into session internals; this contract is the whole
- * boundary.
- */
-export type RadioHost = {
-  /** The live mirror — null while unhydrated or mid-import. */
-  readonly ready: () => Ready | null;
-  /** Ready, or the shared not-ready error (covers dispose). */
-  readonly requireReady: () => Result<Ready>;
-  readonly publish: () => void;
-  /** Queue/settings projections re-derived after a commit lands. */
-  readonly derived: () => void;
-  /** Fire-and-forget op work drain() and dispose() wait on. */
-  readonly own: (work: Promise<unknown>) => void;
-  readonly disposed: () => boolean;
+/** The radio coordinator's per-service seams over SessionHostCore. */
+export type RadioHost = SessionHostCore & {
   /** The dealt play order under shuffle — null when off. */
   readonly dealtOrder: (r: Ready) => readonly string[] | null;
   readonly isOnline: () => boolean;
@@ -71,31 +53,6 @@ export type RadioHost = {
   readonly playOccurrence: (
     occurrenceId: string,
   ) => Promise<Result<void>>;
-  /** Bounded, nonfatal, sanitized internal logging. */
-  readonly logWarn: (message: string) => void;
-  /** One serialized storage segment — the session's commit lane. */
-  readonly enqueueStorage: <T>(
-    fn: () => Promise<Result<T>>,
-  ) => Promise<Result<T>>;
-  /** Post-commit best-effort sync emission. */
-  readonly emitSync: (writes: readonly LocalWrite[]) => void;
-  /**
-   * Track an op CancellationSource for dispose-time cancel; the
-   * returned function untracks it.
-   */
-  readonly trackSource: (source: CancellationSource) => () => void;
-  readonly safeNow: () => number | null;
-  readonly deadline: () => number;
-  readonly newContext: (
-    prefix: string,
-    deadlineMs: number,
-    signal: OperationContext['signal'],
-  ) => OperationContext;
-  readonly withDeadline: <T>(
-    operation: () => Promise<Result<T>>,
-    absoluteDeadlineMs: number,
-    operationSource: CancellationSource,
-  ) => Promise<Result<T>>;
 };
 
 export type RadioCoordinatorDeps = {

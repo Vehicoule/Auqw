@@ -1,5 +1,4 @@
 import { CancellationSource } from '../cancellation.ts';
-import type { OperationContext } from '../cancellation.ts';
 import type { AppError, ErrorKind, Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type {
@@ -9,6 +8,7 @@ import type {
   TrackMetadata,
 } from '../domain.ts';
 import {
+  isSafeNonNegative,
   isString,
   isTrackMetadata,
   isTrackRef,
@@ -40,11 +40,10 @@ import { QueueEngine } from '../queue/queue-engine.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import type { RadioTailRecord } from '../queue/radio-tail.ts';
 import { Serializer } from './serializer.ts';
-import type { Ready } from './ready.ts';
+import type { Ready, SessionHostCore } from './ready.ts';
 import type { SessionPlayback } from './session.ts';
 import {
   internalError,
-  isSafeNonNegative,
   sameRef,
   saturatingAdd,
   timeoutError,
@@ -266,28 +265,15 @@ type ProjectionMarker = {
   done: Promise<void>;
 };
 /**
- * The session seams the playback engine runs against — each is a
- * thin delegation into Session's own machinery (the storage lane, the
- * op bookkeeping, the publish/derived hooks, the radio tail's
- * triggers). The engine never reaches into session internals; this
- * contract is the whole boundary.
+ * The playback engine's per-service seams over SessionHostCore —
+ * publishPosition, the pick/deal reads, the staged-commit and queue
+ * lanes, the port-call wrappers, timer tracking, and the radio-tail
+ * hooks the transition reconcile kicks.
  */
-export type PlaybackHost = {
-  /** The live mirror — null while unhydrated or mid-import. */
-  readonly ready: () => Ready | null;
-  /** Ready, or the shared not-ready error (covers dispose). */
-  readonly requireReady: () => Result<Ready>;
-  readonly publish: () => void;
+export type PlaybackHost = SessionHostCore & {
   /** Position-only publish — the light channel that skips
    * whole-state subscribers. */
   readonly publishPosition: () => void;
-  /** Queue/settings projections re-derived after a commit lands. */
-  readonly derived: () => void;
-  /** Fire-and-forget op work drain() and dispose() wait on. */
-  readonly own: (work: Promise<unknown>, deadline?: boolean) => void;
-  readonly disposed: () => boolean;
-  /** Bounded, nonfatal, sanitized internal logging. */
-  readonly logWarn: (message: string) => void;
   /** Ref selection for an occurrence — the shared pick precedence. */
   readonly pickRef: (
     recording: Recording,
@@ -302,14 +288,6 @@ export type PlaybackHost = {
    * user may be paying for. Playback-intent calls never consult it.
    */
   readonly isMetered: () => boolean;
-  /** One serialized storage segment — the session's commit lane. */
-  readonly enqueueStorage: <T>(
-    fn: () => Promise<Result<T>>,
-  ) => Promise<Result<T>>;
-  /** Bounded, nonfatal persistence; failures publish persistenceError. */
-  readonly persist: (
-    batch: StorageBatch | (() => StorageBatch),
-  ) => Promise<Result<void>>;
   /** Commit-first mutation against the freshest committed mirror. */
   readonly commitStaged: <T>(
     stage: (r: Ready) => Result<PlaybackStage<T>>,
@@ -325,18 +303,6 @@ export type PlaybackHost = {
   /** Every player/storage port call is bounded and cancellable. */
   readonly bounded: <T>(
     fn: () => Promise<Result<T>>,
-  ) => Promise<Result<T>>;
-  readonly safeNow: () => number | null;
-  readonly deadline: () => number;
-  readonly newContext: (
-    prefix: string,
-    deadlineMs: number,
-    signal: OperationContext['signal'],
-  ) => OperationContext;
-  readonly withDeadline: <T>(
-    operation: () => Promise<Result<T>>,
-    absoluteDeadlineMs: number,
-    operationSource: CancellationSource,
   ) => Promise<Result<T>>;
   /**
    * Track a timer CancellationSource for dispose-time cancel; the

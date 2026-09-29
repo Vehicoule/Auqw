@@ -108,13 +108,16 @@ import { RadioCoordinator } from './radio-coordinator.ts';
 import { SyncIngress } from './sync-ingress.ts';
 import { PlaybackEngine } from './playback-engine.ts';
 import {
+  boundedCommit,
+  boundedLoad,
   internalError,
   sameRef,
   saturatingAdd,
+  supersededError,
   timeoutError,
 } from './util.ts';
 import { syncEmitInput } from './ready.ts';
-import type { Ready } from './ready.ts';
+import type { Ready, SessionHostCore } from './ready.ts';
 
 export type SessionPlayback =
   | { readonly type: 'idle' }
@@ -462,6 +465,40 @@ export class Session {
   readonly #isMetered: () => boolean;
   readonly #sync: SyncEmitPort | undefined;
   #restorePromise: Promise<Result<void>> | null = null;
+  /**
+   * The shared half of every service host — thin delegations into
+   * Session's own machinery (the storage lane, the op bookkeeping,
+   * the publish/derived hooks). Each service's host literal spreads
+   * this and adds its per-service seams.
+   */
+  readonly #hostCore: SessionHostCore = {
+    ready: () => this.#ready,
+    requireReady: () => this.#requireReady(),
+    publish: () => this.#publish(),
+    derived: () => this.#derived(),
+    own: (work, deadline) => this.#own(work, deadline),
+    disposed: () => this.#disposed,
+    logWarn: (message) => this.#logWarn(message),
+    enqueueStorage: (fn, options) => this.#enqueueStorage(fn, options),
+    persist: (batch) => this.#persist(batch),
+    emitSync: (writes) => this.#syncIngress.emit(writes),
+    trackSource: (source) => {
+      this.#opSources.add(source);
+      return () => {
+        this.#opSources.delete(source);
+      };
+    },
+    safeNow: () => this.#safeNow(),
+    deadline: () => this.#deadline(),
+    newContext: (prefix, deadlineMs, signal) =>
+      this.#newContext(prefix, deadlineMs, signal),
+    withDeadline: (operation, absoluteDeadlineMs, operationSource) =>
+      this.#withDeadline(
+        operation,
+        absoluteDeadlineMs,
+        operationSource,
+      ),
+  };
 
   constructor(deps: SessionDeps) {
     if (!isSettings(deps.defaults)) {
@@ -512,30 +549,7 @@ export class Session {
       clock: deps.clock,
       corrections: this.#corrections,
       host: {
-        ready: () => this.#ready,
-        requireReady: () => this.#requireReady(),
-        publish: () => this.#publish(),
-        derived: () => this.#derived(),
-        enqueueStorage: (fn) => this.#enqueueStorage(fn),
-        persist: (batch) => this.#persist(batch),
-        emitSync: (writes) => this.#syncIngress.emit(writes),
-        own: (work) => this.#own(work),
-        trackSource: (source) => {
-          this.#opSources.add(source);
-          return () => {
-            this.#opSources.delete(source);
-          };
-        },
-        safeNow: () => this.#safeNow(),
-        deadline: () => this.#deadline(),
-        newContext: (prefix, deadlineMs, signal) =>
-          this.#newContext(prefix, deadlineMs, signal),
-        withDeadline: (operation, absoluteDeadlineMs, operationSource) =>
-          this.#withDeadline(
-            operation,
-            absoluteDeadlineMs,
-            operationSource,
-          ),
+        ...this.#hostCore,
         resumeGatedPlayback: (recordingId) =>
           this.#resumeGatedPlayback(recordingId),
         prepareImport: () => this.#prepareImport(),
@@ -555,12 +569,7 @@ export class Session {
       storage: deps.storage,
       sync: deps.sync,
       host: {
-        ready: () => this.#ready,
-        requireReady: () => this.#requireReady(),
-        publish: () => this.#publish(),
-        derived: () => this.#derived(),
-        own: (work) => this.#own(work),
-        logWarn: (message) => this.#logWarn(message),
+        ...this.#hostCore,
         hasProvider: (id) => this.#providers.has(id),
         providerDeclares: (id, capabilities) => {
           const provider = this.#providers.get(id);
@@ -571,22 +580,6 @@ export class Session {
             )
           );
         },
-        enqueueStorage: (fn, options) => this.#enqueueStorage(fn, options),
-        trackSource: (source) => {
-          this.#opSources.add(source);
-          return () => {
-            this.#opSources.delete(source);
-          };
-        },
-        deadline: () => this.#deadline(),
-        newContext: (prefix, deadlineMs, signal) =>
-          this.#newContext(prefix, deadlineMs, signal),
-        withDeadline: (operation, absoluteDeadlineMs, operationSource) =>
-          this.#withDeadline(
-            operation,
-            absoluteDeadlineMs,
-            operationSource,
-          ),
       },
     });
     this.#radio = new RadioCoordinator({
@@ -594,12 +587,7 @@ export class Session {
       ids: deps.ids,
       router: this.#router,
       host: {
-        ready: () => this.#ready,
-        requireReady: () => this.#requireReady(),
-        publish: () => this.#publish(),
-        derived: () => this.#derived(),
-        own: (work) => this.#own(work),
-        disposed: () => this.#disposed,
+        ...this.#hostCore,
         dealtOrder: (r) => this.#dealtOrder(r),
         isOnline: () => this.#isOnline(),
         localPlaybackFor: (recordingId) =>
@@ -607,25 +595,6 @@ export class Session {
         activeAttempt: () => this.#playback.activeAttempt(),
         playOccurrence: (occurrenceId) =>
           this.playOccurrence(occurrenceId),
-        logWarn: (message) => this.#logWarn(message),
-        enqueueStorage: (fn) => this.#enqueueStorage(fn),
-        emitSync: (writes) => this.#syncIngress.emit(writes),
-        trackSource: (source) => {
-          this.#opSources.add(source);
-          return () => {
-            this.#opSources.delete(source);
-          };
-        },
-        safeNow: () => this.#safeNow(),
-        deadline: () => this.#deadline(),
-        newContext: (prefix, deadlineMs, signal) =>
-          this.#newContext(prefix, deadlineMs, signal),
-        withDeadline: (operation, absoluteDeadlineMs, operationSource) =>
-          this.#withDeadline(
-            operation,
-            absoluteDeadlineMs,
-            operationSource,
-          ),
       },
     });
     this.#playback = new PlaybackEngine({
@@ -635,36 +604,18 @@ export class Session {
       router: this.#router,
       corrections: this.#corrections,
       host: {
-        ready: () => this.#ready,
-        requireReady: () => this.#requireReady(),
-        publish: () => this.#publish(),
+        ...this.#hostCore,
         publishPosition: () => this.#publishPosition(),
-        derived: () => this.#derived(),
-        own: (work, deadline) => this.#own(work, deadline),
-        disposed: () => this.#disposed,
-        logWarn: (message) => this.#logWarn(message),
         pickRef: (recording, occurrenceSelected) =>
           this.#pickRef(recording, occurrenceSelected),
         dealtOrder: (r) => this.#dealtOrder(r),
         isOnline: () => this.#isOnline(),
         isMetered: () => this.#isMetered(),
-        enqueueStorage: (fn) => this.#enqueueStorage(fn),
-        persist: (batch) => this.#persist(batch),
         commitStaged: (stage) => this.#commitStaged(stage),
         persistQueue: (r, before, beforeMarks) =>
           this.#persistQueue(r, before, beforeMarks),
         call: (fn) => this.#call(fn),
         bounded: (fn) => this.#bounded(fn),
-        safeNow: () => this.#safeNow(),
-        deadline: () => this.#deadline(),
-        newContext: (prefix, deadlineMs, signal) =>
-          this.#newContext(prefix, deadlineMs, signal),
-        withDeadline: (operation, absoluteDeadlineMs, operationSource) =>
-          this.#withDeadline(
-            operation,
-            absoluteDeadlineMs,
-            operationSource,
-          ),
         trackTimer: (timer) => {
           this.#timers.add(timer);
           return () => {
@@ -1035,18 +986,15 @@ export class Session {
     try {
       result = await this.#enqueueStorage(async () => {
         if (generation === null || generation !== this.#ready) {
-          return err(
-            appError('superseded', 'session state was replaced'),
-          );
+          return err(supersededError());
         }
-        const deadlineMs = this.#deadline();
-        const context = this.#newContext('persist', deadlineMs, source.signal);
         // A thunk batch evaluates inside the segment so it commits
         // the freshest mirror, not the state captured at call time.
         const evaluated = typeof batch === 'function' ? batch() : batch;
-        const committed = await this.#withDeadline(
-          () => this.#storage.commit(evaluated, context),
-          deadlineMs,
+        const committed = await boundedCommit(
+          this.#hostCore,
+          this.#storage,
+          evaluated,
           source,
         );
         if (committed.ok && evaluated.queue !== undefined) {
@@ -1090,9 +1038,7 @@ export class Session {
       return await this.#enqueueStorage(async () => {
         const r = this.#ready;
         if (generation === null || r !== generation) {
-          return err(
-            appError('superseded', 'session state was replaced'),
-          );
+          return err(supersededError());
         }
         const staged = stage(r);
         if (!staged.ok) {
@@ -1100,15 +1046,10 @@ export class Session {
         }
         const { batch, apply } = staged.value;
         if (batch !== undefined) {
-          const deadlineMs = this.#deadline();
-          const context = this.#newContext(
-            'persist',
-            deadlineMs,
-            source.signal,
-          );
-          const committed = await this.#withDeadline(
-            () => this.#storage.commit(batch, context),
-            deadlineMs,
+          const committed = await boundedCommit(
+            this.#hostCore,
+            this.#storage,
+            batch,
             source,
           );
           if (!committed.ok) {
@@ -1177,9 +1118,7 @@ export class Session {
       return await this.#enqueueStorage(async () => {
         const ready = this.#ready;
         if (generation === null || ready !== generation) {
-          return err(
-            appError('superseded', 'session state was replaced'),
-          );
+          return err(supersededError());
         }
         if (epoch !== r.queueEpoch) {
           // An earlier queue commit failed and rolled the engine back
@@ -1195,11 +1134,10 @@ export class Session {
           // re-committing the earlier revision would regress the store.
           return ok(undefined);
         }
-        const deadlineMs = this.#deadline();
-        const context = this.#newContext('persist', deadlineMs, source.signal);
-        const committed = await this.#withDeadline(
-          () => this.#storage.commit({ queue: after }, context),
-          deadlineMs,
+        const committed = await boundedCommit(
+          this.#hostCore,
+          this.#storage,
+          { queue: after },
           source,
         );
         if (!committed.ok) {
@@ -1356,12 +1294,11 @@ export class Session {
     this.#opSources.add(source);
     let loaded: Result<PersistedState>;
     try {
-      const deadlineMs = this.#deadline();
-      const context = this.#newContext('load', deadlineMs, source.signal);
-      loaded = await this.#withDeadline(
-        () => this.#storage.load(context),
-        deadlineMs,
+      loaded = await boundedLoad(
+        this.#hostCore,
+        this.#storage,
         source,
+        'load',
       );
     } finally {
       this.#opSources.delete(source);
