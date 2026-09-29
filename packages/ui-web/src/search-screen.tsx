@@ -1,5 +1,6 @@
 import { useRef } from 'react';
 import { Icon, Pressable, Spinner, Text } from './primitives.tsx';
+import type { IconName } from './primitives.tsx';
 import { TrackRow, useTrackList } from './track-row.tsx';
 import {
   EmptyState,
@@ -7,11 +8,33 @@ import {
   LoadingState,
   UnavailableState,
 } from './states.tsx';
-import type { SearchStateModel } from '@auqw/ui-shared';
+import type { SearchStateModel, TrackRowModel } from '@auqw/ui-shared';
 import {
   useSearchScreenController,
   type SearchScreenHandlers,
 } from '@auqw/ui-shared/controllers';
+
+// Recent-query and completion rows share the row's Pressable+Icon+Text.
+function SearchRow({
+  icon,
+  label,
+  a11yLabel,
+  onPress,
+}: {
+  readonly icon: IconName;
+  readonly label: string;
+  readonly a11yLabel: string;
+  readonly onPress?: (() => void) | undefined;
+}) {
+  return (
+    <Pressable onPress={onPress} ariaLabel={a11yLabel} className="uw-search__recent">
+      <Icon name={icon} size={14} color="var(--text-secondary)" />
+      <Text variant="body" color="primary" numberOfLines={1}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
 
 export type SearchScreenProps = SearchScreenHandlers & {
   readonly state: SearchStateModel;
@@ -36,60 +59,25 @@ export type SearchScreenProps = SearchScreenHandlers & {
 };
 
 export function SearchScreen({
-  state,
-  query,
   scrollEnabled = true,
-  onQueryChange,
-  onSubmit,
-  onCancel,
-  onRetry,
-  onResultPress,
-  onToggleLike,
-  onAddToPlaylist,
-  onContext,
-  recents = [],
-  onRecentPress,
-  suggestions = [],
-  onSuggestionPress,
   autoFocus = false,
+  ...input
 }: SearchScreenProps) {
-  const view = useSearchScreenController({
-    state,
-    query,
-    onQueryChange,
-    onSubmit,
-    onCancel,
-    onRetry,
-    onResultPress,
-    onToggleLike,
-    onAddToPlaylist,
-    onContext,
-    recents,
-    onRecentPress,
-    suggestions,
-    onSuggestionPress,
-  });
+  const view = useSearchScreenController(input);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const byRow = (fn: ((row: TrackRowModel) => void) | undefined) =>
+    fn === undefined
+      ? undefined
+      : (index: number) => {
+          const row = input.state.results[index];
+          if (row !== undefined) {
+            fn(row);
+          }
+        };
   const list = useTrackList({
-    count: state.results.length,
-    onActivate:
-      onResultPress === undefined
-        ? undefined
-        : (index) => {
-            const row = state.results[index];
-            if (row !== undefined) {
-              onResultPress(row);
-            }
-          },
-    onContext:
-      onContext === undefined
-        ? undefined
-        : (index) => {
-            const row = state.results[index];
-            if (row !== undefined) {
-              onContext(row);
-            }
-          },
+    count: input.state.results.length,
+    onActivate: byRow(input.onResultPress),
+    onContext: byRow(input.onContext),
   });
   return (
     <div
@@ -156,28 +144,9 @@ export function SearchScreen({
           >
             {view.suggestions.heading}
           </Text>
-          <Pressable
-            onPress={view.suggestions.commit.onPress}
-            ariaLabel={view.suggestions.commit.a11yLabel}
-            className="uw-search__recent"
-          >
-            <Icon name="search" size={14} color="var(--text-secondary)" />
-            <Text variant="body" color="primary" numberOfLines={1}>
-              {view.suggestions.commit.label}
-            </Text>
-          </Pressable>
+          <SearchRow {...view.suggestions.commit} />
           {view.suggestions.items.map((suggestion) => (
-            <Pressable
-              key={suggestion.label}
-              onPress={suggestion.onPress}
-              ariaLabel={suggestion.a11yLabel}
-              className="uw-search__recent"
-            >
-              <Icon name="search" size={14} color="var(--text-secondary)" />
-              <Text variant="body" color="primary" numberOfLines={1}>
-                {suggestion.label}
-              </Text>
-            </Pressable>
+            <SearchRow key={suggestion.label} {...suggestion} />
           ))}
         </div>
       )}
@@ -203,17 +172,7 @@ export function SearchScreen({
               {view.idle.heading}
             </Text>
             {view.idle.items.map((recent) => (
-              <Pressable
-                key={recent.label}
-                onPress={recent.onPress}
-                ariaLabel={recent.a11yLabel}
-                className="uw-search__recent"
-              >
-                <Icon name="clock" size={14} color="var(--text-secondary)" />
-                <Text variant="body" color="primary" numberOfLines={1}>
-                  {recent.label}
-                </Text>
-              </Pressable>
+              <SearchRow key={recent.label} {...recent} />
             ))}
           </div>
         ) : (
