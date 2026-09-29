@@ -74,18 +74,28 @@ export function syncHasPairedDevices(dir: string): boolean {
     if (!Array.isArray(devices) || devices.length > 0) {
       return true;
     }
-    // Verifiably empty — but a legacy record orphaned mid-merge (or by
-    // a refused Keychain prompt) still means "paired", so the scan
-    // below gets the last word.
+    // A valid EMPTY mirror is authoritative: the blob it mirrors can
+    // hold an identity-only store (the utility mints one on first
+    // start, pairing or not), so it must not arm on its own. Only a
+    // legacy record orphaned mid-merge (or by a refused Keychain
+    // prompt) still counts — that scan gets the last word here.
+    try {
+      return readdirSync(dir).some(
+        (file) => file.startsWith(DEVICE_PREFIX) && file.endsWith('.b64'),
+      );
+    } catch {
+      return false;
+    }
   } catch (thrown) {
     if (errorCode(thrown) !== 'ENOENT') {
       return true;
     }
   }
   try {
-    // A live sealed blob also arms: it can't be inspected without
-    // decrypting, and a deleted/empty mirror would otherwise strand the
-    // pairings it holds — arming lets loadOnce heal the mirror back.
+    // No mirror at all: a live sealed blob could hold pairings the
+    // deleted mirror can no longer show, so arm and let loadOnce heal
+    // the mirror back — identity-only stores wrongly armed just cost
+    // custody's typed error.
     return readdirSync(dir).some(
       (file) =>
         file === `${STORE_KEY}.b64` ||
