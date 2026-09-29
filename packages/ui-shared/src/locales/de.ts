@@ -443,6 +443,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'settings.downloadStorage': 'download-speicher',
   'settings.artworkCache': 'cover-cache',
   'settings.removeAllDownloads': 'alle downloads entfernen',
+  'settings.confirmAction': '{action} bestätigen',
   'settings.localFolders': 'lokale ordner',
   'settings.removeSource': '„{label}“ entfernen',
   'settings.addLocalFolder': 'lokalen ordner hinzufügen',

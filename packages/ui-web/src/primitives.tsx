@@ -244,7 +244,7 @@ export function Artwork({
           <Icon name="note" size={fill ? 36 : size * 0.44} color="var(--text-secondary)" />
         )
       ) : (
-        <img className="uw-artwork__img" src={url} alt="" />
+        <img className="uw-artwork__img" src={url} alt="" draggable={false} />
       )}
     </div>
   );

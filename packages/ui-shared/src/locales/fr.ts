@@ -445,6 +445,7 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'settings.downloadStorage': 'stockage des téléchargements',
   'settings.artworkCache': 'cache des pochettes',
   'settings.removeAllDownloads': 'supprimer tous les téléchargements',
+  'settings.confirmAction': 'confirmer : {action}',
   'settings.localFolders': 'dossiers locaux',
   'settings.removeSource': 'supprimer “{label}”',
   'settings.addLocalFolder': 'ajouter un dossier local',

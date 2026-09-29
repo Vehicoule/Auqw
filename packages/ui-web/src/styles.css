@@ -24,6 +24,10 @@
      macOS traffic lights inset into). */
   --uw-titlebar-h: 40px;
   -webkit-user-select: none;
+  /* Hover affordance — a faint warm tint halfway to the accentSoft
+     selection state. The neutral fg08 wash read as "greyed out",
+     especially on accent-filled controls it drowned. */
+  --uw-hover: color-mix(in srgb, var(--accent-soft) 50%, transparent);
 }
 
 .ui-web.t-light {
@@ -91,6 +95,13 @@
 .uw-pairing__payload {
   -webkit-user-select: text;
   user-select: text;
+}
+
+/* Chromium lets every img ghost-drag by default — artwork is a
+   surface, never a drag source here. */
+.ui-web img {
+  -webkit-user-drag: none;
+  user-drag: none;
 }
 
 /* ---- text ------------------------------------------------------ */
@@ -222,7 +233,7 @@
 }
 
 .uw-icon-btn:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
 }
 
 .uw-icon-btn[aria-pressed='true'] {
@@ -230,7 +241,7 @@
 }
 
 .uw-pressable:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
 }
 
 .uw-icon-btn--active {
@@ -481,7 +492,7 @@
 }
 
 .uw-back:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
 }
 
 .uw-section-label {
@@ -529,6 +540,20 @@
   text-align: left;
 }
 
+/* A diag-row--action nested INSIDE a diag-row (the delta-exchange
+   actions, a device's unpair) is a member, not the row itself —
+   width:100% would claim the row's whole width, squeeze the label's
+   flex:1 column to zero, and paint its wrapped text over the action.
+   Size to content and let the row wrap instead of colliding. */
+.uw-diag-row:has(> .uw-diag-row--action) {
+  flex-wrap: wrap;
+}
+
+.uw-diag-row > .uw-diag-row--action {
+  width: auto;
+  flex: none;
+}
+
 .uw-notice {
   display: flex;
   align-items: center;
@@ -552,7 +577,7 @@
 }
 
 .uw-track-row:hover {
-  background: var(--fg08);
+  background: var(--uw-hover);
 }
 
 /* The row tints as one surface — the inner pressable doesn't add a
@@ -685,7 +710,7 @@
 }
 
 .uw-state__retry:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
   border-color: var(--fg25);
 }
 
@@ -886,7 +911,7 @@
 }
 
 .uw-rail__see-all:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
   border-color: var(--fg25);
 }
 
@@ -910,22 +935,43 @@
 }
 .uw-rail__card:hover:not(:disabled) .uw-artwork,
 .uw-libcard--grid:hover:not(:disabled) .uw-artwork {
-  outline: var(--stroke-hairline) solid var(--fg25);
+  outline: var(--stroke-progress) solid var(--accent-soft);
   outline-offset: 2px;
 }
 
 /* ---- search ------------------------------------------------------------ */
 
+/* The field pins above the results while the screen scrolls — the
+   translucent fg08 fill would show rows ghosting through, so the
+   background layers it over canvas as one opaque surface. */
 .uw-search__field {
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
-  background: var(--fg08);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background:
+    linear-gradient(var(--fg08), var(--fg08)),
+    var(--canvas);
   border: var(--stroke-hairline) solid transparent;
   border-radius: var(--radius-pill);
   padding: 0 var(--spacing-md);
   min-height: var(--size-touch);
   margin-bottom: var(--spacing-sm);
+}
+
+/* Rows sliding under the pinned field must not peek through the gap
+   below it — the screen's spacing-md row gap plus the field's own
+   spacing-sm margin. A canvas-colored plug keeps the illusion. */
+.uw-search__field::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: calc(var(--spacing-md) + var(--spacing-sm));
+  background: var(--canvas);
 }
 
 .uw-search__field:focus-within {
@@ -944,6 +990,12 @@
 
 .uw-search__input:focus {
   outline: none;
+}
+
+/* Chromium draws its own clear button on type=search next to the
+   app's custom one — hide the native twin. */
+.uw-search__input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
 }
 
 .uw-search__cancel,
@@ -1001,7 +1053,7 @@
 }
 
 .uw-search__recent:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
 }
 
 /* ---- queue ------------------------------------------------------------- */
@@ -1065,7 +1117,7 @@
 
 .uw-collection:hover:not(:disabled) {
   border-color: var(--fg40);
-  background: var(--fg08);
+  background: var(--uw-hover);
 }
 
 .uw-collection__icon {
@@ -1129,7 +1181,7 @@
 }
 
 .uw-chip:hover:not(:disabled):not(.uw-chip--active) {
-  background: var(--fg08);
+  background: var(--uw-hover);
   border-color: var(--fg25);
 }
 
@@ -1139,11 +1191,12 @@
 }
 
 /* Accent-backed pills can't go darker by token — an inset ring is
-   the affordance instead. */
+   the affordance instead. The background must be restated: the shared
+   .uw-pressable hover tint would otherwise repaint the fill. */
 .uw-chip--active:hover:not(:disabled),
-.uw-pill--accent:hover:not(:disabled),
 .uw-playall:hover:not(:disabled),
 .uw-mini__play:hover:not(:disabled) {
+  background: var(--accent-soft);
   box-shadow: inset 0 0 0 var(--stroke-hairline) var(--fg25);
 }
 
@@ -1181,7 +1234,7 @@
 }
 
 .uw-libcard--row:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
 }
 
 .uw-libcard--grid:hover:not(:disabled) .uw-text--body {
@@ -1277,7 +1330,7 @@
 }
 
 .uw-artist:hover:not(:disabled) .uw-artwork {
-  box-shadow: 0 0 0 var(--stroke-progress) var(--fg18);
+  box-shadow: 0 0 0 var(--stroke-progress) var(--accent-soft);
 }
 
 .uw-artist:hover:not(:disabled) .uw-artist__name {
@@ -1319,7 +1372,20 @@
 }
 
 .uw-settings-row:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
+}
+
+/* Armed destructive row — the two-tap confirm keeps the row's slot:
+   warn commit + plain cancel, same headbtn pair as the playlist
+   header. */
+.uw-settings-confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  width: 100%;
+  min-height: var(--size-touch);
+  padding: var(--spacing-xxs) var(--spacing-md);
+  flex-wrap: wrap;
 }
 
 .uw-toggle {
@@ -1387,7 +1453,7 @@
 }
 
 .uw-pill:hover:not(:disabled):not(.uw-pill--accent) {
-  background: var(--fg08);
+  background: var(--uw-hover);
   border-color: var(--fg25);
 }
 
@@ -1396,8 +1462,29 @@
   border-color: transparent;
 }
 
+/* The fill stays accent on hover — the pressable tint must not turn
+   the primary action grey; the inset lift is the affordance. */
 .uw-pill--accent:hover:not(:disabled) {
+  background: var(--accent);
   box-shadow: inset 0 0 0 999px var(--fg18);
+}
+
+/* Disabled filled controls collapse to a quiet surface at full
+   opacity — the dimmed accent fill pinned dark text into the orange
+   and read as painted-over, not disabled. */
+.uw-pill--accent.uw-off,
+.uw-pill--accent:disabled,
+.uw-cta.uw-off,
+.uw-cta:disabled {
+  background: var(--fg18);
+  opacity: 1;
+}
+
+.uw-pill--accent.uw-off .uw-text,
+.uw-pill--accent:disabled .uw-text,
+.uw-cta.uw-off .uw-text,
+.uw-cta:disabled .uw-text {
+  color: var(--text-secondary);
 }
 
 .uw-load-more {
@@ -1412,7 +1499,7 @@
 }
 
 .uw-load-more:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
   border-color: var(--fg25);
 }
 
@@ -1464,7 +1551,7 @@
 }
 
 .uw-headbtn:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
   border-color: var(--fg25);
 }
 
@@ -1523,7 +1610,7 @@
 }
 
 .uw-review__candidate:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
 }
 
 .uw-review__actions {
@@ -1541,7 +1628,7 @@
 }
 
 .uw-review__action:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
   border-color: var(--fg25);
 }
 
@@ -1572,7 +1659,7 @@
 }
 
 .uw-transfer-row:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
 }
 
 .uw-import-preview {
@@ -1624,11 +1711,8 @@
 }
 
 .uw-cta:hover:not(:disabled) {
+  background: var(--accent);
   box-shadow: inset 0 0 0 999px var(--fg18);
-}
-
-.uw-cta:disabled {
-  opacity: 0.5;
 }
 
 /* ---- sheets ----------------------------------------------------------------- */
@@ -1685,7 +1769,7 @@
   border-radius: var(--radius-control);
 }
 .uw-sheet-panel__close:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
 }
 .uw-sheet-row {
   display: flex;
@@ -1708,7 +1792,7 @@
 }
 
 .uw-sheet-row:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
 }
 
 .uw-sheet-row--dashed:hover:not(:disabled) {
@@ -2304,7 +2388,7 @@
 }
 
 .uw-menu-row:hover:not(:disabled) {
-  background: var(--fg08);
+  background: var(--uw-hover);
 }
 
 .uw-stage-scrim {

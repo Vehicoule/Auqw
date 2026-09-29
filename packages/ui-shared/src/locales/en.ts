@@ -424,6 +424,7 @@ export const en = {
   'settings.downloadStorage': 'download storage',
   'settings.artworkCache': 'artwork cache',
   'settings.removeAllDownloads': 'remove all downloads',
+  'settings.confirmAction': 'confirm {action}',
   'settings.localFolders': 'local folders',
   'settings.removeSource': 'remove “{label}”',
   'settings.addLocalFolder': 'add local folder',

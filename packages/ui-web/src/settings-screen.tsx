@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Hairline, Icon, Pressable, Text } from './primitives.tsx';
 import { settingsGroups, t } from '@auqw/ui-shared';
 import type {
@@ -50,6 +50,7 @@ function SettingsRow({
   readonly onSelectRow?: ((key: string) => void) | undefined;
   readonly onToggleRow?: ((key: string) => void) | undefined;
 }) {
+  const [armed, setArmed] = useState(false);
   const interactive =
     row.kind === 'toggle' ? onToggleRow !== undefined : onSelectRow !== undefined;
   // `enabled` is the toggle's checked state (kind 'toggle') and the
@@ -58,6 +59,37 @@ function SettingsRow({
   const off =
     !interactive || (row.kind !== 'toggle' && !row.enabled);
   const label = `${row.label}${row.value === null ? '' : `, ${row.value}`}`;
+  // Destructive rows confirm in place — the playlist delete's two-tap:
+  // the first press arms, the armed slot splits into commit + cancel.
+  const confirms = row.destructive === true && row.kind !== 'toggle';
+  if (armed && interactive) {
+    const confirmLabel = t('settings.confirmAction', { action: row.label });
+    return (
+      <div className="uw-settings-confirm" role="group" aria-label={label}>
+        <Pressable
+          onPress={() => {
+            setArmed(false);
+            onSelectRow?.(row.key);
+          }}
+          ariaLabel={confirmLabel}
+          className="uw-headbtn uw-headbtn--warn"
+        >
+          <Text variant="metadata" color="warn">
+            {confirmLabel}
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() => setArmed(false)}
+          ariaLabel={t('common.cancel')}
+          className="uw-headbtn"
+        >
+          <Text variant="metadata" color="primary">
+            {t('common.cancel')}
+          </Text>
+        </Pressable>
+      </div>
+    );
+  }
   const body = (
     <>
       <Text
@@ -103,7 +135,11 @@ function SettingsRow({
   return (
     <Pressable
       onPress={
-        interactive ? () => onSelectRow?.(row.key) : undefined
+        !interactive
+          ? undefined
+          : confirms
+            ? () => setArmed(true)
+            : () => onSelectRow?.(row.key)
       }
       disabled={off}
       ariaLabel={label}
