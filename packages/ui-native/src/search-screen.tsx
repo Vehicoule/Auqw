@@ -1,18 +1,51 @@
 import { FlatList, ScrollView, TextInput, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Icon, Pressable, Spinner, Text } from './primitives.tsx';
+import type { IconName } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
-import {
-  EmptyState,
-  ErrorState,
-  LoadingState,
-  UnavailableState,
-} from './states.tsx';
+import { EmptyState, StateFor } from './states.tsx';
 import type { SearchStateModel } from '@auqw/ui-shared';
 import {
   useSearchScreenController,
   type SearchScreenHandlers,
 } from '@auqw/ui-shared/controllers';
+
+function IconRow({
+  icon,
+  label,
+  a11yLabel,
+  onPress,
+}: {
+  readonly icon: IconName;
+  readonly label: string;
+  readonly a11yLabel: string;
+  readonly onPress?: (() => void) | undefined;
+}) {
+  const theme = useTheme();
+  return (
+    <Pressable
+      compact
+      onPress={onPress}
+      accessibilityLabel={a11yLabel}
+      style={({ pressed }) => [
+        {
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: theme.spacing.md,
+          minHeight: theme.sizes.touch,
+          paddingHorizontal: theme.spacing.screen,
+          borderRadius: theme.radius.control,
+        },
+        pressed && { backgroundColor: theme.colors.fg08 },
+      ]}
+    >
+      <Icon name={icon} size={14} color={theme.colors.textSecondary} />
+      <Text variant="body" color="primary" numberOfLines={1}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
 
 export type SearchScreenProps = SearchScreenHandlers & {
   readonly state: SearchStateModel;
@@ -156,54 +189,20 @@ export function SearchScreen({
           >
             {view.suggestions.heading}
           </Text>
-          <Pressable
-            compact
+          <IconRow
+            icon="search"
+            label={view.suggestions.commit.label}
+            a11yLabel={view.suggestions.commit.a11yLabel}
             onPress={view.suggestions.commit.onPress}
-            accessibilityLabel={view.suggestions.commit.a11yLabel}
-            style={({ pressed }) => [
-              {
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: theme.spacing.md,
-                minHeight: theme.sizes.touch,
-                paddingHorizontal: theme.spacing.screen,
-                borderRadius: theme.radius.control,
-              },
-              pressed && { backgroundColor: theme.colors.fg08 },
-            ]}
-          >
-            <Icon name="search" size={14} color={theme.colors.textSecondary} />
-            <Text variant="body" color="primary" numberOfLines={1}>
-              {view.suggestions.commit.label}
-            </Text>
-          </Pressable>
+          />
           {view.suggestions.items.map((suggestion) => (
-            <Pressable
+            <IconRow
               key={suggestion.label}
-              compact
+              icon="search"
+              label={suggestion.label}
+              a11yLabel={suggestion.a11yLabel}
               onPress={suggestion.onPress}
-              accessibilityLabel={suggestion.a11yLabel}
-              style={({ pressed }) => [
-                {
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: theme.spacing.md,
-                  minHeight: theme.sizes.touch,
-                  paddingHorizontal: theme.spacing.screen,
-                  borderRadius: theme.radius.control,
-                },
-                pressed && { backgroundColor: theme.colors.fg08 },
-              ]}
-            >
-              <Icon
-                name="search"
-                size={14}
-                color={theme.colors.textSecondary}
-              />
-              <Text variant="body" color="primary" numberOfLines={1}>
-                {suggestion.label}
-              </Text>
-            </Pressable>
+            />
           ))}
         </ScrollView>
       )}
@@ -242,32 +241,13 @@ export function SearchScreen({
               {view.idle.heading}
             </Text>
             {view.idle.items.map((recent) => (
-              <Pressable
+              <IconRow
                 key={recent.label}
-                compact
+                icon="clock"
+                label={recent.label}
+                a11yLabel={recent.a11yLabel}
                 onPress={recent.onPress}
-                accessibilityLabel={recent.a11yLabel}
-                style={({ pressed }) => [
-                  {
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    gap: theme.spacing.md,
-                    minHeight: theme.sizes.touch,
-                    paddingHorizontal: theme.spacing.screen,
-                    borderRadius: theme.radius.control,
-                  },
-                  pressed && { backgroundColor: theme.colors.fg08 },
-                ]}
-              >
-                <Icon
-                  name="clock"
-                  size={14}
-                  color={theme.colors.textSecondary}
-                />
-                <Text variant="body" color="primary" numberOfLines={1}>
-                  {recent.label}
-                </Text>
-              </Pressable>
+              />
             ))}
           </View>
         ) : (
@@ -277,26 +257,7 @@ export function SearchScreen({
             icon={view.idle.icon}
           />
         ))}
-      {view.status?.kind === 'loading' && (
-        <LoadingState title={view.status.title} hint={view.status.hint} />
-      )}
-      {view.status?.kind === 'empty' && (
-        <EmptyState
-          title={view.status.title}
-          hint={view.status.hint}
-          icon={view.status.icon}
-        />
-      )}
-      {view.status?.kind === 'error' && (
-        <ErrorState
-          title={view.status.title}
-          hint={view.status.hint}
-          onRetry={view.status.onRetry}
-        />
-      )}
-      {view.status?.kind === 'unavailable' && (
-        <UnavailableState title={view.status.title} hint={view.status.hint} />
-      )}
+      {view.status !== null && <StateFor view={view.status} />}
       {view.results !== null && (
         <FlatList
           data={view.results.rows}

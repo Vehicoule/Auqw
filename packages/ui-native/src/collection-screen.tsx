@@ -1,6 +1,6 @@
 import { FlatList, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Icon, PillButton, Pressable, Text } from './primitives.tsx';
+import { BackButton, bind, PillButton, Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import type {
@@ -58,18 +58,7 @@ export function CollectionScreen({
           marginBottom: theme.spacing.sm,
         }}
       >
-        <Pressable
-          compact
-          onPress={onBack}
-          accessibilityLabel={t('common.back')}
-          style={{ padding: theme.spacing.xs }}
-        >
-          <Icon
-            name="chevron-left"
-            size={16}
-            color={theme.colors.textSecondary}
-          />
-        </Pressable>
+        <BackButton onPress={onBack} accessibilityLabel={t('common.back')} />
         <Text variant="display" color="bright" style={{ flex: 1 }}>
           {model.title}
         </Text>
@@ -103,19 +92,9 @@ export function CollectionScreen({
             <TrackRow
               row={item.row}
               badge={item.badge}
-              onPress={
-                onPressItem === undefined
-                  ? undefined
-                  : () => onPressItem(item)
-              }
-              onToggleLike={
-                onToggleLike === undefined
-                  ? undefined
-                  : () => onToggleLike(item)
-              }
-              onContext={
-                onContext === undefined ? undefined : () => onContext(item)
-              }
+              onPress={bind(onPressItem, item)}
+              onToggleLike={bind(onToggleLike, item)}
+              onContext={bind(onContext, item)}
             />
           )}
         />

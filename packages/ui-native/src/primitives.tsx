@@ -167,11 +167,11 @@ export function BackButton({
 
 // Curry an optional handler — undefined stays undefined so the control
 // stays honest-inert instead of shipping a dead press.
-export function bind<A>(
-  fn: ((arg: A) => void) | undefined,
-  arg: A,
+export function bind<A extends readonly unknown[]>(
+  fn: ((...args: A) => void) | undefined,
+  ...args: A
 ): (() => void) | undefined {
-  return fn === undefined ? undefined : () => fn(arg);
+  return fn === undefined ? undefined : () => fn(...args);
 }
 
 export type PressableProps = {

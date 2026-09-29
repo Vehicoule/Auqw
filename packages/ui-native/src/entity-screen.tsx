@@ -2,6 +2,7 @@ import { FlatList, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import {
   Artwork,
+  BackButton,
   Icon,
   IconButton,
   PillButton,
@@ -10,7 +11,7 @@ import {
   Text,
 } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
-import { EmptyState, ErrorState, LoadingState } from './states.tsx';
+import { EmptyState, StateFor } from './states.tsx';
 import type { EntityScreenModel } from '@auqw/ui-shared';
 import {
   useEntityScreenController,
@@ -62,7 +63,7 @@ export function EntityScreen({
     onLoadMore,
     onRetry,
   });
-  if (view.kind === 'loading') {
+  if (view.kind !== 'ready') {
     return (
       <View
         style={{
@@ -79,58 +80,12 @@ export function EntityScreen({
             marginBottom: theme.spacing.sm,
           }}
         >
-          <Pressable
-            compact
+          <BackButton
             onPress={onBack}
             accessibilityLabel={view.backA11yLabel}
-            style={{ padding: theme.spacing.xs }}
-          >
-            <Icon
-              name="chevron-left"
-              size={16}
-              color={theme.colors.textSecondary}
-            />
-          </Pressable>
+          />
         </View>
-        <LoadingState title={view.title} />
-      </View>
-    );
-  }
-  if (view.kind === 'error') {
-    return (
-      <View
-        style={{
-          flex: 1,
-          backgroundColor: theme.colors.canvas,
-          paddingTop: topInset + theme.spacing.sm,
-        }}
-      >
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            paddingHorizontal: theme.spacing.lg,
-            marginBottom: theme.spacing.sm,
-          }}
-        >
-          <Pressable
-            compact
-            onPress={onBack}
-            accessibilityLabel={view.backA11yLabel}
-            style={{ padding: theme.spacing.xs }}
-          >
-            <Icon
-              name="chevron-left"
-              size={16}
-              color={theme.colors.textSecondary}
-            />
-          </Pressable>
-        </View>
-        <ErrorState
-          title={view.title}
-          hint={view.hint}
-          onRetry={view.onRetry}
-        />
+        <StateFor view={view} />
       </View>
     );
   }
@@ -149,18 +104,10 @@ export function EntityScreen({
           paddingHorizontal: theme.spacing.lg,
         }}
       >
-        <Pressable
-          compact
+        <BackButton
           onPress={onBack}
           accessibilityLabel={view.backA11yLabel}
-          style={{ padding: theme.spacing.xs }}
-        >
-          <Icon
-            name="chevron-left"
-            size={16}
-            color={theme.colors.textSecondary}
-          />
-        </Pressable>
+        />
       </View>
 
       {/* Hero: centered artwork + title block, then the action pills. */}

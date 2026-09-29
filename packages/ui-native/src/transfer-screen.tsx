@@ -1,6 +1,6 @@
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Icon, PillButton, Pressable, Text } from './primitives.tsx';
+import { BackButton, Icon, PillButton, Pressable, Text } from './primitives.tsx';
 import { ErrorState } from './states.tsx';
 import type { TransferModel } from '@auqw/ui-shared';
 import {
@@ -59,18 +59,10 @@ export function TransferScreen({
           marginBottom: theme.spacing.sm,
         }}
       >
-        <Pressable
-          compact
+        <BackButton
           onPress={onBack}
           accessibilityLabel={view.backA11yLabel}
-          style={{ padding: theme.spacing.xs }}
-        >
-          <Icon
-            name="chevron-left"
-            size={16}
-            color={theme.colors.textSecondary}
-          />
-        </Pressable>
+        />
         <Text variant="display" color="bright" style={{ flex: 1 }}>
           {view.title}
         </Text>

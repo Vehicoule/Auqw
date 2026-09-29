@@ -1,7 +1,7 @@
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Icon, PillButton, Pressable, Text } from './primitives.tsx';
-import { EmptyState, ErrorState, LoadingState } from './states.tsx';
+import { BackButton, Icon, PillButton, Pressable, Text } from './primitives.tsx';
+import { StateFor } from './states.tsx';
 import type { CorrectionsModel } from '@auqw/ui-shared';
 import {
   useCorrectionsScreenController,
@@ -59,18 +59,10 @@ export function CorrectionsScreen({
           marginBottom: theme.spacing.sm,
         }}
       >
-        <Pressable
-          compact
+        <BackButton
           onPress={onBack}
           accessibilityLabel={view.backA11yLabel}
-          style={{ padding: theme.spacing.xs }}
-        >
-          <Icon
-            name="chevron-left"
-            size={16}
-            color={theme.colors.textSecondary}
-          />
-        </Pressable>
+        />
         <Text variant="display" color="bright" style={{ flex: 1 }}>
           {view.title}
         </Text>
@@ -110,20 +102,8 @@ export function CorrectionsScreen({
           </Pressable>
         ))}
       </View>
-      {view.body.kind === 'loading' ? (
-        <LoadingState title={view.body.title} />
-      ) : view.body.kind === 'error' ? (
-        <ErrorState
-          title={view.body.title}
-          hint={view.body.hint}
-          onRetry={view.body.onRetry}
-        />
-      ) : view.body.kind === 'empty' ? (
-        <EmptyState
-          title={view.body.title}
-          hint={view.body.hint}
-          icon={view.body.icon}
-        />
+      {view.body.kind !== 'rows' ? (
+        <StateFor view={view.body} />
       ) : (
         <ScrollView
           scrollEnabled={scrollEnabled}
@@ -228,22 +208,13 @@ function ReviewRow({ view }: { readonly view: CorrectionsRowView }) {
           marginTop: theme.spacing.xs,
         }}
       >
-        {view.action.kind === 'reject' ? (
-          <PillButton
-            label={view.action.label}
-            tone="warn"
-            minHeight={26}
-            onPress={view.action.onPress}
-            accessibilityLabel={view.action.a11yLabel}
-          />
-        ) : (
-          <PillButton
-            label={view.action.label}
-            minHeight={26}
-            onPress={view.action.onPress}
-            accessibilityLabel={view.action.a11yLabel}
-          />
-        )}
+        <PillButton
+          label={view.action.label}
+          tone={view.action.kind === 'reject' ? 'warn' : 'outline'}
+          minHeight={26}
+          onPress={view.action.onPress}
+          accessibilityLabel={view.action.a11yLabel}
+        />
       </View>
     </View>
   );
