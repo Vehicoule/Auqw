@@ -38,7 +38,7 @@ import { createDesktopConnectivity } from './connectivity.ts';
 import { createLocalPlayback } from './local-playback.ts';
 import { createDesktopTagReader } from './tag-reader.ts';
 import { createDesktopTransfer } from './transfer-port.ts';
-import type { MediaSourceLike, MseFactories } from './mse-source.ts';
+import { browserMse } from './mse-source.ts';
 import {
   createPluginProvider,
   manifestCapabilities,
@@ -165,26 +165,6 @@ function repairedSettings(
     }
   }
   return changed ? next : null;
-}
-
-/**
- * The MSE factories a real browser context supplies — `MediaSource`
- * plus blob object URLs. Absent under Node/tests the web player keeps
- * only the serve-url leg.
- */
-function browserMse(): MseFactories | null {
-  return typeof MediaSource === 'function'
-    ? {
-        // The DOM types are wider than the portable interface
-        // (BufferSource vs Uint8Array) — narrow them here.
-        createSource: () =>
-          new MediaSource() as unknown as MediaSourceLike,
-        createObjectURL: (source: unknown) =>
-          URL.createObjectURL(source as MediaSource),
-        revokeObjectURL: (url: string) => URL.revokeObjectURL(url),
-        isTypeSupported: (mime: string) => MediaSource.isTypeSupported(mime),
-      }
-    : null;
 }
 
 export type SessionController = {

@@ -1,6 +1,7 @@
 import type { PlaybackIdentity, PlayerEvent } from '@auqw/application';
 import { createWebPlayerPort } from './web-player.ts';
-import type { MediaSourceLike } from './mse-source.ts';
+import type { MediaSessionLike } from './web-player.ts';
+import { browserMse } from './mse-source.ts';
 
 function field(term: string, value: string): void {
   const list = document.getElementById('status');
@@ -86,29 +87,10 @@ async function boot(): Promise<void> {
   const player = createWebPlayerPort({
     stream: window.auqw.stream,
     audio,
-    mse:
-      typeof MediaSource === 'function'
-        ? {
-            // The DOM types are wider than the portable interface
-            // (BufferSource vs Uint8Array) — narrow them here.
-            createSource: () =>
-              new MediaSource() as unknown as MediaSourceLike,
-            createObjectURL: (source: unknown) =>
-              URL.createObjectURL(source as MediaSource),
-            revokeObjectURL: (url: string) => URL.revokeObjectURL(url),
-            isTypeSupported: (mime: string) =>
-              MediaSource.isTypeSupported(mime),
-          }
-        : null,
+    mse: browserMse(),
     mediaSession:
       'mediaSession' in navigator
-        ? (navigator.mediaSession as {
-            playbackState: string;
-            setActionHandler(
-              action: 'play' | 'pause' | 'nexttrack' | 'previoustrack',
-              handler: (() => void) | null,
-            ): void;
-          })
+        ? (navigator.mediaSession as MediaSessionLike)
         : null,
   });
 
@@ -129,6 +111,8 @@ async function boot(): Promise<void> {
    * after the last settles, unmatched outcomes are superseded-gen
    * stragglers and get released immediately. */
   let pendingRegistrations = 0;
+  const releaseHandle = (handle: string): Promise<unknown> =>
+    player.release({ handle, identity: liveIdentity });
 
   function applyPrepareOutcome(event: PlayerEvent): void {
     if (event.type !== 'prepare') {
@@ -148,10 +132,7 @@ async function boot(): Promise<void> {
   function drainEarlyPrepares(): void {
     for (const event of earlyPrepares.values()) {
       if (event.type === 'prepare' && event.outcome.type === 'prepared') {
-        void player.release({
-          handle: event.outcome.stream.handle,
-          identity: liveIdentity,
-        });
+        void releaseHandle(event.outcome.stream.handle);
       }
     }
     earlyPrepares.clear();
@@ -181,10 +162,7 @@ async function boot(): Promise<void> {
           if (pendingRegistrations > 0) {
             earlyPrepares.set(event.requestId, event);
           } else {
-            void player.release({
-              handle: event.outcome.stream.handle,
-              identity: liveIdentity,
-            });
+            void releaseHandle(event.outcome.stream.handle);
           }
         }
         return;
@@ -260,10 +238,7 @@ async function boot(): Promise<void> {
       if (replacedHandle !== null) {
         void (async () => {
           await player.stop(liveIdentity);
-          await player.release({
-            handle: replacedHandle,
-            identity: liveIdentity,
-          });
+          await releaseHandle(replacedHandle);
         })();
       }
       drainEarlyPrepares();
@@ -280,10 +255,7 @@ async function boot(): Promise<void> {
             mime: mimeFor(ref),
           });
           if (gen !== prepSeq) {
-            void player.release({
-              handle: stream.handle,
-              identity: liveIdentity,
-            });
+            void releaseHandle(stream.handle);
             return;
           }
           liveIdentity = { ...liveIdentity, attemptId: `boot-${gen}` };
@@ -390,7 +362,7 @@ async function boot(): Promise<void> {
       // Stop only detaches the element — the stream session still owns
       // the handle; release it so the pump + partial cache are reaped.
       if (handle !== null) {
-        await player.release({ handle, identity: liveIdentity });
+        await releaseHandle(handle);
       }
       // A newer prepare may have landed while we awaited — its state
       // belongs to the new generation, not to this stop.

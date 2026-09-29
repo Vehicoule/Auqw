@@ -52,6 +52,26 @@ export type MseFactories = {
   readonly revokeObjectURL: (url: string) => void;
 };
 
+/**
+ * The MSE factories a real browser context supplies — `MediaSource`
+ * plus blob object URLs. Absent under Node/tests the web player keeps
+ * only the serve-url leg.
+ */
+export function browserMse(): MseFactories | null {
+  return typeof MediaSource === 'function'
+    ? {
+        // The DOM types are wider than the portable interface
+        // (BufferSource vs Uint8Array) — narrow them here.
+        createSource: () =>
+          new MediaSource() as unknown as MediaSourceLike,
+        createObjectURL: (source: unknown) =>
+          URL.createObjectURL(source as MediaSource),
+        revokeObjectURL: (url: string) => URL.revokeObjectURL(url),
+        isTypeSupported: (mime: string) => MediaSource.isTypeSupported(mime),
+      }
+    : null;
+}
+
 /** Rejects `attach` with this name → caller takes the serve-url path. */
 export class MseUnsupported extends Error {
   constructor(message: string) {
