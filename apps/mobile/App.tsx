@@ -1628,7 +1628,7 @@ function Main({
               console.log(
                 res.ok
                   ? '[journey] radio seeded'
-                  : `[journey] radio seed failed: ${res.error.kind} — ${res.error.message}`,
+                  : `[journey] radio seed failed: ${res.error.kind}`,
               );
             });
           }
@@ -1677,7 +1677,9 @@ function Main({
           if (params.has('list')) {
             void s.listMatchReviews({ status: 'all' }).then((listed) => {
               if (!listed.ok) {
-                console.log('[journey] review list failed:', listed.error);
+                console.log(
+                  `[journey] review list failed: ${listed.error.kind}`,
+                );
                 return;
               }
               for (const review of listed.value) {
