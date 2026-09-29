@@ -45,7 +45,8 @@ export type DownloadChip =
   | 'queued'
   | 'downloading'
   | 'stored'
-  | 'failed';
+  | 'failed'
+  | 'removing';
 
 export type TrackRowModel = {
   readonly key: string;
@@ -1390,6 +1391,36 @@ export function toLibraryModel(input: {
     });
   }
 
+  // One ledger rule across surfaces: every kept record counts — the
+  // collections tile, the page rows, and the settings badge agree.
+  // 'removing' rows are already leaving and count nowhere.
+  const downloadRows: CollectionRowModel[] = (input.downloads ?? [])
+    .filter((d) => d.state !== 'removing')
+    .sort((a, b) =>
+      // Stored rows first, then in-flight, then failed; stable by
+      // recordingId inside a state.
+      chipRank(a.state) - chipRank(b.state) ||
+      a.recordingId.localeCompare(b.recordingId),
+    )
+    .flatMap((d) => {
+      const recording = byId.get(d.recordingId);
+      if (recording === undefined) {
+        return [];
+      }
+      return [
+        {
+          key: `dl-${d.downloadId}`,
+          recordingId: recording.id,
+          badge: downloadBadge(d),
+          row: toTrackRowModel(recording, {
+            key: `dl-${d.downloadId}`,
+            liked: liked.has(recording.id),
+            download: downloadChip(d.state),
+          }),
+        },
+      ];
+    });
+
   return {
     likedCount: items.length,
     items,
@@ -1404,9 +1435,7 @@ export function toLibraryModel(input: {
       {
         key: 'downloads',
         label: t('collection.downloads'),
-        count: (input.downloads ?? []).filter(
-          (d) => d.state === 'available',
-        ).length,
+        count: downloadRows.length,
         enabled: true,
         note: null,
       },
@@ -1429,32 +1458,7 @@ export function toLibraryModel(input: {
       liked: likedRows,
       top50,
       history,
-      downloads: (input.downloads ?? [])
-        .filter((d) => d.state !== 'removing')
-        .sort((a, b) =>
-          // Stored rows first, then in-flight, then failed; stable by
-          // recordingId inside a state.
-          chipRank(a.state) - chipRank(b.state) ||
-          a.recordingId.localeCompare(b.recordingId),
-        )
-        .flatMap((d) => {
-          const recording = byId.get(d.recordingId);
-          if (recording === undefined) {
-            return [];
-          }
-          return [
-            {
-              key: `dl-${d.downloadId}`,
-              recordingId: recording.id,
-              badge: downloadBadge(d),
-              row: toTrackRowModel(recording, {
-                key: `dl-${d.downloadId}`,
-                liked: liked.has(recording.id),
-                download: downloadChip(d.state),
-              }),
-            },
-          ];
-        }),
+      downloads: downloadRows,
     },
     cards,
     artists: [...rail.values()],
@@ -1470,7 +1474,7 @@ export function toCollectionModel(
   return { key, title: t(`collection.${key}`), rows: model.collectionRows[key] };
 }
 
-function downloadChip(state: DownloadProgress['state']): DownloadChip {
+export function downloadChip(state: DownloadProgress['state']): DownloadChip {
   switch (state) {
     case 'requested':
       return 'queued';
@@ -1478,9 +1482,29 @@ function downloadChip(state: DownloadProgress['state']): DownloadChip {
       return 'downloading';
     case 'available':
       return 'stored';
+    case 'removing':
+      return 'removing';
     default:
       return 'failed';
   }
+}
+
+/** Records shown in the downloads ledger — kept rows, not mid-delete ones. */
+export function downloadLedgerCount(
+  downloads: readonly Pick<DownloadProgress, 'state'>[],
+): number {
+  return downloads.filter((d) => d.state !== 'removing').length;
+}
+
+/**
+ * One chip map for every row surface — built off `list()`, which
+ * still carries 'removing' rows, so a mid-delete row reads busy on
+ * both platforms instead of failed-or-hidden.
+ */
+export function downloadChipsByRecording(
+  downloads: readonly DownloadProgress[],
+): ReadonlyMap<string, DownloadChip> {
+  return new Map(downloads.map((d) => [d.recordingId, downloadChip(d.state)]));
 }
 
 function chipRank(state: DownloadProgress['state']): number {

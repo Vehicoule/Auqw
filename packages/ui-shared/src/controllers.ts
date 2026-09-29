@@ -1432,7 +1432,7 @@ export function useStageMode(
 }
 
 export type DownloadButtonView = {
-  readonly icon: 'check' | 'warn' | 'download';
+  readonly icon: 'check' | 'warn' | 'download' | 'spinner';
   readonly stored: boolean;
   readonly failed: boolean;
   readonly busy: boolean;
@@ -1451,19 +1451,26 @@ export function downloadButtonView(
         ? 'check'
         : download === 'failed'
           ? 'warn'
-          : 'download',
+          : download === 'removing'
+            ? 'spinner'
+            : 'download',
     stored: download === 'stored',
     failed: download === 'failed',
-    busy: download === 'queued' || download === 'downloading',
+    busy:
+      download === 'queued' ||
+      download === 'downloading' ||
+      download === 'removing',
     a11yLabel:
       download === 'stored'
         ? t('stage.download.storedA11y')
         : download === 'failed'
           ? t('stage.download.failedA11y')
-          : download === 'queued' || download === 'downloading'
+          : download === 'queued' ||
+              download === 'downloading' ||
+              download === 'removing'
             ? t('stage.download.busyA11y')
             : t('stage.download.idleA11y'),
-    onPress: onDownload,
+    onPress: download === 'removing' ? undefined : onDownload,
   };
 }
 

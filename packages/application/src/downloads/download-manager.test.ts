@@ -991,6 +991,135 @@ async function subscribeThrowDegrades(): Promise<void> {
   );
 }
 
+/**
+ * The read surfaces agree on what counts: a kept failed row is on
+ * `list()`, `recordFor()`, and `records()` — mid-delete 'removing'
+ * rows stay on `list()` (a UI can read them busy) while the dedupe
+ * probes already treat them as gone.
+ */
+async function ledgerReadRules(): Promise<void> {
+  const r = rig({ mintError: 'expired' });
+  await r.manager.init([], r.signal);
+  const req = await r.manager.request(
+    { recordingId: 'rec-1', sourceRef: ref('t1') },
+    r.signal,
+  );
+  assert(req.ok);
+  await drain(200);
+  assertEqual(r.manager.recordFor('rec-1')?.state, 'failed_with_retry');
+  assert(
+    r.manager.list().some((d) => d.state === 'failed_with_retry'),
+    'list() keeps failed rows',
+  );
+  assert(
+    r.manager.records().some((d) => d.state === 'failed_with_retry'),
+    'records() keeps failed rows',
+  );
+  // Gate the file delete so the row sits in 'removing' mid-remove.
+  let releaseRemove: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    releaseRemove = resolve;
+  });
+  const innerRemove = r.transfer.removeFile.bind(r.transfer);
+  r.transfer.removeFile = async (name, signal) => {
+    await gate;
+    return innerRemove(name, signal);
+  };
+  const removal = r.manager.remove(req.value.downloadId, r.signal);
+  await drain(100);
+  assertEqual(
+    r.manager.list().find((d) => d.downloadId === req.value.downloadId)
+      ?.state,
+    'removing',
+    'list() still shows the leaving row',
+  );
+  assertEqual(
+    r.manager.recordFor('rec-1'),
+    null,
+    'recordFor hides the leaving row',
+  );
+  assert(
+    !r.manager
+      .records()
+      .some((d) => d.downloadId === req.value.downloadId),
+    'records() hides the leaving row',
+  );
+  releaseRemove();
+  const done = await removal;
+  assert(done.ok);
+  assertEqual(r.manager.list().length, 0, 'row gone once settled');
+}
+
+/**
+ * retry() clears the stored `error` — the UI surfaces that error on
+ * tap, so a stale 'why' must not outlive the retry it triggered.
+ */
+async function retryClearsStoredError(): Promise<void> {
+  const r = rig();
+  r.transfer.enqueueSink({
+    writeError: appError('storage-full', 'no space'),
+    failWritesAfter: 0,
+  });
+  await r.manager.init([], r.signal);
+  const req = await r.manager.request(
+    { recordingId: 'rec-1', sourceRef: ref('t1') },
+    r.signal,
+  );
+  assert(req.ok);
+  await drain(200);
+  const failed = r.manager.recordFor('rec-1');
+  assertEqual(failed?.state, 'failed_with_retry');
+  assertEqual(failed?.error?.kind, 'storage-full', 'why kept on the row');
+  const retried = await r.manager.retry(req.value.downloadId);
+  assert(retried.ok, 'retry ok');
+  const pending = r.manager.recordFor('rec-1');
+  assert(pending?.state !== 'failed_with_retry', 'out of failed');
+  assertEqual(pending?.error, null, 'error cleared by retry');
+  await drain(200);
+  const done = r.manager.recordFor('rec-1');
+  assertEqual(done?.state, 'available', 'retry completes');
+  assertEqual(done?.error, null);
+}
+
+/**
+ * Settings "remove all" deletes exactly the rows the badge counts:
+ * every kept row (stored AND failed), not just stored ones.
+ */
+async function removeAllTakesKeptRows(): Promise<void> {
+  const stored = row({
+    downloadId: 'dl-ok',
+    recordingId: 'rec-1',
+    filePath: 'dl-ok',
+    state: 'available',
+    bytes: 10,
+    committedOffset: 10,
+    downloadedMs: 1,
+  });
+  const failed = row({
+    downloadId: 'dl-fl',
+    recordingId: 'rec-2',
+    filePath: 'dl-fl',
+    state: 'failed_with_retry',
+    error: { kind: 'transient', message: 'offline' },
+  });
+  const r = rig({ downloads: [stored, failed] });
+  r.transfer.statResults.set('dl-ok', { exists: true, bytes: 10 });
+  await r.manager.init([stored, failed], r.signal);
+  await drain(200);
+  assertEqual(r.manager.list().length, 2, 'kept rows loaded');
+  const removed = await r.manager.removeAll(r.signal);
+  assert(removed.ok);
+  assertEqual(r.manager.list().length, 0, 'every kept row deleted');
+  assert(
+    r.transfer.removedFiles.includes('dl-ok'),
+    'stored file removed',
+  );
+  assert(
+    r.transfer.removedFiles.includes('dl-fl'),
+    'failed file removed',
+  );
+}
+
 export async function run(): Promise<void> {
   await happyPath();
   await dedupeSameMapping();
@@ -1015,4 +1144,7 @@ export async function run(): Promise<void> {
   await meteredEdgePausesActive();
   await meteredTogglePausesActive();
   await subscribeThrowDegrades();
+  await ledgerReadRules();
+  await retryClearsStoredError();
+  await removeAllTakesKeptRows();
 }

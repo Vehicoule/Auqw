@@ -232,7 +232,9 @@ export function TrackRow({
                   ? 'check'
                   : row.download === 'failed'
                     ? 'warn'
-                    : 'download'
+                    : row.download === 'removing'
+                      ? 'spinner'
+                      : 'download'
               }
               size={13}
               color={

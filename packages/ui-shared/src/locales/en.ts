@@ -89,6 +89,7 @@ export const en = {
   'track.download.downloading': 'downloading',
   'track.download.stored': 'stored',
   'track.download.failed': 'failed',
+  'track.download.removing': 'removing',
   'track.download.tooltip': 'download {state}',
   'track.unknown': 'unknown track',
   'track.fallbackTitle': 'track',

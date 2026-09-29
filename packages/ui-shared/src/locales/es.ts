@@ -90,6 +90,7 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'track.download.downloading': 'descargando',
   'track.download.stored': 'guardada',
   'track.download.failed': 'falló',
+  'track.download.removing': 'eliminando',
   'track.download.tooltip': 'descarga {state}',
   'track.unknown': 'pista desconocida',
   'track.fallbackTitle': 'pista',

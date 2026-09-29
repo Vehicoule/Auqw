@@ -90,6 +90,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'track.download.downloading': '下载中',
   'track.download.stored': '已存储',
   'track.download.failed': '失败',
+  'track.download.removing': '移除中',
   'track.download.tooltip': '下载{state}',
   'track.unknown': '未知曲目',
   'track.fallbackTitle': '曲目',
