@@ -1,5 +1,5 @@
 import { appError, err } from '@auqw/application';
-import { shellError } from '../shared/errors.ts';
+import { isShellError, shellError } from '../shared/errors.ts';
 import { isRecord } from '../shared/check.ts';
 import type { UtilityResponse } from './envelope.ts';
 import { createStreamPump, type PumpPort } from './bytes.ts';
@@ -161,6 +161,27 @@ if (port === null) {
       }
       return url;
     },
+  });
+  // Warm the plugin directory scan + wasm load at boot — otherwise the
+  // laziness rides the user's first `stream.prepare`. The warm waits for
+  // the startup bind to settle first: constructing while it pends reads
+  // a null provider URL, and a failed bind + shared-pending retry could
+  // leave the warm's host providerless with nothing left to re-kick the
+  // read. After settlement the construction read behaves exactly like a
+  // first click — success hands the URL over, failure kicks `potRetry`,
+  // whose success pushes the port into the live host. Fire-and-forget:
+  // a rejection clears the memoized promise (`ready` resets on
+  // failure), so the real prepare retries and surfaces its own typed
+  // failure; only the log line lands here, and raw rejections can
+  // carry fs paths, so only the ShellError's safe text is printed.
+  void potBound.then(() => runtime.pluginsReady()).catch((thrown: unknown) => {
+    console.warn(
+      `[auqw] plugin warm failed: ${
+        isShellError(thrown)
+          ? `${thrown.kind}: ${thrown.message}`
+          : 'unexpected failure'
+      }`,
+    );
   });
   // The database path arrives from main in the fork environment —
   // `AUQW_DB_PATH` points under userData; the service opens lazily on
