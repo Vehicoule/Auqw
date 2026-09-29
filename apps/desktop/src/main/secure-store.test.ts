@@ -83,6 +83,39 @@ export async function run(): Promise<void> {
     // Corrupt content surfaces typed errors.
     writeFileSync(join(dir, 'secure', 'bad.b64'), '\u0000\u0001!!!', 'utf8');
     await assertThrowsKind(store.get('bad'), 'corrupt-state');
+    // Corrupt entries stay uncached — a repaired file isn't pinned to
+    // a memoized failure.
+    await assertThrowsKind(store.get('bad'), 'corrupt-state');
+
+    // Decrypts cache per key for the process's life: each decryptString
+    // can fire a macOS Keychain ACL prompt, so repeated reads of one
+    // record must not re-prompt.
+    let decrypts = 0;
+    const countingStorage: SafeStorageLike = {
+      isEncryptionAvailable: () => true,
+      encryptString: (plain) => Buffer.from(`enc:${plain}`),
+      decryptString: (encrypted) => {
+        decrypts += 1;
+        return Buffer.from(encrypted).toString('utf8').slice(4);
+      },
+    };
+    const cdir = join(dir, 'cached');
+    const first = createSecureStore({ dir: cdir, safeStorage: countingStorage });
+    await first.set('k', 'v1');
+    assertEqual(await first.get('k'), 'v1');
+    assertEqual(await first.get('k'), 'v1');
+    assertEqual(decrypts, 0, 'a set primes the cache without decrypting');
+    // A fresh instance (the next boot) decrypts the file once, then
+    // serves every read from memory.
+    const second = createSecureStore({ dir: cdir, safeStorage: countingStorage });
+    assertEqual(await second.get('k'), 'v1');
+    assertEqual(await second.get('k'), 'v1');
+    assertEqual(decrypts, 1, 'one decrypt per key per process');
+    await second.set('k', 'v2');
+    assertEqual(await second.get('k'), 'v2');
+    await second.delete('k');
+    assertEqual(await second.get('k'), null, 'delete clears the cache');
+    assertEqual(decrypts, 1, 'set/delete never re-decrypt');
 
     // No encryption backend → every operation fails 'unavailable' and
     // nothing is written in plaintext.

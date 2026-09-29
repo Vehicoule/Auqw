@@ -30,6 +30,13 @@ export function createSecureStore(opts: {
 }): SecureStore {
   const { dir, safeStorage } = opts;
   let stagingSeq = 0;
+  // One decrypt per key per process: every safeStorage.decryptString
+  // touches the OS secret backend, and on macOS an entry whose Keychain
+  // ACL doesn't yet trust the app prompts PER CALL — caching the
+  // resolved value bounds the prompt count to the number of records,
+  // once, instead of once per read. These files only change through
+  // this store, so the cache can't diverge from disk in-process.
+  const cache = new Map<string, string | null>();
 
   function fileFor(key: string): string {
     return join(dir, `${key}.b64`);
@@ -47,11 +54,15 @@ export function createSecureStore(opts: {
   return {
     async get(key) {
       requireEncryption();
+      if (cache.has(key)) {
+        return cache.get(key) ?? null;
+      }
       let text: string;
       try {
         text = await readFile(fileFor(key), 'utf8');
       } catch (thrown) {
         if (errorCode(thrown) === 'ENOENT') {
+          cache.set(key, null);
           return null;
         }
         throw shellError('io-error', 'secure entry could not be read');
@@ -63,8 +74,12 @@ export function createSecureStore(opts: {
         throw shellError('corrupt-state', 'secure entry is not base64');
       }
       try {
-        return safeStorage.decryptString(decoded);
+        const value = safeStorage.decryptString(decoded);
+        cache.set(key, value);
+        return value;
       } catch {
+        // Corrupt entries stay uncached — a backend that recovers
+        // (or a file a rewrite repairs) is retried, not memoized.
         throw shellError('corrupt-state', 'secure entry failed to decrypt');
       }
     },
@@ -88,6 +103,7 @@ export function createSecureStore(opts: {
         await unlink(staging).catch(() => undefined);
         throw shellError('io-error', 'secure entry could not be written');
       }
+      cache.set(key, value);
     },
 
     async delete(key) {
@@ -99,6 +115,7 @@ export function createSecureStore(opts: {
           throw shellError('io-error', 'secure entry could not be removed');
         }
       }
+      cache.set(key, null);
     },
   };
 }
