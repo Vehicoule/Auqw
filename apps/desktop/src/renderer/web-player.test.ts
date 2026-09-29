@@ -647,7 +647,7 @@ export async function run(): Promise<void> {
   // reports the same 'cancelled' outcome the minted path does.
   {
     const stream = fakeStream();
-    let resolveNow: ((uri: string | null) => void) | null = null;
+    let resolveNow: (uri: string | null) => void = () => undefined;
     const player = createWebPlayerPort({
       stream,
       audio: fakeAudio(),
@@ -668,7 +668,7 @@ export async function run(): Promise<void> {
       identity,
     });
     assert(cancelled.ok, 'cancel during resolve resolves');
-    resolveNow?.('file:///real/pending.flac');
+    resolveNow('file:///real/pending.flac');
     await settle();
     const prepared = events.find((e) => e.type === 'prepare');
     assert(

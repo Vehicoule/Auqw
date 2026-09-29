@@ -704,11 +704,6 @@ export function createWebPlayerPort(deps: {
       // never resolved would leave its pump lease running.
       pendingAttaches.get(gen)?.abort();
       pendingAttaches.delete(gen);
-      // A minted-but-never-attached handle is ours to reap — repeated
-      // leaks would cap the registry.
-      if (handle !== undefined) {
-        releaseMinted(handle);
-      }
       // A stale op's rejection must not label the live attempt — its
       // outcome belongs to the op the session already replaced.
       // Ownership is the handle match once this op set `current` (our
@@ -719,8 +714,29 @@ export function createWebPlayerPort(deps: {
         (attached
           ? current !== null && current.handle === handle
           : projection === p);
+      // A minted-but-never-attached handle is ours to reap — repeated
+      // leaks would cap the registry. For a local mint whose `current`
+      // was already set, reaping alone would leave a live `lf-*`
+      // pointer: a later element error would probe the dead handle on
+      // the seam as `released`. Tear the element down here and report
+      // 'unavailable' — the file exists but can't play, never the
+      // retryable 'internal' a DOM rejection reads as.
+      const failedLocal =
+        handle !== undefined && localHandles.has(handle);
+      if (handle !== undefined) {
+        releaseMinted(handle);
+        if (failedLocal && current !== null && current.handle === handle) {
+          audio.src = '';
+          current = null;
+        }
+      }
       if (stillMine) {
-        status('failed', toError(thrown));
+        status(
+          'failed',
+          failedLocal
+            ? appError('unavailable', 'local file not playable')
+            : toError(thrown),
+        );
       }
     }
   }
