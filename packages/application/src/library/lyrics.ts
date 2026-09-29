@@ -88,8 +88,12 @@ export function applyAcceptance(
   if (result.kind === 'unavailable') {
     return result;
   }
+  const unavailable: LyricsResult = {
+    kind: 'unavailable',
+    matched: result.matched,
+  };
   if (drifted(result.matched, context.durationMs)) {
-    return { kind: 'unavailable', matched: result.matched };
+    return unavailable;
   }
   switch (result.kind) {
     case 'instrumental':
@@ -97,9 +101,7 @@ export function applyAcceptance(
       // honored as reported.
       return result;
     case 'plain':
-      return hasText(result.text)
-        ? result
-        : { kind: 'unavailable', matched: result.matched };
+      return hasText(result.text) ? result : unavailable;
     case 'synced': {
       if (isValidSyncedLines(result.lines)) {
         return result;
@@ -107,7 +109,7 @@ export function applyAcceptance(
       const text = joinedText(result.lines);
       return hasText(text)
         ? { kind: 'plain', text, matched: result.matched }
-        : { kind: 'unavailable', matched: result.matched };
+        : unavailable;
     }
   }
 }
@@ -235,48 +237,40 @@ export function lyricsCacheEntry(
   accepted: LyricsResult,
   fetchedMs: number,
 ): LyricsCacheEntry | null {
+  const base = { recordingId, provider, providerVersion, fetchedMs };
   switch (accepted.kind) {
     case 'unavailable':
       return null;
     case 'instrumental':
       return {
-        recordingId,
-        provider,
-        providerVersion,
+        ...base,
         kind: 'plain',
         payload: {
           plainLyrics: null,
           syncedLyrics: null,
           instrumental: true,
         },
-        fetchedMs,
       };
     case 'plain':
       return {
-        recordingId,
-        provider,
-        providerVersion,
+        ...base,
         kind: 'plain',
         payload: {
           plainLyrics: accepted.text,
           syncedLyrics: null,
           instrumental: false,
         },
-        fetchedMs,
       };
     case 'synced': {
       const text = joinedText(accepted.lines);
       return {
-        recordingId,
-        provider,
-        providerVersion,
+        ...base,
         kind: 'synced',
         payload: {
           plainLyrics: hasText(text) ? text : null,
           syncedLyrics: linesToLrc(accepted.lines),
           instrumental: false,
         },
-        fetchedMs,
       };
     }
   }
