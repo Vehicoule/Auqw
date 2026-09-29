@@ -2105,9 +2105,13 @@ export async function createSyncEngine(
       return { dropped, lanes, ordinals };
     }
     for (const [dev, list] of logByDevice) {
-      const floor = Math.min(
-        ...[...peerMarks.values()].map((marks) => marks.get(dev) ?? 0),
-      );
+      // Iterative min: peerMarks is unbounded (one entry per delta
+      // sender) — a spread would throw RangeError past the runtime's
+      // argument limit.
+      let floor = Infinity;
+      for (const marks of peerMarks.values()) {
+        floor = Math.min(floor, marks.get(dev) ?? 0);
+      }
       if (floor <= 0) {
         // A peer that never claimed this device keeps everything.
         continue;
