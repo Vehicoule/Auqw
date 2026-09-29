@@ -110,6 +110,7 @@ import type {
 import {
   advanceTargetId,
   playlistDownloadPlan,
+  reportStoredDownloadError,
   rowActionsModel,
   stageDownloadChip,
 } from './types.ts';
@@ -504,17 +505,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         case 'failed_with_retry':
           // The row kept why it failed — toast that kind before the
           // retry so the tap is never a silent ↓→⚠→↓ loop.
-          if (existing.error !== null) {
-            reportResult(
-              'action.download',
-              err(
-                appError(
-                  appErrorKind(existing.error.kind),
-                  existing.error.message,
-                ),
-              ),
-            );
-          }
+          reportStoredDownloadError(existing.error);
           void controller.downloads
             .retry(existing.downloadId)
             .then((r) => reportResult('action.retryDownload', r));
@@ -1720,12 +1711,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         if (!canPlayMeta(meta)) {
           return;
         }
-        // Only desktop's card press fed the committed query into
-        // search recents — mobile's suggestion cards never did.
-        if (
-          ports.strictHomeCardKeys !== true &&
-          searchState.type === 'content'
-        ) {
+        if (searchState.type === 'content') {
           recordRecentSearch(searchState.query);
         }
         void dispatchPlay('action.playResult', playMeta(meta));
