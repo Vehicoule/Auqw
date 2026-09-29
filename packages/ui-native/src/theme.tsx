@@ -87,3 +87,26 @@ export function useTheme(): Theme {
   }
   return theme;
 }
+
+/**
+ * A dark scope on a stable boundary — `on` flips the provided value
+ * (the dark scheme carrying the enclosing scale/motion), never the
+ * provider's presence, so a subtree under a conditional dark scope
+ * doesn't remount when the scope toggles.
+ */
+export function DarkThemeScope({
+  on,
+  children,
+}: {
+  readonly on: boolean;
+  readonly children: ReactNode;
+}) {
+  const outer = useTheme();
+  const value = useMemo<Theme>(
+    () => (on ? { ...outer, scheme: 'dark', colors: schemes.dark } : outer),
+    [on, outer],
+  );
+  return (
+    <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
+  );
+}

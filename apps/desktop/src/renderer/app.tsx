@@ -703,6 +703,7 @@ function Main({
     playQueueOccurrence,
     onMoveQueueItem,
     onMoveQueueItemTo,
+    removeQueueOccurrence,
     seekToPosition,
     playRecording,
     onResultPress,
@@ -1216,7 +1217,7 @@ function Main({
                   onStartRadio={onStartRadioGated}
                   onStopRadio={onStopRadio}
                   onPressQueueItem={playQueueOccurrence}
-                  onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
+                  onRemoveQueueItem={removeQueueOccurrence}
                   onToggleQueueReorder={toggleReordering}
                   onMoveQueueItem={onMoveQueueItem}
                   onMoveQueueItemTo={onMoveQueueItemTo}
@@ -1230,7 +1231,7 @@ function Main({
                   reordering={reordering}
                   onToggleReorder={toggleReordering}
                   onPressItem={playQueueOccurrence}
-                  onRemoveItem={(id) => void session.removeOccurrence(id)}
+                  onRemoveItem={removeQueueOccurrence}
                   onMoveItem={onMoveQueueItem}
                   onMoveItemTo={onMoveQueueItemTo}
                 />

@@ -1903,6 +1903,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [session],
   );
 
+  const removeQueueOccurrence = useCallback(
+    (occurrenceId: string) => void session.removeOccurrence(occurrenceId),
+    [session],
+  );
+
   // ---- lyrics (Stage lyrics mode — live read, cancel superseded) --
 
   const fetchLyrics = useCallback(
@@ -3039,6 +3044,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     playQueueOccurrence,
     onMoveQueueItem,
     onMoveQueueItemTo,
+    removeQueueOccurrence,
     seekToPosition,
     canPlay,
     playRecording,

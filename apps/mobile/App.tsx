@@ -838,6 +838,7 @@ function Main({
     playQueueOccurrence,
     onMoveQueueItem,
     onMoveQueueItemTo,
+    removeQueueOccurrence,
     seekToPosition,
     canPlay,
     playRecording,
@@ -2322,7 +2323,7 @@ function Main({
               onStartRadio={onStartRadioGated}
               onStopRadio={onStopRadio}
               onPressQueueItem={playQueueOccurrence}
-              onRemoveQueueItem={(id) => void session.removeOccurrence(id)}
+              onRemoveQueueItem={removeQueueOccurrence}
               onToggleQueueReorder={toggleReordering}
               onMoveQueueItem={onMoveQueueItem}
               onMoveQueueItemTo={onMoveQueueItemTo}
