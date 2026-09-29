@@ -10,8 +10,25 @@ import {
 } from './primitives.tsx';
 import { formatClock, t } from '@auqw/ui-shared';
 import type { TrackRowModel } from '@auqw/ui-shared';
+import type { IconName } from './primitives.tsx';
 
 const DRAG_HANDLE_SLOP = { top: 8, bottom: 8, left: 10, right: 10 };
+
+function trailIcon(icon: IconName, size: number, color: string, width = 30) {
+  return (
+    <View
+      style={{
+        width,
+        height: 30,
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+      accessible={false}
+    >
+      <Icon name={icon} size={size} color={color} />
+    </View>
+  );
+}
 
 export type TrackRowProps = {
   readonly row: TrackRowModel;
@@ -216,63 +233,27 @@ export function TrackRow({
         </View>
       </Pressable>
       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-        {row.download !== null && (
-          <View
-            style={{
-              width: 26,
-              height: 30,
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-            accessible={false}
-          >
-            <Icon
-              name={
-                row.download === 'stored'
-                  ? 'check'
-                  : row.download === 'failed'
-                    ? 'warn'
-                    : row.download === 'removing'
-                      ? 'spinner'
-                      : 'download'
-              }
-              size={13}
-              color={
-                row.download === 'failed'
-                  ? theme.colors.warn
-                  : row.download === 'stored'
-                    ? theme.colors.accent
-                    : theme.colors.textSecondary
-              }
-            />
-          </View>
-        )}
-        {row.state !== 'available' && (
-          <View
-            style={{
-              width: 30,
-              height: 30,
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-            accessible={false}
-          >
-            <Icon name="warn" size={14} color={theme.colors.warn} />
-          </View>
-        )}
-        {row.liked && onToggleLike === undefined && (
-          <View
-            style={{
-              width: 30,
-              height: 30,
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-            accessible={false}
-          >
-            <Icon name="heart-filled" size={14} color={theme.colors.liked} />
-          </View>
-        )}
+        {row.download !== null &&
+          trailIcon(
+            row.download === 'stored'
+              ? 'check'
+              : row.download === 'failed'
+                ? 'warn'
+                : row.download === 'removing'
+                  ? 'spinner'
+                  : 'download',
+            13,
+            row.download === 'failed'
+              ? theme.colors.warn
+              : row.download === 'stored'
+                ? theme.colors.accent
+                : theme.colors.textSecondary,
+            26,
+          )}
+        {row.state !== 'available' && trailIcon('warn', 14, theme.colors.warn)}
+        {row.liked &&
+          onToggleLike === undefined &&
+          trailIcon('heart-filled', 14, theme.colors.liked)}
         {onToggleLike !== undefined && (
           <IconButton
             icon={row.liked ? 'heart-filled' : 'heart'}
