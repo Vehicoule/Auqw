@@ -166,6 +166,12 @@ function trailing(s: ThrottleState, run: () => void): void {
   };
   const gap = Date.now() - s.last;
   if (gap >= 1_000) {
+    // An immediate run supersedes an armed trailing timer — leaving it
+    // would double-probe inside the interval it was meant to cover.
+    if (s.timer !== null) {
+      clearTimeout(s.timer);
+      s.timer = null;
+    }
     exec();
     return;
   }
