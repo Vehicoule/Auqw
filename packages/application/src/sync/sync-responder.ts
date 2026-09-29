@@ -322,29 +322,22 @@ function createPairingStore(opts: {
 
 type WireMsg = { readonly t: string };
 
-function isWireMsg(value: unknown): value is WireMsg {
-  return isRecord(value) && isString(value['t'], 32);
-}
+const isWireMsg = (value: unknown): value is WireMsg =>
+  isRecord(value) && isString(value['t'], 32);
 
-function isPairMsg(
+const isPairMsg = (
   value: unknown,
-): value is { t: 'pair'; code: string } {
-  return (
-    isRecord(value) &&
-    hasExactKeys(value, ['t', 'code']) &&
-    value['t'] === 'pair' &&
-    typeof value['code'] === 'string' &&
-    PAIR_CODE_PATTERN.test(value['code'])
-  );
-}
+): value is { t: 'pair'; code: string } =>
+  isRecord(value) &&
+  hasExactKeys(value, ['t', 'code']) &&
+  value['t'] === 'pair' &&
+  typeof value['code'] === 'string' &&
+  PAIR_CODE_PATTERN.test(value['code']);
 
-function isResumeMsg(value: unknown): value is { t: 'resume' } {
-  return (
-    isRecord(value) &&
-    hasExactKeys(value, ['t']) &&
-    value['t'] === 'resume'
-  );
-}
+const isResumeMsg = (value: unknown): value is { t: 'resume' } =>
+  isRecord(value) &&
+  hasExactKeys(value, ['t']) &&
+  value['t'] === 'resume';
 
 /** Remote-IP the attempt budgets key on — IPv6-wrapped v4 unwrapped. */
 export function normalizeSyncIp(ip: string): string {

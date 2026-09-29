@@ -335,23 +335,14 @@ export type NoiseSuite = {
 };
 
 export function createNoiseSuite(primitives: NoisePrimitives): NoiseSuite {
-  /**
-   * HKDF-SHA256 over the three DH outputs → the 64-byte directional
-   * key block both handshake halves derive (client seals with the
-   * first half, responder with the second).
-   */
+  /** HKDF-SHA256 over the three DHs → 64 bytes of directional key. */
   function sessionKeys(
     dh1: Uint8Array,
     dh2: Uint8Array,
     dh3: Uint8Array,
     salt: Uint8Array,
   ): Uint8Array {
-    return primitives.hkdf(
-      concatBytes(dh1, dh2, dh3),
-      salt,
-      HKDF_INFO,
-      64,
-    );
+    return primitives.hkdf(concatBytes(dh1, dh2, dh3), salt, HKDF_INFO, 64);
   }
 
   function fingerprintOf(pubSpkiB64: string): string {
