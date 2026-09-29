@@ -1,6 +1,12 @@
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Hairline, Icon, Pressable, Text } from './primitives.tsx';
+import {
+  bind,
+  Hairline,
+  Icon,
+  Pressable,
+  Text,
+} from './primitives.tsx';
 import { settingsGroups, t } from '@auqw/ui-shared';
 import type { SettingsModel, SettingsRowModel } from '@auqw/ui-shared';
 
@@ -56,25 +62,18 @@ function SettingsRow({
   readonly onToggleRow?: ((key: string) => void) | undefined;
 }) {
   const theme = useTheme();
-  const interactive =
-    row.kind === 'toggle' ? onToggleRow !== undefined : onSelectRow !== undefined;
   // `enabled` is the toggle's checked state (kind 'toggle') and the
   // disabled flag on every other kind — an off navigation/value row
   // renders visibly inert, never a live control that dead-presses.
-  const off =
-    !interactive || (row.kind !== 'toggle' && !row.enabled);
+  // A missing handler already reads as disabled inside Pressable.
   return (
     <Pressable
       onPress={
         row.kind === 'toggle'
-          ? onToggleRow === undefined
-            ? undefined
-            : () => onToggleRow(row.key)
-          : onSelectRow === undefined
-            ? undefined
-            : () => onSelectRow(row.key)
+          ? bind(onToggleRow, row.key)
+          : bind(onSelectRow, row.key)
       }
-      disabled={off}
+      disabled={row.kind !== 'toggle' && !row.enabled}
       accessibilityLabel={`${row.label}${row.value === null ? '' : `, ${row.value}`}`}
       accessibilityRole={row.kind === 'toggle' ? 'switch' : 'button'}
       accessibilityState={row.kind === 'toggle' ? { checked: row.enabled } : undefined}
@@ -245,7 +244,6 @@ export function SettingsScreen({
          */}
         <Pressable
           onPress={onOpenCorrections}
-          disabled={onOpenCorrections === undefined}
           accessibilityLabel={t('settings.diag.matchReviews')}
           accessibilityRole="button"
           style={({ pressed }) => [
