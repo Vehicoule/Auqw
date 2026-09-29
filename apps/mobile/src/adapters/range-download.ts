@@ -138,7 +138,7 @@ export async function downloadTo(options: {
           return ok(undefined);
         },
       };
-      return Promise.resolve(ok(sink));
+      return ok(sink);
     },
     sweepPartials: () => Promise.resolve(ok(0)),
     usage: () => Promise.resolve(ok(0)),
@@ -159,6 +159,17 @@ export async function downloadTo(options: {
     if (chunkSignal.cancelled) {
       ctl.abort();
     }
+    // An AbortError with no cancel behind it is a fetch-side abort,
+    // reported as a stall (transient), not a cancel.
+    const abortOrRethrow = (thrown: unknown, label: string): never => {
+      if (
+        !chunkSignal.cancelled &&
+        (thrown as { name?: unknown }).name === 'AbortError'
+      ) {
+        throw new DownloadFailure('transient', label);
+      }
+      throw thrown;
+    };
     try {
       const resp = await fetchImpl(url, {
         headers: init.headers,
@@ -173,16 +184,7 @@ export async function downloadTo(options: {
           } catch (thrown) {
             // A body-phase abort with no cancel behind it is the same
             // fetch-side abort as above — a stall, not a cancel.
-            if (
-              !chunkSignal.cancelled &&
-              (thrown as { name?: unknown }).name === 'AbortError'
-            ) {
-              throw new DownloadFailure(
-                'transient',
-                'chunk body aborted',
-              );
-            }
-            throw thrown;
+            abortOrRethrow(thrown, 'chunk body aborted');
           } finally {
             release();
           }
@@ -190,13 +192,7 @@ export async function downloadTo(options: {
       };
     } catch (thrown) {
       release();
-      if (
-        !chunkSignal.cancelled &&
-        (thrown as { name?: unknown }).name === 'AbortError'
-      ) {
-        throw new DownloadFailure('transient', 'chunk fetch aborted');
-      }
-      throw thrown;
+      abortOrRethrow(thrown, 'chunk fetch aborted');
     }
   };
 

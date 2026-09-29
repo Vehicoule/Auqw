@@ -47,6 +47,9 @@ function cancelled(): Result<never> {
   return err(appError('cancelled', 'cancelled'));
 }
 
+const closedErr = (): Result<never> =>
+  err(appError('invalid-response', 'sink is closed'));
+
 class ExpoTransferSink implements TransferSink {
   readonly #part: File;
   readonly #dest: File;
@@ -77,7 +80,7 @@ class ExpoTransferSink implements TransferSink {
 
   async write(bytes: Uint8Array): Promise<Result<void>> {
     if (this.#closed) {
-      return err(appError('invalid-response', 'sink is closed'));
+      return closedErr();
     }
     try {
       this.handle.writeBytes(bytes);
@@ -89,7 +92,7 @@ class ExpoTransferSink implements TransferSink {
 
   async commit(): Promise<Result<number>> {
     if (this.#closed) {
-      return err(appError('invalid-response', 'sink is closed'));
+      return closedErr();
     }
     try {
       // writeBytes lands synchronously; size is the durable offset.
@@ -129,7 +132,7 @@ class ExpoTransferSink implements TransferSink {
 
   async finalize(expected: string | null): Promise<Result<string>> {
     if (this.#closed) {
-      return err(appError('invalid-response', 'sink is closed'));
+      return closedErr();
     }
     this.#closed = true;
     try {
@@ -177,26 +180,29 @@ export function createExpoTransfer(deps: ExpoTransferDeps = {}): {
     new File(directory, `${name}${PART_SUFFIX}`);
   const fileFor = (name: string): File => new File(directory, name);
 
+  // Every op shares the contract: signal gate first, native throws
+  // mapped — never a rejection crossing the port.
+  const guardFs = <T>(
+    signal: CancellationSignal,
+    fn: () => Promise<Result<T>>,
+  ): Promise<Result<T>> => {
+    if (signal.cancelled) {
+      return Promise.resolve(cancelled());
+    }
+    return fn().catch((thrown) => err(asTransferError(thrown)));
+  };
+
   const transfer: MediaTransferPort = {
-    async ensureDir(signal) {
-      if (signal.cancelled) {
-        return cancelled();
-      }
-      try {
+    ensureDir: (signal) =>
+      guardFs(signal, async () => {
         if (!directory.exists) {
           directory.create({ intermediates: true, idempotent: true });
         }
         return ok(undefined);
-      } catch (thrown) {
-        return err(asTransferError(thrown));
-      }
-    },
+      }),
 
-    async begin(input, signal) {
-      if (signal.cancelled) {
-        return cancelled();
-      }
-      try {
+    begin: (input, signal) =>
+      guardFs(signal, async () => {
         // The contract is a bare file name — a path separator would
         // escape the managed directory.
         if (
@@ -289,16 +295,10 @@ export function createExpoTransfer(deps: ExpoTransferDeps = {}): {
         }
         const sink = new ExpoTransferSink(part, fileFor(input.destPath));
         return ok(sink);
-      } catch (thrown) {
-        return err(asTransferError(thrown));
-      }
-    },
+      }),
 
-    async sweepPartials(keepPaths, signal) {
-      if (signal.cancelled) {
-        return cancelled();
-      }
-      try {
+    sweepPartials: (keepPaths, signal) =>
+      guardFs(signal, async () => {
         // A clean install has no transfer directory yet — that's
         // honestly "nothing to sweep", not an error.
         if (!directory.exists) {
@@ -320,16 +320,10 @@ export function createExpoTransfer(deps: ExpoTransferDeps = {}): {
           swept += 1;
         }
         return ok(swept);
-      } catch (thrown) {
-        return err(asTransferError(thrown));
-      }
-    },
+      }),
 
-    async usage(signal) {
-      if (signal.cancelled) {
-        return cancelled();
-      }
-      try {
+    usage: (signal) =>
+      guardFs(signal, async () => {
         // Missing directory on a clean install reads as zero bytes.
         if (!directory.exists) {
           return ok(0);
@@ -344,27 +338,13 @@ export function createExpoTransfer(deps: ExpoTransferDeps = {}): {
           }
         }
         return ok(total);
-      } catch (thrown) {
-        return err(asTransferError(thrown));
-      }
-    },
+      }),
 
-    async freeBytes(signal) {
-      if (signal.cancelled) {
-        return cancelled();
-      }
-      try {
-        return ok(Paths.availableDiskSpace);
-      } catch (thrown) {
-        return err(asTransferError(thrown));
-      }
-    },
+    freeBytes: (signal) =>
+      guardFs(signal, async () => ok(Paths.availableDiskSpace)),
 
-    async removeFile(name, signal) {
-      if (signal.cancelled) {
-        return cancelled();
-      }
-      try {
+    removeFile: (name, signal) =>
+      guardFs(signal, async () => {
         const file = fileFor(name);
         if (file.exists) {
           file.delete();
@@ -374,25 +354,16 @@ export function createExpoTransfer(deps: ExpoTransferDeps = {}): {
           part.delete();
         }
         return ok(undefined);
-      } catch (thrown) {
-        return err(asTransferError(thrown));
-      }
-    },
+      }),
 
-    async stat(name, signal) {
-      if (signal.cancelled) {
-        return cancelled();
-      }
-      try {
+    stat: (name, signal) =>
+      guardFs(signal, async () => {
         const file = fileFor(name);
         if (!file.exists) {
           return ok({ exists: false, bytes: null });
         }
         return ok({ exists: true, bytes: file.info().size ?? null });
-      } catch (thrown) {
-        return err(asTransferError(thrown));
-      }
-    },
+      }),
   };
 
   return {

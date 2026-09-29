@@ -76,6 +76,22 @@ export function createExpoSyncAcceptor(
   // bind. Chain every stop so a listen can never precede a pending one.
   let nativeChain: Promise<void> = Promise.resolve();
 
+  const queueListenStop = (): void => {
+    const stop = native.syncListenStop?.() ?? Promise.resolve();
+    nativeChain = nativeChain.then(
+      () => stop.catch(() => undefined),
+      () => undefined,
+    );
+  };
+
+  const dropLive = (): void => {
+    listenGeneration += 1;
+    for (const socket of live.values()) {
+      socket.destroy();
+    }
+    live.clear();
+  };
+
   return {
     async listen({ onSocket }) {
       if (native.syncListen === undefined) {
@@ -102,34 +118,22 @@ export function createExpoSyncAcceptor(
         const handle: SyncSocketListener = {
           port,
           close() {
-            if (listening !== null && listening.gen === gen) {
+            if (listening?.gen === gen) {
               listening = null;
             }
-            listenGeneration += 1;
-            for (const socket of live.values()) {
-              socket.destroy();
-            }
-            live.clear();
-            const stop = native.syncListenStop?.() ?? Promise.resolve();
-            nativeChain = nativeChain.then(
-              () => stop.catch(() => undefined),
-              () => undefined,
-            );
+            dropLive();
+            queueListenStop();
           },
         };
         return ok(handle);
       } catch (thrown) {
-        if (listening !== null && listening.gen === gen) {
+        if (listening?.gen === gen) {
           listening = null;
         }
         // The native side may have bound partially (accept thread +
         // sockets live) before the promise rejected — a failed start
         // still owes a stop, serialized with any real one.
-        const stop = native.syncListenStop?.() ?? Promise.resolve();
-        nativeChain = nativeChain.then(
-          () => stop.catch(() => undefined),
-          () => undefined,
-        );
+        queueListenStop();
         return err(
           nativeError(thrown) ?? appError('unavailable', 'sync: listen failed'),
         );
@@ -149,11 +153,7 @@ export function createExpoSyncAcceptor(
       dataSub = null;
       closedSub = null;
       listening = null;
-      listenGeneration += 1;
-      for (const socket of live.values()) {
-        socket.destroy();
-      }
-      live.clear();
+      dropLive();
     },
   };
 }

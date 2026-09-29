@@ -309,16 +309,10 @@ function buildPairHost(opts: {
     fp,
     fingerprintOf: nobleFingerprintOf,
     advertise: discovery.advertise,
-    mintCode: () => {
-      const bytes = opts.random(4);
-      const value =
-        (((bytes[0] ?? 0) << 24) |
-          ((bytes[1] ?? 0) << 16) |
-          ((bytes[2] ?? 0) << 8) |
-          (bytes[3] ?? 0)) >>>
-        0;
-      return (value % 1_000_000).toString().padStart(6, '0');
-    },
+    mintCode: () =>
+      (opts.random(4).reduce((v, b) => v * 256 + b, 0) % 1_000_000)
+        .toString()
+        .padStart(6, '0'),
     clock: opts.clock,
     onResume: (peer) => opts.kickResume(peer.fp),
     onAdvertiseError: () => {

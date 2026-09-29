@@ -94,9 +94,7 @@ export class ExpoSyncSocket implements SyncSocket {
     if (event === 'data') {
       this.#listeners.data.push(listener as (chunk: Uint8Array) => void);
     } else if (event === 'close') {
-      this.#listeners.close.push(
-        listener as (hadError: boolean) => void,
-      );
+      this.#listeners.close.push(listener as (hadError: boolean) => void);
     } else if (event === 'error') {
       this.#listeners.error.push(
         listener as (error: { readonly message: string }) => void,
@@ -190,6 +188,9 @@ export function createExpoSyncSockets(
       }
       const socketId = `sync-${(socketSeq += 1)}-${Date.now().toString(36)}`;
       ensureWatch();
+      const kill = (): void => {
+        void native.syncDestroy(socketId).catch(() => undefined);
+      };
       const dial = (async (): Promise<Result<SyncSocket>> => {
         try {
           const reply = await native.syncConnect(
@@ -199,14 +200,14 @@ export function createExpoSyncSockets(
             timeoutMs,
           );
           if (signal?.cancelled === true) {
-            void native.syncDestroy(socketId).catch(() => undefined);
+            kill();
             return err(appError('cancelled', 'sync: dial cancelled'));
           }
           if (released) {
             // close() ran mid-dial — the live set was already cleared,
             // so registering now would leak a native socket nobody
             // owns. Destroy the dial and answer released.
-            void native.syncDestroy(socketId).catch(() => undefined);
+            kill();
             return err(appError('released', 'sync: socket port closed'));
           }
           const socket = new ExpoSyncSocket({
@@ -233,7 +234,7 @@ export function createExpoSyncSockets(
         // The dial may still be minting native-side — destroy the id
         // eagerly; a late syncConnect resolution is reaped by the
         // dial's own cancelled check.
-        void native.syncDestroy(socketId).catch(() => undefined);
+        kill();
         return err(appError('cancelled', 'sync: dial cancelled'));
       }
       if (outcome.t === 'failed') {

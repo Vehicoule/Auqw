@@ -117,24 +117,26 @@ export function createPluginProvider(
     return (async () => {
       // Race the handshake against the deadline — a startRequest that
       // outlives it still settles here, and its late id is cancelled.
-      let startTimer: ReturnType<typeof setTimeout> | undefined;
       let expireStart: (() => void) | undefined;
       const expired = new Promise<{ t: 'expired' }>((res) => {
         expireStart = () => res({ t: 'expired' });
       });
-      const armStartDeadline = (): void => {
-        startTimer = setTimeout(
-          () => {
-            if (!(context.deadlineMs - Date.now() > 0)) {
-              expireStart?.();
-            } else {
-              armStartDeadline();
-            }
-          },
-          Math.min(context.deadlineMs - Date.now(), 0x7fffffff),
-        );
+      // Deadline timers re-arm in slices: setTimeout overflows past
+      // ~24.8 days, so a far-out deadline re-checks instead of firing
+      // early. `!(x > 0)` fails closed on NaN. Returns the disarmer.
+      const onDeadline = (fire: () => void): (() => void) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const arm = (): void => {
+          timer = setTimeout(
+            () =>
+              context.deadlineMs - Date.now() > 0 ? arm() : fire(),
+            Math.min(context.deadlineMs - Date.now(), 0x7fffffff),
+          );
+        };
+        arm();
+        return () => clearTimeout(timer);
       };
-      armStartDeadline();
+      const disarmStart = onDeadline(() => expireStart?.());
       let call: Promise<string>;
       try {
         // A synchronous host throw is a typed failure, never a
@@ -143,7 +145,7 @@ export function createPluginProvider(
           host.startRequest(pluginId, capability, payload),
         );
       } catch (thrown) {
-        clearTimeout(startTimer);
+        disarmStart();
         return err(nativeError(thrown));
       }
       const started = call.then(
@@ -167,7 +169,7 @@ export function createPluginProvider(
         raced(call, handshakeSource.signal),
         expired,
       ]);
-      clearTimeout(startTimer);
+      disarmStart();
       bridge();
       handshakeSource.cancel();
       // A handshake that outlives its race still settles — its late
@@ -217,16 +219,28 @@ export function createPluginProvider(
         );
       }
       return new Promise<Result<T>>((resolve) => {
-        let unsubscribe = (): void => { };
-        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-        const finish = (result: Result<T>): void => {
+        let unsubscribe = (): void => {};
+        let disarmDeadline = (): void => {};
+        // Settle the pending entry: drop it, disarm the deadline,
+        // resolve the caller. `abort` also tells the host to cancel —
+        // the request is dead to us either way and any late outcome
+        // is dropped.
+        const finish = (
+          result: Result<T>,
+          abort: boolean,
+        ): void => {
           const entry = pending.get(requestId);
           if (entry === undefined) {
             return;
           }
           dropRequest(requestId, entry);
-          if (deadlineTimer !== undefined) {
-            clearTimeout(deadlineTimer);
+          disarmDeadline();
+          if (abort) {
+            try {
+              host.cancel(requestId);
+            } catch {
+              // dead either way
+            }
           }
           resolve(result);
         };
@@ -237,50 +251,11 @@ export function createPluginProvider(
               (slug) => appErrorKind(slug ?? ''),
               decode,
             ),
+            false,
           );
         };
         const cancelInFlight = (): void => {
-          const current = pending.get(requestId);
-          if (current === undefined) {
-            return;
-          }
-          dropRequest(requestId, current);
-          if (deadlineTimer !== undefined) {
-            clearTimeout(deadlineTimer);
-          }
-          // The request is dead to us either way; the host aborts it
-          // and any late outcome is dropped.
-          try {
-            host.cancel(requestId);
-          } catch {
-            // dead either way
-          }
-          resolve(err(providerCancelledError()));
-        };
-        const timeoutInFlight = (): void => {
-          const current = pending.get(requestId);
-          if (current === undefined) {
-            return;
-          }
-          dropRequest(requestId, current);
-          try {
-            host.cancel(requestId);
-          } catch {
-            // dead either way
-          }
-          resolve(err(timeoutError()));
-        };
-        const armDeadlineTimer = (): void => {
-          deadlineTimer = setTimeout(
-            () => {
-              if (!(context.deadlineMs - Date.now() > 0)) {
-                timeoutInFlight();
-              } else {
-                armDeadlineTimer();
-              }
-            },
-            Math.min(context.deadlineMs - Date.now(), 0x7fffffff),
-          );
+          finish(err(providerCancelledError()), true);
         };
         const entry: Pending = {
           unsubscribe: () => unsubscribe(),
@@ -289,7 +264,9 @@ export function createPluginProvider(
         };
         pending.set(requestId, entry);
         unsubscribe = signal.subscribe(cancelInFlight);
-        armDeadlineTimer();
+        disarmDeadline = onDeadline(() =>
+          finish(err(timeoutError()), true),
+        );
         const stashed = early.get(requestId);
         if (stashed !== undefined) {
           early.delete(requestId);
