@@ -886,7 +886,11 @@ export function StageSheet({
   const seekTap = useMemo(
     () =>
       Gesture.Tap()
-        .onStart(() => {
+        .onBegin(() => {
+          // onBegin = touch-down (the tap's BEGIN state); onStart
+          // would only run at activation on release, letting a
+          // mid-hold track flip feed the replacement occurrence to
+          // both sides of the comparison.
           seekTapAtOccurrence.value = seekTapOccurrence.value;
         })
         .onEnd((e, success) => {
@@ -1216,8 +1220,11 @@ export function StageSheet({
               contentContainerStyle={{ paddingBottom: segmentReserve }}
             >
               {lyricsPane.lines.map((line, i) => (
+                // Occurrence-keyed: a song swap remounts every row so
+                // unchanged geometries still emit fresh onLayout —
+                // the owed-scroll retry in onLayout depends on it.
                 <View
-                  key={i}
+                  key={`${player.occurrenceId ?? ''}:${i}`}
                   onLayout={(e) => {
                     lyricLayouts.current[i] = {
                       y: e.nativeEvent.layout.y,
