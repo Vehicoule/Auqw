@@ -1,7 +1,7 @@
 # Wave-3 LoC-reduction — shard: desktop-utility
 
 Base `a675a7b` → `devin/w3-desktop-utility` HEAD `742427a`.
-Final diff: **28 files, +532 / −1108 → net −576 LoC.**
+Final diff (vs origin/main): **29 files, +708 / −1108 → net −400 LoC.**
 
 ## Gates
 

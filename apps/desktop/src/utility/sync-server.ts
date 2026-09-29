@@ -414,15 +414,18 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
   }
 
   async function status(): Promise<SyncStatusResult> {
+    // Disabled is a stable answer, not a custody question — an
+    // explicit AUQW_SYNC_DISABLED must never depend on safeStorage.
+    const pairedDevices =
+      listener === 'disabled' ? 0 : await deviceCount();
+    // idleStatus reads lastSyncAt — sample it after the await so a
+    // sync completing during the wait isn't reported stale.
     return {
       ...idleStatus(listener),
       endpoint: endpoint(),
       boundPort,
       advertise: advertiseState,
-      // Disabled is a stable answer, not a custody question — an
-      // explicit AUQW_SYNC_DISABLED must never depend on safeStorage.
-      pairedDevices:
-        listener === 'disabled' ? 0 : await deviceCount(),
+      pairedDevices,
       sessions: [...responder.sessions].filter(
         (s) => s.phase === 'open',
       ).length,
