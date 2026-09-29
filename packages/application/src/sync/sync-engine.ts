@@ -176,7 +176,7 @@ export function syncedRecordKey(
   kind: SyncRecordKind,
   recordId: string,
 ): string {
-  return `${kind}\u001f${recordId}`;
+  return `${kind}${KEY_SEP}${recordId}`;
 }
 
 /**

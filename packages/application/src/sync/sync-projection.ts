@@ -930,15 +930,18 @@ function foldOutcome(fold: RecordFold, outcome: AppliedOutcome): void {
 }
 
 function numField(
-  fields: Map<string, unknown>,
+  fields: Map<string, unknown> | undefined,
   field: string,
 ): number | null {
-  const v = fields.get(field);
+  const v = fields?.get(field);
   return typeof v === 'number' && Number.isSafeInteger(v) ? v : null;
 }
 
-function strField(fields: Map<string, unknown>, field: string): string | null {
-  const v = fields.get(field);
+function strField(
+  fields: Map<string, unknown> | undefined,
+  field: string,
+): string | null {
+  const v = fields?.get(field);
   return typeof v === 'string' ? v : null;
 }
 
@@ -1300,8 +1303,7 @@ function finishProjection(
     plan: RecordingPlan,
     id: string,
   ): Recording | null => {
-    const title =
-      fields !== undefined ? strField(fields, 'title') : null;
+    const title = strField(fields, 'title');
     if (title === null) {
       return null;
     }
@@ -1309,17 +1311,17 @@ function finishProjection(
     const rec: Recording = {
       id,
       title,
-      artist: strField(fields ?? new Map(), 'artist'),
-      album: strField(fields ?? new Map(), 'album'),
-      durationMs: numField(fields ?? new Map(), 'durationMs'),
-      releaseYear: numField(fields ?? new Map(), 'releaseYear'),
+      artist: strField(fields, 'artist'),
+      album: strField(fields, 'album'),
+      durationMs: numField(fields, 'durationMs'),
+      releaseYear: numField(fields, 'releaseYear'),
       artwork: (get('artwork') as Recording['artwork']) ?? [],
       explicit:
         typeof get('explicit') === 'boolean'
           ? (get('explicit') as boolean)
           : null,
-      genre: strField(fields ?? new Map(), 'genre'),
-      isrc: strField(fields ?? new Map(), 'isrc'),
+      genre: strField(fields, 'genre'),
+      isrc: strField(fields, 'isrc'),
       versionLabels:
         (get('versionLabels') as Recording['versionLabels']) ?? [],
       sourceRefs: applyRefOps([], plan),
