@@ -413,13 +413,7 @@ export type RadioModel = {
 
 export function toRadioModel(radio: RadioTail | null): RadioModel {
   if (radio === null) {
-    return {
-      armed: false,
-      status: null,
-      fetching: false,
-      label: null,
-      detail: null,
-    };
+    return { armed: false, status: null, fetching: false, label: null, detail: null };
   }
   return {
     armed: true,
@@ -464,20 +458,13 @@ export type CorrectionsModel = {
 };
 
 function reviewStatusLabel(review: MatchReview): string {
-  switch (review.status) {
-    case 'confirmed': {
-      const ref = review.resolution?.ref;
-      return ref === null || ref === undefined
-        ? t('corrections.status.confirmed')
-        : t('corrections.status.confirmedProvider', { provider: ref.provider });
-    }
-    case 'rejected':
-      return t('corrections.status.rejected');
-    case 'pending':
-      return t('corrections.status.pending');
-    case 'dismissed':
-      return t('corrections.status.dismissed');
+  if (review.status !== 'confirmed') {
+    return t(`corrections.status.${review.status}`);
   }
+  const ref = review.resolution?.ref;
+  return ref === null || ref === undefined
+    ? t('corrections.status.confirmed')
+    : t('corrections.status.confirmedProvider', { provider: ref.provider });
 }
 
 /**
@@ -608,11 +595,7 @@ export function toSyncModel(input: {
       state: view.state,
       stateLabel: view.syncing
         ? t('sync.state.syncing')
-        : view.state === 'open'
-          ? t('sync.state.connected')
-          : view.state === 'connecting'
-            ? t('sync.state.connecting')
-            : t('sync.state.offline'),
+        : t(`sync.state.${view.state === 'open' ? 'connected' : view.state}`),
       syncing: view.syncing,
       lastSyncLabel:
         view.peer.lastSyncAt === undefined
@@ -692,13 +675,7 @@ export type TransferModel = {
   readonly exportPhase: 'idle' | 'working' | 'done' | 'error';
   /** The written path on `done`; the typed message on `error`. */
   readonly exportDetail: string | null;
-  readonly importPhase:
-  | 'idle'
-  | 'reading'
-  | 'preview'
-  | 'applying'
-  | 'done'
-  | 'error';
+  readonly importPhase: 'idle' | 'reading' | 'preview' | 'applying' | 'done' | 'error';
   /** The typed message on `error`; the applied summary on `done`. */
   readonly importDetail: string | null;
   readonly preview: ImportPreviewModel | null;
@@ -850,6 +827,17 @@ function likedIds(likes: readonly Like[]): ReadonlySet<string> {
       .filter((like) => like.entityKind === 'track')
       .map((like) => like.targetId),
   );
+}
+
+/** recordingId → occurrence count — duplicates keep row identity. */
+function countByRecordingId(
+  rows: readonly { readonly recordingId: string }[],
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    counts.set(row.recordingId, (counts.get(row.recordingId) ?? 0) + 1);
+  }
+  return counts;
 }
 
 /**
@@ -1022,11 +1010,7 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
   if (queue.blockedError !== undefined && queue.currentOccurrenceId !== null) {
     failed.add(queue.currentOccurrenceId);
   }
-  const occurrencesByRecording = new Map<string, number>();
-  for (const occurrence of queue.occurrences) {
-    const count = occurrencesByRecording.get(occurrence.recordingId) ?? 0;
-    occurrencesByRecording.set(occurrence.recordingId, count + 1);
-  }
+  const occurrencesByRecording = countByRecordingId(queue.occurrences);
   const items: QueueItemModel[] = queue.occurrences.map(
     (occurrence, index) => {
       const recording = byId.get(occurrence.recordingId);
@@ -1169,6 +1153,21 @@ export function toLibraryModel(input: {
 }): LibraryModel {
   const byId = indexById(input.recordings);
   const liked = likedIds(input.likes);
+  const collectionRow = (
+    key: string,
+    recording: Recording,
+    badge: string | null,
+    extra?: TrackRowOptions,
+  ): CollectionRowModel => ({
+    key,
+    recordingId: recording.id,
+    badge,
+    row: toTrackRowModel(recording, {
+      key,
+      liked: liked.has(recording.id),
+      ...extra,
+    }),
+  });
   const items: TrackRowModel[] = [...input.likes]
     .filter((like) => like.entityKind === 'track')
     .sort((a, b) => b.likedAtMs - a.likedAtMs)
@@ -1184,15 +1183,13 @@ export function toLibraryModel(input: {
   const top50: CollectionRowModel[] = topPlayed(
     input.playCounts,
     input.recordings,
-  ).map((entry, index) => ({
-    key: `top50-${entry.recording.id}-${index}`,
-    recordingId: entry.recording.id,
-    badge: t('collection.plays', { count: entry.count }),
-    row: toTrackRowModel(entry.recording, {
-      key: `top50-${entry.recording.id}-${index}`,
-      liked: liked.has(entry.recording.id),
-    }),
-  }));
+  ).map((entry, index) =>
+    collectionRow(
+      `top50-${entry.recording.id}-${index}`,
+      entry.recording,
+      t('collection.plays', { count: entry.count }),
+    ),
+  );
 
   // History: one row per counted play, most recent first; repeated
   // plays of one recording keep their own event-keyed rows.
@@ -1202,17 +1199,7 @@ export function toLibraryModel(input: {
       const recording = byId.get(event.recordingId);
       return recording === undefined
         ? []
-        : [
-            {
-              key: `hist-${event.eventId}`,
-              recordingId: recording.id,
-              badge: null,
-              row: toTrackRowModel(recording, {
-                key: `hist-${event.eventId}`,
-                liked: liked.has(recording.id),
-              }),
-            },
-          ];
+        : [collectionRow(`hist-${event.eventId}`, recording, null)];
     });
 
   const likedRows: CollectionRowModel[] = items.map((row) => {
@@ -1316,16 +1303,9 @@ export function toLibraryModel(input: {
       return recording === undefined
         ? []
         : [
-            {
-              key: `dl-${d.downloadId}`,
-              recordingId: recording.id,
-              badge: downloadBadge(d),
-              row: toTrackRowModel(recording, {
-                key: `dl-${d.downloadId}`,
-                liked: liked.has(recording.id),
-                download: downloadChip(d.state),
-              }),
-            },
+            collectionRow(`dl-${d.downloadId}`, recording, downloadBadge(d), {
+              download: downloadChip(d.state),
+            }),
           ];
     });
 
@@ -1435,13 +1415,7 @@ export function toPlaylistModel(input: {
   const entries = input.playlistEntries
     .filter((entry) => entry.playlistId === playlist.playlistId)
     .sort((a, b) => a.position - b.position);
-  const perRecording = new Map<string, number>();
-  for (const entry of entries) {
-    perRecording.set(
-      entry.recordingId,
-      (perRecording.get(entry.recordingId) ?? 0) + 1,
-    );
-  }
+  const perRecording = countByRecordingId(entries);
   // Entry rows key on entryId — a duplicate keeps its own row.
   const rows: PlaylistEntryModel[] = entries.map((entry) => {
     const recording = byId.get(entry.recordingId);
@@ -1595,14 +1569,10 @@ export type LanguageOption = {
  * language), so they are intentionally identical across catalogs.
  */
 export function languageOptions(): readonly LanguageOption[] {
-  return [
-    { key: 'system', label: t('settings.languageValue.system') },
-    { key: 'en', label: t('settings.languageValue.en') },
-    { key: 'de', label: t('settings.languageValue.de') },
-    { key: 'es', label: t('settings.languageValue.es') },
-    { key: 'fr', label: t('settings.languageValue.fr') },
-    { key: 'zh', label: t('settings.languageValue.zh') },
-  ];
+  return (['system', 'en', 'de', 'es', 'fr', 'zh'] as const).map((key) => ({
+    key,
+    label: t(`settings.languageValue.${key}`),
+  }));
 }
 
 /**
