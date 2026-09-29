@@ -83,7 +83,15 @@ function statError(thrown: unknown): null {
   // ELOOP joins the absent family: a symlink loop (or a leaf refused
   // under O_NOFOLLOW) means the name never reaches a real file, and
   // 'missing' beats a retryable io-error for a fault that won't heal.
-  if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') {
+  if (
+    code === 'ENOENT' ||
+    code === 'ENOTDIR' ||
+    code === 'ELOOP' ||
+    // A platform that refuses a directory at open (EISDIR) maps to the
+    // same 'unavailable' the descriptor isFile() check produces where
+    // the open succeeds — the name exists but can never serve bytes.
+    code === 'EISDIR'
+  ) {
     return null;
   }
   if (code === 'EACCES' || code === 'EPERM') {

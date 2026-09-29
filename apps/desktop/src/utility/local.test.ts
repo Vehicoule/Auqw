@@ -525,9 +525,10 @@ export async function run(): Promise<void> {
           position: 0,
           maxLen: 8,
         }),
-        new Promise<'timeout'>((resolve) =>
-          setTimeout(() => resolve('timeout'), 5000),
-        ),
+        new Promise<'timeout'>((resolve) => {
+          const timer = setTimeout(() => resolve('timeout'), 5000);
+          timer.unref();
+        }),
       ]);
       assert(
         typeof fifoResult === 'object' &&
