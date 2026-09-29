@@ -51,8 +51,10 @@ export function QueueList({
   // from the model — otherwise it keeps showing the rejected landing.
   const [dragRemount, bumpDragRemount] = useState(0);
   // The remount's fresh list starts at the top — carry the last
-  // scroll offset across so deep-queue reordering stays put.
-  const dragScrollY = useRef(0);
+  // scroll offset across so deep-queue reordering stays put. Both
+  // list variants feed the ref and mount at it, so offset survives
+  // mode switches too.
+  const listScrollY = useRef(0);
   if (queue.items.length === 0) {
     return <EmptyState title={t('queue.empty')} icon="queue" />;
   }
@@ -141,9 +143,9 @@ export function QueueList({
         scrollEnabled={scrollEnabled}
         scrollEventThrottle={64}
         onScroll={(event) => {
-          dragScrollY.current = event.nativeEvent.contentOffset.y;
+          listScrollY.current = event.nativeEvent.contentOffset.y;
         }}
-        contentOffset={{ x: 0, y: dragScrollY.current }}
+        contentOffset={{ x: 0, y: listScrollY.current }}
         contentContainerStyle={{ paddingBottom: contentPaddingBottom }}
         onDragEnd={({ from, to }) => {
           const item = items[from];
@@ -208,6 +210,11 @@ export function QueueList({
       }
       scrollEnabled={scrollEnabled}
       initialNumToRender={15}
+      scrollEventThrottle={64}
+      onScroll={(event) => {
+        listScrollY.current = event.nativeEvent.contentOffset.y;
+      }}
+      contentOffset={{ x: 0, y: listScrollY.current }}
       contentContainerStyle={{ paddingBottom: contentPaddingBottom }}
     />
   );
