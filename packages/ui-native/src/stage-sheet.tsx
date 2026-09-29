@@ -847,23 +847,37 @@ export function StageSheet({
   // Tap-to-seek on the waveform: the scrub pan only ever activates on
   // movement, so a plain tap resolves x→ms through the same commit
   // path. Callbacks live behind a ref — a deps-listed prop would
-  // rebuild the gesture on every position-tick re-render.
+  // rebuild the gesture on every position-tick re-render. The tap's
+  // occurrence is captured on the UI thread at touch-down and checked
+  // again at commit — a track flip between the two must not seek the
+  // replacement track at the old tap's position.
   const seekTapMeta = useRef({
     width: 0,
     durationMs: player.durationMs,
+    occurrenceId: player.occurrenceId,
     onSeek,
   });
+  const seekTapOccurrence = useSharedValue(player.occurrenceId);
+  const seekTapAtOccurrence = useSharedValue<string | null>(null);
   useEffect(() => {
     seekTapMeta.current.onSeek = onSeek;
     seekTapMeta.current.durationMs = player.durationMs;
+    seekTapMeta.current.occurrenceId = player.occurrenceId;
+    seekTapOccurrence.value = player.occurrenceId;
   });
-  const commitSeekTap = useCallback((x: number) => {
-    const { width, durationMs, onSeek: seek } = seekTapMeta.current;
+  const commitSeekTap = useCallback((x: number, tappedOccurrence: string | null) => {
+    const {
+      width,
+      durationMs,
+      occurrenceId,
+      onSeek: seek,
+    } = seekTapMeta.current;
     if (
       seek === undefined ||
       durationMs === null ||
       durationMs <= 0 ||
-      width <= 0
+      width <= 0 ||
+      tappedOccurrence !== occurrenceId
     ) {
       return;
     }
@@ -871,37 +885,70 @@ export function StageSheet({
   }, []);
   const seekTap = useMemo(
     () =>
-      Gesture.Tap().onEnd((e, success) => {
-        if (success) {
-          scheduleOnRN(commitSeekTap, e.x);
-        }
-      }),
-    [commitSeekTap],
+      Gesture.Tap()
+        .onStart(() => {
+          seekTapAtOccurrence.value = seekTapOccurrence.value;
+        })
+        .onEnd((e, success) => {
+          if (success) {
+            scheduleOnRN(commitSeekTap, e.x, seekTapAtOccurrence.value);
+          }
+        }),
+    [commitSeekTap, seekTapAtOccurrence, seekTapOccurrence],
   );
 
-  // Lyrics auto-scroll — the synced active line stays in view; the
-  // scroll lands only on an activeIndex change so a manual scroll
-  // between line flips is never yanked back.
+  // Lyrics auto-scroll — the synced active line stays in view. A
+  // scroll is owed whenever (occurrence, activeIndex) differs from the
+  // pair last scrolled to: a song swap with an unchanged index still
+  // owes one, and a line change settles it. Between those, a manual
+  // scroll is never yanked back.
   const lyricsScrollRef = useRef<ScrollView>(null);
   const lyricsScrollH = useRef(0);
   const lyricLayouts = useRef<({ y: number; height: number } | undefined)[]>(
     [],
   );
+  const lyricScrolledKey = useRef<string | null>(null);
   const lyricActiveIndex =
     lyricsPane.kind === 'lines' ? lyricsPane.activeIndex : null;
+  const lyricScrollKey =
+    lyricActiveIndex === null
+      ? null
+      : `${player.occurrenceId ?? ''}:${lyricActiveIndex}`;
+  // A song swap re-measures every line — the previous song's y offsets
+  // would otherwise satisfy the owed scroll at stale positions.
+  const lyricOccurrenceRef = useRef(player.occurrenceId);
+  if (lyricOccurrenceRef.current !== player.occurrenceId) {
+    lyricOccurrenceRef.current = player.occurrenceId;
+    lyricLayouts.current = [];
+  }
+  const scrollToLyricLine = useCallback(
+    (index: number) => {
+      const line = lyricLayouts.current[index];
+      if (line === undefined) {
+        return false;
+      }
+      lyricsScrollRef.current?.scrollTo({
+        y: Math.max(0, line.y + line.height / 2 - lyricsScrollH.current / 2),
+        animated: !theme.reducedMotion,
+      });
+      return true;
+    },
+    [theme.reducedMotion],
+  );
   useEffect(() => {
-    if (activeMode !== 'lyrics' || lyricActiveIndex === null) {
+    if (lyricScrollKey === null) {
+      lyricScrolledKey.current = null;
       return;
     }
-    const line = lyricLayouts.current[lyricActiveIndex];
-    if (line === undefined) {
-      return;
+    if (
+      activeMode === 'lyrics' &&
+      lyricScrolledKey.current !== lyricScrollKey &&
+      lyricActiveIndex !== null &&
+      scrollToLyricLine(lyricActiveIndex)
+    ) {
+      lyricScrolledKey.current = lyricScrollKey;
     }
-    lyricsScrollRef.current?.scrollTo({
-      y: Math.max(0, line.y + line.height / 2 - lyricsScrollH.current / 2),
-      animated: !theme.reducedMotion,
-    });
-  }, [activeMode, lyricActiveIndex, theme.reducedMotion]);
+  }, [activeMode, lyricActiveIndex, lyricScrollKey, scrollToLyricLine]);
 
   // The lyrics-mode header rides the pane chrome — the same element
   // sits above the lines list or the state block.
@@ -1176,6 +1223,18 @@ export function StageSheet({
                       y: e.nativeEvent.layout.y,
                       height: e.nativeEvent.layout.height,
                     };
+                    // Layout arriving after the scroll effect ran —
+                    // first open mid-song, or a swap clearing the
+                    // measurements — still owes the active line's
+                    // scroll once its own measurement exists.
+                    if (
+                      lyricScrollKey !== null &&
+                      i === lyricActiveIndex &&
+                      lyricScrolledKey.current !== lyricScrollKey &&
+                      scrollToLyricLine(i)
+                    ) {
+                      lyricScrolledKey.current = lyricScrollKey;
+                    }
                   }}
                 >
                   <Text

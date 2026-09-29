@@ -325,9 +325,11 @@ export function NowPlayingScreen({
       ? player.artworkUrl
       : null;
   const immersive = activeMode === 'player' && liveArtwork !== null;
-  // Lyrics auto-scroll — the synced active line stays in view; the
-  // scroll lands only on an activeIndex change so a manual scroll
-  // between line flips is never yanked back.
+  // Lyrics auto-scroll — the synced active line stays in view. A
+  // scroll lands on an activeIndex or occurrence change (a swap
+  // inheriting the previous song's scroll would leave the new active
+  // line offscreen); between those, a manual scroll is never yanked
+  // back.
   const lyricsRef = useRef<HTMLDivElement>(null);
   const lyricActiveIndex =
     lyricsPane.kind === 'lines' ? lyricsPane.activeIndex : null;
@@ -338,7 +340,7 @@ export function NowPlayingScreen({
     lyricsRef.current
       ?.querySelector('.uw-lyrics__line--active')
       ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  }, [activeMode, lyricActiveIndex]);
+  }, [activeMode, lyricActiveIndex, player.occurrenceId]);
   return (
     <div
       className={`uw-stage${immersive ? ' uw-stage--immersive t-dark' : ''}`}
