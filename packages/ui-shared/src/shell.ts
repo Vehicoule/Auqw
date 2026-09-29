@@ -118,54 +118,34 @@ export function toSearchModel(
   state: SearchState,
   playingRef: SourceRef | null = null,
 ): SearchStateModel {
+  const base = {
+    query: state.type === 'idle' ? '' : state.query,
+    results: [],
+    providerId: null,
+    message: null,
+    retryable: false,
+  };
   switch (state.type) {
     case 'idle':
-      return {
-        phase: 'idle',
-        query: '',
-        results: [],
-        providerId: null,
-        message: null,
-        retryable: false,
-      };
     case 'loading':
-      return {
-        phase: 'loading',
-        query: state.query,
-        results: [],
-        providerId: null,
-        message: null,
-        retryable: false,
-      };
     case 'empty':
-      return {
-        phase: 'empty',
-        query: state.query,
-        results: [],
-        providerId: null,
-        message: null,
-        retryable: false,
-      };
+      return { ...base, phase: state.type };
     case 'content':
       return {
+        ...base,
         phase: state.page.items.length === 0 ? 'empty' : 'ready',
-        query: state.query,
         results: state.page.items.map((meta, index) =>
           toSearchRowModel(meta, index, playingRef),
         ),
-        providerId: null,
         message: errorText(state.refreshError),
-        retryable: false,
       };
     case 'error': {
       const unavailable =
         state.error.kind === 'unavailable' ||
         state.error.kind === 'auth-required';
       return {
+        ...base,
         phase: unavailable ? 'unavailable' : 'error',
-        query: state.query,
-        results: [],
-        providerId: null,
         message: errorText(state.error),
         retryable: true,
       };
@@ -226,35 +206,43 @@ export type ActionTarget =
 // The settings provider slots and the capabilities each one routes
 // by — a picker only ever lists providers that declared the slot's
 // capability (manifest-derived, via ProviderPort.capabilities).
+// Lyrics and radio are nullable overrides — 'auto' returns routing
+// to capability declaration; the required slots never offer it.
 export type ProviderSlot =
   | 'catalogProvider'
   | 'playbackProvider'
   | 'lyricsProvider'
   | 'radioProvider';
 
-export const SLOT_CAPABILITIES: Record<
+const SLOT_META: Record<
   ProviderSlot,
-  readonly ProviderCapability[]
+  {
+    readonly label: MessageId;
+    readonly capabilities: readonly ProviderCapability[];
+    readonly optional: boolean;
+  }
 > = {
-  catalogProvider: ['catalog.search'],
-  playbackProvider: ['playback.resolve'],
-  lyricsProvider: ['lyrics.synced', 'lyrics.plain'],
-  radioProvider: ['radio.seed'],
+  catalogProvider: {
+    label: 'settings.catalogProvider',
+    capabilities: ['catalog.search'],
+    optional: false,
+  },
+  playbackProvider: {
+    label: 'settings.playbackProvider',
+    capabilities: ['playback.resolve'],
+    optional: false,
+  },
+  lyricsProvider: {
+    label: 'settings.lyricsProvider',
+    capabilities: ['lyrics.synced', 'lyrics.plain'],
+    optional: true,
+  },
+  radioProvider: {
+    label: 'settings.radioProvider',
+    capabilities: ['radio.seed'],
+    optional: true,
+  },
 };
-
-export const SLOT_LABEL_IDS: Record<ProviderSlot, MessageId> = {
-  catalogProvider: 'settings.catalogProvider',
-  playbackProvider: 'settings.playbackProvider',
-  lyricsProvider: 'settings.lyricsProvider',
-  radioProvider: 'settings.radioProvider',
-};
-
-// Lyrics and radio are nullable overrides — 'auto' returns routing
-// to capability declaration; the required slots never offer it.
-export const OPTIONAL_SLOTS: ReadonlySet<ProviderSlot> = new Set([
-  'lyricsProvider',
-  'radioProvider',
-]);
 
 export type ProviderPickerModel = {
   readonly title: string;
@@ -275,10 +263,10 @@ export function providerPickerModel(
   if (slot === null) {
     return null;
   }
-  const required = SLOT_CAPABILITIES[slot];
+  const meta = SLOT_META[slot];
   const options = providers
     .filter((provider) =>
-      required.some((capability) =>
+      meta.capabilities.some((capability) =>
         provider.capabilities.includes(capability),
       ),
     )
@@ -287,10 +275,9 @@ export function providerPickerModel(
       label: provider.id,
       detail: provider.capabilities.join(' · '),
     }));
-  const selected = settings[slot];
   return {
-    title: t(SLOT_LABEL_IDS[slot]),
-    options: OPTIONAL_SLOTS.has(slot)
+    title: t(meta.label),
+    options: meta.optional
       ? [
           {
             key: 'auto',
@@ -300,7 +287,7 @@ export function providerPickerModel(
           ...options,
         ]
       : options,
-    selectedKey: selected ?? 'auto',
+    selectedKey: settings[slot] ?? 'auto',
   };
 }
 
@@ -346,30 +333,23 @@ export function reportResult(
   action: MessageId,
   result: Result<unknown>,
 ): void {
-  if (!result.ok) {
-    // Log the typed kind only — an error message crossing a bridge can
-    // embed a signed URL or token that has no business in renderer logs.
-    console.warn(`[ui] ${action} failed: ${result.error.kind}`);
-    // Teardown suppression lives at this ops-level funnel — 'cancelled'
-    // can also be a provider's real verdict, so surfaces don't silence
-    // it, but an op torn down by a newer intent never toasts.
-    if (
-      result.error.kind === 'cancelled' ||
-      result.error.kind === 'superseded'
-    ) {
-      return;
-    }
-    // The toast carries the humanized reason, never the raw kind or
-    // message; silent (disposal) outcomes don't toast at all.
-    const detail = errorText(result.error);
-    if (detail !== null) {
-      toastSink?.(
-        t('toast.failed', {
-          action: t(action),
-          detail,
-        }),
-      );
-    }
+  if (result.ok) {
+    return;
+  }
+  // Log the typed kind only — an error message crossing a bridge can
+  // embed a signed URL or token that has no business in renderer logs.
+  console.warn(`[ui] ${action} failed: ${result.error.kind}`);
+  // Teardown suppression lives at this ops-level funnel — 'cancelled'
+  // can also be a provider's real verdict, so surfaces don't silence
+  // it, but an op torn down by a newer intent never toasts.
+  if (result.error.kind === 'cancelled' || result.error.kind === 'superseded') {
+    return;
+  }
+  // The toast carries the humanized reason, never the raw kind or
+  // message; silent (disposal) outcomes don't toast at all.
+  const detail = errorText(result.error);
+  if (detail !== null) {
+    toastSink?.(t('toast.failed', { action: t(action), detail }));
   }
 }
 
@@ -552,29 +532,33 @@ export function overlayReducer<O>(
 export function useOverlayStack<O>(): OverlayStack<O> {
   const [stack, setStack] = useState<readonly OverlayEntry<O>[]>([]);
   const counter = useRef(0);
-  const push = useCallback((next: O) => {
-    const key = `ov-${(counter.current += 1)}`;
-    setStack((stack) =>
-      overlayReducer(stack, { type: 'push', key, overlay: next }),
-    );
-  }, []);
-  const reset = useCallback((next: O) => {
-    const key = `ov-${(counter.current += 1)}`;
-    setStack((stack) =>
-      overlayReducer(stack, { type: 'reset', key, overlay: next }),
-    );
-  }, []);
-  /** Pop the top route — every screen's own back affordance. */
-  const close = useCallback(() => {
-    setStack((stack) => overlayReducer(stack, { type: 'close' }));
-  }, []);
-  /** Screen-stack dismissal removes a screen and all above it. */
-  const dismiss = useCallback((key: string) => {
-    setStack((stack) => overlayReducer(stack, { type: 'dismiss', key }));
-  }, []);
-  const clear = useCallback(() => {
-    setStack((stack) => overlayReducer(stack, { type: 'clear' }));
-  }, []);
+  const mintKey = (): string => `ov-${(counter.current += 1)}`;
+  const push = useCallback(
+    (next: O) =>
+      setStack((s) =>
+        overlayReducer(s, { type: 'push', key: mintKey(), overlay: next }),
+      ),
+    [],
+  );
+  const reset = useCallback(
+    (next: O) =>
+      setStack((s) =>
+        overlayReducer(s, { type: 'reset', key: mintKey(), overlay: next }),
+      ),
+    [],
+  );
+  const close = useCallback(
+    () => setStack((s) => overlayReducer(s, { type: 'close' })),
+    [],
+  );
+  const dismiss = useCallback(
+    (key: string) => setStack((s) => overlayReducer(s, { type: 'dismiss', key })),
+    [],
+  );
+  const clear = useCallback(
+    () => setStack((s) => overlayReducer(s, { type: 'clear' })),
+    [],
+  );
   const top = stack[stack.length - 1]?.overlay ?? null;
   return { stack, top, push, reset, close, dismiss, clear };
 }
