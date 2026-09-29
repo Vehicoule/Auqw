@@ -475,10 +475,7 @@ export class FakeProvider implements ProviderPort {
   /** The wire capability the prefer hint maps to under declared caps. */
   #lyricsCapability(prefer: LyricsPreference): ProviderCapability | null {
     const has = (cap: ProviderCapability) => this.capabilities.includes(cap);
-    if (prefer === 'plain') {
-      return has('lyrics.plain') ? 'lyrics.plain' : null;
-    }
-    if (has('lyrics.synced')) {
+    if (prefer !== 'plain' && has('lyrics.synced')) {
       return 'lyrics.synced';
     }
     return has('lyrics.plain') ? 'lyrics.plain' : null;
@@ -841,29 +838,15 @@ export class FakeStorage implements StoragePort {
     // only as its applied result, so the merge runs on live state.
     this.commits.push({ batch: clone(batch), context });
     // Clone-on-write: later caller mutation cannot alter stored state.
-    const staged = clone(batch);
+    // `recordingsMerge` is a function — the JSON clone drops it.
+    const { attempts: stagedAttempts, ...staged } = clone(batch);
     const merged: PersistedState = {
+      ...this.#state,
+      ...staged,
       recordings:
         batch.recordingsMerge !== undefined
           ? batch.recordingsMerge(this.#state.recordings)
           : (staged.recordings ?? this.#state.recordings),
-      likes: staged.likes ?? this.#state.likes,
-      entities: staged.entities ?? this.#state.entities,
-      entitySourceRefs:
-        staged.entitySourceRefs ?? this.#state.entitySourceRefs,
-      playlists: staged.playlists ?? this.#state.playlists,
-      playlistEntries:
-        staged.playlistEntries ?? this.#state.playlistEntries,
-      playHistory: staged.playHistory ?? this.#state.playHistory,
-      playCounts: staged.playCounts ?? this.#state.playCounts,
-      matchReviews: staged.matchReviews ?? this.#state.matchReviews,
-      lyricsCache: staged.lyricsCache ?? this.#state.lyricsCache,
-      artworkCache: staged.artworkCache ?? this.#state.artworkCache,
-      downloads: staged.downloads ?? this.#state.downloads,
-      localSources: staged.localSources ?? this.#state.localSources,
-      localFiles: staged.localFiles ?? this.#state.localFiles,
-      queue: staged.queue ?? this.#state.queue,
-      settings: staged.settings ?? this.#state.settings,
     };
     // Mirror sqlite: validate the merged document before any mutation
     // so tests can't commit states the real backend would reject.
@@ -873,8 +856,8 @@ export class FakeStorage implements StoragePort {
       );
     }
     this.#state = merged;
-    if (staged.attempts !== undefined) {
-      this.#attempts = [...this.#attempts, ...staged.attempts].slice(
+    if (stagedAttempts !== undefined) {
+      this.#attempts = [...this.#attempts, ...stagedAttempts].slice(
         -FakeStorage.MAX_ATTEMPTS,
       );
     }
