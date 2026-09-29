@@ -3,6 +3,10 @@
 // then drives mode switches via the `mode` prop (same path as
 // onModeChange → setStageMode). Per commit it records React Profiler
 // durations and DOM mutation counts (add/remove = real mounts).
+// Run from apps/desktop (which owns the jsdom devDep):
+//   cd apps/desktop && node ../../packages/ui-web/probe-tabs.mjs
+// or let the repo-root node_modules resolve it — ui-web itself does
+// not declare jsdom, so an isolated per-package install can't run it.
 import { register } from 'node:module';
 register('./src/tsx-loader.mjs', import.meta.url);
 

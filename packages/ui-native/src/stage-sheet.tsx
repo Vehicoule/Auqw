@@ -935,12 +935,11 @@ export function StageSheet({
   );
   useEffect(() => {
     if (lyricScrollKey === null || activeMode !== 'lyrics') {
-      // Leaving the pane resets the owed key AND the measurements —
-      // the kept-alive scroller holds stale frames while hidden, so a
-      // re-entry must not scroll until its layout refires.
+      // Re-entry owes the active line a scroll — the kept-alive
+      // measurements are still valid (mounted rows only refire
+      // onLayout when geometry actually changes), so only the owed
+      // key resets.
       lyricScrolledKey.current = null;
-      lyricsScrollH.current = 0;
-      lyricLayouts.current = [];
       return;
     }
     if (
