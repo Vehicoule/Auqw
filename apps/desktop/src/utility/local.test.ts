@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import {
   chmod,
@@ -371,6 +372,51 @@ export async function run(): Promise<void> {
       'restoring available re-arms the verdict',
     );
 
+    // The verdict belongs to the resolved PATH, not the URI string —
+    // a symlink re-point moves the target without touching the index
+    // (the freshness stamp stays put), so a cached answer must still
+    // match the realpath computed on THIS call. Prime a denial with
+    // `swap` still pointing at the unowned `evil`, then re-point it.
+    const swapUri = pathToFileURL(swap).href;
+    const primed = await call(CHANNELS.localResolve, { uri: swapUri });
+    assert(
+      primed.ok &&
+        (primed.result as { uri: string | null }).uri === null,
+      'the pre-swap denial is the one being primed',
+    );
+    await rm(swap);
+    await symlink(granted, swap);
+    const repointAllow = await call(CHANNELS.localResolve, {
+      uri: swapUri,
+    });
+    assert(
+      repointAllow.ok &&
+        (repointAllow.result as { uri: string | null }).uri ===
+          pathToFileURL(await realpath(granted)).href,
+      'a re-pointed symlink re-evaluates against its new target',
+    );
+    // …and the allowed direction: a verdict minted while the link
+    // named owned bytes dies the moment the link names anything else.
+    const turncoat = join(folder, 'turncoat.wav');
+    await symlink(granted, turncoat);
+    const turnUri = pathToFileURL(turncoat).href;
+    const firstLook = await call(CHANNELS.localResolve, { uri: turnUri });
+    assert(
+      firstLook.ok &&
+        (firstLook.result as { uri: string | null }).uri !== null,
+      'a link to owned bytes resolves',
+    );
+    await rm(turncoat);
+    await symlink(evil, turncoat);
+    const secondLook = await call(CHANNELS.localResolve, {
+      uri: turnUri,
+    });
+    assert(
+      secondLook.ok &&
+        (secondLook.result as { uri: string | null }).uri === null,
+      'a stale allow dies with the target it was minted for',
+    );
+
     // `local:read` — ranged bytes over the same grant gate.
     const read = await call(CHANNELS.localRead, {
       uri: grantedUri,
@@ -445,6 +491,63 @@ export async function run(): Promise<void> {
     assert(
       !goneRead.ok && goneRead.error?.kind !== 'invalid-response',
       'a vanished file reads a typed failure',
+    );
+    // A directory or FIFO wearing an indexed name can never serve
+    // bytes — the open must refuse typed 'unavailable' (not a raw
+    // EISDIR surfacing as 'internal', and never a parked open).
+    const dirRow = join(folder, 'dirrow');
+    await mkdir(dirRow);
+    dbW.prepare(
+      `INSERT INTO local_files
+       (file_id, source_id, doc_id, size, fingerprint, recording_id)
+       VALUES ('lf-5', 'src-1', 'dirrow', 0, 'fp5', 'rec-1')`,
+    ).run();
+    const dirRead = await call(CHANNELS.localRead, {
+      uri: pathToFileURL(dirRow).href,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !dirRead.ok && dirRead.error?.kind === 'unavailable',
+      'a directory at an owned name reads unavailable',
+    );
+    if (process.platform !== 'win32') {
+      const fifoRow = join(folder, 'pipe');
+      execFileSync('mkfifo', [fifoRow]);
+      dbW.prepare(
+        `INSERT INTO local_files
+         (file_id, source_id, doc_id, size, fingerprint, recording_id)
+         VALUES ('lf-6', 'src-1', 'pipe', 0, 'fp6', 'rec-1')`,
+      ).run();
+      const fifoResult = await Promise.race([
+        call(CHANNELS.localRead, {
+          uri: pathToFileURL(fifoRow).href,
+          position: 0,
+          maxLen: 8,
+        }),
+        new Promise<'timeout'>((resolve) => {
+          const timer = setTimeout(() => resolve('timeout'), 5000);
+          timer.unref();
+        }),
+      ]);
+      assert(
+        typeof fifoResult === 'object' &&
+          fifoResult !== null &&
+          !fifoResult.ok &&
+          fifoResult.error?.kind === 'unavailable',
+        'a FIFO at an owned name fails typed — never parks the open',
+      );
+    }
+    // A symlink-escape read is denied at the gate — `turncoat` ends
+    // pointing at the unowned `evil` from the re-point check above.
+    const turnRead = await call(CHANNELS.localRead, {
+      uri: turnUri,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !turnRead.ok && turnRead.error?.kind === 'permission-denied',
+      'a symlink-escape read is permission-denied',
     );
   } finally {
     local.close();

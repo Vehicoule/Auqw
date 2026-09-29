@@ -1,4 +1,4 @@
-import type { Stats } from 'node:fs';
+import { constants, type Stats } from 'node:fs';
 import { access, open, realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -80,7 +80,18 @@ function asIo(message: string, thrown: unknown): never {
  */
 function statError(thrown: unknown): null {
   const code = errorCode(thrown);
-  if (code === 'ENOENT' || code === 'ENOTDIR') {
+  // ELOOP joins the absent family: a symlink loop (or a leaf refused
+  // under O_NOFOLLOW) means the name never reaches a real file, and
+  // 'missing' beats a retryable io-error for a fault that won't heal.
+  if (
+    code === 'ENOENT' ||
+    code === 'ENOTDIR' ||
+    code === 'ELOOP' ||
+    // A platform that refuses a directory at open (EISDIR) maps to the
+    // same 'unavailable' the descriptor isFile() check produces where
+    // the open succeeds — the name exists but can never serve bytes.
+    code === 'EISDIR'
+  ) {
     return null;
   }
   if (code === 'EACCES' || code === 'EPERM') {
@@ -88,6 +99,16 @@ function statError(thrown: unknown): null {
   }
   throw shellError('io-error', 'path could not be statted');
 }
+
+// `local:read` opens with O_NOFOLLOW so a leaf swapped for a symlink
+// after the gate's realpath is refused (ELOOP) rather than followed,
+// and O_NONBLOCK so an owned-name FIFO can never park the worker
+// thread on a blocking open. Both are best-effort hints outside
+// POSIX — absent constants degrade to a plain read-only open.
+const READ_FLAGS =
+  constants.O_RDONLY |
+  (constants.O_NOFOLLOW ?? 0) |
+  (constants.O_NONBLOCK ?? 0);
 
 async function statChecked(path: string): Promise<Stats | null> {
   try {
@@ -322,7 +343,15 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
   // download leaving 'available' re-opens the scan). O(1) per call.
   // If the pragma is unavailable the stamp falls back to a content
   // hash over the gate-relevant columns (string work, still no fs).
-  const gateCache = new Map<string, string | null>();
+  // The verdict belongs to the PATH the URI resolved to, not the URI
+  // string — a re-pointed symlink keeps its URI while moving the
+  // target, so a hit must match the realpath computed this call. `real`
+  // is re-derived fresh above on every call; only the index scan is
+  // memoized.
+  const gateCache = new Map<
+    string,
+    { readonly real: string; readonly allowed: string | null }
+  >();
   let gateStamp = '';
   function indexStamp(db: DatabaseSync): string {
     try {
@@ -389,15 +418,15 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
       gateStamp = stamp;
     }
     const cached = gateCache.get(uri);
-    if (cached !== undefined) {
-      return cached;
+    if (cached !== undefined && cached.real === real) {
+      return cached.allowed;
     }
     const allowed = await gateLocalPath(db, abs, real);
     // An index write mid-evaluation voids the verdict — only cache
     // when the stamp still matches, so an in-flight scan can never
     // repopulate the table with pre-mutation answers.
     if (indexStamp(db) === stamp) {
-      gateCache.set(uri, allowed);
+      gateCache.set(uri, { real, allowed });
     }
     return allowed;
   }
@@ -512,7 +541,7 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
     }
     let file;
     try {
-      file = await open(real, 'r');
+      file = await open(real, READ_FLAGS);
     } catch (thrown) {
       // A vanished file is a typed failure, not a null result — the
       // contract result shape is `{data}` only; null would surface to
@@ -521,6 +550,24 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
       throw shellError('unavailable', 'local file is gone');
     }
     try {
+      // The verdict belongs to the canonical path — prove the opened
+      // descriptor is still bound to the file that path resolves to:
+      // realpath-equality refuses a swapped directory component and
+      // the inode match refuses a leaf that changed since the gate,
+      // so a post-gate symlink swap can never serve bytes outside the
+      // granted set. A directory/FIFO/device at an owned name is a
+      // typed 'unavailable', not an element-facing read error.
+      const opened = await file.stat();
+      const live = await statChecked(real);
+      if (
+        !opened.isFile() ||
+        live === null ||
+        live.dev !== opened.dev ||
+        live.ino !== opened.ino ||
+        (await realpathChecked(real)) !== real
+      ) {
+        throw shellError('unavailable', 'local file is gone');
+      }
       const buffer = Buffer.alloc(args.maxLen);
       const { bytesRead } = await file.read(
         buffer,
@@ -529,6 +576,9 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         args.position,
       );
       return { data: buffer.subarray(0, bytesRead).toString('base64') };
+    } catch (thrown) {
+      asIo('local read failed', thrown);
+      throw shellError('io-error', 'unreachable');
     } finally {
       await file.close();
     }
