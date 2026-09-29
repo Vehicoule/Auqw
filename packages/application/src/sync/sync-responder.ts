@@ -40,7 +40,7 @@ import {
  */
 
 /** The custody record's wire-visible fields — the welcome's `device`. */
-export type ResponderDeviceRecord = {
+type ResponderDeviceRecord = {
   readonly id: string;
   readonly name: string;
   readonly pub: string;
@@ -50,7 +50,7 @@ export type ResponderDeviceRecord = {
 };
 
 /** One row of a 'devices' reply — the caller's own custody view. */
-export type ResponderDeviceRow = {
+type ResponderDeviceRow = {
   readonly id: string;
   readonly name: string;
   readonly pairedAt: number;
@@ -58,12 +58,12 @@ export type ResponderDeviceRow = {
 };
 
 /** What custody already knows about a caller's key at hello time. */
-export type ResponderPrior = {
+type ResponderPrior = {
   readonly id: string;
   readonly pairedAt: number;
 };
 
-export type ResponderRead<T> =
+type ResponderRead<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false };
 
@@ -71,16 +71,16 @@ export type ResponderRead<T> =
  * A custody write's verdict — `reason` lands verbatim in the wire
  * reject so the caller sees the store's own failure kind.
  */
-export type ResponderWrite =
+type ResponderWrite =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: string };
 
-export type ResponderTouch =
+type ResponderTouch =
   | { readonly ok: true; readonly updated: boolean }
   | { readonly ok: false };
 
 /** Device custody for the responder role — the platform secure store. */
-export interface SyncResponderCustody<
+interface SyncResponderCustody<
   TRecord extends ResponderDeviceRecord,
 > {
   /** By device fingerprint — the hello-time `registered` answer. */
@@ -107,10 +107,10 @@ export interface SyncResponderCustody<
   ): Promise<ResponderTouch>;
 }
 
-export type ResponderPhase = 'hello' | 'auth' | 'open';
+type ResponderPhase = 'hello' | 'auth' | 'open';
 
 /** A cancellable one-shot timer — CancellationSource or a setTimeout wrap. */
-export type ResponderTimer = { cancel(): void };
+type ResponderTimer = { cancel(): void };
 
 /**
  * The socket shape handed to the pump factory — assignable INTO both
@@ -120,7 +120,7 @@ export type ResponderTimer = { cancel(): void };
  * unsatisfiable in either direction, so the seam spells the wider
  * one; the pump attaches listeners and never invents a value for it.
  */
-export type ResponderSocket = {
+type ResponderSocket = {
   /** Peer address when the underlying transport knows one. */
   readonly remoteAddress?: string | undefined;
   write(data: Uint8Array): unknown;

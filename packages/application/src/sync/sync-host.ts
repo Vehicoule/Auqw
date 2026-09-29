@@ -130,7 +130,7 @@ export type SyncPairHostDeps = {
   readonly log?: (line: string) => void;
 };
 
-export interface SyncPairHost {
+interface SyncPairHost {
   /** Bind the acceptor; resolves the bound port. Idempotent —
    * retries a failed bind, shares an in-flight one. */
   start(signal?: CancellationSignal): Promise<Result<{ port: number }>>;
