@@ -1,7 +1,6 @@
 import type {
   AppError,
   AttemptTrace,
-  ErrorKind,
   PlaybackIdentity,
   PlayerEvent,
   PlayerPort,
@@ -32,10 +31,8 @@ import {
  * `window` itself, so the port is testable under plain node. */
 export type StreamClient = AuqwApi['stream'];
 
-/**
- * The DOM Audio element surface the port drives. Declared minimally so
- * tests inject a fake without a DOM.
- */
+/** The DOM Audio element surface the port drives — declared minimally
+ * so tests inject a fake without a DOM. */
 export type AudioLike = {
   src: string;
   currentTime: number;
@@ -57,7 +54,7 @@ export type MediaSessionLike = {
   ): void;
 };
 
-/** Stream dead-resource kinds — a failed op with one of these means the
+/** Dead-resource kinds — a failed op with one of these means the
  * registry dropped the session, which the session layer re-prepares. */
 const DEAD_HANDLE_KINDS: ReadonlySet<ErrorKind> = new Set([
   'released',
@@ -67,14 +64,20 @@ const DEAD_HANDLE_KINDS: ReadonlySet<ErrorKind> = new Set([
   'not-found',
 ]);
 
+type ErrorKind = AppError['kind'];
+type StatusState = Extract<PlayerEvent, { type: 'status' }>['state'];
+type Settled = { url: string; source: MseSource | null };
+type AttachLeg = { url: string; settle: Promise<Settled>; abort(): void };
+
 function toError(thrown: unknown): AppError {
   if (isRecord(thrown)) {
-    const kind = appErrorKind(thrown['kind']);
-    const message =
-      typeof thrown['message'] === 'string' && thrown['message'].length > 0
-        ? (thrown['message'] as string)
-        : 'stream call failed';
-    return appError(kind, message);
+    const message = thrown['message'];
+    return appError(
+      appErrorKind(thrown['kind']),
+      typeof message === 'string' && message.length > 0
+        ? message
+        : 'stream call failed',
+    );
   }
   return appError('internal', 'stream call failed');
 }
@@ -91,37 +94,27 @@ function identityEq(a: PlaybackIdentity, b: PlaybackIdentity): boolean {
   return a.attemptId === b.attemptId && a.queueRev === b.queueRev;
 }
 
-function toPreparedStream(
-  payload: PreparedStreamPayload,
-): PreparedStream {
-  const stream: PreparedStream = {
-    handle: payload.handle,
-    mime: payload.mime,
+function toPreparedStream(p: PreparedStreamPayload): PreparedStream {
+  return {
+    handle: p.handle,
+    mime: p.mime,
+    ...(p.itag === undefined ? {} : { itag: p.itag }),
+    ...(p.contentLength === undefined
+      ? {}
+      : { contentLength: p.contentLength }),
+    ...(p.expiresAtMs === undefined ? {} : { expiresAtMs: p.expiresAtMs }),
+    ...(p.bitrateKbps === undefined ? {} : { bitrateKbps: p.bitrateKbps }),
   };
-  const out = stream as {
-    itag?: number;
-    contentLength?: number;
-    expiresAtMs?: number;
-    bitrateKbps?: number;
-  };
-  if (payload.itag !== undefined) out.itag = payload.itag;
-  if (payload.contentLength !== undefined)
-    out.contentLength = payload.contentLength;
-  if (payload.expiresAtMs !== undefined)
-    out.expiresAtMs = payload.expiresAtMs;
-  if (payload.bitrateKbps !== undefined)
-    out.bitrateKbps = payload.bitrateKbps;
-  return stream;
 }
 
 /** Diagnostics degrade to a zeroed trace rather than corrupting the
- * pipeline — mirrors the mobile adapter's convention. */
+ * pipeline; the payload shape is already the trace shape. */
 function toAttemptTrace(
   payload: AttemptSummaryPayload | undefined,
   requestId: string,
 ): AttemptTrace {
-  if (payload === undefined) {
-    return {
+  return (
+    payload ?? {
       requestId,
       steps: 0,
       httpCalls: 0,
@@ -130,37 +123,18 @@ function toAttemptTrace(
       elapsedMs: 0,
       httpTrace: [],
       guestLog: [],
-    };
-  }
-  return {
-    requestId: payload.requestId,
-    steps: payload.steps,
-    httpCalls: payload.httpCalls,
-    bytes: payload.bytes,
-    fuelUsed: payload.fuelUsed,
-    elapsedMs: payload.elapsedMs,
-    httpTrace: payload.httpTrace.map((entry) => {
-      const out: {
-        method: string;
-        url: string;
-        status?: number;
-        bytes: number;
-        elapsedMs: number;
-      } = {
-        method: entry.method,
-        url: entry.url,
-        bytes: entry.bytes,
-        elapsedMs: entry.elapsedMs,
-      };
-      if (entry.status !== undefined) out.status = entry.status;
-      return out;
-    }),
-    guestLog: payload.guestLog.map((entry) => ({
-      level: entry.level,
-      message: entry.message,
-    })),
-  };
+    }
+  );
 }
+
+/** The port's full surface — `noteMime` feeds the MSE gate mimes the
+ * page learned outside `prepare` (the dev-gate's `stream.devPrepare`). */
+export type WebPlayerPort = PlayerPort & {
+  noteMime(handle: string, mime: string): void;
+  /** `lf-*` handle → its resolved `file://` URI, else null — the
+   * peaks port reads local bytes through `local:read` with this. */
+  localUriFor(handle: string): string | null;
+};
 
 /**
  * `PlayerPort` over HTML audio + Media Session, fed by the stream
@@ -171,64 +145,41 @@ function toAttemptTrace(
  * `remote-previous` restarts or steps back — and lands as
  * `queue-transition` events for the session to reconcile.
  */
-/** The port's full surface — `noteMime` feeds the MSE gate mimes the
- * page learned outside `prepare` (the dev-gate's `stream.devPrepare`). */
-export type WebPlayerPort = PlayerPort & {
-  noteMime(handle: string, mime: string): void;
-  /** `lf-*` handle → its resolved `file://` URI, else null — the
-   * peaks port reads local bytes through `local:read` with this. */
-  localUriFor(handle: string): string | null;
-};
-
 export function createWebPlayerPort(deps: {
   stream: StreamClient;
   audio: AudioLike;
   mediaSession?: MediaSessionLike | null;
   now?: () => number;
-  /**
-   * MSE factories — present under Electron (real `MediaSource` + blob
-   * URLs); absent in tests/node, where the serve-url path is the only
-   * leg. The MSE attach is preferred for every mime it can take; a
-   * non-fragmented container still falls back to `streamServeUrl`.
-   */
+  /** MSE factories — present under Electron; absent in tests/node,
+   * where the serve-url path is the only leg. */
   mse?: MseFactories | null;
-  /**
-   * MIME for extensionless managed-download URIs — the ledger records
-   * the provider stream's mime at finalize, so a `file://` URI under
-   * the media dir can resolve its container from the row instead of
-   * reporting 'audio/*'. Absent in tests/the dev harness.
-   */
+  /** MIME for extensionless managed-download `file://` URIs — the
+   * ledger records the stream's mime at finalize. */
   localMime?: ((uri: string) => string | null) | null;
-  /**
-   * `local:resolve` — the utility's realpath + grant-confinement gate
-   * on a `file://` URI, consumed at prepare time: a null answer fails
-   * the prepare 'unavailable' so a lexical-URI-minted ref can never
-   * attach bytes outside the granted set. Absent in tests/the dev
-   * harness (the URI is trusted there).
-   */
+  /** `local:resolve` — the utility's realpath + grant-confinement gate
+   * on a `file://` URI; a null answer fails the prepare 'unavailable'
+   * so a lexical URI can't attach bytes outside the granted set. */
   localResolve?: ((uri: string) => Promise<string | null>) | null;
 }): WebPlayerPort {
   const { stream, audio } = deps;
   const now = deps.now ?? Date.now;
+  const mediaSession = deps.mediaSession ?? null;
+  const localResolve = deps.localResolve ?? null;
   const listeners = new Set<(event: PlayerEvent) => void>();
   let current: {
     handle: string;
     identity: PlaybackIdentity;
     occurrenceId: string | null;
   } | null = null;
-  /** `handle` → container mime, recorded from this port's own prepares
-   * — `play()` args carry no mime, so the MSE gate reads it here. */
+  /** `handle` → container mime — `play()` args carry no mime, so the
+   * MSE gate reads it here. */
   const handleMimes = new Map<string, string>();
-  /**
-   * `provider:'local'` mints `lf-*` handles keyed to their `file://`
-   * URI — the stream seam never sees them: prepare/attach/cancel/
-   * release all resolve inside this port (the mobile adapter's `lf-*`
-   * convention — the ref id IS the URI).
-   */
+  /** `provider:'local'` mints `lf-*` handles keyed to their `file://`
+   * URI — the stream seam never sees them (the mobile adapter's
+   * `lf-*` convention — the ref id IS the URI). */
   const localHandles = new Map<string, string>();
-  /** requestId → minted handle for `lf-req-*` prepares — the entry
-   * outlives the outcome so cancelPrepare can reclaim an adopted-
-   * but-unattached handle; release drops it with the handle. */
+  /** requestId → minted handle for `lf-req-*` prepares — lets
+   * `cancelPrepare` reclaim an adopted-but-unattached handle. */
   const localPrepares = new Map<string, string>();
   /** `lf-req-*` ids whose `local:resolve` is still in flight — the
    * requestId is live before the mint so `cancelPrepare` can stop a
@@ -239,11 +190,28 @@ export function createWebPlayerPort(deps: {
   let activeMse: { handle: string; source: MseSource } | null = null;
   /** In-flight attachUrl aborts keyed by op generation — between
    * `attachUrl` and its `settle` there is no `activeMse` for dropMse
-   * to kill, so a stop, release, or superseding op must abort the
-   * pending attach directly or its pump lease outlives the op. */
-  const pendingAttaches = new Map<
-    number,
-    { readonly handle: string; readonly abort: () => void }
+   * to kill, so a superseding op must abort the pending attach
+   * directly or its pump lease outlives the op. */
+  const pendingAttaches = new Map<number, { handle: string; abort: () => void }>();
+  let projection: QueueProjection | null = null;
+  let mediaActionsInstalled = false;
+  let seq = 0;
+  /** Monotonic op generation — a superseded async completion (play,
+   * cursor attach) must never touch `current` or the element. */
+  let opGen = 0;
+  /** In-flight `play` ops keyed by handle — the newest writer wins.
+   * A `release` of a tracked handle or a matching `pause` bumps opGen
+   * so the late serveUrl can't start a dropped stream or resume audio
+   * past the pause; `positionMs` tracks the newest seek so one issued
+   * mid-resolve isn't overwritten by the play's start position. */
+  const pendingPlayGens = new Map<
+    string,
+    {
+      gen: number;
+      identity: PlaybackIdentity;
+      positionMs: number;
+      occurrenceId: string | null;
+    }
   >();
 
   function abortPendingAttaches(handle?: string): void {
@@ -255,26 +223,14 @@ export function createWebPlayerPort(deps: {
     }
   }
 
-  /**
-   * Desktop `provider:'local'` refs are `file://` URIs verbatim — the
-   * `localPlaybackFor`/`local:probe` convention (`toFileUri`).
-   */
-  function isLocalUri(value: string): boolean {
-    // The `local:resolve`/`local:read` contract bound — a picked-dir
-    // URI plus a nested docId can exceed the path bound alone.
-    return value.startsWith('file://') && value.length <= 8192;
-  }
-
-  /**
-   * Mint an `lf-*` handle for a `file://` URI. The mime derives from
-   * the extension table first, then the download ledger's recorded
-   * mime for `dl-*` names; 'audio/*' reports "container unknown —
-   * the element sniffs" like the mobile adapter does.
-   */
+  /** Mint an `lf-*` handle for a `file://` URI. The mime derives from
+   * the extension table, then the ledger mime for `dl-*` names;
+   * 'audio/*' reports "container unknown — the element sniffs". */
   function mintLocalHandle(
     sourceRef: string,
   ): Result<{ handle: string; mime: string }> {
-    if (!isLocalUri(sourceRef)) {
+    // A renderer URI is lexical — the bound matches `local:resolve`.
+    if (!sourceRef.startsWith('file://') || sourceRef.length > 8192) {
       return err(appError('invalid-response', 'bad local sourceRef'));
     }
     const handle = `lf-${++localSeq}`;
@@ -285,11 +241,8 @@ export function createWebPlayerPort(deps: {
     return ok({ handle, mime });
   }
 
-  /**
-   * Reap a handle an attach leg minted but must not keep — an `lf-*`
-   * entry disappears locally (no host call), anything else rides the
-   * seam's release like before.
-   */
+  /** Reap a handle an attach leg minted but must not keep — `lf-*`
+   * drops locally, anything else rides the seam's release. */
   function releaseMinted(handle: string): void {
     if (localHandles.delete(handle)) {
       handleMimes.delete(handle);
@@ -304,13 +257,9 @@ export function createWebPlayerPort(deps: {
     void stream.release({ handle }).catch(() => undefined);
   }
 
-  /**
-   * Drop a pending-play marker. The play's late completion is
-   * invalidated by generation, but the global bump must only fire
-   * while the dropped play is still the newest op — a younger op
-   * already holding `opGen` would otherwise be killed by a route it
-   * never registered.
-   */
+  /** Drop a pending-play marker; the global bump only fires while the
+   * dropped play is still the newest op — a younger op already holding
+   * `opGen` must not be killed by a route it never registered. */
   function dropPendingPlay(handle: string): void {
     const pending = pendingPlayGens.get(handle);
     if (pending === undefined) {
@@ -322,13 +271,10 @@ export function createWebPlayerPort(deps: {
     }
   }
 
-  /**
-   * Handles a prepared outcome reports as superseded/pruned — dead
-   * registry-side, so every local route that could still aim a mime
-   * hint, attach, or pending play at them is dropped. `current` is
-   * left alone: it is only ever superseded by the very op installing
-   * its replacement, and stale-identity reporting needs the entry.
-   */
+  /** Drop every local route aimed at handles an outcome reports as
+   * superseded/pruned — dead registry-side. `current` is left alone:
+   * only the op installing its replacement supersedes it, and
+   * stale-identity reporting needs the entry. */
   function dropSuperseded(handles: readonly string[] | undefined): void {
     if (handles === undefined) {
       return;
@@ -343,14 +289,10 @@ export function createWebPlayerPort(deps: {
 
   function installMse(handle: string, source: MseSource | null): void {
     activeMse = source === null ? null : { handle, source };
-    // Post-attach pump/SourceBuffer death — the element's own error
-    // event never fires for a dead MSE feed (a revoked object URL does
-    // not detach the element), so the session reports it here the same
-    // way the audio error path does.
+    // Post-attach pump/SourceBuffer death never fires the element's
+    // error event (a revoked blob URL doesn't detach it) — report it
+    // here the same way the audio error path does.
     source?.onFail((error) => {
-      // Liveness is `activeMse` itself — a successor op's dropMse
-      // already cleared us, and a play()-installed source has no
-      // `current` entry to compare against.
       if (activeMse === null || activeMse.source !== source) {
         return;
       }
@@ -370,31 +312,43 @@ export function createWebPlayerPort(deps: {
     }
   }
 
+  /** A killed op's attach must not settle into the element — abort the
+   * pump lease and destroy whatever source the late settle produced. */
+  function dropAttach(gen: number, first: AttachLeg): void {
+    pendingAttaches.delete(gen);
+    first.abort();
+    void first.settle
+      .then((s) => s.source?.destroy())
+      .catch(() => undefined);
+  }
+
+  /** The attach's own teardown rejects `settle` with MseAborted — a
+   * killed op finishes quietly instead of surfacing a failure. */
+  function settleOrNull(settle: Promise<Settled>): Promise<Settled | null> {
+    return settle.catch((thrown) => {
+      if (thrown instanceof MseAborted) {
+        return null;
+      }
+      throw thrown;
+    });
+  }
+
   /**
-   * The MSE-first attach: when the mime is known and MSE-decodable the
-   * byte pump feeds a SourceBuffer; anything it refuses — non-fragmented
-   * mp4 above all — takes the `streamServeUrl` loopback instead.
-   *
-   * `url` lands fast enough to attach (a MediaSource only opens once
-   * its object URL is on the element — waiting for first-append
-   * readiness before assigning `audio.src` would deadlock `sourceopen`).
-   * `settle` then resolves the committed outcome: the MSE source once a
-   * segment lands, or the serve-url leg when the attach refuses
-   * mid-stream.
+   * MSE-first attach: a known MSE-decodable mime feeds a SourceBuffer;
+   * anything it refuses — non-fragmented mp4 above all — takes the
+   * `streamServeUrl` loopback instead. `url` must land on the element
+   * for `sourceopen` to fire at all; `settle` then resolves the
+   * committed outcome (the MSE source once a segment lands, or the
+   * serve-url leg when the attach refuses mid-stream).
    */
   async function attachUrl(
     handle: string,
     mimeHint?: string,
-  ): Promise<{
-    url: string;
-    settle: Promise<{ url: string; source: MseSource | null }>;
-    abort(): void;
-  }> {
+  ): Promise<AttachLeg> {
     const localUri = localHandles.get(handle);
     if (localUri !== undefined) {
-      // The element reads `file://` itself — Chromium decodes and
-      // seeks the file with native random access, so there is no
-      // pump to lease, no settle stage, and nothing to abort.
+      // The element reads `file://` itself — no pump to lease, no
+      // settle stage, nothing to abort.
       return {
         url: localUri,
         settle: Promise.resolve({ url: localUri, source: null }),
@@ -417,11 +371,9 @@ export function createWebPlayerPort(deps: {
         });
         const settle = attach.ready.then(
           (source) => ({ url: attach.url, source }),
-          async (
-            thrown,
-          ): Promise<{ url: string; source: MseSource | null }> => {
-            // An aborted attach is a killed op, not a refusal — the
-            // serve-url leg would mint a stream for a dead playback.
+          // An aborted attach is a killed op, not a refusal — the
+          // serve-url leg would mint a stream for a dead playback.
+          async (thrown): Promise<Settled> => {
             if (thrown instanceof MseAborted) {
               throw thrown;
             }
@@ -431,8 +383,7 @@ export function createWebPlayerPort(deps: {
         );
         return { url: attach.url, settle, abort: attach.abort };
       } catch {
-        // Pre-wire MSE refusal (mime gate / dead broker) — the loopback
-        // leg serves the same element through server.rs.
+        // Pre-wire MSE refusal — the loopback leg serves the element.
       }
     }
     const { url } = await stream.serveUrl({ handle });
@@ -442,34 +393,9 @@ export function createWebPlayerPort(deps: {
       abort: () => undefined,
     };
   }
-  let projection: QueueProjection | null = null;
-  let mediaActionsInstalled = false;
-  let seq = 0;
-  /** Monotonic op generation — a superseded async completion (play,
-   * cursor attach) must never touch `current` or the element. */
-  let opGen = 0;
-  /** In-flight `play` ops keyed by handle — the newest writer wins,
-   * each play removes only its own token. A `release` of a tracked
-   * handle or a matching `pause` invalidates that op (bumps opGen) so
-   * its late serveUrl completion can't start a host-dropped stream or
-   * resume audio past a successful pause. `positionMs` tracks the
-   * newest seek issued against the op's identity so a seek during the
-   * resolve isn't overwritten by the play's older start position. */
-  const pendingPlayGens = new Map<
-    string,
-    {
-      gen: number;
-      identity: PlaybackIdentity;
-      positionMs: number;
-      occurrenceId: string | null;
-    }
-  >();
 
-  /**
-   * A mime learned outside `prepare` — the dev-gate calls
-   * `stream.devPrepare` through the page, never through this port, so
-   * the page reports the payload's mime for the MSE gate to read.
-   */
+  /** A mime learned outside `prepare` — the dev-gate reports the
+   * payload's mime for the MSE gate to read. */
   function noteMime(handle: string, mime: string): void {
     if (handle.length <= 512 && mime.length <= 128) {
       handleMimes.set(handle, mime);
@@ -488,7 +414,8 @@ export function createWebPlayerPort(deps: {
     }
   }
 
-  const posMs = (): number => Math.max(0, Math.round(audio.currentTime * 1000));
+  const posMs = (): number =>
+    Math.max(0, Math.round(audio.currentTime * 1000));
   const durMs = (): number | undefined =>
     Number.isFinite(audio.duration)
       ? Math.round(audio.duration * 1000)
@@ -504,17 +431,7 @@ export function createWebPlayerPort(deps: {
     }
   }
 
-  function status(
-    state:
-      | 'idle'
-      | 'buffering'
-      | 'ready'
-      | 'playing'
-      | 'paused'
-      | 'ended'
-      | 'failed',
-    error?: AppError,
-  ): void {
+  function status(state: StatusState, error?: AppError): void {
     if (current === null) {
       return;
     }
@@ -573,29 +490,25 @@ export function createWebPlayerPort(deps: {
     }
     const requestId = `watt-${++seq}`;
     const gen = ++opGen;
-    // A new remote transition supersedes every older op — their
-    // in-flight attaches are dead on arrival, so kill their pump
-    // leases now rather than at settle.
+    // A new remote transition supersedes every older op — kill their
+    // pump leases now rather than at settle.
     abortPendingAttaches();
     let handle: string | undefined;
-    // Once this op owns `current`, failure-emit ownership is the
-    // handle match — emitTransition already swapped the projection
-    // reference, so `projection === p` can no longer prove liveness.
+    // Once this op owns `current`, liveness is the handle match —
+    // emitTransition already swapped the projection reference, so
+    // `projection === p` can no longer prove liveness.
     let attached = false;
     try {
       let mime: string;
       if (item.provider === 'local') {
-        // `provider:'local'` never reaches the seam — the port mints
-        // the `lf-*` handle the attach below reads as a `file://` URI.
-        // Successors pass the same realpath confinement as prepare:
-        // a lexical URI could resolve to an escaped path post-scan.
-        // A REJECTED resolve propagates to the outer catch — the
-        // retryable toError path — not the 'unavailable' a null means.
-        const resolver = deps.localResolve;
+        // Same realpath confinement as prepare: a lexical URI could
+        // resolve to an escaped path post-scan. A REJECTED resolve
+        // propagates to the outer catch (the retryable toError path),
+        // not the 'unavailable' a null means.
         const resolved =
-          resolver === undefined || resolver === null
+          localResolve === null
             ? item.sourceRef
-            : await resolver(item.sourceRef);
+            : await localResolve(item.sourceRef);
         if (resolved === null) {
           if (gen === opGen && projection === p) {
             status(
@@ -621,14 +534,13 @@ export function createWebPlayerPort(deps: {
           requestId,
         });
         if (outcome.type !== 'prepared' || outcome.stream === undefined) {
-          // A stale op's failure is not the live attempt's — suppress it
-          // rather than label the stream the session already moved to.
+          // A stale op's failure is not the live attempt's — suppress
+          // it rather than label the stream the session moved to.
           if (gen === opGen && projection === p) {
-            const kind = appErrorKind(outcome.kind);
             status(
               'failed',
               appError(
-                kind,
+                appErrorKind(outcome.kind),
                 outcome.message ?? 'successor prepare failed',
               ),
             );
@@ -637,29 +549,21 @@ export function createWebPlayerPort(deps: {
         }
         handle = outcome.stream.handle;
         mime = outcome.stream.mime;
-        // Sessions this prepare superseded are dead registry-side —
-        // drop every local route aimed at them before they can serve
-        // a later attach.
         dropSuperseded(outcome.superseded);
         noteMime(handle, mime);
       }
       const first = await attachUrl(handle, mime);
       pendingAttaches.set(gen, { handle, abort: first.abort });
-      // A later play/attach/prepare or a moved projection makes this
-      // completion stale — release its minted handle and stay out of
-      // the element; the live attempt keeps ownership.
+      // Superseded while the attach resolved — release the minted
+      // handle and stay out of the element.
       if (gen !== opGen || projection !== p) {
-        pendingAttaches.delete(gen);
-        first.abort();
-        void first.settle
-          .then((s) => s.source?.destroy())
-          .catch(() => undefined);
+        dropAttach(gen, first);
         releaseMinted(handle);
         return;
       }
       // The successor's pump must close before this source installs —
-      // two live pumps on one element attach is the leak the review
-      // flagged (dropMse only ran inside play()).
+      // two live pumps on one element attach is the leak dropMse
+      // previously missed outside play().
       dropMse();
       const identity: PlaybackIdentity = {
         attemptId: `watt-id-${seq}`,
@@ -671,18 +575,11 @@ export function createWebPlayerPort(deps: {
       audio.currentTime = 0;
       emitTransition(p, item.occurrenceId, reason, 0, identity, handle);
       emitMarks(handle, identity);
-      const settled = await first.settle.catch((thrown) => {
-        if (thrown instanceof MseAborted) {
-          return null;
-        }
-        throw thrown;
-      });
+      const settled = await settleOrNull(first.settle);
       if (settled === null) {
-        // MseAborted only comes from abortPendingAttaches — a
-        // superseding op — so this op is dead and its minted-but-
-        // never-installed handle is ours to reap, or repeated
-        // supersessions leak registry slots. (play() doesn't own its
-        // handle — the session minted it — so no release there.)
+        // Aborted — this op is dead and its minted-but-never-installed
+        // handle is ours to reap, or repeated supersessions leak
+        // registry slots.
         pendingAttaches.delete(gen);
         if (current !== null && current.handle === handle) {
           current = null;
@@ -690,10 +587,6 @@ export function createWebPlayerPort(deps: {
         releaseMinted(handle);
         return;
       }
-      // Liveness past the element install is the handle match —
-      // our own emitTransition already swapped the `projection`
-      // reference, so `projection === p` can no longer prove this op
-      // is the live attempt.
       if (
         gen !== opGen ||
         current === null ||
@@ -706,7 +599,7 @@ export function createWebPlayerPort(deps: {
       }
       pendingAttaches.delete(gen);
       installMse(handle, settled.source);
-      // A mid-stream MSE refusal swaps the element onto the loopback leg.
+      // A mid-stream MSE refusal swaps the element onto the loopback.
       if (settled.url !== first.url) {
         audio.src = settled.url;
         audio.currentTime = 0;
@@ -715,32 +608,27 @@ export function createWebPlayerPort(deps: {
       if (shouldPlay) {
         await audio.play();
       }
-      if (deps.mediaSession !== null && deps.mediaSession !== undefined) {
-        deps.mediaSession.playbackState = shouldPlay ? 'playing' : 'paused';
+      if (mediaSession !== null) {
+        mediaSession.playbackState = shouldPlay ? 'playing' : 'paused';
       }
     } catch (thrown) {
       // A failed op's pending attach can't outlive it — a settle that
       // never resolved would leave its pump lease running.
       pendingAttaches.get(gen)?.abort();
       pendingAttaches.delete(gen);
-      // A stale op's rejection must not label the live attempt — its
-      // outcome belongs to the op the session already replaced.
-      // Ownership is the handle match once this op set `current` (our
-      // own emitTransition already replaced the projection reference),
-      // or the untouched projection before attach.
       const stillMine =
         gen === opGen &&
         (attached
           ? current !== null && current.handle === handle
           : projection === p);
-      // A minted-but-never-attached handle is ours to reap — repeated
-      // leaks would cap the registry. For a local mint whose `current`
-      // was already set, reaping alone would leave a live `lf-*`
-      // pointer: a later element error would probe the dead handle on
-      // the seam as `released`. Report 'unavailable' FIRST — status()
-      // needs `current` to name the failing handle — then tear the
-      // element down. 'unavailable' over the retryable 'internal' a
-      // DOM rejection reads as: the file exists but can't play.
+      // A minted-but-never-attached handle is ours to reap. For a
+      // local mint whose `current` was set, reaping alone would leave
+      // a live `lf-*` pointer and a later element error would probe
+      // the dead handle on the seam — report 'unavailable' FIRST
+      // (status() needs `current` to name the failing handle), then
+      // tear the element down. 'unavailable' over the retryable
+      // 'internal' a DOM rejection reads as: the file exists but
+      // can't play.
       const failedLocal =
         handle !== undefined && localHandles.has(handle);
       if (stillMine) {
@@ -753,7 +641,11 @@ export function createWebPlayerPort(deps: {
       }
       if (handle !== undefined) {
         releaseMinted(handle);
-        if (failedLocal && current !== null && current.handle === handle) {
+        if (
+          failedLocal &&
+          current !== null &&
+          current.handle === handle
+        ) {
           audio.src = '';
           current = null;
         }
@@ -775,17 +667,14 @@ export function createWebPlayerPort(deps: {
     // The cursor walks `order` positions — the dealt play order under
     // shuffle, failed rows still in it flagged `skipsForward`; an
     // absent list reads as canonical identity.
-    const order =
-      p.order.length === 0
-        ? p.items.map((_, i) => i)
-        : p.order;
+    const order = p.order.length === 0 ? p.items.map((_, i) => i) : p.order;
     const pos = order.indexOf(idx);
     if (pos < 0) {
       return;
     }
     const restartInPlace = (): boolean => {
-      // Same-item cursor move: the live attach replays/restarts — the
-      // emitted transition carries the attempt's own identity per the
+      // Same-item cursor move: the live attach replays — the emitted
+      // transition carries the attempt's own identity per the
       // remote-previous restart rule.
       const cur = current;
       if (cur === null) {
@@ -799,9 +688,8 @@ export function createWebPlayerPort(deps: {
         cur.identity,
         cur.handle,
       );
-      // The track start may have been evicted — rewinding only the
-      // element would wait on bytes the pump never re-requests;
-      // the source re-anchors it, matching the seekTo path.
+      // The track start may have been evicted — the source re-anchors
+      // it, matching the seekTo path.
       activeMse?.source.seekTo(0);
       audio.currentTime = 0;
       if (reason === 'ended' || p.mode === 'playing') {
@@ -831,11 +719,12 @@ export function createWebPlayerPort(deps: {
     }
     // repeat=one replays the cursor item on a natural end (manual
     // remote-next still advances); repeat=all wraps the walk to its
-    // first unflagged entry — a single-item queue lands back on
-    // itself, handled by the same in-place restart as any same-item
-    // target. `skipsForward` rows are stepped over exactly like the
-    // engine's next(); backward moves above still reach them.
-    const unflagged = (walkPos: number): (typeof p.items)[number] | undefined => {
+    // first unflagged entry. `skipsForward` rows are stepped over
+    // exactly like the engine's next(); backward moves still reach
+    // them.
+    const unflagged = (
+      walkPos: number,
+    ): (typeof p.items)[number] | undefined => {
       for (let i = walkPos + 1; i < order.length; i += 1) {
         const item = p.items[order[i] ?? -1];
         if (item !== undefined && item.skipsForward !== true) {
@@ -862,8 +751,8 @@ export function createWebPlayerPort(deps: {
         current = null;
         audio.pause();
         audio.src = '';
-        if (deps.mediaSession !== null && deps.mediaSession !== undefined) {
-          deps.mediaSession.playbackState = 'none';
+        if (mediaSession !== null) {
+          mediaSession.playbackState = 'none';
         }
       }
       // Tail of the queue — a null target means the cursor ran off.
@@ -882,8 +771,7 @@ export function createWebPlayerPort(deps: {
     identity: PlaybackIdentity,
   ): void {
     if (localHandles.has(handle)) {
-      // A local attach has no seam session to mark — `stream:marks`
-      // on an `lf-*` handle could only return not-found.
+      // A local attach has no seam session to mark.
       return;
     }
     void stream
@@ -892,9 +780,8 @@ export function createWebPlayerPort(deps: {
         if (current === null || current.handle !== handle) {
           return;
         }
-        // `resolveMs`/`mintMs` are durations already; the later marks
-        // are wall-clock epochs — convert through `prepareStartedMs`,
-        // skipping any the conversion cannot anchor.
+        // `resolveMs`/`mintMs` are durations; the later marks are
+        // wall-clock epochs converted through `prepareStartedMs`.
         const started = marks.prepareStartedMs;
         const phases: ReadonlyArray<
           readonly [string, number | undefined, boolean]
@@ -959,10 +846,9 @@ export function createWebPlayerPort(deps: {
       return;
     }
     if (localHandles.has(owner.handle)) {
-      // No stream to probe — the element IS the resource. A file://
-      // attach that errors can't be re-minted into playing bytes,
-      // so the honest verdict is non-retryable, never a dead-handle
-      // kind (that would loop re-prepares over the same bad file).
+      // No stream to probe — the element IS the resource; report
+      // non-retryable, never a dead-handle kind (that would loop
+      // re-prepares over the same bad file).
       status(
         'failed',
         appError('unavailable', 'local file could not be played'),
@@ -970,13 +856,12 @@ export function createWebPlayerPort(deps: {
       return;
     }
     // A media error on a reaped loopback URL is the stream's death
-    // arriving async — e.g. a paused seek past the registry TTL makes
-    // the element refetch a dead URL. Probe the handle so the session
-    // sees the dead-resource kind (which it re-prepares) instead of a
-    // transient media failure that fails the occurrence. The probe
-    // resolving means the stream lives — a real flake — so stay
-    // 'transient', and a non-dead probe failure tells us nothing about
-    // the stream, so it stays 'transient' too.
+    // arriving async (e.g. a paused seek past the registry TTL
+    // refetches a dead URL) — probe the handle so the session sees
+    // the dead-resource kind it re-prepares instead of a transient
+    // failure that fails the occurrence. A resolved probe means the
+    // stream lives (a real flake — stays 'transient'), and a non-dead
+    // probe failure says nothing (stays 'transient' too).
     const gen = opGen;
     void stream.marks({ handle: owner.handle }).then(
       () => {
@@ -999,21 +884,17 @@ export function createWebPlayerPort(deps: {
   });
 
   function installMediaActions(): void {
-    const ms = deps.mediaSession;
-    if (ms === null || ms === undefined || mediaActionsInstalled) {
+    if (mediaSession === null || mediaActionsInstalled) {
       return;
     }
     mediaActionsInstalled = true;
-    ms.setActionHandler('play', () => {
+    mediaSession.setActionHandler('play', () => {
       void audio.play().catch(() => undefined);
     });
-    ms.setActionHandler('pause', () => {
-      // A media-key pause is transport-wide — a pending play's late
-      // serveUrl must not start audio after it, whatever attempt the
-      // op belongs to. Each killed op is reported paused with its own
-      // identity so the session reconciles the attempt — otherwise
-      // play() resolving with no attach and no event strands it in
-      // buffering.
+    mediaSession.setActionHandler('pause', () => {
+      // A media-key pause is transport-wide — each killed pending play
+      // is reported paused with its own identity so the session
+      // reconciles the attempt instead of stranding it in buffering.
       const killed = [...pendingPlayGens.entries()];
       invalidatePendingPlays(null);
       audio.pause();
@@ -1027,57 +908,45 @@ export function createWebPlayerPort(deps: {
         });
       }
     });
-    ms.setActionHandler('nexttrack', () => advanceQueue('remote-next'));
-    ms.setActionHandler('previoustrack', () =>
+    mediaSession.setActionHandler('nexttrack', () =>
+      advanceQueue('remote-next'),
+    );
+    mediaSession.setActionHandler('previoustrack', () =>
       advanceQueue('remote-previous'),
     );
   }
 
   function stale(identity: PlaybackIdentity): Result<never> | null {
     if (current !== null && !identityEq(identity, current.identity)) {
-      return err(
-        appError('invalid-message', 'stale playback identity'),
-      );
+      return err(appError('invalid-message', 'stale playback identity'));
     }
     return null;
   }
 
   /**
    * The `provider:'local'` prepare leg — `lf-*` in the mobile
-   * adapter's convention. The sourceRef already IS the `file://`
-   * URI, so the mint is synchronous; the outcome still emits on a
-   * microtask like the stream leg's `.then` so the session's event
-   * ordering stays exact. opGen/pendingAttaches ran in `prepare()`
-   * above this call — a newer op supersedes this one the same way it
-   * supersedes a stream mint.
+   * adapter's convention. The sourceRef already IS the `file://` URI,
+   * but the mint runs on the utility's realpath-checked answer: a
+   * renderer-side URI is lexical, and only the utility can confine it
+   * to the granted roots (null → 'unavailable'; with no resolver the
+   * lexical ref is trusted). The outcome emits on a microtask like the
+   * stream leg's `.then` so the session's event ordering stays exact.
    */
   function issueLocalPrepare(
-    input: {
-      sourceRef: string;
-      identity: PlaybackIdentity;
-    },
+    input: { sourceRef: string; identity: PlaybackIdentity },
     requestId: string,
     emitFailed: (error: AppError) => void,
   ): void {
-    // The URI mints on the utility's realpath-checked answer: a
-    // renderer-side `file://` string is lexical, and only the utility
-    // can realpath + confine it to the granted roots. A null answer
-    // (escape, revoke, gone) fails the prepare 'unavailable'. With no
-    // resolver (tests/dev harness) the lexical ref is trusted as-is.
     pendingLocalResolve.add(requestId);
     const mint = (resolved: string | null): void => {
       if (!pendingLocalResolve.delete(requestId)) {
-        // cancelPrepare arrived while the resolve was in flight — the
-        // cancelled outcome mirrors the microtask path below.
-        emitFailed(
-          appError('cancelled', 'local prepare cancelled'),
-        );
+        // cancelPrepare arrived mid-resolve — the cancelled outcome
+        // mirrors the microtask path below.
+        emitFailed(appError('cancelled', 'local prepare cancelled'));
         return;
       }
       if (resolved === null) {
-        emitFailed(
-          appError('unavailable', 'local file not readable'),
-        );
+        emitFailed(appError('unavailable', 'local file not readable'));
         return;
       }
       const minted = mintLocalHandle(resolved);
@@ -1086,8 +955,7 @@ export function createWebPlayerPort(deps: {
         return;
       }
       // The entry lands before the outcome so a `cancelPrepare` racing
-      // the microtask finds and reclaims the minted handle — the mobile
-      // adapter's reclaim-by-requestId contract.
+      // the microtask finds and reclaims the minted handle.
       localPrepares.set(requestId, minted.value.handle);
       queueMicrotask(() => {
         if (!localPrepares.has(requestId)) {
@@ -1109,33 +977,24 @@ export function createWebPlayerPort(deps: {
         });
       });
     };
-    const resolver = deps.localResolve;
-    if (resolver === undefined || resolver === null) {
+    if (localResolve === null) {
       queueMicrotask(() => mint(input.sourceRef));
       return;
     }
     // A REJECTED resolve is a bridge/utility failure — the retryable
-    // path via toError, not the terminal 'unavailable' a null answer
-    // means. The session's retry policy can then re-prepare after a
-    // utility restart rather than skipping a track that never played.
-    resolver(input.sourceRef).then(mint, (thrown) => {
+    // toError path, not the terminal 'unavailable' a null means.
+    localResolve(input.sourceRef).then(mint, (thrown) => {
       if (!pendingLocalResolve.delete(requestId)) {
-        emitFailed(
-          appError('cancelled', 'local prepare cancelled'),
-        );
+        emitFailed(appError('cancelled', 'local prepare cancelled'));
         return;
       }
       emitFailed(toError(thrown));
     });
-    return;
   }
 
-  /**
-   * Issue a stream-seam resolve+prepare and translate its terminal
-   * outcome into the `prepare` event — shared by `prepare` and
-   * `prewarm`; the difference is the caller's playback-intent
-   * side effects (op generation, attach teardown), not this path.
-   */
+  /** The shared stream-seam resolve+prepare leg behind `prepare` and
+   * `prewarm` — they differ only in playback-intent side effects
+   * (op generation, attach teardown), not this path. */
   function issueStreamPrepare(
     input: {
       provider: string;
@@ -1144,7 +1003,10 @@ export function createWebPlayerPort(deps: {
     },
     requestId: string,
   ): void {
-    const emitFailed = (error: AppError): void => {
+    const emitFailed = (
+      error: AppError,
+      attempt?: AttemptSummaryPayload,
+    ): void => {
       emit({
         type: 'prepare',
         requestId,
@@ -1152,13 +1014,11 @@ export function createWebPlayerPort(deps: {
         outcome: {
           type: 'failed',
           error,
-          attempt: toAttemptTrace(undefined, requestId),
+          attempt: toAttemptTrace(attempt, requestId),
         },
       });
     };
     if (input.provider === 'local') {
-      // Desktop local files attach as `file://` on the element — the
-      // seam never sees the ref, so mint the `lf-*` handle here.
       issueLocalPrepare(input, requestId, emitFailed);
       return;
     }
@@ -1170,86 +1030,65 @@ export function createWebPlayerPort(deps: {
       })
       .then((outcome: PrepareOutcomePayload) => {
         if (
-          outcome.type === 'prepared' &&
-          outcome.stream !== undefined
+          outcome.type !== 'prepared' ||
+          outcome.stream === undefined
         ) {
-          const prepared = toPreparedStream(outcome.stream);
-          dropSuperseded(outcome.superseded);
-          noteMime(prepared.handle, prepared.mime);
-          emit({
-            type: 'prepare',
-            requestId,
-            identity: input.identity,
-            outcome: {
-              type: 'prepared',
-              stream: prepared,
-              attempt: toAttemptTrace(outcome.attempt, requestId),
-            },
-          });
-        } else {
-          const kind = appErrorKind(outcome.kind);
-          emit({
-            type: 'prepare',
-            requestId,
-            identity: input.identity,
-            outcome: {
-              type: 'failed',
-              error: appError(
-                kind,
-                outcome.message ?? 'prepare failed',
-              ),
-              attempt: toAttemptTrace(outcome.attempt, requestId),
-            },
-          });
+          emitFailed(
+            appError(
+              appErrorKind(outcome.kind),
+              outcome.message ?? 'prepare failed',
+            ),
+            outcome.attempt,
+          );
+          return;
         }
+        const prepared = toPreparedStream(outcome.stream);
+        dropSuperseded(outcome.superseded);
+        noteMime(prepared.handle, prepared.mime);
+        emit({
+          type: 'prepare',
+          requestId,
+          identity: input.identity,
+          outcome: {
+            type: 'prepared',
+            stream: prepared,
+            attempt: toAttemptTrace(outcome.attempt, requestId),
+          },
+        });
       })
       .catch((thrown) => emitFailed(toError(thrown)));
   }
 
+  const mintRequestId = (provider: string): string =>
+    provider === 'local' ? `lf-req-${++localSeq}` : `wreq-${++seq}`;
+
   return {
     async prepare(input) {
-      // `provider:'local'` mints `lf-req-*` ids — they never reach
-      // the seam, so cancelPrepare routes on the prefix (the mobile
-      // adapter's convention).
-      const requestId =
-        input.provider === 'local'
-          ? `lf-req-${++localSeq}`
-          : `wreq-${++seq}`;
-      // Return the requestId up front — the terminal outcome arrives
+      // The requestId returns up front — the terminal outcome arrives
       // as a `prepare` event, so a session-side deadline can reach
-      // `cancelPrepare` while the utility is still resolving.
+      // `cancelPrepare` while the utility is still resolving. The
+      // opGen bump already kills in-flight ops' generations; kill
+      // their in-flight attaches too, or a stalled stream keeps its
+      // pump lease for a settle that will never be accepted.
+      const requestId = mintRequestId(input.provider);
       opGen++;
-      // The bump already kills every in-flight playback op's
-      // generation — kill their in-flight attaches too, or a stalled
-      // stream keeps its pump lease for a settle that will never be
-      // accepted.
       abortPendingAttaches();
       issueStreamPrepare(input, requestId);
       return ok(requestId);
     },
 
-    /**
-     * Advisory warm: identical resolve+prepare leg minus the playback
-     * intent — no op-generation bump and no attach teardown, so an
-     * in-flight attach or pending play outlives the speculation. The
-     * seam enforces the one-unattached-session bound on its side, and
-     * a later same-ref prepare adopts the warm session without
-     * re-resolving. The terminal outcome is still a `prepare` event.
-     */
+    /** Advisory warm: the same leg minus playback intent — no op-gen
+     * bump and no attach teardown, so an in-flight attach or pending
+     * play outlives the speculation. The outcome still arrives as a
+     * `prepare` event. */
     async prewarm(input) {
-      const requestId =
-        input.provider === 'local'
-          ? `lf-req-${++localSeq}`
-          : `wreq-${++seq}`;
+      const requestId = mintRequestId(input.provider);
       issueStreamPrepare(input, requestId);
       return ok(requestId);
     },
 
     async play(input) {
       const gen = ++opGen;
-      // A new play supersedes every older op — kill their in-flight
-      // attaches now; their settles are already dead on arrival and
-      // the pump lease mustn't ride out a source that never lands.
       abortPendingAttaches();
       pendingPlayGens.set(input.handle, {
         gen,
@@ -1264,22 +1103,12 @@ export function createWebPlayerPort(deps: {
             handle: input.handle,
             abort: first.abort,
           });
-          // A newer play/prepare/stop superseded this one while the
-          // attach resolved — the late completion must not retake
-          // the element. A release of this same handle landed too: it
-          // bumped opGen through the pendingPlayGens guard.
           if (gen !== opGen) {
-            pendingAttaches.delete(gen);
-            first.abort();
-            void first.settle
-              .then((s) => s.source?.destroy())
-              .catch(() => undefined);
+            dropAttach(gen, first);
             return;
           }
-          // The surviving token is authoritative — a queue mutation may
-          // have re-keyed its queueRev since this op was issued, and
-          // attaching the caller's stale revision would fail every
-          // later control as `invalid-message`.
+          // The surviving token is authoritative — a queue mutation
+          // may have re-keyed its queueRev since this op was issued.
           const pending = pendingPlayGens.get(input.handle);
           const identity = pending?.identity ?? input.identity;
           dropMse();
@@ -1287,26 +1116,19 @@ export function createWebPlayerPort(deps: {
             handle: input.handle,
             identity,
             occurrenceId:
-              pending?.occurrenceId ?? projection?.currentOccurrenceId ?? null,
+              pending?.occurrenceId ??
+              projection?.currentOccurrenceId ??
+              null,
           };
           audio.src = first.url;
           audio.currentTime =
             (pending?.positionMs ?? input.positionMs ?? 0) / 1000;
           status('buffering');
           emitMarks(input.handle, identity);
-          const settled = await first.settle.catch((thrown) => {
-            // The op's own teardown aborted the attach — finish
-            // quietly rather than surfacing a spurious failure.
-            if (thrown instanceof MseAborted) {
-              return null;
-            }
-            throw thrown;
-          });
+          const settled = await settleOrNull(first.settle);
           if (settled === null) {
             return;
           }
-          // Superseded while the MSE attach settled — whatever source
-          // it produced belongs to a dead op.
           if (gen !== opGen) {
             pendingAttaches.delete(gen);
             settled.source?.destroy();
@@ -1314,29 +1136,26 @@ export function createWebPlayerPort(deps: {
           }
           pendingAttaches.delete(gen);
           installMse(input.handle, settled.source);
-          // A mid-stream MSE refusal swaps the element onto the
-          // loopback leg.
           if (settled.url !== first.url) {
             audio.src = settled.url;
             audio.currentTime =
               (pending?.positionMs ?? input.positionMs ?? 0) / 1000;
           }
           // The pump always opens at byte 0 — a resume position (or a
-          // seek issued while this attach was in flight, which only
-          // updated the pending slot) must re-anchor the source or the
-          // element waits on the whole stream head downloading first.
+          // mid-flight seek, which only updated the pending slot) must
+          // re-anchor the source. Read live: a seek during the await
+          // updates `pending`.
           const startMs = pending?.positionMs ?? input.positionMs ?? 0;
           if (startMs > 0) {
             settled.source?.seekTo(startMs);
           }
           await audio.play();
-          if (deps.mediaSession !== null && deps.mediaSession !== undefined) {
-            deps.mediaSession.playbackState = 'playing';
+          if (mediaSession !== null) {
+            mediaSession.playbackState = 'playing';
           }
         } finally {
-          // An attach still pending on exit — error, abort path, or
-          // an upstream settle that never landed — must not keep its
-          // pump lease running past the dead op.
+          // An attach still pending on exit must not keep its pump
+          // lease running past the dead op.
           const attach = pendingAttaches.get(gen);
           if (attach !== undefined) {
             pendingAttaches.delete(gen);
@@ -1356,14 +1175,13 @@ export function createWebPlayerPort(deps: {
       if (bad !== null) {
         return bad;
       }
-      // A play still awaiting its serve URL has not attached `current`
-      // yet — without invalidating it, the late completion would start
-      // audio after this pause already succeeded. `stale` can't see it,
-      // so match it by the same identity contract a live attempt uses.
+      // A play still awaiting its serve URL hasn't attached `current`
+      // — without invalidating it, the late completion would start
+      // audio after this pause succeeded.
       invalidatePendingPlays(identity);
       audio.pause();
-      if (deps.mediaSession !== null && deps.mediaSession !== undefined) {
-        deps.mediaSession.playbackState = 'paused';
+      if (mediaSession !== null) {
+        mediaSession.playbackState = 'paused';
       }
       return ok(undefined);
     },
@@ -1373,9 +1191,8 @@ export function createWebPlayerPort(deps: {
       if (bad !== null) {
         return bad;
       }
-      // A play still awaiting its serve URL applies its captured
-      // position when it lands — keep the pending op's position in
-      // step so a seek issued during the resolve isn't overwritten.
+      // Keep a pending play's position in step so a seek issued during
+      // the resolve isn't overwritten when it lands.
       for (const pending of pendingPlayGens.values()) {
         if (identityEq(input.identity, pending.identity)) {
           pending.positionMs = input.positionMs;
@@ -1383,7 +1200,7 @@ export function createWebPlayerPort(deps: {
       }
       audio.currentTime = input.positionMs / 1000;
       // An uncovered position re-anchors the pump through the
-      // journal/Cues index; a covered one just plays from buffer.
+      // journal/Cues index; a covered one plays from buffer.
       activeMse?.source.seekTo(input.positionMs);
       return ok(undefined);
     },
@@ -1398,8 +1215,8 @@ export function createWebPlayerPort(deps: {
       dropMse();
       audio.pause();
       audio.src = '';
-      if (deps.mediaSession !== null && deps.mediaSession !== undefined) {
-        deps.mediaSession.playbackState = 'none';
+      if (mediaSession !== null) {
+        mediaSession.playbackState = 'none';
       }
       status('idle');
       current = null;
@@ -1408,8 +1225,7 @@ export function createWebPlayerPort(deps: {
 
     async cancelPrepare(input) {
       // `lf-req-*` ids never reached the seam — the cancel reclaims
-      // the minted handle locally so a cancelled prepare can't
-      // orphan it (the mobile adapter's convention).
+      // the minted handle locally.
       if (input.requestId.startsWith('lf-req-')) {
         pendingLocalResolve.delete(input.requestId);
         const handle = localPrepares.get(input.requestId);
@@ -1436,9 +1252,9 @@ export function createWebPlayerPort(deps: {
       dropMse(input.handle);
       abortPendingAttaches(input.handle);
       handleMimes.delete(input.handle);
-      // Releasing a handle an in-flight play is about to attach must
-      // invalidate that op — otherwise its late serveUrl resolves into
-      // an already-dropped host stream and audio resumes post-teardown.
+      // A release on a handle an in-flight play is about to attach
+      // must invalidate that op — otherwise its late serveUrl starts
+      // an already-dropped stream and audio resumes post-teardown.
       dropPendingPlay(input.handle);
       if (localHandles.delete(input.handle)) {
         for (const [requestId, minted] of localPrepares) {
@@ -1447,7 +1263,7 @@ export function createWebPlayerPort(deps: {
             break;
           }
         }
-        // The seam never saw this handle — there is nothing to release.
+        // The seam never saw this handle — nothing to release.
         return ok(undefined);
       }
       return guard(() => stream.release({ handle: input.handle }));
@@ -1457,10 +1273,10 @@ export function createWebPlayerPort(deps: {
       projection = next;
       // The session re-keys the live attempt's queueRev whenever it
       // projects queue state for the SAME occurrence, then sends that
-      // re-keyed identity to transport calls — keep ours in step or the
-      // stale guard rejects legitimate pause/seek/stop. A projection
-      // naming another occurrence is left alone: that attach arrives
-      // through a fresh play() carrying its own revision.
+      // identity to transport calls — keep ours in step or the stale
+      // guard rejects legitimate pause/seek/stop. A projection naming
+      // another occurrence is left alone: that attach arrives through
+      // a fresh play() carrying its own revision.
       if (
         current !== null &&
         next !== null &&
@@ -1476,9 +1292,7 @@ export function createWebPlayerPort(deps: {
         };
       }
       // Pending plays pinned to the same occurrence ride the same
-      // re-key — the session re-issues pause/seek under the new
-      // revision, so a stale queueRev here would strand their
-      // identity match the way an un-re-keyed `current` would.
+      // re-key.
       if (next !== null && next.currentOccurrenceId !== null) {
         for (const pending of pendingPlayGens.values()) {
           if (pending.occurrenceId === next.currentOccurrenceId) {
@@ -1495,12 +1309,7 @@ export function createWebPlayerPort(deps: {
 
     subscribe(listener) {
       listeners.add(listener);
-      let active = true;
       return () => {
-        if (!active) {
-          return;
-        }
-        active = false;
         listeners.delete(listener);
       };
     },
