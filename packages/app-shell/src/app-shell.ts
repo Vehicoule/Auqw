@@ -1,18 +1,10 @@
 /**
- * `useAppShell` — the shared shell composition both apps used to
- * build inline. One hook call returns the whole state/callback
- * surface: navigation + overlay stack, toast bus, locale apply,
- * serialized settings writes, sheet epochs, downloads ledger/usage,
- * offline playability gates, search flow, entity fetches, all
- * view-model derivations, the play/report funnel, queue/playlist/
- * lyrics/radio ops, row-action + playlist-picker sheets, and the
- * transfer state machine.
- *
- * Every genuine platform divergence is a documented `ports` flag —
- * see types.ts. The hook never probes a platform API itself; the
- * apps wire `subscribeOnline`, `localPlayable`, `exportJson`, the
- * peaks port, the post-mutation local-source sync, and the sync-row
- * destination.
+ * `useAppShell` — the shared shell composition both apps mount: one
+ * hook call returns the whole state/callback surface (nav, overlays,
+ * toasts, locale, settings writes, downloads, playability gates,
+ * search, models, play funnel, sheets, transfer). Every platform
+ * divergence is a documented `ports` flag in types.ts — the hook
+ * never probes a platform API itself.
  */
 import {
   useCallback,
@@ -130,9 +122,8 @@ const SHELL_OVERLAY_TYPES: ReadonlySet<string> = new Set([
   'transfer',
 ]);
 
-/** Narrows an app-extended overlay to the factory's own routes — a
-    platform extra (mobile's `{ type: 'sync' }`) is never a shell
-    route, so `type` membership is the whole check. */
+/** Narrows an app-extended overlay to the shell's own routes —
+    a platform extra (mobile's `{ type: 'sync' }`) never is. */
 function shellOverlayOf<E extends { readonly type: string }>(
   overlay: ShellOverlay | E | null | undefined,
 ): ShellOverlay | null {
@@ -164,13 +155,14 @@ const reporter =
   (result: Result<unknown>) =>
     reportResult(action, result);
 
-// ~1 Hz trailing throttle for the download progress stream — a
-// statfs/list probe per chunk would be hundreds of scans per
-// download, so a burst settles into one trailing read.
-function trailing(
-  s: { last: number; timer: ReturnType<typeof setTimeout> | null },
-  run: () => void,
-): void {
+// ~1 Hz trailing throttle — a statfs/list probe per progress chunk
+// would be hundreds of scans per download; a burst settles into one
+// trailing read.
+type ThrottleState = {
+  last: number;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+function trailing(s: ThrottleState, run: () => void): void {
   const exec = () => {
     s.last = Date.now();
     run();
@@ -239,9 +231,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const { session } = controller;
 
   // ---- position channel ------------------------------------------
-  // Position ticks ride the session's light channel — status ticks
-  // that only move position skip the state publish, so the position
-  // read subscribes here instead of through `state`.
+  // Position ticks ride the session's light channel — position-only
+  // ticks skip the state publish, so the read subscribes here.
   const positionMs = useSyncExternalStore(
     useCallback((l: () => void) => session.subscribePosition(l), [session]),
     () => session.positionMs(),
@@ -251,7 +242,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const [tab, setTab] = useState('home');
   // `stageOpen` is the desktop Stage column collapse flag AND the
   // mobile sheet's expanded flag — ports.stageInitiallyOpen picks
-  // the mount-time pose per platform.
+  // the mount-time pose.
   const [stageOpen, setStageOpen] = useState(
     ports.stageInitiallyOpen === true,
   );
@@ -259,10 +250,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const [reordering, setReordering] = useState(false);
   const [query, setQuery] = useState('');
   // Bumped when '/' routes to explore — remounts SearchScreen so its
-  // autoFocus refocuses the box even when the tab was already active.
+  // autoFocus refocuses even when the tab was already active.
   const [searchFocusTick, setSearchFocusTick] = useState(0);
-  // Recent searches: session-scoped, newest first — persisting them
-  // would be a storage-schema decision, so they die with the app.
+  // Session-scoped, newest first — persisting them would be a
+  // storage-schema decision, so they die with the app.
   const [searchRecents, setSearchRecents] = useState<readonly string[]>(
     [],
   );
@@ -273,11 +264,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const [storefrontSheetOpen, setStorefrontSheetOpen] = useState(false);
   const [qualityPickerOpen, setQualityPickerOpen] = useState(false);
   const [storefrontDraft, setStorefrontDraft] = useState('');
-  // Sheet openings are epoch-tagged — a save that resolves after the
-  // user dismissed and reopened the sheet must not close the new one.
-  // Theme and language also bump on dismiss and on each pick, so a
-  // late save from an earlier pick can neither close the sheet nor
-  // apply a stale locale over a newer pick.
+  // Sheet openings are epoch-tagged — a save resolving after dismiss+
+  // reopen must not close the new sheet. Theme/language also bump on
+  // dismiss and each pick, so a late save can neither close nor apply
+  // a stale locale over a newer pick.
   const storefrontEpoch = useRef(0);
   const qualityEpoch = useRef(0);
   const themeEpoch = useRef(0);
@@ -285,8 +275,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   // ---- locale -----------------------------------------------------
   // setLocale mutates module state and never notifies React — every
-  // apply bumps localeTick so the localized model memos below rebuild
-  // their t() strings in the new language (they carry it as a dep).
+  // apply bumps localeTick so the localized model memos rebuild their
+  // t() strings (they carry it as a dep).
   const [localeTick, setLocaleTick] = useState(0);
   const applyLocale = useCallback(
     (setting: string | null | undefined) => {
@@ -295,11 +285,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
     },
     [],
   );
-  // Every settings write serializes through the shared chain —
-  // updateSettings persists a complete snapshot, so each patch merges
-  // onto the session's latest committed settings at execution time
-  // (snapshot(), not React state, is the merge base; the live
-  // settings are the fallback while it isn't ready).
+  // Every settings write serializes through the shared chain — each
+  // patch merges onto the latest committed settings at execution
+  // time (snapshot() is the merge base, never the React state).
   const queueSettingsWrite = useSerializedWrite(
     (next: Settings) => session.updateSettings(next),
     () => {
@@ -308,10 +296,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
     },
     state.settings,
   );
-  // A persisted language (or 'system' resolution) applies once the
-  // ready settings arrive — never during render. The ready UI stays
-  // gated until that apply has landed: an ungated effect commits one
-  // ready frame in the system language and only flips afterwards.
+  // The persisted language applies once the ready settings arrive —
+  // the ready UI stays gated until that apply has landed, otherwise
+  // one frame commits in the system language before flipping.
   const [localeApplied, setLocaleApplied] = useState(false);
   useEffect(() => {
     applyLocale(state.settings.language);
@@ -321,10 +308,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // ---- diagnostics + overlay stack --------------------------------
   const [attempts, setAttempts] = useState<readonly AttemptTrace[]>([]);
   const resultMeta = useRef(new Map<string, TrackMetadata>());
-  // Library-world overlay stack: pushed routes — collection list,
-  // playlist editor, provider entity page — rendered as push screens
-  // above the nav shell. Entity pages keep a fetch per ref so popping
-  // back to a deeper screen restores its loaded content.
+  // Entity pages keep a fetch per ref so popping back to a deeper
+  // screen restores its loaded content.
   const {
     stack: overlayStack,
     top: overlay,
@@ -351,10 +336,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
 
   // ---- connectivity -----------------------------------------------
-  // null = connectivity unknown (no baseline yet) — the offline
-  // banner renders only on an explicit false. The subscribe seam is
-  // the app's: desktop forwards its webContents subscription, mobile
-  // wraps its connectivity port (subscribe-then-snapshot, edge guard).
+  // null = unknown (no baseline yet) — the offline banner renders
+  // only on an explicit false.
   const [online, setOnline] = useState<boolean | null>(null);
   useEffect(
     () => ports.subscribeOnline(setOnline),
@@ -362,8 +345,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
 
   // ---- toast bus ---------------------------------------------------
-  // Transient failure pill: reportResult routes its text here through
-  // the module-level sink (installed on mount), and it self-clears.
+  // reportResult routes its text through the module sink; the pill
+  // self-clears.
   const [toast, setToast] = useState<string | null>(null);
   useEffect(() => {
     setToastSink(setToast);
@@ -380,41 +363,39 @@ export function useAppShell<E extends { readonly type: string } = never>(
   }, [toast]);
 
   // ---- downloads ledger + usage probes -----------------------------
-  // Live download ledger — subscribed once; chips + the downloads
-  // collection + the stage action all read it.
+  // Live ledger — chips, the downloads collection, and the stage
+  // action all read it.
   const [downloads, setDownloads] = useState(
     () => controller.downloads.list(),
   );
-  const downloadsThrottle = useRef<{
-    last: number;
-    timer: ReturnType<typeof setTimeout> | null;
-  }>({ last: 0, timer: null });
+  const downloadsThrottle = useRef<ThrottleState>({
+    last: 0,
+    timer: null,
+  });
   const refreshDownloads = useCallback(() => {
     trailing(downloadsThrottle.current, () =>
       setDownloads(controller.downloads.list()),
     );
   }, [controller]);
   // Bumped after a local-folder mutation so the models re-read
-  // `local()` — the source is storage-backed, not evented, and scans
-  // here are user-initiated only.
+  // `local()` — the source is storage-backed, not evented.
   const [localTick, setLocalTick] = useState(0);
 
   // Raw usage — formatted per render so the storage line follows the
-  // UI language instead of freezing the phrasing at probe time.
+  // UI language.
   const [storageUsage, setStorageUsage] = useState<{
     readonly bytes: number;
     readonly free: number;
   } | null>(null);
   // Transfer events can outpace the statfs probe — each read stamps a
-  // sequence, and only a success newer than the last applied success
-  // lands. A failed probe advances nothing, so it can't knock out an
-  // older success still in flight.
+  // sequence and only a success newer than the last applied one
+  // lands, so a stale in-flight success can't knock out a newer one.
   const usageSeq = useRef(0);
   const usageApplied = useRef(0);
-  const usageThrottle = useRef<{
-    last: number;
-    timer: ReturnType<typeof setTimeout> | null;
-  }>({ last: 0, timer: null });
+  const usageThrottle = useRef<ThrottleState>({
+    last: 0,
+    timer: null,
+  });
   const refreshUsage = useCallback(() => {
     trailing(usageThrottle.current, () => {
       const seq = (usageSeq.current += 1);
@@ -450,11 +431,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   // ---- playability gates -------------------------------------------
   // Bytes on disk — a stored download or a scanned local file.
-  // Ownership is NOT the local-playback probe: the probe answers
-  // whether the player can attach the bytes, while ownership answers
-  // whether 'download missing' may skip the row — asking the first
-  // question with the second probe would re-request stored tracks
-  // and delete their files on a changed mapping.
+  // Ownership is NOT the local-playback probe (ports.localPlayable /
+  // canPlay): the probe answers whether the player can attach the
+  // bytes, ownership answers whether 'download missing' may skip the
+  // row — conflating them re-requests stored tracks and deletes their
+  // files on a changed mapping.
   const isOwned = useCallback(
     (recordingId: string): boolean =>
       controller.downloads.fileFor(recordingId) !== null ||
@@ -472,10 +453,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
         : isOwned(recordingId),
     [ports.localPlayable, isOwned],
   );
-  // Offline honesty for remote paths: with connectivity explicitly
-  // down nothing streams — every row's play affordance waits instead
-  // of firing a remote attempt. Attachable owned bytes are the
-  // exception.
+  // Offline honesty: with connectivity explicitly down only
+  // attachable owned bytes still play — remote rows wait instead of
+  // firing dead attempts.
   const canPlay = useCallback(
     (recordingId: string): boolean =>
       online !== false || localPlayable(recordingId),
@@ -514,19 +494,17 @@ export function useAppShell<E extends { readonly type: string } = never>(
       // Mirrors Session.#pickRef's provider path — a download is
       // resolved by the active playback provider, so only a mapping
       // verdict or a non-rejected ref it owns can produce a stream.
-      // Other providers' refs would fail resolvePlayback: hide them.
       const provider = state.settings.playbackProvider;
       const mapped = effectiveMapping(recording, provider);
-      if (mapped !== null) {
-        return mapped.ref;
-      }
       return (
+        mapped?.ref ??
         recording.sourceRefs.find(
           (r) =>
             r.provider === provider &&
             r.kind === 'track' &&
             !isRefRejected(recording.mappings, r),
-        ) ?? null
+        ) ??
+        null
       );
     },
     [
@@ -585,40 +563,29 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
 
   // ---- lyrics / reviews / transfer bookkeeping ---------------------
-  // Lyrics are a live read off the Stage's lyrics mode, not session
-  // state — the fetch is keyed to the playing recording and canceled
-  // when superseded.
+  // Live reads off their surfaces, not session state — each fetch is
+  // keyed to its target and canceled when superseded.
   const [lyricsFetch, setLyricsFetch] = useState<LyricsFetch | null>(
     null,
   );
   const lyricsSource = useRef<CancellationSource | null>(null);
-  // Corrections are live reads too (session.listMatchReviews); the
-  // queue reloads after every op so a verdict renders immediately.
   const [reviewFetch, setReviewFetch] = useState<ReviewFetch>({
     reviews: null,
     error: null,
   });
   const [reviewFilter, setReviewFilter] =
     useState<CorrectionsFilter>('pending');
-  // Export/import state lives in the transfer overlay; the picked
-  // file's text is stashed between preview and confirm.
   const [transfer, setTransfer] = useState<TransferModel>(IDLE_TRANSFER);
   const importText = useRef<string | null>(null);
-  // The staged import preview is a localized snapshot — its row
-  // labels freeze at file-choice time. The raw document is kept
-  // beside it so the model can be rebuilt in the current language
-  // whenever the locale changes (localeTick effect below).
+  // Localized transfer strings freeze into state at write time —
+  // keep the raw pieces beside them so the localeTick effect below
+  // can re-derive the model in the new language (exportDetail is a
+  // closure for the same reason; error details are typed, not
+  // localized).
   const importPreviewRaw = useRef<{
     preview: ImportPreview;
     sourceLabel: string;
   } | null>(null);
-  // The applied-import summary and the saved-export notice are also
-  // localized strings frozen into transfer state — keep their raw
-  // pieces beside the preview so the localeTick effect can re-derive
-  // them. Only read while the matching phase is 'done'; error details
-  // carry typed messages, which are not localized. The export detail
-  // is a CLOSURE the platform's exportJson returns — re-running it
-  // re-derives the label (desktop's download-name template).
   const importSummaryCounts = useRef<{
     tracks: number;
     likes: number;
@@ -667,7 +634,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     });
   }, [session]);
 
-  // ---- search ------------------------------------------------------
+  // ---- search -------------------------------------------------------
   const catalogProvider =
     controller.providers.find(
       (p) => p.id === state.settings.catalogProvider,
@@ -702,21 +669,20 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [controller.providers],
   );
   const [suggestions, setSuggestions] = useState<readonly string[]>([]);
-  const suggestSource = useRef<CancellationSource | null>(null);
-  const suggestSeq = useRef(0);
+  const suggest = useRef<{
+    source: CancellationSource | null;
+    seq: number;
+  }>({ source: null, seq: 0 });
 
   const runSearch = useCallback(
     (q: string) => {
-      // A committed search replaces the draft surface with results —
-      // the platform gets the first move (mobile dismisses the IME;
-      // it would just cover the list otherwise).
+      // The platform gets the first move on commit (mobile dismisses
+      // the IME). A commit also supersedes the suggest stream — the
+      // draft pane closes and in-flight completions are dropped.
       ports.onSearchCommit?.();
       const trimmed = q.trim();
-      // A committed search supersedes the suggest stream — the draft
-      // pane closes and in-flight completions are dropped.
-      suggestSource.current?.cancel();
-      suggestSource.current = null;
-      suggestSeq.current += 1;
+      suggest.current.source?.cancel();
+      suggest.current = { source: null, seq: suggest.current.seq + 1 };
       setSuggestions([]);
       if (trimmed === '') {
         search?.cancel();
@@ -733,12 +699,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   const recordRecentSearch = useCallback((q: string) => {
     const trimmed = q.trim();
-    if (trimmed === '') {
-      return;
+    if (trimmed !== '') {
+      setSearchRecents((prev) =>
+        [trimmed, ...prev.filter((r) => r !== trimmed)].slice(0, 8),
+      );
     }
-    setSearchRecents((prev) =>
-      [trimmed, ...prev.filter((r) => r !== trimmed)].slice(0, 8),
-    );
   }, []);
 
   const cancelSearch = useCallback(() => {
@@ -760,12 +725,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [recordRecentSearch, runSearch],
   );
 
-  // `state` republishes a fresh `settings` object on every tick, and
-  // `searchState` swaps identity on every revision — both would
-  // re-fire this effect (and cancel the debounce) without an actual
-  // change underneath. Depend on the derived values instead: the
-  // provider selection is stable across publishes, and the committed
-  // query is the only searchState field the gate reads.
+  // The deps below key on derived values, not object identities:
+  // `state` republishes a fresh `settings` on every tick and
+  // `searchState` swaps identity on every revision — either would
+  // re-fire the debounce effect without an actual change underneath.
   const suggestSelection = useMemo(
     () => selectionFromSettings(state.settings),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -781,17 +744,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const retrySearch = useCallback(() => {
     runSearch(committedQuery);
   }, [runSearch, committedQuery]);
-  // Keystrokes debounce into `catalog.suggest` completions routed over
-  // declaring providers — the typing surface is suggestions, not live
-  // result pages, so the debounce runs tighter than a catalog search
-  // ever could. Only a commit (Enter or a row tap) runs catalog.search.
+  // Keystrokes debounce into `catalog.suggest` completions — only a
+  // commit (Enter or a row tap) runs catalog.search.
   useEffect(() => {
     const trimmed = query.trim();
     // An edit invalidates the prior burst at once — a completion that
     // lands mid-debounce belongs to old text and must never paint.
-    suggestSource.current?.cancel();
-    suggestSource.current = null;
-    suggestSeq.current += 1;
+    suggest.current.source?.cancel();
+    suggest.current = { source: null, seq: suggest.current.seq + 1 };
     if (trimmed === '') {
       setSuggestions([]);
       search?.cancel();
@@ -805,8 +765,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     }
     const timer = setTimeout(() => {
       const source = new CancellationSource();
-      suggestSource.current = source;
-      const seq = suggestSeq.current;
+      const seq = suggest.current.seq;
+      suggest.current = { source, seq };
       void providerRouter
         .suggest(
           suggestSelection,
@@ -814,7 +774,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
           opContext('suggest', 10_000, source),
         )
         .then((result) => {
-          if (suggestSeq.current === seq && !source.signal.cancelled) {
+          if (suggest.current.seq === seq && !source.signal.cancelled) {
             setSuggestions(result.ok ? result.value : []);
           }
         });
@@ -823,7 +783,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
   }, [query, committedQuery, search, providerRouter, suggestSelection]);
 
   // Keep the row→metadata map in sync so a tap can recover the
-  // TrackMetadata the session needs for addAndPlay.
+  // TrackMetadata the session needs for addAndPlay; the first rows
+  // also feed the session's advisory warm.
   useEffect(() => {
     const map = resultMeta.current;
     map.clear();
@@ -831,14 +792,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       searchState.page.items.forEach((meta, index) => {
         map.set(toSearchRowModel(meta, index).key, meta);
       });
-      // Visible rows are the ones the user can tap — hand the refs to
-      // the session's advisory warm; prefetch/connectivity gates own
-      // the honesty policy inside the session.
+      const head = searchState.page.items.slice(0, 9);
       session.prewarm({
-        sourceRefs: searchState.page.items
-          .slice(0, 9)
-          .map((meta) => meta.sourceRef),
-        tracks: searchState.page.items.slice(0, 9),
+        sourceRefs: head.map((meta) => meta.sourceRef),
+        tracks: head,
       });
     }
   }, [searchState, session]);
@@ -847,9 +804,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     null,
   );
 
-  // Diagnostics: attempt traces are persisted by the session; load a
-  // page whenever the settings tab becomes active. The pending-review
-  // count is a live read on the same visit.
+  // Diagnostics + pending-review count load on each settings-tab
+  // visit — persisted traces and live rows, never session snapshots.
   useEffect(() => {
     if (tab !== 'settings') {
       return;
@@ -871,12 +827,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
   }, [tab, controller, session]);
 
   // ---- models ------------------------------------------------------
-  // Published snapshots keep stable refs for unchanged sections, so
-  // model memos key on the slices they read — a queue-only publish
-  // no longer rebuilds the library model, and position-only ticks
-  // (which skip the state channel entirely) flow through positionMs.
-  // The recording an engaged attempt (preparing/buffering/playing)
-  // points at — the "playing" row mark; idle/paused/failed mark none.
+  // Model memos key on the slices they read — published snapshots
+  // keep stable refs for unchanged sections, and position-only ticks
+  // (which skip the state channel) flow through positionMs.
+  // activeRecordingId is the "playing" row mark — an engaged attempt
+  // (preparing/buffering/playing); idle/paused/failed mark none.
   const activeRecordingId =
     state.playback.type === 'idle' ||
     state.playback.type === 'paused' ||
@@ -919,11 +874,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // mount out from under an expanded sheet would vanish it mid-view.
   // While expanded the mount is held on the last model until the user
   // collapses; release then waits out the settle spring so the slide
-  // lands before unmount, and the morph re-seed happens at rest so a
-  // fresh player starts collapsed, not mid-morph. The snapshot sits
-  // in a ref — mirroring the live model into state would double the
-  // per-tick render. ports.holdEndedPlayer gates the whole mount —
-  // desktop's stage column simply unmounts.
+  // lands before unmount. The snapshot sits in a ref — mirroring the
+  // live model into state would double the per-tick render.
+  // ports.holdEndedPlayer gates the whole mount — desktop's stage
+  // column simply unmounts.
   const lastPlayerRef = useRef<PlayerModel | null>(null);
   const [endHold, setEndHold] = useState(false);
   const resetStageMorph = ports.resetStageMorph;
@@ -969,7 +923,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const heldOccurrenceId =
     player === null ? (stagePlayer?.occurrenceId ?? null) : null;
 
-  // playback.type names only the latest failure — the app carries
+  // playback.type names only the latest failure — the hook carries
   // the set so a row the cursor moved past keeps its 'error' mark;
   // a fresh attempt for the occurrence clears it, removals prune.
   const failedQueueIds = useRef(new Set<string>());
@@ -990,21 +944,20 @@ export function useAppShell<E extends { readonly type: string } = never>(
         failedQueueIds.current.delete(id);
       }
     }
-    // Same honesty rule as the library rows: offline + unattachable
-    // marks 'unavailable' so a dead press isn't a surprise.
-    const unavailable =
-      online === false
-        ? new Set(
-            state.queue.occurrences
-              .map((o) => o.recordingId)
-              .filter((id) => !localPlayable(id)),
-          )
-        : undefined;
     return toQueueModel({
       queue: state.queue,
       recordings: state.recordings,
       likes: state.likes,
-      unavailableRecordingIds: unavailable,
+      // Same honesty rule as the library rows: offline + unattachable
+      // marks 'unavailable' so a dead press isn't a surprise.
+      unavailableRecordingIds:
+        online === false
+          ? new Set(
+              state.queue.occurrences
+                .map((o) => o.recordingId)
+                .filter((id) => !localPlayable(id)),
+            )
+          : undefined,
       failedOccurrenceIds:
         failedQueueIds.current.size === 0
           ? undefined
@@ -1027,11 +980,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
   ]);
 
   const libraryModel = useMemo(() => {
-    // ports.localCatalog: local index rows (provenance 'local') are
-    // authoritative over the session's in-memory copies — a scan
-    // commits fresher tags than restore loaded. Session stays
-    // authoritative for every other row. Off flag (desktop) the
-    // session's rows are read alone.
+    // ports.localCatalog: local index rows (provenance 'local')
+    // shadow the session's in-memory copies — a scan commits fresher
+    // tags than restore loaded. Without the port the session rows
+    // render as-is.
     const local = controller.local();
     const recordings = (() => {
       if (ports.localCatalog !== true || local === null) {
@@ -1056,7 +1008,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
       entitySourceRefs: state.entitySourceRefs,
       downloads,
     });
-    const chipByRecording = chipsByRecording;
     // Honest-offline: with connectivity explicitly down, a row plays
     // only from bytes the player can attach — remote streams degrade
     // to 'unavailable' instead of spinning.
@@ -1067,7 +1018,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     ): TrackRowModel => {
       const base: TrackRowModel = {
         ...row,
-        download: chipByRecording.get(recordingId) ?? row.download,
+        download: chipsByRecording.get(recordingId) ?? row.download,
         playing: recordingId === activeRecordingId ? true : row.playing,
       };
       return offline && !localPlayable(recordingId)
@@ -1131,10 +1082,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       return {
         ...model,
         entries: model.entries.map((entry) => {
-          const chip =
+          const download =
             downloadChipFor(entry.recordingId) ?? entry.row.download;
           const owned =
-            chip === 'stored' || localPlayable(entry.recordingId);
+            download === 'stored' || localPlayable(entry.recordingId);
           return {
             ...entry,
             row: {
@@ -1143,7 +1094,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
                 entry.recordingId === activeRecordingId
                   ? true
                   : entry.row.playing,
-              download: chip,
+              download,
               ...(offline && !owned
                 ? { state: 'unavailable' as const, note: t('note.offline') }
                 : {}),
@@ -1205,9 +1156,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
       }),
     [state.likes, state.entitySourceRefs, playingRef, localeTick],
   );
-  // Row-key → TrackMetadata map for entity items, same contract as
-  // resultMeta for search results — namespaced per stack entry so two
-  // entity screens in the stack never collide.
+  // Row-key → TrackMetadata for entity items (resultMeta's contract)
+  // — namespaced per stack entry so two entity screens never collide.
   useEffect(() => {
     const map = entityMeta.current;
     map.clear();
@@ -1262,8 +1212,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         .filter((l) => l.entityKind === 'track')
         .map((l) => l.targetId),
     );
-    const local = controller.local();
-    const localUris = local?.uriMap();
+    const localUris = controller.local()?.uriMap();
     const rows: TrackRowModel[] = [];
     for (const rec of state.recordings) {
       // Folder removal keeps the recording but drops its file row —
@@ -1348,9 +1297,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // back (same contract as the search-result and entity maps).
   const suggestionMeta = useMemo((): Map<string, TrackMetadata> => {
     if (searchState.type === 'content') {
-      // Divergence: desktop bounded the card-activation lookup to the
-      // first 12 results; mobile searched the whole page. Parameterized
-      // via ports.homeSuggestionLimit (desktop: 12, mobile: unset).
+      // ports.homeSuggestionLimit: desktop bounded the card lookup to
+      // the first 12 results; mobile searched the whole page (unset).
       const items =
         ports.homeSuggestionLimit === undefined
           ? searchState.page.items
@@ -1435,23 +1383,20 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   // ---- play funnel -------------------------------------------------
   // The ambiguous-match gate parks candidates in a review the user
-  // must resolve — retrying the press only fails the same way, so a
-  // play that hits the gate opens the review surface instead of
-  // dying quietly on a dead queue item.
+  // must resolve — a play that hits it opens the corrections surface
+  // instead of dying on a dead queue item.
   //
   // reportPlayError is the single error funnel: the play promise and
-  // the published `playback.failed` state carry the SAME error object,
-  // so identity-dedupe via lastPlayErrorRef reports each failure once
-  // regardless of which channel delivers it first. The dedupe engages
-  // only under ports.trackAttemptActions — the watcher below is
-  // desktop's (mobile has no late-verdict channel to dedupe against).
+  // the published `playback.failed` carry the SAME error object, so
+  // identity-dedupe reports each failure once regardless of channel.
+  // The dedupe engages only under ports.trackAttemptActions — the
+  // watcher is desktop's (mobile has no late-verdict channel).
   const lastPlayErrorRef = useRef<AppError | null>(null);
   // Action labels travel with the ATTEMPT, not the button: a pause
   // during an in-flight prepare must not steal the play attempt's
   // name. dispatchPlay records the pending action with a seq; the
-  // playback watcher binds it to the attemptId the moment the new
-  // attempt publishes, and clears it on settle so engine-advanced
-  // attempts (auto-next, queue drain) fall back to the neutral label.
+  // watcher binds it to the attemptId at publish and clears on settle
+  // so engine-advanced attempts fall back to the neutral label.
   const attemptActionsRef = useRef(new Map<string, MessageId>());
   const pendingAttemptRef = useRef<{
     seq: number;
@@ -1518,13 +1463,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
     },
     [reportPlay],
   );
-  // A prepare/stream failure that lands after the play promise already
-  // resolved reaches the UI only through `playback.failed` — the
-  // watcher reports it through the same deduped funnel as the promise
-  // path so the failure can't pass silently. Its action comes from
-  // attemptActionsRef: whichever op created the attempt owns its name.
+  // A failure that lands after the play promise resolved reaches the
+  // UI only through `playback.failed` — the watcher reports it through
+  // the same deduped funnel, with the attempt's recorded action.
   // ports.trackAttemptActions mounts it — mobile's op promises cover
-  // its verdicts itself and it runs no watcher.
+  // its verdicts themselves.
   useEffect(() => {
     if (ports.trackAttemptActions !== true) {
       return;
@@ -1567,20 +1510,17 @@ export function useAppShell<E extends { readonly type: string } = never>(
       }
       // Tap-to-play dedupe: a queued track jumps to its occurrence
       // instead of minting a repeat — 'add to queue' stays additive.
-      const queued = queuedOccurrenceFor(state.queue, recordingId);
+      const queued =
+        queuedOccurrenceFor(state.queue, recordingId) ??
+        (await session.enqueueRecording(recordingId).then((r) => {
+          if (!r.ok) {
+            reportResult('action.enqueueTrack', r);
+          }
+          return r.ok ? r.value : null;
+        }));
       if (queued !== null) {
         await dispatchPlay('common.play', session.playOccurrence(queued));
-        return;
       }
-      const enqueued = await session.enqueueRecording(recordingId);
-      if (!enqueued.ok) {
-        reportResult('action.enqueueTrack', enqueued);
-        return;
-      }
-      await dispatchPlay(
-        'common.play',
-        session.playOccurrence(enqueued.value),
-      );
     },
     [session, state.queue, canPlay, dispatchPlay],
   );
@@ -1600,24 +1540,18 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [session, state.queue, canPlay, dispatchPlay],
   );
 
-  // Mirrors the cursor's targeting in walk space — the dealt order
-  // under shuffle, canonical otherwise: next → the engine's
-  // mark-skipping destination; previous → restart current when
-  // positionMs>3s or at the walk's head, else position−1 — and under
-  // repeat=all both edges wrap (tail→head, head→tail). The gate sees
-  // the same target the engine would land on — an attachable target
-  // still advances offline.
-  // ports.gateAdvanceAlways: desktop tests the target on EVERY
-  // advance (a missing walk target no-ops even online); mobile tests
-  // only while connectivity is explicitly down.
+  // The gate tests the same target the engine would land on in walk
+  // space (dealt order under shuffle, canonical otherwise) — an
+  // attachable target still advances offline.
+  // ports.gateAdvanceAlways: desktop tests on EVERY advance (a
+  // missing walk target no-ops even online); mobile tests only while
+  // connectivity is explicitly down.
   const advance = useCallback(
     (method: 'next' | 'previous') => {
       const { occurrences, currentOccurrenceId } = state.queue;
-      const gate =
-        ports.gateAdvanceAlways === true || online === false;
-      if (gate) {
-        // Position ticks ride the light channel now — read it live,
-        // not the (possibly position-stale) published snapshot.
+      if (ports.gateAdvanceAlways === true || online === false) {
+        // Position ticks ride the light channel — read it live, not
+        // the (possibly position-stale) published snapshot.
         const targetId = advanceTargetId({
           method,
           occurrences,
@@ -1660,9 +1594,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
 
   // Offline honesty for metadata paths (cached search/entity rows):
-  // the materialized recording is playable offline only when the
-  // player can attach its bytes — a provider ref alone would start a
-  // remote attempt the UI says waits for connectivity.
+  // the materialized recording is playable only when the player can
+  // attach its bytes — a provider ref alone would start a remote
+  // attempt the UI says waits for connectivity.
   const canPlayMeta = useCallback(
     (meta: TrackMetadata): boolean => {
       if (online !== false) {
@@ -1676,9 +1610,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [online, state.recordings, localPlayable],
   );
 
-  // Same dedupe as playRecording for metadata taps (search results,
-  // entity rows, home cards): the tap's source ref can match a queued
-  // occurrence or one of its recording's refs before it materializes.
+  // The playRecording dedupe for metadata taps: a tap's source ref
+  // can match a queued occurrence (or its recording's refs) before
+  // the metadata materializes into one.
   const playMeta = useCallback(
     (meta: TrackMetadata) => {
       const queued = queuedOccurrenceForRef(
@@ -1693,8 +1627,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [session, state.queue, state.recordings],
   );
 
-  // The shared result-tap funnel: the gate stays per-call so the
-  // recordRecentSearch side effects below fire only on a playable tap.
+  // The shared result-tap funnel: the gate fires inside so callers'
+  // side effects (recordRecentSearch) run only on a playable tap.
   const playCheckedMeta = useCallback(
     (meta: TrackMetadata) => {
       if (canPlayMeta(meta)) {
@@ -1734,18 +1668,17 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
 
   // A home card carries either a materialized recording id (recents /
-  // resume rails) or a suggestion's `${provider}:${id}` key. The meta
+  // resume rails) or a suggestion's `${provider}:${id}` key; the meta
   // map covers every rendered suggestion card — a miss means a
-  // recording-keyed card. ports.strictHomeCardKeys: mobile only treats
-  // the card as a recording when it sits in the recents rail — an
+  // recording-keyed card. ports.strictHomeCardKeys: mobile resolves a
+  // recording only when the key sits in the recents rail — an
   // unrecognized suggestion key no-ops instead of enqueueing a
   // provider-keyed 'recordingId' that can only fail; desktop presses
   // any unmatched key through the recording path.
   const onHomeCardPress = useCallback(
     (card: { readonly key: string }) => {
-      // strictHomeCardKeys (mobile): a recents-rail card is a recording
-      // first — a key collision with a suggestion still plays the
-      // recording, matching the pre-extraction activateHomeCard order.
+      // strictHomeCardKeys (mobile): a recents-rail card is a
+      // recording first — a key collision still plays the recording.
       if (
         ports.strictHomeCardKeys === true &&
         homeModel.recents.some((liked) => liked.key === card.key)
@@ -1787,6 +1720,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       // A committed mutation lands on the instance the op ran on —
       // ports.afterLocalMutation owns the post-commit projection
       // (the apps disagree on the mid-flight rehydrate swap).
+      const open = (epoch: { current: number }, set: (v: boolean) => void) => {
+        epoch.current += 1;
+        set(true);
+      };
       const localMutate = (
         label: MessageId,
         op: (local: LocalFileSource) => Promise<Result<unknown>>,
@@ -1804,12 +1741,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       };
       switch (key) {
         case 'theme':
-          themeEpoch.current += 1;
-          setThemePickerOpen(true);
+          open(themeEpoch, setThemePickerOpen);
           return;
         case 'language':
-          languageEpoch.current += 1;
-          setLanguagePickerOpen(true);
+          open(languageEpoch, setLanguagePickerOpen);
           return;
         case 'catalogProvider':
         case 'playbackProvider':
@@ -1825,13 +1760,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
           pushOverlay({ type: 'transfer' });
           return;
         case 'storefront':
-          storefrontEpoch.current += 1;
+          open(storefrontEpoch, setStorefrontSheetOpen);
           setStorefrontDraft(state.settings.storefront ?? '');
-          setStorefrontSheetOpen(true);
           return;
         case 'qualityKbps':
-          qualityEpoch.current += 1;
-          setQualityPickerOpen(true);
+          open(qualityEpoch, setQualityPickerOpen);
           return;
         case 'removeAllDownloads':
           void controller.downloads.removeAll(freshSignal()).then((r) => {
@@ -1875,7 +1808,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
       }
     },
     [
-      session,
       state.settings,
       controller,
       refreshLocal,
@@ -1916,11 +1848,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const currentRecordingId =
     playback.type === 'idle' ? null : playback.recordingId;
   // Real waveform peaks for the Stage seek — lazy, cached per
-  // recordingId|attemptId (a re-prepared stream never inherits the
-  // attempt it replaced). The port borrows the live stream handle;
-  // it never owns or closes it. null where the platform has no
-  // decode path (iOS) — the seeded pattern stays while pending or
-  // on failure.
+  // recordingId|attemptId. The port borrows the live stream handle,
+  // never owns it; null where the platform has no decode path (iOS).
   const peaksTarget: PeaksTarget | null =
     playback.type === 'buffering' ||
     playback.type === 'playing' ||
@@ -1936,10 +1865,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const onPlayPause = useCallback(() => {
     // Pause is always allowed; resuming a remote track while offline
     // would start a prepare that cannot finish. The intent is the
-    // queue's mode, not transport: during a retry backoff playback
-    // publishes 'preparing' with no handle, and the tap must still
-    // pause. A transport 'paused' that arrived natively (queue still
-    // 'playing') means the tap resumes, not re-pauses.
+    // queue's mode, not the transport: during a retry backoff playback
+    // publishes 'preparing' with no handle and the tap must still
+    // pause; a natively-arrived transport 'paused' (queue still
+    // 'playing') means the tap resumes.
     const intentPlaying =
       state.queue.mode === 'playing' && state.playback.type !== 'paused';
     if (
@@ -1950,9 +1879,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
       return;
     }
     ports.haptic?.('light');
-    // pause/resume keep the SAME attempt identity — they never own a
-    // new one, so no pendingAttempt claim; their own promise still
-    // reports with their own action.
+    // pause/resume keep the SAME attempt identity — never a
+    // pendingAttempt claim; their promise reports under their own
+    // action.
     void (intentPlaying ? session.pause() : session.resume()).then((r) =>
       reportPlay(intentPlaying ? 'common.pause' : 'action.resume', r),
     );
@@ -2033,11 +1962,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [session],
   );
 
-  // Lyrics load lazily — while the Stage is showing in lyrics mode —
-  // and refetch whenever the track under it changes. Leaving lyrics
-  // mode keeps the last sheet cached. ports.lyricsWhileOpen widens
-  // the trigger to any open stage (mobile prefetches so the lyrics
-  // tab switch is instant).
+  // Lyrics load lazily — while the Stage shows lyrics mode — and
+  // refetch on track change. ports.lyricsWhileOpen widens the
+  // trigger to any open stage (mobile prefetches so the tab switch
+  // is instant). Leaving lyrics mode keeps the last sheet cached.
   useEffect(() => {
     const openForLyrics =
       ports.lyricsWhileOpen === true
@@ -2060,10 +1988,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
   ]);
 
   // ports.resetModeOnTrack: a new track under an open sheet returns
-  // it to player mode — the playing item is what the sheet exists to
-  // show. Explicit opens (deep links, menus) set the mode before
-  // expanding, so this listens only for the track change, not the
-  // open flip.
+  // it to player mode. Explicit opens set the mode before expanding,
+  // so this listens only for the track change, not the open flip.
   const openForMode = useRef(stageOpen);
   useEffect(() => {
     openForMode.current = stageOpen;
@@ -2078,9 +2004,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     }
   }, [currentRecordingId, ports.resetModeOnTrack]);
 
-  // Lyrics highlight rides a smoothed clock so the active line tracks
-  // playback between the engine's sparse position ticks; it only ticks
-  // while the lyrics pane is actually on screen.
+  // Lyrics highlight rides a smoothed clock between the engine's
+  // sparse position ticks; it ticks only while the pane is on screen.
   const [seekGeneration, bumpSeekGeneration] = useState(0);
   const seekToPosition = useCallback(
     (ms: number, expectedOccurrenceId?: string): Promise<Result<void>> => {
@@ -2123,9 +2048,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     state.radio,
     localeTick,
   ]);
-  // Radio seeds route by the seed reference's own provider — a track
-  // is only seedable when THAT provider declares radio.seed, not just
-  // any loaded one.
+  // Seeds route by the ref's own provider — a track is seedable only
+  // when THAT provider declares radio.seed.
   const radioSeedable = useCallback(
     (ref: SourceRef | null): boolean =>
       ref !== null &&
@@ -2138,8 +2062,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   // The stage radio control seeds from the playing occurrence's
   // selected ref, falling back to the recording's first source ref —
-  // the same derivation the seed op uses, kept shared so the gate
-  // mirrors the action exactly.
+  // the same derivation the seed op uses so the gate mirrors it.
   const radioSeedRef = useMemo((): SourceRef | null => {
     const current = state.queue.occurrences.find(
       (o) => o.occurrenceId === state.queue.currentOccurrenceId,
@@ -2152,7 +2075,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   }, [state.queue, state.recordings, currentRecordingId]);
 
   // The row-action seed: a metadata row seeds its own ref; a library
-  // row seeds its first source ref. Gate matches the op's target.
+  // row seeds its first source ref.
   const actionRadioRef = useMemo((): SourceRef | null => {
     if (actionsFor === null) {
       return null;
@@ -2176,8 +2099,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   // ---- corrections (live read + serialized review ops) -----------
 
-  // The queue reloads whenever the corrections overlay opens — the
-  // rows are live reads, never stale session state.
+  // The queue reloads on every corrections-overlay open — live
+  // reads, never stale session state.
   useEffect(() => {
     if (shellOverlayOf(overlay)?.type === 'corrections') {
       loadReviews();
@@ -2195,8 +2118,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [reviewFetch, state.recordings, reviewFilter, localeTick],
   );
 
-  // A failed op surfaces its typed error as the screen's error state;
-  // a landed verdict reloads the queue so the row resolves in place.
+  // A landed verdict reloads the queue; a failed op surfaces its
+  // typed error as the screen's error state.
   const reviewOp = useCallback(
     (op: () => Promise<Result<unknown>>) => {
       void op().then((result) => {
@@ -2223,12 +2146,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
         return;
       }
       const name = `auqw-library-${new Date().toISOString().slice(0, 10)}.json`;
-      let outcome: ExportWrite;
-      try {
-        outcome = await ports.exportJson(result.value.json, name);
-      } catch {
-        outcome = { kind: 'error' };
-      }
+      const outcome = await ports
+        .exportJson(result.value.json, name)
+        .catch((): ExportWrite => ({ kind: 'error' }));
       if (outcome.kind === 'done') {
         exportDoneDetail.current = outcome.detail;
         patchTransfer({
@@ -2249,10 +2169,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
   }, [session, ports.exportJson, patchTransfer]);
 
   // The shared side of an import read: beginImportRead arms the
-  // 'reading' phase, then the platform's pick hands the file's text +
-  // display name to onImportText. cancelImportRead covers every
-  // "user backed out" shape (dismissed picker, AbortError, canceled
-  // pick result); failImportRead covers an unreadable file.
+  // 'reading' phase, the platform's pick hands text + display name
+  // to onImportText; cancelImportRead covers every backed-out shape
+  // (dismissed picker, AbortError, canceled pick) and failImportRead
+  // an unreadable file.
   const beginImportRead = useCallback(() => {
     importPreviewRaw.current = null;
     patchTransfer({
@@ -2305,10 +2225,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
       return;
     }
     patchTransfer({ importPhase: 'applying' });
-    // replaceLibrary drains the download manager (live runners and
-    // finalized files) before session.importLibrary swaps sections,
-    // then rehydrates the media owners off the new snapshot. The
-    // returned preview doubles as the applied-summary counts.
+    // replaceLibrary drains the download manager before the import
+    // swaps sections, then rehydrates the media owners; the returned
+    // preview doubles as the applied-summary counts.
     void controller.replaceLibrary(text, freshSignal()).then((result) => {
       if (!result.ok) {
         patchTransfer({
@@ -2341,9 +2260,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     patchTransfer({ importPhase: 'idle', importDetail: null, preview: null });
   }, [patchTransfer]);
 
-  // Full transfer-surface reset — the deep-link shell wipes the whole
-  // phase pair (export AND import) before driving a fresh leg, unlike
-  // onResetImport which only unwinds the import stage.
+  // Full reset — unlike onResetImport (import stage only), the
+  // deep-link shell wipes both phases before driving a fresh leg.
   const resetTransfer = useCallback(() => {
     importText.current = null;
     importPreviewRaw.current = null;
@@ -2449,14 +2367,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       return;
     }
     const key = entityRefKey(cur.ref);
-    /*
-     * The port's only entity request is an EntityRef — there is no
-     * continuation payload on the catalog.entity wire (ABI 0.3.0),
-     * and shipped providers never mint one. The token is carried
-     * back as the ref id: ref-scoped routing returns it to the
-     * provider that minted it, which is the only honest
-     * interpretation the port supports.
-     */
+    // The wire has no continuation payload — the token is carried
+    // back as the ref id so ref-scoped routing returns it to the
+    // provider that minted it (the only honest interpretation the
+    // port supports).
     const more: EntityRef = {
       provider: cur.ref.provider,
       kind: cur.ref.kind,
@@ -2871,9 +2785,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [session],
   );
 
-  // Entity-screen play surfaces — ports.entityPlayRequiresCanPlay
-  // gates the desktop's canPlayMeta filter + empty early-return;
-  // mobile plays every fetched row.
+  // Entity-screen play — ports.entityPlayRequiresCanPlay gates the
+  // desktop canPlayMeta filter + empty early-return; mobile plays
+  // every fetched row.
   const entityPlayAll = useCallback(
     (fetch: EntityFetch | null, entryKey: string, shuffle: boolean) => {
       const metas = entityModelFor(fetch)
