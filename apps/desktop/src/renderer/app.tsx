@@ -604,8 +604,8 @@ function Main({
 
   // Bytes on disk — a stored download or a scanned local file.
   // Ownership is NOT the local-playback probe: the probe answers
-  // whether the web player can attach the bytes (today it cannot),
-  // while ownership answers whether 'download missing' may skip the
+  // whether the web player can attach the bytes right now, while
+  // ownership answers whether 'download missing' may skip the
   // row — asking the first question with the second probe would
   // re-request stored tracks and delete their files on a changed
   // mapping.

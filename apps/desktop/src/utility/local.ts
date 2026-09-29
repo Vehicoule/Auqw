@@ -20,7 +20,7 @@ import {
   toFileUri,
 } from '../shared/local-paths.ts';
 import type { UtilityHandler } from './router.ts';
-import { mimeForPath } from './tags.ts';
+import { mimeForPath } from '../shared/audio-mime.ts';
 import { isBareName } from './transfer.ts';
 
 /**

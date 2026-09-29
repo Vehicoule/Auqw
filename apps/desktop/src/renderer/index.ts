@@ -220,6 +220,13 @@ async function boot(): Promise<void> {
         option.textContent = id;
         select.append(option);
       }
+      // The `provider:'local'` leg — exercises the file:// attach
+      // without a plugin. Its source field takes a file:// URI (or a
+      // bare absolute path, prefixed below).
+      const local = document.createElement('option');
+      local.value = 'local';
+      local.textContent = 'local (file://)';
+      select.append(local);
     }
   } catch (thrown) {
     field('host:plugins', describe(thrown));
@@ -304,6 +311,12 @@ async function boot(): Promise<void> {
         renderState();
         return;
       }
+      // `provider:'local'` refs are file:// URIs verbatim — a bare
+      // absolute path gets the prefix for dev convenience.
+      const sourceRef =
+        provider === 'local' && !ref.startsWith('file://')
+          ? `file://${ref}`
+          : ref;
       const attemptIdentity: PlaybackIdentity = {
         ...identity,
         attemptId: `boot-${gen}`,
@@ -311,7 +324,7 @@ async function boot(): Promise<void> {
       pendingRegistrations += 1;
       const res = await player.prepare({
         provider,
-        sourceRef: ref,
+        sourceRef,
         identity: attemptIdentity,
       });
       pendingRegistrations -= 1;

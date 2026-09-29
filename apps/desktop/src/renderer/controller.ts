@@ -27,6 +27,7 @@ import type {
 } from '@auqw/application';
 import { SqliteStorage } from '@auqw/storage-sqlite';
 import type { AuqwApi } from '../shared/contract.ts';
+import { toFileUri } from '../shared/local-paths.ts';
 import { createDesktopConnectivity } from './connectivity.ts';
 import { createLocalPlayback } from './local-playback.ts';
 import { createDesktopTagReader } from './tag-reader.ts';
@@ -320,6 +321,27 @@ export async function createSessionController(
           ? (navigator.mediaSession as MediaSessionLike)
           : null,
       mse: browserMse(),
+      // Extensionless `dl-*` names carry their container mime in the
+      // download ledger — a `file://` URI under the media dir resolves
+      // its row back. Reads `mediaDir`/`downloads` live: both fill in
+      // after construction (meta round-trip, ledger restore) and only
+      // attach-time probes ever call this.
+      localMime: (uri) => {
+        if (mediaDir === null) {
+          return null;
+        }
+        const prefix = `${toFileUri(mediaDir)}/`;
+        if (!uri.startsWith(prefix)) {
+          return null;
+        }
+        const name = uri.slice(prefix.length);
+        return (
+          downloads
+            .records()
+            .find((d) => d.filePath === name && d.state === 'available')
+            ?.mime ?? null
+        );
+      },
     });
 
   const clock = options?.clock ?? createClock();
@@ -362,13 +384,14 @@ export async function createSessionController(
   // the fallback seed. Every transition re-runs the session's
   // connectivity reconciliation.
   let lastOnline = true;
-  // The web player rejects every `provider:'local'` prepare — until the
-  // Phase-4 adapter lands the probe must answer null: otherwise the
-  // session picks refs the player refuses and offline marks advertise
-  // presses that can only fail. Flip once web-player gains the route.
-  const localPlaybackCapable = false;
+  // The web player now attaches `provider:'local'` as `file://` on the
+  // element, so the probe answers the real URI: managed downloads once
+  // `probe` lands with the meta round-trip, imported files through the
+  // source's docUri math. A null answer still means "cannot attach" —
+  // the session's offline-marking reads that distinction separately
+  // from ownership (`fileFor`/`uriMap().has`), which must not move.
   const localPlaybackFor = (id: string): string | null =>
-    localPlaybackCapable ? (probe?.(id) ?? uriForHook(id)) : null;
+    probe?.(id) ?? uriForHook(id);
   const session = new Session({
     storage,
     player,
