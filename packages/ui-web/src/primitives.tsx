@@ -83,6 +83,21 @@ export function Hairline({ vertical = false }: { readonly vertical?: boolean | u
   return <div className={vertical ? 'uw-hairline uw-hairline--v' : 'uw-hairline'} />;
 }
 
+/** Uppercase label text heading a section block. */
+export function CapsLabel({
+  className,
+  children,
+}: {
+  readonly className: string;
+  readonly children: ReactNode;
+}) {
+  return (
+    <Text variant="label" color="secondary" uppercase className={className}>
+      {children}
+    </Text>
+  );
+}
+
 export type PressableProps = {
   readonly onPress?: (() => void) | undefined;
   readonly onContextMenu?: ((event: MouseEvent) => void) | undefined;

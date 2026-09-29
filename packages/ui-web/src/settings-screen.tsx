@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { DiagPressRow, Hairline, Icon, Pressable, Text } from './primitives.tsx';
+import { CapsLabel, DiagPressRow, Hairline, Icon, Pressable, Text } from './primitives.tsx';
 import { focusTargetAfterRemoval } from './settings-focus.ts';
 import { settingsGroups, t } from '@auqw/ui-shared';
 import type {
@@ -393,14 +393,7 @@ export function SettingsScreen({
       </Text>
       {groups.map((group) => (
         <section key={group.key} className="uw-settings__group">
-          <Text
-            variant="label"
-            color="secondary"
-            uppercase
-            className="uw-section-label"
-          >
-            {group.label}
-          </Text>
+          <CapsLabel className="uw-section-label">{group.label}</CapsLabel>
           <div className="uw-card">
             {group.rows.map((row, i) => (
               <div key={row.key}>
@@ -418,14 +411,9 @@ export function SettingsScreen({
         </section>
       ))}
       <section className="uw-settings__group">
-        <Text
-          variant="label"
-          color="secondary"
-          uppercase
-          className="uw-section-label"
-        >
+        <CapsLabel className="uw-section-label">
           {t('settings.heading.diagnostics')}
-        </Text>
+        </CapsLabel>
         <div className="uw-card uw-card--padded">
           <DiagRow k={t('settings.diag.providers')}>
             <DiagV>
@@ -477,14 +465,9 @@ export function SettingsScreen({
           aria-label={t('settings.heading.sync')}
           className="uw-settings__group"
         >
-          <Text
-            variant="label"
-            color="secondary"
-            uppercase
-            className="uw-section-label"
-          >
+          <CapsLabel className="uw-section-label">
             {t('settings.heading.sync')}
-          </Text>
+          </CapsLabel>
           <div className="uw-card uw-card--padded">
             {sync.status === null ? (
               <DiagRow k={listenerKey} placeholder>

@@ -1,5 +1,5 @@
 import { useRef } from 'react';
-import { Icon, Pressable, Spinner, Text } from './primitives.tsx';
+import { CapsLabel, Icon, Pressable, Spinner, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { TrackRow, indexAdapter, useTrackList } from './track-row.tsx';
 import {
@@ -127,14 +127,9 @@ export function SearchScreen({
       </div>
       {view.suggestions !== null && (
         <div role="list" aria-label={view.suggestions.a11yLabel}>
-          <Text
-            variant="label"
-            color="secondary"
-            uppercase
-            className="uw-search__recents-label"
-          >
+          <CapsLabel className="uw-search__recents-label">
             {view.suggestions.heading}
-          </Text>
+          </CapsLabel>
           <SearchRow {...view.suggestions.commit} />
           {view.suggestions.items.map((suggestion) => (
             <SearchRow key={suggestion.label} {...suggestion} />
@@ -154,14 +149,9 @@ export function SearchScreen({
       {view.idle !== null &&
         (view.idle.kind === 'recents' ? (
           <div>
-            <Text
-              variant="label"
-              color="secondary"
-              uppercase
-              className="uw-search__recents-label"
-            >
+            <CapsLabel className="uw-search__recents-label">
               {view.idle.heading}
-            </Text>
+            </CapsLabel>
             {view.idle.items.map((recent) => (
               <SearchRow key={recent.label} {...recent} />
             ))}

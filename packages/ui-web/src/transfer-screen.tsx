@@ -1,4 +1,4 @@
-import { Icon, Pressable, ScreenHead, Text } from './primitives.tsx';
+import { CapsLabel, Icon, Pressable, ScreenHead, Text } from './primitives.tsx';
 import { ErrorState } from './states.tsx';
 import type { TransferModel } from '@auqw/ui-shared';
 import {
@@ -46,14 +46,7 @@ export function TransferScreen({
       <div className="uw-transfer__sections">
         {sections.map((section) => (
           <section key={section.label}>
-            <Text
-              variant="label"
-              color="secondary"
-              uppercase
-              className="uw-section-label"
-            >
-              {section.label}
-            </Text>
+            <CapsLabel className="uw-section-label">{section.label}</CapsLabel>
             <TransferRow view={section.row} />
             <ImportBody body={section.body} />
           </section>
