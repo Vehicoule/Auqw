@@ -32,7 +32,7 @@ import {
   matchDisplayKey,
   topPlayed,
 } from '@auqw/application';
-import { fromTag, t, type MessageId } from './i18n.ts';
+import { fromTag, t, type Locale, type MessageId } from './i18n.ts';
 import { errorText } from './error-text.ts';
 
 export type PlatformVariant = 'android' | 'ios';
@@ -62,12 +62,7 @@ export type TrackRowModel = {
   readonly download: DownloadChip | null;
 };
 
-type PlayerStatus =
-  | 'preparing'
-  | 'buffering'
-  | 'playing'
-  | 'paused'
-  | 'failed';
+type PlayerStatus = 'preparing' | 'buffering' | 'playing' | 'paused' | 'failed';
 
 export type PlayerModel = {
   readonly status: PlayerStatus;
@@ -138,13 +133,7 @@ export type QueueModel = {
   readonly ended: boolean;
 };
 
-type SearchPhase =
-  | 'idle'
-  | 'loading'
-  | 'ready'
-  | 'empty'
-  | 'error'
-  | 'unavailable';
+type SearchPhase = 'idle' | 'loading' | 'ready' | 'empty' | 'error' | 'unavailable';
 
 export type SearchStateModel = {
   readonly phase: SearchPhase;
@@ -202,7 +191,7 @@ export type CollectionRowModel = {
 };
 
 export type CollectionModel = {
-  readonly key: 'liked' | 'top50' | 'history' | 'downloads';
+  readonly key: CollectionKey;
   readonly title: string;
   readonly rows: readonly CollectionRowModel[];
 };
@@ -327,13 +316,7 @@ export type StageMode = 'player' | 'lyrics' | 'queue';
  * `instrumental`, and `unavailable` results never receive line
  * highlighting or any synced treatment.
  */
-type LyricsState =
-  | 'loading'
-  | 'synced'
-  | 'plain'
-  | 'instrumental'
-  | 'unavailable'
-  | 'error';
+type LyricsState = 'loading' | 'synced' | 'plain' | 'instrumental' | 'unavailable' | 'error';
 
 export type LyricsModel = {
   readonly state: LyricsState;
@@ -378,17 +361,13 @@ export function toLyricsModel(input: {
   const provenance = `${sheet.provider}${sheet.cached ? t('lyrics.cachedSuffix') : ''}`;
   switch (sheet.kind) {
     case 'synced': {
-      let activeIndex: number | null = null;
-      sheet.lines.forEach((line, index) => {
-        if (line.tMs <= input.positionMs) {
-          activeIndex = index;
-        }
-      });
+      const found = sheet.lines.findLastIndex(
+        (line) => line.tMs <= input.positionMs,
+      );
       // Before the first timestamp the intro still owns a highlighted
       // line — holding line 0 beats showing no highlight at all.
-      if (activeIndex === null && sheet.lines.length > 0) {
-        activeIndex = 0;
-      }
+      const activeIndex =
+        found === -1 ? (sheet.lines.length > 0 ? 0 : null) : found;
       return {
         state: 'synced',
         lines: sheet.lines.map((line) => line.text),
@@ -406,16 +385,15 @@ export function toLyricsModel(input: {
         message: null,
       };
     case 'instrumental':
-      return {
-        ...empty,
-        state: 'instrumental',
-        message: t('lyrics.instrumentalMessage'),
-      };
     case 'unavailable':
       return {
         ...empty,
-        state: 'unavailable',
-        message: t('lyrics.noMatch'),
+        state: sheet.kind,
+        message: t(
+          sheet.kind === 'instrumental'
+            ? 'lyrics.instrumentalMessage'
+            : 'lyrics.noMatch',
+        ),
       };
   }
 }
@@ -529,9 +507,7 @@ export function toCorrectionsModel(input: {
   const rank = (review: MatchReview): number =>
     review.status === 'pending' ? 0 : 1;
   const rows: ReviewRowModel[] = [...input.reviews]
-    .sort(
-      (a, b) => rank(a) - rank(b) || b.createdMs - a.createdMs,
-    )
+    .sort((a, b) => rank(a) - rank(b) || b.createdMs - a.createdMs)
     .map((review) => {
       const recording = byId.get(review.recordingId);
       // One row per display group: parked candidates that render
@@ -696,33 +672,19 @@ export function toImportPreviewModel(
     formatVersion: preview.doc.formatVersion,
     sourceLabel,
     exportedLabel: formatExportDate(preview.exportedAtMs),
-    rows: [
-      { key: 'recordings', label: t('import.tracks'), count: counts.recordings },
-      { key: 'likes', label: t('import.likes'), count: counts.likes },
-      { key: 'playlists', label: t('import.playlists'), count: counts.playlists },
-      {
-        key: 'playlistEntries',
-        label: t('import.playlistEntries'),
-        count: counts.playlistEntries,
-      },
-      { key: 'entities', label: t('import.entities'), count: counts.entities },
-      {
-        key: 'playEvents',
-        label: t('import.playHistory'),
-        count: counts.playEvents,
-      },
-      {
-        key: 'playCounts',
-        label: t('import.playCounts'),
-        count: counts.playCounts,
-      },
-      {
-        key: 'matchReviews',
-        label: t('import.matchReviews'),
-        count: counts.matchReviews,
-      },
-      { key: 'mappings', label: t('import.matchMappings'), count: counts.mappings },
-    ],
+    rows: (
+      [
+        ['recordings', 'import.tracks'],
+        ['likes', 'import.likes'],
+        ['playlists', 'import.playlists'],
+        ['playlistEntries', 'import.playlistEntries'],
+        ['entities', 'import.entities'],
+        ['playEvents', 'import.playHistory'],
+        ['playCounts', 'import.playCounts'],
+        ['matchReviews', 'import.matchReviews'],
+        ['mappings', 'import.matchMappings'],
+      ] as const
+    ).map(([key, label]) => ({ key, label: t(label), count: counts[key] })),
   };
 }
 
@@ -747,9 +709,7 @@ export function formatClock(ms: number | null): string {
     return '—';
   }
   const total = Math.floor(ms / 1000);
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  return `${Math.floor(total / 60)}:${(total % 60).toString().padStart(2, '0')}`;
 }
 
 export function formatRemaining(
@@ -767,14 +727,10 @@ export function pickArtworkUrl(
   artwork: readonly ArtworkRef[],
   targetWidth = 128,
 ): string | null {
-  const first = artwork[0];
-  if (first === undefined) {
-    return null;
-  }
   let best: ArtworkRef | null = null;
-  let largest: ArtworkRef = first;
+  let largest: ArtworkRef | null = artwork[0] ?? null;
   for (const ref of artwork) {
-    if (ref.width !== null && ref.width >= (largest.width ?? 0)) {
+    if (ref.width !== null && ref.width >= (largest?.width ?? 0)) {
       largest = ref;
     }
     const width = ref.width ?? Number.MAX_SAFE_INTEGER;
@@ -783,17 +739,13 @@ export function pickArtworkUrl(
       best = ref;
     }
   }
-  return (best ?? largest).url;
+  return (best ?? largest)?.url ?? null;
 }
 
 function albumLabel(recording: Recording): string | null {
-  const parts: string[] = [];
-  if (recording.album !== null) {
-    parts.push(recording.album);
-  }
-  if (recording.releaseYear !== null) {
-    parts.push(String(recording.releaseYear));
-  }
+  const parts = [recording.album, recording.releaseYear].filter(
+    (part) => part !== null,
+  );
   return parts.length === 0 ? null : parts.join(' · ');
 }
 
@@ -845,13 +797,29 @@ export function toSearchRowModel(
     // ref the player resolved — the accent row + eq overlay the
     // preview draws inside result lists.
     playing:
-      playingRef !== null &&
-      playingRef !== undefined &&
+      playingRef != null &&
       metadata.sourceRef.provider === playingRef.provider &&
       metadata.sourceRef.kind === playingRef.kind &&
       metadata.sourceRef.id === playingRef.id,
     state: 'available',
     note: null,
+    download: null,
+  };
+}
+
+/** The row for a recording that isn't in the library — honest unknown. */
+function missingRecordingRow(key: string, playing: boolean): TrackRowModel {
+  return {
+    key,
+    title: t('track.unknown'),
+    versionLabel: null,
+    artist: null,
+    durationMs: null,
+    artworkUrl: null,
+    liked: false,
+    playing,
+    state: 'unavailable',
+    note: t('common.unavailable'),
     download: null,
   };
 }
@@ -905,40 +873,24 @@ export function nextQueueDestination(input: {
   readonly repeat: RepeatMode;
 }): string | null {
   const { queue, repeat, failedIds } = input;
-  const ids = queue.occurrences.map((o) => o.occurrenceId);
+  const walk =
+    input.dealtOrder ?? queue.occurrences.map((o) => o.occurrenceId);
   const unmarked = (id: string): boolean => failedIds?.has(id) !== true;
-  if (input.dealtOrder != null) {
-    const walk = input.dealtOrder;
-    const pos =
-      queue.currentOccurrenceId === null
-        ? -1
-        : walk.indexOf(queue.currentOccurrenceId);
-    const next =
-      pos >= 0 ? walk.slice(pos + 1).find(unmarked) : undefined;
-    if (next !== undefined) {
-      return next;
-    }
-    if (repeat !== 'all') {
-      return null;
-    }
-    return walk.find(unmarked) ?? null;
-  }
   const pos =
     queue.currentOccurrenceId === null
       ? -1
-      : ids.indexOf(queue.currentOccurrenceId);
-  const next =
-    pos >= 0 ? ids.slice(pos + 1).find(unmarked) : undefined;
+      : walk.indexOf(queue.currentOccurrenceId);
+  const next = pos >= 0 ? walk.slice(pos + 1).find(unmarked) : undefined;
   if (next !== undefined) {
     return next;
   }
   if (repeat !== 'all') {
     return null;
   }
-  // The canonical wrap picks the first unmarked head — the same edge
-  // the engine makes after `next()` stops at the tail; all-failed
-  // ends the walk instead of replaying a known-dead row.
-  return ids.find(unmarked) ?? null;
+  // The wrap picks the first unmarked head — the same edge the engine
+  // makes after `next()` stops at the tail; all-failed ends the walk
+  // instead of replaying a known-dead row.
+  return walk.find(unmarked) ?? null;
 }
 
 export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
@@ -954,20 +906,13 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
   const activeId = playback.occurrenceId ?? queue.currentOccurrenceId;
   // Boundaries live in walk space: the dealt order under shuffle, the
   // canonical occurrence order otherwise — same space the cursor uses.
-  const walk =
-    shuffleOrder ?? queue.occurrences.map((o) => o.occurrenceId);
-  const currentIndex =
-    activeId === null ? -1 : walk.indexOf(activeId);
+  const walk = shuffleOrder ?? queue.occurrences.map((o) => o.occurrenceId);
+  const currentIndex = activeId === null ? -1 : walk.indexOf(activeId);
   // Under repeat=all the wrap edges are real moves — the transport
   // keeps both controls enabled at walk boundaries so they stay
   // reachable (the cursor applies the same wrap rules; a lone item
   // self-wraps into an in-place restart).
   const wraps = repeat === 'all' && walk.length > 0;
-  const canPrevious =
-    currentIndex > 0 || (wraps && currentIndex === 0);
-  const canNext =
-    currentIndex >= 0 &&
-    (currentIndex < walk.length - 1 || wraps);
   const recordingId = playback.recordingId;
   const recording = recordingId === null ? undefined : byId.get(recordingId);
   const base = {
@@ -980,10 +925,10 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
       // consumers downscale the same cached file.
       recording === undefined ? null : pickArtworkUrl(recording.artwork, 512),
     liked: recordingId !== null && liked.has(recordingId),
-    canPrevious,
-    canNext,
-    intentPlaying:
-      queue.mode === 'playing' && playback.type !== 'paused',
+    canPrevious: currentIndex > 0 || (wraps && currentIndex === 0),
+    canNext:
+      currentIndex >= 0 && (currentIndex < walk.length - 1 || wraps),
+    intentPlaying: queue.mode === 'playing' && playback.type !== 'paused',
   };
   switch (playback.type) {
     case 'preparing':
@@ -1055,9 +1000,7 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
   const dealt = input.dealtOrder;
   const dealIndex = new Map<string, number>();
   dealt?.forEach((id, i) => {
-    if (!dealIndex.has(id)) {
-      dealIndex.set(id, i);
-    }
+    dealIndex.set(id, dealIndex.get(id) ?? i);
   });
   const useWalk =
     dealt !== undefined &&
@@ -1100,43 +1043,25 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
               : 'history';
       const row: TrackRowModel =
         recording === undefined
-          ? {
-            key: occurrence.occurrenceId,
-            title: t('track.unknown'),
-            versionLabel: null,
-            artist: null,
-            durationMs: null,
-            artworkUrl: null,
-            liked: false,
-            playing: current && queue.mode === 'playing',
-            state: 'unavailable',
-            note: t('common.unavailable'),
-            download: null,
-          }
-          : {
-            key: occurrence.occurrenceId,
-            title: recording.title,
-            versionLabel:
-              recording.versionLabels.length === 0
-                ? null
-                : recording.versionLabels.join(' · '),
-            artist: recording.artist,
-            durationMs: recording.durationMs,
-            artworkUrl: pickArtworkUrl(recording.artwork),
-            liked: liked.has(recording.id),
-            playing: current && queue.mode === 'playing',
-            state: isFailed
-              ? 'error'
-              : unavailable.has(recording.id)
-                ? 'unavailable'
-                : 'available',
-            note: isFailed
-              ? t('queue.failed')
-              : unavailable.has(recording.id)
-                ? t('common.unavailable')
-                : null,
-            download: null,
-          };
+          ? missingRecordingRow(
+              occurrence.occurrenceId,
+              current && queue.mode === 'playing',
+            )
+          : toTrackRowModel(recording, {
+              key: occurrence.occurrenceId,
+              liked: liked.has(recording.id),
+              playing: current && queue.mode === 'playing',
+              state: isFailed
+                ? 'error'
+                : unavailable.has(recording.id)
+                  ? 'unavailable'
+                  : 'available',
+              note: isFailed
+                ? t('queue.failed')
+                : unavailable.has(recording.id)
+                  ? t('common.unavailable')
+                  : null,
+            });
       return {
         occurrenceId: occurrence.occurrenceId,
         recordingId: occurrence.recordingId,
@@ -1180,15 +1105,6 @@ function likedEntityIds(likes: readonly Like[]): ReadonlySet<string> {
   );
 }
 
-function playlistEntriesFor(
-  entries: readonly PlaylistEntry[],
-  playlistId: string,
-): PlaylistEntry[] {
-  return entries
-    .filter((entry) => entry.playlistId === playlistId)
-    .sort((a, b) => a.position - b.position);
-}
-
 const EMPTY_ENTRIES: readonly PlaylistEntry[] = [];
 
 /**
@@ -1220,9 +1136,7 @@ function entityRefMap(
 ): Map<string, EntityRef> {
   const map = new Map<string, EntityRef>();
   for (const ref of refs) {
-    if (!map.has(ref.entityId)) {
-      map.set(ref.entityId, ref.ref);
-    }
+    map.set(ref.entityId, map.get(ref.entityId) ?? ref.ref);
   }
   return map;
 }
@@ -1255,17 +1169,15 @@ export function toLibraryModel(input: {
 }): LibraryModel {
   const byId = indexById(input.recordings);
   const liked = likedIds(input.likes);
-  const ordered = [...input.likes]
+  const items: TrackRowModel[] = [...input.likes]
     .filter((like) => like.entityKind === 'track')
-    .sort((a, b) => b.likedAtMs - a.likedAtMs);
-  const items: TrackRowModel[] = [];
-  for (const like of ordered) {
-    const recording = byId.get(like.targetId);
-    if (recording === undefined) {
-      continue;
-    }
-    items.push(toTrackRowModel(recording, { liked: liked.has(recording.id) }));
-  }
+    .sort((a, b) => b.likedAtMs - a.likedAtMs)
+    .flatMap((like) => {
+      const recording = byId.get(like.targetId);
+      return recording === undefined
+        ? []
+        : [toTrackRowModel(recording, { liked: liked.has(recording.id) })];
+    });
 
   // Top 50: durable play-count ranking (count desc, recency, id) via
   // the library's own topPlayed — unresolvable ids drop honestly.
@@ -1288,28 +1200,25 @@ export function toLibraryModel(input: {
     .sort((a, b) => b.playedMs - a.playedMs)
     .flatMap((event) => {
       const recording = byId.get(event.recordingId);
-      if (recording === undefined) {
-        return [];
-      }
-      return [
-        {
-          key: `hist-${event.eventId}`,
-          recordingId: recording.id,
-          badge: null,
-          row: toTrackRowModel(recording, {
-            key: `hist-${event.eventId}`,
-            liked: liked.has(recording.id),
-          }),
-        },
-      ];
+      return recording === undefined
+        ? []
+        : [
+            {
+              key: `hist-${event.eventId}`,
+              recordingId: recording.id,
+              badge: null,
+              row: toTrackRowModel(recording, {
+                key: `hist-${event.eventId}`,
+                liked: liked.has(recording.id),
+              }),
+            },
+          ];
     });
 
-  const likedRows: CollectionRowModel[] = items.map((row) => ({
-    key: `liked-${row.key}`,
-    recordingId: row.key,
-    badge: null,
-    row: { ...row, key: `liked-${row.key}` },
-  }));
+  const likedRows: CollectionRowModel[] = items.map((row) => {
+    const key = `liked-${row.key}`;
+    return { key, recordingId: row.key, badge: null, row: { ...row, key } };
+  });
 
   // Ownable grid: user playlists plus liked album/artist entities.
   const entityLikes = likedEntityIds(input.likes);
@@ -1404,56 +1313,39 @@ export function toLibraryModel(input: {
     )
     .flatMap((d) => {
       const recording = byId.get(d.recordingId);
-      if (recording === undefined) {
-        return [];
-      }
-      return [
-        {
-          key: `dl-${d.downloadId}`,
-          recordingId: recording.id,
-          badge: downloadBadge(d),
-          row: toTrackRowModel(recording, {
-            key: `dl-${d.downloadId}`,
-            liked: liked.has(recording.id),
-            download: downloadChip(d.state),
-          }),
-        },
-      ];
+      return recording === undefined
+        ? []
+        : [
+            {
+              key: `dl-${d.downloadId}`,
+              recordingId: recording.id,
+              badge: downloadBadge(d),
+              row: toTrackRowModel(recording, {
+                key: `dl-${d.downloadId}`,
+                liked: liked.has(recording.id),
+                download: downloadChip(d.state),
+              }),
+            },
+          ];
     });
 
   return {
     likedCount: items.length,
     items,
-    collections: [
-      {
-        key: 'liked',
-        label: t('collection.liked'),
-        count: items.length,
-        enabled: true,
-        note: null,
-      },
-      {
-        key: 'downloads',
-        label: t('collection.downloads'),
-        count: downloadRows.length,
-        enabled: true,
-        note: null,
-      },
-      {
-        key: 'top50',
-        label: t('collection.top50'),
-        count: top50.length,
-        enabled: true,
-        note: null,
-      },
-      {
-        key: 'history',
-        label: t('collection.history'),
-        count: history.length,
-        enabled: true,
-        note: null,
-      },
-    ],
+    collections: (
+      [
+        ['liked', items.length],
+        ['downloads', downloadRows.length],
+        ['top50', top50.length],
+        ['history', history.length],
+      ] as const
+    ).map(([key, count]) => ({
+      key,
+      label: t(`collection.${key}`),
+      count,
+      enabled: true,
+      note: null,
+    })),
     collectionRows: {
       liked: likedRows,
       top50,
@@ -1469,24 +1361,25 @@ export function toLibraryModel(input: {
 
 export function toCollectionModel(
   model: LibraryModel,
-  key: 'liked' | 'top50' | 'history' | 'downloads',
+  key: CollectionKey,
 ): CollectionModel {
   return { key, title: t(`collection.${key}`), rows: model.collectionRows[key] };
 }
 
+/** Chip + ledger rank per download state — one exhaustive table. */
+const DOWNLOAD_ROW_META: Record<
+  DownloadProgress['state'],
+  { readonly chip: DownloadChip; readonly rank: number }
+> = {
+  requested: { chip: 'queued', rank: 1 },
+  transferring: { chip: 'downloading', rank: 1 },
+  available: { chip: 'stored', rank: 0 },
+  failed_with_retry: { chip: 'failed', rank: 2 },
+  removing: { chip: 'removing', rank: 2 },
+};
+
 export function downloadChip(state: DownloadProgress['state']): DownloadChip {
-  switch (state) {
-    case 'requested':
-      return 'queued';
-    case 'transferring':
-      return 'downloading';
-    case 'available':
-      return 'stored';
-    case 'removing':
-      return 'removing';
-    default:
-      return 'failed';
-  }
+  return DOWNLOAD_ROW_META[state].chip;
 }
 
 /** Records shown in the downloads ledger — kept rows, not mid-delete ones. */
@@ -1508,11 +1401,7 @@ export function downloadChipsByRecording(
 }
 
 function chipRank(state: DownloadProgress['state']): number {
-  return state === 'available'
-    ? 0
-    : state === 'transferring' || state === 'requested'
-      ? 1
-      : 2;
+  return DOWNLOAD_ROW_META[state].rank;
 }
 
 function downloadBadge(d: DownloadProgress): string {
@@ -1543,10 +1432,9 @@ export function toPlaylistModel(input: {
   }
   const byId = indexById(input.recordings);
   const liked = likedIds(input.likes);
-  const entries = playlistEntriesFor(
-    input.playlistEntries,
-    playlist.playlistId,
-  );
+  const entries = input.playlistEntries
+    .filter((entry) => entry.playlistId === playlist.playlistId)
+    .sort((a, b) => a.position - b.position);
   const perRecording = new Map<string, number>();
   for (const entry of entries) {
     perRecording.set(
@@ -1554,24 +1442,12 @@ export function toPlaylistModel(input: {
       (perRecording.get(entry.recordingId) ?? 0) + 1,
     );
   }
+  // Entry rows key on entryId — a duplicate keeps its own row.
   const rows: PlaylistEntryModel[] = entries.map((entry) => {
     const recording = byId.get(entry.recordingId);
-    // Entry rows key on entryId — a duplicate keeps its own row.
     const row: TrackRowModel =
       recording === undefined
-        ? {
-          key: entry.entryId,
-          title: t('track.unknown'),
-          versionLabel: null,
-          artist: null,
-          durationMs: null,
-          artworkUrl: null,
-          liked: false,
-          playing: false,
-          state: 'unavailable',
-          note: t('common.unavailable'),
-          download: null,
-        }
+        ? missingRecordingRow(entry.entryId, false)
         : toTrackRowModel(recording, {
           key: entry.entryId,
           liked: liked.has(recording.id),
@@ -1671,13 +1547,14 @@ export function toHomeModel(input: {
   readonly greeting: string;
   readonly subline: string;
 }): HomeModel {
-  const byId = new Map(input.recordings.map((recording) => [recording.id, recording]));
+  const byId = indexById(input.recordings);
   const recents = [...input.likes]
     .sort((a, b) => b.likedAtMs - a.likedAtMs)
-    .map((like) =>
-      like.entityKind === 'track' ? byId.get(like.targetId) : undefined,
-    )
-    .filter((recording): recording is Recording => recording !== undefined)
+    .flatMap((like) => {
+      const recording =
+        like.entityKind === 'track' ? byId.get(like.targetId) : undefined;
+      return recording === undefined ? [] : [recording];
+    })
     .slice(0, 12)
     .map(toRailCard);
   const suggestions = input.suggestions.slice(0, 12).map((metadata) => ({
@@ -1735,17 +1612,15 @@ export function languageOptions(): readonly LanguageOption[] {
  * what activation selects: absent and unsupported values (including
  * Traditional Chinese, which has no shipped catalog) read as 'system'.
  */
-export function languageOptionKey(setting: string | null | undefined): string {
+export function languageOptionKey(
+  setting: string | null | undefined,
+): Locale | 'system' {
   return fromTag(setting) ?? 'system';
 }
 
 /** Display name for a `Settings.language` value; unknown reads system. */
 function languageLabel(setting: string | null | undefined): string {
-  return (
-    languageOptions().find(
-      (option) => option.key === languageOptionKey(setting),
-    )?.label ?? t('settings.languageValue.system')
-  );
+  return t(`settings.languageValue.${languageOptionKey(setting)}`);
 }
 
 export function toSettingsModel(
@@ -1773,178 +1648,100 @@ export function toSettingsModel(
     readonly syncLabel?: string | null;
   } = {},
 ): SettingsModel {
+  const nav = (
+    key: string,
+    label: string,
+    value: string | null,
+    enabled = true,
+    destructive = false,
+  ): SettingsRowModel => ({
+    key,
+    label,
+    value,
+    kind: 'navigation',
+    enabled,
+    ...(destructive ? { destructive: true } : {}),
+  });
+  const val = (
+    key: string,
+    label: string,
+    value: string | null,
+  ): SettingsRowModel => ({ key, label, value, kind: 'value', enabled: true });
+  const tog = (key: string, label: string, on: boolean): SettingsRowModel => ({
+    key,
+    label,
+    value: t(on ? 'settings.value.on' : 'settings.value.off'),
+    kind: 'toggle',
+    enabled: on,
+  });
   return {
     theme: settings.theme,
     rows: [
-      {
-        key: 'theme',
-        label: t('settings.theme'),
-        value: t(`settings.themeValue.${settings.theme}`),
-        kind: 'navigation',
-        enabled: true,
-      },
-      {
-        // Display preference, same shape as theme: a navigation row
-        // whose value is the current choice; the host opens the
-        // picker (LanguagePickerSheet) on select.
-        key: 'language',
-        label: t('settings.language'),
-        value: languageLabel(settings.language),
-        kind: 'navigation',
-        enabled: true,
-      },
-      {
-        key: 'catalogProvider',
-        label: t('settings.catalogProvider'),
-        value: settings.catalogProvider,
-        kind: 'navigation',
-        enabled: true,
-      },
-      {
-        key: 'playbackProvider',
-        label: t('settings.playbackProvider'),
-        value: settings.playbackProvider,
-        kind: 'navigation',
-        enabled: true,
-      },
-      {
-        key: 'lyricsProvider',
-        label: t('settings.lyricsProvider'),
-        value: settings.lyricsProvider ?? t('settings.value.auto'),
-        kind: 'navigation',
-        enabled: true,
-      },
-      {
-        key: 'radioProvider',
-        label: t('settings.radioProvider'),
-        value: settings.radioProvider ?? t('settings.value.auto'),
-        kind: 'navigation',
-        enabled: true,
-      },
-      {
-        key: 'storefront',
-        label: t('settings.storefront'),
-        value: settings.storefront ?? t('settings.value.notSet'),
-        kind: 'navigation',
-        enabled: true,
-      },
-      {
-        key: 'qualityKbps',
-        label: t('settings.quality'),
-        value: t('settings.qualityUnit', { value: settings.qualityKbps }),
-        kind: 'navigation',
-        enabled: true,
-      },
-      {
-        key: 'prefetch',
-        label: t('settings.prefetch'),
-        value: settings.prefetch
-          ? t('settings.value.on')
-          : t('settings.value.off'),
-        kind: 'toggle',
-        enabled: settings.prefetch,
-      },
-      {
-        key: 'downloadMetered',
-        label: t('settings.downloadMetered'),
-        value: settings.downloadMetered
-          ? t('settings.value.on')
-          : t('settings.value.off'),
-        kind: 'toggle',
-        enabled: settings.downloadMetered === true,
-      },
-      {
-        key: 'downloadStorage',
-        label: t('settings.downloadStorage'),
-        value: media.storageText ?? '—',
-        kind: 'value',
-        enabled: true,
-      },
-      {
-        // Bounded LRU on disk (data.md ~200 MB) — the value is the
-        // configured cap; picking a new one commits it and sweeps.
-        key: 'artworkCacheBytes',
-        label: t('settings.artworkCache'),
-        value: t('settings.cacheUnit', {
+      nav('theme', t('settings.theme'), t(`settings.themeValue.${settings.theme}`)),
+      // Display preference, same shape as theme: a navigation row
+      // whose value is the current choice; the host opens the
+      // picker (LanguagePickerSheet) on select.
+      nav('language', t('settings.language'), languageLabel(settings.language)),
+      nav('catalogProvider', t('settings.catalogProvider'), settings.catalogProvider),
+      nav('playbackProvider', t('settings.playbackProvider'), settings.playbackProvider),
+      nav('lyricsProvider', t('settings.lyricsProvider'), settings.lyricsProvider ?? t('settings.value.auto')),
+      nav('radioProvider', t('settings.radioProvider'), settings.radioProvider ?? t('settings.value.auto')),
+      nav('storefront', t('settings.storefront'), settings.storefront ?? t('settings.value.notSet')),
+      nav('qualityKbps', t('settings.quality'), t('settings.qualityUnit', { value: settings.qualityKbps })),
+      tog('prefetch', t('settings.prefetch'), settings.prefetch),
+      tog('downloadMetered', t('settings.downloadMetered'), settings.downloadMetered === true),
+      val('downloadStorage', t('settings.downloadStorage'), media.storageText ?? '—'),
+      // Bounded LRU on disk (data.md ~200 MB) — the value is the
+      // configured cap; picking a new one commits it and sweeps.
+      nav(
+        'artworkCacheBytes',
+        t('settings.artworkCache'),
+        t('settings.cacheUnit', {
           value: Math.round(
             (settings.artworkCacheBytes ?? ARTWORK_CACHE_BUDGET_DEFAULT_BYTES) /
               (1024 * 1024),
           ),
         }),
-        kind: 'navigation',
-        enabled: true,
-      },
-      {
-        key: 'removeAllDownloads',
-        label: t('settings.removeAllDownloads'),
-        value:
-          media.downloadCount === undefined
-            ? null
-            : `${media.downloadCount}`,
-        kind: 'navigation',
-        enabled: (media.downloadCount ?? 0) > 0,
-        destructive: true,
-      },
-      {
-        key: 'localSources',
-        label: t('settings.localFolders'),
-        value:
-          media.localSupported === false
-            ? t('settings.value.unsupported')
-            : media.localFolderCount === undefined
-              ? '—'
-              : `${media.localFolderCount}`,
-        kind: 'value',
-        enabled: true,
-      },
+      ),
+      nav(
+        'removeAllDownloads',
+        t('settings.removeAllDownloads'),
+        media.downloadCount === undefined ? null : `${media.downloadCount}`,
+        (media.downloadCount ?? 0) > 0,
+        true,
+      ),
+      val(
+        'localSources',
+        t('settings.localFolders'),
+        media.localSupported === false
+          ? t('settings.value.unsupported')
+          : media.localFolderCount === undefined
+            ? '—'
+            : `${media.localFolderCount}`,
+      ),
       // One removal row per granted source — the plan's local-files
       // "remove" affordance without a picker surface.
-      ...(media.localSources ?? []).map((source) => ({
-        key: `localSourceRemove:${source.sourceId}`,
-        label: t('settings.removeSource', { label: source.label }),
-        value: null,
-        kind: 'navigation' as const,
-        enabled: media.localSupported !== false,
-        destructive: true,
-      })),
-      {
-        key: 'addLocalFolder',
-        label: t('settings.addLocalFolder'),
-        value: null,
-        kind: 'navigation',
-        enabled: media.localSupported !== false,
-      },
-      {
-        key: 'rescanLocal',
-        label: t('settings.rescanLocal'),
-        value: null,
-        kind: 'navigation',
-        enabled: media.localSupported !== false,
-      },
-      {
-        key: 'sync',
-        label: t('settings.sync'),
-        value:
-          media.syncSupported === false
-            ? t('sync.status.unavailable')
-            : (media.syncLabel ?? t('sync.status.notPaired')),
-        kind: 'navigation',
-        enabled: media.syncSupported !== false,
-      },
-      {
-        key: 'exportLibrary',
-        label: t('settings.exportLibrary'),
-        value: null,
-        kind: 'navigation',
-        enabled: true,
-      },
-      {
-        key: 'importLibrary',
-        label: t('settings.importLibrary'),
-        value: null,
-        kind: 'navigation',
-        enabled: true,
-      },
+      ...(media.localSources ?? []).map((source) =>
+        nav(
+          `localSourceRemove:${source.sourceId}`,
+          t('settings.removeSource', { label: source.label }),
+          null,
+          media.localSupported !== false,
+          true,
+        ),
+      ),
+      nav('addLocalFolder', t('settings.addLocalFolder'), null, media.localSupported !== false),
+      nav('rescanLocal', t('settings.rescanLocal'), null, media.localSupported !== false),
+      nav(
+        'sync',
+        t('settings.sync'),
+        media.syncSupported === false
+          ? t('sync.status.unavailable')
+          : (media.syncLabel ?? t('sync.status.notPaired')),
+        media.syncSupported !== false,
+      ),
+      nav('exportLibrary', t('settings.exportLibrary'), null),
+      nav('importLibrary', t('settings.importLibrary'), null),
     ],
     diagnostics,
   };
@@ -1977,27 +1774,19 @@ export function settingsGroups(
   rows: readonly SettingsRowModel[],
 ): readonly SettingsGroup[] {
   const starts = new Map<string, MessageId>(SETTINGS_GROUP_STARTS);
-  const groups: {
-    key: string;
-    labelId: MessageId;
-    rows: SettingsRowModel[];
-  }[] = [];
+  const groups: { key: string; label: string; rows: SettingsRowModel[] }[] = [];
   for (const row of rows) {
     const labelId = starts.get(row.key);
     if (labelId !== undefined || groups.length === 0) {
       groups.push({
         key: row.key,
-        labelId: labelId ?? 'settings.section.appearance',
+        label: t(labelId ?? 'settings.section.appearance'),
         rows: [],
       });
     }
     groups[groups.length - 1]!.rows.push(row);
   }
-  return groups.map((group) => ({
-    key: group.key,
-    label: t(group.labelId),
-    rows: group.rows,
-  }));
+  return groups;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2084,11 +1873,8 @@ export type SyncPanelModel = {
 
 /** Relative-time label: 'just now' / '5m' / '2h' / '3d' / ISO date. */
 export function formatAgo(ms: number, nowMs: number): string {
-  if (!Number.isFinite(ms) || !Number.isFinite(nowMs)) {
-    return '—';
-  }
   const delta = nowMs - ms;
-  if (delta < 0) {
+  if (!Number.isFinite(delta) || delta < 0) {
     return '—';
   }
   if (delta < 60_000) {
@@ -2103,10 +1889,7 @@ export function formatAgo(ms: number, nowMs: number): string {
     return t('ago.hours', { count: hours });
   }
   const days = Math.floor(hours / 24);
-  if (days < 7) {
-    return t('ago.days', { count: days });
-  }
-  return formatExportDate(ms) ?? '—';
+  return days < 7 ? t('ago.days', { count: days }) : (formatExportDate(ms) ?? '—');
 }
 
 export function formatExpiry(expiresAt: number, nowMs: number): string {
