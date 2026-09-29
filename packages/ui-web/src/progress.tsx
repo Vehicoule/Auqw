@@ -24,57 +24,43 @@ import type { KeyboardEvent } from 'react';
 
 // Same squared ring the native 'arc' variant draws — the desktop
 // chrome uses it everywhere (there is no platform split on web).
-export const SQUARED_RING_PATH =
+const SQUARED_RING_PATH =
   'M26 3 L38 3 Q49 3 49 14 L49 38 Q49 49 38 49 L14 49 Q3 49 3 38 L3 14 Q3 3 14 3 Z';
 
-type Pt = { readonly x: number; readonly y: number };
-
+// [x1, y1, x2, y2] line or [x1, y1, cx, cy, x2, y2] quadratic corner —
+// the same outline SQUARED_RING_PATH draws.
 type Seg =
-  | { readonly kind: 'l'; readonly a: Pt; readonly b: Pt }
-  | { readonly kind: 'q'; readonly a: Pt; readonly c: Pt; readonly b: Pt };
-
-const pt = (x: number, y: number): Pt => ({ x, y });
+  | readonly [number, number, number, number]
+  | readonly [number, number, number, number, number, number];
 
 const RING_SEGS: readonly Seg[] = [
-  { kind: 'l', a: pt(26, 3), b: pt(38, 3) },
-  { kind: 'q', a: pt(38, 3), c: pt(49, 3), b: pt(49, 14) },
-  { kind: 'l', a: pt(49, 14), b: pt(49, 38) },
-  { kind: 'q', a: pt(49, 38), c: pt(49, 49), b: pt(38, 49) },
-  { kind: 'l', a: pt(38, 49), b: pt(14, 49) },
-  { kind: 'q', a: pt(14, 49), c: pt(3, 49), b: pt(3, 38) },
-  { kind: 'l', a: pt(3, 38), b: pt(3, 14) },
-  { kind: 'q', a: pt(3, 14), c: pt(3, 3), b: pt(14, 3) },
-  { kind: 'l', a: pt(14, 3), b: pt(26, 3) },
+  [26, 3, 38, 3], [38, 3, 49, 3, 49, 14], [49, 14, 49, 38],
+  [49, 38, 49, 49, 38, 49], [38, 49, 14, 49], [14, 49, 3, 49, 3, 38],
+  [3, 38, 3, 14], [3, 14, 3, 3, 14, 3], [14, 3, 26, 3],
 ];
-
-function segPoint(seg: Seg, t: number): Pt {
-  if (seg.kind === 'l') {
-    return pt(seg.a.x + (seg.b.x - seg.a.x) * t, seg.a.y + (seg.b.y - seg.a.y) * t);
-  }
-  const u = 1 - t;
-  return pt(
-    u * u * seg.a.x + 2 * u * t * seg.c.x + t * t * seg.b.x,
-    u * u * seg.a.y + 2 * u * t * seg.c.y + t * t * seg.b.y,
-  );
-}
 
 // Polyline approximation of the ring outline — the same 24-sample
 // resolution the native port uses, so the dash model is identical.
 function segLength(seg: Seg): number {
-  if (seg.kind === 'l') {
-    return Math.hypot(seg.b.x - seg.a.x, seg.b.y - seg.a.y);
+  if (seg.length === 4) {
+    return Math.hypot(seg[2] - seg[0], seg[3] - seg[1]);
   }
   let length = 0;
-  let prev = seg.a;
+  let px = seg[0];
+  let py = seg[1];
   for (let i = 1; i <= 24; i += 1) {
-    const cur = segPoint(seg, i / 24);
-    length += Math.hypot(cur.x - prev.x, cur.y - prev.y);
-    prev = cur;
+    const s = i / 24;
+    const u = 1 - s;
+    const x = u * u * seg[0] + 2 * u * s * seg[2] + s * s * seg[4];
+    const y = u * u * seg[1] + 2 * u * s * seg[3] + s * s * seg[5];
+    length += Math.hypot(x - px, y - py);
+    px = x;
+    py = y;
   }
   return length;
 }
 
-export const SQUARED_RING_LENGTH = RING_SEGS.map(segLength).reduce(
+const SQUARED_RING_LENGTH = RING_SEGS.map(segLength).reduce(
   (a, b) => a + b,
   0,
 );
@@ -400,78 +386,6 @@ function useScrubCommit(
   };
 }
 
-export type LinearScrubberProps = {
-  readonly positionMs: number;
-  readonly durationMs: number | null;
-  readonly onSeek?: ((ms: number) => void) | undefined;
-  /** Identity of the track on the player — scopes the optimistic
-   *  hold so a track change never displays the previous track's
-   *  committed position. */
-  readonly trackKey?: string | null | undefined;
-  readonly className?: string | undefined;
-};
-
-// The native LinearScrubber is a pan-gesture strip; the web port is a
-// real range input — the browser gives focus, arrows, and AT a slider
-// for free, and the ±10s step stays wired via Arrow keys.
-export function LinearScrubber({
-  positionMs,
-  durationMs,
-  onSeek,
-  trackKey,
-  className,
-}: LinearScrubberProps) {
-  const scrub = useScrubCommit(positionMs, durationMs, onSeek, trackKey);
-  const { enabled, shownMs } = scrub;
-  const p = progressOf(shownMs, durationMs);
-  const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (scrub.onScrubKey(event.key)) {
-      event.preventDefault();
-    }
-  };
-  return (
-    <input
-      type="range"
-      className={`uw-scrubber${enabled ? '' : ' uw-off'}${className ? ` ${className}` : ''}`}
-      aria-label={t('progress.a11y.seek')}
-      aria-valuetext={t('progress.a11y.value', {
-        position: formatClock(shownMs),
-        duration: formatClock(durationMs),
-      })}
-      min={0}
-      max={Math.max(1, durationMs ?? 0)}
-      step="any"
-      value={Math.round(shownMs)}
-      disabled={!enabled}
-      onKeyDown={onKeyDown}
-      onPointerDown={
-        enabled ? (event) => scrub.onScrubStart(event.pointerId) : undefined
-      }
-      onPointerUp={
-        enabled
-          ? (event) =>
-            scrub.onScrubEnd(
-              Number(event.currentTarget.value),
-              event.pointerId,
-            )
-          : undefined
-      }
-      onPointerCancel={
-        enabled ? (event) => scrub.onScrubEnd(null, event.pointerId) : undefined
-      }
-      onLostPointerCapture={
-        enabled ? (event) => scrub.onScrubEnd(null, event.pointerId) : undefined
-      }
-      onChange={
-        enabled
-          ? (event) => scrub.onScrubValue(Number(event.currentTarget.value))
-          : undefined
-      }
-      style={{ '--uw-fill': `${p * 100}%` } as React.CSSProperties}
-    />
-  );
-}
-
 const WAVE_HEIGHT = 48;
 const WAVE_MID = 24;
 const WAVE_MAX_EXTENT = 20;
@@ -489,21 +403,10 @@ function barsPathD(
   let d = '';
   for (let i = 0; i < xs.length; i += 1) {
     const peak = peaks[i];
-    const upExtent = waveformBarExtent(
-      peak?.up ?? 0,
-      WAVE_MAX_EXTENT,
-      WAVE_MIN_EXTENT,
-      1,
-    );
-    const downExtent = waveformBarExtent(
-      peak?.down ?? 0,
-      WAVE_MAX_EXTENT,
-      WAVE_MIN_EXTENT,
-      1,
-    );
-    d += `M${(xs[i] ?? 0).toFixed(2)} ${(WAVE_MID - upExtent).toFixed(2)} L${(
-      xs[i] ?? 0
-    ).toFixed(2)} ${(WAVE_MID + downExtent).toFixed(2)}`;
+    const up = waveformBarExtent(peak?.up ?? 0, WAVE_MAX_EXTENT, WAVE_MIN_EXTENT, 1);
+    const down = waveformBarExtent(peak?.down ?? 0, WAVE_MAX_EXTENT, WAVE_MIN_EXTENT, 1);
+    const x = (xs[i] ?? 0).toFixed(2);
+    d += `M${x} ${(WAVE_MID - up).toFixed(2)} L${x} ${(WAVE_MID + down).toFixed(2)}`;
   }
   return d;
 }
@@ -524,12 +427,12 @@ function partitionBars(
     const amp = Math.max(peaks[i]?.up ?? 0, peaks[i]?.down ?? 0);
     groups[amp <= t1 ? 0 : amp <= t2 ? 1 : 2].push(i);
   }
-  return groups.map((g) =>
+  const pick = (g: readonly number[]) =>
     barsPathD(
       g.map((i) => xs[i] ?? 0),
       g.map((i) => peaks[i] ?? { up: 0, down: 0 }),
-    ),
-  ) as [string, string, string];
+    );
+  return [pick(groups[0]), pick(groups[1]), pick(groups[2])];
 }
 
 export type WaveformSeekProps = {
@@ -585,8 +488,7 @@ export function WaveformSeek({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  const enabled = scrub.enabled;
-  const shownMs = scrub.shownMs;
+  const { enabled, shownMs } = scrub;
   const isLoading = loading || durationMs === null;
   const p = progressOf(shownMs, durationMs);
   const layout = useMemo(
@@ -616,6 +518,17 @@ export function WaveformSeek({
   // Forward preview tints unplayed bars with accent; backward preview
   // dims the played span that would be given back.
   const bandBackward = preview < p;
+  const minibar = (x: number, i: number, fill?: string) => (
+    <rect
+      key={i}
+      x={x - WAVE_BAR_WIDTH / 2}
+      y={WAVE_MID - WAVE_MIN_EXTENT}
+      width={WAVE_BAR_WIDTH}
+      height={WAVE_MIN_EXTENT * 2}
+      rx={1.5}
+      fill={fill}
+    />
+  );
   return (
     <div className={`uw-wave${className ? ` ${className}` : ''}`} ref={rootRef}>
       <svg
@@ -626,28 +539,9 @@ export function WaveformSeek({
       >
         {isLoading ? (
           <>
-            {layout.xs.map((x, i) => (
-              <rect
-                key={i}
-                x={x - WAVE_BAR_WIDTH / 2}
-                y={WAVE_MID - WAVE_MIN_EXTENT}
-                width={WAVE_BAR_WIDTH}
-                height={WAVE_MIN_EXTENT * 2}
-                rx={1.5}
-                fill="var(--fg18)"
-              />
-            ))}
+            {layout.xs.map((x, i) => minibar(x, i, 'var(--fg18)'))}
             <clipPath id={`bars-${uid}`}>
-              {layout.xs.map((x, i) => (
-                <rect
-                  key={i}
-                  x={x - WAVE_BAR_WIDTH / 2}
-                  y={WAVE_MID - WAVE_MIN_EXTENT}
-                  width={WAVE_BAR_WIDTH}
-                  height={WAVE_MIN_EXTENT * 2}
-                  rx={1.5}
-                />
-              ))}
+              {layout.xs.map((x, i) => minibar(x, i))}
             </clipPath>
             <g clipPath={`url(#bars-${uid})`}>
               <rect
@@ -682,30 +576,19 @@ export function WaveformSeek({
                 />
               </clipPath>
             )}
-            <path
-              d={dLow}
-              stroke="var(--fg18)"
-              strokeWidth={WAVE_BAR_WIDTH}
-              strokeLinecap="round"
-              fill="none"
-              opacity={0.6}
-            />
-            <path
-              d={dMid}
-              stroke="var(--fg18)"
-              strokeWidth={WAVE_BAR_WIDTH}
-              strokeLinecap="round"
-              fill="none"
-              opacity={0.8}
-            />
-            <path
-              d={dHigh}
-              stroke="var(--fg18)"
-              strokeWidth={WAVE_BAR_WIDTH}
-              strokeLinecap="round"
-              fill="none"
-              opacity={1}
-            />
+            {([[dLow, 0.6], [dMid, 0.8], [dHigh, 1]] as const).map(
+              ([d, opacity]) => (
+                <path
+                  key={opacity}
+                  d={d}
+                  stroke="var(--fg18)"
+                  strokeWidth={WAVE_BAR_WIDTH}
+                  strokeLinecap="round"
+                  fill="none"
+                  opacity={opacity}
+                />
+              ),
+            )}
             <g clipPath={`url(#played-${uid})`}>
               <path
                 d={dAll}
