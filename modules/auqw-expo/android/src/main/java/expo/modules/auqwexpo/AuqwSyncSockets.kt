@@ -44,7 +44,6 @@ class AuqwSyncSockets(
    * time; the accept loop hands each inbound socket a registry entry
    * (same reader path as dialed sockets) and emits it upstream. */
   private var listener: ServerSocket? = null
-  private var acceptThread: Thread? = null
   private var nextSocketSeq = 0
   // Pairing-only accepts get no auth before a reader thread starts —
   // cap live accept-* sockets so idle LAN connects can't exhaust
@@ -70,69 +69,67 @@ class AuqwSyncSockets(
         throw CodedException("unavailable", "syncListen failed", e)
       }
     listener = server
-    val thread =
-      Thread(
-        {
-          while (true) {
-            val socket =
-              try {
-                server.accept()
-              } catch (e: Exception) {
-                // stopListening() closes the socket — that's the only
-                // accept failure allowed to kill the thread. A
-                // transient reject (e.g. EMFILE under a burst) must
-                // not silently end the listener.
-                if (listener !== server || server.isClosed) {
-                  return@Thread
-                }
-                Log.w(TAG, "syncListen accept failed; retrying", e)
-                try {
-                  Thread.sleep(50)
-                } catch (_: InterruptedException) {
-                  return@Thread
-                }
-                continue
+    Thread(
+      {
+        while (true) {
+          val socket =
+            try {
+              server.accept()
+            } catch (e: Exception) {
+              // stopListening() closes the socket — that's the only
+              // accept failure allowed to kill the thread. A
+              // transient reject (e.g. EMFILE under a burst) must
+              // not silently end the listener.
+              if (listener !== server || server.isClosed) {
+                return@Thread
               }
-            socket.tcpNoDelay = true
-            socket.keepAlive = true
-            val liveAccepts =
-              entries.keys.count { it.startsWith("accept-") }
-            if (liveAccepts >= maxAccepted) {
-              runCatching { socket.close() }
+              Log.w(TAG, "syncListen accept failed; retrying", e)
+              try {
+                Thread.sleep(50)
+              } catch (_: InterruptedException) {
+                return@Thread
+              }
               continue
             }
-            val socketId = "accept-${++nextSocketSeq}"
-            val entry = Entry(socket)
-            entries[socketId] = entry
-            // Emit acceptance BEFORE the reader starts: bridge events
-            // keep post order, so the JS acceptor registers the socket
-            // id before any of its data can arrive. A prompt peer's
-            // hello must never outrun the accept event.
-            emitAccepted(
-              socketId,
-              socket.inetAddress?.hostAddress ?: "unknown",
-            )
-            val reader =
-              Thread({ readLoop(socketId, entry) }, "auqw-sync-$socketId").apply {
-                isDaemon = true
-                start()
-              }
-            entry.reader = reader
+          socket.tcpNoDelay = true
+          socket.keepAlive = true
+          val liveAccepts =
+            entries.keys.count { it.startsWith("accept-") }
+          if (liveAccepts >= maxAccepted) {
+            runCatching { socket.close() }
+            continue
           }
-        },
-        "auqw-sync-accept",
-      ).apply {
-        isDaemon = true
-        start()
-      }
-    acceptThread = thread
+          val socketId = "accept-${++nextSocketSeq}"
+          val entry = Entry(socket)
+          entries[socketId] = entry
+          // Emit acceptance BEFORE the reader starts: bridge events
+          // keep post order, so the JS acceptor registers the socket
+          // id before any of its data can arrive. A prompt peer's
+          // hello must never outrun the accept event.
+          emitAccepted(
+            socketId,
+            socket.inetAddress?.hostAddress ?: "unknown",
+          )
+          entry.reader = spawnReader(socketId, entry)
+        }
+      },
+      "auqw-sync-accept",
+    ).apply {
+      isDaemon = true
+      start()
+    }
     return server.localPort
   }
+
+  private fun spawnReader(socketId: String, entry: Entry): Thread =
+    Thread({ readLoop(socketId, entry) }, "auqw-sync-$socketId").apply {
+      isDaemon = true
+      start()
+    }
 
   fun stopListening() {
     val server = listener ?: return
     listener = null
-    acceptThread = null
     runCatching { server.close() }
   }
 
@@ -174,12 +171,7 @@ class AuqwSyncSockets(
       Log.w(TAG, "syncConnect failed", e)
       throw CodedException("unavailable", "syncConnect failed", e)
     }
-    val reader =
-      Thread({ readLoop(socketId, entry) }, "auqw-sync-$socketId").apply {
-        isDaemon = true
-        start()
-      }
-    entry.reader = reader
+    entry.reader = spawnReader(socketId, entry)
     return socket.inetAddress?.hostAddress
   }
 
@@ -195,8 +187,7 @@ class AuqwSyncSockets(
       }
     synchronized(entry.socket) {
       try {
-        entry.socket.getOutputStream().write(bytes)
-        entry.socket.getOutputStream().flush()
+        entry.socket.getOutputStream().apply { write(bytes); flush() }
       } catch (e: Exception) {
         reportClosed(socketId, entry, "error")
         Log.w(TAG, "syncSend failed", e)
@@ -234,9 +225,7 @@ class AuqwSyncSockets(
 
   fun destroyAll() {
     stopListening()
-    for (id in entries.keys.toList()) {
-      destroy(id)
-    }
+    entries.keys.toList().forEach(::destroy)
   }
 
   private fun readLoop(socketId: String, entry: Entry) {

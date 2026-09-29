@@ -37,10 +37,7 @@ class AuqwConnectivityMonitor(
   private var registered = false
 
   @Volatile
-  private var lastOnline = false
-
-  @Volatile
-  private var lastMetered = false
+  private var last = Pair(false, false)
 
   private val callback = object : ConnectivityManager.NetworkCallback() {
     override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
@@ -48,10 +45,8 @@ class AuqwConnectivityMonitor(
         validatedNetwork =
           if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
             network
-          } else if (validatedNetwork == network) {
-            null
           } else {
-            validatedNetwork
+            validatedNetwork.takeUnless { it == network }
           }
       }
       publish()
@@ -101,10 +96,9 @@ class AuqwConnectivityMonitor(
     registered = true
     // Emit the current edge immediately — first observers get a
     // baseline, not silence until the next network change.
-    val (online, metered) = snapshot()
-    lastOnline = online
-    lastMetered = metered
-    emit(online, metered)
+    val snap = snapshot()
+    last = snap
+    emit(snap.first, snap.second)
   }
 
   fun stop() {
@@ -120,12 +114,11 @@ class AuqwConnectivityMonitor(
   }
 
   private fun publish() {
-    val (online, metered) = snapshot()
-    if (online == lastOnline && metered == lastMetered) {
+    val snap = snapshot()
+    if (snap == last) {
       return // change edges only — no per-network flapping
     }
-    lastOnline = online
-    lastMetered = metered
-    emit(online, metered)
+    last = snap
+    emit(snap.first, snap.second)
   }
 }

@@ -76,32 +76,22 @@ private const val FIRST_OUTPUT_POLL_DEADLINE_MS = 5_000L
 private const val RELEASED_HANDLES_CAP = 512
 
 class HostConfigInput : Record {
-  @Field
-  var fuelPerEntry: Double = 0.0
-
-  @Field
-  var fuelTotal: Double = 0.0
-
-  @Field
-  var potProviderUrl: String? = null
+  @Field var fuelPerEntry: Double = 0.0
+  @Field var fuelTotal: Double = 0.0
+  @Field var potProviderUrl: String? = null
 
   /** Optional overrides — both default to app-private dirs below. */
-  @Field
-  var statePath: String? = null
-
-  @Field
-  var streamPath: String? = null
+  @Field var statePath: String? = null
+  @Field var streamPath: String? = null
 
   /** Container preference order for playback.resolve — the surface's
    * prefer hint (webm-first here); null = guest default. */
-  @Field
-  var prefer: List<String>? = null
+  @Field var prefer: List<String>? = null
 
   /** Initial OAuth access token for Authorization: Bearer on InnerTube
    * calls — the session-trust header. null = anonymous; refresh via
    * setAuthToken. Never logged. */
-  @Field
-  var authToken: String? = null
+  @Field var authToken: String? = null
 }
 
 /**
@@ -117,7 +107,7 @@ private class Attachment(
   val handle: String,
   var attemptId: String,
   var queueRev: Double,
-  val attachElapsedMs: Long,
+  val attachElapsedMs: Long = SystemClock.elapsedRealtime(),
 ) {
   var readyMarked = false
   var firstFrameMarked = false
@@ -125,28 +115,16 @@ private class Attachment(
 
 /** One immutable projected queue item — never carries a signed URL. */
 class ProjectionItemInput : Record {
-  @Field
-  var occurrenceId: String = ""
-
-  @Field
-  var provider: String? = null
-
-  @Field
-  var sourceRef: String? = null
-
-  @Field
-  var title: String = ""
-
-  @Field
-  var artist: String? = null
-
-  @Field
-  var artworkUrl: String? = null
+  @Field var occurrenceId: String = ""
+  @Field var provider: String? = null
+  @Field var sourceRef: String? = null
+  @Field var title: String = ""
+  @Field var artist: String? = null
+  @Field var artworkUrl: String? = null
 
   /** Session failed-mark — forward moves skip this row, backward
    * moves still reach it. Absent from older JS bundles = unmarked. */
-  @Field
-  var skipsForward: Boolean? = null
+  @Field var skipsForward: Boolean? = null
 }
 
 /**
@@ -155,37 +133,25 @@ class ProjectionItemInput : Record {
  * and reports `queue-transition` events for reconciliation.
  */
 class QueueProjectionInput : Record {
-  @Field
-  var projectionId: String = ""
-
-  @Field
-  var queueRev: Double = 0.0
-
-  @Field
-  var currentOccurrenceId: String? = null
-
-  @Field
-  var positionMs: Double = 0.0
-
-  @Field
-  var mode: String = "stopped"
+  @Field var projectionId: String = ""
+  @Field var queueRev: Double = 0.0
+  @Field var currentOccurrenceId: String? = null
+  @Field var positionMs: Double = 0.0
+  @Field var mode: String = "stopped"
 
   /** Cursor repeat rule: `all` wraps a tail move to the head (and a
    * head remote-previous to the tail); `one` replays the cursor item
    * on `ended`. Absent from older JS bundles = `off`. */
-  @Field
-  var repeat: String = "off"
+  @Field var repeat: String = "off"
 
   /** The dealt walk order: a permutation of `items` indices the
    * cursor steps through (shuffle). Failed rows stay in the walk
    * flagged `skipsForward` — forward moves skip them, backward moves
    * still reach them. Canonical item order never changes — only the
    * walk does. Absent from older JS bundles = the identity order. */
-  @Field
-  var order: List<Int> = emptyList()
+  @Field var order: List<Int> = emptyList()
 
-  @Field
-  var items: List<ProjectionItemInput> = emptyList()
+  @Field var items: List<ProjectionItemInput> = emptyList()
 }
 
 @androidx.annotation.OptIn(UnstableApi::class)
@@ -196,42 +162,37 @@ class AuqwExpoModule : Module() {
   private val streamDataSourceFactory = AuqwStreamDataSource.Factory(streamRegistry)
   private val waveformPeaks = AuqwWaveformPeaks(
     streamRegistry,
-    { handle ->
-      // provider:'local' handles are device files — no seam session
-      // exists for them, so peaks decode straight off the
-      // file/content URI the way `play` resolves them.
-      localHandles[handle]?.let { local ->
-        val ctx = appContext.reactContext
-          ?: throw CodedException("unavailable", "no react context", null)
-        val uri = Uri.parse(
-          if (local.path.contains("://")) local.path else "file://${local.path}"
-        )
-        // The encoded length enforces the same extraction cap the
-        // stream pull applies; -1 leaves the bound to the decode
-        // loop's consumed-byte count.
-        val bytes = if (local.path.contains("://")) {
-          try {
-            ctx.contentResolver.openAssetFileDescriptor(uri, "r")?.use {
-              it.length
-            } ?: -1L
-          } catch (_: Exception) {
-            -1L
-          }
-        } else {
-          try {
-            File(local.path).let { if (it.isFile) it.length() else -1L }
-          } catch (_: Exception) {
-            -1L
-          }
-        }
-        LocalSource(uri, ctx, bytes)
-      }
-    },
+    ::localSourceFor,
     {
       appContext.reactContext?.cacheDir
         ?: throw CodedException("unavailable", "no react context", null)
     }
   )
+
+  /** provider:'local' handles are device files — no seam session
+   * exists for them, so peaks decode straight off the file/content
+   * URI the way `play` resolves them. */
+  private fun localSourceFor(handle: String): LocalSource? =
+    localHandles[handle]?.let { local ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("unavailable", "no react context", null)
+      val uri = localUri(local.path)
+      // The encoded length enforces the same extraction cap the
+      // stream pull applies; -1 leaves the bound to the decode
+      // loop's consumed-byte count.
+      val bytes = runCatching {
+        if (local.path.contains("://")) {
+          ctx.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+        } else {
+          File(local.path).let { if (it.isFile) it.length() else -1L }
+        }
+      }.getOrDefault(-1L)
+      LocalSource(uri, ctx, bytes)
+    }
+
+  private fun localUri(path: String): Uri =
+    Uri.parse(if (path.contains("://")) path else "file://$path")
+
   // The seam's terminal kinds (released/expired/superseded/…) can
   // never succeed on retry — let them fail to onPlayerError at once
   // instead of burning the default policy's ~3s of retries; the
@@ -290,6 +251,12 @@ class AuqwExpoModule : Module() {
   // the session is still routable (a genuinely failed release).
   private val releasedHandles = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+  private fun markReleased(handle: String) {
+    if (releasedHandles.size < RELEASED_HANDLES_CAP) {
+      releasedHandles.add(handle)
+    }
+  }
+
   /** One in-flight SAF folder pick — resolved by OnActivityResult. */
   private var pendingPickPromise: Promise? = null
 
@@ -301,7 +268,6 @@ class AuqwExpoModule : Module() {
   // initial value. JS may consume several moves after resuming.
   @Volatile
   private var boundService: AuqwMediaSessionService? = null
-
 
   /** Lazily created on the first connectivity observer. */
   private var connectivityMonitor: AuqwConnectivityMonitor? = null
@@ -326,26 +292,17 @@ class AuqwExpoModule : Module() {
     syncSockets
       ?: AuqwSyncSockets(
         emitData = { socketId, dataB64 ->
-          sendEvent(
-            EVENT_SYNC_DATA,
-            mapOf("socketId" to socketId, "data" to dataB64)
-          )
+          sendEvent(EVENT_SYNC_DATA, mapOf("socketId" to socketId, "data" to dataB64))
         },
         emitClosed = { socketId, reason ->
-          sendEvent(
-            EVENT_SYNC_CLOSED,
-            mapOf("socketId" to socketId, "reason" to reason)
-          )
+          sendEvent(EVENT_SYNC_CLOSED, mapOf("socketId" to socketId, "reason" to reason))
         },
       ).also { syncSockets = it }
 
   private fun connectivityMonitorInstance(ctx: Context): AuqwConnectivityMonitor =
     connectivityMonitor
       ?: AuqwConnectivityMonitor(ctx) { online, metered ->
-        sendEvent(
-          EVENT_CONNECTIVITY,
-          mapOf("online" to online, "metered" to metered)
-        )
+        sendEvent(EVENT_CONNECTIVITY, mapOf("online" to online, "metered" to metered))
       }.also { connectivityMonitor = it }
 
   /** provider:'local' attach tokens — path/mime for an lf-* handle. */
@@ -399,14 +356,26 @@ class AuqwExpoModule : Module() {
     }
   }
 
+  /** Drop the attach join — the player itself is untouched. */
+  private fun clearAttach() {
+    attached = null
+    attachedForOccurrence = null
+    attachedByService = false
+  }
+
+  /** Join cleared and playback torn down — one atomic player-looper step. */
+  private fun detachPlayer(p: ExoPlayer) {
+    clearAttach()
+    p.stop()
+    p.clearMediaItems()
+  }
+
   /** Free the session behind an attached stream that lost its owner:
    * mark the handle ended so a queued attach can't resurrect it,
    * unroute it, and release on the host that minted it — best-effort,
    * the same pattern as stale transition outcomes. */
   private fun releaseAbandonedAttach(att: Attachment) {
-    if (releasedHandles.size < RELEASED_HANDLES_CAP) {
-      releasedHandles.add(att.handle)
-    }
+    markReleased(att.handle)
     val h = streamRegistry.hostFor(att.handle)
     streamRegistry.unregister(att.handle)
     try {
@@ -422,20 +391,9 @@ class AuqwExpoModule : Module() {
    * the attach is live and playing. */
   private fun kickPositionTicker() {
     val p = player ?: return
-    if (tickerPosted || attached == null || !p.isPlaying) {
-      return
-    }
+    if (tickerPosted || attached == null || !p.isPlaying) return
     tickerPosted = true
     Handler(p.applicationLooper).post(positionTicker)
-  }
-
-  /** Thrown seam errors carry the ABI taxonomy verbatim as the code —
-   * the JS surface maps `error.code` onto the ErrorKind union, so a
-   * generic `ERR_STREAM` would erase `released`/`expired`/… to
-   * `internal`. */
-  private fun streamErrCode(e: StreamException): String = when (e) {
-    is StreamException.Failed -> e.kind
-    is StreamException.Unavailable -> "unavailable"
   }
 
   /** Dev-only legs must not exist in a release binary — file/URL
@@ -443,12 +401,15 @@ class AuqwExpoModule : Module() {
    * being debuggable. */
   private fun requireDebuggable() {
     val ctx = appContext.reactContext
-    val debuggable = ctx != null &&
-      (ctx.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
-    if (!debuggable) {
+    if (ctx == null ||
+      (ctx.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0
+    ) {
       throw CodedException("ERR_DEV_ONLY", "dev instrumentation is debug-build only", null)
     }
   }
+
+  private fun requireHost(): PluginHost =
+    host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
 
   /** Which occurrence an attach binds the stream to. */
   private enum class OccurrenceBind {
@@ -544,14 +505,13 @@ class AuqwExpoModule : Module() {
       fun tone(name: String): String? {
         val id = ctx.resources.getIdentifier(name, "color", "android")
         if (id == 0) return null
-        val color = try {
-          ctx.getColor(id)
-        } catch (e: Exception) {
-          return null
-        }
         // ARGB int -> '#rrggbb'; the alpha channel is always 0xff on
         // these resources and the JS parser ignores it anyway.
-        return "#%06x".format(color and 0xffffff)
+        return try {
+          "#%06x".format(ctx.getColor(id) and 0xffffff)
+        } catch (e: Exception) {
+          null
+        }
       }
       val palette = mapOf(
         "neutral1_50" to tone("system_neutral1_50"),
@@ -570,10 +530,8 @@ class AuqwExpoModule : Module() {
      * `syncConnect` resolves with the peer's address string.
      */
     AsyncFunction("syncConnect") { socketId: String, host: String, port: Double, timeoutMs: Double ->
-      mapOf(
-        "remoteAddress" to
-          syncSocketsInstance().connect(socketId, host, port.toInt(), timeoutMs.toInt())
-      )
+      mapOf("remoteAddress" to
+        syncSocketsInstance().connect(socketId, host, port.toInt(), timeoutMs.toInt()))
     }
 
     AsyncFunction("syncSend") { socketId: String, data: String ->
@@ -598,14 +556,9 @@ class AuqwExpoModule : Module() {
      * address. Resolves with {port}. One listener at a time.
      */
     AsyncFunction("syncListen") { ->
-      val port =
-        syncSocketsInstance().listen { socketId, remoteAddress ->
-          sendEvent(
-            EVENT_SYNC_ACCEPTED,
-            mapOf("socketId" to socketId, "remoteAddress" to remoteAddress)
-          )
-        }
-      mapOf("port" to port)
+      mapOf("port" to syncSocketsInstance().listen { socketId, remoteAddress ->
+        sendEvent(EVENT_SYNC_ACCEPTED, mapOf("socketId" to socketId, "remoteAddress" to remoteAddress))
+      })
     }
 
     AsyncFunction("syncListenStop") { ->
@@ -704,20 +657,14 @@ class AuqwExpoModule : Module() {
       // drop the join rather than let the old stream keep playing
       // until its reads fail one by one.
       player?.let { p ->
-        Handler(p.applicationLooper).post {
-          attached = null
-          attachedForOccurrence = null
-          attachedByService = false
-          p.stop()
-          p.clearMediaItems()
-        }
+        Handler(p.applicationLooper).post { detachPlayer(p) }
       }
       Log.i(TAG, "host created")
       null
     }
 
     Function("setAuthToken") { token: String? ->
-      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      val h = requireHost()
       h.setAuthToken(token)
     }
 
@@ -728,12 +675,12 @@ class AuqwExpoModule : Module() {
      * anonymous resolve ladder.
      */
     Function("setPotProvider") { url: String? ->
-      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      val h = requireHost()
       h.setPotProvider(url)
     }
 
     AsyncFunction("loadPlugin") { wasmBase64: String, manifestJson: String ->
-      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      val h = requireHost()
       val wasm = Base64.decode(wasmBase64, Base64.DEFAULT)
       try {
         h.loadPlugin(wasm, manifestJson)
@@ -743,24 +690,20 @@ class AuqwExpoModule : Module() {
     }
 
     AsyncFunction("startRequest") { pluginId: String, capability: String, payloadJson: String ->
-      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      val h = requireHost()
       val listener = object : RequestListener {
         override fun onOutcome(requestId: String, outcome: RequestOutcome) {
           when (outcome) {
-            is RequestOutcome.Succeeded -> {
-              Log.i(
-                TAG,
-                "request $requestId succeeded steps=${outcome.attempt.steps} " +
-                  "elapsed=${outcome.attempt.elapsedMs}ms"
-              )
-            }
-            is RequestOutcome.Failed -> {
-              Log.i(
-                TAG,
-                "request $requestId failed kind=${outcome.kind} " +
-                  "message=${outcome.message}"
-              )
-            }
+            is RequestOutcome.Succeeded -> Log.i(
+              TAG,
+              "request $requestId succeeded steps=${outcome.attempt.steps} " +
+                "elapsed=${outcome.attempt.elapsedMs}ms"
+            )
+            is RequestOutcome.Failed -> Log.i(
+              TAG,
+              "request $requestId failed kind=${outcome.kind} " +
+                "message=${outcome.message}"
+            )
           }
           sendEvent(
             EVENT_REQUEST_OUTCOME,
@@ -790,7 +733,7 @@ class AuqwExpoModule : Module() {
       if (attemptId.isEmpty() || !isSafeNonNegative(queueRev)) {
         throw CodedException("ERR_INVALID_ARGUMENT", "bad prepare arguments", null)
       }
-      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      val h = requireHost()
       val listener = object : PrepareListener {
         override fun onOutcome(requestId: String, outcome: PrepareOutcome) {
           when (outcome) {
@@ -806,13 +749,11 @@ class AuqwExpoModule : Module() {
                   "mime=${outcome.stream.mime} elapsed=${outcome.attempt.elapsedMs}ms"
               )
             }
-            is PrepareOutcome.Failed -> {
-              Log.i(
-                TAG,
-                "prepare $requestId failed kind=${outcome.kind} " +
-                  "message=${outcome.message}"
-              )
-            }
+            is PrepareOutcome.Failed -> Log.i(
+              TAG,
+              "prepare $requestId failed kind=${outcome.kind} " +
+                "message=${outcome.message}"
+            )
           }
           sendEvent(
             EVENT_PREPARE_OUTCOME,
@@ -854,28 +795,23 @@ class AuqwExpoModule : Module() {
         throw CodedException("ERR_INVALID_ARGUMENT", "bad play arguments", null)
       }
       val local = localHandles[handle]
-      if (local !== null) {
-        val ctx = appContext.reactContext
-          ?: throw CodedException("ERR_RUNTIME", "no react context", null)
-        val uri = Uri.parse(
-          if (local.path.contains("://")) local.path else "file://${local.path}"
-        )
-        attachNow(
-          handle, attemptId, queueRev, positionMs, uri,
-          DefaultDataSource.Factory(ctx),
+      when {
+        local !== null -> attachNow(
+          handle, attemptId, queueRev, positionMs, localUri(local.path),
+          DefaultDataSource.Factory(
+            appContext.reactContext
+              ?: throw CodedException("ERR_RUNTIME", "no react context", null)
+          ),
           OccurrenceBind.CURSOR, null, local.mime
         )
-        maybeRequestNotificationPermission()
-        return@Coroutine null
+        streamRegistry.hostFor(handle) == null ->
+          throw CodedException("not-found", "unknown stream handle", null)
+        else -> attachNow(
+          handle, attemptId, queueRev, positionMs,
+          Uri.parse("auqw-stream://$handle"), streamDataSourceFactory,
+          OccurrenceBind.CURSOR, null, null
+        )
       }
-      if (streamRegistry.hostFor(handle) == null) {
-        throw CodedException("not-found", "unknown stream handle", null)
-      }
-      attachNow(
-        handle, attemptId, queueRev, positionMs,
-        Uri.parse("auqw-stream://$handle"), streamDataSourceFactory,
-        OccurrenceBind.CURSOR, null, null
-      )
       // After the attach post so a first-play permission prompt can't
       // queue ahead of it on the main looper.
       maybeRequestNotificationPermission()
@@ -902,21 +838,17 @@ class AuqwExpoModule : Module() {
     AsyncFunction("stop") Coroutine { ->
       val p = awaitPlayer()
       onPlayerThread(p) {
-        attached = null
-        attachedForOccurrence = null
-        attachedByService = false
+        detachPlayer(p)
         // A stop kills any pending service move: cancel its prepare
         // so the resolve/mint stops burning budget, and mark the
         // latch dropped for its (still-arriving) outcome.
         dropArmedMove()
-        p.stop()
-        p.clearMediaItems()
       }
       null
     }
 
     AsyncFunction("cancelPrepare") { requestId: String ->
-      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      val h = requireHost()
       h.cancel(requestId)
       Log.i(TAG, "cancelPrepare requested: $requestId")
       null
@@ -929,30 +861,20 @@ class AuqwExpoModule : Module() {
       // already removed the entry) stays a no-op, never a host call.
       if (handle.startsWith("lf-")) {
         localHandles.remove(handle)
-        if (releasedHandles.size < RELEASED_HANDLES_CAP) {
-          releasedHandles.add(handle)
-        }
+        markReleased(handle)
         val pl = awaitPlayer()
         onPlayerThread(pl) {
-          if (attached?.handle == handle) {
-            attached = null
-            attachedForOccurrence = null
-            attachedByService = false
-            pl.stop()
-            pl.clearMediaItems()
-          }
+          if (attached?.handle == handle) detachPlayer(pl)
         }
         return@Coroutine null
       }
-      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      val h = requireHost()
       // Mark the handle ended before terminating: an attach still
       // queued on the player looper checks the mark and skips, so a
       // released handle is never resurrected into a stale status.
       // The set is bounded — marks only matter across the queued-
       // attach window.
-      if (releasedHandles.size < RELEASED_HANDLES_CAP) {
-        releasedHandles.add(handle)
-      }
+      markReleased(handle)
       try {
         h.streamRelease(handle)
       } catch (e: StreamException) {
@@ -965,7 +887,7 @@ class AuqwExpoModule : Module() {
         // The UniFFI message already formats "{kind}: {detail}" — do
         // not prefix the kind a second time; the code carries the
         // ABI kind so the JS taxonomy survives the boundary.
-        throw CodedException(streamErrCode(e), e.message, e)
+        throw CodedException(streamKind(e), e.message, e)
       }
       // Released — unmap only on success so a failed release keeps the
       // handle routable (the session is still alive).
@@ -975,23 +897,17 @@ class AuqwExpoModule : Module() {
       // that landed mid-release keeps both its join and its playback.
       val p = awaitPlayer()
       onPlayerThread(p) {
-        if (attached?.handle == handle) {
-          attached = null
-          attachedForOccurrence = null
-          attachedByService = false
-          p.stop()
-          p.clearMediaItems()
-        }
+        if (attached?.handle == handle) detachPlayer(p)
       }
       null
     }
 
     AsyncFunction("phaseMarks") { handle: String ->
-      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      val h = requireHost()
       val marks = try {
         h.streamPhaseMarks(handle)
       } catch (e: StreamException) {
-        throw CodedException(streamErrCode(e), e.message, e)
+        throw CodedException(streamKind(e), e.message, e)
       }
       // The generated record is flat — epoch fields pass through
       // verbatim and durations keep their names (no invented epochs).
@@ -1036,9 +952,8 @@ class AuqwExpoModule : Module() {
     AsyncFunction("devAttachFile") Coroutine { path: String ->
       requireDebuggable()
       val handle = "dev-file-${devAttachSeq.incrementAndGet()}"
-      val uri = Uri.parse(if (path.contains("://")) path else "file://$path")
       attachNow(
-        handle, "dev", 0.0, null, uri, FileDataSource.Factory(),
+        handle, "dev", 0.0, null, localUri(path), FileDataSource.Factory(),
         OccurrenceBind.NONE, null
       )
       handle
@@ -1050,11 +965,11 @@ class AuqwExpoModule : Module() {
     // fetch-through, and phase marks. Dev instrumentation only.
     AsyncFunction("devPrepareUrl") Coroutine { url: String, mime: String, contentLength: Double?, remintable: Boolean? ->
       requireDebuggable()
-      val h = host ?: throw CodedException("ERR_NO_HOST", "createHost first", null)
+      val h = requireHost()
       val prepared = try {
         h.devPrepareUrl(url, mime, contentLength?.toULong(), remintable == true)
       } catch (e: StreamException) {
-        throw CodedException(streamErrCode(e), e.message, e)
+        throw CodedException(streamKind(e), e.message, e)
       }
       streamRegistry.register(prepared.handle, h)
       prepared.handle
@@ -1096,11 +1011,8 @@ class AuqwExpoModule : Module() {
       if (payload.requestCode != AuqwTagReader.PICK_REQUEST_CODE) {
         return@OnActivityResult
       }
-      val promise = pendingPickPromise
+      val promise = pendingPickPromise ?: return@OnActivityResult
       pendingPickPromise = null
-      if (promise == null) {
-        return@OnActivityResult
-      }
       val uri = payload.data?.data
       val ctx = appContext.reactContext
       if (payload.resultCode != android.app.Activity.RESULT_OK || uri == null || ctx == null) {
@@ -1189,30 +1101,19 @@ class AuqwExpoModule : Module() {
       val a = attached
       val p = player
       if (a != null && p != null) {
-        sendEvent(
-          EVENT_PLAYBACK_STATUS,
+        emitStatusFor(
+          a,
+          "failed",
           Bundle().apply {
-            putString("handle", a.handle)
-            putString("attemptId", a.attemptId)
-            putDouble("queueRev", a.queueRev)
-            putString("state", "failed")
-            putDouble(
-              "positionMs",
-              runCatching { p.currentPosition }
-                .getOrDefault(0L)
-                .coerceAtLeast(0)
-                .toDouble()
-            )
-            putBundle(
-              "error",
-              Bundle().apply {
-                // transient — the session convention for player-side
-                // death (retryable); the stream itself may be fine.
-                putString("kind", "transient")
-                putString("message", "media service disconnected")
-              }
-            )
-          }
+            // transient — the session convention for player-side
+            // death (retryable); the stream itself may be fine.
+            putString("kind", "transient")
+            putString("message", "media service disconnected")
+          },
+          runCatching { p.currentPosition }
+            .getOrDefault(0L)
+            .coerceAtLeast(0)
+            .toDouble()
         )
       }
       // A service-minted attach dies with the service — the app may
@@ -1222,9 +1123,7 @@ class AuqwExpoModule : Module() {
       if (a != null && attachedByService) {
         releaseAbandonedAttach(a)
       }
-      attached = null
-      attachedForOccurrence = null
-      attachedByService = false
+      clearAttach()
       dropArmedMove()
       // Reset so the next awaitPlayer rebinds instead of resolving a
       // stale deferred.
@@ -1291,7 +1190,7 @@ class AuqwExpoModule : Module() {
     mimeHint: String? = null,
   ) {
     val p = awaitPlayer()
-    val a = Attachment(handle, attemptId, queueRev, SystemClock.elapsedRealtime())
+    val a = Attachment(handle, attemptId, queueRev)
     onPlayerThread(p) {
       // An app/dev-initiated attach supersedes any armed remote move:
       // drop the latch (cancelling its prepare) so the stale outcome
@@ -1323,9 +1222,8 @@ class AuqwExpoModule : Module() {
     // evicted) is dead: attaching could only fail, but silently
     // skipping leaves the app waiting on a status that never comes —
     // report the attach as failed under its own identity.
-    if (dataSourceFactory === streamDataSourceFactory &&
-      streamRegistry.hostFor(a.handle) == null
-    ) {
+    val isStream = dataSourceFactory === streamDataSourceFactory
+    if (isStream && streamRegistry.hostFor(a.handle) == null) {
       // A stream that never reached the player reports position 0 —
       // echoing the outgoing item's position would lie about progress.
       emitStatusFor(
@@ -1366,7 +1264,7 @@ class AuqwExpoModule : Module() {
           .build()
       )
       .build()
-    val source = (if (dataSourceFactory === streamDataSourceFactory) {
+    val source = (if (isStream) {
       streamMediaSourceFactory
     } else {
       ProgressiveMediaSource.Factory(dataSourceFactory)
@@ -1374,10 +1272,9 @@ class AuqwExpoModule : Module() {
     // Drop the outgoing join before touching the player — the
     // IDLE→BUFFERING states setMediaSource/prepare fire synchronously
     // would otherwise echo the replaced attach's identity.
-    attached = null
-    attachedForOccurrence = null
-    attachedByService = false
-    p.setMediaSource(source, positionMs?.toLong() ?: 0L)
+    clearAttach()
+    val startMs = positionMs?.toLong() ?: 0L
+    p.setMediaSource(source, startMs)
     p.prepare()
     // Service-initiated attaches (remote next/previous, ended advance)
     // honor the transport's playWhenReady — a paused lock-screen press
@@ -1396,7 +1293,7 @@ class AuqwExpoModule : Module() {
     attached = a
     attachedByService = bind == OccurrenceBind.FIXED
     attachedForOccurrence = occId
-    armFirstOutputPoll(p, a, positionMs?.toLong() ?: 0L)
+    armFirstOutputPoll(p, a, startMs)
   }
 
   private fun stateOf(p: ExoPlayer): String = when (p.playbackState) {
@@ -1410,8 +1307,13 @@ class AuqwExpoModule : Module() {
     }
   }
 
-  private fun emitStatus(state: String, error: Bundle? = null) {
+  private fun emitStatus(state: String, error: Bundle? = null) =
     emitStatusFor(attached, state, error)
+
+  /** Status emit for the live attach — a no-op with no player/join. */
+  private fun emitLiveStatus() {
+    val p = player ?: return
+    if (attached != null) emitStatus(stateOf(p))
   }
 
   /** Status under an explicit attachment — an attach that fails
@@ -1424,9 +1326,7 @@ class AuqwExpoModule : Module() {
     error: Bundle? = null,
     positionMs: Double? = null
   ) {
-    if (a == null) {
-      return
-    }
+    if (a == null) return
     val p = player ?: return
     sendEvent(
       EVENT_PLAYBACK_STATUS,
@@ -1477,28 +1377,14 @@ class AuqwExpoModule : Module() {
   private fun validateProjection(p: QueueProjectionInput) {
     fun bad(msg: String): Nothing =
       throw CodedException("ERR_INVALID_PROJECTION", msg, null)
-    if (p.projectionId.isEmpty()) {
-      bad("projectionId required")
-    }
-    if (!isSafeNonNegative(p.queueRev)) {
-      bad("queueRev must be a safe non-negative integer")
-    }
-    if (!isSafeNonNegative(p.positionMs)) {
-      bad("positionMs must be a safe non-negative integer")
-    }
-    if (p.mode != "stopped" && p.mode != "paused" && p.mode != "playing") {
-      bad("unknown projection mode")
-    }
-    if (p.repeat != "off" && p.repeat != "all" && p.repeat != "one") {
-      bad("unknown repeat mode")
-    }
-    if (p.items.size > 500) {
-      bad("projection exceeds item bound")
-    }
+    if (p.projectionId.isEmpty()) bad("projectionId required")
+    if (!isSafeNonNegative(p.queueRev)) bad("queueRev must be a safe non-negative integer")
+    if (!isSafeNonNegative(p.positionMs)) bad("positionMs must be a safe non-negative integer")
+    if (p.mode !in setOf("stopped", "paused", "playing")) bad("unknown projection mode")
+    if (p.repeat !in setOf("off", "all", "one")) bad("unknown repeat mode")
+    if (p.items.size > 500) bad("projection exceeds item bound")
     for (item in p.items) {
-      if (item.occurrenceId.isEmpty()) {
-        bad("occurrenceId required")
-      }
+      if (item.occurrenceId.isEmpty()) bad("occurrenceId required")
       if ((item.provider == null) != (item.sourceRef == null)) {
         bad("provider/sourceRef must be null together")
       }
@@ -1508,9 +1394,8 @@ class AuqwExpoModule : Module() {
     }
     // The walk is a unique subsequence — failed rows legitimately
     // drop out of it while `items` keeps every occurrence.
-    if (p.order.isNotEmpty() &&
-      (p.order.any { it < 0 || it >= p.items.size } ||
-        p.order.toSet().size != p.order.size)
+    if (p.order.any { it < 0 || it >= p.items.size } ||
+      p.order.toSet().size != p.order.size
     ) {
       bad("order must be a unique subsequence of item indices")
     }
@@ -1531,10 +1416,7 @@ class AuqwExpoModule : Module() {
     installedProjection = proj
     val att = attached
     when {
-      att == null -> {
-        attachedForOccurrence = null
-        attachedByService = false
-      }
+      att == null -> clearAttach()
       attachedForOccurrence != proj.currentOccurrenceId -> {
         // The attached stream serves an occurrence the new revision
         // no longer has as cursor — a service move the app superseded,
@@ -1542,12 +1424,8 @@ class AuqwExpoModule : Module() {
         // belongs to the old occurrence either way: stop it and free
         // the session, or a stale attach leaks until expiry while
         // claiming the new cursor.
-        attached = null
-        attachedForOccurrence = null
-        attachedByService = false
+        detachPlayer(p)
         releaseAbandonedAttach(att)
-        p.stop()
-        p.clearMediaItems()
       }
     }
     // The application re-keys its active identity's queueRev to the
@@ -1582,14 +1460,10 @@ class AuqwExpoModule : Module() {
     if (transitionInFlight != null) {
       return
     }
-    val idx = proj.items.indexOfFirst { it.occurrenceId == from }
-    if (idx < 0) {
-      return
-    }
     // The cursor walks `order` positions — the dealt play order under
     // shuffle; an absent list (older JS bundles) reads as identity.
     val order = if (proj.order.isEmpty()) proj.items.indices.toList() else proj.order
-    val pos = order.indexOf(idx)
+    val pos = order.indexOf(proj.items.indexOfFirst { it.occurrenceId == from })
     if (pos < 0) {
       return
     }
@@ -1599,10 +1473,7 @@ class AuqwExpoModule : Module() {
       // handle/identity.
       if (p.currentPosition > REMOTE_PREVIOUS_RESTART_MS) {
         p.seekTo(0)
-        emitTransition(
-          proj, from, from, reason, 0.0,
-          att.attemptId to att.queueRev, att.handle
-        )
+        emitSelfTransition(proj, from, reason, att)
         return
       }
       if (pos == 0) {
@@ -1613,10 +1484,7 @@ class AuqwExpoModule : Module() {
           moveTo(p, proj, from, last, reason)
         } else {
           p.seekTo(0)
-          emitTransition(
-            proj, from, from, reason, 0.0,
-            att.attemptId to att.queueRev, att.handle
-          )
+          emitSelfTransition(proj, from, reason, att)
         }
         return
       }
@@ -1629,10 +1497,7 @@ class AuqwExpoModule : Module() {
     if (reason == "ended" && proj.repeat == "one") {
       p.seekTo(0)
       p.play()
-      emitTransition(
-        proj, from, from, reason, 0.0,
-        att.attemptId to att.queueRev, att.handle
-      )
+      emitSelfTransition(proj, from, reason, att)
       return
     }
     // Forward moves step over `skipsForward` rows — the same skip the
@@ -1658,20 +1523,13 @@ class AuqwExpoModule : Module() {
       if (reason == "ended") {
         p.play()
       }
-      emitTransition(
-        proj, from, from, reason, 0.0,
-        att.attemptId to att.queueRev, att.handle
-      )
+      emitSelfTransition(proj, from, reason, att)
       return
     }
     if (next == null) {
       // Ran off the tail: a null-target transition is the legal stop.
       val endPosition = p.currentPosition.coerceAtLeast(0).toDouble()
-      attached = null
-      attachedForOccurrence = null
-      attachedByService = false
-      p.stop()
-      p.clearMediaItems()
+      detachPlayer(p)
       emitTransition(proj, from, null, reason, endPosition, null, null)
       return
     }
@@ -1701,16 +1559,10 @@ class AuqwExpoModule : Module() {
       val localHandle = "lf-${localSeq.incrementAndGet()}"
       localHandles[localHandle] = LocalHandle(sourceRef, null)
       val localAttempt = nextSvcId()
-      val localAttach = Attachment(
-        localHandle, localAttempt, proj.queueRev,
-        SystemClock.elapsedRealtime()
-      )
-      val localUri = Uri.parse(
-        if (sourceRef.contains("://")) sourceRef else "file://$sourceRef"
-      )
+      val localAttach = Attachment(localHandle, localAttempt, proj.queueRev)
       val ctx = appContext.reactContext ?: return
       attachOnPlayerThread(
-        p, localAttach, 0.0, localUri,
+        p, localAttach, 0.0, localUri(sourceRef),
         DefaultDataSource.Factory(ctx),
         OccurrenceBind.FIXED, target.occurrenceId
       )
@@ -1730,11 +1582,7 @@ class AuqwExpoModule : Module() {
       override fun onOutcome(requestId: String, outcome: PrepareOutcome) {
         // Prepare outcomes fire on a host runtime worker — hop back
         // to the player looper before touching projection state.
-        val pl = player
-        if (pl == null) {
-          releaseOutcomeHandle(h, outcome)
-          return
-        }
+        val pl = player ?: return releaseOutcomeHandle(h, outcome)
         Handler(pl.applicationLooper).post {
           finishTransition(pl, h, proj, seq, from, target.occurrenceId, reason, outcome)
         }
@@ -1788,10 +1636,7 @@ class AuqwExpoModule : Module() {
         outcome.superseded.forEach(streamRegistry::unregister)
         streamRegistry.register(outcome.stream.handle, h)
         val attemptId = nextSvcId()
-        val a = Attachment(
-          outcome.stream.handle, attemptId, proj.queueRev,
-          SystemClock.elapsedRealtime()
-        )
+        val a = Attachment(outcome.stream.handle, attemptId, proj.queueRev)
         try {
           attachOnPlayerThread(
             p, a, 0.0, Uri.parse("auqw-stream://${outcome.stream.handle}"),
@@ -1852,6 +1697,18 @@ class AuqwExpoModule : Module() {
     }
   }
 
+  /** Same-item transition — the cursor restarts in place under the
+   * live handle and identity. */
+  private fun emitSelfTransition(
+    proj: QueueProjectionInput,
+    occurrenceId: String,
+    reason: String,
+    att: Attachment,
+  ) = emitTransition(
+    proj, occurrenceId, occurrenceId, reason, 0.0,
+    att.attemptId to att.queueRev, att.handle
+  )
+
   private fun emitTransition(
     proj: QueueProjectionInput,
     from: String?,
@@ -1907,24 +1764,19 @@ class AuqwExpoModule : Module() {
     }
   }
 
-  private fun errorKind(error: PlaybackException): String {
-    var cause: Throwable? = error
-    while (cause != null) {
-      if (cause is AuqwStreamException) {
-        return cause.kind
+  private fun errorKind(error: PlaybackException): String =
+    generateSequence<Throwable>(error) { it.cause }
+      .filterIsInstance<AuqwStreamException>()
+      .firstOrNull()?.kind
+      ?: when (error.errorCode) {
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+        PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE,
+        PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+        PlaybackException.ERROR_CODE_TIMEOUT -> "transient"
+        PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "not-found"
+        else -> "internal"
       }
-      cause = cause.cause
-    }
-    return when (error.errorCode) {
-      PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
-      PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
-      PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE,
-      PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
-      PlaybackException.ERROR_CODE_TIMEOUT -> "transient"
-      PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "not-found"
-      else -> "internal"
-    }
-  }
 
   private val playerListener = object : Player.Listener {
     override fun onPlaybackStateChanged(playbackState: Int) {
@@ -1935,9 +1787,7 @@ class AuqwExpoModule : Module() {
         a.readyMarked = true
         emitPhaseMark(a, "state-ready")
       }
-      if (a != null) {
-        emitStatus(stateOf(p))
-      }
+      if (a != null) emitStatus(stateOf(p))
       if (p.isPlaying) {
         kickPositionTicker()
       }
@@ -1949,22 +1799,14 @@ class AuqwExpoModule : Module() {
     }
 
     override fun onIsPlayingChanged(isPlaying: Boolean) {
-      val p = player ?: return
-      if (attached == null) {
-        return
-      }
-      emitStatus(stateOf(p))
+      emitLiveStatus()
       if (isPlaying) {
         kickPositionTicker()
       }
     }
 
     override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-      val p = player ?: return
-      if (attached == null) {
-        return
-      }
-      emitStatus(stateOf(p))
+      emitLiveStatus()
     }
 
     override fun onPlayerError(error: PlaybackException) {
@@ -1991,16 +1833,11 @@ class AuqwExpoModule : Module() {
    * attach by [Attachment.firstFrameMarked].
    */
   private fun markFirstAudioOutput(a: Attachment) {
-    if (a.firstFrameMarked) {
-      return
-    }
+    if (a.firstFrameMarked) return
     a.firstFrameMarked = true
     emitPhaseMark(a, "rendered-first-frame")
-    Log.i(
-      TAG,
-      "attach ${a.handle} rendered-first-frame " +
-        "${SystemClock.elapsedRealtime() - a.attachElapsedMs}ms"
-    )
+    Log.i(TAG, "attach ${a.handle} rendered-first-frame " +
+      "${SystemClock.elapsedRealtime() - a.attachElapsedMs}ms")
   }
 
   /**
@@ -2017,11 +1854,8 @@ class AuqwExpoModule : Module() {
     val baseline = p.currentPosition.coerceAtLeast(startPositionMs)
     val poll = object : Runnable {
       override fun run() {
-        if (attached !== a || a.firstFrameMarked) {
-          return
-        }
-        if (SystemClock.elapsedRealtime() - a.attachElapsedMs >
-          FIRST_OUTPUT_POLL_DEADLINE_MS
+        if (attached !== a || a.firstFrameMarked ||
+          SystemClock.elapsedRealtime() - a.attachElapsedMs > FIRST_OUTPUT_POLL_DEADLINE_MS
         ) {
           return
         }
@@ -2094,13 +1928,17 @@ class AuqwExpoModule : Module() {
       putString("resultJson", outcome.resultJson)
       putBundle("attempt", attemptBundle(outcome.attempt))
     }
-    is RequestOutcome.Failed -> Bundle().apply {
-      putString("type", "failed")
-      putString("kind", outcome.kind)
-      putString("message", outcome.message)
-      putBundle("attempt", attemptBundle(outcome.attempt))
-    }
+    is RequestOutcome.Failed ->
+      failedBundle(outcome.kind, outcome.message, outcome.attempt)
   }
+
+  private fun failedBundle(kind: String, message: String?, attempt: AttemptSummary) =
+    Bundle().apply {
+      putString("type", "failed")
+      putString("kind", kind)
+      putString("message", message)
+      putBundle("attempt", attemptBundle(attempt))
+    }
 
   // onPrepareOutcome stream payload: the JS contract shape —
   // {handle, mime, itag?, contentLength?, expiresAtMs?, bitrateKbps?} —
@@ -2121,12 +1959,8 @@ class AuqwExpoModule : Module() {
       )
       putBundle("attempt", attemptBundle(outcome.attempt))
     }
-    is PrepareOutcome.Failed -> Bundle().apply {
-      putString("type", "failed")
-      putString("kind", outcome.kind)
-      putString("message", outcome.message)
-      putBundle("attempt", attemptBundle(outcome.attempt))
-    }
+    is PrepareOutcome.Failed ->
+      failedBundle(outcome.kind, outcome.message, outcome.attempt)
   }
 
   private fun coded(e: HostException): CodedException = when (e) {

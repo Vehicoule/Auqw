@@ -58,6 +58,9 @@ private const val DEQUEUE_US = 10_000L
 private val DEAD_HANDLE_KINDS = setOf(
   "released", "evicted", "expired", "superseded", "not-found"
 )
+private val INVALID_RESPONSE_KINDS = setOf(
+  "invalid-request", "invalid-response", "invalid-message"
+)
 
 /** A provider:'local' backing for an lf-* handle — the file or content
  *  URI, the Context the extractor needs to open it, and the resolved
@@ -125,9 +128,7 @@ internal class AuqwWaveformPeaks(
   }
 
   fun cancelAll() {
-    for ((_, job) in jobs) {
-      job.cancel()
-    }
+    jobs.values.forEach { it.cancel() }
     jobs.clear()
     cancels.clear()
   }
@@ -168,7 +169,8 @@ internal class AuqwWaveformPeaks(
         throw CancellationException("cancelled before extraction started")
       }
       val local = localFor(handle)
-      val decoded = if (local !== null) {
+      val setSource: (MediaExtractor) -> Unit
+      if (local !== null) {
         if (local.bytes > cap) {
           throw CodedException(
             if (provisionalCap) "not-applicable" else "budget-exceeded",
@@ -176,27 +178,14 @@ internal class AuqwWaveformPeaks(
             null
           )
         }
-        decodePcm(
-          { extractor ->
-            extractor.setDataSource(local.context, local.uri, null)
-          },
-          cap,
-          provisionalCap,
-          pcmFile,
-        )
+        setSource = { it.setDataSource(local.context, local.uri, null) }
       } else {
         val host = registry.hostFor(handle)
           ?: throw CodedException("released", "unknown stream handle", null)
         val encoded = pullBytes(host, handle, cap, provisionalCap)
-        decodePcm(
-          { extractor ->
-            extractor.setDataSource(ByteArrayMediaDataSource(encoded))
-          },
-          cap,
-          provisionalCap,
-          pcmFile,
-        )
+        setSource = { it.setDataSource(ByteArrayMediaDataSource(encoded)) }
       }
+      val decoded = decodePcm(setSource, cap, provisionalCap, pcmFile)
       return bucket(
         pcmFile, decoded.bytes, decoded.channels, decoded.floatPcm, count, job
       )
@@ -227,16 +216,14 @@ internal class AuqwWaveformPeaks(
     provisionalCap: Boolean,
   ): ByteArray {
     val out = ByteArrayOutputStream()
-    var position = 0L
     var ended = false
     var deadline = SystemClock.uptimeMillis() + FIRST_READ_TIMEOUT_MS
     // `<=` so an exactly-`cap` stream still reaches its EOF read.
     while (out.size() <= cap) {
       coroutineContext.ensureActive()
-      val readPos = position
       val chunk = try {
         withContext(Dispatchers.IO) {
-          host.streamPeek(handle, readPos.toULong(), READ_CHUNK.toULong())
+          host.streamPeek(handle, out.size().toULong(), READ_CHUNK.toULong())
         }
       } catch (e: StreamException) {
         throw seamError(e)
@@ -263,7 +250,6 @@ internal class AuqwWaveformPeaks(
         }
         else -> {
           out.write(chunk, 0, chunk.size)
-          position += chunk.size
           deadline = SystemClock.uptimeMillis() + PARK_TIMEOUT_MS
         }
       }
@@ -304,20 +290,13 @@ internal class AuqwWaveformPeaks(
         )
       }
       pcmOut = FileOutputStream(pcmFile).channel
-      var track = -1
-      var format: MediaFormat? = null
-      for (i in 0 until extractor.trackCount) {
-        val f = extractor.getTrackFormat(i)
-        val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
-        if (mime.startsWith("audio/")) {
-          track = i
-          format = f
-          break
+      val (track, format) = (0 until extractor.trackCount)
+        .firstNotNullOfOrNull { i ->
+          extractor.getTrackFormat(i).takeIf {
+            it.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+          }?.let { i to it }
         }
-      }
-      if (track < 0 || format === null) {
-        throw CodedException("invalid-response", "no audio track", null)
-      }
+        ?: throw CodedException("invalid-response", "no audio track", null)
       extractor.selectTrack(track)
       val mime = format.getString(MediaFormat.KEY_MIME)
         ?: throw CodedException("invalid-response", "audio track has no mime", null)
@@ -421,31 +400,24 @@ internal class AuqwWaveformPeaks(
         channels,
         pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT,
       )
-    } catch (e: CodedException) {
-      throw e
-    } catch (e: CancellationException) {
-      throw e
     } catch (e: Exception) {
+      if (e is CodedException || e is CancellationException) throw e
       throw CodedException(
         "invalid-response", e.message ?: "audio decode failed", e
       )
     } finally {
-      try {
-        codec?.stop()
-      } catch (e: Exception) {
-        Log.i(TAG, "codec stop: ${e.message}")
-      }
-      try {
-        codec?.release()
-      } catch (e: Exception) {
-        Log.i(TAG, "codec release: ${e.message}")
-      }
+      quiet("codec stop") { codec?.stop() }
+      quiet("codec release") { codec?.release() }
       extractor.release()
-      try {
-        pcmOut?.close()
-      } catch (e: Exception) {
-        Log.i(TAG, "pcm spill close: ${e.message}")
-      }
+      quiet("pcm spill close") { pcmOut?.close() }
+    }
+  }
+
+  private fun quiet(what: String, block: () -> Unit) {
+    try {
+      block()
+    } catch (e: Exception) {
+      Log.i(TAG, "$what: ${e.message}")
     }
   }
 
@@ -532,13 +504,10 @@ internal class AuqwWaveformPeaks(
   }
 
   private fun formatInt(format: MediaFormat, key: String): Int? =
-    if (format.containsKey(key)) {
-      try {
-        format.getInteger(key)
-      } catch (_: Exception) {
-        null
-      }
-    } else {
+    if (!format.containsKey(key)) null
+    else try {
+      format.getInteger(key)
+    } catch (_: Exception) {
       null
     }
 
@@ -546,13 +515,10 @@ internal class AuqwWaveformPeaks(
    *  the desktop port's `toError` applies. */
   private fun seamError(e: StreamException): CodedException {
     val kind = when {
-      e is StreamException.Failed && DEAD_HANDLE_KINDS.contains(e.kind) -> "released"
-      e is StreamException.Failed &&
-        (e.kind == "invalid-request" ||
-          e.kind == "invalid-response" ||
-          e.kind == "invalid-message") -> "invalid-response"
-      e is StreamException.Failed -> "transient"
-      else -> "unavailable"
+      e !is StreamException.Failed -> "unavailable"
+      e.kind in DEAD_HANDLE_KINDS -> "released"
+      e.kind in INVALID_RESPONSE_KINDS -> "invalid-response"
+      else -> "transient"
     }
     return CodedException(kind, e.message, e)
   }
@@ -564,13 +530,11 @@ private class ByteArrayMediaDataSource(
   private val bytes: ByteArray,
 ) : MediaDataSource() {
   override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
-    if (position < 0 || position >= bytes.size.toLong()) {
-      return -1
-    }
+    if (position < 0 || position >= bytes.size.toLong()) return -1
+    // Long→Int narrowing is safe past this guard: n ≤ size and
+    // position < bytes.size, both under Int.MAX_VALUE.
     val n = minOf(size.toLong(), bytes.size.toLong() - position).toInt()
-    if (n <= 0) {
-      return -1
-    }
+    if (n <= 0) return -1
     System.arraycopy(bytes, position.toInt(), buffer, offset, n)
     return n
   }

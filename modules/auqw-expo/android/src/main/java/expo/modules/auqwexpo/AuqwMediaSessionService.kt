@@ -57,6 +57,16 @@ class AuqwMediaSessionService : MediaSessionService() {
     private const val MAX_BUFFER_MS = 20_000
     private const val BUFFER_FOR_PLAYBACK_MS = 75
     private const val BUFFER_FOR_REBUFFER_MS = 100
+
+    /** The next/previous commands the session advertises and routes
+     * to the projection cursor (a single-item ExoPlayer never
+     * reports them itself). */
+    private val QUEUE_COMMANDS = setOf(
+      Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+      Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
+      Player.COMMAND_SEEK_TO_NEXT,
+      Player.COMMAND_SEEK_TO_PREVIOUS,
+    )
   }
 
   private var player: ExoPlayer? = null
@@ -82,41 +92,22 @@ class AuqwMediaSessionService : MediaSessionService() {
   private class QueuePlayer(player: Player) : ForwardingPlayer(player) {
     override fun getAvailableCommands(): Player.Commands =
       super.getAvailableCommands().buildUpon()
-        .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
-        .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
-        .add(Player.COMMAND_SEEK_TO_NEXT)
-        .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+        .also { QUEUE_COMMANDS.forEach(it::add) }
         .build()
 
     override fun isCommandAvailable(command: Int): Boolean =
       command in QUEUE_COMMANDS || super.isCommandAvailable(command)
-
-    private companion object {
-      val QUEUE_COMMANDS = setOf(
-        Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
-        Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
-        Player.COMMAND_SEEK_TO_NEXT,
-        Player.COMMAND_SEEK_TO_PREVIOUS,
-      )
-    }
   }
 
   inner class LocalBinder : Binder() {
     // The service is exported (MediaSession controllers bind from
     // SystemUI); the raw player/service handles are same-UID only.
-    fun player(): ExoPlayer? =
-      if (Binder.getCallingUid() == Process.myUid()) {
-        this@AuqwMediaSessionService.player
-      } else {
-        null
-      }
+    private fun <T> sameUid(value: T): T? =
+      if (Binder.getCallingUid() == Process.myUid()) value else null
 
-    fun service(): AuqwMediaSessionService? =
-      if (Binder.getCallingUid() == Process.myUid()) {
-        this@AuqwMediaSessionService
-      } else {
-        null
-      }
+    fun player(): ExoPlayer? = sameUid(this@AuqwMediaSessionService.player)
+
+    fun service(): AuqwMediaSessionService? = sameUid(this@AuqwMediaSessionService)
   }
 
   private val sessionCallback = object : MediaSession.Callback {
@@ -128,10 +119,7 @@ class AuqwMediaSessionService : MediaSessionService() {
       // session consumes them through the projection cursor (the
       // QueuePlayer is what makes them report *available*).
       val playerCommands = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
-        .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
-        .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
-        .add(Player.COMMAND_SEEK_TO_NEXT)
-        .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+        .also { QUEUE_COMMANDS.forEach(it::add) }
         .build()
       return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
         .setAvailablePlayerCommands(playerCommands)
@@ -148,25 +136,20 @@ class AuqwMediaSessionService : MediaSessionService() {
       controllerInfo: MediaSession.ControllerInfo,
       playerCommand: Int
     ): Int {
-      when (playerCommand) {
+      val command = when (playerCommand) {
         Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
-        Player.COMMAND_SEEK_TO_NEXT -> {
-          remoteDispatcher?.dispatch("remote-next")
-            // Consumed only when the projection cursor heard it — a
-            // dead dispatcher (module destroyed, service surviving on
-            // foreground playback) falls through to the player's own
-            // seek instead of swallowing the press.
-            ?: return super.onPlayerCommandRequest(session, controllerInfo, playerCommand)
-          return SessionResult.RESULT_ERROR_NOT_SUPPORTED
-        }
+        Player.COMMAND_SEEK_TO_NEXT -> "remote-next"
         Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
-        Player.COMMAND_SEEK_TO_PREVIOUS -> {
-          remoteDispatcher?.dispatch("remote-previous")
-            ?: return super.onPlayerCommandRequest(session, controllerInfo, playerCommand)
-          return SessionResult.RESULT_ERROR_NOT_SUPPORTED
-        }
+        Player.COMMAND_SEEK_TO_PREVIOUS -> "remote-previous"
+        else -> return super.onPlayerCommandRequest(session, controllerInfo, playerCommand)
       }
-      return super.onPlayerCommandRequest(session, controllerInfo, playerCommand)
+      // Consumed only when the projection cursor heard it — a dead
+      // dispatcher (module destroyed, service surviving on foreground
+      // playback) falls through to the player's own seek instead of
+      // swallowing the press.
+      remoteDispatcher?.dispatch(command)
+        ?: return super.onPlayerCommandRequest(session, controllerInfo, playerCommand)
+      return SessionResult.RESULT_ERROR_NOT_SUPPORTED
     }
 
     override fun onMediaButtonEvent(
@@ -180,19 +163,15 @@ class AuqwMediaSessionService : MediaSessionService() {
         @Suppress("DEPRECATION")
         intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
       }
-      if (keyEvent?.action == KeyEvent.ACTION_DOWN) {
-        when (keyEvent.keyCode) {
-          KeyEvent.KEYCODE_MEDIA_NEXT -> {
-            remoteDispatcher?.dispatch("remote-next")
-              ?: return super.onMediaButtonEvent(session, controllerInfo, intent)
-            return true
-          }
-          KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
-            remoteDispatcher?.dispatch("remote-previous")
-              ?: return super.onMediaButtonEvent(session, controllerInfo, intent)
-            return true
-          }
-        }
+      val command = when (keyEvent?.keyCode) {
+        KeyEvent.KEYCODE_MEDIA_NEXT -> "remote-next"
+        KeyEvent.KEYCODE_MEDIA_PREVIOUS -> "remote-previous"
+        else -> null
+      }
+      if (keyEvent?.action == KeyEvent.ACTION_DOWN && command != null) {
+        remoteDispatcher?.dispatch(command)
+          ?: return super.onMediaButtonEvent(session, controllerInfo, intent)
+        return true
       }
       return super.onMediaButtonEvent(session, controllerInfo, intent)
     }

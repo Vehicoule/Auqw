@@ -32,9 +32,7 @@ class AuqwStreamRegistry {
   fun hostFor(handle: String): PluginHost? = hosts[handle]
 
   /** Drop every routing entry — a replaced host can never serve them. */
-  fun clear() {
-    hosts.clear()
-  }
+  fun clear() = hosts.clear()
 
   /**
    * Whether `host` still has `handle` in its session map. `not-found`
