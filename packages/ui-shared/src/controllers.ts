@@ -1145,10 +1145,10 @@ export function useSearchScreenController({
 } & SearchScreenHandlers): SearchScreenView {
   const loading = state.phase === 'loading';
   const editing = query ?? state.query;
+  const trimmed = editing.trim();
   // Draft mode: the box carries text that was never committed as the
   // shown query — completions own the pane until submit.
-  const draft = editing.trim() !== '' && editing.trim() !== state.query;
-  const trimmed = editing.trim();
+  const draft = trimmed !== '' && trimmed !== state.query;
   return {
     draft,
     field: {

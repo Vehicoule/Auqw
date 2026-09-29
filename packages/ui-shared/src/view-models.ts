@@ -537,11 +537,9 @@ export function toCorrectionsModel(input: {
   const visible =
     input.filter === 'all'
       ? rows
-      : rows.filter((row) =>
-        input.filter === 'pending'
-          ? row.status === 'pending'
-          : row.status !== 'pending',
-      );
+      : rows.filter(
+          (row) => (row.status === 'pending') === (input.filter === 'pending'),
+        );
   return {
     state: 'ready',
     message: null,
@@ -920,15 +918,18 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
   };
   switch (playback.type) {
     case 'preparing':
+    case 'failed':
       return {
         ...base,
-        status: 'preparing',
-        title: recording?.title ?? t('player.title.preparing'),
-        // The queue holds the seek intent the pending 'prepared'
-        // outcome will play from.
+        status: playback.type,
+        title: recording?.title ?? t(`player.title.${playback.type}`),
+        // The queue's position is authoritative for both states — the
+        // pending 'prepared' outcome plays from the seek intent, and a
+        // failed attempt parks the occurrence where retry resumes.
         positionMs: queue.positionMs,
         durationMs: recording?.durationMs ?? null,
-        errorMessage: null,
+        errorMessage:
+          playback.type === 'failed' ? errorText(playback.error) : null,
       };
     case 'buffering':
     case 'playing':
@@ -940,17 +941,6 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
         positionMs: playback.positionMs,
         durationMs: playback.durationMs ?? recording?.durationMs ?? null,
         errorMessage: null,
-      };
-    case 'failed':
-      return {
-        ...base,
-        status: 'failed',
-        title: recording?.title ?? t('player.title.failed'),
-        // A failed attempt parks the occurrence — the queue's
-        // position is where playback resumes on retry.
-        positionMs: queue.positionMs,
-        durationMs: recording?.durationMs ?? null,
-        errorMessage: errorText(playback.error),
       };
   }
 }
@@ -1217,19 +1207,13 @@ export function toLibraryModel(input: {
   for (const playlist of input.playlists) {
     const entries =
       entriesByPlaylist.get(playlist.playlistId) ?? EMPTY_ENTRIES;
-    const first = entries[0];
-    const artworkRecording =
-      first === undefined ? undefined : byId.get(first.recordingId);
     cards.push({
       key: `playlist-${playlist.playlistId}`,
       kind: 'playlist',
       title: playlist.name,
       subtitle: t('playlist.meta', { count: entries.length }),
       count: entries.length,
-      artworkUrl:
-        artworkRecording === undefined
-          ? null
-          : pickArtworkUrl(artworkRecording.artwork),
+      artworkUrl: headArtwork(byId, entries),
       sortMs: playlist.updatedMs,
       playlistId: playlist.playlistId,
       entityRef: null,
@@ -1397,6 +1381,15 @@ function downloadBadge(d: DownloadProgress): string {
   return t(`track.download.${downloadChip(d.state)}`);
 }
 
+const headArtwork = (
+  byId: ReadonlyMap<string, Recording>,
+  entries: readonly { readonly recordingId: string }[],
+): string | null => {
+  const recording =
+    entries[0] === undefined ? undefined : byId.get(entries[0].recordingId);
+  return recording === undefined ? null : pickArtworkUrl(recording.artwork);
+};
+
 export function toPlaylistModel(input: {
   readonly playlistId: string;
   readonly playlists: readonly Playlist[];
@@ -1434,17 +1427,11 @@ export function toPlaylistModel(input: {
       row,
     };
   });
-  const first = entries[0];
-  const artworkRecording =
-    first === undefined ? undefined : byId.get(first.recordingId);
   return {
     playlistId: playlist.playlistId,
     name: playlist.name,
     count: rows.length,
-    artworkUrl:
-      artworkRecording === undefined
-        ? null
-        : pickArtworkUrl(artworkRecording.artwork),
+    artworkUrl: headArtwork(byId, entries),
     entries: rows,
   };
 }
