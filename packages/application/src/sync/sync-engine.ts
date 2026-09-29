@@ -36,6 +36,12 @@ import type { LogPort } from '../ports/log.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import { HybridClock, compareStamp, isHlcStamp } from './hlc.ts';
 import type { HlcStamp } from './hlc.ts';
+import {
+  KEY_SEP,
+  compareEntryTs,
+  entryKey,
+  jsonEquals,
+} from './entry-order.ts';
 
 /**
  * The slice-4 merge engine for phone↔desktop library sync (sync.md).
@@ -84,21 +90,7 @@ import type { HlcStamp } from './hlc.ts';
 
 // ---- record kinds ---------------------------------------------------------
 
-export type SyncRecordKind =
-  | 'recording'
-  | 'recordingSourceRef'
-  | 'recordingMapping'
-  | 'like'
-  | 'entity'
-  | 'entitySourceRef'
-  | 'playlist'
-  | 'playlistEntry'
-  | 'playEvent'
-  | 'playCount'
-  | 'matchReview'
-  | 'settings';
-
-const SYNC_RECORD_KINDS: readonly SyncRecordKind[] = [
+const SYNC_RECORD_KINDS = [
   'recording',
   'recordingSourceRef',
   'recordingMapping',
@@ -111,7 +103,9 @@ const SYNC_RECORD_KINDS: readonly SyncRecordKind[] = [
   'playCount',
   'matchReview',
   'settings',
-];
+] as const;
+
+export type SyncRecordKind = (typeof SYNC_RECORD_KINDS)[number];
 
 const SYNC_RECORD_KIND_SET: ReadonlySet<string> = new Set(SYNC_RECORD_KINDS);
 
@@ -126,8 +120,6 @@ export const TOMBSTONE_FIELD = '*';
 
 /** The singleton settings record's id. */
 export const SETTINGS_RECORD_ID = 'settings';
-
-const KEY_SEP = '\u001f';
 
 /**
  * Record ids are kind-local. Presence-style records key on domain
@@ -144,11 +136,7 @@ const KEY_SEP = '\u001f';
  * component, keeping worst-case ids inside MAX_RECORD_ID.
  */
 function encodeRecordId(parts: readonly string[]): string {
-  let out = '';
-  for (const part of parts) {
-    out += `${part.length}:${part}`;
-  }
-  return out;
+  return parts.map((part) => `${part.length}:${part}`).join('');
 }
 
 export function likeRecordId(
@@ -666,30 +654,19 @@ const optStr =
   (value: unknown): boolean =>
     isOptString(value, max);
 
-function isBooleanValue(value: unknown): boolean {
-  return typeof value === 'boolean';
-}
+const isBooleanValue = (value: unknown): boolean =>
+  typeof value === 'boolean';
+const isOptBoolean = (value: unknown): boolean =>
+  value === null || isBooleanValue(value);
 
-function isOptBoolean(value: unknown): boolean {
-  return value === null || typeof value === 'boolean';
-}
+const isReleaseYear = (value: unknown): boolean =>
+  value === null ||
+  (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0);
 
-function isReleaseYear(value: unknown): boolean {
-  return (
-    value === null ||
-    (typeof value === 'number' &&
-      Number.isSafeInteger(value) &&
-      value >= 0)
-  );
-}
-
-function isArtworkList(value: unknown): boolean {
-  return (
-    Array.isArray(value) &&
-    value.length <= 8 &&
-    value.every(isArtworkRef)
-  );
-}
+const isArtworkList = (value: unknown): boolean =>
+  Array.isArray(value) &&
+  value.length <= 8 &&
+  value.every(isArtworkRef);
 
 // Mirrors domain.ts's VersionLabel set — duplicated here so the wire
 // whitelist stays self-describing next to the fields it gates.
@@ -702,48 +679,34 @@ const VERSION_LABEL_VALUES: ReadonlySet<string> = new Set([
   'alternate',
 ]);
 
-function isVersionLabels(value: unknown): boolean {
-  return (
-    Array.isArray(value) &&
-    value.length <= 16 &&
-    new Set(value).size === value.length &&
-    value.every((l) => typeof l === 'string' && VERSION_LABEL_VALUES.has(l))
-  );
-}
+const isVersionLabels = (value: unknown): boolean =>
+  Array.isArray(value) &&
+  value.length <= 16 &&
+  new Set(value).size === value.length &&
+  value.every((l) => typeof l === 'string' && VERSION_LABEL_VALUES.has(l));
 
-function isProvenance(value: unknown): boolean {
-  return value === 'provider' || value === 'local';
-}
+const isProvenance = (value: unknown): boolean =>
+  value === 'provider' || value === 'local';
 
-function isEntityKindValue(value: unknown): value is EntityKind {
-  return value === 'album' || value === 'artist';
-}
+const isEntityKindValue = (value: unknown): value is EntityKind =>
+  value === 'album' || value === 'artist';
 
-function isStorefrontValue(value: unknown): boolean {
-  return (
-    value === null ||
-    (typeof value === 'string' && /^[A-Z]{2}$/.test(value))
-  );
-}
+const isStorefrontValue = (value: unknown): boolean =>
+  value === null ||
+  (typeof value === 'string' && /^[A-Z]{2}$/.test(value));
 
-function isThemeValue(value: unknown): boolean {
-  return (
-    value === 'dark' ||
-    value === 'light' ||
-    value === 'oled' ||
-    value === 'system' ||
-    value === 'adaptive'
-  );
-}
+const isThemeValue = (value: unknown): boolean =>
+  value === 'dark' ||
+  value === 'light' ||
+  value === 'oled' ||
+  value === 'system' ||
+  value === 'adaptive';
 
-function isQualityKbps(value: unknown): boolean {
-  return (
-    typeof value === 'number' &&
-    Number.isSafeInteger(value) &&
-    value >= 1 &&
-    value <= 512
-  );
-}
+const isQualityKbps = (value: unknown): boolean =>
+  typeof value === 'number' &&
+  Number.isSafeInteger(value) &&
+  value >= 1 &&
+  value <= 512;
 
 const REVIEW_STATUSES: ReadonlySet<string> = new Set([
   'pending',
@@ -752,26 +715,20 @@ const REVIEW_STATUSES: ReadonlySet<string> = new Set([
   'dismissed',
 ]);
 
-function isReviewStatus(value: unknown): boolean {
-  return typeof value === 'string' && REVIEW_STATUSES.has(value);
-}
+const isReviewStatus = (value: unknown): boolean =>
+  typeof value === 'string' && REVIEW_STATUSES.has(value);
 
-function isResolutionValue(value: unknown): boolean {
-  return value === null || isMatchResolution(value);
-}
+const isResolutionValue = (value: unknown): boolean =>
+  value === null || isMatchResolution(value);
 
-function isCandidateList(value: unknown): boolean {
-  return (
-    Array.isArray(value) &&
-    value.length >= 1 &&
-    value.length <= 64 &&
-    value.every(isCandidateSnapshot)
-  );
-}
+const isCandidateList = (value: unknown): boolean =>
+  Array.isArray(value) &&
+  value.length >= 1 &&
+  value.length <= 64 &&
+  value.every(isCandidateSnapshot);
 
-function isOptTrackRef(value: unknown): boolean {
-  return value === null || isTrackRef(value);
-}
+const isOptTrackRef = (value: unknown): boolean =>
+  value === null || isTrackRef(value);
 
 /**
  * The whitelist — the exact set of (kind, field) pairs that may enter
@@ -1066,22 +1023,6 @@ type RecordState = {
   tombstone: ChangeEntry | undefined;
 };
 
-/** The total order: (l, c) then deviceId — ties are impossible then. */
-function compareEntryTs(
-  a: { hlc: HlcStamp; deviceId: string },
-  b: { hlc: HlcStamp; deviceId: string },
-): number {
-  const byStamp = compareStamp(a.hlc, b.hlc);
-  if (byStamp !== 0) {
-    return byStamp;
-  }
-  return a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0;
-}
-
-function entryKey(entry: ChangeEntry): string {
-  return `${entry.deviceId}${KEY_SEP}${entry.hlc.l}${KEY_SEP}${entry.hlc.c}`;
-}
-
 function divergenceKey(
   kind: SyncRecordKind,
   recordId: string,
@@ -1102,13 +1043,31 @@ function divergenceKey(
   ]);
 }
 
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return isRecord(value);
-}
-
 /** Emission ordinals are 1-based: 0 means "nothing observed". */
 function isEmissionSeq(value: unknown): value is number {
   return isSafeNonNegative(value) && value >= 1;
+}
+
+/**
+ * First index whose seq does not satisfy `before` — per-device logs
+ * stay seq-sorted, so this is both the insert point and the start of
+ * a (mark, …] window.
+ */
+function firstSeqIndex(
+  list: readonly ChangeEntry[],
+  before: (seq: number) => boolean,
+): number {
+  let lo = 0;
+  let hi = list.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (before(list[mid]?.seq ?? 0)) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
 }
 
 function isSkippedMap(
@@ -1123,38 +1082,6 @@ function isSkippedMap(
         seqs.length <= MAX_DELTA_ENTRIES &&
         seqs.every(isSafeNonNegative),
     )
-  );
-}
-
-function jsonEquals(a: unknown, b: unknown): boolean {
-  if (Object.is(a, b)) {
-    return true;
-  }
-  if (
-    typeof a !== 'object' ||
-    typeof b !== 'object' ||
-    a === null ||
-    b === null
-  ) {
-    return false;
-  }
-  if (Array.isArray(a) !== Array.isArray(b)) {
-    return false;
-  }
-  if (Array.isArray(a) && Array.isArray(b)) {
-    return (
-      a.length === b.length && a.every((item, i) => jsonEquals(item, b[i]))
-    );
-  }
-  if (!isJsonObject(a) || !isJsonObject(b)) {
-    return false;
-  }
-  const aKeys = Object.keys(a);
-  if (aKeys.length !== Object.keys(b).length) {
-    return false;
-  }
-  return aKeys.every(
-    (key) => Object.hasOwn(b, key) && jsonEquals(a[key], b[key]),
   );
 }
 
@@ -1467,13 +1394,7 @@ export async function createSyncEngine(
     const foldHypothetical = (dev: string, seq: number): void => {
       let buffer = buffers.get(dev);
       if (buffer === undefined) {
-        buffer = new Set<number>();
-        const prior = seenSeqs.get(dev);
-        if (prior !== undefined) {
-          for (const existing of prior) {
-            buffer.add(existing);
-          }
-        }
+        buffer = new Set(seenSeqs.get(dev));
         buffers.set(dev, buffer);
         marks[dev] = contiguous.get(dev) ?? 0;
       }
@@ -1486,17 +1407,32 @@ export async function createSyncEngine(
         marks[dev] = mark;
       }
     };
-    if (skipped !== undefined) {
-      for (const [dev, seqs] of Object.entries(skipped)) {
-        for (const seq of seqs) {
-          foldHypothetical(dev, seq);
-        }
+    for (const [dev, seqs] of Object.entries(skipped ?? {})) {
+      for (const seq of seqs) {
+        foldHypothetical(dev, seq);
       }
     }
     for (const entry of entries) {
       foldHypothetical(entry.deviceId, entry.seq);
     }
     return marks;
+  }
+
+  /**
+   * Trim the in-memory divergence history to its cap; returns the
+   * oldest retained row's seq so the store can drop strictly below
+   * it.
+   */
+  function pruneDivergence(): number | undefined {
+    if (divergence.length <= DIVERGENCE_HISTORY_LIMIT) {
+      return undefined;
+    }
+    const floorRow = divergence[divergence.length - DIVERGENCE_HISTORY_LIMIT];
+    if (floorRow === undefined) {
+      return undefined;
+    }
+    divergence.splice(0, divergence.length - DIVERGENCE_HISTORY_LIMIT);
+    return floorRow.seq;
   }
 
   function commitSeqs(
@@ -1636,37 +1572,38 @@ export async function createSyncEngine(
    * applies: a tombstone competes against the prior tombstone only —
    * field survival is decided at read time by comparing each field's
    * stamp against the winning tombstone's. A field write competes
-   * against the field's current winner (or by value for 'max' rules),
-   * then against the tombstone. Every loser lands in divergence.
+   * against the field's current winner (or by value for 'max'/'sum'
+   * rules: larger numeric value, stamps break exact ties
+   * deterministically), then against the tombstone. Every loser lands
+   * in divergence.
    */
-  /**
-   * The merge rule's winner over a set of live candidates: 'lww'
-   * takes the newest stamp; 'max' takes the largest numeric value
-   * (stamps break exact ties deterministically).
-   */
+  function beats(
+    candidate: ChangeEntry,
+    rival: ChangeEntry,
+    merge: FieldRule['merge'] | undefined,
+  ): boolean {
+    if (
+      (merge === 'max' || merge === 'sum') &&
+      typeof candidate.value === 'number' &&
+      typeof rival.value === 'number'
+    ) {
+      return (
+        candidate.value > rival.value ||
+        (candidate.value === rival.value &&
+          compareEntryTs(candidate, rival) > 0)
+      );
+    }
+    return compareEntryTs(candidate, rival) > 0;
+  }
+
+  /** The merge rule's winner over a set of live candidates. */
   function pickWinner(
-    rule: FieldRule | undefined,
+    merge: FieldRule['merge'] | undefined,
     candidates: readonly ChangeEntry[],
   ): ChangeEntry {
-    let winner = candidates[0];
+    let winner: ChangeEntry | undefined;
     for (const candidate of candidates) {
-      if (winner === undefined) {
-        winner = candidate;
-        continue;
-      }
-      if (
-        (rule?.merge === 'max' || rule?.merge === 'sum') &&
-        typeof candidate.value === 'number' &&
-        typeof winner.value === 'number'
-      ) {
-        if (
-          candidate.value > winner.value ||
-          (candidate.value === winner.value &&
-            compareEntryTs(candidate, winner) > 0)
-        ) {
-          winner = candidate;
-        }
-      } else if (compareEntryTs(candidate, winner) > 0) {
+      if (winner === undefined || beats(candidate, winner, merge)) {
         winner = candidate;
       }
     }
@@ -1683,16 +1620,9 @@ export async function createSyncEngine(
   ): ChangeEntry | undefined {
     let best: ChangeEntry | undefined;
     for (const candidate of live) {
-      if (candidate.deviceId !== dev) {
-        continue;
-      }
       if (
-        best === undefined ||
-        (typeof candidate.value === 'number' &&
-          typeof best.value === 'number' &&
-          (candidate.value > best.value ||
-            (candidate.value === best.value &&
-              compareEntryTs(candidate, best) > 0)))
+        candidate.deviceId === dev &&
+        (best === undefined || beats(candidate, best, 'sum'))
       ) {
         best = candidate;
       }
@@ -1722,30 +1652,6 @@ export async function createSyncEngine(
       }
     }
     return total;
-  }
-
-  /**
-   * Does `candidate` beat `rival` under the merge rule? 'lww' —
-   * newer stamp. 'max'/'sum' — larger numeric value, ties broken by
-   * stamp.
-   */
-  function beats(
-    candidate: ChangeEntry,
-    rival: ChangeEntry,
-    rule: FieldRule | undefined,
-  ): boolean {
-    if (
-      (rule?.merge === 'max' || rule?.merge === 'sum') &&
-      typeof candidate.value === 'number' &&
-      typeof rival.value === 'number'
-    ) {
-      return (
-        candidate.value > rival.value ||
-        (candidate.value === rival.value &&
-          compareEntryTs(candidate, rival) > 0)
-      );
-    }
-    return compareEntryTs(candidate, rival) > 0;
   }
 
   /**
@@ -1861,7 +1767,7 @@ export async function createSyncEngine(
         if (survivors.length === 0) {
           record.fields.delete(field);
         } else {
-          const winner = pickWinner(rule, survivors);
+          const winner = pickWinner(rule?.merge, survivors);
           record.fields.set(field, {
             winner,
             live: survivors,
@@ -1906,7 +1812,7 @@ export async function createSyncEngine(
         ? componentWinner(cell?.live ?? [], entry.deviceId)
         : cell?.winner;
 
-    if (rival !== undefined && !beats(entry, rival, rule)) {
+    if (rival !== undefined && !beats(entry, rival, rule?.merge)) {
       if (!jsonEquals(entry.value, rival.value)) {
         recordDivergence(divs, entry, rival, emit);
       }
@@ -1948,7 +1854,7 @@ export async function createSyncEngine(
     } else {
       const live = cell?.live ?? [];
       liveInsert(live, entry, rule.merge === 'sum', divs, emit);
-      const winner = pickWinner(rule, live);
+      const winner = pickWinner(rule?.merge, live);
       record.fields.set(entry.field, {
         winner,
         live,
@@ -1982,17 +1888,7 @@ export async function createSyncEngine(
       list.push(entry);
       return;
     }
-    let lo = 0;
-    let hi = list.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if ((list[mid]?.seq ?? 0) < entry.seq) {
-        lo = mid + 1;
-      } else {
-        hi = mid;
-      }
-    }
-    list.splice(lo, 0, entry);
+    list.splice(firstSeqIndex(list, (seq) => seq < entry.seq), 0, entry);
   }
 
   async function appendLog(
@@ -2076,17 +1972,7 @@ export async function createSyncEngine(
     if (rows.length === 0 && drops.length === 0 && pendingRows.size === 0) {
       return;
     }
-    let dropBefore: number | undefined;
-    if (divergence.length > DIVERGENCE_HISTORY_LIMIT) {
-      const floorRow = divergence[divergence.length - DIVERGENCE_HISTORY_LIMIT];
-      if (floorRow !== undefined) {
-        dropBefore = floorRow.seq;
-        divergence.splice(
-          0,
-          divergence.length - DIVERGENCE_HISTORY_LIMIT,
-        );
-      }
-    }
+    const dropBefore = pruneDivergence();
     const write: SyncLogWrite = {
       ...(rows.length > 0 ? { divergence: rows } : {}),
       ...(dropBefore === undefined
@@ -2189,13 +2075,9 @@ export async function createSyncEngine(
       return { dropped, lanes, ordinals };
     }
     for (const [dev, list] of logByDevice) {
-      let floor = Infinity;
-      for (const marks of peerMarks.values()) {
-        const mark = marks.get(dev) ?? 0;
-        if (mark < floor) {
-          floor = mark;
-        }
-      }
+      const floor = Math.min(
+        ...[...peerMarks.values()].map((marks) => marks.get(dev) ?? 0),
+      );
       if (floor <= 0) {
         // A peer that never claimed this device keeps everything.
         continue;
@@ -2370,21 +2252,12 @@ export async function createSyncEngine(
       try {
         entries = inputs.map((input, index) => {
           const stamp = hlc.tick(at);
-          const entry: ChangeEntry =
-            'tombstone' in input
-              ? {
-                kind: input.kind,
-                recordId: input.recordId,
-                field: TOMBSTONE_FIELD,
-                value: null,
-                tombstone: true,
-                hlc: stamp,
-                deviceId,
-                seq: localSeq + index + 1,
-              }
+          const entry: ChangeEntry = {
+            kind: input.kind,
+            recordId: input.recordId,
+            ...('tombstone' in input
+              ? { field: TOMBSTONE_FIELD, value: null, tombstone: true }
               : {
-                kind: input.kind,
-                recordId: input.recordId,
                 field: input.field,
                 // Own the value: the caller keeps its mutable object,
                 // the engine freezes its clone — same ownership rule
@@ -2393,10 +2266,11 @@ export async function createSyncEngine(
                   preNormalized ? input.value : sumComponentFor(input),
                 ),
                 tombstone: false,
-                hlc: stamp,
-                deviceId,
-                seq: localSeq + index + 1,
-              };
+              }),
+            hlc: stamp,
+            deviceId,
+            seq: localSeq + index + 1,
+          };
           deepFreezeValue(entry);
           return entry;
         });
@@ -2426,26 +2300,24 @@ export async function createSyncEngine(
     return cancellable(work, sig);
   }
 
-  async function localChange(
-    input: LocalWrite,
-    signal?: CancellationSignal,
-  ): Promise<Result<LocalChangeResult>> {
-    const batch = await writeChanges([input], signal);
+  /** Unwrap the single-write batch both write entry points share. */
+  function firstWritten(
+    batch: Result<readonly LocalChangeResult[]>,
+  ): Result<LocalChangeResult> {
     if (!batch.ok) {
       return err(batch.error);
     }
     const first = batch.value[0];
-    if (first === undefined) {
-      return err(appError('internal', 'local write produced no entry'));
-    }
-    return ok(first);
+    return first === undefined
+      ? err(appError('internal', 'local write produced no entry'))
+      : ok(first);
   }
 
-  async function localChangeBatch(
-    inputs: readonly LocalWrite[],
+  async function localChange(
+    input: LocalWrite,
     signal?: CancellationSignal,
-  ): Promise<Result<readonly LocalChangeResult[]>> {
-    return writeChanges(inputs, signal);
+  ): Promise<Result<LocalChangeResult>> {
+    return firstWritten(await writeChanges([input], signal));
   }
 
   async function exportDelta(
@@ -2545,18 +2417,9 @@ export async function createSyncEngine(
       const lanes: Lane[] = [];
       for (const [dev, list] of logByDevice) {
         const mark = since?.[dev] ?? 0;
-        let lo = 0;
-        let hi = list.length;
-        while (lo < hi) {
-          const mid = (lo + hi) >> 1;
-          if ((list[mid]?.seq ?? 0) <= mark) {
-            lo = mid + 1;
-          } else {
-            hi = mid;
-          }
-        }
-        if (lo < list.length) {
-          const lane: Lane = { dev, list, pos: lo, head: undefined };
+        const pos = firstSeqIndex(list, (seq) => seq <= mark);
+        if (pos < list.length) {
+          const lane: Lane = { dev, list, pos, head: undefined };
           seek(lane);
           lanes.push(lane);
         }
@@ -2610,17 +2473,11 @@ export async function createSyncEngine(
         // built over the whole log.
         const list = logByDevice.get(dev) ?? [];
         const present = new Set<number>();
-        let lo = 0;
-        let hi = list.length;
-        while (lo < hi) {
-          const mid = (lo + hi) >> 1;
-          if ((list[mid]?.seq ?? 0) <= mark) {
-            lo = mid + 1;
-          } else {
-            hi = mid;
-          }
-        }
-        for (let i = lo; i < list.length; i += 1) {
+        for (
+          let i = firstSeqIndex(list, (seq) => seq <= mark);
+          i < list.length;
+          i += 1
+        ) {
           const seq = list[i]?.seq;
           if (seq === undefined || seq > accounted) {
             break;
@@ -2814,16 +2671,28 @@ export async function createSyncEngine(
     return cancellable(work, sig);
   }
 
-  /** The record's surviving field set as the merge currently sees it. */
-  function recordSnapshot(entry: ChangeEntry): MaterializedRecord {
-    const record = records.get(`${entry.kind}${KEY_SEP}${entry.recordId}`);
+  /** A record's surviving field→value map as the merge sees it. */
+  function fieldsOf(
+    record: RecordState | undefined,
+  ): Record<string, unknown> {
     const fields: Record<string, unknown> = {};
     if (record !== undefined) {
       for (const [field, cell] of record.fields) {
         fields[field] = cell.value;
       }
     }
-    return { kind: entry.kind, recordId: entry.recordId, fields };
+    return fields;
+  }
+
+  /** The record's surviving field set as the merge currently sees it. */
+  function recordSnapshot(entry: ChangeEntry): MaterializedRecord {
+    return {
+      kind: entry.kind,
+      recordId: entry.recordId,
+      fields: fieldsOf(
+        records.get(`${entry.kind}${KEY_SEP}${entry.recordId}`),
+      ),
+    };
   }
 
   function divergenceHistory(
@@ -2862,24 +2731,12 @@ export async function createSyncEngine(
     // The loser value is already the field's component form for
     // 'sum' rules — restoring must stamp it verbatim, not translate
     // a second aggregate (Review #46 round-8).
-    const batch = await writeChanges([input], signal, true);
-    if (!batch.ok) {
-      return err(batch.error);
-    }
-    const first = batch.value[0];
-    if (first === undefined) {
-      return err(appError('internal', 'local write produced no entry'));
-    }
-    return ok(first);
+    return firstWritten(await writeChanges([input], signal, true));
   }
 
   function materialize(): readonly MaterializedRecord[] {
     const out: MaterializedRecord[] = [];
     for (const record of records.values()) {
-      const fields: Record<string, unknown> = {};
-      for (const [field, cell] of record.fields) {
-        fields[field] = cell.value;
-      }
       // Empty fields is included on purpose: a record only ends up
       // fieldless after a WINNING tombstone, so it means "synced then
       // deleted" — distinct from a record absent here, which was never
@@ -2888,7 +2745,7 @@ export async function createSyncEngine(
       out.push({
         kind: record.kind,
         recordId: record.recordId,
-        fields,
+        fields: fieldsOf(record),
       });
     }
     out.sort((a, b) => {
@@ -3015,18 +2872,7 @@ export async function createSyncEngine(
   // that the store is missing (e.g. a prior divergence append that
   // failed). Bounded by the same cap as live writes.
   if (repairs.length > 0) {
-    let dropBefore: number | undefined;
-    if (divergence.length > DIVERGENCE_HISTORY_LIMIT) {
-      const floorRow =
-        divergence[divergence.length - DIVERGENCE_HISTORY_LIMIT];
-      if (floorRow !== undefined) {
-        dropBefore = floorRow.seq;
-        divergence.splice(
-          0,
-          divergence.length - DIVERGENCE_HISTORY_LIMIT,
-        );
-      }
-    }
+    const dropBefore = pruneDivergence();
     const write: SyncLogWrite = {
       divergence: repairs,
       ...(dropBefore === undefined
@@ -3056,7 +2902,7 @@ export async function createSyncEngine(
   const engine: SyncEngine = {
     deviceId,
     localChange,
-    localChangeBatch,
+    localChangeBatch: writeChanges,
     exportDelta,
     applyDelta,
     divergenceHistory,
