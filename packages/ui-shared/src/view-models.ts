@@ -883,6 +883,63 @@ function likedIds(likes: readonly Like[]): ReadonlySet<string> {
   );
 }
 
+/**
+ * The occurrence `session.next()` would land on — mirrors the
+ * engine's mark-skipping walk so a UI gate (offline ownership,
+ * availability) tests the same row the cursor actually plays. The
+ * dealt order is the walk under shuffle, the canonical occurrence
+ * order otherwise; rows already marked failed drop out of both.
+ * Under repeat=all an exhausted forward walk wraps — canonical to
+ * the head row, dealt to its first unmarked row — matching the
+ * cursor's own wrap rules.
+ */
+export function nextQueueDestination(input: {
+  readonly queue: {
+    readonly occurrences: readonly { readonly occurrenceId: string }[];
+    readonly currentOccurrenceId: string | null;
+  };
+  /** The dealt play order under shuffle; canonical when null/absent. */
+  readonly dealtOrder?: readonly string[] | null;
+  /** Occurrence ids marked failed this session. */
+  readonly failedIds?: ReadonlySet<string>;
+  readonly repeat: RepeatMode;
+}): string | null {
+  const { queue, repeat, failedIds } = input;
+  const ids = queue.occurrences.map((o) => o.occurrenceId);
+  const unmarked = (id: string): boolean => failedIds?.has(id) !== true;
+  if (input.dealtOrder != null) {
+    const walk = input.dealtOrder;
+    const pos =
+      queue.currentOccurrenceId === null
+        ? -1
+        : walk.indexOf(queue.currentOccurrenceId);
+    const next =
+      pos >= 0 ? walk.slice(pos + 1).find(unmarked) : undefined;
+    if (next !== undefined) {
+      return next;
+    }
+    if (repeat !== 'all') {
+      return null;
+    }
+    return walk.find(unmarked) ?? null;
+  }
+  const pos =
+    queue.currentOccurrenceId === null
+      ? -1
+      : ids.indexOf(queue.currentOccurrenceId);
+  const next =
+    pos >= 0 ? ids.slice(pos + 1).find(unmarked) : undefined;
+  if (next !== undefined) {
+    return next;
+  }
+  if (repeat !== 'all') {
+    return null;
+  }
+  // The canonical wrap selects the head row unconditionally — the
+  // same edge the engine makes after `next()` stops at the tail.
+  return ids[0] ?? null;
+}
+
 export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
   const { playback, queue, recordings, likes, repeat, shuffleOrder } = input;
   if (playback.type === 'idle') {

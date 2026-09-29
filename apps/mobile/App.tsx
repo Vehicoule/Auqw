@@ -145,6 +145,7 @@ import {
   formatBytes,
   greeting,
   navItems,
+  nextQueueDestination,
   providerPickerModel,
   qualityOptions,
   reportResult,
@@ -1901,9 +1902,15 @@ function Main({
         const wrapAll = state.repeat === 'all';
         const targetId =
           method === 'next'
-            ? pos === walk.length - 1 && wrapAll
-              ? walk[0]
-              : walk[pos + 1]
+            ? // The same mark-skipping destination the engine
+              // computes — a gate one walk slot ahead would test the
+              // failed row the cursor is about to skip.
+              nextQueueDestination({
+                queue: { occurrences, currentOccurrenceId },
+                dealtOrder: state.shuffleOrder,
+                failedIds: failedQueueIds.current,
+                repeat: state.repeat,
+              })
             : positionMs > 3000
               ? walk[pos]
               : pos === 0 && wrapAll && walk.length > 1

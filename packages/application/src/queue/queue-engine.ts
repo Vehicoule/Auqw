@@ -504,6 +504,34 @@ export class QueueEngine {
     this.#tick();
   }
 
+  /**
+   * Rewrites the canonical sequence — `order` must be a permutation
+   * of the live occurrence ids. Cursor, marks, and position ride on
+   * ids, so a full re-layout needs nothing else; a reorder that
+   * changes nothing skips the tick like `move` does.
+   */
+  reorder(order: readonly string[]): void {
+    if (order.length !== this.#occurrences.length) {
+      throw new TypeError('reorder must cover every occurrence');
+    }
+    const byId = new Map(
+      this.#occurrences.map((o) => [o.occurrenceId, o] as const),
+    );
+    const next = order.map((id) => {
+      const occurrence = byId.get(id);
+      if (occurrence === undefined) {
+        throw new TypeError('reorder carries an unknown occurrence');
+      }
+      return occurrence;
+    });
+    if (next.every((o, i) => o === this.#occurrences[i])) {
+      return;
+    }
+    this.#requireTick();
+    this.#occurrences = next.map(cloneOccurrence);
+    this.#tick();
+  }
+
   /** Replaces an occurrence's selected source ref. */
   setSelectedRef(occurrenceId: string, ref: SourceRef | null): void {
     const index = this.#requireIndex(occurrenceId);

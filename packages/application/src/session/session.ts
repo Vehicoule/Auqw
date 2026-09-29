@@ -2601,6 +2601,9 @@ export class Session {
     const before = r.queue.snapshot();
     const beforeMarks = r.queue.unplayableIds;
     const dealt = this.#dealtOrder(r);
+    // The deal this move writes — remembered so a commit failure can
+    // roll it back only while no later mutation owns the field.
+    let movedDeal: string[] | null = null;
     try {
       if (dealt === null) {
         const cursor =
@@ -2612,8 +2615,9 @@ export class Session {
         r.queue.move(id, cursor === -1 ? toIndex : cursor + toIndex);
       } else {
         // The rendered order under shuffle IS the deal: move the row
-        // inside it so playback follows, then mirror the same step in
-        // canonical order so a later shuffle-off keeps the intent.
+        // inside it so playback follows, and write the same sequence
+        // into the canonical order — a later shuffle-off keeps the
+        // user's layout instead of partially reverting it.
         const cursor =
           before.currentOccurrenceId === null
             ? -1
@@ -2624,17 +2628,9 @@ export class Session {
           order.length,
         );
         order.splice(dest, 0, id);
-        const predecessor = order[dest - 1];
-        const canonicalIds = before.occurrences
-          .map((o) => o.occurrenceId)
-          .filter((x) => x !== id);
-        r.queue.move(
-          id,
-          predecessor === undefined
-            ? 0
-            : canonicalIds.indexOf(predecessor) + 1,
-        );
+        r.queue.reorder(order);
         r.shuffleOrder = order;
+        movedDeal = order;
       }
     } catch (thrown) {
       return err(
@@ -2645,6 +2641,18 @@ export class Session {
     }
     const persisted = await this.#persistQueue(r, before, beforeMarks);
     if (!persisted.ok) {
+      // The queue snapshot rolled back; the session-side deal must
+      // too — but only while it still IS this move's write (a shuffle
+      // toggle that raced the commit owns the field now). The restored
+      // deal is pruned to the rolled-back membership, same reconcile
+      // rule #dealtOrder applies.
+      if (dealt !== null && r.shuffleOrder === movedDeal) {
+        const snap = r.queue.snapshot();
+        const live = new Set(
+          snap.occurrences.map((o) => o.occurrenceId),
+        );
+        r.shuffleOrder = dealt.filter((x) => live.has(x));
+      }
       return persisted;
     }
     this.#derived();

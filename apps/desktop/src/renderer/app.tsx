@@ -111,6 +111,7 @@ import {
   formatBytes,
   greeting,
   navItems,
+  nextQueueDestination,
   providerPickerModel,
   qualityOptions,
   reportResult,
@@ -1797,30 +1798,38 @@ function Main({
       // Position ticks ride the light channel now — read it live,
       // not from the (possibly position-stale) published snapshot.
       const positionMs = session.positionMs();
-      const walk =
-        state.shuffleOrder !== null
-          ? state.shuffleOrder
-          : occurrences.map((o) => o.occurrenceId);
-      const pos =
-        currentOccurrenceId === null ? -1 : walk.indexOf(currentOccurrenceId);
-      if (pos < 0) {
-        return;
-      }
-      const wraps = state.repeat === 'all' && walk.length > 0;
       const targetId =
         method === 'next'
-          ? pos + 1 < walk.length
-            ? walk[pos + 1]
-            : wraps
-              ? walk[0]
-              : undefined
-          : positionMs > 3_000
-            ? walk[pos]
-            : pos === 0
-              ? wraps
-                ? walk[walk.length - 1]
-                : walk[pos]
-              : walk[pos - 1];
+          ? // The same mark-skipping destination the engine computes —
+            // a gate that only looks one walk slot ahead would test the
+            // failed row the cursor is about to skip.
+            nextQueueDestination({
+              queue: { occurrences, currentOccurrenceId },
+              dealtOrder: state.shuffleOrder,
+              failedIds: failedQueueIds.current,
+              repeat: state.repeat,
+            })
+          : (() => {
+              const walk =
+                state.shuffleOrder !== null
+                  ? state.shuffleOrder
+                  : occurrences.map((o) => o.occurrenceId);
+              const pos =
+                currentOccurrenceId === null
+                  ? -1
+                  : walk.indexOf(currentOccurrenceId);
+              if (pos < 0) {
+                return null;
+              }
+              const wraps = state.repeat === 'all' && walk.length > 0;
+              return positionMs > 3_000
+                ? walk[pos]
+                : pos === 0
+                  ? wraps
+                    ? walk[walk.length - 1]
+                    : walk[pos]
+                  : walk[pos - 1];
+            })();
       const target = occurrences.find(
         (o) => o.occurrenceId === targetId,
       );

@@ -2400,8 +2400,11 @@ export class PlaybackEngine {
     // legality below; the identity/revision checks still apply.
     const edgeUnverifiable = recorded === undefined;
     const execItems = executed?.items ?? [];
+    // The walk is a subsequence — failed rows drop out while `items`
+    // keeps them, so a shorter order is the intended skip, not
+    // malformation; only an absent walk falls back to identity.
     const execOrder =
-      executed === null || executed.order.length !== execItems.length
+      executed === null || executed.order.length === 0
         ? execItems.map((_, i) => i)
         : executed.order;
     const execCursor =

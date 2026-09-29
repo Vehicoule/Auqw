@@ -10,6 +10,7 @@ import {
   formatAgo,
   getLocale,
   languageOptionKey,
+  nextQueueDestination,
   overlayReducer,
   resolveLocale,
   setLocale,
@@ -256,6 +257,68 @@ assertEqual(
     .join(','),
   'occ-1,occ-2,occ-3,occ-4,occ-5,occ-6,occ-7,occ-8',
   'current missing from the deal: canonical partitioning',
+);
+
+// ---- nextQueueDestination ----------------------------------------------
+// Mirrors the engine's mark-skipping walk so offline/availability gates
+// test the row the cursor actually plays, not the next walk slot.
+const failed = new Set(['occ-3', 'occ-8']);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-2' },
+    repeat: 'off',
+    failedIds: failed,
+  }),
+  'occ-4',
+  'canonical next steps over the marked row',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-7' },
+    repeat: 'off',
+    failedIds: failed,
+  }),
+  null,
+  'tail row marked + no repeat: nowhere to land',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-7' },
+    repeat: 'all',
+    failedIds: failed,
+  }),
+  'occ-1',
+  'repeat=all wraps canonical to the head row',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-4' },
+    dealtOrder: ['occ-2', 'occ-8', 'occ-4'],
+    repeat: 'all',
+    failedIds: failed,
+  }),
+  'occ-2',
+  'dealt tail wraps to the first unmarked row',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-4' },
+    dealtOrder: ['occ-2', 'occ-4', 'occ-8', 'occ-1'],
+    repeat: 'all',
+    failedIds: failed,
+  }),
+  'occ-1',
+  'dealt next skips the marked successor',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: 'occ-4' },
+    dealtOrder: ['occ-2', 'occ-4', 'occ-8'],
+    repeat: 'all',
+    failedIds: new Set(['occ-2', 'occ-4', 'occ-8']),
+  }),
+  null,
+  'a fully-marked deal has no destination even under repeat=all',
 );
 
 const settings = toSettingsModel(fixtureSettings, fixtureDiagnostics, {});
