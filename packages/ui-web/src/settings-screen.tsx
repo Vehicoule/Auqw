@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Hairline, Icon, Pressable, Text } from './primitives.tsx';
+import { DiagPressRow, Hairline, Icon, Pressable, Text } from './primitives.tsx';
 import { focusTargetAfterRemoval } from './settings-focus.ts';
 import { settingsGroups, t } from '@auqw/ui-shared';
 import type {
@@ -111,18 +111,10 @@ function DiagAction({
   readonly children?: ReactNode;
 }) {
   return (
-    <Pressable
-      onPress={onPress}
-      disabled={onPress === undefined}
-      ariaLabel={label}
-      className="uw-diag-row uw-diag-row--action"
-    >
-      <Text variant="metadata" color="secondary" className="uw-diag-row__k">
-        {label}
-      </Text>
+    <DiagPressRow label={label} onPress={onPress}>
       {children}
       <Icon name="chevron-right" size={12} color="var(--text-secondary)" />
-    </Pressable>
+    </DiagPressRow>
   );
 }
 

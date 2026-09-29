@@ -645,6 +645,37 @@ export function ScreenHead({
   );
 }
 
+/** The shared `uw-diag-row--action` pressable — label cell + tail. */
+export function DiagPressRow({
+  label,
+  ariaLabel = label,
+  kColor = 'secondary',
+  onPress,
+  disabled = false,
+  children,
+}: {
+  readonly label: string;
+  readonly ariaLabel?: string | undefined;
+  readonly kColor?: 'secondary' | 'primary' | 'warn' | undefined;
+  readonly onPress?: (() => void) | undefined;
+  readonly disabled?: boolean | undefined;
+  readonly children?: ReactNode;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      ariaLabel={ariaLabel}
+      className="uw-diag-row uw-diag-row--action"
+    >
+      <Text variant="metadata" color={kColor} className="uw-diag-row__k">
+        {label}
+      </Text>
+      {children}
+    </Pressable>
+  );
+}
+
 const EQ_HEIGHTS = [0.45, 1, 0.65] as const;
 
 export function EqBars({

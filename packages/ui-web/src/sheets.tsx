@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import type { PairingModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
 import type { ProviderPickerOption } from '@auqw/ui-shared';
-import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
+import { Artwork, DiagPressRow, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { bindTo } from './track-row.tsx';
 import { useOverlayDismiss, useOverlayFocus } from './stack.tsx';
@@ -532,19 +532,17 @@ function NearbyRow({
   const ready = /^[0-9]{6}$/.test(code);
   return (
     <div className="uw-nearby__row">
-      <Pressable
+      <DiagPressRow
+        label={peer.name}
+        ariaLabel={t('sync.nearby.codeFor', { name: peer.name })}
+        kColor="primary"
         onPress={() => setOpen((v) => !v)}
         disabled={onPair === undefined}
-        ariaLabel={t('sync.nearby.codeFor', { name: peer.name })}
-        className="uw-diag-row uw-diag-row--action"
       >
-        <Text variant="metadata" color="primary" className="uw-diag-row__k">
-          {peer.name}
-        </Text>
         <Text variant="metadata" color="secondary">
           {peer.address}
         </Text>
-      </Pressable>
+      </DiagPressRow>
       {open && (
         <div className="uw-nearby__dial">
           <Field
@@ -705,21 +703,13 @@ export function PairingSheet({
               </Text>{' '}
               · {pairing.expiresLabel}
             </Text>
-            <Pressable
-              onPress={onCopyPayload}
-              disabled={onCopyPayload === undefined}
+            <DiagPressRow
+              label={t('pairing.copyPayload')}
               ariaLabel={t('pairing.copyPayloadA11y')}
-              className="uw-diag-row uw-diag-row--action"
+              onPress={onCopyPayload}
             >
-              <Text
-                variant="metadata"
-                color="secondary"
-                className="uw-diag-row__k"
-              >
-                {t('pairing.copyPayload')}
-              </Text>
               <Icon name="check" size={12} color="var(--text-secondary)" />
-            </Pressable>
+            </DiagPressRow>
           </>
         )}
         {nearbyPeers !== undefined && onPairNearby !== undefined && (
