@@ -1,6 +1,6 @@
 import { FlatList, ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Artwork, Icon, PillButton, Pressable, Text } from './primitives.tsx';
+import { Artwork, bind, Icon, PillButton, Pressable, Text } from './primitives.tsx';
 import { EmptyState } from './states.tsx';
 import { formatClock, t } from '@auqw/ui-shared';
 import type { HomeModel, RailCardModel, ResumeModel } from '@auqw/ui-shared';
@@ -126,7 +126,7 @@ function Rail({
             <PillButton
               label={t('home.seeAll')}
               minHeight={26}
-              onPress={() => onPressSeeAll(section)}
+              onPress={bind(onPressSeeAll, section)}
               accessibilityLabel={t('home.seeAllA11y', { title })}
             />
           )}
@@ -156,9 +156,7 @@ function Rail({
           renderItem={({ item }) => (
             <Pressable
               compact
-              onPress={
-                onPressCard === undefined ? undefined : () => onPressCard(item)
-              }
+              onPress={bind(onPressCard, item)}
               accessibilityLabel={
                 item.subtitle === null
                   ? item.title

@@ -398,47 +398,31 @@ export function LibraryScreen({
           />
           <View style={{ alignItems: 'center' }}>
             {view.newCard !== null && (
-              <NewPlaylistCard
-                view="grid"
-                label={view.newCard.label}
-                a11yLabel={view.newCard.a11yLabel}
-                onPress={view.newCard.onPress}
-              />
+              <NewPlaylistCard view="grid" {...view.newCard} />
             )}
           </View>
         </View>
-      ) : view.layout === 'grid' ? (
+      ) : (
         <View
-          style={{
-            flexDirection: 'row',
-            flexWrap: 'wrap',
-            gap: theme.spacing.lg,
-          }}
+          style={
+            view.layout === 'grid'
+              ? {
+                  flexDirection: 'row',
+                  flexWrap: 'wrap',
+                  gap: theme.spacing.lg,
+                }
+              : { marginHorizontal: -theme.spacing.sm, gap: 2 }
+          }
         >
           {view.cards.map((card) => (
-            <LibraryCard key={card.card.key} view={card} layout="grid" />
+            <LibraryCard
+              key={card.card.key}
+              view={card}
+              layout={view.layout}
+            />
           ))}
           {view.newCard !== null && (
-            <NewPlaylistCard
-              view="grid"
-              label={view.newCard.label}
-              a11yLabel={view.newCard.a11yLabel}
-              onPress={view.newCard.onPress}
-            />
-          )}
-        </View>
-      ) : (
-        <View style={{ marginHorizontal: -theme.spacing.sm, gap: 2 }}>
-          {view.cards.map((card) => (
-            <LibraryCard key={card.card.key} view={card} layout="list" />
-          ))}
-          {view.newCard !== null && (
-            <NewPlaylistCard
-              view="list"
-              label={view.newCard.label}
-              a11yLabel={view.newCard.a11yLabel}
-              onPress={view.newCard.onPress}
-            />
+            <NewPlaylistCard view={view.layout} {...view.newCard} />
           )}
         </View>
       )}

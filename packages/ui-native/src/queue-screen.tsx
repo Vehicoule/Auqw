@@ -1,9 +1,8 @@
 import { View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import {
-  Artwork,
-  EqBars,
   IconButton,
+  PlayingArtwork,
   Text,
 } from './primitives.tsx';
 import { QueueList } from './queue-list';
@@ -93,32 +92,10 @@ export function QueueScreen({
             backgroundColor: theme.colors.accentSoft,
           }}
         >
-          <View
-            style={{
-              width: 40,
-              height: 40,
-              borderRadius: theme.radius.thumb,
-              overflow: 'hidden',
-            }}
-          >
-            <Artwork url={view.current.artworkUrl} size={40} />
-            {view.current.playing && (
-              <View
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  backgroundColor: theme.colors.scrim,
-                }}
-              >
-                <EqBars size={11} />
-              </View>
-            )}
-          </View>
+          <PlayingArtwork
+            url={view.current.artworkUrl}
+            playing={view.current.playing}
+          />
           <View style={{ flex: 1, minWidth: 0 }}>
             <Text variant="body" color="accent" numberOfLines={1}>
               {view.current.title}

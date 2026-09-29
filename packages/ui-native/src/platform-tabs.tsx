@@ -47,9 +47,11 @@ export function PlatformTabs({
           }}
         />
       </View>
-      {tabBarHidden ? null : accessory}
-      {tabBarHidden ? null : (
-      <AppNavbar items={items} activeKey={activeKey} onSelect={onSelect} />
+      {!tabBarHidden && (
+        <>
+          {accessory}
+          <AppNavbar items={items} activeKey={activeKey} onSelect={onSelect} />
+        </>
       )}
     </View>
   );

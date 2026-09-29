@@ -46,22 +46,16 @@ export type TextColor =
   | 'canvas';
 
 function textColor(theme: Theme, color: TextColor): string {
-  switch (color) {
-    case 'primary':
-      return theme.colors.textPrimary;
-    case 'bright':
-      return theme.colors.textBright;
-    case 'secondary':
-      return theme.colors.textSecondary;
-    case 'accent':
-      return theme.colors.accent;
-    case 'warn':
-      return theme.colors.warn;
-    case 'liked':
-      return theme.colors.liked;
-    case 'canvas':
-      return theme.colors.canvas;
-  }
+  const colors: Record<TextColor, string> = {
+    primary: theme.colors.textPrimary,
+    bright: theme.colors.textBright,
+    secondary: theme.colors.textSecondary,
+    accent: theme.colors.accent,
+    warn: theme.colors.warn,
+    liked: theme.colors.liked,
+    canvas: theme.colors.canvas,
+  };
+  return colors[color];
 }
 
 export type TextProps = {
@@ -99,11 +93,10 @@ export function Text({
         ...base,
         fontSize: base.fontSize * theme.textScale,
         lineHeight: base.lineHeight * theme.textScale,
-        ...(letterSpacing === undefined
-          ? undefined
-          : {
-            letterSpacing: letterSpacing * theme.textScale,
-          }),
+        letterSpacing:
+          letterSpacing === undefined
+            ? undefined
+            : letterSpacing * theme.textScale,
       };
   return (
     <RNText
@@ -140,14 +133,75 @@ export function Hairline({
       style={[
         {
           backgroundColor: theme.colors.hairline,
+          alignSelf: 'stretch',
           ...(vertical
-            ? { width: theme.strokes.hairline, alignSelf: 'stretch' as const }
-            : { height: theme.strokes.hairline, alignSelf: 'stretch' as const }),
+            ? { width: theme.strokes.hairline }
+            : { height: theme.strokes.hairline }),
         },
         style,
       ]}
     />
   );
+}
+
+// The detail-screen chrome button — every pushed screen's chevron.
+export function BackButton({
+  onPress,
+  accessibilityLabel,
+}: {
+  readonly onPress?: (() => void) | undefined;
+  readonly accessibilityLabel: string;
+}) {
+  const theme = useTheme();
+  return (
+    <Pressable
+      compact
+      onPress={onPress}
+      accessibilityLabel={accessibilityLabel}
+      style={{ padding: theme.spacing.xs }}
+    >
+      <Icon name="chevron-left" size={16} color={theme.colors.textSecondary} />
+    </Pressable>
+  );
+}
+
+// The pushed-screen header shell: chevron + trailing content row.
+export function BackRow({
+  onPress,
+  accessibilityLabel,
+  children,
+}: {
+  readonly onPress?: (() => void) | undefined;
+  readonly accessibilityLabel: string;
+  readonly children?: ReactNode;
+}) {
+  const theme = useTheme();
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: theme.spacing.sm,
+        paddingHorizontal: theme.spacing.lg,
+        marginBottom: theme.spacing.sm,
+      }}
+    >
+      <BackButton
+        onPress={onPress}
+        accessibilityLabel={accessibilityLabel}
+      />
+      {children}
+    </View>
+  );
+}
+
+// Curry an optional handler — undefined stays undefined so the control
+// stays honest-inert instead of shipping a dead press.
+export function bind<A extends readonly unknown[]>(
+  fn: ((...args: A) => void) | undefined,
+  ...args: A
+): (() => void) | undefined {
+  return fn === undefined ? undefined : () => fn(...args);
 }
 
 export type PressableProps = {
@@ -465,6 +519,50 @@ export function Artwork({
   );
 }
 
+/** Artwork with the playing-state scrim + EqBars overlay. */
+export function PlayingArtwork({
+  url,
+  playing,
+  size = 40,
+  dimmed = false,
+}: {
+  readonly url: string | null;
+  readonly playing: boolean;
+  readonly size?: number | undefined;
+  readonly dimmed?: boolean | undefined;
+}) {
+  const theme = useTheme();
+  return (
+    <View
+      style={{
+        width: size,
+        height: size,
+        borderRadius: theme.radius.thumb,
+        overflow: 'hidden',
+      }}
+      accessible={false}
+    >
+      <Artwork url={url} size={size} dimmed={dimmed} />
+      {playing && (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: theme.colors.scrim,
+          }}
+        >
+          <EqBars size={11} />
+        </View>
+      )}
+    </View>
+  );
+}
+
 export type IconName =
   | 'play'
   | 'pause'
@@ -686,6 +784,9 @@ export function Icon({
   const glyph = GLYPHS[name];
   const useFill = filled ?? glyph.filled;
   const paint = color ?? theme.colors.textPrimary;
+  const stroke = useFill ? 'none' : paint;
+  const strokeW = strokeWidth ?? theme.strokes.progress;
+  const fill = useFill ? paint : 'none';
   return (
     <Svg
       width={size}
@@ -695,43 +796,38 @@ export function Icon({
       accessible={false}
     >
       {glyph.shapes.map((shape, i) => {
+        const common = { stroke, strokeWidth: strokeW, fill };
         switch (shape.kind) {
           case 'path':
             return (
               <Path
                 key={i}
+                {...common}
                 d={shape.d}
-                stroke={useFill ? 'none' : paint}
-                strokeWidth={strokeWidth ?? theme.strokes.progress}
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                fill={useFill ? paint : 'none'}
               />
             );
           case 'circle':
             return (
               <Circle
                 key={i}
+                {...common}
                 cx={shape.cx}
                 cy={shape.cy}
                 r={shape.r}
-                stroke={useFill ? 'none' : paint}
-                strokeWidth={strokeWidth ?? theme.strokes.progress}
-                fill={useFill ? paint : 'none'}
               />
             );
           case 'rect':
             return (
               <Rect
                 key={i}
+                {...common}
                 x={shape.x}
                 y={shape.y}
                 width={shape.w}
                 height={shape.h}
                 rx={shape.rx ?? 0}
-                stroke={useFill ? 'none' : paint}
-                strokeWidth={strokeWidth ?? theme.strokes.progress}
-                fill={useFill ? paint : 'none'}
               />
             );
         }
@@ -766,15 +862,16 @@ export function PlayPauseIcon({
   const leftProps = useAnimatedProps(() => ({ d: leftPath.value }));
   const rightProps = useAnimatedProps(() => ({ d: rightPath.value }));
   const paint = color ?? theme.colors.textPrimary;
+  const morph = morphPlayPause(playing ? 1 : 0);
   return (
     <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" accessible={false}>
       <AnimatedPath
-        d={quadPath(morphPlayPause(playing ? 1 : 0).left)}
+        d={quadPath(morph.left)}
         fill={paint}
         animatedProps={leftProps}
       />
       <AnimatedPath
-        d={quadPath(morphPlayPause(playing ? 1 : 0).right)}
+        d={quadPath(morph.right)}
         fill={paint}
         animatedProps={rightProps}
       />

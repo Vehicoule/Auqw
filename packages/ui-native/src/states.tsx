@@ -32,6 +32,33 @@ function StateShell({
   );
 }
 
+function StateCopy({
+  title,
+  hint,
+  centered = true,
+}: {
+  readonly title: string;
+  readonly hint?: string | null | undefined;
+  readonly centered?: boolean | undefined;
+}) {
+  return (
+    <>
+      <Text variant="body" color="secondary">
+        {title}
+      </Text>
+      {hint !== null && hint !== undefined && (
+        <Text
+          variant="metadata"
+          color="secondary"
+          style={centered ? { textAlign: 'center' } : undefined}
+        >
+          {hint}
+        </Text>
+      )}
+    </>
+  );
+}
+
 export function LoadingState({
   title = t('state.loading'),
   hint = null,
@@ -44,14 +71,7 @@ export function LoadingState({
   return (
     <StateShell>
       <Spinner size={18} />
-      <Text variant="body" color="secondary">
-        {title}
-      </Text>
-      {hint !== null && (
-        <Text variant="metadata" color="secondary">
-          {hint}
-        </Text>
-      )}
+      <StateCopy title={title} hint={hint} centered={false} />
       {onCancel !== undefined && (
         <PillButton label={t('common.cancel')} onPress={onCancel} />
       )}
@@ -64,14 +84,7 @@ export function EmptyState({ title, hint = null, icon = 'note' }: StateViewProps
   return (
     <StateShell>
       <Icon name={icon} size={20} color={theme.colors.textSecondary} />
-      <Text variant="body" color="secondary">
-        {title}
-      </Text>
-      {hint !== null && (
-        <Text variant="metadata" color="secondary" style={{ textAlign: 'center' }}>
-          {hint}
-        </Text>
-      )}
+      <StateCopy title={title} hint={hint} />
     </StateShell>
   );
 }
@@ -91,14 +104,7 @@ export function ErrorState({
   return (
     <StateShell>
       <Icon name="warn" size={20} color={theme.colors.warn} />
-      <Text variant="body" color="secondary">
-        {title}
-      </Text>
-      {hint !== null && (
-        <Text variant="metadata" color="secondary" style={{ textAlign: 'center' }}>
-          {hint}
-        </Text>
-      )}
+      <StateCopy title={title} hint={hint} />
       {onRetry !== undefined && (
         <PillButton label={retryLabel} onPress={onRetry} />
       )}
@@ -117,14 +123,53 @@ export function UnavailableState({
   return (
     <StateShell>
       <Icon name="warn" size={20} color={theme.colors.warn} />
-      <Text variant="body" color="secondary">
-        {title}
-      </Text>
-      {hint !== null && (
-        <Text variant="metadata" color="secondary" style={{ textAlign: 'center' }}>
-          {hint}
-        </Text>
-      )}
+      <StateCopy title={title} hint={hint} />
     </StateShell>
   );
+}
+
+/** The kind-tagged status views the ui-shared controllers emit. */
+export type StatePhase =
+  | {
+      readonly kind: 'loading';
+      readonly title: string;
+      readonly hint?: string | null | undefined;
+    }
+  | {
+      readonly kind: 'empty';
+      readonly title: string;
+      readonly hint?: string | null | undefined;
+      readonly icon?: IconName | undefined;
+    }
+  | {
+      readonly kind: 'unavailable';
+      readonly title: string;
+      readonly hint?: string | null | undefined;
+    }
+  | {
+      readonly kind: 'error';
+      readonly title: string;
+      readonly hint?: string | null | undefined;
+      readonly onRetry?: (() => void) | undefined;
+    };
+
+export function StateFor({ view }: { readonly view: StatePhase }) {
+  switch (view.kind) {
+    case 'loading':
+      return <LoadingState title={view.title} hint={view.hint} />;
+    case 'unavailable':
+      return <UnavailableState title={view.title} hint={view.hint} />;
+    case 'error':
+      return (
+        <ErrorState
+          title={view.title}
+          hint={view.hint}
+          onRetry={view.onRetry}
+        />
+      );
+    case 'empty':
+      return (
+        <EmptyState title={view.title} hint={view.hint} icon={view.icon} />
+      );
+  }
 }

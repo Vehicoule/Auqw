@@ -90,6 +90,7 @@ export function MiniPlayer({
       ? 0
       : Math.min(1, Math.max(0, player.positionMs / player.durationMs));
   const busy = player.status === 'preparing' || player.status === 'buffering';
+  const playColor = ios ? theme.colors.textBright : theme.colors.accent;
   // Latest callbacks via ref — the parent passes fresh inline closures
   // every position tick, and a deps-listed callback would rebuild the
   // pan (a fresh Pan() cancels the in-flight swipe — exactly the bug
@@ -119,6 +120,22 @@ export function MiniPlayer({
           : windowHeight;
       return Math.max(1, measured);
     };
+    // Only settle when this gesture actually displaced the sheet —
+    // restoring toward `dragStart` after grabbing a closing sheet
+    // would resurrect it mid-collapse (the pill is interactive
+    // only while `expanded` is false, so the anchor here is 0).
+    const settleBack = () => {
+      'worklet';
+      if (
+        sheetProgress !== undefined &&
+        wroteProgress.value &&
+        sheetProgress.value > 0
+      ) {
+        sheetProgress.value = theme.reducedMotion
+          ? 0
+          : withSpring(0, { stiffness: 200, damping: 28 });
+      }
+    };
     return Gesture.Pan()
       .activeOffsetX([-12, 12])
       .activeOffsetY([-8, 8])
@@ -145,15 +162,7 @@ export function MiniPlayer({
         // translation, so without the guard a dead gesture still
         // dismisses/skips/commits. Restore whatever it wrote and stop.
         if (!success) {
-          if (
-            sheetProgress !== undefined &&
-            wroteProgress.value &&
-            sheetProgress.value > 0
-          ) {
-            sheetProgress.value = theme.reducedMotion
-              ? 0
-              : withSpring(0, { stiffness: 200, damping: 28 });
-          }
+          settleBack();
           return;
         }
         if (sheetProgress === undefined) {
@@ -171,15 +180,7 @@ export function MiniPlayer({
           return;
         }
         if (Math.abs(e.translationX) >= Math.abs(e.translationY)) {
-          // Only settle when this gesture actually displaced the sheet —
-          // restoring toward `dragStart` after grabbing a closing sheet
-          // would resurrect it mid-collapse (the pill is interactive
-          // only while `expanded` is false, so the anchor here is 0).
-          if (wroteProgress.value && sheetProgress.value > 0) {
-            sheetProgress.value = theme.reducedMotion
-              ? 0
-              : withSpring(0, { stiffness: 200, damping: 28 });
-          }
+          settleBack();
           if (e.translationX < -40) {
             scheduleOnRN(emit, 'onNext');
           } else if (e.translationX > 40) {
@@ -364,12 +365,12 @@ export function MiniPlayer({
             }}
           >
             {busy ? (
-              <Spinner size={14} color={ios ? theme.colors.textBright : theme.colors.accent} />
+              <Spinner size={14} color={playColor} />
             ) : (
               <PlayPauseIcon
                 playing={player.intentPlaying}
                 size={16}
-                color={ios ? theme.colors.textBright : theme.colors.accent}
+                color={playColor}
               />
             )}
           </Pressable>

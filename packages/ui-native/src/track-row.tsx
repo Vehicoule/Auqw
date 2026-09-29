@@ -1,17 +1,33 @@
 import { View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import {
-  Artwork,
-  EqBars,
   Icon,
   IconButton,
+  PlayingArtwork,
   Pressable,
   Text,
 } from './primitives.tsx';
 import { formatClock, t } from '@auqw/ui-shared';
 import type { TrackRowModel } from '@auqw/ui-shared';
+import type { IconName } from './primitives.tsx';
 
 const DRAG_HANDLE_SLOP = { top: 8, bottom: 8, left: 10, right: 10 };
+
+function trailIcon(icon: IconName, size: number, color: string, width = 30) {
+  return (
+    <View
+      style={{
+        width,
+        height: 30,
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+      accessible={false}
+    >
+      <Icon name={icon} size={size} color={color} />
+    </View>
+  );
+}
 
 export type TrackRowProps = {
   readonly row: TrackRowModel;
@@ -157,33 +173,11 @@ export function TrackRow({
           pressed && { backgroundColor: theme.colors.fg08 },
         ]}
       >
-        <View
-          style={{
-            width: 40,
-            height: 40,
-            borderRadius: theme.radius.thumb,
-            overflow: 'hidden',
-          }}
-          accessible={false}
-        >
-          <Artwork url={row.artworkUrl} size={40} dimmed={unavailable} />
-          {row.playing && (
-            <View
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                right: 0,
-                bottom: 0,
-                alignItems: 'center',
-                justifyContent: 'center',
-                backgroundColor: theme.colors.scrim,
-              }}
-            >
-              <EqBars size={11} />
-            </View>
-          )}
-        </View>
+        <PlayingArtwork
+          url={row.artworkUrl}
+          playing={row.playing}
+          dimmed={unavailable}
+        />
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text
             variant="body"
@@ -203,7 +197,7 @@ export function TrackRow({
           >
             {row.title}
           </Text>
-        {sub !== '' && (
+          {sub !== '' && (
             <Text
               variant="metadata"
               color="secondary"
@@ -216,63 +210,27 @@ export function TrackRow({
         </View>
       </Pressable>
       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-        {row.download !== null && (
-          <View
-            style={{
-              width: 26,
-              height: 30,
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-            accessible={false}
-          >
-            <Icon
-              name={
-                row.download === 'stored'
-                  ? 'check'
-                  : row.download === 'failed'
-                    ? 'warn'
-                    : row.download === 'removing'
-                      ? 'spinner'
-                      : 'download'
-              }
-              size={13}
-              color={
-                row.download === 'failed'
-                  ? theme.colors.warn
-                  : row.download === 'stored'
-                    ? theme.colors.accent
-                    : theme.colors.textSecondary
-              }
-            />
-          </View>
-        )}
-        {row.state !== 'available' && (
-          <View
-            style={{
-              width: 30,
-              height: 30,
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-            accessible={false}
-          >
-            <Icon name="warn" size={14} color={theme.colors.warn} />
-          </View>
-        )}
-        {row.liked && onToggleLike === undefined && (
-          <View
-            style={{
-              width: 30,
-              height: 30,
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-            accessible={false}
-          >
-            <Icon name="heart-filled" size={14} color={theme.colors.liked} />
-          </View>
-        )}
+        {row.download !== null &&
+          trailIcon(
+            row.download === 'stored'
+              ? 'check'
+              : row.download === 'failed'
+                ? 'warn'
+                : row.download === 'removing'
+                  ? 'spinner'
+                  : 'download',
+            13,
+            row.download === 'failed'
+              ? theme.colors.warn
+              : row.download === 'stored'
+                ? theme.colors.accent
+                : theme.colors.textSecondary,
+            26,
+          )}
+        {row.state !== 'available' && trailIcon('warn', 14, theme.colors.warn)}
+        {row.liked &&
+          onToggleLike === undefined &&
+          trailIcon('heart-filled', 14, theme.colors.liked)}
         {onToggleLike !== undefined && (
           <IconButton
             icon={row.liked ? 'heart-filled' : 'heart'}

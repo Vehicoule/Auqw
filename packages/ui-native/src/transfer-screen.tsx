@@ -1,6 +1,6 @@
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Icon, PillButton, Pressable, Text } from './primitives.tsx';
+import { BackRow, Icon, PillButton, Pressable, Text } from './primitives.tsx';
 import { ErrorState } from './states.tsx';
 import type { TransferModel } from '@auqw/ui-shared';
 import {
@@ -42,6 +42,16 @@ export function TransferScreen({
     onApplyImport,
     onResetImport,
   });
+  const sectionLabel = (label: string) => (
+    <Text
+      variant="label"
+      color="secondary"
+      uppercase
+      style={{ paddingHorizontal: theme.spacing.sm }}
+    >
+      {label}
+    </Text>
+  );
   return (
     <View
       style={{
@@ -50,31 +60,11 @@ export function TransferScreen({
         paddingTop: topInset + theme.spacing.sm,
       }}
     >
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: theme.spacing.sm,
-          paddingHorizontal: theme.spacing.lg,
-          marginBottom: theme.spacing.sm,
-        }}
-      >
-        <Pressable
-          compact
-          onPress={onBack}
-          accessibilityLabel={view.backA11yLabel}
-          style={{ padding: theme.spacing.xs }}
-        >
-          <Icon
-            name="chevron-left"
-            size={16}
-            color={theme.colors.textSecondary}
-          />
-        </Pressable>
+      <BackRow onPress={onBack} accessibilityLabel={view.backA11yLabel}>
         <Text variant="display" color="bright" style={{ flex: 1 }}>
           {view.title}
         </Text>
-      </View>
+      </BackRow>
       <ScrollView
         scrollEnabled={scrollEnabled}
         contentContainerStyle={{
@@ -84,25 +74,11 @@ export function TransferScreen({
         }}
       >
         <View>
-          <Text
-            variant="label"
-            color="secondary"
-            uppercase
-            style={{ paddingHorizontal: theme.spacing.sm }}
-          >
-            {view.exportSectionLabel}
-          </Text>
+          {sectionLabel(view.exportSectionLabel)}
           <TransferRow view={view.exportRow} />
         </View>
         <View>
-          <Text
-            variant="label"
-            color="secondary"
-            uppercase
-            style={{ paddingHorizontal: theme.spacing.sm }}
-          >
-            {view.importSectionLabel}
-          </Text>
+          {sectionLabel(view.importSectionLabel)}
           <TransferRow view={view.importRow} />
           <ImportBody body={view.importBody} />
         </View>

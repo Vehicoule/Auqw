@@ -34,77 +34,38 @@ import { progressPathState } from './motion';
 const AnimatedPath = Animated.createAnimatedComponent(Path);
 const AnimatedRect = Animated.createAnimatedComponent(Rect);
 
-type Pt = { readonly x: number; readonly y: number };
-
-type Seg =
-  | { readonly kind: 'l'; readonly a: Pt; readonly b: Pt }
-  | { readonly kind: 'q'; readonly a: Pt; readonly c: Pt; readonly b: Pt };
-
-const pt = (x: number, y: number): Pt => ({ x, y });
-
-const RING_SEGS: readonly Seg[] = [
-  { kind: 'l', a: pt(26, 3), b: pt(38, 3) },
-  { kind: 'q', a: pt(38, 3), c: pt(49, 3), b: pt(49, 14) },
-  { kind: 'l', a: pt(49, 14), b: pt(49, 38) },
-  { kind: 'q', a: pt(49, 38), c: pt(49, 49), b: pt(38, 49) },
-  { kind: 'l', a: pt(38, 49), b: pt(14, 49) },
-  { kind: 'q', a: pt(14, 49), c: pt(3, 49), b: pt(3, 38) },
-  { kind: 'l', a: pt(3, 38), b: pt(3, 14) },
-  { kind: 'q', a: pt(3, 14), c: pt(3, 3), b: pt(14, 3) },
-  { kind: 'l', a: pt(14, 3), b: pt(26, 3) },
-];
-
-function segPoint(seg: Seg, t: number): Pt {
-  if (seg.kind === 'l') {
-    return pt(seg.a.x + (seg.b.x - seg.a.x) * t, seg.a.y + (seg.b.y - seg.a.y) * t);
-  }
-  const u = 1 - t;
-  return pt(
-    u * u * seg.a.x + 2 * u * t * seg.c.x + t * t * seg.b.x,
-    u * u * seg.a.y + 2 * u * t * seg.c.y + t * t * seg.b.y,
-  );
+function clamp01(v: number): number {
+  'worklet';
+  return Math.min(1, Math.max(0, v));
 }
 
-function segLength(seg: Seg): number {
-  if (seg.kind === 'l') {
-    return Math.hypot(seg.b.x - seg.a.x, seg.b.y - seg.a.y);
-  }
-  let length = 0;
-  let prev = seg.a;
-  for (let i = 1; i <= 24; i += 1) {
-    const cur = segPoint(seg, i / 24);
-    length += Math.hypot(cur.x - prev.x, cur.y - prev.y);
-    prev = cur;
-  }
-  return length;
-}
-
-function sampleRing(
-  count: number,
-): { readonly points: readonly Pt[]; readonly length: number } {
-  const segLens = RING_SEGS.map(segLength);
-  const total = segLens.reduce((a, b) => a + b, 0);
-  const points: Pt[] = [];
-  for (let i = 0; i < count; i += 1) {
-    let s = (i / count) * total;
-    let segIndex = 0;
-    let segLen = segLens[0] ?? total;
-    while (segIndex < segLens.length - 1 && s > segLen) {
-      s -= segLen;
-      segIndex += 1;
-      segLen = segLens[segIndex] ?? total;
+function useMeasuredWidth(initial: number): {
+  readonly width: number;
+  readonly onLayout: (e: LayoutChangeEvent) => void;
+} {
+  const [width, setWidth] = useState(initial);
+  const onLayout = useCallback((e: LayoutChangeEvent) => {
+    const w = e.nativeEvent.layout.width;
+    if (w > 0) {
+      setWidth(w);
     }
-    const seg = RING_SEGS[segIndex];
-    points.push(seg === undefined ? pt(0, 0) : segPoint(seg, segLen === 0 ? 0 : s / segLen));
-  }
-  return { points, length: total };
+  }, []);
+  return { width, onLayout };
 }
 
-const RING = sampleRing(200);
+function clearTimer(ref: {
+  current: ReturnType<typeof setTimeout> | null;
+}): void {
+  if (ref.current !== null) {
+    clearTimeout(ref.current);
+    ref.current = null;
+  }
+}
 
 export const SQUARED_RING_PATH =
   'M26 3 L38 3 Q49 3 49 14 L49 38 Q49 49 38 49 L14 49 Q3 49 3 38 L3 14 Q3 3 14 3 Z';
-export const SQUARED_RING_LENGTH = RING.length;
+// Arc length of SQUARED_RING_PATH (quadrature over the four corners).
+export const SQUARED_RING_LENGTH = 167.40917715109828;
 
 // Worklet twins of the ui-shared helpers — reanimated can't workletize
 // functions imported from another package, so the math is duplicated
@@ -115,7 +76,7 @@ function staggerW(progress: number, index: number, count: number): number {
     return 1;
   }
   const delay = (index / count) * 0.55;
-  return Math.min(1, Math.max(0, (progress - delay) / (1 - delay)));
+  return clamp01((progress - delay) / (1 - delay));
 }
 
 function barExtentW(
@@ -125,7 +86,7 @@ function barExtentW(
   bloom: number,
 ): number {
   'worklet';
-  const t = Number.isFinite(bloom) ? Math.min(1, Math.max(0, bloom)) : 0;
+  const t = Number.isFinite(bloom) ? clamp01(bloom) : 0;
   const eased = 1 - (1 - t) ** 3;
   return minExtent + (maxExtent - minExtent) * amplitude * eased;
 }
@@ -177,7 +138,7 @@ export function ArtworkRing({
 }: ArtworkRingProps) {
   const theme = useTheme();
   const box = size ?? theme.sizes.artworkRing;
-  const clamped = Math.min(1, Math.max(0, progress));
+  const clamped = clamp01(progress);
   const animatedProgress = useSharedValue(clamped);
   const previousProgress = useRef(clamped);
   useEffect(() => {
@@ -249,20 +210,12 @@ function useSeekGesture(
   readonly gesture: ReturnType<typeof Gesture.Pan>;
   readonly onLayout: (e: LayoutChangeEvent) => void;
 } {
-  const [width, setWidth] = useState(1);
-  const onLayout = useCallback((e: LayoutChangeEvent) => {
-    const w = e.nativeEvent.layout.width;
-    if (w > 0) {
-      setWidth(w);
-    }
-  }, []);
+  const { width, onLayout } = useMeasuredWidth(1);
   const preview = useCallback(
     (x: number) => {
-      if (durationMs === null || durationMs <= 0) {
-        return;
+      if (durationMs !== null && durationMs > 0) {
+        onPreview?.(Math.round(clamp01(x / width) * durationMs));
       }
-      const ratio = Math.min(1, Math.max(0, x / width));
-      onPreview?.(Math.round(ratio * durationMs));
     },
     [durationMs, onPreview, width],
   );
@@ -272,8 +225,7 @@ function useSeekGesture(
         onPreview?.(null);
         return;
       }
-      const ratio = Math.min(1, Math.max(0, x / width));
-      onSeek(Math.round(ratio * durationMs));
+      onSeek(Math.round(clamp01(x / width) * durationMs));
     },
     [durationMs, onPreview, onSeek, width],
   );
@@ -312,12 +264,10 @@ function useSeekA11y(
   positionMs: number,
   durationMs: number | null,
   onSeek: ((ms: number) => void) | undefined,
-): {
-  readonly onAccessibilityAction: (e: AccessibilityActionEvent) => void;
-} {
+): (e: AccessibilityActionEvent) => void {
   // `adjustable` promises increment/decrement to AT — the ±10s step is
   // the VoiceOver seek path the pan gesture can't provide.
-  const onAccessibilityAction = useCallback(
+  return useCallback(
     (e: AccessibilityActionEvent) => {
       if (durationMs === null || durationMs <= 0 || onSeek === undefined) {
         return;
@@ -331,14 +281,13 @@ function useSeekA11y(
     },
     [durationMs, onSeek, positionMs],
   );
-  return { onAccessibilityAction };
 }
 
 function progressOf(positionMs: number, durationMs: number | null): number {
   if (durationMs === null || durationMs <= 0) {
     return 0;
   }
-  return Math.min(1, Math.max(0, positionMs / durationMs));
+  return clamp01(positionMs / durationMs);
 }
 
 export type LinearScrubberProps = {
@@ -398,33 +347,25 @@ export function LinearScrubber({
   // hold the waveform seek applies.
   const commit = useCallback(
     (ms: number) => {
-      // A dead gesture's release does nothing but drain it.
-      if (gestureDead.current) {
-        gestureDead.current = false;
-        gestureKey.current = undefined;
-        setPreviewMs(null);
-        return;
-      }
-      // A track change since the pan began abandons the release —
-      // it must not seek the new track to a position the preview
-      // only ever showed on the old one.
       const begunOn = gestureKey.current;
-      if (
-        begunOn !== undefined &&
-        begunOn !== trackKeyRef.current
-      ) {
-        gestureKey.current = undefined;
-        setPreviewMs(null);
-        return;
-      }
+      const wasDead = gestureDead.current;
+      gestureDead.current = false;
       gestureKey.current = undefined;
       setPreviewMs(null);
+      // A dead gesture's release does nothing but drain it; a track
+      // change since the pan began abandons the release — it must not
+      // seek the new track to a position the preview only ever showed
+      // on the old one.
+      if (
+        wasDead ||
+        (begunOn !== undefined && begunOn !== trackKeyRef.current)
+      ) {
+        return;
+      }
       heldBaseline.current = positionRef.current;
       heldKey.current = trackKeyRef.current;
       setHeldMs(ms);
-      if (heldTimer.current !== null) {
-        clearTimeout(heldTimer.current);
-      }
+      clearTimer(heldTimer);
       heldTimer.current = setTimeout(() => {
         heldTimer.current = null;
         setHeldMs(null);
@@ -438,10 +379,7 @@ export function LinearScrubber({
   );
   useEffect(() => {
     if (heldMs !== null && positionMs !== heldBaseline.current) {
-      if (heldTimer.current !== null) {
-        clearTimeout(heldTimer.current);
-        heldTimer.current = null;
-      }
+      clearTimer(heldTimer);
       setHeldMs(null);
     }
   }, [positionMs, heldMs]);
@@ -451,10 +389,7 @@ export function LinearScrubber({
   // the same key check.
   useEffect(() => {
     if (heldMs !== null && heldKey.current !== trackKey) {
-      if (heldTimer.current !== null) {
-        clearTimeout(heldTimer.current);
-        heldTimer.current = null;
-      }
+      clearTimer(heldTimer);
       setHeldMs(null);
     }
     if (
@@ -466,27 +401,19 @@ export function LinearScrubber({
       setPreviewMs(null);
     }
   }, [trackKey, heldMs]);
-  useEffect(
-    () => () => {
-      if (heldTimer.current !== null) {
-        clearTimeout(heldTimer.current);
-      }
-    },
-    [],
-  );
+  useEffect(() => () => clearTimer(heldTimer), []);
   const { gesture, onLayout } = useSeekGesture(
     durationMs,
     commit,
     onPreview,
   );
   const shownMs =
-    (previewMs !== null &&
-    gestureKey.current === trackKey
+    (previewMs !== null && gestureKey.current === trackKey
       ? previewMs
       : null) ??
     (heldMs !== null && heldKey.current === trackKey ? heldMs : null) ??
     positionMs;
-  const { onAccessibilityAction } = useSeekA11y(shownMs, durationMs, onSeek);
+  const onAccessibilityAction = useSeekA11y(shownMs, durationMs, onSeek);
   const p = progressOf(shownMs, durationMs);
   return (
     <GestureDetector gesture={gesture}>
@@ -617,14 +544,8 @@ export function WaveformSeek({
 }: WaveformSeekProps) {
   const theme = useTheme();
   const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
-  const [width, setWidth] = useState(0);
-  const onLayout = useCallback((e: LayoutChangeEvent) => {
-    const w = e.nativeEvent.layout.width;
-    if (w > 0) {
-      setWidth(w);
-    }
-  }, []);
-  const { onAccessibilityAction } = useSeekA11y(positionMs, durationMs, onSeek);
+  const { width, onLayout } = useMeasuredWidth(0);
+  const onAccessibilityAction = useSeekA11y(positionMs, durationMs, onSeek);
 
   const isLoading = loading || durationMs === null;
   const progress = progressOf(positionMs, durationMs);
@@ -653,7 +574,6 @@ export function WaveformSeek({
   const fill = useSharedValue(progress);
   const bloom = useSharedValue(theme.reducedMotion ? 1 : 0);
   const shimmer = useSharedValue(0);
-  const scrubbing = useSharedValue(0);
   const [scrubMs, setScrubMs] = useState<number | null>(null);
   const scrubActive = useRef(false);
   const scrubSec = useRef(-1);
@@ -664,9 +584,8 @@ export function WaveformSeek({
   useEffect(() => {
     const delta = Math.abs(progress - previousProgress.current);
     previousProgress.current = progress;
-    if (delta > 0 && settleTimer.current !== null) {
-      clearTimeout(settleTimer.current);
-      settleTimer.current = null;
+    if (delta > 0) {
+      clearTimer(settleTimer);
     }
     if (scrubActive.current) {
       return;
@@ -676,14 +595,7 @@ export function WaveformSeek({
       ? progress
       : withTiming(progress, { duration });
   }, [fill, progress, theme.motion.state, theme.reducedMotion]);
-  useEffect(
-    () => () => {
-      if (settleTimer.current !== null) {
-        clearTimeout(settleTimer.current);
-      }
-    },
-    [],
-  );
+  useEffect(() => () => clearTimer(settleTimer), []);
   useEffect(() => {
     bloom.value = 0;
     bloom.value = theme.reducedMotion ? 1 : withTiming(1, { duration: 320 });
@@ -777,9 +689,7 @@ export function WaveformSeek({
       // Optimistic fill: when no position tick confirms the seek
       // (paused playback, noop onSeek) fall back to the real
       // progress instead of disagreeing with the labels forever.
-      if (settleTimer.current !== null) {
-        clearTimeout(settleTimer.current);
-      }
+      clearTimer(settleTimer);
       settleTimer.current = setTimeout(() => {
         settleTimer.current = null;
         if (scrubActive.current) {
@@ -812,75 +722,42 @@ export function WaveformSeek({
     durationMs !== null && durationMs > 0 && onSeek !== undefined;
   // Stable gesture object — a fresh Pan() per render would cancel a
   // scrub in progress when the position tick re-renders the control.
-  const gesture = useMemo(
-    () =>
-      Gesture.Pan()
-        .minDistance(0)
-        .enabled(enabled)
-        .onBegin((e) => {
-          'worklet';
-          if (dead.value === 1) {
-            return;
-          }
-          const f = Math.min(1, Math.max(0, e.x / width));
-          fill.value = f;
-          scrubbing.value = 1;
-          scheduleOnRN(preview, f);
-        })
-        .onUpdate((e) => {
-          'worklet';
-          if (dead.value === 1) {
-            return;
-          }
-          const f = Math.min(1, Math.max(0, e.x / width));
-          fill.value = f;
-          scheduleOnRN(preview, f);
-        })
-        .onFinalize((e, success) => {
-          'worklet';
-          dead.value = 0;
-          const f = Math.min(1, Math.max(0, e.x / width));
-          scrubbing.value = 0;
-          scheduleOnRN(success ? commit : cancelScrub, f);
-        }),
-    [cancelScrub, commit, dead, enabled, fill, preview, scrubbing, width],
-  );
-  const dLow = useDerivedValue(() =>
-    barsPathD(
-      groups[0].xs,
-      groups[0].ups,
-      groups[0].downs,
-      groups[0].idx,
-      layout.count,
-      WAVE_MID,
-      WAVE_MAX_EXTENT,
-      bloom.value,
-    ),
-  );
-  const dMid = useDerivedValue(() =>
-    barsPathD(
-      groups[1].xs,
-      groups[1].ups,
-      groups[1].downs,
-      groups[1].idx,
-      layout.count,
-      WAVE_MID,
-      WAVE_MAX_EXTENT,
-      bloom.value,
-    ),
-  );
-  const dHigh = useDerivedValue(() =>
-    barsPathD(
-      groups[2].xs,
-      groups[2].ups,
-      groups[2].downs,
-      groups[2].idx,
-      layout.count,
-      WAVE_MID,
-      WAVE_MAX_EXTENT,
-      bloom.value,
-    ),
-  );
+  const gesture = useMemo(() => {
+    const frac = (e: { readonly x: number }) => {
+      'worklet';
+      return clamp01(e.x / width);
+    };
+    const drag = (e: { readonly x: number }) => {
+      'worklet';
+      if (dead.value === 1) {
+        return;
+      }
+      const f = frac(e);
+      fill.value = f;
+      scheduleOnRN(preview, f);
+    };
+    return Gesture.Pan()
+      .minDistance(0)
+      .enabled(enabled)
+      .onBegin((e) => {
+        'worklet';
+        drag(e);
+      })
+      .onUpdate((e) => {
+        'worklet';
+        drag(e);
+      })
+      .onFinalize((e, success) => {
+        'worklet';
+        dead.value = 0;
+        scheduleOnRN(success ? commit : cancelScrub, frac(e));
+      });
+  }, [cancelScrub, commit, dead, enabled, fill, preview, width]);
+  const dTerciles = useDerivedValue((): [string, string, string] => {
+    const d = (g: BarGroup) =>
+      barsPathD(g.xs, g.ups, g.downs, g.idx, layout.count, WAVE_MID, WAVE_MAX_EXTENT, bloom.value);
+    return [d(groups[0]), d(groups[1]), d(groups[2])];
+  });
   // No clip-path here: react-native-svg drops animated prop updates
   // inside <ClipPath>, so the played layer is rebuilt each frame as
   // the subset of bars whose center sits left of the fill edge.
@@ -897,9 +774,9 @@ export function WaveformSeek({
       fill.value * width,
     ),
   );
-  const lowProps = useAnimatedProps(() => ({ d: dLow.value }));
-  const midProps = useAnimatedProps(() => ({ d: dMid.value }));
-  const highProps = useAnimatedProps(() => ({ d: dHigh.value }));
+  const lowProps = useAnimatedProps(() => ({ d: dTerciles.value[0] }));
+  const midProps = useAnimatedProps(() => ({ d: dTerciles.value[1] }));
+  const highProps = useAnimatedProps(() => ({ d: dTerciles.value[2] }));
   const playedProps = useAnimatedProps(() => ({ d: dAll.value }));
   const shimmerProps = useAnimatedProps(() => ({
     x: shimmer.value * (width + width * 0.16) - width * 0.16,
@@ -911,6 +788,17 @@ export function WaveformSeek({
     gestureKey.current === trackKey
       ? scrubMs
       : null) ?? positionMs;
+  const skeletonBars = layout.xs.map((x, i) => (
+    <Rect
+      key={i}
+      x={x - WAVE_BAR_WIDTH / 2}
+      y={WAVE_MID - 2.4}
+      width={WAVE_BAR_WIDTH}
+      height={4.8}
+      rx={1.5}
+      fill={theme.colors.fg18}
+    />
+  ));
   return (
     <View style={style}>
       <GestureDetector gesture={gesture}>
@@ -941,31 +829,12 @@ export function WaveformSeek({
             <Svg width={width} height={WAVE_HEIGHT}>
               {isLoading ? (
                 <>
-                  {layout.xs.map((x, i) => (
-                    <Rect
-                      key={i}
-                      x={x - WAVE_BAR_WIDTH / 2}
-                      y={WAVE_MID - 2.4}
-                      width={WAVE_BAR_WIDTH}
-                      height={4.8}
-                      rx={1.5}
-                      fill={theme.colors.fg18}
-                    />
-                  ))}
+                  {skeletonBars}
                   {!theme.reducedMotion && (
                     <>
                       <Defs>
                         <ClipPath id={`bars-${uid}`}>
-                          {layout.xs.map((x, i) => (
-                            <Rect
-                              key={i}
-                              x={x - WAVE_BAR_WIDTH / 2}
-                              y={WAVE_MID - 2.4}
-                              width={WAVE_BAR_WIDTH}
-                              height={4.8}
-                              rx={1.5}
-                            />
-                          ))}
+                          {skeletonBars}
                         </ClipPath>
                       </Defs>
                       <G clipPath={`url(#bars-${uid})`}>
@@ -983,30 +852,23 @@ export function WaveformSeek({
                 </>
               ) : (
                 <>
-                  <AnimatedPath
-                    fill="none"
-                    stroke={theme.colors.fg18}
-                    strokeWidth={WAVE_BAR_WIDTH}
-                    strokeLinecap="round"
-                    opacity={0.6}
-                    animatedProps={lowProps}
-                  />
-                  <AnimatedPath
-                    fill="none"
-                    stroke={theme.colors.fg18}
-                    strokeWidth={WAVE_BAR_WIDTH}
-                    strokeLinecap="round"
-                    opacity={0.8}
-                    animatedProps={midProps}
-                  />
-                  <AnimatedPath
-                    fill="none"
-                    stroke={theme.colors.fg18}
-                    strokeWidth={WAVE_BAR_WIDTH}
-                    strokeLinecap="round"
-                    opacity={1}
-                    animatedProps={highProps}
-                  />
+                  {(
+                    [
+                      [lowProps, 0.6],
+                      [midProps, 0.8],
+                      [highProps, 1],
+                    ] as const
+                  ).map(([props, opacity]) => (
+                    <AnimatedPath
+                      key={opacity}
+                      fill="none"
+                      stroke={theme.colors.fg18}
+                      strokeWidth={WAVE_BAR_WIDTH}
+                      strokeLinecap="round"
+                      opacity={opacity}
+                      animatedProps={props}
+                    />
+                  ))}
                   <AnimatedPath
                     fill="none"
                     stroke={theme.colors.accent}

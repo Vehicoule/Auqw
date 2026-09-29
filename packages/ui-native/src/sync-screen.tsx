@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { useState } from 'react';
 import { ScrollView, TextInput, View } from 'react-native';
 import { useTheme } from './theme.tsx';
+import type { Theme } from './theme.tsx';
 import { Hairline, Icon, PillButton, Pressable, Text } from './primitives.tsx';
 import { QrCode } from './qr-code.tsx';
 import type { SyncModel, SyncPeerModel } from '@auqw/ui-shared';
@@ -85,6 +86,18 @@ export type SyncScreenProps = {
   readonly onImportDelta?: (() => void) | undefined;
 };
 
+function fieldBox(theme: Theme) {
+  return {
+    borderRadius: theme.radius.control,
+    borderWidth: theme.strokes.hairline,
+    borderColor: theme.colors.hairline,
+    overflow: 'hidden' as const,
+  };
+}
+
+const digits6 = (next: string) =>
+  next.replace(/[^0-9]/g, '').slice(0, 6);
+
 function Section({
   title,
   children,
@@ -131,14 +144,16 @@ function PeerRow({
   readonly onUnpair?: ((fp: string) => void) | undefined;
 }) {
   const theme = useTheme();
-  const stateColor = peer.state === 'open' ? 'accent' : 'secondary';
   return (
     <View style={{ padding: 14, gap: theme.spacing.xs }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: theme.spacing.sm }}>
         <Text variant="body" color="primary" style={{ flex: 1 }} numberOfLines={1}>
           {peer.name}
         </Text>
-        <Text variant="metadata" color={stateColor}>
+        <Text
+          variant="metadata"
+          color={peer.state === 'open' ? 'accent' : 'secondary'}
+        >
           {peer.stateLabel}
         </Text>
       </View>
@@ -221,20 +236,10 @@ function PairForm({
       <Text variant="metadata" color="secondary">
         {t('sync.form.help')}
       </Text>
-      <View
-        style={{
-          flexDirection: 'row',
-          borderRadius: theme.radius.control,
-          borderWidth: theme.strokes.hairline,
-          borderColor: theme.colors.hairline,
-          overflow: 'hidden',
-        }}
-      >
+      <View style={[{ flexDirection: 'row' }, fieldBox(theme)]}>
         <TextInput
           value={code}
-          onChangeText={(next) =>
-            setCode(next.replace(/[^0-9]/g, '').slice(0, 6))
-          }
+          onChangeText={(next) => setCode(digits6(next))}
           placeholder="123456"
           placeholderTextColor={theme.colors.textSecondary}
           keyboardType="number-pad"
@@ -243,15 +248,7 @@ function PairForm({
           style={inputStyle}
         />
       </View>
-      <View
-        style={{
-          flexDirection: 'row',
-          borderRadius: theme.radius.control,
-          borderWidth: theme.strokes.hairline,
-          borderColor: theme.colors.hairline,
-          overflow: 'hidden',
-        }}
-      >
+      <View style={[{ flexDirection: 'row' }, fieldBox(theme)]}>
         <TextInput
           value={host}
           onChangeText={setHost}
@@ -343,13 +340,11 @@ function PayloadPasteForm({
         accessibilityLabel={t('sync.form.payloadA11y')}
         style={[
           theme.typography.body,
+          fieldBox(theme),
           {
             color: theme.colors.textPrimary,
             paddingVertical: theme.spacing.sm,
             paddingHorizontal: theme.spacing.screen,
-            borderRadius: theme.radius.control,
-            borderWidth: theme.strokes.hairline,
-            borderColor: theme.colors.hairline,
             minHeight: 40,
           },
         ]}
@@ -524,9 +519,7 @@ function NearbyRow({
         >
           <TextInput
             value={code}
-            onChangeText={(next) =>
-              setCode(next.replace(/[^0-9]/g, '').slice(0, 6))
-            }
+            onChangeText={(next) => setCode(digits6(next))}
             placeholder={t('sync.nearby.codeFor', { name: peer.name })}
             placeholderTextColor={theme.colors.textSecondary}
             keyboardType="number-pad"
@@ -534,14 +527,12 @@ function NearbyRow({
             accessibilityLabel={t('sync.form.codeA11y')}
             style={[
               theme.typography.body,
+              fieldBox(theme),
               {
                 flex: 1,
                 color: theme.colors.textPrimary,
                 paddingVertical: theme.spacing.sm,
                 paddingHorizontal: theme.spacing.screen,
-                borderRadius: theme.radius.control,
-                borderWidth: theme.strokes.hairline,
-                borderColor: theme.colors.hairline,
               },
             ]}
           />
@@ -762,29 +753,28 @@ export function SyncScreen({
                   padding: 14,
                 }}
               >
-                {onExportDelta !== undefined && (
-                  <Pressable
-                    onPress={onExportDelta}
-                    accessibilityLabel={t('sync.panel.copyDelta')}
-                    accessibilityRole="button"
-                    style={({ pressed }) => [pressed && { opacity: 0.5 }]}
-                  >
-                    <Text variant="metadata" color="accent">
-                      {t('sync.panel.copyDelta')}
-                    </Text>
-                  </Pressable>
-                )}
-                {onImportDelta !== undefined && (
-                  <Pressable
-                    onPress={onImportDelta}
-                    accessibilityLabel={t('sync.panel.pasteDelta')}
-                    accessibilityRole="button"
-                    style={({ pressed }) => [pressed && { opacity: 0.5 }]}
-                  >
-                    <Text variant="metadata" color="accent">
-                      {t('sync.panel.pasteDelta')}
-                    </Text>
-                  </Pressable>
+                {(
+                  [
+                    [onExportDelta, 'sync.panel.copyDelta'],
+                    [onImportDelta, 'sync.panel.pasteDelta'],
+                  ] as const
+                ).map(
+                  ([fn, key]) =>
+                    fn !== undefined && (
+                      <Pressable
+                        key={key}
+                        onPress={fn}
+                        accessibilityLabel={t(key)}
+                        accessibilityRole="button"
+                        style={({ pressed }) => [
+                          pressed && { opacity: 0.5 },
+                        ]}
+                      >
+                        <Text variant="metadata" color="accent">
+                          {t(key)}
+                        </Text>
+                      </Pressable>
+                    ),
                 )}
               </View>
           </Section>

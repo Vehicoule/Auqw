@@ -172,6 +172,34 @@ function Frame({
   );
 }
 
+function Caption({ children }: { readonly children: ReactNode }) {
+  return (
+    <Text variant="metadata" color="secondary" style={{ marginBottom: 4 }}>
+      {children}
+    </Text>
+  );
+}
+
+function ShowcaseFrame({
+  label,
+  height,
+  children,
+}: {
+  readonly label: ReactNode;
+  readonly height: number;
+  readonly children: ReactNode;
+}) {
+  const theme = useTheme();
+  return (
+    <View style={{ marginBottom: theme.spacing.md }}>
+      <Caption>{label}</Caption>
+      <Frame height={height}>{children}</Frame>
+    </View>
+  );
+}
+
+const PLATFORMS = ['android', 'ios'] as const;
+
 function IconSwatch({ name }: { readonly name: IconName }) {
   return (
     <View style={{ alignItems: 'center', width: 52, gap: 4 }}>
@@ -260,6 +288,35 @@ function GalleryBody({
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const search = fixtureSearchStates[searchPhase] ?? fixtureSearchStates[0];
+  const stagePlayer = {
+    ...fixturePlayerPlaying,
+    title: 'Self Aware (Live at the Observatory)',
+  };
+  const queueHandlers = {
+    scrollEnabled: false,
+    onPressItem: noop,
+    onRemoveItem: noop,
+  };
+  const playlistHandlers = {
+    onBack: noop,
+    onPlayAll: noop,
+    onRename: noop,
+    onDelete: noop,
+    scrollEnabled: false,
+  };
+  const entityHandlers = {
+    onBack: noop,
+    onToggleLike: noop,
+    onPressItem: noop,
+    onContext: noop,
+    scrollEnabled: false,
+  };
+  const settingsHandlers = {
+    onSelectRow: noop,
+    onToggleRow: noop,
+    onOpenCorrections: noop,
+    scrollEnabled: false,
+  };
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: theme.colors.canvas }}
@@ -424,27 +481,23 @@ function GalleryBody({
 
       <Section title="states" note="loading · empty · error · unavailable">
         <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-          <View style={{ width: '50%', height: 160 }}>
-            <LoadingState title="searching" hint="roads portishead" onCancel={noop} />
-          </View>
-          <View style={{ width: '50%', height: 160 }}>
-            <EmptyState title="queue is empty" hint="add tracks to hear them" icon="queue" />
-          </View>
-          <View style={{ width: '50%', height: 160 }}>
-            <ErrorState title="search failed" hint="rate limited by provider" onRetry={noop} />
-          </View>
-          <View style={{ width: '50%', height: 160 }}>
-            <UnavailableState title="search unavailable" hint="provider unavailable" />
-          </View>
+          {[
+            <LoadingState title="searching" hint="roads portishead" onCancel={noop} />,
+            <EmptyState title="queue is empty" hint="add tracks to hear them" icon="queue" />,
+            <ErrorState title="search failed" hint="rate limited by provider" onRetry={noop} />,
+            <UnavailableState title="search unavailable" hint="provider unavailable" />,
+          ].map((state, i) => (
+            <View key={i} style={{ width: '50%', height: 160 }}>
+              {state}
+            </View>
+          ))}
         </View>
       </Section>
 
       <Section title="mini player" note="arc ring · ios glass">
-        {(['android', 'ios'] as const).map((platform) => (
+        {PLATFORMS.map((platform) => (
           <View key={platform} style={{ marginBottom: theme.spacing.md }}>
-            <Text variant="metadata" color="secondary" style={{ marginBottom: 4 }}>
-              {platform} · playing
-            </Text>
+            <Caption>{platform} · playing</Caption>
             <MiniPlayer
               player={fixturePlayerPlaying}
               platform={platform}
@@ -454,20 +507,19 @@ function GalleryBody({
               onPrevious={noop}
               onToggleLike={noop}
             />
-            <MiniPlayer
-              player={fixturePlayerPaused}
-              platform={platform}
-              onPress={noop}
-              onPlayPause={noop}
-              onNext={noop}
-            />
-            <MiniPlayer
-              player={fixturePlayerBuffering}
-              platform={platform}
-              onPress={noop}
-              onPlayPause={noop}
-              onNext={noop}
-            />
+            {[
+              fixturePlayerPaused,
+              fixturePlayerBuffering,
+            ].map((player) => (
+              <MiniPlayer
+                key={player.status}
+                player={player}
+                platform={platform}
+                onPress={noop}
+                onPlayPause={noop}
+                onNext={noop}
+              />
+            ))}
           </View>
         ))}
       </Section>
@@ -481,9 +533,7 @@ function GalleryBody({
       <Section title="transport" note="m3e squircle · ios glass">
         {(['m3e', 'ios'] as const).map((variant) => (
           <View key={variant} style={{ marginBottom: theme.spacing.md }}>
-            <Text variant="metadata" color="secondary" style={{ marginBottom: 4 }}>
-              {variant}
-            </Text>
+            <Caption>{variant}</Caption>
             <TransportControls
               variant={variant}
               status={fixturePlayerPlaying.status}
@@ -501,11 +551,9 @@ function GalleryBody({
       </Section>
 
       <Section title="phone composition" note="list + mini + navbar">
-        {(['android', 'ios'] as const).map((platform) => (
+        {PLATFORMS.map((platform) => (
           <View key={platform} style={{ marginBottom: theme.spacing.lg }}>
-            <Text variant="metadata" color="secondary" style={{ marginBottom: 4 }}>
-              {platform}
-            </Text>
+            <Caption>{platform}</Caption>
             <Frame height={520}>
               <View style={{ flex: 1, paddingHorizontal: 6, paddingTop: theme.spacing.sm }}>
                 {fixtureRowStates.slice(0, 6).map((row) => (
@@ -557,17 +605,14 @@ function GalleryBody({
             />
           ))}
         </View>
-        {(['android', 'ios'] as const).map((platform) => (
+        {PLATFORMS.map((platform) => (
           <View key={platform} style={{ marginBottom: theme.spacing.lg }}>
-            <Text variant="metadata" color="secondary" style={{ marginBottom: 4 }}>
+            <Caption>
               {platform} · {platform === 'android' ? 'm3e controls' : 'glass controls'}
-            </Text>
+            </Caption>
             <Frame height={620}>
               <StageSheet
-                player={{
-                  ...fixturePlayerPlaying,
-                  title: 'Self Aware (Live at the Observatory)',
-                }}
+                player={stagePlayer}
                 platform={platform}
                 expanded={expanded}
                 dragPreview={gestureState}
@@ -589,17 +634,12 @@ function GalleryBody({
         <Text variant="metadata" color="secondary">
           compact 400pt viewport · switch to 200% text above · long title and ownership actions
         </Text>
-        {(['android', 'ios'] as const).map((platform) => (
+        {PLATFORMS.map((platform) => (
           <View key={platform} style={{ marginTop: theme.spacing.sm }}>
-            <Text variant="metadata" color="secondary">
-              {platform}
-            </Text>
+            <Caption>{platform}</Caption>
             <Frame height={400} scaleWithText={false}>
               <StageSheet
-                player={{
-                  ...fixturePlayerPlaying,
-                  title: 'Self Aware (Live at the Observatory)',
-                }}
+                player={stagePlayer}
                 platform={platform}
                 expanded
                 topInset={theme.spacing.xxl}
@@ -636,13 +676,7 @@ function GalleryBody({
         </Text>
         {fixtureLyricsScenarios.map(([label, lyrics]) => (
           <View key={label} style={{ marginTop: theme.spacing.sm }}>
-            <Text
-              variant="metadata"
-              color="secondary"
-              style={{ marginBottom: 4 }}
-            >
-              {label}
-            </Text>
+            <Caption>{label}</Caption>
             <Frame height={420}>
               <StageSheet
                 player={fixturePlayerPlaying}
@@ -663,9 +697,7 @@ function GalleryBody({
           <QueueScreen
             queue={fixtureQueueModel}
             player={fixturePlayerPlaying}
-            scrollEnabled={false}
-            onPressItem={noop}
-            onRemoveItem={noop}
+            {...queueHandlers}
           />
         </Frame>
         <View style={{ height: theme.spacing.md }} />
@@ -674,11 +706,9 @@ function GalleryBody({
             queue={fixtureQueueModelPaused}
             player={fixturePlayerPaused}
             reordering
-            scrollEnabled={false}
             onToggleReorder={noop}
-            onPressItem={noop}
-            onRemoveItem={noop}
             onMoveItem={noop}
+            {...queueHandlers}
           />
         </Frame>
       </Section>
@@ -719,54 +749,25 @@ function GalleryBody({
       </Section>
 
       <Section title="library" note="collections · ownable grid · artists">
-        <Frame height={560}>
-          <LibraryScreen
-            model={fixtureLibraryModel}
-            onPressItem={noop}
-            onToggleLike={noop}
-            onContext={noop}
-            onOpenCollection={noop}
-            onPlayCollection={noop}
-            onOpenCard={noop}
-            onOpenArtist={noop}
-            onCreatePlaylist={noop}
-            scrollEnabled={false}
-          />
-        </Frame>
-        <View style={{ height: theme.spacing.md }} />
-        <Text variant="metadata" color="secondary" style={{ marginBottom: 4 }}>
-          empty library · honest empties
-        </Text>
-        <Frame height={560}>
-          <LibraryScreen
-            model={fixtureLibraryModelEmpty}
-            onPressItem={noop}
-            onToggleLike={noop}
-            onContext={noop}
-            onOpenCollection={noop}
-            onPlayCollection={noop}
-            onOpenCard={noop}
-            onOpenArtist={noop}
-            onCreatePlaylist={noop}
-            scrollEnabled={false}
-          />
-        </Frame>
-      </Section>
-
-      <Section title="collection" note="top 50 · history ordering">
-        {fixtureCollectionModels.map((collection) => (
-          <View key={collection.key} style={{ marginBottom: theme.spacing.md }}>
-            <Text variant="metadata" color="secondary" style={{ marginBottom: 4 }}>
-              {collection.title} · {collection.rows.length} rows
-            </Text>
-            <Frame height={380}>
-              <CollectionScreen
-                model={collection}
-                onBack={noop}
-                onPlayAll={noop}
+        {(
+          [
+            [null, fixtureLibraryModel],
+            ['empty library · honest empties', fixtureLibraryModelEmpty],
+          ] as const
+        ).map(([label, model], i) => (
+          <View key={i} style={{ marginTop: i > 0 ? theme.spacing.md : 0 }}>
+            {label !== null && <Caption>{label}</Caption>}
+            <Frame height={560}>
+              <LibraryScreen
+                model={model}
                 onPressItem={noop}
                 onToggleLike={noop}
                 onContext={noop}
+                onOpenCollection={noop}
+                onPlayCollection={noop}
+                onOpenCard={noop}
+                onOpenArtist={noop}
+                onCreatePlaylist={noop}
                 scrollEnabled={false}
               />
             </Frame>
@@ -774,55 +775,56 @@ function GalleryBody({
         ))}
       </Section>
 
+      <Section title="collection" note="top 50 · history ordering">
+        {fixtureCollectionModels.map((collection) => (
+          <ShowcaseFrame
+            key={collection.key}
+            label={`${collection.title} · ${collection.rows.length} rows`}
+            height={380}
+          >
+            <CollectionScreen
+              model={collection}
+              onBack={noop}
+              onPlayAll={noop}
+              onPressItem={noop}
+              onToggleLike={noop}
+              onContext={noop}
+              scrollEnabled={false}
+            />
+          </ShowcaseFrame>
+        ))}
+      </Section>
+
       <Section title="playlist" note="duplicates · reorder · empty">
         <Frame height={480}>
           <PlaylistScreen
             model={fixturePlaylistModel}
-            onBack={noop}
-            onPlayAll={noop}
-            onRename={noop}
-            onDelete={noop}
             onPressEntry={noop}
             onToggleLike={noop}
             onRemoveEntry={noop}
             onMoveEntry={noop}
-            scrollEnabled={false}
+            {...playlistHandlers}
           />
         </Frame>
         <View style={{ height: theme.spacing.md }} />
         <Frame height={480}>
           <PlaylistScreen
             model={fixturePlaylistModelEmpty}
-            onBack={noop}
-            onPlayAll={noop}
-            onRename={noop}
-            onDelete={noop}
-            scrollEnabled={false}
+            {...playlistHandlers}
           />
         </Frame>
       </Section>
 
       <Section title="entity" note="complete · partial+continuation · error">
         <Frame height={480}>
-          <EntityScreen
-            model={fixtureEntityModel}
-            onBack={noop}
-            onToggleLike={noop}
-            onPressItem={noop}
-            onContext={noop}
-            scrollEnabled={false}
-          />
+          <EntityScreen model={fixtureEntityModel} {...entityHandlers} />
         </Frame>
         <View style={{ height: theme.spacing.md }} />
         <Frame height={480}>
           <EntityScreen
             model={fixtureEntityModelPartial}
-            onBack={noop}
-            onToggleLike={noop}
-            onPressItem={noop}
-            onContext={noop}
             onLoadMore={noop}
-            scrollEnabled={false}
+            {...entityHandlers}
           />
         </Frame>
         <View style={{ height: theme.spacing.md }} />
@@ -889,22 +891,13 @@ function GalleryBody({
 
       <Section title="settings" note="rows + diagnostics">
         <Frame height={620}>
-          <SettingsScreen
-            model={fixtureSettingsModel}
-            onSelectRow={noop}
-            onToggleRow={noop}
-            onOpenCorrections={noop}
-            scrollEnabled={false}
-          />
+          <SettingsScreen model={fixtureSettingsModel} {...settingsHandlers} />
         </Frame>
         <View style={{ height: theme.spacing.md }} />
         <Frame height={620}>
           <SettingsScreen
             model={fixtureSettingsModelDegraded}
-            onSelectRow={noop}
-            onToggleRow={noop}
-            onOpenCorrections={noop}
-            scrollEnabled={false}
+            {...settingsHandlers}
           />
         </Frame>
       </Section>
@@ -914,25 +907,16 @@ function GalleryBody({
         note="pending · resolved · empty · loading · error"
       >
         {fixtureCorrectionsScenarios.map(([label, model]) => (
-          <View key={label} style={{ marginBottom: theme.spacing.md }}>
-            <Text
-              variant="metadata"
-              color="secondary"
-              style={{ marginBottom: 4 }}
-            >
-              {label}
-            </Text>
-            <Frame height={480}>
-              <CorrectionsScreen
-                model={model}
-                onBack={noop}
-                onFilter={noop}
-                onConfirm={noop}
-                onReject={noop}
-                onUndo={noop}
-              />
-            </Frame>
-          </View>
+          <ShowcaseFrame key={label} label={label} height={480}>
+            <CorrectionsScreen
+              model={model}
+              onBack={noop}
+              onFilter={noop}
+              onConfirm={noop}
+              onReject={noop}
+              onUndo={noop}
+            />
+          </ShowcaseFrame>
         ))}
       </Section>
 
@@ -941,25 +925,16 @@ function GalleryBody({
         note="preview → confirm → apply · typed errors"
       >
         {fixtureTransferScenarios.map(([label, model]) => (
-          <View key={label} style={{ marginBottom: theme.spacing.md }}>
-            <Text
-              variant="metadata"
-              color="secondary"
-              style={{ marginBottom: 4 }}
-            >
-              {label}
-            </Text>
-            <Frame height={520}>
-              <TransferScreen
-                model={model}
-                onBack={noop}
-                onExport={noop}
-                onPickImportFile={noop}
-                onApplyImport={noop}
-                onResetImport={noop}
-              />
-            </Frame>
-          </View>
+          <ShowcaseFrame key={label} label={label} height={520}>
+            <TransferScreen
+              model={model}
+              onBack={noop}
+              onExport={noop}
+              onPickImportFile={noop}
+              onApplyImport={noop}
+              onResetImport={noop}
+            />
+          </ShowcaseFrame>
         ))}
       </Section>
 
@@ -975,25 +950,16 @@ function GalleryBody({
             ['unavailable', fixtureSyncModelUnavailable],
           ] as const
         ).map(([label, model]) => (
-          <View key={label} style={{ marginBottom: theme.spacing.md }}>
-            <Text
-              variant="metadata"
-              color="secondary"
-              style={{ marginBottom: 4 }}
-            >
-              {label}
-            </Text>
-            <Frame height={480}>
-              <SyncScreen
-                model={model}
-                onBack={noop}
-                onPairCode={noop}
-                onPairPayload={noop}
-                onSyncNow={noop}
-                onUnpair={noop}
-              />
-            </Frame>
-          </View>
+          <ShowcaseFrame key={label} label={label} height={480}>
+            <SyncScreen
+              model={model}
+              onBack={noop}
+              onPairCode={noop}
+              onPairPayload={noop}
+              onSyncNow={noop}
+              onUnpair={noop}
+            />
+          </ShowcaseFrame>
         ))}
       </Section>
 

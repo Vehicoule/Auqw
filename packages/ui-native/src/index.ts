@@ -3,15 +3,8 @@ export type { Theme, ThemeProviderProps } from './theme.tsx';
 // The adaptive-theme source contract — apps read OS palettes into it.
 export type { ThemeSource } from '@auqw/design-tokens/adaptive';
 
-export {
-    ArtworkResolverProvider,
-    useArtworkResolver,
-    useResolvedArtworkUri,
-} from './artwork.tsx';
-export type {
-    ArtworkResolver,
-    ArtworkResolverProviderProps,
-} from './artwork.tsx';
+export { ArtworkResolverProvider } from './artwork.tsx';
+export type { ArtworkResolver } from './artwork.tsx';
 
 export * from '@auqw/ui-shared';
 
@@ -62,14 +55,10 @@ export {
 } from './states.tsx';
 export type { StateViewProps } from './states.tsx';
 
-export { AndroidNavbar, AppNavbar, IosGlassNavbar } from './navbar.tsx';
-export type { AppNavbarProps, NavbarProps } from './navbar.tsx';
-
 // Extensionless specifiers for platform-split modules: an explicit
 // '.tsx' resolves to the shared file literally under Metro and the
 // '.native.tsx' variant is never considered.
 export { PlatformTabs } from './platform-tabs';
-export type { PlatformTabsProps } from './platform-tabs';
 export { AppStack, PushScreen, SheetScreen, StackItem } from './stack';
 export type {
   AppStackProps,
@@ -129,7 +118,6 @@ export { TransferScreen } from './transfer-screen.tsx';
 export type { TransferScreenProps } from './transfer-screen.tsx';
 
 export { SyncScreen } from './sync-screen.tsx';
-export type { SyncScreenProps } from './sync-screen.tsx';
 
 export { HomeScreen } from './home-screen.tsx';
 export type { HomeScreenProps } from './home-screen.tsx';

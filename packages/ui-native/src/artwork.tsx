@@ -32,7 +32,7 @@ export function ArtworkResolverProvider({
   );
 }
 
-export function useArtworkResolver(): ArtworkResolver | null {
+function useArtworkResolver(): ArtworkResolver | null {
   return useContext(ArtworkResolverContext);
 }
 

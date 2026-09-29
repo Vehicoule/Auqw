@@ -3,10 +3,10 @@ import { FlatList, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import {
   Artwork,
-  Icon,
+  BackButton,
+  bind,
   IconButton,
   PillButton,
-  Pressable,
   Text,
 } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
@@ -115,18 +115,7 @@ export function PlaylistScreen({
           paddingHorizontal: theme.spacing.lg,
         }}
       >
-        <Pressable
-          compact
-          onPress={onBack}
-          accessibilityLabel={t('common.back')}
-          style={{ padding: theme.spacing.xs }}
-        >
-          <Icon
-            name="chevron-left"
-            size={16}
-            color={theme.colors.textSecondary}
-          />
-        </Pressable>
+        <BackButton onPress={onBack} accessibilityLabel={t('common.back')} />
         <Artwork url={model.artworkUrl} size={56} />
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text variant="heading" color="bright" numberOfLines={1}>
@@ -261,35 +250,16 @@ export function PlaylistScreen({
               row={item.row}
               badge={item.duplicate ? t('queue.badge.repeat') : null}
               reorderControls="buttons"
-              onMoveUp={
-                index > 0 && onMoveEntry !== undefined
-                  ? () => onMoveEntry(item, -1)
-                  : undefined
-              }
+              onMoveUp={index > 0 ? bind(onMoveEntry, item, -1) : undefined}
               onMoveDown={
-                index < model.entries.length - 1 &&
-                  onMoveEntry !== undefined
-                  ? () => onMoveEntry(item, 1)
+                index < model.entries.length - 1
+                  ? bind(onMoveEntry, item, 1)
                   : undefined
               }
-              onPress={
-                onPressEntry === undefined
-                  ? undefined
-                  : () => onPressEntry(item)
-              }
-              onToggleLike={
-                onToggleLike === undefined
-                  ? undefined
-                  : () => onToggleLike(item)
-              }
-              onContext={
-                onContext === undefined ? undefined : () => onContext(item)
-              }
-              onRemove={
-                onRemoveEntry === undefined
-                  ? undefined
-                  : () => onRemoveEntry(item)
-              }
+              onPress={bind(onPressEntry, item)}
+              onToggleLike={bind(onToggleLike, item)}
+              onContext={bind(onContext, item)}
+              onRemove={bind(onRemoveEntry, item)}
             />
           )}
         />
