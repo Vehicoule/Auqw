@@ -225,31 +225,31 @@ export function PlaylistScreen({
           className="uw-list"
           onKeyDown={list.onKeyDown}
         >
-          {model.entries.map((entry, index) => (
-            <TrackRow
-              key={entry.entryId}
-              row={entry.row}
-              badge={entry.duplicate ? t('queue.badge.repeat') : null}
-              reorderControls="buttons"
-              tabIndex={list.rowTabIndex(index)}
-              onFocusRow={() => list.onRowFocus(index)}
-              onMoveUp={
-                index > 0 && onMoveEntry !== undefined
-                  ? () => onMoveEntry(entry, -1)
-                  : undefined
-              }
-              onMoveDown={
-                index < model.entries.length - 1 && onMoveEntry !== undefined
-                  ? () => onMoveEntry(entry, 1)
-                  : undefined
-              }
-              onPress={bindTo(onPressEntry, entry)}
-              onToggleLike={bindTo(onToggleLike, entry)}
-              onAddToPlaylist={bindTo(onAddToPlaylist, entry)}
-              onContext={bindTo(onContext, entry)}
-              onRemove={bindTo(onRemoveEntry, entry)}
-            />
-          ))}
+          {model.entries.map((entry, index) => {
+            const moveCtl = (dir: -1 | 1) =>
+              onMoveEntry === undefined ||
+              index + dir < 0 ||
+              index + dir >= model.entries.length
+                ? undefined
+                : () => onMoveEntry(entry, dir);
+            return (
+              <TrackRow
+                key={entry.entryId}
+                row={entry.row}
+                badge={entry.duplicate ? t('queue.badge.repeat') : null}
+                reorderControls="buttons"
+                tabIndex={list.rowTabIndex(index)}
+                onFocusRow={() => list.onRowFocus(index)}
+                onMoveUp={moveCtl(-1)}
+                onMoveDown={moveCtl(1)}
+                onPress={bindTo(onPressEntry, entry)}
+                onToggleLike={bindTo(onToggleLike, entry)}
+                onAddToPlaylist={bindTo(onAddToPlaylist, entry)}
+                onContext={bindTo(onContext, entry)}
+                onRemove={bindTo(onRemoveEntry, entry)}
+              />
+            );
+          })}
         </div>
       )}
     </div>

@@ -265,6 +265,7 @@ export function useTrackList({
   const focusIndex = reconcileFocusIndex(rawFocusIndex, count);
   const listRef = useRef<HTMLDivElement | null>(null);
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    listRef.current = event.currentTarget;
     // Keys the list owns belong to the row's main action only — nested
     // buttons (like, menu, chevrons) keep their own Enter/Space so a
     // bubbling keypress can't double-fire the row's play callback.
@@ -294,10 +295,7 @@ export function useTrackList({
   };
   return {
     focusIndex,
-    onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
-      listRef.current = event.currentTarget;
-      onKeyDown(event);
-    },
+    onKeyDown,
     rowTabIndex: (index: number) => (focusIndex === -1 ? (index === 0 ? 0 : -1) : index === focusIndex ? 0 : -1),
     onRowFocus: (index: number) => setFocusIndex(index),
   };

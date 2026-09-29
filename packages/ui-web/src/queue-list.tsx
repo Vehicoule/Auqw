@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { Text } from './primitives.tsx';
-import { TrackRow } from './track-row.tsx';
+import { TrackRow, useTrackList } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
-import { useTrackList } from './track-row.tsx';
 import { t } from '@auqw/ui-shared';
 import { queueSectionLabel } from '@auqw/ui-shared/controllers';
 import type { QueueItemModel, QueueModel } from '@auqw/ui-shared';
@@ -300,8 +299,12 @@ export function QueueList({
       onKeyDown={onKeyDown}
     >
       {orderedItems.map((item, index) => {
-        const canMove =
-          reordering && canReorder && item.section === 'upNext';
+        const canMoveTo = (dir: -1 | 1) =>
+          reordering &&
+          canReorder &&
+          item.section === 'upNext' &&
+          orderedItems[index + dir]?.section === 'upNext';
+        const moveCtl = (dir: -1 | 1) => () => moveItem(item.occurrenceId, dir);
         return (
         <div key={item.occurrenceId}>
           {orderedItems[index - 1]?.section !== item.section && (
@@ -339,16 +342,8 @@ export function QueueList({
                 ? undefined
                 : () => onRemoveItem(item.occurrenceId)
             }
-            onMoveUp={
-              canMove && orderedItems[index - 1]?.section === 'upNext'
-                ? () => moveItem(item.occurrenceId, -1)
-                : undefined
-            }
-            onMoveDown={
-              canMove && orderedItems[index + 1]?.section === 'upNext'
-                ? () => moveItem(item.occurrenceId, 1)
-                : undefined
-            }
+            onMoveUp={canMoveTo(-1) ? moveCtl(-1) : undefined}
+            onMoveDown={canMoveTo(1) ? moveCtl(1) : undefined}
           />
         </div>
         );
