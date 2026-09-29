@@ -94,7 +94,7 @@ function defaultSettings(
     ...(catalog === null ? ['catalog.search'] : []),
     ...(playback === null ? ['playback.resolve'] : []),
   ];
-  if (missing.length > 0) {
+  if (catalog === null || playback === null) {
     throw new Error(
       `no provider declares ${missing.join(' / ')} — the plugin set cannot serve a session`,
     );

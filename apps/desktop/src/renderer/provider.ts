@@ -1,5 +1,4 @@
 import type {
-  AppError,
   OperationContext,
   ProviderCapability,
   ProviderPort,
@@ -12,10 +11,10 @@ import {
   createProviderWirePort,
   decodeProviderOutcome,
   err,
-  isRecord,
   providerCancelledError,
 } from '@auqw/application';
 import type { AuqwApi, RequestOutcomePayload } from '../shared/contract.ts';
+import { rawToAppError } from './ipc-errors.ts';
 
 export { manifestCapabilities } from '@auqw/application';
 
@@ -32,20 +31,6 @@ export { manifestCapabilities } from '@auqw/application';
  * DOM-free so the adapter is testable under plain Node.
  */
 export type AuqwHost = AuqwApi['host'];
-
-/** A `host.request` rejection is a ShellError-shaped value crossing IPC. */
-function hostError(thrown: unknown): AppError {
-  if (isRecord(thrown)) {
-    const message = thrown['message'];
-    return appError(
-      appErrorKind(thrown['kind']),
-      typeof message === 'string' && message.length > 0
-        ? message
-        : 'host call failed',
-    );
-  }
-  return appError('internal', 'host call failed');
-}
 
 export type PluginProvider = ProviderPort & { dispose(): void };
 
@@ -152,7 +137,8 @@ export function createPluginProvider(
         .then(
           (outcome: RequestOutcomePayload) =>
             finish(decodeProviderOutcome(outcome, appErrorKind, decode)),
-          (thrown: unknown) => finish(err(hostError(thrown))),
+          (thrown: unknown) =>
+            finish(err(rawToAppError(thrown, 'host call failed'))),
         );
     });
   }

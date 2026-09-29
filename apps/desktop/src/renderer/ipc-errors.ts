@@ -4,9 +4,17 @@ import type {
   ErrorKind,
   Result,
 } from '@auqw/application';
-import { appError, err, fromUnknown, ok, raced } from '@auqw/application';
+import {
+  appError,
+  appErrorKind,
+  err,
+  fromUnknown,
+  ok,
+  raced,
+} from '@auqw/application';
 import type { ShellErrorKind } from '../shared/errors.ts';
 import { isShellError } from '../shared/errors.ts';
+import { isRecord } from '../shared/check.ts';
 
 /**
  * Shell→application error-kind map for the port adapters. The shell's
@@ -37,6 +45,22 @@ export function shellToAppError(thrown: unknown): AppError {
     return appError(SHELL_TO_APP[thrown.kind], thrown.message);
   }
   return fromUnknown(thrown);
+}
+
+/** A raw bridge rejection: the record's kind slug maps through the
+ * taxonomy and its message survives; a non-record reads `internal`
+ * with the call site's fallback. */
+export function rawToAppError(thrown: unknown, fallback: string): AppError {
+  if (isRecord(thrown)) {
+    const message = thrown['message'];
+    return appError(
+      appErrorKind(thrown['kind']),
+      typeof message === 'string' && message.length > 0
+        ? message
+        : fallback,
+    );
+  }
+  return appError('internal', fallback);
 }
 
 /** The cancelled pre-check every observed IPC op starts with. */

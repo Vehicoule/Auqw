@@ -19,7 +19,7 @@ import type {
   StreamMarksResult,
 } from '../shared/contract.ts';
 import { mimeForPath } from '../shared/audio-mime.ts';
-import { isRecord } from '../shared/check.ts';
+import { rawToAppError } from './ipc-errors.ts';
 import {
   attachMseSource,
   MseAborted,
@@ -69,18 +69,8 @@ type StatusState = Extract<PlayerEvent, { type: 'status' }>['state'];
 type Settled = { url: string; source: MseSource | null };
 type AttachLeg = { url: string; settle: Promise<Settled>; abort(): void };
 
-function toError(thrown: unknown): AppError {
-  if (isRecord(thrown)) {
-    const message = thrown['message'];
-    return appError(
-      appErrorKind(thrown['kind']),
-      typeof message === 'string' && message.length > 0
-        ? message
-        : 'stream call failed',
-    );
-  }
-  return appError('internal', 'stream call failed');
-}
+const toError = (thrown: unknown): AppError =>
+  rawToAppError(thrown, 'stream call failed');
 
 async function guard<T>(fn: () => Promise<T>): Promise<Result<T>> {
   try {
