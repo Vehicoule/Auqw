@@ -1,23 +1,10 @@
 /**
- * `useAppShell` owns the composition both app shells used to build
- * inline: navigation + overlay stacks, the toast bus, locale
- * application, the settings write chain and picker epochs, downloads
- * ledger/usage reads, the offline playability gates, search flow
- * (session, suggestions, recents), entity fetch bookkeeping, every
- * view-model derivation, the play/report funnel, queue/playlist/
- * lyrics/radio ops, row action + playlist-picker sheets, and the
- * transfer state machine.
- *
- * What it does NOT own — the platform seams stay in the apps, wired
- * through `AppShellPorts`: how connectivity is probed, what 'owned'
- * bytes the player can attach, file pickers / SAF writes, the sync
- * surfaces (IPC panel vs engine client), artwork cache, gesture
- * morph values, and every screen's JSX.
- *
- * Genuine platform differences are parameterized, not unified:
- * `ports` carries a flag for each real divergence (see each field's
- * doc). Where both apps threaded the same callback under different
- * names the factory picked one name and the apps adapt.
+ * `useAppShell` owns the shared shell composition; the platform seams
+ * stay in the apps, wired through `AppShellPorts`: connectivity,
+ * local-playback capability, file pickers / SAF writes, sync
+ * surfaces, artwork cache, gesture morph values, and every screen's
+ * JSX. Genuine platform differences are parameterized, not unified —
+ * `ports` carries a flag for each real divergence (see each field).
  */
 import {
   appError,
@@ -45,7 +32,7 @@ import {
   reportResult,
   t,
 } from '@auqw/ui-shared';
-import type { DownloadChip } from '@auqw/ui-shared';
+import type { ActionTarget, DownloadChip } from '@auqw/ui-shared';
 
 /** The overlay variants the factory can push itself. Apps extend the
     union with their own routes (mobile adds `{ type: 'sync' }`). */
@@ -59,10 +46,8 @@ export type ShellOverlay =
   | { readonly type: 'corrections' }
   | { readonly type: 'transfer' };
 
-/** The slice of each app's SessionController the shell composition
-    reads. Both controllers satisfy this structurally — the factory
-    never touches the platform-only members (connectivity, sync,
-    artwork cache, local-playback probe). */
+/** The slice of each app's SessionController the shell reads — both
+    satisfy this structurally; platform-only members stay app-side. */
 export interface AppShellController {
   readonly session: Session;
   readonly storage: Pick<StoragePort, 'loadAttempts'>;
@@ -76,76 +61,70 @@ export interface AppShellController {
 }
 
 /** Outcome of the platform's export write. `done` carries a detail
-    CLOSURE, not a string — the transfer overlay re-derives its labels
-    on locale change, so the write reports how to rebuild the detail
-    rather than freezing one language at write time. */
+    CLOSURE — the transfer overlay re-derives its labels on locale
+    change, so the write reports how to rebuild the detail. */
 export type ExportWrite =
   | { readonly kind: 'done'; readonly detail: () => string }
   | { readonly kind: 'cancelled' }
   | { readonly kind: 'error' };
 
 /** Platform seams + the genuine behavior divergences. Every member is
-    optional unless noted; an absent flag reproduces the mobile/desktop
-    default documented on it. */
+    optional unless noted; an absent flag takes the documented
+    default. */
 export interface AppShellPorts<E> {
   /**
    * Connectivity edge stream — REQUIRED. Desktop:
    * `controller.subscribeOnline`. Mobile wraps its connectivity port:
-   * subscribe-then-snapshot with an edge guard (a delayed snapshot
-   * must not overwrite a landed edge) and a subscribe-throw fallback.
+   * subscribe-then-snapshot with an edge guard and a subscribe-throw
+   * fallback.
    */
   readonly subscribeOnline: (set: (online: boolean) => void) => () => void;
 
   /**
    * "Owned bytes the player can attach" probe — desktop:
-   * `controller.localPlaybackFor(id) !== null` (today always false —
-   * the web player has no `provider:'local'` route yet). Mobile: the
-   * ledger/local-file ownership read, which is the factory's internal
-   * `isOwned` — so mobile leaves this unset. Also drives the offline
-   * 'unavailable' marks on queue/library/playlist rows.
+   * `controller.localPlaybackFor(id) !== null`. Mobile's owned set IS
+   * the attachable set, so it leaves this unset (the factory's
+   * `isOwned`). Also drives the offline 'unavailable' row marks.
    */
   readonly localPlayable?: ((recordingId: string) => boolean) | undefined;
 
   /**
    * Desktop's attempt-action funnel: pending action labels ride
-   * `attemptActionsRef` and the `playback.failed` watcher reports
-   * engine-advanced verdicts through the deduped funnel. Mobile reports
-   * each op's own Result directly. Default false (mobile shape).
+   * `attemptActionsRef` and a `playback.failed` watcher reports
+   * engine-advanced verdicts. Mobile reports each op's own Result
+   * directly. Default false (mobile).
    */
   readonly trackAttemptActions?: boolean | undefined;
 
   /**
-   * Desktop gates next/previous on a resolvable target ALWAYS (a
-   * missing walk target no-ops even online); mobile gates only while
-   * connectivity is explicitly down. Default false (mobile shape).
+   * Desktop gates next/previous on a resolvable target ALWAYS; mobile
+   * gates only while connectivity is explicitly down. Default false.
    */
   readonly gateAdvanceAlways?: boolean | undefined;
 
   /**
    * Mobile drops a selectedRef pin when bytes are owned so downloads
    * actually play (a provider pin beats owned bytes in #pickRef);
-   * desktop always passes the entry's selectedRef. Default false.
+   * desktop always forwards the entry pin. Default false.
    */
   readonly preferOwnedRef?: boolean | undefined;
 
   /**
    * Desktop's entity play-all/shuffle filter requires `canPlayMeta`;
-   * mobile plays every fetched row. Default false (mobile shape).
+   * mobile plays every fetched row. Default false.
    */
   readonly entityPlayRequiresCanPlay?: boolean | undefined;
 
   /**
    * Mobile marks catalog/entity rows whose sourceRef is the ref the
-   * player resolved (`playingRef` into toSearchModel/toEntityModel);
-   * desktop does not mark. Default false.
+   * player resolved; desktop does not mark. Default false.
    */
   readonly markPlayingRef?: boolean | undefined;
 
   /**
    * Mobile's local catalog: provenance-local recordings overlay the
-   * session's copies in the library model, and folder-owned
-   * recordings fold into search results as `local:` rows. Desktop
-   * reads session recordings alone. Default false.
+   * session's copies, and folder-owned rows fold into search results
+   * as `local:` rows. Default false.
    */
   readonly localCatalog?: boolean | undefined;
 
@@ -153,28 +132,26 @@ export interface AppShellPorts<E> {
    * Mobile treats a home card as a recording only when its key sits
    * in the recents rail — an unrecognized suggestion key no-ops
    * instead of enqueueing a provider-keyed 'recordingId' that can
-   * only fail (activateHomeCard). Desktop presses any unmatched key
-   * through the recording path. Default false.
+   * only fail. Desktop presses any unmatched key through the
+   * recording path. Default false.
    */
   readonly strictHomeCardKeys?: boolean | undefined;
 
   /**
    * Download affordances (create-side) — mobile hides them on iOS
-   * (its provisional player has no local-attach path, so a stored
-   * byte could never play); desktop always shows. Default true.
+   * (stored bytes could never play there). Default true.
    */
   readonly downloadsEnabled?: boolean | undefined;
 
   /**
-   * Stage-open initial state — desktop's stage column mounts open,
+   * Stage-open initial state — desktop's column mounts open,
    * mobile's sheet starts collapsed. Default false.
    */
   readonly stageInitiallyOpen?: boolean | undefined;
 
   /**
    * Mobile holds the ended player model mounted through the collapse
-   * settle (ripping it out mid-gesture would vanish the sheet);
-   * desktop unmounts immediately. Default false.
+   * settle; desktop unmounts immediately. Default false.
    */
   readonly holdEndedPlayer?: boolean | undefined;
   /**
@@ -184,53 +161,46 @@ export interface AppShellPorts<E> {
   readonly resetStageMorph?: (() => void) | undefined;
 
   /**
-   * Mobile prefetches lyrics whenever the sheet is open (any mode) —
-   * desktop only while lyrics mode is showing. Default false.
+   * Mobile prefetches lyrics whenever the sheet is open (any mode);
+   * desktop only while lyrics mode shows. Default false.
    */
   readonly lyricsWhileOpen?: boolean | undefined;
 
   /**
    * Mobile returns an open sheet to player mode when the track under
-   * it changes (deep-link modes keep their explicit mode — the reset
-   * listens only for the track change). Default false.
+   * it changes. Default false.
    */
   readonly resetModeOnTrack?: boolean | undefined;
 
   /**
-   * The 'sync' settings row. Mobile pushes its dedicated sync overlay
+   * The 'sync' settings row. Mobile pushes its sync overlay
    * (`openSyncOverlay: { type: 'sync' }`); desktop scrolls+focuses the
-   * inline sync section instead (`openSync` callback bumping its
-   * focus tick). Exactly one should be set.
+   * inline sync section (`openSync`). Exactly one should be set.
    */
   readonly openSyncOverlay?: E | undefined;
   readonly openSync?: (() => void) | undefined;
 
   /**
    * Bound on how many search results feed the home suggestion-card
-   * lookup. Desktop capped it at 12 (the rail's depth); mobile's
-   * activateHomeCard searched the whole page. Unset = unbounded
-   * (mobile behavior).
+   * lookup — desktop capped it at 12 (the rail's depth); mobile
+   * searched the whole page. Unset = unbounded (mobile).
    */
   readonly homeSuggestionLimit?: number | undefined;
 
   /**
    * The mobile-only 'artworkCacheBytes' settings row opens a budget
    * picker; a shrunken cap runs `sweepArtworkCache` after the write
-   * commits (desktop filters the row out entirely — see
-   * `omitSettingsRows`). Providing `openArtworkCacheRow` is what turns
-   * the row live.
+   * commits. `openArtworkCacheRow` is what turns the row live.
    */
   readonly openArtworkCacheRow?: (() => void) | undefined;
   readonly sweepArtworkCache?: (() => void) | undefined;
 
   /**
-   * After a committed local-source mutation (add/remove/rescan) the
-   * mutated instance's rows must reach the session, and the
-   * local-read models must re-derive (`refreshLocal` bumps their
-   * tick). Both apps solve the mid-flight rehydrate swap
-   * differently — desktop re-reads the live source and syncs its
-   * snapshot; mobile rehydrates when the instance swapped and
-   * refreshes on the swap's settle instead.
+   * After a committed local-source mutation the mutated instance's
+   * rows must reach the session and the local-read models re-derive.
+   * The apps disagree on the mid-flight rehydrate swap — desktop
+   * re-reads the live source and syncs its snapshot; mobile
+   * rehydrates when the instance swapped.
    */
   readonly afterLocalMutation: (
     mutated: LocalFileSource,
@@ -252,8 +222,7 @@ export interface AppShellPorts<E> {
   /**
    * Settings-model platform inputs the factory cannot derive:
    * `localSupported` (desktop probes `local() !== null`; mobile asks
-   * the tag-reader module) and the sync row's availability + label
-   * (each app's own sync surface owns those).
+   * the tag-reader module) and the sync row's availability + label.
    */
   readonly settingsExtras: () => {
     readonly localSupported: boolean;
@@ -266,9 +235,9 @@ export interface AppShellPorts<E> {
   readonly omitSettingsRows?: readonly string[] | undefined;
 
   /**
-   * Library export write — desktop triggers a browser download; mobile
-   * writes through SAF/documents. Returns 'cancelled' when the user
-   * backed out of the destination pick (import phase resets to idle).
+   * Library export write — desktop triggers a browser download;
+   * mobile writes through SAF/documents. 'cancelled' = the user
+   * backed out of the destination pick.
    */
   readonly exportJson: (
     json: string,
@@ -320,14 +289,15 @@ export function advanceTargetId(input: {
   if (pos < 0) {
     return null;
   }
-  const wraps = input.repeat === 'all' && walk.length > 0;
-  return input.positionMs > 3_000
-    ? (walk[pos] ?? null)
-    : pos === 0
-      ? wraps
-        ? (walk[walk.length - 1] ?? null)
-        : (walk[pos] ?? null)
-      : (walk[pos - 1] ?? null);
+  const target =
+    input.positionMs > 3_000
+      ? pos
+      : pos === 0
+        ? input.repeat === 'all'
+          ? walk.length - 1
+          : 0
+        : pos - 1;
+  return walk[target] ?? null;
 }
 
 /** A row-actions sheet entry — `icon` is the subset of both
@@ -346,9 +316,7 @@ export type ShellSheetAction = {
     | 'library';
 };
 
-export type ActionTargetLike =
-  | { readonly kind: 'recording'; readonly recordingId: string }
-  | { readonly kind: 'metadata'; readonly meta: TrackMetadata };
+export type ActionTargetLike = ActionTarget;
 
 /**
  * The row-actions sheet model — identical list on both platforms.
@@ -366,94 +334,75 @@ export function rowActionsModel(input: {
   readonly radioSeedable: boolean;
 }): { readonly title: string; readonly actions: ShellSheetAction[] } {
   const { target } = input;
-  const actions: ShellSheetAction[] = [
-    // Like lives in the sheet for recording targets — the row itself
-    // keeps the heart icon only as an indicator.
-    ...(target.kind === 'recording'
-      ? [
-          {
-            key: 'like',
-            label: input.liked ? t('common.unlike') : t('common.like'),
-            icon: 'heart' as const,
-          },
-        ]
-      : []),
-    {
-      key: 'enqueue',
-      label: t('action.addToQueue'),
-      icon: 'queue' as const,
-    },
-    {
-      key: 'add',
-      label: t('sheets.addToPlaylist'),
-      icon: 'list-plus' as const,
-    },
-    // Download affordance where a provider ref can mint a stream — OR
-    // a ledger row already exists (cancel/retry/remove don't need a
-    // resolvable ref).
-    ...(target.kind === 'recording' &&
-    (input.recordFor(target.recordingId) !== null ||
-      input.downloadRefFor(target.recordingId) !== null)
-      ? [
-          {
-            key: 'download',
-            label: (() => {
-              const row = input.recordFor(target.recordingId);
-              return row === null
-                ? t('action.download')
-                : row.state === 'available'
-                  ? t('action.removeDownload')
-                  : row.state === 'failed_with_retry'
-                    ? t('action.retryDownload')
-                    : t('action.cancelDownload');
-            })(),
-            icon: 'download' as const,
-          },
-          // A failed row needs an out that isn't retry — keep vs.
-          // delete are both honest offers.
-          ...(input.recordFor(target.recordingId)?.state ===
-          'failed_with_retry'
-            ? [
-                {
-                  key: 'removeDownload',
-                  label: t('action.removeDownload'),
-                  icon: 'close' as const,
-                },
-              ]
-            : []),
-        ]
-      : []),
-    // Only offer the seed affordance when the seed's own provider
-    // declares radio.seed — routing is ref-scoped, so another
-    // provider's support is a dead end.
-    ...(input.radioSeedable
-      ? [
-          {
-            key: 'radio',
-            label: t('stage.radio.start'),
-            icon: 'radio' as const,
-          },
-        ]
-      : []),
-    ...(target.kind === 'metadata' && target.meta.albumRef != null
-      ? [
-          {
-            key: 'album',
-            label: t('action.openAlbum'),
-            icon: 'note' as const,
-          },
-        ]
-      : []),
-    ...(target.kind === 'metadata' && target.meta.artistRef != null
-      ? [
-          {
-            key: 'artist',
-            label: t('action.openArtist'),
-            icon: 'library' as const,
-          },
-        ]
-      : []),
-  ];
+  const actions: ShellSheetAction[] = [];
+  // Like lives in the sheet for recording targets — the row itself
+  // keeps the heart icon only as an indicator.
+  if (target.kind === 'recording') {
+    actions.push({
+      key: 'like',
+      label: input.liked ? t('common.unlike') : t('common.like'),
+      icon: 'heart',
+    });
+  }
+  actions.push(
+    { key: 'enqueue', label: t('action.addToQueue'), icon: 'queue' },
+    { key: 'add', label: t('sheets.addToPlaylist'), icon: 'list-plus' },
+  );
+  // Download affordance where a provider ref can mint a stream — OR
+  // a ledger row already exists (cancel/retry/remove don't need a
+  // resolvable ref).
+  if (target.kind === 'recording') {
+    const row = input.recordFor(target.recordingId);
+    if (row !== null || input.downloadRefFor(target.recordingId) !== null) {
+      actions.push({
+        key: 'download',
+        label:
+          row === null
+            ? t('action.download')
+            : row.state === 'available'
+              ? t('action.removeDownload')
+              : row.state === 'failed_with_retry'
+                ? t('action.retryDownload')
+                : t('action.cancelDownload'),
+        icon: 'download',
+      });
+      // A failed row needs an out that isn't retry — keep vs. delete
+      // are both honest offers.
+      if (row?.state === 'failed_with_retry') {
+        actions.push({
+          key: 'removeDownload',
+          label: t('action.removeDownload'),
+          icon: 'close',
+        });
+      }
+    }
+  }
+  // Only offer the seed affordance when the seed's own provider
+  // declares radio.seed — routing is ref-scoped, so another
+  // provider's support is a dead end.
+  if (input.radioSeedable) {
+    actions.push({
+      key: 'radio',
+      label: t('stage.radio.start'),
+      icon: 'radio',
+    });
+  }
+  if (target.kind === 'metadata') {
+    if (target.meta.albumRef != null) {
+      actions.push({
+        key: 'album',
+        label: t('action.openAlbum'),
+        icon: 'note',
+      });
+    }
+    if (target.meta.artistRef != null) {
+      actions.push({
+        key: 'artist',
+        label: t('action.openArtist'),
+        icon: 'library',
+      });
+    }
+  }
   return { title: input.title, actions };
 }
 
@@ -467,14 +416,11 @@ export function stageDownloadChip(input: {
   readonly downloadRefFor: (recordingId: string) => SourceRef | null;
   readonly chipFor: (recordingId: string) => DownloadChip | null;
 }): DownloadChip | null {
-  if (
-    input.recordingId === null ||
-    (input.recordFor(input.recordingId) === null &&
-      input.downloadRefFor(input.recordingId) === null)
-  ) {
-    return null;
-  }
-  return input.chipFor(input.recordingId) ?? 'idle';
+  const id = input.recordingId;
+  return id !== null &&
+    (input.recordFor(id) !== null || input.downloadRefFor(id) !== null)
+    ? (input.chipFor(id) ?? 'idle')
+    : null;
 }
 
 /** Report the failed-download's stored error before retrying — the
@@ -482,13 +428,12 @@ export function stageDownloadChip(input: {
 export function reportStoredDownloadError(
   error: { readonly kind: string; readonly message: string } | null,
 ): void {
-  if (error === null) {
-    return;
+  if (error !== null) {
+    reportResult(
+      'action.download',
+      err(appError(appErrorKind(error.kind), error.message)),
+    );
   }
-  reportResult(
-    'action.download',
-    err(appError(appErrorKind(error.kind), error.message)),
-  );
 }
 
 /**
@@ -534,14 +479,14 @@ export function playlistDownloadPlan(input: {
     readonly sourceRef: SourceRef;
   }[];
 } {
-  const requests = input.entries
-    .filter((entry) => !input.isOwned(entry.recordingId))
-    .flatMap((entry) => {
-      const sourceRef = input.downloadRefFor(entry.recordingId);
-      return sourceRef === null
-        ? []
-        : [{ recordingId: entry.recordingId, sourceRef }];
-    });
+  const requests = input.entries.flatMap((entry) => {
+    const sourceRef = input.isOwned(entry.recordingId)
+      ? null
+      : input.downloadRefFor(entry.recordingId);
+    return sourceRef === null
+      ? []
+      : [{ recordingId: entry.recordingId, sourceRef }];
+  });
   // 'all' means every entry is owned — a stored download or a local
   // file both count; only-downloadable entries gate it.
   const allStored =
