@@ -77,18 +77,22 @@ export type ControlView = {
   readonly onPress: (() => void) | undefined;
 };
 
+/**
+ * Bind a handler to fixed args — an absent handler stays undefined so
+ * the affordance renders inert (the pattern every view derives on).
+ */
+function bind<A extends readonly unknown[]>(
+  fn: ((...args: A) => void) | undefined,
+  ...args: A
+): (() => void) | undefined {
+  return fn === undefined ? undefined : () => fn(...args);
+}
+
 // ---- queue ------------------------------------------------------------
 
 /** Localized header label for a queue display section. */
 export function queueSectionLabel(key: QueueSectionKey): string {
-  switch (key) {
-    case 'nowPlaying':
-      return t('queue.nowPlaying');
-    case 'upNext':
-      return t('queue.upNext');
-    case 'history':
-      return t('queue.history');
-  }
+  return t(`queue.${key}`);
 }
 
 export type QueueScreenHandlers = {
@@ -302,10 +306,9 @@ export function useCorrectionsScreenController({
                     a11yLabel: t('corrections.a11y.confirm', {
                       title: candidate.title,
                     }),
-                    onPress:
-                      pending && onConfirm !== undefined
-                        ? () => onConfirm(row.reviewId, candidate.index)
-                        : undefined,
+                    onPress: pending
+                      ? bind(onConfirm, row.reviewId, candidate.index)
+                      : undefined,
                   })),
                   action:
                     pending
@@ -315,10 +318,7 @@ export function useCorrectionsScreenController({
                           a11yLabel: t('corrections.a11y.reject', {
                             title: row.title,
                           }),
-                          onPress:
-                            onReject === undefined
-                              ? undefined
-                              : () => onReject(row.reviewId),
+                          onPress: bind(onReject, row.reviewId),
                         }
                       : {
                           kind: 'undo',
@@ -326,10 +326,7 @@ export function useCorrectionsScreenController({
                           a11yLabel: t('corrections.a11y.undo', {
                             title: row.title,
                           }),
-                          onPress:
-                            onUndo === undefined
-                              ? undefined
-                              : () => onUndo(row.reviewId),
+                          onPress: bind(onUndo, row.reviewId),
                         },
                 };
               }),
@@ -347,8 +344,7 @@ export function useCorrectionsScreenController({
       label: t(filter.label),
       selected: model.filter === filter.value,
       a11yLabel: t('corrections.filterA11y', { label: t(filter.label) }),
-      onPress:
-        onFilter === undefined ? undefined : () => onFilter(filter.value),
+      onPress: bind(onFilter, filter.value),
     })),
     body,
   };
