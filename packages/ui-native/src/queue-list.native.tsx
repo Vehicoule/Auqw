@@ -134,14 +134,14 @@ export function QueueList({
         onDragEnd={({ from, to }) => {
           const item = items[from];
           // Reorder is confined to up-next: the drop clamps into the
-          // section, and the displaced row's canonical slot is the
-          // index the engine understands.
-          const target =
+          // section — and the clamped display slot is the destination
+          // the session's move contract indexes.
+          const destination =
             upNextStart === -1
               ? undefined
-              : items[Math.max(upNextStart, Math.min(to, upNextEnd))];
-          if (item?.section === 'upNext' && target !== undefined) {
-            onMoveItemTo(item.occurrenceId, target.index);
+              : Math.max(upNextStart, Math.min(to, upNextEnd));
+          if (item?.section === 'upNext' && destination !== undefined) {
+            onMoveItemTo(item.occurrenceId, destination);
           }
         }}
         renderItem={({

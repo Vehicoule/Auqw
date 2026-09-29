@@ -624,11 +624,12 @@ export function createWebPlayerPort(deps: {
       return;
     }
     // The cursor walks `order` positions — the dealt play order under
-    // shuffle; a malformed/absent walk reads as canonical identity.
+    // shuffle, with failed rows dropped out of the walk; an absent
+    // list reads as canonical identity.
     const order =
-      p.order.length === p.items.length
-        ? p.order
-        : p.items.map((_, i) => i);
+      p.order.length === 0
+        ? p.items.map((_, i) => i)
+        : p.order;
     const pos = order.indexOf(idx);
     if (pos < 0) {
       return;

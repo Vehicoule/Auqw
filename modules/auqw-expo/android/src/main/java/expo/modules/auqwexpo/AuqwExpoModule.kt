@@ -1500,12 +1500,13 @@ class AuqwExpoModule : Module() {
     if (p.items.map { it.occurrenceId }.toSet().size != p.items.size) {
       bad("duplicate occurrenceId")
     }
+    // The walk is a unique subsequence — failed rows legitimately
+    // drop out of it while `items` keeps every occurrence.
     if (p.order.isNotEmpty() &&
-      (p.order.size != p.items.size ||
-        p.order.any { it < 0 || it >= p.items.size } ||
+      (p.order.any { it < 0 || it >= p.items.size } ||
         p.order.toSet().size != p.order.size)
     ) {
-      bad("order must be a permutation of item indices")
+      bad("order must be a unique subsequence of item indices")
     }
     if (p.currentOccurrenceId != null &&
       p.items.none { it.occurrenceId == p.currentOccurrenceId }
