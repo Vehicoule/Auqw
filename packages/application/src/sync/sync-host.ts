@@ -203,6 +203,15 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
 
   const log = deps.log ?? (() => undefined);
 
+  /** Best-effort close — a dead advertiser/listener fails quiet. */
+  const quiet = (fn: () => void): void => {
+    try {
+      fn();
+    } catch {
+      // best effort
+    }
+  };
+
   /**
    * The endpoints worth redialing for this caller: its own
    * advertised listener addrs first (self-reported, so they survive
@@ -233,6 +242,22 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
     return list;
   }
 
+  /** Shared registry read — a store error is {ok:false} either way. */
+  async function registryFind<T>(
+    fp: string,
+    signal: CancellationSignal | undefined,
+    map: (row: SyncCallerPeer) => T,
+  ): Promise<{ ok: true; value: T | null } | { ok: false }> {
+    const found = await deps.registry.find(fp, signal);
+    if (!found.ok) {
+      return { ok: false };
+    }
+    return {
+      ok: true,
+      value: found.value === null ? null : map(found.value),
+    };
+  }
+
   const responder = createSyncResponder<SyncCallerPeer>({
     crypto: () => deps.crypto,
     attach: attachSyncPump,
@@ -244,18 +269,10 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
     armTimer,
     custody: {
       async find(fp, signal) {
-        const found = await deps.registry.find(fp, signal);
-        if (!found.ok) {
-          return { ok: false };
-        }
-        const prior = found.value;
-        return {
-          ok: true,
-          value:
-            prior === null
-              ? null
-              : { id: prior.id, pairedAt: prior.pairedAt },
-        };
+        return registryFind(fp, signal, (prior) => ({
+          id: prior.id,
+          pairedAt: prior.pairedAt,
+        }));
       },
       async put(record, signal) {
         const put = await trackWrite(deps.registry.put(record, signal));
@@ -288,28 +305,15 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
       endpoints: endpointsOf(session),
     }),
     async ownDeviceRows(session, signal) {
-      const found = await deps.registry.find(
-        session.devFp ?? '',
-        signal,
-      );
-      if (!found.ok) {
-        return { ok: false };
-      }
-      const own = found.value;
-      return {
-        ok: true,
-        value:
-          own === null
-            ? []
-            : [
-                {
-                  id: own.id,
-                  name: own.name,
-                  pairedAt: own.pairedAt,
-                  lastSeenAt: own.lastSeenAt,
-                },
-              ],
-      };
+      const own = await registryFind(session.devFp ?? '', signal, (row) => [
+        {
+          id: row.id,
+          name: row.name,
+          pairedAt: row.pairedAt,
+          lastSeenAt: row.lastSeenAt,
+        },
+      ]);
+      return own.ok ? { ok: true, value: own.value ?? [] } : own;
     },
     welcomeExtra: () => ({
       host: {
@@ -450,17 +454,9 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
         if (listenerGen < gen) {
           const bound = listener;
           listener = null;
-          try {
-            advertiser?.close();
-          } catch {
-            // best effort
-          }
+          quiet(() => advertiser?.close());
           advertiser = null;
-          try {
-            bound?.close();
-          } catch {
-            // best effort
-          }
+          quiet(() => bound?.close());
         }
       };
       const ran = lifecycle.then(teardown, teardown);
@@ -492,27 +488,15 @@ export function createSyncPairHost(deps: SyncPairHostDeps): SyncPairHost {
       await drainWrites();
       const bound = listener;
       listener = null;
-      try {
-        advertiser?.close();
-      } catch {
-        // best effort
-      }
+      quiet(() => advertiser?.close());
       advertiser = null;
-      try {
-        bound?.close();
-      } catch {
-        // best effort
-      }
+      quiet(() => bound?.close());
       const started = startPromise;
       startPromise = null;
       await started?.catch(() => undefined);
       // Terminal — the acceptor's own subscriptions (native event
       // listeners, accept threads) die with the host.
-      try {
-        deps.acceptor.close?.();
-      } catch {
-        // best effort
-      }
+      quiet(() => deps.acceptor.close?.());
     },
   };
 }
