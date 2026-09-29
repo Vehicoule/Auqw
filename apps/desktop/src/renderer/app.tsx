@@ -405,8 +405,8 @@ function Main({
           }
         })
         .catch((thrown: unknown) => {
-          opts?.onFail?.(thrown);
           if (alive()) {
+            opts?.onFail?.(thrown);
             setPairing(null);
           }
         })

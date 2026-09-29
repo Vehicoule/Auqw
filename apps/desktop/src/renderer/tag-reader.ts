@@ -75,6 +75,10 @@ export function createDesktopTagReader(api: AuqwApi): TagReaderPort {
     call: (docIds: readonly string[]) => Promise<readonly (R | null)[]>,
   ): Promise<Result<readonly (R | null)[]>> {
     const out: (R | null)[] = [];
+    const initial = ifCancelled(signal);
+    if (initial !== null) {
+      return initial;
+    }
     for (let at = 0; at < docIds.length; at += MAX_TAGREAD_BATCH) {
       const cancelled = ifCancelled(signal);
       if (cancelled !== null) {
