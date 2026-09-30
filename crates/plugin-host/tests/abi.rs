@@ -1348,6 +1348,45 @@ async fn provider_wall_fail_kind_is_accepted() {
     assert_eq!(message, "bot-check");
 }
 
+/// The published schema's `errorKind` enum and the host's accepted
+/// guest-fail vocabulary must agree — a kind the schema declares but
+/// the host rejects would make contract-valid failures die as
+/// `InvalidMessage` protocol violations instead.
+#[tokio::test]
+async fn schema_error_kind_enum_matches_guest_fail_kinds() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../sdk/contract/messages.schema.json"
+    ))
+    .expect("schema parses");
+    let kinds: Vec<String> = schema["$defs"]["errorKind"]["enum"]
+        .as_array()
+        .expect("errorKind is an enum")
+        .iter()
+        .map(|k| k.as_str().unwrap().to_string())
+        .collect();
+    for kind in &kinds {
+        let wasm = ok(wat::parse_str(raw_wat(&format!(
+            "{{\"type\":\"fail\",\"error\":{{\"kind\":\"{kind}\",\
+             \"message\":\"x\"}}}}"
+        ))));
+        let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+        let (http, _calls) = CannedHttp::new();
+        let Invocation { result, .. } = invoke(
+            &plugin,
+            "playback.resolve",
+            serde_json::json!({}),
+            &default_budgets(),
+            CancellationToken::new(),
+            svc(&http, None),
+        )
+        .await;
+        let InvokeError::GuestFail { kind: seen, .. } = err(result) else {
+            panic!("schema kind {kind} must land GuestFail, not a rejection");
+        };
+        assert_eq!(seen, *kind);
+    }
+}
+
 /// A key name is guest-controlled text reaching an error surface like
 /// any other: an unknown `done` key named after the token material the
 /// host merged into the payload must not write that token out.

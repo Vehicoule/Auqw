@@ -23,6 +23,7 @@ import { rawToAppError } from './ipc-errors.ts';
 import {
   attachMseSource,
   MseAborted,
+  PumpFailure,
   type MseFactories,
   type MseSource,
 } from './mse-source.ts';
@@ -292,7 +293,17 @@ export function createWebPlayerPort(deps: {
         return;
       }
       dropMse();
-      status('failed', appError('transient', error.message));
+      // Transport codes stay transient weather; a taxonomy slug from
+      // a re-mint rides verbatim — a provider wall laundered to
+      // 'transient' would retry the same refusal and toast the
+      // generic interruption copy instead of the wall's.
+      const kind =
+        error instanceof PumpFailure &&
+        error.code !== 'io-error' &&
+        error.code !== 'closed'
+          ? appErrorKind(error.code)
+          : 'transient';
+      status('failed', appError(kind, error.message));
     });
   }
 

@@ -48,7 +48,7 @@ const SLUG_KIND: Readonly<Record<string, ShellErrorKind>> = {
   internal: 'internal',
 };
 
-function napiSlug(thrown: unknown): string | null {
+export function napiSlug(thrown: unknown): string | null {
   // napi-rs typed errors land as `err.cause.message` = JSON blob.
   const cause =
     isRecord(thrown) && isRecord(thrown['cause'])

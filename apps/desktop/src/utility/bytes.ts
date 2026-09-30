@@ -5,6 +5,7 @@ import {
   type PumpServerMessage,
 } from '../shared/pump-protocol.ts';
 import type { PluginHostLike } from './host.ts';
+import { napiSlug } from './stream.ts';
 
 /**
  * The utility-side byte pump for one prepared stream handle. It owns a
@@ -111,7 +112,7 @@ export function createStreamPump(deps: {
             epoch,
             bytes: new Uint8Array(chunk),
           });
-        } catch {
+        } catch (thrown) {
           inFlight -= 1;
           if (readEpoch !== epoch) {
             // Stale-epoch read failed after a seek — keep pumping at
@@ -119,7 +120,11 @@ export function createStreamPump(deps: {
             // post-seek grant's credit with nothing left to spend it.
             continue;
           }
-          sendError('io-error');
+          // A typed napi rejection carries its taxonomy slug — a
+          // re-mint verdict like `provider-wall` must reach the
+          // renderer verbatim; only untyped transport deaths are
+          // io-error.
+          sendError(napiSlug(thrown) ?? 'io-error');
           return;
         }
       }

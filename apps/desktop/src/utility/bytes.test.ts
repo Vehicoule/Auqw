@@ -241,6 +241,47 @@ export async function run(): Promise<void> {
     assert(port.closed, 'failed attach closed the port');
   }
 
+  // A typed napi rejection mid-read rides its taxonomy slug — a
+  // re-mint verdict like `provider-wall` must not launder to io-error.
+  {
+    const host = fakeHost(new Uint8Array(1024).fill(9), {
+      async streamRead(): Promise<Buffer> {
+        const thrown = new Error('provider-wall: bot-check');
+        thrown.cause = new Error(
+          JSON.stringify({
+            code: 'provider-wall',
+            kind: 'provider-wall',
+            detail: 'bot-check',
+          }),
+        );
+        throw thrown;
+      },
+    });
+    const port = fakePort();
+    createStreamPump({ host: () => host, handle: 'h-5b', port });
+    port.emitMessage({ kind: 'grant', bytes: 256 });
+    await settle();
+    const error = port.sent.find((m) => m.kind === 'error');
+    assert(error !== undefined, 'typed rejection sent an error frame');
+    assertEqual(error?.['code'], 'provider-wall');
+  }
+
+  // An untyped transport rejection still surfaces as io-error.
+  {
+    const host = fakeHost(new Uint8Array(1024).fill(9), {
+      async streamRead(): Promise<Buffer> {
+        throw new Error('socket died mid-read');
+      },
+    });
+    const port = fakePort();
+    createStreamPump({ host: () => host, handle: 'h-5c', port });
+    port.emitMessage({ kind: 'grant', bytes: 256 });
+    await settle();
+    const error = port.sent.find((m) => m.kind === 'error');
+    assert(error !== undefined, 'transport rejection sent an error frame');
+    assertEqual(error?.['code'], 'io-error');
+  }
+
   // A port 'close' event detaches the stream exactly once.
   {
     const host = fakeHost(new Uint8Array(8).fill(1));
