@@ -774,7 +774,7 @@ function Main({
     closeStorefront,
     authSnapshot,
     authSheetOpen,
-    openAuthSheet,
+    onAuthRecovery,
     closeAuthSheet,
     retryAuthFlow,
     onAuthSignOut,
@@ -1236,7 +1236,7 @@ function Main({
                   onDownload={onStageDownload}
                   onAddToPlaylist={onStageAddToPlaylist}
                   onStopPlayback={() => void session.stop()}
-                  onRecovery={openAuthSheet}
+                  onRecovery={onAuthRecovery}
                   onSeek={seekToPosition}
                   peaks={peaks}
                   onRetryLyrics={onRetryLyrics}

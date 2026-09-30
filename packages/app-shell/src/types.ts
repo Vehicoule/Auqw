@@ -93,6 +93,9 @@ export interface AuthShellPort {
   cancelSignIn(): void;
   /** Drops the grant: custody, host slot, memory. */
   signOut(): Promise<Result<void>>;
+  /** Forces an immediate renewal attempt — the linked-but-dead
+   *  recovery affordance a wall CTA can offer without a sign-out. */
+  retryNow(): void;
   /** The advanced client_id override — null restores the default. */
   setClientOverride(clientId: string | null): Promise<Result<void>>;
   copyText(text: string): void;

@@ -137,26 +137,28 @@ export function createFetchOAuthHttp(
         });
       } catch {
         return err(appError('unavailable', 'oauth: network failure'));
+      }
+      try {
+        // The deadline must cover the BODY too — fetch resolves on
+        // headers; a peer stalling the body would otherwise hang past
+        // the timeout with no abort armed.
+        const text = await resp.text().catch(() => null);
+        if (text === null || text.length > OAUTH_BODY_CAP) {
+          return ok({ status: resp.status, body: null });
+        }
+        let parsed: unknown = null;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = null;
+        }
+        return ok({ status: resp.status, body: parsed });
       } finally {
         if (timer !== null) {
           clearTimeout(timer);
         }
         off?.();
       }
-      // Device-flow errors answer HTTP 400 with a JSON `error` body —
-      // parse before judging so pending/denied/expired surface
-      // distinctly instead of collapsing into a bare status.
-      const text = await resp.text().catch(() => null);
-      if (text === null || text.length > OAUTH_BODY_CAP) {
-        return ok({ status: resp.status, body: null });
-      }
-      let parsed: unknown = null;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        parsed = null;
-      }
-      return ok({ status: resp.status, body: parsed });
     },
   };
 }

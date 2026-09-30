@@ -27,6 +27,7 @@ export function createMobileAuth(controller: {
     beginSignIn: () => session.beginSignIn(),
     cancelSignIn: () => session.cancelSignIn(),
     signOut: () => session.signOut(),
+    retryNow: () => session.retryNow(),
     setClientOverride: (clientId) => session.setClientOverride(clientId),
     copyText: (text) => Clipboard.setString(text),
     openUrl: (url) => {

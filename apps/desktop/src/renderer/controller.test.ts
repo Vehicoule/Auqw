@@ -268,6 +268,7 @@ function fakeApi(): Rig {
         cancel: () => Promise.resolve(),
         signOut: () => Promise.resolve(),
         setClient: () => Promise.resolve(),
+        retry: () => Promise.resolve(),
         openUrl: () => Promise.resolve(),
         onState: () => () => {},
       },

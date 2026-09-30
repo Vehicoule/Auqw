@@ -101,6 +101,7 @@ export const CHANNELS = {
   authCancel: 'auth:cancel',
   authSignOut: 'auth:signOut',
   authSetClient: 'auth:setClient',
+  authRetry: 'auth:retry',
   authOpenUrl: 'auth:openUrl',
   /** Main→renderer push of each new auth snapshot. */
   authState: 'auth:state',

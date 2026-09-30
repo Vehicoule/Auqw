@@ -198,6 +198,12 @@ export interface AuthSession {
   restore(): Promise<void>;
   /** No-op while signed in or a flow is in flight (duplicate guard). */
   beginSignIn(): void;
+  /**
+   * Forces an immediate renewal attempt while a grant is live — the
+   * recovery affordance for a linked-but-dead bearer. No-op signed
+   * out; a flow in flight is unaffected.
+   */
+  retryNow(): void;
   /** Sheet dismissal — cancels an in-flight flow, resets a transient failure. */
   cancelSignIn(): void;
   /**
@@ -439,8 +445,33 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     );
   }
 
-  async function applyAccess(grant: TokenGrant): Promise<void> {
-    await Promise.resolve(deps.applyToken(grant.accessToken));
+  /** Host-slot writes serialize like custody writes — a pending
+   *  apply can never land after a later clear and resurrect a
+   *  dropped bearer. */
+  let accessChain: Promise<unknown> = Promise.resolve();
+
+  function writeAccess(token: string | null): Promise<void> {
+    const next = accessChain.then(() =>
+      Promise.resolve(deps.applyToken(token)),
+    );
+    accessChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  async function applyAccess(
+    grant: TokenGrant,
+    owner: string,
+  ): Promise<void> {
+    await writeAccess(grant.accessToken);
+    if (refreshToken !== owner) {
+      // The slot changed hands while the write was in flight — a
+      // sign-out's null write is chained after ours; don't claim
+      // liveness for a grant that no longer owns the slot.
+      return;
+    }
     accessExpiresAtMs = grant.expiresAtMs;
     const flipped = !bearerLive;
     bearerLive = true;
@@ -467,7 +498,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     disarmPersist();
     renewFails = 0;
     try {
-      await deps.applyToken(null);
+      await writeAccess(null);
     } catch {
       // A dead host still loses the bearer — custody clearing proceeds.
     }
@@ -543,7 +574,9 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         }
       }
       try {
-        await applyAccess(grant);
+        // Owner = the live refresh grant this mint answers —
+        // post-rotation that's the replacement, otherwise `token`.
+        await applyAccess(grant, grant.refreshToken ?? token);
       } catch (thrown) {
         // Host slot rejected — the grant is still good; retry.
         void thrown;
@@ -564,7 +597,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       // off liveness) and clear the stale token.
       bearerLive = false;
       try {
-        await deps.applyToken(null);
+        await writeAccess(null);
       } catch {
         // The flag is the truth consumers read; the host write is
         // best-effort against a possibly-dead sink.
@@ -764,7 +797,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         return;
       }
       try {
-        await applyAccess(token);
+        await applyAccess(token, token.refreshToken);
       } catch (thrown) {
         endFlow();
         status = {
@@ -800,6 +833,14 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       return ensureRestore();
     },
 
+    retryNow() {
+      if (refreshToken === null) {
+        return;
+      }
+      disarmRenew();
+      renewQueued();
+    },
+
     beginSignIn() {
       if (
         flow !== null ||
@@ -827,6 +868,15 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
             state: 'failed',
             error: appError('unavailable', 'oauth: custody read failed'),
           };
+          publish();
+          return;
+        }
+        if (refreshToken !== null) {
+          // Restore found a stored grant — the account is already
+          // linked (its refresh is queued); publish that rather
+          // than minting a second device code.
+          pendingBegin = null;
+          status = { state: 'signed-in' };
           publish();
           return;
         }
@@ -892,7 +942,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       // Host slot first — a custody failure below must never leave a
       // live bearer reachable.
       try {
-        await deps.applyToken(null);
+        await writeAccess(null);
       } catch {
         // reported through the custody write result below — the
         // dangerous direction (surviving bearer) is already handled.

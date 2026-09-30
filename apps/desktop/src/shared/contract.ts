@@ -1543,6 +1543,9 @@ export type AuqwApi = {
     readonly signOut: () => Promise<void>;
     /** The advanced client_id override — null restores the default. */
     readonly setClient: (clientId: string | null) => Promise<void>;
+    /** Forces an immediate renewal attempt — the linked-but-dead
+     *  recovery affordance. */
+    readonly retry: () => Promise<void>;
     /** Opens the device-flow verification URL — allowlisted in main. */
     readonly openUrl: (url: string) => Promise<void>;
     readonly onState: (

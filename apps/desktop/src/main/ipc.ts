@@ -356,6 +356,7 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
   fwd(CHANNELS.authCancel, noArgs),
   fwd(CHANNELS.authSignOut, noArgs),
   fwd(CHANNELS.authSetClient, isAuthSetClientArgs),
+  fwd(CHANNELS.authRetry, noArgs),
   // The verification-URL open stays in main — the utility owns no
   // shell.openExternal, and the allowlist lives at the dep.
   [

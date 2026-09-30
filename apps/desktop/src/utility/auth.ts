@@ -86,6 +86,10 @@ export function createAuthService(deps: {
       }
       return undefined;
     }),
+    'auth:retry': guarded('auth:retry', noArgs, () => {
+      session.retryNow();
+      return undefined;
+    }),
     'auth:setClient': guarded(
       'auth:setClient',
       isAuthSetClientArgs,

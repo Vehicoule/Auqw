@@ -892,6 +892,105 @@ async function testRotationPersistRetry(): Promise<void> {
   assertEqual(record.current?.refreshToken, 'r2');
 }
 
+async function testApplyRacingSignOut(): Promise<void> {
+  // A pending access apply finishing after sign-out must not
+  // resurrect the bearer — serialized writes land null last and
+  // the owner check drops the late flag.
+  const { custody } = fakeCustody({
+    v: 1,
+    refreshToken: 'r1',
+    clientId: null,
+    grantClientId: null,
+  });
+  const { oauth, refreshes } = fakeOAuth();
+  refreshes.push(ok(tokenGrant({ refreshToken: null })));
+  const pending = deferred<void>();
+  const applied: (string | null)[] = [];
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+      if (t === 'access-1') {
+        return pending.promise;
+      }
+      return Promise.resolve();
+    },
+    clock: fakeClock().clock,
+  });
+  await session.restore();
+  await flush();
+  // The mint's apply is parked; sign-out queues its null behind it.
+  const out = session.signOut();
+  pending.resolve();
+  await out;
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-out');
+  assertEqual(session.snapshot().bearerLive, false);
+  assertEqual(applied[applied.length - 1], null);
+}
+
+async function testBeginRacesRestore(): Promise<void> {
+  // A sign-in tap while the custody read is still in flight must
+  // not mint a second device code once a stored grant lands.
+  const seed = {
+    v: 1 as const,
+    refreshToken: 'r-stored',
+    clientId: 'kept',
+    grantClientId: null,
+  };
+  const { custody } = fakeCustody(seed);
+  const pendingRead = deferred<Result<AuthCustodyRecord | null>>();
+  custody.read = () => pendingRead.promise;
+  const { oauth, calls, refreshes } = fakeOAuth();
+  refreshes.push(ok(tokenGrant({ refreshToken: null })));
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  pendingRead.resolve(ok(seed));
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-in');
+  assert(
+    calls.every((c) => c.kind !== 'begin'),
+    'device flow minted despite a restored grant',
+  );
+}
+
+async function testRetryNow(): Promise<void> {
+  // The recovery verb bypasses the renewal backoff — the refresh
+  // fires on the next tick, not after the retry timer.
+  const { custody } = fakeCustody({
+    v: 1,
+    refreshToken: 'r1',
+    clientId: null,
+    grantClientId: null,
+  });
+  const { oauth, refreshes, calls } = fakeOAuth();
+  refreshes.push(ok(tokenGrant({ refreshToken: null })));
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  await session.restore();
+  await flush();
+  const before = calls.filter((c) => c.kind === 'refresh').length;
+  refreshes.push(
+    ok(tokenGrant({ accessToken: 'a2', refreshToken: null })),
+  );
+  session.retryNow();
+  await flush();
+  assertEqual(
+    calls.filter((c) => c.kind === 'refresh').length,
+    before + 1,
+  );
+}
+
 async function testDuplicateBegin(): Promise<void> {
   const { custody } = fakeCustody(null);
   const { oauth, begins, pollDeferreds } = fakeOAuth();
@@ -935,5 +1034,8 @@ export async function run(): Promise<void> {
   await testBearerLiveExpires();
   await testCustodyReadFailGatesVerbs();
   await testRotationPersistRetry();
+  await testApplyRacingSignOut();
+  await testBeginRacesRestore();
+  await testRetryNow();
   await testDuplicateBegin();
 }

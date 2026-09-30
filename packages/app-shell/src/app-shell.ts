@@ -323,6 +323,16 @@ export function useAppShell<E extends { readonly type: string } = never>(
     setAuthSheetOpen(false);
     authPort?.cancelSignIn();
   }, [authPort]);
+  // Wall CTA: opens the sheet AND acts on the link it describes — a
+  // linked-but-dead grant (signed-in, bearer expired) gets an
+  // immediate renewal nudge rather than an inert account pane.
+  const onAuthRecovery = useCallback(() => {
+    openAuthSheet();
+    const snap = authPort?.snapshot();
+    if (snap?.status.state === 'signed-in' && !snap.bearerLive) {
+      authPort?.retryNow();
+    }
+  }, [authPort, openAuthSheet]);
   // In-sheet retry after a terminal verdict (denied/expired/error).
   const retryAuthFlow = useCallback(() => {
     authPort?.beginSignIn();
@@ -3264,6 +3274,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     authSnapshot,
     authSheetOpen,
     openAuthSheet,
+    onAuthRecovery,
     closeAuthSheet,
     retryAuthFlow,
     onAuthSignOut,

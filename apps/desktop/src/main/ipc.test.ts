@@ -532,6 +532,7 @@ export async function run(): Promise<void> {
       CHANNELS.authBegin,
       CHANNELS.authCancel,
       CHANNELS.authSignOut,
+      CHANNELS.authRetry,
     ]) {
       const forwarded = await invoke(channel, undefined);
       assert(forwarded.ok, `${channel} did not forward`);

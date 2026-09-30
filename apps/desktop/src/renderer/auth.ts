@@ -100,6 +100,9 @@ export function createDesktopAuth(api: AuqwApi): AuthShellPort {
         (thrown: unknown) => err(shellToAppError(thrown)),
       );
     },
+    retryNow() {
+      void api.auth.retry().catch(() => undefined);
+    },
     setClientOverride(clientId: string | null): Promise<Result<void>> {
       return api.auth.setClient(clientId).then(
         () => ok(undefined),

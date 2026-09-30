@@ -449,6 +449,7 @@ const api: AuqwApi = {
       invoke(CHANNELS.authSignOut, undefined, isUndefinedResult),
     setClient: (clientId) =>
       invoke(CHANNELS.authSetClient, { clientId }, isUndefinedResult),
+    retry: () => invoke(CHANNELS.authRetry, undefined, isUndefinedResult),
     openUrl: (url) =>
       invoke(CHANNELS.authOpenUrl, { url }, isUndefinedResult),
     onState: subscribeTo(

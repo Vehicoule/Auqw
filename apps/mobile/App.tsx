@@ -916,7 +916,7 @@ function Main({
     closeStorefront,
     authSnapshot,
     authSheetOpen,
-    openAuthSheet,
+    onAuthRecovery,
     closeAuthSheet,
     retryAuthFlow,
     onAuthSignOut,
@@ -2312,7 +2312,7 @@ function Main({
               download={stageDownload}
               onDownload={onStageDownload}
               onAddToPlaylist={onStageAddToPlaylist}
-              onRecovery={openAuthSheet}
+              onRecovery={onAuthRecovery}
               onSeek={
                 heldOccurrenceId !== null
                   ? (ms) => {
