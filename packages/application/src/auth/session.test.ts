@@ -20,6 +20,7 @@ import type {
   AuthClock,
   AuthCustody,
   AuthCustodyRecord,
+  AuthPendingFlow,
   AuthSnapshot,
 } from './session.ts';
 import type {
@@ -192,6 +193,23 @@ function testCustodyValidator(): void {
     }),
     'full record rejected',
   );
+  assert(
+    isAuthCustodyRecord({
+      v: 1,
+      refreshToken: null,
+      clientId: null,
+      grantClientId: null,
+      pendingFlow: {
+        deviceCode: 'dev-code',
+        userCode: 'ABCD-EFGH',
+        verificationUrl: 'https://www.google.com/device',
+        intervalMs: 1_000,
+        expiresAtMs: 60_000,
+        clientId: 'client-1',
+      },
+    }),
+    'pending-flow record rejected',
+  );
   for (const bad of [
     null,
     { v: 1 },
@@ -201,6 +219,35 @@ function testCustodyValidator(): void {
     { v: 1, refreshToken: '', clientId: null },
     { v: 1, refreshToken: null, clientId: null, extra: 1 },
     { v: 1, refreshToken: 'x'.repeat(5000), clientId: null },
+    {
+      v: 1,
+      refreshToken: null,
+      clientId: null,
+      grantClientId: null,
+      pendingFlow: { deviceCode: 'dev-code' },
+    },
+    {
+      v: 1,
+      refreshToken: null,
+      clientId: null,
+      grantClientId: null,
+      pendingFlow: 'dev-code',
+    },
+    {
+      v: 1,
+      refreshToken: null,
+      clientId: null,
+      grantClientId: null,
+      pendingFlow: {
+        deviceCode: 'dev-code',
+        userCode: 'ABCD-EFGH',
+        verificationUrl: 'https://www.google.com/device',
+        intervalMs: 1_000,
+        expiresAtMs: 60_000,
+        clientId: 'client-1',
+        extra: 1,
+      },
+    },
   ]) {
     assert(
       !isAuthCustodyRecord(bad),
@@ -314,9 +361,11 @@ async function testSignInFlow(): Promise<void> {
   assert(seen.includes('starting'), 'starting never published');
   assert(seen.includes('authorizing'), 'authorizing never published');
   assertDeepEqual(applied, ['access-1']);
-  // The refresh grant persisted BEFORE signed-in published.
-  assertEqual(writes.length, 1);
-  assertEqual(writes[0]?.refreshToken, 'refresh-1');
+  // The minted flow persisted first (resume hook), then the refresh
+  // grant BEFORE signed-in published.
+  assertEqual(writes.length, 2);
+  assertEqual(writes[0]?.pendingFlow?.deviceCode, 'dev-code');
+  assertEqual(writes[1]?.refreshToken, 'refresh-1');
   // begin → 3 polls (pending, slowDown, granted)
   assertEqual(calls.length, 4);
 }
@@ -347,7 +396,9 @@ async function testSignInCancelMidPoll(): Promise<void> {
   await flush();
   assertEqual(session.snapshot().status.state, 'signed-out');
   assertEqual(applied.length, 0);
-  assertEqual(writes.length, 0);
+  // The pending record survives dismissal — that's the resume hook.
+  assertEqual(writes.length, 1);
+  assertEqual(writes[0]?.pendingFlow?.deviceCode, 'dev-code');
 }
 
 async function testSignInDenied(): Promise<void> {
@@ -366,7 +417,9 @@ async function testSignInDenied(): Promise<void> {
   const status = session.snapshot().status;
   assert(status.state === 'failed', 'denied did not fail');
   assertEqual(status.error.kind, 'permission-denied');
-  assertEqual(writes.length, 0);
+  // pending write + denial clear — the dead code can't be resumed.
+  assertEqual(writes.length, 2);
+  assertEqual(writes[1]?.pendingFlow, undefined);
   // A failed flow is re-beginnable — the sheet's retry row works.
   session.cancelSignIn();
   begins.push(ok(deviceGrant()));
@@ -419,10 +472,12 @@ async function testSignInNoRefreshToken(): Promise<void> {
   await flush();
   const status = session.snapshot().status;
   // A grant that can't outlive its ~1h access token is a failure,
-  // not a silent half-link — no custody write, no host bearer.
+  // not a silent half-link — no grant write, no host bearer; the
+  // persisted pending is cleared (its custody write + the clear).
   assert(status.state === 'failed', 'missing refresh token signed in');
   assertEqual(status.error.kind, 'invalid-response');
-  assertEqual(writes.length, 0);
+  assertEqual(writes.length, 2);
+  assertEqual(writes[1]?.pendingFlow, undefined);
   assertEqual(applied.length, 0);
 }
 
@@ -1011,6 +1066,224 @@ async function testDuplicateBegin(): Promise<void> {
   session.cancelSignIn();
 }
 
+// ------------------------------------------------------------------
+// Persisted device flow — interrupted approvals resume
+// ------------------------------------------------------------------
+
+function pendingFlow(over: Partial<AuthPendingFlow> = {}): AuthPendingFlow {
+  return {
+    deviceCode: 'dev-code',
+    userCode: 'ABCD-EFGH',
+    verificationUrl: 'https://www.google.com/device',
+    intervalMs: 1_000,
+    expiresAtMs: 60_000,
+    clientId: 'minted-client',
+    ...over,
+  };
+}
+
+async function testResumeAfterDismissal(): Promise<void> {
+  const { custody, record, writes } = fakeCustody(null);
+  const { oauth, begins, polls, calls } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  const applied: (string | null)[] = [];
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  await flush();
+  assert(
+    session.snapshot().status.state === 'authorizing',
+    'never reached authorizing',
+  );
+  // Sheet dismissed mid-approve — the poll dies but the record
+  // keeps the code Google may have already granted.
+  session.cancelSignIn();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-out');
+  const saved = record.current?.pendingFlow;
+  assert(saved !== undefined && saved !== null, 'pending not persisted');
+  assertEqual(saved.deviceCode, 'dev-code');
+  // Reopening resumes on the SAME code — no second mint.
+  polls.push(ok({ type: 'granted', grant: tokenGrant() }));
+  session.beginSignIn();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-in');
+  assertEqual(
+    calls.filter((c) => c.kind === 'begin').length,
+    1,
+    'resume minted a second device code',
+  );
+  // The resumed poll rides the client_id the code was minted under.
+  const lastPoll = [...calls].reverse().find((c) => c.kind === 'poll');
+  assertEqual(lastPoll?.creds.clientId, saved.clientId);
+  // The grant write consumed the pending record.
+  assertEqual(record.current?.refreshToken, 'refresh-1');
+  assertEqual(record.current?.pendingFlow, undefined);
+  assertDeepEqual(applied, ['access-1']);
+  assertEqual(writes[writes.length - 1]?.refreshToken, 'refresh-1');
+}
+
+async function testBootResumesPendingFlow(): Promise<void> {
+  const { custody, record } = fakeCustody({
+    v: 1,
+    refreshToken: null,
+    clientId: null,
+    grantClientId: null,
+    pendingFlow: pendingFlow(),
+  });
+  const { oauth, polls, calls } = fakeOAuth();
+  polls.push(ok({ type: 'granted', grant: tokenGrant() }));
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  // Process died while the user approved in the browser — boot
+  // re-arms the same poll; the landed grant applies itself.
+  await session.restore();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-in');
+  assertEqual(
+    calls.filter((c) => c.kind === 'begin').length,
+    0,
+    'boot resume minted a code',
+  );
+  const poll = calls.find((c) => c.kind === 'poll');
+  assertEqual(poll?.creds.clientId, 'minted-client');
+  assertEqual(record.current?.refreshToken, 'refresh-1');
+}
+
+async function testExpiredPendingMintsFresh(): Promise<void> {
+  const { custody } = fakeCustody({
+    v: 1,
+    refreshToken: null,
+    clientId: null,
+    grantClientId: null,
+    pendingFlow: pendingFlow({ expiresAtMs: 1_000 }),
+  });
+  const { oauth, begins, polls, calls } = fakeOAuth();
+  const clock = fakeClock(10_000);
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: clock.clock,
+  });
+  await session.restore();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-out');
+  assertEqual(calls.length, 0, 'expired pending resumed');
+  begins.push(ok(deviceGrant()));
+  polls.push(ok({ type: 'granted', grant: tokenGrant() }));
+  session.beginSignIn();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-in');
+}
+
+async function testPendingWriteFailureFailsBegin(): Promise<void> {
+  // The sealed write rejects — a code that can't survive
+  // interruption is never offered; the failure is typed.
+  const failing: AuthCustody = {
+    read: () => Promise.resolve(ok(null)),
+    write: () =>
+      Promise.resolve(err(appError('unavailable', 'seal failed'))),
+    clear: () => Promise.resolve(ok(undefined)),
+  };
+  const { oauth, begins, calls } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  const session = createAuthSession({
+    custody: failing,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  await flush();
+  const status = session.snapshot().status;
+  assert(status.state === 'failed', 'pending-write failure still ran');
+  assertEqual(status.error.kind, 'unavailable');
+  assertEqual(calls.filter((c) => c.kind === 'poll').length, 0);
+  // The failed mint is forgotten — a retry must mint fresh, never
+  // resume the code that was never persisted.
+  begins.push(ok(deviceGrant()));
+  session.beginSignIn();
+  await flush();
+  assertEqual(
+    calls.filter((c) => c.kind === 'begin').length,
+    2,
+    'retry resumed an unpersisted code',
+  );
+}
+
+async function testOverrideDoesNotReviveFailedPending(): Promise<void> {
+  // Pending write parked in flight; an override write queues behind
+  // it. The pending write then fails — the queued write must not
+  // resurrect the code it snapshotted before the failure.
+  const writes: AuthCustodyRecord[] = [];
+  const gate = deferred<Result<void>>();
+  let calls = 0;
+  const custody: AuthCustody = {
+    read: () => Promise.resolve(ok(null)),
+    write: (next) => {
+      writes.push(next);
+      calls += 1;
+      return calls === 1 ? gate.promise : Promise.resolve(ok(undefined));
+    },
+    clear: () => Promise.resolve(ok(undefined)),
+  };
+  const { oauth, begins } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  await flush();
+  assertEqual(writes.length, 1, 'pending write never queued');
+  assertEqual(writes[0]?.pendingFlow?.deviceCode, 'dev-code');
+  const override = session.setClientOverride('new-client');
+  gate.resolve(err(appError('unavailable', 'seal failed')));
+  await flush();
+  await override;
+  assertEqual(writes.length, 2, 'override write never landed');
+  assertEqual(writes[1]?.clientId, 'new-client');
+  assertEqual(
+    writes[1]?.pendingFlow,
+    undefined,
+    'override resurrected the failed pending code',
+  );
+}
+
+async function testDeniedClearsPendingRecord(): Promise<void> {
+  const { custody, record } = fakeCustody(null);
+  const { oauth, begins, polls } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  polls.push(ok({ type: 'denied' }));
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  await flush();
+  assert(
+    session.snapshot().status.state === 'failed',
+    'denied did not fail',
+  );
+  assertEqual(record.current?.refreshToken, null);
+  assertEqual(record.current?.pendingFlow, undefined);
+}
+
 export async function run(): Promise<void> {
   testCustodyValidator();
   await testRestoreEmpty();
@@ -1038,4 +1311,10 @@ export async function run(): Promise<void> {
   await testBeginRacesRestore();
   await testRetryNow();
   await testDuplicateBegin();
+  await testResumeAfterDismissal();
+  await testBootResumesPendingFlow();
+  await testExpiredPendingMintsFresh();
+  await testDeniedClearsPendingRecord();
+  await testPendingWriteFailureFailsBegin();
+  await testOverrideDoesNotReviveFailedPending();
 }
