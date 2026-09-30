@@ -11,6 +11,7 @@ import {
   isStreamMarksResult,
   isStreamOpenArgs,
   isStreamPrepareArgs,
+  isStreamProbeArgs,
   isStreamReadArgs,
 } from '../shared/contract.ts';
 import { isRecord } from '../shared/check.ts';
@@ -211,6 +212,17 @@ export function createStreamHandlers(deps: {
           'base64',
         ),
       })),
+
+    [CHANNELS.streamProbe]: napiCall(isStreamProbeArgs, 'stream:probe',
+      napiError, async (h, a) => {
+        const r = await h.streamProbe(
+          a.handle,
+          a.position,
+          a.maxLen,
+          a.fetch ?? true,
+        );
+        return { data: r.data.toString('base64'), total: r.total, eof: r.eof };
+      }),
 
     [CHANNELS.streamClose]: napiCall(isStreamHandleArgs, 'stream:close',
       napiError, (h, a) => void h.streamClose(a.handle)),

@@ -34,6 +34,7 @@ export const CHANNELS = {
   streamServeUrl: 'stream:serve-url',
   streamOpen: 'stream:open',
   streamRead: 'stream:read',
+  streamProbe: 'stream:probe',
   streamClose: 'stream:close',
   streamRelease: 'stream:release',
   streamMarks: 'stream:marks',

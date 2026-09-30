@@ -21,6 +21,13 @@
  */
 import { ok, err, appError } from '../src/errors.ts';
 import type { Result } from '../src/errors.ts';
+import { createPeaksTracker } from '../src/peaks-tracker.ts';
+import type { PeaksTrackerDeps } from '../src/peaks-tracker.ts';
+import type {
+  PeaksPort,
+  PeaksStore,
+  WaveformPeak,
+} from '../src/ports/peaks.ts';
 import { Session } from '../src/session/session.ts';
 import type {
   AttemptTrace,
@@ -60,6 +67,33 @@ const LAT = {
   mint: 550,
   attach: 40,
 } as const;
+
+/**
+ * Waveform-peaks extraction legs (documented estimates, same style as
+ * LAT). Probes are bounded ranged reads on the minted session — one
+ * WAN round-trip each, overlapped `concurrency`-wide. Decode is the
+ * measured OfflineAudioContext cost of one ~5 s stereo cluster
+ * (~30 ms on this box). `headCommitted` models a head probe landing
+ * on bytes the pump already committed (peek serve + IPC) — the mint's
+ * speculative fill commits the head before 'prepared' lands, so even
+ * cold prepares get the committed rate; `headFetch` is the pessimistic
+ * cold-fetch bound for streams whose pump hadn't reached the head yet.
+ */
+const PEAKS = {
+  store: 10, // sqlite point lookup → persisted profile
+  headCommitted: 5,
+  headFetch: 150,
+  probe: 150, // one ranged GET round on the session's connection
+  decode: 30, // one cluster's decode + bucket
+  concurrency: 4,
+  coarseSamples: 5, // emit threshold inside the extractor
+  samples: 24, // coarse + refine probe budget
+} as const;
+
+const PEAK_PROFILE: readonly WaveformPeak[] = Array.from(
+  { length: 256 },
+  (_, i) => ({ up: ((i * 37) % 100) / 100, down: ((i * 53) % 100) / 200 }),
+);
 
 const TRACE: AttemptTrace = {
   requestId: 'req-x',
@@ -205,7 +239,13 @@ type Legs = {
   resolveAck: number;
   mint: number;
   attach: number;
+  peaks: number;
 };
+
+/** One settleable step of the modeled peaks pipeline. `apply` runs
+ * after the clock has already advanced by `ms` — it emits the coarse
+ * profile, resolves the port call, or settles a store hit. */
+type PeakLeg = { readonly ms: number; readonly apply?: () => void };
 
 type Env = {
   session: Session;
@@ -225,10 +265,25 @@ type Env = {
   served: { prepare: number; prewarm: number };
   seq: number;
   playingEmitted: boolean;
-  marks: { clickAtMs: number; bufferingAtMs: number | null; playingAtMs: number | null };
+  /** Peak extraction work queued by the fake port, FIFO like the
+   * player's deferreds — drive() pays one leg per round. */
+  peaksJobs: PeakLeg[][];
+  /** Recording ids with a persisted peaks profile (store hit). */
+  peaksStoredIds: ReadonlySet<string>;
+  /** The waveform tracker — same wiring `useWaveformPeaks` builds. */
+  peaksTracker: ReturnType<typeof peaksTrackerFor>;
+  /** The id the tracker already pulled — pull once per attempt. */
+  peaksPulledFor: string | null;
+  marks: {
+    clickAtMs: number;
+    bufferingAtMs: number | null;
+    playingAtMs: number | null;
+    peaksCoarseAtMs: number | null;
+    peaksFinalAtMs: number | null;
+  };
 };
 
-function newEnv(state: PersistedState): Env {
+function buildEnv(state: PersistedState): Env {
   const storage = new FakeStorage(state);
   const player = new FakePlayer();
   const itunes = new FakeProvider('itunes');
@@ -251,13 +306,103 @@ function newEnv(state: PersistedState): Env {
     itunes,
     ytm,
     clock,
-    legs: { commit: 0, candidates: 0, resolveAck: 0, mint: 0, attach: 0 },
+    legs: { commit: 0, candidates: 0, resolveAck: 0, mint: 0, attach: 0, peaks: 0 },
     counts: { commits: 0, candidates: 0, prepares: 0, prewarms: 0 },
     served: { prepare: 0, prewarm: 0 },
     seq: 0,
     playingEmitted: false,
-    marks: { clickAtMs: -1, bufferingAtMs: null, playingAtMs: null },
+    peaksJobs: [],
+    peaksStoredIds: new Set(),
+    peaksTracker: null as never,
+    peaksPulledFor: null,
+    marks: {
+      clickAtMs: -1,
+      bufferingAtMs: null,
+      playingAtMs: null,
+      peaksCoarseAtMs: null,
+      peaksFinalAtMs: null,
+    },
   };
+}
+
+function newEnv(state: PersistedState): Env {
+  const env = buildEnv(state);
+  env.peaksTracker = peaksTrackerFor(env);
+  return env;
+}
+
+/**
+ * The waveform pipeline, wired exactly like `useWaveformPeaks`: a
+ * tracker over a port whose work is paid out as PeakLeg rounds inside
+ * drive(). `onCoarse` marks the first real-bar moment; the promise's
+ * settle marks the refined profile. A store hit resolves inside one
+ * 10 ms DB leg instead of opening the probe path.
+ */
+function peaksTrackerFor(env: Env) {
+  const store: PeaksStore = {
+    load: (recordingId) =>
+      new Promise((resolve) => {
+        if (!env.peaksStoredIds.has(recordingId)) {
+          resolve(null);
+          return;
+        }
+        env.peaksJobs.push([
+          {
+            ms: PEAKS.store,
+            apply: () => {
+              env.marks.peaksCoarseAtMs = env.clock.nowMs();
+              env.marks.peaksFinalAtMs = env.clock.nowMs();
+              resolve(PEAK_PROFILE);
+            },
+          },
+        ]);
+      }),
+    save: () => Promise.resolve(),
+  };
+  const port: PeaksPort = {
+    peaks(request) {
+      return new Promise<Result<readonly WaveformPeak[]>>((resolve) => {
+        // Head probe lands on bytes the mint's speculative fill
+        // already committed — peek serve + IPC on every path; the
+        // tail Cues probe is the one fetch that always costs a RTT.
+        const legs: PeakLeg[] = [
+          { ms: PEAKS.headCommitted },
+          { ms: PEAKS.probe },
+        ];
+        const rounds = Math.ceil(PEAKS.samples / PEAKS.concurrency);
+        const coarseRound = Math.ceil(
+          PEAKS.coarseSamples / PEAKS.concurrency,
+        );
+        for (let r = 1; r <= rounds; r++) {
+          legs.push({
+            ms: PEAKS.probe + PEAKS.decode,
+            apply:
+              r === coarseRound
+                ? () => {
+                    env.marks.peaksCoarseAtMs = env.clock.nowMs();
+                    request.onCoarse?.(PEAK_PROFILE);
+                  }
+                : undefined,
+          });
+        }
+        legs.push({
+          ms: 0,
+          apply: () => {
+            env.marks.peaksFinalAtMs = env.clock.nowMs();
+            resolve(ok(PEAK_PROFILE));
+          },
+        });
+        env.peaksJobs.push(legs);
+      });
+    },
+  };
+  const deps: PeaksTrackerDeps = {
+    port,
+    clock: env.clock,
+    store,
+    onChange: () => {},
+  };
+  return createPeaksTracker(deps);
 }
 
 /** Builds a candidates result that matches the call's own query. */
@@ -327,6 +472,22 @@ async function drive(
     // prior row's stale 'playing' status is not the click landing.
     if (env.marks.bufferingAtMs === null && playbackStatus(env) === 'buffering') {
       env.marks.bufferingAtMs = env.clock.nowMs();
+      // The waveform pull fires the moment `peaksTarget` materializes
+      // — same trigger `useWaveformPeaks` uses: the first visible
+      // 'buffering' state already carries the borrowed handle.
+      const snap = env.session.snapshot();
+      if (snap.type === 'ready' && snap.playback.type === 'buffering') {
+        const pb = snap.playback;
+        const peaksId = `${pb.recordingId}|${pb.identity.attemptId}`;
+        if (env.peaksPulledFor !== peaksId) {
+          env.peaksPulledFor = peaksId;
+          env.peaksTracker.pull({
+            id: peaksId,
+            handle: pb.handle,
+            durationMs: pb.durationMs ?? null,
+          });
+        }
+      }
     }
     if (
       env.marks.bufferingAtMs !== null &&
@@ -366,6 +527,21 @@ async function drive(
       env.legs.commit += LAT.commit;
       env.counts.commits += 1;
       env.storage.settleCommit(ok(undefined));
+      continue;
+    }
+    // Peaks legs settle ahead of unrelated background work — probes
+    // ride the click's own stream-session connection, while other
+    // rows' candidates and warm mints run on separate ones; in the
+    // real app they overlap, so the model pays peaks first.
+    const peakJob = env.peaksJobs[0];
+    if (peakJob !== undefined) {
+      const leg = peakJob.shift()!;
+      env.clock.advance(leg.ms);
+      env.legs.peaks += leg.ms;
+      leg.apply?.();
+      if (peakJob.length === 0) {
+        env.peaksJobs.shift();
+      }
       continue;
     }
     // Candidates calls race in parallel (independent HTTP requests) —
@@ -438,6 +614,11 @@ async function driveClick(
         playbackStatus(env) !== 'buffering'),
     60,
   );
+  // Then let the waveform finish under the same leg model — peaks
+  // keep working while playback runs, so the marks close out after
+  // 'playing' lands exactly as the render would trail the first
+  // audio frame.
+  await drive(env, () => env.peaksJobs.length === 0, 60);
   return intent;
 }
 
@@ -446,6 +627,9 @@ function markClick(env: Env): void {
   env.marks.clickAtMs = env.clock.nowMs();
   env.marks.bufferingAtMs = null;
   env.marks.playingAtMs = null;
+  env.marks.peaksCoarseAtMs = null;
+  env.marks.peaksFinalAtMs = null;
+  env.peaksPulledFor = null;
   env.playingEmitted = false;
 }
 
@@ -454,15 +638,20 @@ function report(
   env: Env,
   extra: Record<string, unknown> = {},
 ): Record<string, unknown> {
-  const { clickAtMs, bufferingAtMs, playingAtMs } = env.marks;
+  const { clickAtMs, bufferingAtMs, playingAtMs, peaksCoarseAtMs, peaksFinalAtMs } = env.marks;
   return {
     scenario,
     clickToBufferMs:
       bufferingAtMs === null ? null : bufferingAtMs - clickAtMs,
     clickToPlayMs: playingAtMs === null ? null : playingAtMs - clickAtMs,
+    clickToPeaksCoarseMs:
+      peaksCoarseAtMs === null ? null : peaksCoarseAtMs - clickAtMs,
+    clickToPeaksFinalMs:
+      peaksFinalAtMs === null ? null : peaksFinalAtMs - clickAtMs,
     legs: env.legs,
     counts: env.counts,
     latencyModel: LAT,
+    peaksLatencyModel: PEAKS,
     ...extra,
   };
 }
@@ -701,8 +890,26 @@ async function warmQueueSuccessorQuiet() {
   });
 }
 
+/**
+ * Scenario: same cold pinned tap, but the recording's peaks profile
+ * is persisted — the store hit serves the waveform inside one DB leg
+ * and the probe path never runs. This is the repeat-play fast path.
+ */
+async function coldQueuePinnedStoredPeaks() {
+  const env = newEnv(threeTrackQueue());
+  await env.session.restore();
+  env.peaksStoredIds = new Set(['rB']);
+  await drive(env, () => env.storage.pendingCommits === 0);
+  markClick(env);
+  const res = await driveClick(env, env.session.playOccurrence('oB'));
+  return report('cold.queue-row.pinned.stored-peaks', env, {
+    intentOk: res.ok,
+  });
+}
+
 const scenarios = [
   coldQueuePinned,
+  coldQueuePinnedStoredPeaks,
   coldQueueUnmapped,
   coldCatalogTapSameProvider,
   coldCatalogTapCrossProvider,

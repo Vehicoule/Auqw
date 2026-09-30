@@ -10,7 +10,32 @@ import type { Result } from '../errors.ts';
 export type PeaksRequest = {
   readonly handle: string;
   readonly durationMs: number | null;
+  /**
+   * Fires at most once, when a coarse-but-real profile is ready
+   * before the refined result lands: sampled extractors emit it
+   * after their first probe round so the seek bar draws measured
+   * bars in the sub-200ms window instead of holding the placeholder
+   * for the full sweep. The promise still resolves the refined
+   * profile — coarse output is real measured data, never a
+   * fabricated-looking placeholder, and the final result always
+   * supersedes it.
+   */
+  readonly onCoarse?: (peaks: readonly WaveformPeak[]) => void;
 };
+
+/**
+ * Persistence for finished peak profiles, keyed by content identity
+ * (the recording id, not an attempt — a re-prepared stream replays
+ * the same audio, so attempt-keyed entries guaranteed cold repeats
+ * on every retry). Implementations live wherever the app keeps
+ * device-local caches; a `null` store keeps the tracker memory-only.
+ */
+export interface PeaksStore {
+  /** Load the persisted profile for `recordingId`, if one exists. */
+  load(recordingId: string): Promise<readonly WaveformPeak[] | null>;
+  /** Persist a final (never coarse, never failed) profile. */
+  save(recordingId: string, peaks: readonly WaveformPeak[]): Promise<void>;
+}
 
 /**
  * Decorative extraction bound shared by every `PeaksPort`: decoded

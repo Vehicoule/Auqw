@@ -40,7 +40,7 @@ mod testkit;
 pub use error::StreamError;
 pub use fetch::{BodyStream, Fetch, FetchResponse, RangeRequest, ReqwestFetch};
 pub use marks::PhaseMarks;
-pub use registry::{PrepareInfo, StreamRegistry, SweepReport};
+pub use registry::{PrepareInfo, ProbeRead, StreamRegistry, SweepReport};
 pub use server::StreamServer;
 
 use std::path::PathBuf;

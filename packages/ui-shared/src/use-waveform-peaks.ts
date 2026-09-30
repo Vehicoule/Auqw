@@ -1,24 +1,32 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createClock, createPeaksTracker } from '@auqw/application';
-import type { PeaksPort, PeaksTarget, WaveformPeak } from '@auqw/application';
+import type {
+  PeaksPort,
+  PeaksStore,
+  PeaksTarget,
+  WaveformPeak,
+} from '@auqw/application';
 
 export type { PeaksTarget } from '@auqw/application';
 
 /**
  * Real waveform peaks for the currently playing recording — lazily
- * extracted on track change, cached per attempt (`recordingId|attemptId`
- * — a re-prepared stream never inherits the attempt it replaced), a
- * `null` entry marks a settled failure so the placeholder baseline
- * sticks without re-pulling on every render, and a small LRU bounds
- * memory. A cancelled extraction never caches — revisiting the
+ * extracted on track change, cached per recording (content identity —
+ * a re-prepared stream replays the same audio), a `null` entry marks
+ * a settled failure so the placeholder baseline sticks without
+ * re-pulling on every render, and a small LRU bounds memory. A
+ * cancelled extraction never caches — revisiting the
  * track retries. Returns `null` while pending or on failure — the
- * renderer falls back to `waveformPlaceholder`. The lifecycle itself
- * lives in `@auqw/application`'s `peaks-tracker.ts`; this hook only
- * bridges it to React.
+ * renderer falls back to `waveformPlaceholder`. A coarse-but-measured
+ * profile can land first — the tracker swaps the refined result in
+ * under it, so bars only ever get more honest, never pop. The
+ * lifecycle itself lives in `@auqw/application`'s `peaks-tracker.ts`;
+ * this hook only bridges it to React.
  */
 export function useWaveformPeaks(
   port: PeaksPort | null,
   target: PeaksTarget | null,
+  store?: PeaksStore | null,
 ): readonly WaveformPeak[] | null {
   const [, setTick] = useState(0);
   const tracker = useMemo(
@@ -28,9 +36,10 @@ export function useWaveformPeaks(
         : createPeaksTracker({
             port,
             clock: createClock(),
+            store: store ?? undefined,
             onChange: () => setTick((tick) => tick + 1),
           }),
-    [port],
+    [port, store],
   );
 
   const id = target?.id ?? null;

@@ -61,6 +61,12 @@ export type PluginHostLike = {
     position: number,
     maxLen: number,
   ): Promise<Buffer>;
+  streamProbe(
+    handle: string,
+    position: number,
+    maxLen: number,
+    fetch: boolean,
+  ): Promise<{ data: Buffer; total: number | null; eof: boolean }>;
   streamClose(handle: string): void;
   streamRelease(handle: string): void;
   streamPhaseMarks(handle: string): unknown;

@@ -27,7 +27,7 @@ use tokio::runtime::Handle;
 use crate::error::{lock, StreamError};
 use crate::fetch::{Fetch, ReqwestFetch};
 use crate::marks::{now_ms, PhaseMarks};
-use crate::pump::pump_loop;
+use crate::pump::{classify_status, drive_fetch, pump_loop, FetchOutcome};
 use crate::session::{PoolSignals, SessionInner};
 use crate::store::Sidecar;
 use crate::{PreparedSource, Remint, StreamConfig};
@@ -56,6 +56,21 @@ pub struct PrepareInfo {
     /// is never on it, but the list still carries every *other*
     /// unattached, unclaimed session the scan ended.
     pub superseded: Vec<String>,
+}
+
+/// What [`StreamRegistry::probe`] returns: the contiguous bytes at
+/// the requested position plus the best-known stream total.
+#[derive(Debug, Clone)]
+pub struct ProbeRead {
+    /// Contiguous committed bytes from `position` — empty on a
+    /// confirmed EOF and on a fetch-disabled hole.
+    pub bytes: Vec<u8>,
+    /// Best-known stream total (wire `Content-Range` wins over the
+    /// resolve-time hint); `None` while neither has produced one.
+    pub total: Option<u64>,
+    /// `position` is confirmed at/past end-of-stream — never true
+    /// for a mere unfetched hole.
+    pub eof: bool,
 }
 
 /// How the startup sweep settled leftover session files.
@@ -360,6 +375,131 @@ impl StreamRegistry {
         max_len: u64,
     ) -> Result<Option<Vec<u8>>, StreamError> {
         self.session(handle)?.peek(position, max_len)
+    }
+
+    /// One probe read's outcome: the contiguous bytes served or
+    /// fetched at `position`, the best-known stream total, and a
+    /// confirmed-EOF flag. `fetch: false` on a hole returns
+    /// `bytes: []`, `eof: false` — the caller treats that as "not
+    /// committed yet", never as end-of-stream.
+    ///
+    /// A probe is a *decorative* read: it queues no demand, never
+    /// parks, and moves no read position. On a committed hit it is
+    /// `peek` semantics plus the total report; on a hole with
+    /// `fetch` enabled it issues ONE bounded ranged GET through the
+    /// session's own `Fetch` — same URL, same mint headers, same
+    /// `206`/`Content-Range` validation as the pump — and commits the
+    /// bytes into the sparse store, so a probed extent is real data
+    /// every later reader (playback included) serves for free. It
+    /// never re-mints: a `403` reads back as `Expired` for the caller
+    /// to retry once the element's own demand has re-minted, and a
+    /// `429` stakes the same provider cooldown the pump honors (the
+    /// probe errors `RateLimited` rather than landing inside the ask).
+    ///
+    /// # Errors
+    /// [`StreamError::NotFound`] for an unknown handle; the session's
+    /// terminal error if it already ended; `RateLimited` while a
+    /// provider `Retry-After` window is still open; the classified
+    /// wire/status error otherwise.
+    pub async fn probe(
+        &self,
+        handle: &str,
+        position: u64,
+        max_len: u64,
+        fetch: bool,
+    ) -> Result<ProbeRead, StreamError> {
+        let session = self.session(handle)?;
+        // Probe requests cap at the pump's chunk size — a decoration
+        // asks for bounded samples, not segments.
+        let want = max_len.clamp(1, session.config.chunk_bytes);
+        // Committed hit or a confirmed hole/EOF — the peek semantics,
+        // with the total riding along either way.
+        if let Some(bytes) = session.peek(position, want)? {
+            return Ok(ProbeRead {
+                eof: bytes.is_empty(),
+                bytes,
+                total: session.effective_total()?,
+            });
+        }
+        let total = session.effective_total()?;
+        if !fetch {
+            return Ok(ProbeRead {
+                bytes: Vec::new(),
+                total,
+                eof: false,
+            });
+        }
+        // An open provider `Retry-After` window binds every leg —
+        // probes included. Under-waiting is the hammer the header
+        // exists to prevent.
+        if let Some(wait) = session.cooldown_remaining() {
+            return Err(StreamError::RateLimited {
+                message: format!("probe at {position} inside provider cooldown"),
+                retry_after_ms: Some(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX)),
+            });
+        }
+        let (url, headers) = session.current_fetch()?;
+        match drive_fetch(&session, &*self.fetch, &url, &headers, position, want).await? {
+            FetchOutcome::Committed => {
+                // Re-peek serves exactly what was committed — the
+                // same bytes every later reader sees.
+                let bytes = session.peek(position, want)?.unwrap_or_default();
+                Ok(ProbeRead {
+                    eof: bytes.is_empty(),
+                    bytes,
+                    total: session.effective_total()?,
+                })
+            }
+            FetchOutcome::Status(416, range_total, _) => {
+                // Same wire rule as the pump: a `bytes */N` total is
+                // authoritative — a refusal AT/PAST it confirms EOF;
+                // one covering the probe position is self-contradictory
+                // and must not set a ceiling it can't honor.
+                if let Some(total) = range_total {
+                    session.check_total(total)?;
+                    if position < total {
+                        return Err(StreamError::InvalidResponse {
+                            message: format!(
+                                "416 at offset {position} but Content-Range declares total {total}"
+                            ),
+                        });
+                    }
+                    session.mark_eof_below(total);
+                    return Ok(ProbeRead {
+                        bytes: Vec::new(),
+                        total: session.effective_total()?,
+                        eof: true,
+                    });
+                }
+                // Bare refusal: ambiguous between real EOF and a dead
+                // signed URL, and the probe never re-mints to
+                // disambiguate — it confirms only what the known total
+                // already proves; otherwise the position is simply
+                // unprobed (`eof: false` like an unfetched hole).
+                let proven = matches!(session.effective_total()?, Some(t) if position >= t);
+                Ok(ProbeRead {
+                    bytes: Vec::new(),
+                    total: session.effective_total()?,
+                    eof: proven,
+                })
+            }
+            FetchOutcome::Status(429, _, retry_after_ms) => {
+                // Stake the provider's ask session-wide — whichever
+                // leg fetches next owes the remainder.
+                let e = classify_status(429, position, retry_after_ms);
+                if let Some(ms) = retry_after_ms {
+                    session.set_cooldown(std::time::Instant::now() + Duration::from_millis(ms));
+                }
+                Err(e)
+            }
+            // `403` is a dead mint — `Expired`, not `InvalidResponse`:
+            // the caller's retry lands after the element's own demand
+            // has re-minted the session.
+            FetchOutcome::Status(403, _, _) => Err(StreamError::Expired),
+            FetchOutcome::Status(status, _, retry_after_ms) => {
+                Err(classify_status(status, position, retry_after_ms))
+            }
+        }
     }
 
     /// DataSource close: detaches the consumer; the session stays live

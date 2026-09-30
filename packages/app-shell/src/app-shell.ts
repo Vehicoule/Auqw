@@ -2168,7 +2168,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
           durationMs: playback.durationMs ?? null,
         }
       : null;
-  const peaks = useWaveformPeaks(ports.peaksPort ?? null, peaksTarget);
+  const peaks = useWaveformPeaks(
+    ports.peaksPort ?? null,
+    peaksTarget,
+    ports.peaksStore ?? null,
+  );
 
   const onPlayPause = useCallback(() => {
     // Pause is always allowed; resuming a remote track while offline

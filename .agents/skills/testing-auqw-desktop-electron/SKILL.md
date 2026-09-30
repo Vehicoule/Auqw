@@ -331,6 +331,76 @@ kill as its own command).
   sheet which shows the typed inline error `guest failure (transient):
   transient: bot-check` — that's the correct surface, not a crash.
 
+## Capturing precise pipeline timings (no stopwatch needed)
+
+`ELECTRON_ENABLE_LOGGING=1` in the launch env forwards renderer
+`console.*` to the launch shell's stderr as `[INFO:CONSOLE:line]`
+lines — including logs from `packages/*` code bundled into app.js.
+For latency evidence, temporarily add `console.log('MARK', Math.round(
+performance.now()), ...)` lines at the points of interest (e.g.
+peaks-tracker's pull/store-load/onCoarse/settle, and a render-signature
+log inside `useWaveformPeaks`'s return). Build (`pnpm build`) — esbuild
+bundles @auqw/* from source so edits land in dist — then grep the
+launch log for the marks. Revert the edits and rebuild when done;
+console.log in tracker code also runs under node in unit tests
+(harmless noise) but should not be committed.
+
+## peaks_cache / sqlite verification
+
+The app DB is `~/.config/auqw-desktop/auqw.db` (userData). sqlite3
+lives at `~/Android/Sdk/platform-tools/sqlite3` on this box:
+
+```
+~/Android/Sdk/platform-tools/sqlite3 ~/.config/auqw-desktop/auqw.db \
+  "select recording_id, length(peaks_json), fetched_ms from peaks_cache; \
+   select version from schema_version;"
+```
+
+`delete from peaks_cache` before a run forces an honest cold
+(store-miss) extraction; a relaunch then replays to a store-hit.
+
+## stream:probe / IPC seam probing via devtools
+
+Every `window.auqw.stream.*` call is usable from devtools
+(Ctrl+Shift+I) on either page. The dev-gate harness prints the handle
+(`dev-prepared st-0-0 (audio/webm)`), so a probe can be driven
+directly:
+
+```
+window.auqw.stream.probe({handle:'st-0-0',position:4000000,maxLen:65536,fetch:false})
+// hole -> {data:'', total:N, eof:false}; fetch:true -> bytes + ONE ranged
+// GET at that offset; same fetch:false after -> bytes with NO new request
+```
+
+Peek (fetch:false) proves sparse-store commit; the ranged fixture log
+proves the positional fetch. Probe at an offset past the prepare-time
+speculative head fill (~3 MiB on the box) or it serves committed bytes
+and you learn nothing.
+
+## New IPC channels need fwd() in main's table — easy to miss
+
+A new `CHANNELS.*` entry + preload invoke + utility napiCall is NOT
+enough: `src/main/ipc.ts` must also forward it (`fwd(CHANNELS.x, isXArgs)`).
+Missing fwd → renderer sees `Error invoking remote method 'x': Error:
+No handler registered for 'x'` and feature code silently falls back.
+Found live on the waveform PR (stream:probe unwired → sampled path
+never ran). A contract sweep now exists in ipc.test.ts asserting every
+preload invoke has a main-side registration.
+
+## youtube-music waveform-path specifics
+
+- Product UI radio sessions resolve audio/webm opus on this box —
+  exercises the sampled webm extractor (needs >4 MiB total AND <8 min
+  declared duration; a 7-min track at ~130 kbps is ~7 MB — safe pick).
+- Cold sampled run observed: pull->store-miss ~4ms, coarse profile
+  ~335ms, first rendered bars ~340ms, refined profile ~790ms.
+- Store-hit replay after app restart: pull->hit ~5ms, bars same tick,
+  zero probe traffic. In-session replays hit the tracker's MEMORY
+  cache instead — store-load never fires; app restart is required to
+  prove the persisted path.
+- itunes/deezer catalog rows feed metadata only; playback always
+  resolves through youtube-music regardless of catalog provider.
+
 # Suggested additions to testing-auqw-desktop-electron (verified 2026-09-30 on devin/1790807912-tab-latency)
 
 ## World (top-level) tab notes — keep-alive era

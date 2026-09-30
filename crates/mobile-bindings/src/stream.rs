@@ -128,6 +128,29 @@ impl From<surface::StreamError> for StreamError {
     }
 }
 
+/// One `stream_probe` result: contiguous bytes at the requested
+/// position, the best-known stream total, and a confirmed-EOF flag.
+#[derive(uniffi::Record)]
+pub struct StreamProbeResult {
+    /// Contiguous bytes from `position` — empty on a confirmed EOF
+    /// and on a fetch-disabled hole (`eof` distinguishes them).
+    pub data: Vec<u8>,
+    /// Best-known stream total, when one exists.
+    pub total: Option<u64>,
+    /// `position` is confirmed at/past end-of-stream.
+    pub eof: bool,
+}
+
+impl From<surface::StreamProbeResult> for StreamProbeResult {
+    fn from(r: surface::StreamProbeResult) -> Self {
+        Self {
+            data: r.bytes,
+            total: r.total,
+            eof: r.eof,
+        }
+    }
+}
+
 /// Lifecycle marks for one stream session: epoch-ms timestamps plus
 /// durations, for joining intent → prepared → attached → rendered.
 #[derive(uniffi::Record)]
@@ -236,6 +259,30 @@ impl PluginHost {
     ) -> Result<Option<Vec<u8>>, StreamError> {
         self.inner
             .stream_peek(handle, position, max_len)
+            .map_err(StreamError::from)
+    }
+
+    /// Probing read for decorative consumers (waveform peaks): a
+    /// committed hit serves already-buffered bytes; on a hole with
+    /// `fetch` enabled it issues ONE bounded ranged GET through the
+    /// session's own fetch and commits the bytes so later readers
+    /// serve them for free. Queues no pump demand, moves no read
+    /// position. Blocks the calling thread on the runtime — **foreign
+    /// (JNI) threads only**, same rule as `stream_read`.
+    ///
+    /// # Errors
+    /// [`StreamError::Unavailable`] when the seam is not configured;
+    /// [`StreamError::Failed`] with the session's kind otherwise.
+    pub fn stream_probe(
+        &self,
+        handle: String,
+        position: u64,
+        max_len: u64,
+        fetch: bool,
+    ) -> Result<StreamProbeResult, StreamError> {
+        self.inner
+            .stream_probe_blocking(handle, position, max_len, fetch)
+            .map(StreamProbeResult::from)
             .map_err(StreamError::from)
     }
 

@@ -110,6 +110,28 @@ pub struct StreamPhaseMarks {
     pub attach_ms: Option<u64>,
 }
 
+/// One probe read's outcome: contiguous bytes at the requested
+/// position, the best-known stream total, and a confirmed-EOF flag.
+pub struct StreamProbeResult {
+    /// Contiguous bytes from `position` — empty on a confirmed EOF
+    /// and on a fetch-disabled hole (`eof` distinguishes them).
+    pub bytes: Vec<u8>,
+    /// Best-known stream total, when one exists.
+    pub total: Option<u64>,
+    /// `position` is confirmed at/past end-of-stream.
+    pub eof: bool,
+}
+
+impl From<auqw_stream::ProbeRead> for StreamProbeResult {
+    fn from(r: auqw_stream::ProbeRead) -> Self {
+        Self {
+            bytes: r.bytes,
+            total: r.total,
+            eof: r.eof,
+        }
+    }
+}
+
 impl From<PhaseMarks> for StreamPhaseMarks {
     fn from(m: PhaseMarks) -> Self {
         Self {
@@ -835,6 +857,56 @@ impl PluginHost {
         self.stream_registry()?
             .peek(&handle, position, max_len)
             .map_err(seam_err)
+    }
+
+    /// Probing read for decorative consumers (waveform peaks): a
+    /// committed hit serves like `stream_peek` plus the stream total;
+    /// on a hole with `fetch` enabled it issues ONE bounded ranged
+    /// GET through the session's own fetch — same wire rules as the
+    /// pump — and commits the bytes so later readers serve them for
+    /// free. Queues no pump demand, never parks, moves no read
+    /// position. Async: run it on the host runtime, or use
+    /// [`PluginHost::stream_probe_blocking`] from a foreign thread.
+    ///
+    /// # Errors
+    /// [`StreamError::Unavailable`] when the seam is not configured;
+    /// [`StreamError::Failed`] with the session's kind otherwise.
+    pub async fn stream_probe(
+        &self,
+        handle: String,
+        position: u64,
+        max_len: u64,
+        fetch: bool,
+    ) -> Result<StreamProbeResult, StreamError> {
+        self.stream_registry()?
+            .probe(&handle, position, max_len, fetch)
+            .await
+            .map(StreamProbeResult::from)
+            .map_err(seam_err)
+    }
+
+    /// [`PluginHost::stream_probe`] for foreign (JNI) threads: blocks
+    /// the calling thread on the runtime. Parking a runtime worker on
+    /// it is a bug — a probe outlives at most one bounded request.
+    ///
+    /// # Errors
+    /// [`StreamError::Unavailable`] when the seam is not configured;
+    /// [`StreamError::Failed`] with the session's kind otherwise.
+    pub fn stream_probe_blocking(
+        &self,
+        handle: String,
+        position: u64,
+        max_len: u64,
+        fetch: bool,
+    ) -> Result<StreamProbeResult, StreamError> {
+        self.runtime
+            .block_on(self.stream_probe(handle, position, max_len, fetch))
+    }
+
+    /// The host runtime handle — for bindings that must spawn an
+    /// async surface call (napi's `streamProbe`).
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.handle().clone()
     }
 
     /// DataSource close: detaches the consumer; the session stays live

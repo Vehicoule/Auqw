@@ -86,6 +86,8 @@ function fakeStream(overrides: Partial<StreamClient> = {}): StreamClient & {
     },
     open: () => Promise.resolve({ remaining: null }),
     read: () => Promise.resolve({ data: '' }),
+    probe: () =>
+      Promise.resolve({ data: '', total: null, eof: false }),
     close: () => Promise.resolve(undefined),
     release: (args) => {
       record('release')(args);
