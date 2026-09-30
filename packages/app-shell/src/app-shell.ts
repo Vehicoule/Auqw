@@ -317,12 +317,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
       authPort.beginSignIn();
     }
   }, [authPort]);
-  // Sheet dismissal cancels the poll — a closed sheet never leaves a
-  // zombie loop. On 'failed' it also resets the row to signed-out.
+  // Sheet dismissal is a UI gesture, not an abort: the user may still
+  // be approving in the browser, so the poll keeps running and a
+  // landed grant signs in without a reopen. The persisted pending
+  // flow (session-side) survives process death the same way.
   const closeAuthSheet = useCallback(() => {
     setAuthSheetOpen(false);
-    authPort?.cancelSignIn();
-  }, [authPort]);
+  }, []);
   // Wall CTA: opens the sheet AND acts on the link it describes — a
   // linked-but-dead grant (signed-in, bearer expired) gets an
   // immediate renewal nudge rather than an inert account pane.

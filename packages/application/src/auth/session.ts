@@ -8,7 +8,10 @@
  *
  * Custody rules:
  *  - The refresh grant is the only persisted credential. Access
- *    tokens live in memory + the host slot, never on disk.
+ *    tokens live in memory + the host slot, never on disk. An
+ *    in-flight device flow is persisted too — a dismissed sheet or a
+ *    killed process must not discard the code the user is approving;
+ *    the poll re-arms over it on restore/reopen.
  *  - The user-supplied `clientId` override is a preference — it rides
  *    the same sealed record so custody writes stay atomic, and
  *    sign-out preserves it while dropping the grant.
@@ -73,6 +76,22 @@ export type AuthSnapshot = {
  * are nullable (never absent) so a partial record can't smuggle an
  * undeclared shape through JSON.parse.
  */
+/**
+ * An in-flight device flow — persisted so an interrupted approval
+ * (sheet dismissed mid-poll, or the whole app process dying while the
+ * user is in the browser) can resume polling the same device code
+ * instead of throwing the grant Google already minted away.
+ */
+export type AuthPendingFlow = {
+  readonly deviceCode: string;
+  readonly userCode: string;
+  readonly verificationUrl: string;
+  readonly intervalMs: number;
+  readonly expiresAtMs: number;
+  /** The client_id the code was minted under — polls must reuse it. */
+  readonly clientId: string;
+};
+
 export type AuthCustodyRecord = {
   readonly v: 1;
   readonly refreshToken: string | null;
@@ -83,6 +102,8 @@ export type AuthCustodyRecord = {
    * after the override preference moves.
    */
   readonly grantClientId: string | null;
+  /** Optional — absent once a flow grants, denies, or lapses. */
+  readonly pendingFlow?: AuthPendingFlow | undefined;
 };
 
 export const EMPTY_AUTH_CUSTODY: AuthCustodyRecord = {
@@ -92,22 +113,53 @@ export const EMPTY_AUTH_CUSTODY: AuthCustodyRecord = {
   grantClientId: null,
 };
 
+function isPendingFlow(value: unknown): value is AuthPendingFlow {
+  const numOk = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, [
+      'deviceCode',
+      'userCode',
+      'verificationUrl',
+      'intervalMs',
+      'expiresAtMs',
+      'clientId',
+    ]) &&
+    typeof value['deviceCode'] === 'string' &&
+    value['deviceCode'].length > 0 &&
+    value['deviceCode'].length <= 4096 &&
+    typeof value['userCode'] === 'string' &&
+    value['userCode'].length <= 64 &&
+    typeof value['verificationUrl'] === 'string' &&
+    value['verificationUrl'].length <= 512 &&
+    numOk(value['intervalMs']) &&
+    numOk(value['expiresAtMs']) &&
+    typeof value['clientId'] === 'string' &&
+    value['clientId'].length > 0 &&
+    value['clientId'].length <= 512
+  );
+}
+
 export function isAuthCustodyRecord(
   value: unknown,
 ): value is AuthCustodyRecord {
   const idOk = (v: unknown) =>
     v === null ||
     (typeof v === 'string' && v.length > 0 && v.length <= 512);
+  const baseKeys = ['v', 'refreshToken', 'clientId', 'grantClientId'];
   return (
     isRecord(value) &&
-    hasExactKeys(value, ['v', 'refreshToken', 'clientId', 'grantClientId']) &&
+    (hasExactKeys(value, baseKeys) ||
+      hasExactKeys(value, [...baseKeys, 'pendingFlow'])) &&
     value['v'] === 1 &&
     (value['refreshToken'] === null ||
       (typeof value['refreshToken'] === 'string' &&
         value['refreshToken'].length > 0 &&
         value['refreshToken'].length <= 4096)) &&
     idOk(value['clientId']) &&
-    idOk(value['grantClientId'])
+    idOk(value['grantClientId']) &&
+    (value['pendingFlow'] === undefined ||
+      isPendingFlow(value['pendingFlow']))
   );
 }
 
@@ -267,6 +319,10 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
   /** Issuer of the live `refreshToken` — refresh exchanges ride
    *  this, never the moving override. */
   let grantClientId: string | null = null;
+  /** The persisted in-flight device flow — memory mirror of the
+   *  record's `pendingFlow` field; resume hooks read it, terminal
+   *  poll outcomes clear it. */
+  let pendingFlow: AuthPendingFlow | null = null;
   let bearerLive = false;
   const listeners = new Set<() => void>();
   let current: AuthSnapshot = { status, clientId: null, bearerLive };
@@ -347,6 +403,66 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       () => undefined,
     );
     return next;
+  }
+
+  /** Whole-record write carrying (or dropping) the in-flight flow. */
+  function writePending(
+    flowRec: AuthPendingFlow | null,
+  ): Promise<Result<void>> {
+    return writeCustody({
+      v: 1,
+      refreshToken: null,
+      clientId: clientIdOverride,
+      grantClientId: null,
+      ...(flowRec !== null ? { pendingFlow: flowRec } : {}),
+    });
+  }
+
+  /**
+   * Forget the persisted flow — best-effort; the write is skipped
+   * once a refresh grant exists (its own record write already
+   * replaced the record), so it can never clobber a landed grant.
+   */
+  function clearPendingCustody(): void {
+    pendingFlow = null;
+    if (refreshToken !== null) {
+      return;
+    }
+    void writePending(null);
+  }
+
+  /**
+   * Re-arm a poll over the persisted device grant — used by restore
+   * and by begin's resume branch. Identical to the live flow:
+   * dismissal cancels it, a granted verdict applies and clears.
+   */
+  function resumePendingFlow(): void {
+    const pending = pendingFlow;
+    if (pending === null || flow !== null || pendingBegin !== null) {
+      return;
+    }
+    const source = new CancellationSource();
+    const grant: DeviceGrant = {
+      deviceCode: pending.deviceCode,
+      userCode: pending.userCode,
+      verificationUrl: pending.verificationUrl,
+      intervalMs: pending.intervalMs,
+      expiresAtMs: pending.expiresAtMs,
+    };
+    flow = {
+      source,
+      grant,
+      intervalMs: grant.intervalMs,
+      creds: credsFor(pending.clientId),
+    };
+    status = {
+      state: 'authorizing',
+      userCode: grant.userCode,
+      verificationUrl: grant.verificationUrl,
+      expiresAtMs: grant.expiresAtMs,
+    };
+    publish();
+    void runPollLoop(source, grant, grant.intervalMs);
   }
 
   function disarmRenew(): void {
@@ -492,6 +608,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
   async function dropGrant(): Promise<void> {
     refreshToken = null;
     grantClientId = null;
+    pendingFlow = null;
     accessExpiresAtMs = 0;
     bearerLive = false;
     disarmRenew();
@@ -621,6 +738,15 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     clientIdOverride = read.value.clientId;
     refreshToken = read.value.refreshToken;
     grantClientId = read.value.grantClientId;
+    pendingFlow = read.value.pendingFlow ?? null;
+    if (
+      refreshToken !== null ||
+      (pendingFlow !== null && pendingFlow.expiresAtMs <= clock.now())
+    ) {
+      // A grant landed while the app was gone, or the code already
+      // lapsed — the record self-cleans on the next custody write.
+      pendingFlow = null;
+    }
     if (refreshToken !== null && status.state === 'signed-out') {
       // The stored grant IS the signed-in state — publish before the
       // first exchange resolves so a cold/offline boot still renders
@@ -630,6 +756,11 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     publish();
     if (refreshToken !== null) {
       renewQueued();
+    } else {
+      // An approval interrupted mid-flight (sheet closed, process
+      // killed while the user was in the browser) resumes silently —
+      // a landed grant applies itself instead of being discarded.
+      resumePendingFlow();
     }
   }
 
@@ -671,6 +802,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         return;
       }
       if (clock.now() >= grant.expiresAtMs) {
+        clearPendingCustody();
         endFlow();
         status = {
           state: 'failed',
@@ -700,6 +832,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         verdict.type !== 'granted' &&
         clock.now() >= grant.expiresAtMs
       ) {
+        clearPendingCustody();
         endFlow();
         status = {
           state: 'failed',
@@ -715,20 +848,17 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         interval += SLOWDOWN_STEP_MS;
         continue;
       }
-      if (verdict.type === 'denied') {
+      if (verdict.type === 'denied' || verdict.type === 'expired') {
+        // The code is dead server-side — the persisted flow can't be
+        // resumed, so forget it.
+        clearPendingCustody();
         endFlow();
         status = {
           state: 'failed',
-          error: appError('permission-denied', 'oauth: denied'),
-        };
-        publish();
-        return;
-      }
-      if (verdict.type === 'expired') {
-        endFlow();
-        status = {
-          state: 'failed',
-          error: appError('expired', 'oauth: device code expired'),
+          error:
+            verdict.type === 'denied'
+              ? appError('permission-denied', 'oauth: denied')
+              : appError('expired', 'oauth: device code expired'),
         };
         publish();
         return;
@@ -741,6 +871,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         // token — signing in on it would strand the user mid-session
         // with no renew path, so it's a typed failure, not a silent
         // half-linked state.
+        clearPendingCustody();
         endFlow();
         status = {
           state: 'failed',
@@ -765,6 +896,9 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       }
       refreshToken = token.refreshToken;
       grantClientId = owned.creds.clientId;
+      // The grant write replaces the record whole — the persisted
+      // flow is consumed.
+      pendingFlow = null;
       const wrote = await writeCustody({
         v: 1,
         refreshToken: token.refreshToken,
@@ -880,6 +1014,24 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
           publish();
           return;
         }
+        if (flow !== null) {
+          // Restore resumed a persisted flow — the poll is already
+          // running under its own source.
+          pendingBegin = null;
+          return;
+        }
+        if (pendingFlow !== null && pendingFlow.expiresAtMs > clock.now()) {
+          // An approval interrupted mid-flight resumes on the same
+          // device code — the sheet shows the identical userCode and
+          // the poll picks up where it left off.
+          pendingBegin = null;
+          resumePendingFlow();
+          return;
+        }
+        if (pendingFlow !== null) {
+          // Expired record — forgotten; the mint below rewrites it.
+          pendingFlow = null;
+        }
         const beginCreds = creds();
         const begun = await oauth.beginDeviceFlow(beginCreds, {
           timeoutMs: OAUTH_REQUEST_TIMEOUT_MS,
@@ -900,6 +1052,18 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
           intervalMs: begun.value.intervalMs,
           creds: beginCreds,
         };
+        // Persist the in-flight grant — a dismissed sheet or a killed
+        // process must never discard the code the user is approving;
+        // resume hooks re-arm the same poll on top of it.
+        pendingFlow = {
+          deviceCode: begun.value.deviceCode,
+          userCode: begun.value.userCode,
+          verificationUrl: begun.value.verificationUrl,
+          intervalMs: begun.value.intervalMs,
+          expiresAtMs: begun.value.expiresAtMs,
+          clientId: beginCreds.clientId,
+        };
+        void writePending(pendingFlow);
         status = {
           state: 'authorizing',
           userCode: begun.value.userCode,
@@ -934,6 +1098,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       pendingBegin = null;
       refreshToken = null;
       grantClientId = null;
+      pendingFlow = null;
       accessExpiresAtMs = 0;
       bearerLive = false;
       disarmRenew();
