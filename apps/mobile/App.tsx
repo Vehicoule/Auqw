@@ -880,6 +880,7 @@ function Main({
     stagePlayer: sheetPlayer,
     heldOccurrenceId,
     queueModel,
+    skipPreview,
     peaks,
     onPlayPause,
     onToggleLike,
@@ -2323,6 +2324,8 @@ function Main({
                   onPrevious={() => advance('previous')}
                   onToggleLike={onToggleLike}
                   onDismiss={() => void session.stop()}
+                  skipNext={skipPreview.next}
+                  skipPrevious={skipPreview.previous}
                 />
               ) : undefined
             }

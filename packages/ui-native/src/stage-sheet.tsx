@@ -372,9 +372,10 @@ function PlayerBackdrop({
   // sharp copy does anyway (offline a remote refetch is just absent).
   const { uri, pending, markSourceError } = useResolvedArtworkUri(artworkUrl);
   const theme = useTheme();
+  const haveArt = !pending && uri !== null;
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
-      {pending || uri === null ? (
+      {!haveArt && (
         <View
           style={[
             StyleSheet.absoluteFill,
@@ -387,64 +388,137 @@ function PlayerBackdrop({
         >
           <Icon name="note" size={36} color={theme.colors.textSecondary} />
         </View>
-      ) : (
-        <Image
-          source={{ uri }}
-          style={StyleSheet.absoluteFill}
-          resizeMode="cover"
-          onError={markSourceError}
-          accessibilityIgnoresInvertColors
-        />
       )}
-      <Svg style={StyleSheet.absoluteFill}>
-        <Defs>
-          <LinearGradient id="uwfp-scrim" x1="0" y1="0" x2="0" y2="1">
-            <Stop offset="0" stopColor={NIGHT} stopOpacity="0.30" />
-            <Stop offset="1" stopColor={NIGHT} stopOpacity="0.82" />
-          </LinearGradient>
-          {/* Alpha ramp for the frost mask: invisible until the
-              frost zone, fully opaque by the transport row. */}
-          <LinearGradient id="uwfp-frost-reveal" x1="0" y1="0" x2="0" y2="1">
-            <Stop offset={FROST_TOP_FRACTION} stopColor={MASK_LIGHT} stopOpacity="0" />
-            <Stop offset="0.72" stopColor={MASK_LIGHT} stopOpacity="0.55" />
-            <Stop offset="0.9" stopColor={MASK_LIGHT} stopOpacity="1" />
-          </LinearGradient>
-          <Mask
-            id="uwfp-frost"
-            x="0"
-            y="0"
-            width="100%"
-            height="100%"
-            maskUnits="userSpaceOnUse"
-            maskContentUnits="userSpaceOnUse"
-          >
-            <Rect
-              x="0"
-              y="0"
-              width="100%"
-              height="100%"
-              fill="url(#uwfp-frost-reveal)"
+      {/*
+       * Frost composition on native: the blurred copy is the UNDER
+       * layer (blurRadius bakes the blur once at image decode — off
+       * the render thread — instead of a software SVG filter pass at
+       * mount), and the sharp copy sits above masked to fade out
+       * exactly where the frost zone begins. Same visual as the
+       * web path below, reversed: web has no blurRadius, so there the
+       * mask reveals a filtered SvgImage over the sharp Image.
+       */}
+      {Platform.OS === 'web' ? (
+        <>
+          {haveArt && (
+            <Image
+              source={{ uri }}
+              style={StyleSheet.absoluteFill}
+              resizeMode="cover"
+              onError={markSourceError}
+              accessibilityIgnoresInvertColors
             />
-          </Mask>
-          <Filter id="uwfp-blur">
-            <FeGaussianBlur stdDeviation={36} />
-          </Filter>
-        </Defs>
-        {!pending && uri !== null && (
-          <G mask="#uwfp-frost">
-            <SvgImage
-              href={uri}
-              x="0"
-              y="0"
-              width="100%"
-              height="100%"
-              preserveAspectRatio="xMidYMid slice"
-              filter="#uwfp-blur"
+          )}
+          <Svg style={StyleSheet.absoluteFill}>
+            <Defs>
+              <LinearGradient id="uwfp-scrim" x1="0" y1="0" x2="0" y2="1">
+                <Stop offset="0" stopColor={NIGHT} stopOpacity="0.30" />
+                <Stop offset="1" stopColor={NIGHT} stopOpacity="0.82" />
+              </LinearGradient>
+              {/* Alpha ramp for the frost mask: invisible until the
+                  frost zone, fully opaque by the transport row. */}
+              <LinearGradient id="uwfp-frost-reveal" x1="0" y1="0" x2="0" y2="1">
+                <Stop offset={FROST_TOP_FRACTION} stopColor={MASK_LIGHT} stopOpacity="0" />
+                <Stop offset="0.72" stopColor={MASK_LIGHT} stopOpacity="0.55" />
+                <Stop offset="0.9" stopColor={MASK_LIGHT} stopOpacity="1" />
+              </LinearGradient>
+              <Mask
+                id="uwfp-frost"
+                x="0"
+                y="0"
+                width="100%"
+                height="100%"
+                maskUnits="userSpaceOnUse"
+                maskContentUnits="userSpaceOnUse"
+              >
+                <Rect
+                  x="0"
+                  y="0"
+                  width="100%"
+                  height="100%"
+                  fill="url(#uwfp-frost-reveal)"
+                />
+              </Mask>
+              <Filter id="uwfp-blur">
+                <FeGaussianBlur stdDeviation={36} />
+              </Filter>
+            </Defs>
+            {haveArt && (
+              <G mask="#uwfp-frost">
+                <SvgImage
+                  href={uri}
+                  x="0"
+                  y="0"
+                  width="100%"
+                  height="100%"
+                  preserveAspectRatio="xMidYMid slice"
+                  filter="#uwfp-blur"
+                />
+              </G>
+            )}
+            <Rect x="0" y="0" width="100%" height="100%" fill="url(#uwfp-scrim)" />
+          </Svg>
+        </>
+      ) : (
+        <>
+          {haveArt && (
+            <Image
+              source={{ uri }}
+              blurRadius={36}
+              style={StyleSheet.absoluteFill}
+              resizeMode="cover"
+              onError={markSourceError}
+              accessibilityIgnoresInvertColors
             />
-          </G>
-        )}
-        <Rect x="0" y="0" width="100%" height="100%" fill="url(#uwfp-scrim)" />
-      </Svg>
+          )}
+          <Svg style={StyleSheet.absoluteFill}>
+            <Defs>
+              <LinearGradient id="uwfp-scrim" x1="0" y1="0" x2="0" y2="1">
+                <Stop offset="0" stopColor={NIGHT} stopOpacity="0.30" />
+                <Stop offset="1" stopColor={NIGHT} stopOpacity="0.82" />
+              </LinearGradient>
+              {/* Sharp zone: the inverse of the frost ramp — opaque
+                  until the frost zone, fading out where the blurred
+                  under-layer takes over, gone by the transport row. */}
+              <LinearGradient id="uwfp-sharp-reveal" x1="0" y1="0" x2="0" y2="1">
+                <Stop offset={FROST_TOP_FRACTION} stopColor={MASK_LIGHT} stopOpacity="1" />
+                <Stop offset="0.72" stopColor={MASK_LIGHT} stopOpacity="0.45" />
+                <Stop offset="0.9" stopColor={MASK_LIGHT} stopOpacity="0" />
+              </LinearGradient>
+              <Mask
+                id="uwfp-sharp"
+                x="0"
+                y="0"
+                width="100%"
+                height="100%"
+                maskUnits="userSpaceOnUse"
+                maskContentUnits="userSpaceOnUse"
+              >
+                <Rect
+                  x="0"
+                  y="0"
+                  width="100%"
+                  height="100%"
+                  fill="url(#uwfp-sharp-reveal)"
+                />
+              </Mask>
+            </Defs>
+            {haveArt && (
+              <G mask="#uwfp-sharp">
+                <SvgImage
+                  href={uri}
+                  x="0"
+                  y="0"
+                  width="100%"
+                  height="100%"
+                  preserveAspectRatio="xMidYMid slice"
+                />
+              </G>
+            )}
+            <Rect x="0" y="0" width="100%" height="100%" fill="url(#uwfp-scrim)" />
+          </Svg>
+        </>
+      )}
     </View>
   );
 }
@@ -603,6 +677,16 @@ export function StageSheet({
   const grabDragStart = useSharedValue(0);
   const lyricsChromeDragStart = useSharedValue(0);
   const queueChromeDragStart = useSharedValue(0);
+  const playerPaneDragStart = useSharedValue(0);
+  // True only when the player pane's content actually overflows its
+  // viewport — a scrollable pane keeps its scroll gesture, a fitting
+  // one (the common case) is drag chrome for dismiss.
+  const [playerCanScroll, setPlayerCanScroll] = useState(false);
+  const playerPaneSize = useRef({ viewport: 0, content: 0 });
+  const measurePlayerPane = useCallback(() => {
+    const { viewport, content } = playerPaneSize.current;
+    setPlayerCanScroll(viewport > 0 && content > viewport + 1);
+  }, []);
   const { activeMode, select: selectMode } = useStageMode(
     mode,
     onModeChange,
@@ -772,6 +856,14 @@ export function StageSheet({
     () => makeSheetPan(queueChromeDragStart),
     [makeSheetPan, queueChromeDragStart],
   );
+  // Drag-down-to-dismiss anywhere on the player pane — enabled only
+  // while the pane's content fits (no scroll to steal), and the
+  // failOffsetX inside makeSheetPan keeps horizontal waveform
+  // scrubs on the seek pan.
+  const playerPanePan = useMemo(
+    () => makeSheetPan(playerPaneDragStart).enabled(!playerCanScroll),
+    [makeSheetPan, playerPaneDragStart, playerCanScroll],
+  );
 
   const restCorner = theme.radius.float;
   const animatedStyle = useAnimatedStyle(() => {
@@ -798,9 +890,15 @@ export function StageSheet({
     };
   });
 
-  const contentStyle = useAnimatedStyle(() => ({
-    opacity: stageContentAlpha(progress.value),
-  }));
+  // The reveal rides progress twice — fade and a 4% grow — so the
+  // expanded surface settles into place instead of just brightening.
+  const contentStyle = useAnimatedStyle(() => {
+    const p = Math.min(1, Math.max(0, progress.value));
+    return {
+      opacity: stageContentAlpha(progress.value),
+      transform: [{ scale: 0.96 + 0.04 * p }],
+    };
+  });
 
   const scrimStyle = useAnimatedStyle(() => ({
     opacity: stageScrimAlpha(progress.value),
@@ -1204,11 +1302,21 @@ export function StageSheet({
         </View>
       )}
       <View {...paneProps('player')}>
+        <GestureDetector gesture={playerPanePan}>
+          <View style={{ flex: 1 }}>
           {/* Title/artist bottom-anchored in the light-frost zone; the
               timeline/transport cluster stays pinned at the bottom. */}
           <ScrollView
             style={{ flex: 1 }}
             contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-end' }}
+            onLayout={(e) => {
+              playerPaneSize.current.viewport = e.nativeEvent.layout.height;
+              measurePlayerPane();
+            }}
+            onContentSizeChange={(_w, h) => {
+              playerPaneSize.current.content = h;
+              measurePlayerPane();
+            }}
           >
             {player.artworkUrl === null && (
               <View
@@ -1365,6 +1473,8 @@ export function StageSheet({
               onCycleRepeat={onCycleRepeat}
             />
           </View>
+          </View>
+        </GestureDetector>
         </View>
       <View {...paneProps('lyrics')}>
         {lyricsPane.kind === 'lines' ? (
@@ -1539,10 +1649,12 @@ export function StageSheet({
             artwork and controls fade in through the pill's fade window
             and are fully present at the input gate. */}
         <Animated.View style={[StyleSheet.absoluteFill, contentStyle]}>
-          {/* Keep the backdrop mounted across mode switches — remounting
-              would re-run the artwork resolver and flicker the surface.
-              Non-player modes just hide it under their flat stage. */}
-          {risenOn && player.artworkUrl !== null && (
+          {/* Keep the backdrop mounted across mode switches AND the
+              parked sheet — remounting mid-morph would pay the artwork
+              resolver and decode during the drag. Its cost is bound to
+              track changes instead; non-player modes just hide it
+              under their flat stage. */}
+          {player.artworkUrl !== null && (
             <View
               style={[
                 StyleSheet.absoluteFill,

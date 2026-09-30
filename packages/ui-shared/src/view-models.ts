@@ -1128,6 +1128,45 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
   };
 }
 
+/**
+ * One sideswipe landing row — the track the mini-player's conveyor
+ * previews sliding in from its edge. `occurrenceId` (not recordingId)
+ * identifies it because 'previous' past the restart threshold targets
+ * the occurrence already on the player, and the pill's commit path
+ * keys its invisible reset on that identity.
+ */
+export type SkipPeek = {
+  readonly occurrenceId: string;
+  readonly title: string;
+  readonly artist: string | null;
+  readonly artworkUrl: string | null;
+};
+
+/**
+ * The conveyor's landing row for an already-resolved walk-space
+ * target (advanceTargetId's answer — engine semantics, dealt order
+ * and failed marks included). Null target or a target missing from
+ * the model is a dead edge: no peek, no commit.
+ */
+export function skipPeekFor(
+  queue: QueueModel,
+  occurrenceId: string | null,
+): SkipPeek | null {
+  if (occurrenceId === null) {
+    return null;
+  }
+  const item = queue.items.find((i) => i.occurrenceId === occurrenceId);
+  if (item === undefined) {
+    return null;
+  }
+  return {
+    occurrenceId,
+    title: item.row.title,
+    artist: item.row.artist,
+    artworkUrl: item.row.artworkUrl,
+  };
+}
+
 function likedEntityIds(likes: readonly Like[]): ReadonlySet<string> {
   return new Set(
     likes
