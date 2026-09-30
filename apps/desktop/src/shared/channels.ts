@@ -107,4 +107,17 @@ export const CHANNELS = {
   authState: 'auth:state',
   authSubscribe: 'auth:subscribe',
   authUnsubscribe: 'auth:unsubscribe',
+  /**
+   * Release update check — the egress lives in main (the renderer
+   * CSP admits only 'self'), so the renderer sees validated
+   * snapshots plus the check/open verbs. The open verb carries no
+   * URL: main opens the release URL its own snapshot recorded.
+   */
+  updateStatus: 'update:status',
+  updateCheck: 'update:check',
+  updateOpen: 'update:open',
+  /** Main→renderer push of each new update snapshot. */
+  updateState: 'update:state',
+  updateSubscribe: 'update:subscribe',
+  updateUnsubscribe: 'update:unsubscribe',
 } as const;

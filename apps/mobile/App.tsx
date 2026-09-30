@@ -87,6 +87,7 @@ import {
   ErrorState,
   GalleryScreen,
   HomeScreen,
+  IconButton,
   LanguagePickerSheet,
   LibraryScreen,
   LoadingState,
@@ -143,11 +144,13 @@ import type { AppShellPorts } from '@auqw/app-shell';
 import { createMobileAuth } from './src/adapters/auth.ts';
 import { createAuqwExpoPlayer } from './src/adapters/auqw-expo-player.ts';
 import { createExpoPeaksPort } from './src/adapters/expo-peaks.ts';
+import { createExpoUpdate } from './src/adapters/expo-update.ts';
 import { discoveredPotProviderUrl } from './src/adapters/pot-provider-discovery.ts';
 import { potProviderUrlFromPeers } from './src/adapters/pot-provider.ts';
 import { createClock, createIds } from '@auqw/application';
 import { devRoute } from './src/dev-routes.ts';
 import { appFilePath, runSeamLink } from './seam-dev.ts';
+import appConfig from './app.config.ts';
 
 // Boot and gate strings render before the ready settings arrive —
 // seed the UI language from the system tag so those first screens
@@ -647,6 +650,13 @@ function Main({
   // token slot; construction kicks the memoized boot restore, so a
   // stored grant refreshes before the first sign-in UI ever reads.
   const authPort = useMemo(() => createMobileAuth(controller), [controller]);
+  // Release-update seam — the shared check over RN fetch; on Android
+  // the act leg downloads the APK and fires the system installer,
+  // everywhere else it opens the release page.
+  const updatePort = useMemo(
+    () => createExpoUpdate(appConfig.version ?? ''),
+    [],
+  );
   const ports = useMemo<AppShellPorts<Overlay>>(
     () => ({
       // Mobile's connectivity port is edge+snapshot: subscribe first
@@ -687,6 +697,9 @@ function Main({
       // OAuth session trust — refresh custody lives in secure storage;
       // only status + the device pair cross this surface.
       auth: authPort,
+      // Release check — GitHub only, once per boot + manual from
+      // settings; the install affordance is per-platform.
+      update: updatePort,
       // Mobile's playlist-entry play resolves owned bytes first —
       // selectedRef drops to null so the session picks the local
       // file over the pinned provider ref.
@@ -809,7 +822,15 @@ function Main({
         }
       },
     }),
-    [controller, session, peaksPort, authPort, syncSurface, syncStatus],
+    [
+      controller,
+      session,
+      peaksPort,
+      authPort,
+      updatePort,
+      syncSurface,
+      syncStatus,
+    ],
   );
 
   // The shared shell composition — every state/callback surface the
@@ -824,6 +845,9 @@ function Main({
     localeTick,
     online,
     toast,
+    updateBanner,
+    onUpdateBannerAct,
+    onUpdateBannerDismiss,
     tab,
     setTab,
     selectTab,
@@ -2367,6 +2391,42 @@ function Main({
               <Text variant="metadata" color="secondary">
                 {t('offline.bannerDownloads')}
               </Text>
+            </View>
+          )}
+          {updateBanner !== null && (
+            <View
+              style={{
+                ...pillStyle,
+                // Below the offline pill when both float.
+                top: topInset + (online === false ? 38 : 4),
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 6,
+                paddingLeft: 12,
+                paddingRight: 4,
+                paddingVertical: 3,
+              }}
+            >
+              <Text variant="metadata" color="secondary">
+                {updateBanner.label}
+              </Text>
+              <Pressable
+                onPress={onUpdateBannerAct}
+                accessibilityRole="button"
+                accessibilityLabel={updateBanner.actionLabel}
+                style={{ paddingHorizontal: 6, paddingVertical: 3 }}
+              >
+                <Text variant="metadata" color="accent">
+                  {updateBanner.actionLabel}
+                </Text>
+              </Pressable>
+              <IconButton
+                icon="close"
+                size={24}
+                iconSize={10}
+                accessibilityLabel={t('update.dismiss')}
+                onPress={onUpdateBannerDismiss}
+              />
             </View>
           )}
           {toast !== null && (

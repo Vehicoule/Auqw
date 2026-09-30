@@ -17,6 +17,7 @@ import android.util.Base64
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -1076,6 +1077,52 @@ class AuqwExpoModule : Module() {
         ?: throw CodedException("no-result", "no react context", null)
       AuqwDownloadService.update(ctx.applicationContext, active.toInt())
       null
+    }
+
+    // Sideloaded-APK update install (docs/decisions.md — the app
+    // distributes as a sideloaded APK, so the update row can actually
+    // install). The unknown-sources gate is the platform's own: API
+    // 26+ refuses the install intent until the user grants it, so the
+    // honest path is opening OUR page of that settings surface and
+    // reporting 'needs-permission' — the JS adapter toasts that
+    // instead of pretending a download+install ran. Granted → the
+    // downloaded file crosses to the system installer as a content
+    // URI through our FileProvider (a raw file:// path would hit
+    // FileUriExposedException on modern targets).
+    AsyncFunction("installApk") { path: String ->
+      val ctx = appContext.reactContext
+        ?: throw CodedException("no-result", "no react context", null)
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+        !ctx.packageManager.canRequestPackageInstalls()
+      ) {
+        val settings = Intent(
+          Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+          Uri.parse("package:${ctx.packageName}")
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        ctx.startActivity(settings)
+        return@AsyncFunction mapOf("status" to "needs-permission")
+      }
+      val file = File(Uri.parse(path).path ?: path)
+      if (!file.isFile) {
+        throw CodedException("not-found", "apk file missing", null)
+      }
+      val uri = FileProvider.getUriForFile(
+        ctx,
+        "${ctx.packageName}.fileprovider",
+        file
+      )
+      val install = Intent(Intent.ACTION_VIEW).apply {
+        // ACTION_INSTALL_PACKAGE is deprecated since API 30 — the
+        // view intent with the apk MIME opens the same system
+        // installer sheet on every target we ship.
+        setDataAndType(uri, "application/vnd.android.package-archive")
+        addFlags(
+          Intent.FLAG_GRANT_READ_URI_PERMISSION or
+            Intent.FLAG_ACTIVITY_NEW_TASK
+        )
+      }
+      ctx.startActivity(install)
+      mapOf("status" to "installing")
     }
   }
 

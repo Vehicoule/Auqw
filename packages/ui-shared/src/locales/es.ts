@@ -448,6 +448,7 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'settings.section.downloads': 'descargas',
   'settings.section.localFiles': 'archivos locales',
   'settings.section.library': 'biblioteca',
+  'settings.section.app': 'app',
   'settings.diag.providers': 'proveedores',
   'settings.diag.none': 'ninguno',
   'settings.diag.attemptTrace': 'traza de intentos',
@@ -490,6 +491,8 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'settings.sync': 'sync lan',
   'settings.exportLibrary': 'exportar biblioteca',
   'settings.importLibrary': 'importar biblioteca',
+  'settings.appVersion': 'versión',
+  'settings.checkUpdate': 'buscar actualizaciones',
   'settings.value.auto': 'auto',
   'settings.value.notSet': 'sin definir',
   'settings.value.on': 'activado',
@@ -601,6 +604,17 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'optionDetail.themeSystem': 'seguir el sistema',
   'optionDetail.themeLight': 'luz del día',
   'optionDetail.themeOled': 'negro puro',
+
+  // ---- update check ------------------------------------------------------
+  'update.value.idle': 'sin comprobar',
+  'update.value.checking': 'comprobando…',
+  'update.value.current': 'al día',
+  'update.value.available': 'v{version} disponible',
+  'update.value.failed': 'comprobación fallida — toca para reintentar',
+  'update.banner': 'actualización disponible — v{version}',
+  'update.action.open': 'obtener',
+  'update.action.install': 'instalar',
+  'update.dismiss': 'descartar',
 
   // ---- offline banner ----------------------------------------------------
   'offline.bannerDownloads':

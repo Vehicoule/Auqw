@@ -42,6 +42,7 @@ import type {
   Settings,
   SourceRef,
   TrackMetadata,
+  UpdateSnapshot,
 } from '@auqw/application';
 import {
   DIAGNOSTICS_LIMIT,
@@ -76,6 +77,7 @@ import {
   toSearchRowModel,
   toSettingsModel,
   toTrackRowModel,
+  toUpdateBanner,
   useOverlayStack,
   useSerializedWrite,
   useSmoothedPosition,
@@ -387,6 +389,44 @@ export function useAppShell<E extends { readonly type: string } = never>(
     authClientEpoch.current += 1;
     setAuthClientSheetOpen(false);
   }, []);
+
+  // ---- release update check ----------------------------------------
+  // Same optional-seam shape as auth: no `ports.update` → no banner,
+  // no settings rows. The port owns rate-limiting ('boot' is once
+  // per process inside it); the shell fires that check after mount
+  // and the settings row offers 'manual'.
+  const updatePort = ports.update;
+  const updateSnapshot = useSyncExternalStore(
+    useCallback(
+      (l: () => void) => updatePort?.subscribe(l) ?? NOOP_UNSUBSCRIBE,
+      [updatePort],
+    ),
+    useCallback(
+      (): UpdateSnapshot | null => updatePort?.snapshot() ?? null,
+      [updatePort],
+    ),
+  );
+  useEffect(() => {
+    updatePort?.check('boot');
+  }, [updatePort]);
+  // Banner dismissal is session-scoped and per-version — a newer
+  // release re-surfaces it.
+  const [updateDismissed, setUpdateDismissed] = useState<string | null>(null);
+  const updateBanner = toUpdateBanner(
+    updateSnapshot,
+    updatePort?.action ?? 'open',
+    updateDismissed,
+  );
+  const onUpdateBannerAct = useCallback(() => {
+    updatePort?.act();
+  }, [updatePort]);
+  const onUpdateBannerDismiss = useCallback(() => {
+    setUpdateDismissed(
+      updateSnapshot?.status.state === 'available'
+        ? updateSnapshot.status.version
+        : null,
+    );
+  }, [updateSnapshot]);
 
   // ---- locale -----------------------------------------------------
   // setLocale mutates module state and never notifies React — every
@@ -1503,6 +1543,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
               state: authSnapshot.status.state,
               clientId: authSnapshot.clientId,
             },
+      update:
+        updateSnapshot === null || updatePort === undefined
+          ? undefined
+          : {
+              status: updateSnapshot.status,
+              currentVersion: updateSnapshot.currentVersion,
+            },
     });
     // Row omits are the platform's — desktop drops the artwork-cache
     // budget row: the renderer has no application artwork cache
@@ -1524,6 +1571,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     ports.settingsExtras,
     ports.omitSettingsRows,
     authSnapshot,
+    updateSnapshot,
+    updatePort,
     localTick,
     localeTick,
   ]);
@@ -1941,6 +1990,18 @@ export function useAppShell<E extends { readonly type: string } = never>(
           open(authClientEpoch, setAuthClientSheetOpen);
           setAuthClientDraft(authSnapshot?.clientId ?? '');
           return;
+        case 'checkUpdate':
+          // 'available' → the row's select IS the install affordance;
+          // anything else re-runs the check.
+          if (updatePort === undefined) {
+            return;
+          }
+          if (updateSnapshot?.status.state === 'available') {
+            updatePort.act();
+          } else {
+            updatePort.check('manual');
+          }
+          return;
         case 'addLocalFolder':
           localMutate('settings.addLocalFolder', (l) =>
             l.addFolder(freshSignal()),
@@ -1974,6 +2035,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
       authSnapshot,
       openAuthSheet,
       onAuthSignOut,
+      updatePort,
+      updateSnapshot,
     ],
   );
 
@@ -3314,6 +3377,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
     onSubmitAuthClient,
     onClearAuthClient,
     closeAuthClient,
+    // release update check — `updateBanner` is null until a newer
+    // release is known (and for a dismissed version). `updateSnapshot`
+    // is null where the platform has no update seam.
+    updateSnapshot,
+    updateBanner,
+    onUpdateBannerAct,
+    onUpdateBannerDismiss,
     // settings + misc ops
     onSettingsSelect,
     onSettingsToggle,

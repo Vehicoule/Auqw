@@ -1408,6 +1408,51 @@ export const isAuthOpenUrlArgs = v.object({
   url: v.boundedString(2048),
 });
 
+// ------------------------------------------------------------------
+// update:* — release update check. Snapshots + verbs only; the egress
+// and the open-target allowlist live in main.
+// ------------------------------------------------------------------
+
+const isUpdateArtifact = v.object({
+  name: v.boundedString(256),
+  url: v.boundedString(2048),
+});
+
+const isUpdateStatusPayload = v.union(
+  v.object({ state: v.literal('idle') }),
+  v.object({ state: v.literal('checking') }),
+  v.object({ state: v.literal('current') }),
+  v.object({
+    state: v.literal('available'),
+    version: v.boundedString(64),
+    url: v.boundedString(2048),
+    artifact: v.nullable(isUpdateArtifact),
+  }),
+  v.object({
+    state: v.literal('failed'),
+    error: v.object({
+      kind: v.boundedString(64),
+      message: v.boundedString(1024),
+      retryable: v.boolean(),
+      retryAfterMs: v.optional(v.finite()),
+    }),
+  }),
+);
+
+/** `update:status` reply + `update:state` push payload. */
+export const isUpdateSnapshot = v.object({
+  status: isUpdateStatusPayload,
+  currentVersion: v.boundedString(64),
+});
+
+export type UpdateSnapshotPayload = v.Guarded<typeof isUpdateSnapshot>;
+
+export const isUpdateCheckArgs = v.object({
+  kind: v.literals('boot', 'manual'),
+});
+
+export type UpdateCheckArgs = v.Guarded<typeof isUpdateCheckArgs>;
+
 /**
  * The `window.auqw` surface the preload exposes. Every method resolves
  * with a validated payload and rejects with a `ShellError`-shaped value.
@@ -1550,6 +1595,22 @@ export type AuqwApi = {
     readonly openUrl: (url: string) => Promise<void>;
     readonly onState: (
       listener: (snapshot: AuthSnapshotPayload) => void,
+    ) => () => void;
+  };
+  /**
+   * Release update check — status snapshots + the check/open verbs.
+   * `open` takes no URL: main opens the release page its own
+   * snapshot recorded (allowlisted to the repo's releases).
+   */
+  readonly update: {
+    readonly status: () => Promise<UpdateSnapshotPayload>;
+    readonly check: (
+      kind: UpdateCheckArgs['kind'],
+    ) => Promise<UpdateSnapshotPayload>;
+    /** Opens the available release's page (or the releases index). */
+    readonly open: () => Promise<void>;
+    readonly onState: (
+      listener: (snapshot: UpdateSnapshotPayload) => void,
     ) => () => void;
   };
 };

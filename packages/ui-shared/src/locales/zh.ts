@@ -419,6 +419,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'settings.section.downloads': '下载',
   'settings.section.localFiles': '本地文件',
   'settings.section.library': '曲库',
+  'settings.section.app': '应用',
   'settings.diag.providers': '来源',
   'settings.diag.none': '无',
   'settings.diag.attemptTrace': '尝试追踪',
@@ -458,6 +459,8 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'settings.sync': '局域网同步',
   'settings.exportLibrary': '导出曲库',
   'settings.importLibrary': '导入曲库',
+  'settings.appVersion': '版本',
+  'settings.checkUpdate': '检查更新',
   'settings.value.auto': '自动',
   'settings.value.notSet': '未设置',
   'settings.value.on': '开',
@@ -568,6 +571,17 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'optionDetail.themeSystem': '跟随系统',
   'optionDetail.themeLight': '日间',
   'optionDetail.themeOled': '纯黑',
+
+  // ---- update check ------------------------------------------------------
+  'update.value.idle': '未检查',
+  'update.value.checking': '检查中…',
+  'update.value.current': '已是最新',
+  'update.value.available': '有 v{version} 可用',
+  'update.value.failed': '检查失败 — 点按重试',
+  'update.banner': '有可用更新 — v{version}',
+  'update.action.open': '获取',
+  'update.action.install': '安装',
+  'update.dismiss': '忽略',
 
   // ---- offline banner ----------------------------------------------------
   'offline.bannerDownloads': '离线 — 已下载的可播放；流媒体等待连接',

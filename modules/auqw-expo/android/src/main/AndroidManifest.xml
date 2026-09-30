@@ -18,6 +18,11 @@
        posts is silently dropped — lock-screen/SystemUI controls would
        have nothing to show. -->
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <!-- Sideloaded-APK self-update (docs/decisions.md): the install
+       intent needs this declared — the runtime grant is still the
+       user's unknown-sources switch, surfaced by installApk's
+       'needs-permission' path. -->
+  <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
   <application>
     <!-- Single warm player lives in the service so it survives the JS
          UI being torn down; module manifests merge into the app. -->
@@ -35,5 +40,17 @@
         android:name="expo.modules.auqwexpo.AuqwDownloadService"
         android:exported="false"
         android:foregroundServiceType="dataSync" />
+    <!-- The update-install leg hands the package installer a content
+         URI for the downloaded APK — the system's installer reads
+         through this grant, never the app's sandbox directly. -->
+    <provider
+        android:name="androidx.core.content.FileProvider"
+        android:authorities="${applicationId}.fileprovider"
+        android:exported="false"
+        android:grantUriPermissions="true">
+      <meta-data
+          android:name="android.support.FILE_PROVIDER_PATHS"
+          android:resource="@xml/auqw_file_paths" />
+    </provider>
   </application>
 </manifest>

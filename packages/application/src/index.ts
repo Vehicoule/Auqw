@@ -51,3 +51,4 @@ export * from './providers/provider-router.ts';
 export * from './providers/provider-wire.ts';
 export * from './auth/oauth.ts';
 export * from './auth/session.ts';
+export * from './update.ts';

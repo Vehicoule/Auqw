@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider roots for the APK self-update leg: the installer
+     reads the downloaded artifact out of the app cache — nothing
+     else is ever shared through this provider. -->
+<paths>
+  <cache-path name="update" path="auqw-update/" />
+</paths>
