@@ -1,8 +1,10 @@
 import {
   appError,
+  appErrorKind,
   err,
   fromUnknown,
   isBotCheckWall,
+  isPermanentFailure,
   ok,
 } from './errors.ts';
 import type { ErrorKind } from './errors.ts';
@@ -26,6 +28,7 @@ export function run(): void {
     'auth-expired',
     'rate-limit',
     'transient',
+    'provider-wall',
     'expired-resource',
     'permission-denied',
     'invalid-response',
@@ -69,7 +72,18 @@ export function run(): void {
   const mappedString = fromUnknown('plain string');
   assertEqual(mappedString.kind, 'internal');
 
-  // isBotCheckWall: the guest's 'bot-check' detail survives every
+  // isBotCheckWall: the dedicated `provider-wall` kind is a wall on
+  // its own — no message sniffing needed.
+  assert(isBotCheckWall(appError('provider-wall', 'provider-wall: bot-check')));
+  assert(isBotCheckWall(appError('provider-wall', 'anything')));
+  // A wall is terminal but never condemns the row — it sits in
+  // neither set.
+  assert(!appError('provider-wall', 'w').retryable);
+  assert(!isPermanentFailure(appError('provider-wall', 'w')));
+  // The slug decodes through the boundary table.
+  assertEqual(appErrorKind('provider-wall'), 'provider-wall');
+
+  // The legacy shape: the guest's 'bot-check' detail survives every
   // host prefix-wrap as the LAST `:`-separated segment — only a
   // `transient` verdict ending in exactly that token is the wall.
   const walls = [

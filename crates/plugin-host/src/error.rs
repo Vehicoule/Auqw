@@ -82,6 +82,7 @@ pub(crate) const GUEST_FAIL_KINDS: &[&str] = &[
     "auth-expired",
     "rate-limit",
     "transient",
+    "provider-wall",
     "expired-resource",
     "permission-denied",
     "invalid-response",

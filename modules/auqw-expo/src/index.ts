@@ -64,7 +64,8 @@ export type RequestOutcomeEvent = { requestId: string; outcome: RequestOutcome }
  * verbatim from the host, so the union must cover the whole set). */
 export type ErrorKind =
   | 'no-result' | 'not-applicable' | 'unsupported' | 'auth-required'
-  | 'auth-expired' | 'rate-limit' | 'transient' | 'expired-resource'
+  | 'auth-expired' | 'rate-limit' | 'transient' | 'provider-wall'
+  | 'expired-resource'
   | 'permission-denied' | 'invalid-response' | 'timeout' | 'cancelled'
   | 'budget-exceeded' | 'guest-trap' | 'invalid-message' | 'artifact-rejected'
   | 'streams-capped' | 'released' | 'superseded' | 'evicted'

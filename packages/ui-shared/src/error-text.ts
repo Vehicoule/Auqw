@@ -32,6 +32,7 @@ const TEXT_BY_KIND: Readonly<Record<ErrorKind, MessageId>> = {
   'auth-expired': 'error.authExpired',
   'rate-limit': 'error.rateLimited',
   transient: 'error.transient',
+  'provider-wall': 'error.providerWall',
   'expired-resource': 'error.expiredLink',
   'permission-denied': 'error.permission',
   'invalid-response': 'error.unexpected',

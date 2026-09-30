@@ -141,6 +141,7 @@ fn invoke_err_as_seam(kind: &str, message: String) -> auqw_stream::StreamError {
         "rate-limit" => E::RateLimited { message },
         "streams-capped" => E::StreamsCapped { message },
         "transient" | "timeout" => E::Transient { message },
+        "provider-wall" => E::ProviderWall { message },
         "invalid-response" | "no-result" | "not-applicable" => E::InvalidResponse { message },
         "not-found" => E::NotFound,
         _ => E::Internal { message },

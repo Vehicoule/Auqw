@@ -1322,6 +1322,32 @@ async fn fail_message_is_redacted() {
     assert!(!e.to_string().contains("SYNTHETIC_SECRET"), "{e}");
 }
 
+/// `provider-wall` is a first-class ABI kind — a guest emitting it
+/// lands `GuestFail` verbatim, not an `InvalidMessage` rejection.
+#[tokio::test]
+async fn provider_wall_fail_kind_is_accepted() {
+    let wasm = ok(wat::parse_str(raw_wat(
+        "{\"type\":\"fail\",\"error\":{\"kind\":\"provider-wall\",\
+         \"message\":\"bot-check\"}}",
+    )));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    let InvokeError::GuestFail { kind, message } = err(result) else {
+        panic!("expected GuestFail");
+    };
+    assert_eq!(kind, "provider-wall");
+    assert_eq!(message, "bot-check");
+}
+
 /// A key name is guest-controlled text reaching an error surface like
 /// any other: an unknown `done` key named after the token material the
 /// host merged into the payload must not write that token out.

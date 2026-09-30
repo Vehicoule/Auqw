@@ -282,7 +282,8 @@ fn status_for(e: &StreamError) -> u16 {
         StreamError::Transient { .. } | StreamError::AuthRequired { .. } => 503,
         StreamError::RateLimited { .. }
         | StreamError::StreamsCapped { .. }
-        | StreamError::InvalidResponse { .. } => 502,
+        | StreamError::InvalidResponse { .. }
+        | StreamError::ProviderWall { .. } => 502,
         StreamError::Internal { .. } => 500,
     }
 }
