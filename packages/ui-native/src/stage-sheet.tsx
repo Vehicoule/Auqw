@@ -367,7 +367,7 @@ function PlayerBackdrop({
   // inside Artwork would repeat the persisted lookup and access-time
   // write; the blurred layer must read the same cache-local file the
   // sharp copy does anyway (offline a remote refetch is just absent).
-  const { uri, pending, markRemote } = useResolvedArtworkUri(artworkUrl);
+  const { uri, pending, markSourceError } = useResolvedArtworkUri(artworkUrl);
   const theme = useTheme();
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
@@ -389,7 +389,7 @@ function PlayerBackdrop({
           source={{ uri }}
           style={StyleSheet.absoluteFill}
           resizeMode="cover"
-          onError={markRemote}
+          onError={markSourceError}
           accessibilityIgnoresInvertColors
         />
       )}

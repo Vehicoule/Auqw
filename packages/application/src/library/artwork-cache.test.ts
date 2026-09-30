@@ -955,6 +955,40 @@ async function commitFailureDropsMirror(): Promise<void> {
   assertDeepEqual(await storedUrls(r.storage), [A]);
 }
 
+async function touchFlushRetriesOnFailure(): Promise<void> {
+  const r = rig(persisted({ artworkCache: [seed(A, 8 * MB, 10)] }));
+  const warm = await r.cache.get(A, ctx());
+  assert(warm.ok && warm.value.hit, 'warm hit failed');
+  r.clock.advance(500);
+  const hit = await r.cache.get(A, ctx());
+  assert(hit.ok && hit.value.hit, 'hit failed');
+  // Fail the first scheduled flush — the retry cycle re-arms on
+  // its own and lands the touch without another get scheduling it.
+  r.storage.failNext(appError('transient', 'db write failed'));
+  r.clock.advance(3_000);
+  await pump();
+  // The failed commit never reached the applied log.
+  assertEqual(r.storage.commits.length, 0, 'failed flush unapplied');
+  const still = await r.storage.load(ctx());
+  assert(still.ok);
+  assertEqual(
+    still.value.artworkCache[0]?.lastAccessedMs,
+    10,
+    'failed flush persisted nothing',
+  );
+  // The retry fires after a doubled delay (3s → 6s).
+  r.clock.advance(7_000);
+  await pump();
+  assertEqual(r.storage.commits.length, 1, 'retry committed once');
+  const after = await r.storage.load(ctx());
+  assert(after.ok);
+  assertEqual(
+    after.value.artworkCache[0]?.lastAccessedMs,
+    1_500,
+    'retry landed the touch',
+  );
+}
+
 async function sweepSeesUnflushedTouches(): Promise<void> {
   // A touch still waiting on the debounced flush must count for
   // recency — the sweep's fresh load carries the mirror's newer
@@ -1046,6 +1080,7 @@ export async function run(): Promise<void> {
   await hitsServeFromMirror();
   await mirrorRefreshesAfterTtl();
   await commitFailureDropsMirror();
+  await touchFlushRetriesOnFailure();
   await sweepSeesUnflushedTouches();
   await sweepReapsMissing();
   await sweepExistsErrorKeepsRow();

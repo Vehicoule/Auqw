@@ -230,6 +230,15 @@ const SECTION_REFRESH_MS = 60_000;
 const TOUCH_FLUSH_DELAY_MS = 3_000;
 
 /**
+ * Extra flushes a failed commit earns before the cycle gives up.
+ * The delay doubles per attempt (6s, 12s, 24s after the initial
+ * 3s) — bounded so a persistently wedged writer isn't retried in a
+ * tight loop; the dirty mark survives the last retry so the next
+ * touch re-arms a fresh cycle instead of dropping recency for good.
+ */
+const TOUCH_FLUSH_RETRY_MAX = 3;
+
+/**
  * Bounded LRU on-disk artwork cache (docs/specs/data.md: ~200 MB,
  * managed in settings). Entries persist in the `artworkCache`
  * section of StoragePort; files live in the paths port's directory.
@@ -274,6 +283,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
   /** Mirror holds access times newer than the last committed write. */
   let touchDirty = false;
   let touchFlushScheduled = false;
+  let touchRetryCount = 0;
 
   /** Defensive clock read: unsafe values never reach downstream math. */
   function safeNow(): number | null {
@@ -355,19 +365,25 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
   /**
    * Debounced write-back of access-time touches. The first dirty
    * touch schedules one commit TOUCH_FLUSH_DELAY_MS later covering
-   * the whole burst; a failed commit re-marks dirty so the next
-   * touch schedules a retry rather than silently losing recency.
+   * the whole burst. A failed commit — or a failed sleep — re-arms
+   * on a doubling backoff up to TOUCH_FLUSH_RETRY_MAX times: a
+   * transient write failure shouldn't have to wait for a lucky
+   * next hit, and a restart after the last retry is the only way
+   * recency is actually lost. Retries exhausted keeps the dirty
+   * mark (and the backoff counter, so no tight loop); the next
+   * touch re-arms the cycle at that delay.
    */
   function scheduleTouchFlush(): void {
     if (touchFlushScheduled) {
       return;
     }
     touchFlushScheduled = true;
+    const delayMs = TOUCH_FLUSH_DELAY_MS * 2 ** touchRetryCount;
     const work = (async (): Promise<void> => {
       try {
         const slept = await call(() =>
           deps.clock.sleep(
-            TOUCH_FLUSH_DELAY_MS,
+            delayMs,
             new CancellationSource().signal,
           ),
         );
@@ -393,6 +409,12 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         });
       } finally {
         touchFlushScheduled = false;
+        if (!touchDirty) {
+          touchRetryCount = 0;
+        } else if (touchRetryCount < TOUCH_FLUSH_RETRY_MAX) {
+          touchRetryCount += 1;
+          scheduleTouchFlush();
+        }
       }
     })();
     own(work);
