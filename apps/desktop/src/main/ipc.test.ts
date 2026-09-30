@@ -188,7 +188,7 @@ export async function run(): Promise<void> {
     // Channels whose listeners live outside registerChannels are named
     // here explicitly — the list must grow by hand so an unwired
     // channel can never satisfy the sweep by accident.
-    const BOOTSTRAP_REGISTERED = new Set([CHANNELS.chromeScheme]);
+    const BOOTSTRAP_REGISTERED = new Set<string>([CHANNELS.chromeScheme]);
     {
       const preloadSrc = readFileSync(
         new URL('../preload/index.ts', import.meta.url),
