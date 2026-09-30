@@ -68,7 +68,7 @@ function checkRow(row: Record<string, unknown>): void {
 const DEAD_HANDLE =
   /NullPointerException|IllegalStateException|database is closed|has been closed|already closed/i;
 
-export function isDeadHandleError(thrown: unknown): boolean {
+export function isDeadHandleError(thrown: unknown): thrown is Error {
   return thrown instanceof Error && DEAD_HANDLE.test(thrown.message);
 }
 
