@@ -12,10 +12,10 @@
     },
     {
       "id": "youtube-music",
-      "version": "0.4.5",
+      "version": "0.4.6",
       "abi": "0.3.0",
-      "digest": "sha256:381c49a8ab17cc76a292c76f3d6725add7f47559fbb0bdb62eaa8e1ca33c4eb6",
-      "source": "release:../auqw-plugins/releases/youtube-music/0.4.5"
+      "digest": "sha256:f8e5a481d7ff6c094fda073ddeae1269745a26e7b0492b0f5bad8b3f668e5d34",
+      "source": "release:../auqw-plugins/releases/youtube-music/0.4.6"
     },
     {
       "id": "deezer",
