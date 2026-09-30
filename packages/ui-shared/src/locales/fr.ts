@@ -450,6 +450,7 @@ export const fr: Readonly<Record<MessageId, Message>> = {
     other: '{count} tentatives',
   },
   'settings.diag.last': 'dernier : {value}',
+  'settings.diag.lastFailure': 'dernier échec',
   'settings.diag.persistence': 'persistance',
   'settings.diag.persistenceValue.ok': 'ok',
   'settings.diag.persistenceValue.degraded': 'dégradée',

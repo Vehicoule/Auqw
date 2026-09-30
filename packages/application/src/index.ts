@@ -1,4 +1,5 @@
 export * from './errors.ts';
+export { redactSensitive } from './redact.ts';
 export * from './cancellation.ts';
 export * from './domain.ts';
 export * from './race.ts';

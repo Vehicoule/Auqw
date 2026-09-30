@@ -56,7 +56,6 @@ import {
   CollectionScreen,
   CorrectionsScreen,
   DesktopChrome,
-  EmptyState,
   EntityScreen,
   ErrorState,
   HomeScreen,
@@ -67,12 +66,12 @@ import {
   PlaylistScreen,
   ProviderPickerSheet,
   PushScreen,
-  QueueScreen,
   RowActionsSheet,
   SearchScreen,
   SettingsScreen,
   SheetScreen,
   StackItem,
+  StageIdlePane,
   Text,
   ThemeProvider,
   TransferScreen,
@@ -1248,24 +1247,21 @@ function Main({
                   onMoveQueueItem={onMoveQueueItem}
                   onMoveQueueItemTo={onMoveQueueItemTo}
                 />
-              ) : queueModel.ended ? (
-                // An ended queue keeps its surface: the stage column
-                // shows it instead of collapsing to the empty state —
-                // a row press replays through playOccurrence.
-                <QueueScreen
-                  queue={queueModel}
-                  reordering={reordering}
-                  onToggleReorder={toggleReordering}
-                  onPressItem={playQueueOccurrence}
-                  onRemoveItem={removeQueueOccurrence}
-                  onMoveItem={onMoveQueueItem}
-                  onMoveItemTo={onMoveQueueItemTo}
-                />
               ) : (
-                <EmptyState
-                  title={t('stage.empty')}
-                  hint={t('stage.emptyHint')}
-                  icon="note"
+                // An ended queue keeps its surface: queue mode shows it
+                // (a row press replays through playOccurrence); other
+                // modes get the empty pane. The floating segment stays
+                // mounted either way.
+                <StageIdlePane
+                  mode={stageMode}
+                  onModeChange={setStageMode}
+                  queue={queueModel.ended ? queueModel : undefined}
+                  queueReordering={reordering}
+                  onToggleQueueReorder={toggleReordering}
+                  onPressQueueItem={playQueueOccurrence}
+                  onRemoveQueueItem={removeQueueOccurrence}
+                  onMoveQueueItem={onMoveQueueItem}
+                  onMoveQueueItemTo={onMoveQueueItemTo}
                 />
               )
             }

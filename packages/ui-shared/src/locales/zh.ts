@@ -424,6 +424,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'settings.diag.attemptTrace': '尝试追踪',
   'settings.diag.attempts': '{count} 次尝试',
   'settings.diag.last': '上次：{value}',
+  'settings.diag.lastFailure': '上次失败',
   'settings.diag.persistence': '持久化',
   'settings.diag.persistenceValue.ok': '正常',
   'settings.diag.persistenceValue.degraded': '降级',

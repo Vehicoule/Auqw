@@ -456,6 +456,7 @@ export const es: Readonly<Record<MessageId, Message>> = {
     other: '{count} intentos',
   },
   'settings.diag.last': 'último: {value}',
+  'settings.diag.lastFailure': 'último fallo',
   'settings.diag.persistence': 'persistencia',
   'settings.diag.persistenceValue.ok': 'ok',
   'settings.diag.persistenceValue.degraded': 'degradada',
