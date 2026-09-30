@@ -13,8 +13,14 @@
 // of the failure survives — the point is to lose the secret, not the
 // diagnosis.
 
-/** Any scheme's URL, not just http(s): `ws://`, `wss://`, `file://`. */
-const URL_LIKE = /[a-z][a-z0-9+.-]*:\/\/[^\s]*/gi;
+/**
+ * Any scheme's URL, not just http(s): `ws://`, `wss://`, `file://`.
+ * The scheme run is bounded ({0,127}) because an unbounded `*` ahead of
+ * the required `:` backtracks once per candidate character at every
+ * start position — quadratic on a long identifier run with no `://`.
+ * No real scheme approaches 128 chars, so nothing redactable is lost.
+ */
+const URL_LIKE = /[a-z][a-z0-9+.-]{0,127}:\/\/[^\s]*/gi;
 
 /**
  * Header-style secrets. The value runs to the end of the line, because
