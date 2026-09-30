@@ -185,22 +185,19 @@ export async function run(): Promise<void> {
     // reach a registered handler (invoke → handle, send → on) — an
     // unwired channel fails silently for the user, the caller only
     // sees "no handler registered". `stream:probe` shipped that way.
-    // A few listeners (chromeScheme) live in the bootstrap outside
-    // registerChannels — claimed in main/index.ts counts as wired.
+    // Channels whose listeners live outside registerChannels are named
+    // here explicitly — the list must grow by hand so an unwired
+    // channel can never satisfy the sweep by accident.
+    const BOOTSTRAP_REGISTERED = new Set([CHANNELS.chromeScheme]);
     {
       const preloadSrc = readFileSync(
         new URL('../preload/index.ts', import.meta.url),
         'utf8',
       );
-      const bootstrapSrc = readFileSync(
-        new URL('./index.ts', import.meta.url),
-        'utf8',
-      );
       for (const m of preloadSrc.matchAll(/invoke\(CHANNELS\.(\w+)/g)) {
         const channel = CHANNELS[m[1] as keyof typeof CHANNELS];
         assert(
-          ipc.handlers.has(channel) ||
-            bootstrapSrc.includes(`CHANNELS.${m[1]}`),
+          ipc.handlers.has(channel) || BOOTSTRAP_REGISTERED.has(channel),
           `preload invokes '${channel}' but main registers no handler`,
         );
       }
@@ -209,7 +206,7 @@ export async function run(): Promise<void> {
         assert(
           ipc.handlers.has(channel) ||
             ipc.listeners.has(channel) ||
-            bootstrapSrc.includes(`CHANNELS.${m[1]}`),
+            BOOTSTRAP_REGISTERED.has(channel),
           `preload sends '${channel}' but main registers nothing`,
         );
       }
