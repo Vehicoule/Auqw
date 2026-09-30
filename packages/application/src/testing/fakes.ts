@@ -524,6 +524,10 @@ export class FakePlayer implements PlayerPort {
     return this.#prepareDeferreds.length;
   }
 
+  get pendingPrewarms(): number {
+    return this.#prewarmDeferreds.length;
+  }
+
   /** Settles the oldest pending prewarm; false when none pending. */
   settlePrewarm(result: Result<string>): boolean {
     return settleQueue(this.#prewarmDeferreds, 0, result);
@@ -720,6 +724,10 @@ export class FakeStorage implements StoragePort {
   /** Settles the oldest pending commit; false when none pending. */
   settleCommit(result: Result<void>): boolean {
     return settleQueue(this.#commitDeferreds, 0, result);
+  }
+
+  get pendingCommits(): number {
+    return this.#commitDeferreds.length;
   }
 
   /** Settles the oldest pending load; false when none pending. */

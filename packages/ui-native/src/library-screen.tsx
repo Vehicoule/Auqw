@@ -480,6 +480,7 @@ export function LibraryScreen({
                 key={`recent-${item.row.key}`}
                 row={item.row}
                 onPress={item.onPress}
+                onIntent={item.onIntent}
                 onToggleLike={item.onToggleLike}
                 onContext={item.onContext}
               />

@@ -288,6 +288,26 @@ type StreamWarm = {
 };
 
 /**
+ * One row under the user's finger — the freshest possible surface
+ * intent a `prewarm()` call can carry. `kind` selects the row's own
+ * identity: a library recording, a queue occurrence, or a catalog
+ * track that never became a recording.
+ */
+export type PrewarmFocus =
+  | { readonly kind: 'recording'; readonly id: string }
+  | { readonly kind: 'occurrence'; readonly id: string }
+  | { readonly kind: 'track'; readonly track: TrackMetadata };
+
+/** Surface hands `prewarm()` accepts — advisory, bounded, cancellable. */
+export type PrewarmInput = {
+  readonly recordingIds?: readonly string[];
+  readonly occurrenceIds?: readonly string[];
+  readonly sourceRefs?: readonly SourceRef[];
+  readonly tracks?: readonly TrackMetadata[];
+  readonly focus?: PrewarmFocus;
+};
+
+/**
  * A repeat-driven replay or wrap begins a new listen for the target
  * occurrence — bump its cycle so play-history dedup counts the loop.
  */
@@ -522,8 +542,15 @@ export class PlaybackEngine {
   /**
    * Recording ids a surface handed `prewarm()` — the window loop
    * drains them into `#warmSeen` bookkeeping; bounded at add time.
+   * `occurrenceId` pins the resolved ref onto that queue row (a
+   * viewport hand), and `backlogKey` — non-null only for surface
+   * hands — pushes the resolved ref into `#surfaceBacklog` so the
+   * one stream-warm slot can mint it before the tap.
    */
-  #warmPending = new Set<string>();
+  #warmPending = new Map<
+    string,
+    { occurrenceId: string | null; backlogKey: string | null }
+  >();
   /**
    * Row-warm suppression: recently-attempted recording ids — the
    * 64-entry LRU the candidates warm is required to dedupe under.
@@ -2882,7 +2909,7 @@ export class PlaybackEngine {
         // row was only suppressed for the in-flight call, so unsee
         // it like the warm cancel paths do and let a later warm
         // retry instead of sitting out WARM_ROW_TTL_MS.
-        this.#unseeWarmTarget({ recordingId, occurrenceId });
+        this.#unseeWarmTarget({ recordingId, occurrenceId, backlogKey: null });
         return;
       }
       if (!result.ok) {
@@ -2986,46 +3013,126 @@ export class PlaybackEngine {
     this.#maybeWarmStream();
   }
 
-  prewarm(input: {
-    readonly recordingIds?: readonly string[];
-    readonly sourceRefs?: readonly SourceRef[];
-    readonly tracks?: readonly TrackMetadata[];
-  }): void {
+  prewarm(input: PrewarmInput): void {
     const ready = this.#host.requireReady();
     if (!ready.ok) {
       return;
     }
     const r = ready.value;
-    const refs = input.sourceRefs ?? [];
-    for (const s of refs.slice(0, PREWARM_INPUT_LIMIT)) {
+    const playbackProvider = r.settings.playbackProvider;
+    const now = this.#host.safeNow();
+
+    const backlogPush = (entry: {
+      key: string;
+      provider: string;
+      sourceRef: string;
+      atMs: number;
+    }): void => {
       if (
-        isTrackRef(s) &&
-        s.provider === r.settings.playbackProvider &&
-        s.provider !== LOCAL_PROVIDER
+        now !== null &&
+        this.#surfaceBacklog.length < WARM_SEEN_CAP &&
+        !this.#surfaceBacklog.some((e) => e.key === entry.key)
       ) {
-        const now = this.#host.safeNow();
-        if (now !== null) {
-          this.#surfaceWarm = {
-            provider: s.provider,
-            sourceRef: s.id,
-            atMs: now,
-          };
+        this.#surfaceBacklog.push(entry);
+      }
+    };
+    const pendRow = (
+      recordingId: string,
+      pending: { occurrenceId: string | null; backlogKey: string | null },
+    ): void => {
+      if (this.#warmPending.size < WARM_SEEN_CAP) {
+        this.#warmPending.set(recordingId, pending);
+      }
+    };
+
+    // `sourceRefs`: the FIRST eligible ref is the direct mint hand;
+    // the rest queue in the backlog (reversed so the hand's rank
+    // order is the offer order — the backlog scans newest-first).
+    const refs = (input.sourceRefs ?? []).slice(0, PREWARM_INPUT_LIMIT);
+    const eligible = refs.filter(
+      (s) =>
+        isTrackRef(s) &&
+        s.provider === playbackProvider &&
+        s.provider !== LOCAL_PROVIDER,
+    );
+    const extraRefs = eligible.slice(1);
+    this.#surfaceKeysReplace(
+      's:',
+      extraRefs.map((s) => `s:${s.provider}:${s.id}`),
+    );
+    for (const s of [...extraRefs].reverse()) {
+      backlogPush({
+        key: `s:${s.provider}:${s.id}`,
+        provider: s.provider,
+        sourceRef: s.id,
+        atMs: (now ?? 0) - 1,
+      });
+    }
+    const first = eligible[0];
+    if (first !== undefined && now !== null) {
+      this.#surfaceWarm = {
+        provider: first.provider,
+        sourceRef: first.id,
+        atMs: now,
+      };
+    }
+
+    // `occurrenceIds`: queue rows the surface is showing. A resolved
+    // row's ref straight into the backlog — the stream-warm slot
+    // mints it; an unresolved row joins the window pass tagged so
+    // the resolve pins it AND mints through the same backlog.
+    if (input.occurrenceIds !== undefined) {
+      const occIds = input.occurrenceIds.slice(0, PREWARM_INPUT_LIMIT);
+      this.#surfaceKeysReplace(
+        'o:',
+        occIds.map((id) => `o:${id}`),
+      );
+      for (const occurrenceId of [...occIds].reverse()) {
+        if (!isString(occurrenceId, 256)) {
+          continue;
         }
-        break;
+        const ref = this.#queueRowRef(r, occurrenceId);
+        if (ref !== null) {
+          backlogPush({
+            key: `o:${occurrenceId}`,
+            provider: ref.provider,
+            sourceRef: ref.sourceRef,
+            atMs: now ?? 0,
+          });
+          continue;
+        }
+        const snap = r.queue.snapshot();
+        const occurrence = snap.occurrences.find(
+          (o) => o.occurrenceId === occurrenceId,
+        );
+        if (occurrence !== undefined) {
+          pendRow(occurrence.recordingId, {
+            occurrenceId,
+            backlogKey: `o:${occurrenceId}`,
+          });
+        }
       }
     }
+
     const ids = input.recordingIds ?? [];
     for (const id of ids.slice(0, PREWARM_INPUT_LIMIT)) {
-      if (isString(id, 256) && this.#warmPending.size < WARM_SEEN_CAP) {
-        this.#warmPending.add(id);
+      if (
+        isString(id, 256) &&
+        this.#warmPending.size < WARM_SEEN_CAP &&
+        !this.#warmPending.has(id)
+      ) {
+        this.#warmPending.set(id, { occurrenceId: null, backlogKey: null });
       }
     }
     const tracks = input.tracks ?? [];
     if (input.tracks !== undefined) {
       // The visible page just changed: queued and resolved intents
       // from the old one are dropped — a stale match must never mint
-      // over the rows now under the user's finger.
-      this.#surfaceKeys = new Set(
+      // over the rows now under the user's finger. Only the `q:`
+      // namespace rotates: focus/occurrence/source hands own their
+      // own keys and a tracks hand never evicts them.
+      this.#surfaceKeysReplace(
+        'q:',
         tracks
           .slice(0, PREWARM_INPUT_LIMIT)
           .filter(
@@ -3036,11 +3143,11 @@ export class PlaybackEngine {
           )
           .map((meta) => `q:${meta.sourceRef.provider}:${meta.sourceRef.id}`),
       );
-      this.#warmPendingQueries = this.#warmPendingQueries.filter((t) =>
-        this.#surfaceKeys.has(t.key),
+      this.#warmPendingQueries = this.#warmPendingQueries.filter(
+        (t) => !t.key.startsWith('q:') || this.#surfaceKeys.has(t.key),
       );
       this.#surfaceBacklog = this.#surfaceBacklog.filter((e) => {
-        if (this.#surfaceKeys.has(e.key)) {
+        if (!e.key.startsWith('q:') || this.#surfaceKeys.has(e.key)) {
           return true;
         }
         // Never offered, so the row's seen mark is undone — a page
@@ -3082,8 +3189,101 @@ export class PlaybackEngine {
         });
       }
     }
+
+    // `focus` — the one row under the finger, processed last so it
+    // outranks every other hand. A resolved row hands the mint slot
+    // directly; an unresolved one jumps the window pass's queue and
+    // mints through the backlog when its resolve lands.
+    if (input.focus !== undefined) {
+      const focus = input.focus;
+      this.#surfaceKeysReplace(
+        'f:',
+        focus.kind === 'recording' ? [`f:${focus.id}`] : [],
+      );
+      if (focus.kind === 'occurrence') {
+        const ref = this.#queueRowRef(r, focus.id);
+        if (ref !== null && now !== null) {
+          this.#surfaceWarm = {
+            provider: ref.provider,
+            sourceRef: ref.sourceRef,
+            atMs: now,
+          };
+        } else {
+          const snap = r.queue.snapshot();
+          const occurrence = snap.occurrences.find(
+            (o) => o.occurrenceId === focus.id,
+          );
+          if (occurrence !== undefined) {
+            this.#surfaceKeys.add(`o:${focus.id}`);
+            pendRow(occurrence.recordingId, {
+              occurrenceId: focus.id,
+              backlogKey: `o:${focus.id}`,
+            });
+          }
+        }
+      } else if (focus.kind === 'recording') {
+        const rec = r.recordings.find((x) => x.id === focus.id);
+        const ref =
+          rec === undefined ? null : this.#host.pickRef(rec, null);
+        if (
+          ref !== null &&
+          isTrackRef(ref) &&
+          ref.provider === playbackProvider &&
+          ref.provider !== LOCAL_PROVIDER &&
+          now !== null
+        ) {
+          this.#surfaceWarm = {
+            provider: ref.provider,
+            sourceRef: ref.id,
+            atMs: now,
+          };
+        } else if (rec !== undefined) {
+          pendRow(rec.id, { occurrenceId: null, backlogKey: `f:${rec.id}` });
+        }
+      } else {
+        const meta = focus.track;
+        if (
+          isTrackMetadata(meta) &&
+          meta.sourceRef.provider === playbackProvider &&
+          meta.sourceRef.provider !== LOCAL_PROVIDER &&
+          now !== null
+        ) {
+          this.#surfaceWarm = {
+            provider: meta.sourceRef.provider,
+            sourceRef: meta.sourceRef.id,
+            atMs: now,
+          };
+        } else if (
+          isTrackMetadata(meta) &&
+          meta.sourceRef.provider !== LOCAL_PROVIDER
+        ) {
+          const key = `f:${meta.sourceRef.provider}:${meta.sourceRef.id}`;
+          this.#surfaceKeys.add(key);
+          this.#warmPendingQueries = this.#warmPendingQueries.filter(
+            (t) => t.key !== key,
+          );
+          this.#warmPendingQueries.unshift({
+            key,
+            query: {
+              title: meta.title,
+              artist: meta.artist,
+              album: meta.album,
+              durationMs: meta.durationMs,
+              versionLabels: extractVersionLabels(meta.title, meta.explicit),
+              isrc: meta.isrc ?? null,
+            },
+          });
+        }
+      }
+    }
     this.#maybeWarmWindow();
     this.#maybeWarmStream();
+  }
+
+  /** Replace one provenance namespace inside the visible-row key set. */
+  #surfaceKeysReplace(prefix: string, keys: readonly string[]): void {
+    const kept = [...this.#surfaceKeys].filter((k) => !k.startsWith(prefix));
+    this.#surfaceKeys = new Set([...kept, ...keys]);
   }
 
   /** Speculative gates — playback-intent paths never consult these. */
@@ -3154,10 +3354,16 @@ export class PlaybackEngine {
   #unseeWarmTarget(target: {
     recordingId: string;
     occurrenceId: string | null;
+    backlogKey: string | null;
   }): void {
     this.#warmSeen.delete(target.recordingId);
-    if (target.occurrenceId === null) {
-      this.#warmPending.add(target.recordingId);
+    // Dealt-window rows re-derive on their own; surface-handed rows
+    // (a backlog key, or a bare recordingIds hand) requeue.
+    if (target.occurrenceId === null || target.backlogKey !== null) {
+      this.#warmPending.set(target.recordingId, {
+        occurrenceId: target.occurrenceId,
+        backlogKey: target.backlogKey,
+      });
     }
   }
 
@@ -3299,7 +3505,12 @@ export class PlaybackEngine {
    * bytes, mapping, unvetoed source ref — is already resolved.
    */
   #nextWarmTarget(r: Ready):
-    | { kind: 'row'; recordingId: string; occurrenceId: string | null }
+    | {
+        kind: 'row';
+        recordingId: string;
+        occurrenceId: string | null;
+        backlogKey: string | null;
+      }
     | { kind: 'query'; query: RecordingQuery; key: string }
     | null {
     // Only the row the active attempt is itself resolving stays out
@@ -3312,16 +3523,57 @@ export class PlaybackEngine {
       this.#active !== null && !this.#active.preparedHandled
         ? this.#active.recordingId
         : null;
-    for (const id of [...this.#warmPending]) {
+    const snapNow = r.queue.snapshot();
+    for (const [id, pending] of [...this.#warmPending]) {
       this.#warmPending.delete(id);
       const rec = r.recordings.find((x) => x.id === id);
+      const occurrence =
+        pending.occurrenceId === null
+          ? undefined
+          : snapNow.occurrences.find(
+              (o) => o.occurrenceId === pending.occurrenceId,
+            );
+      if (rec === undefined || id === resolvingId || this.#warmSeenFresh(id)) {
+        continue;
+      }
+      if (pending.occurrenceId !== null && occurrence === undefined) {
+        // The handed row left the queue before its resolve ran —
+        // nothing to pin, nothing to mint over.
+        continue;
+      }
+      const picked = this.#host.pickRef(
+        rec,
+        occurrence?.selectedRef ?? null,
+      );
+      if (picked === null) {
+        return {
+          kind: 'row',
+          recordingId: id,
+          occurrenceId: pending.occurrenceId,
+          backlogKey: pending.backlogKey,
+        };
+      }
+      // Already resolved by the time the pass reached it — a
+      // surface-mint row still owes its mint, straight into the
+      // backlog without paying a candidates leg.
       if (
-        rec !== undefined &&
-        id !== resolvingId &&
-        this.#host.pickRef(rec, null) === null &&
-        !this.#warmSeenFresh(id)
+        pending.backlogKey !== null &&
+        picked.provider === r.settings.playbackProvider &&
+        picked.provider !== LOCAL_PROVIDER
       ) {
-        return { kind: 'row', recordingId: id, occurrenceId: null };
+        const now = this.#host.safeNow();
+        if (
+          now !== null &&
+          this.#surfaceBacklog.length < WARM_SEEN_CAP &&
+          !this.#surfaceBacklog.some((e) => e.key === pending.backlogKey)
+        ) {
+          this.#surfaceBacklog.push({
+            key: pending.backlogKey,
+            provider: picked.provider,
+            sourceRef: picked.id,
+            atMs: now,
+          });
+        }
       }
     }
     while (this.#warmPendingQueries.length > 0) {
@@ -3368,6 +3620,7 @@ export class PlaybackEngine {
           kind: 'row',
           recordingId: rec.id,
           occurrenceId: occurrence.occurrenceId,
+          backlogKey: null,
         };
       }
     }
@@ -3441,7 +3694,11 @@ export class PlaybackEngine {
    * work never enqueues a review.
    */
   async #warmOne(
-    target: { recordingId: string; occurrenceId: string | null },
+    target: {
+      recordingId: string;
+      occurrenceId: string | null;
+      backlogKey: string | null;
+    },
     source: CancellationSource,
   ): Promise<void> {
     const warmed = await this.#warmCandidates(
@@ -3553,6 +3810,27 @@ export class PlaybackEngine {
       // A new pin changes what a service move would attach — the
       // projection must carry it.
       this.#host.own(this.projectQueue());
+    }
+    if (target.backlogKey !== null) {
+      // Surface-handed row: resolve+pin is spent — park the ref so
+      // the one stream-warm slot mints it before the tap lands.
+      const now = this.#host.safeNow();
+      if (
+        now !== null &&
+        isTrackRef(ref) &&
+        ref.provider === provider.id &&
+        ref.provider !== LOCAL_PROVIDER &&
+        this.#surfaceBacklog.length < WARM_SEEN_CAP &&
+        !this.#surfaceBacklog.some((e) => e.key === target.backlogKey)
+      ) {
+        this.#surfaceBacklog.push({
+          key: target.backlogKey,
+          provider: ref.provider,
+          sourceRef: ref.id,
+          atMs: now,
+        });
+      }
+      this.#maybeWarmStream();
     }
   }
 
@@ -3692,12 +3970,19 @@ export class PlaybackEngine {
       sourceRef: string;
       atMs: number;
     } | null = null;
+    const snap = r.queue.snapshot();
     for (let i = this.#surfaceBacklog.length - 1; i >= 0; i -= 1) {
       const e = this.#surfaceBacklog[i];
       if (e === undefined) {
         continue;
       }
+      // An 'o:'-keyed entry lives and dies with its queue row — a
+      // removed occurrence's resolved ref mints nothing.
+      const gone =
+        e.key.startsWith('o:') &&
+        !snap.occurrences.some((o) => o.occurrenceId === e.key.slice(2));
       if (
+        gone ||
         !this.#surfaceKeys.has(e.key) ||
         now - e.atMs >= SURFACE_WARM_TTL_MS ||
         e.provider !== r.settings.playbackProvider
@@ -4047,6 +4332,10 @@ export class PlaybackEngine {
       this.#surfaceBacklog = this.#surfaceBacklog.filter(
         (e) => e.key !== warm.backlogKey,
       );
+    } else if (warm.origin === 'surface') {
+      // A direct `#surfaceWarm` hand is spent on its mint — leaving
+      // it set would re-issue the same ref and starve the backlog.
+      this.#surfaceWarm = null;
     }
     if (this.#active?.handle === stream.handle) {
       // An attempt or a service move already attached this session —

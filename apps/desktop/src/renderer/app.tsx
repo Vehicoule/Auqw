@@ -724,6 +724,7 @@ function Main({
     onToggleLike,
     advance,
     playQueueOccurrence,
+    rowIntent,
     onMoveQueueItem,
     onMoveQueueItemTo,
     removeQueueOccurrence,
@@ -1001,6 +1002,12 @@ function Main({
             onCancel={cancelSearch}
             onRetry={retrySearch}
             onResultPress={onResultPress}
+            onRowIntent={(row) => {
+              const meta = resultMetaFor(row.key);
+              if (meta !== undefined) {
+                rowIntent({ kind: 'track', track: meta });
+              }
+            }}
             onAddToPlaylist={(row) => metaPick(resultMetaFor(row.key))}
             onContext={(row) => metaActions(resultMetaFor(row.key))}
             recents={searchRecents}
@@ -1015,6 +1022,7 @@ function Main({
           <LibraryScreen
             model={libraryModel}
             onPressItem={(id) => void playRecording(id)}
+            onRowIntent={(id) => rowIntent({ kind: 'recording', id })}
             onToggleLike={(id) => void session.toggleLike(id)}
             onAddToPlaylist={(id) =>
               setPickerFor({ kind: 'recording', recordingId: id })
@@ -1074,6 +1082,9 @@ function Main({
             onBack={closeOverlay}
             onPlayAll={() => playCollectionRows(model.rows)}
             onPressItem={(row) => void playRecording(row.recordingId)}
+            onRowIntent={(row) =>
+              rowIntent({ kind: 'recording', id: row.recordingId })
+            }
             onToggleLike={(row) => void session.toggleLike(row.recordingId)}
             onAddToPlaylist={(row) =>
               setPickerFor({ kind: 'recording', recordingId: row.recordingId })
@@ -1100,6 +1111,9 @@ function Main({
               dismissOverlay(entry.key);
             }}
             onPressEntry={playPlaylistEntry}
+            onRowIntent={(entry) =>
+              rowIntent({ kind: 'recording', id: entry.recordingId })
+            }
             onToggleLike={(entry) => void session.toggleLike(entry.recordingId)}
             onAddToPlaylist={(entry) =>
               setPickerFor({
@@ -1141,6 +1155,12 @@ function Main({
                     void session.toggleEntityLike(current.ref.kind, entityId)
             }
             onPressItem={(row) => onEntityRowPress(entry.key, row)}
+            onRowIntent={(row) => {
+              const meta = metaFor(row);
+              if (meta !== undefined) {
+                rowIntent({ kind: 'track', track: meta });
+              }
+            }}
             onAddToPlaylist={(row) => metaPick(metaFor(row))}
             onContext={(row) => metaActions(metaFor(row))}
             onLoadMore={onLoadMore}
@@ -1255,6 +1275,9 @@ function Main({
                   onStartRadio={onStartRadioGated}
                   onStopRadio={onStopRadio}
                   onPressQueueItem={playQueueOccurrence}
+                  onQueueRowIntent={(id) =>
+                    rowIntent({ kind: 'occurrence', id })
+                  }
                   onRemoveQueueItem={removeQueueOccurrence}
                   onToggleQueueReorder={toggleReordering}
                   onMoveQueueItem={onMoveQueueItem}
@@ -1272,6 +1295,9 @@ function Main({
                   queueReordering={reordering}
                   onToggleQueueReorder={toggleReordering}
                   onPressQueueItem={playQueueOccurrence}
+                  onQueueRowIntent={(id) =>
+                    rowIntent({ kind: 'occurrence', id })
+                  }
                   onRemoveQueueItem={removeQueueOccurrence}
                   onMoveQueueItem={onMoveQueueItem}
                   onMoveQueueItemTo={onMoveQueueItemTo}

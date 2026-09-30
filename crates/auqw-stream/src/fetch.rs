@@ -119,6 +119,17 @@ impl ReqwestFetch {
         })?;
         Ok(Self { client })
     }
+
+    /// Wrap a shared [`reqwest::Client`].
+    ///
+    /// The host shares one client (one connection pool) between guest
+    /// HTTP and stream fetches: a plugin's last-byte resolve probe to a
+    /// CDN host keeps its connection pooled, so the pump's first range
+    /// request to the same origin skips TCP+TLS setup.
+    #[must_use]
+    pub fn with_client(client: reqwest::Client) -> Self {
+        Self { client }
+    }
 }
 
 /// Host (sans port/userinfo) of an `https://` URL — case-insensitive
@@ -647,6 +658,90 @@ mod tests {
         let _ = release.send(());
         worker.join().unwrap();
         assert!(matches!(result, Ok(Some(Err(StreamError::Cancelled)))));
+    }
+
+    /// Shared-pool contract behind `with_client`: a range fetch must
+    /// reuse a keep-alive connection an earlier request on the same
+    /// `reqwest::Client` opened — the host relies on this for the
+    /// probe → pump handoff (the guest's last-byte resolve probe warms
+    /// the connection the first range fetch would otherwise
+    /// re-handshake).
+    #[tokio::test]
+    async fn with_client_reuses_the_pooled_connection() {
+        use super::*;
+        use std::io::{Read, Write};
+        use std::sync::mpsc;
+
+        // One handler per accepted socket; it reports the socket's id
+        // for every request it serves. Connection reuse ⇒ both
+        // requests report the same id.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/range", listener.local_addr().unwrap());
+        let (tx, rx) = mpsc::channel::<usize>();
+        // The acceptor stays blocked in `accept` after the assertions —
+        // it dies with the test binary; each served socket gets its own
+        // handler thread that exits on the read timeout.
+        std::thread::spawn(move || {
+            for (id, stream) in listener.incoming().enumerate() {
+                let mut socket = match stream {
+                    Ok(socket) => socket,
+                    Err(_) => return,
+                };
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(800)))
+                    .unwrap();
+                let tx = tx.clone();
+                std::thread::spawn(move || loop {
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        if socket.read_exact(&mut byte).is_err() {
+                            return;
+                        }
+                        request.push(byte[0]);
+                    }
+                    if socket
+                        .write_all(
+                            b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 0-3/100\r\n\r\nxxxx",
+                        )
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let _ = tx.send(id);
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+        // The guest's resolve probe — same origin, keep-alive conn.
+        let probe = client.get(&url).send().await.unwrap();
+        drop(probe.bytes().await);
+
+        let fetch = ReqwestFetch::with_client(client);
+        let mut response = fetch
+            .get_range(RangeRequest {
+                url: &url,
+                offset: 0,
+                max_len: 4,
+                headers: &[],
+                stall: Duration::from_secs(2),
+                deadline: Duration::from_secs(3),
+                cancel: CancellationToken::new(),
+            })
+            .await
+            .unwrap();
+        while let Some(_piece) = response.body.next().await {}
+
+        let mut served = Vec::new();
+        while served.len() < 2 {
+            served.push(rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        }
+        assert_eq!(
+            served,
+            [0, 0],
+            "probe and range fetch must ride one pooled connection"
+        );
     }
 
     const MINT: &str = "https://rr1---sn-x.googlevideo.com/videoplayback?sig=1";

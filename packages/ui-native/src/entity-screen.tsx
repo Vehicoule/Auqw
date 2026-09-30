@@ -48,6 +48,7 @@ export function EntityScreen({
   onShuffleAll,
   onToggleLike,
   onPressItem,
+  onRowIntent,
   onContext,
   onLoadMore,
   onRetry,
@@ -59,6 +60,7 @@ export function EntityScreen({
     onShuffleAll,
     onToggleLike,
     onPressItem,
+    onRowIntent,
     onContext,
     onLoadMore,
     onRetry,
@@ -210,6 +212,7 @@ export function EntityScreen({
             <TrackRow
               row={item.row}
               onPress={item.onPress}
+              onIntent={item.onIntent}
               onContext={item.onContext}
             />
           )}

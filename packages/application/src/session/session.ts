@@ -107,6 +107,8 @@ import { LibraryService } from './library-service.ts';
 import { RadioCoordinator } from './radio-coordinator.ts';
 import { SyncIngress } from './sync-ingress.ts';
 import { PlaybackEngine } from './playback-engine.ts';
+import type { PrewarmInput } from './playback-engine.ts';
+export type { PrewarmFocus, PrewarmInput } from './playback-engine.ts';
 import {
   boundedCommit,
   boundedLoad,
@@ -1510,27 +1512,36 @@ export class Session {
 
   /**
    * Advisory warm for rows a surface is showing — never playback
-   * intent, never an error channel. Two levels, both bounded and
-   * gated by `settings.prefetch` + the connectivity reads:
+   * intent, never an error channel. All hands are bounded and gated
+   * by `settings.prefetch` + the connectivity reads:
    *
    * - `recordingIds`: candidates-resolve + automatic-mapping for the
    *   row's missing ref — up to `PREWARM_INPUT_LIMIT` ids drain into
    *   the same dealt-window pass; an 'ambiguous' match is a typed
    *   skip, never a review enqueue.
+   * - `occurrenceIds`: queue rows the surface is showing (the
+   *   viewport hand). A resolved row's ref queues into the stream
+   *   backlog and mints in display order; an unresolved row is
+   *   candidates-resolved, pinned, then minted — its tap adopts the
+   *   already-spent session.
    * - `sourceRefs`: the FIRST playable ref for the active playback
    *   provider becomes the idle-time advisory stream warm — a real
    *   `player.prewarm` resolve+prepare whose minted session a later
-   *   same-ref `prepare` adopts without re-resolving. Only ever the
-   *   newest one wins: a scrolled-to row is the one the user can tap.
+   *   same-ref `prepare` adopts without re-resolving. Extra refs
+   *   queue behind it in the backlog in rank order.
+   * - `tracks`: catalog rows the visible page carries — those
+   *   without a playback-provider ref candidates-resolve into the
+   *   backlog (`q:` namespace, replaced wholesale on each hand).
+   * - `focus`: the single row under the user's finger — hover,
+   *   long-press, keyboard focus. Outranks every other hand; a
+   *   resolved ref mints straight away, an unresolved one jumps the
+   *   window pass's queue. The next focus replaces it — scroll
+   *   churn cancels stale intent.
    *
    * Everything is cancellable and idempotent — repeated calls for
    * the same rows dedupe through `#warmSeen`/`#streamWarm`.
    */
-  prewarm(input: {
-    readonly recordingIds?: readonly string[];
-    readonly sourceRefs?: readonly SourceRef[];
-    readonly tracks?: readonly TrackMetadata[];
-  }): void {
+  prewarm(input: PrewarmInput): void {
     this.#playback.prewarm(input);
   }
 
@@ -1543,7 +1554,7 @@ export class Session {
     if (!r.recordings.some((rec) => rec.id === recordingId)) {
       return err(appError('not-found', 'unknown recording'));
     }
-    return this.#commitAndDerive((cur) => {
+    const staged = await this.#commitAndDerive((cur) => {
       const live = cur.recordings.find((rec) => rec.id === recordingId);
       if (live === undefined) {
         return err(appError('not-found', 'unknown recording'));
@@ -1563,6 +1574,13 @@ export class Session {
         },
       });
     });
+    if (staged.ok) {
+      // A just-enqueued row is the likeliest next tap — the viewport
+      // hand resolves+pins+mint-warms it before any surface reports
+      // it visible.
+      this.#playback.prewarm({ occurrenceIds: [staged.value] });
+    }
+    return staged;
   }
 
   async addAndPlay(metadata: TrackMetadata): Promise<Result<void>> {

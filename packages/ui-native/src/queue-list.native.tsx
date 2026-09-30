@@ -25,6 +25,7 @@ export function QueueList({
   scrollEnabled = true,
   contentPaddingBottom = 0,
   onPressItem,
+  onRowIntent,
   onRemoveItem,
   onMoveItem,
   onMoveItemTo,
@@ -70,6 +71,11 @@ export function QueueList({
           onPressItem === undefined || reordering
             ? undefined
             : () => onPressItem(item.occurrenceId)
+        }
+        onIntent={
+          onRowIntent === undefined
+            ? undefined
+            : () => onRowIntent(item.occurrenceId)
         }
         onRemove={
           onRemoveItem === undefined || item.current || reordering

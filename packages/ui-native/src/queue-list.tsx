@@ -65,6 +65,8 @@ export type QueueListProps = {
       scroll fully clear of it. */
   readonly contentPaddingBottom?: number | undefined;
   readonly onPressItem?: ((occurrenceId: string) => void) | undefined;
+  /** Advisory row intent — touch-down on a row; the caller warms it. */
+  readonly onRowIntent?: ((occurrenceId: string) => void) | undefined;
   readonly onRemoveItem?: ((occurrenceId: string) => void) | undefined;
   readonly onMoveItem?:
   | ((occurrenceId: string, direction: -1 | 1) => void)
@@ -80,6 +82,7 @@ export function QueueList({
   scrollEnabled = true,
   contentPaddingBottom = 0,
   onPressItem,
+  onRowIntent,
   onRemoveItem,
   onMoveItem,
   onMoveItemTo,
@@ -127,6 +130,11 @@ export function QueueList({
               onPressItem === undefined || reordering
                 ? undefined
                 : () => onPressItem(item.occurrenceId)
+            }
+            onIntent={
+              onRowIntent === undefined
+                ? undefined
+                : () => onRowIntent(item.occurrenceId)
             }
             onRemove={
               onRemoveItem === undefined || item.current || reordering

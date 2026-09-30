@@ -37,6 +37,7 @@ import type {
   ImportPreview,
   LocalFileSource,
   OperationContext,
+  PrewarmFocus,
   Result,
   SearchState,
   Settings,
@@ -950,6 +951,33 @@ export function useAppShell<E extends { readonly type: string } = never>(
     }
   }, [searchState, session]);
 
+  // Row-intent warm: a hovered/focused/pressed row is the likeliest
+  // next tap — hand its focus slot to the session (newest wins, the
+  // engine cancels stale intent). A short trailing debounce absorbs
+  // pointer/scroll sweeps so a flyby never issues a mint.
+  const rowIntentTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rowIntent = useCallback(
+    (focus: PrewarmFocus) => {
+      const timer = rowIntentTimer.current;
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+      rowIntentTimer.current = setTimeout(() => {
+        rowIntentTimer.current = null;
+        session.prewarm({ focus });
+      }, 120);
+    },
+    [session],
+  );
+  useEffect(
+    () => () => {
+      if (rowIntentTimer.current !== null) {
+        clearTimeout(rowIntentTimer.current);
+      }
+    },
+    [],
+  );
+
   const [pendingReviews, setPendingReviews] = useState<number | null>(null);
 
   // Diagnostics + pending-review count load on each settings-tab
@@ -1157,6 +1185,23 @@ export function useAppShell<E extends { readonly type: string } = never>(
       setStageMode('queue');
     }
   }, [playbackIdle, queueModel.ended]);
+
+  // Queue viewport: rows on screen get mint-level warms — a tap on
+  // any visible up-next row adopts instead of paying a cold resolve.
+  // Handed only while the queue surface shows; the engine's one warm
+  // slot rotates the head, display order first.
+  const queueRowsVisible = stageOpen && stageMode === 'queue';
+  useEffect(() => {
+    if (!queueRowsVisible) {
+      return;
+    }
+    const ids = (queueModel.sections.find((s) => s.key === 'upNext')?.items ?? [])
+      .slice(0, 9)
+      .map((item) => item.occurrenceId);
+    if (ids.length > 0) {
+      session.prewarm({ occurrenceIds: ids });
+    }
+  }, [queueRowsVisible, queueModel, session]);
 
   const libraryModel = useMemo(() => {
     // ports.localCatalog: local index rows (provenance 'local')
@@ -3295,6 +3340,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     onToggleLike,
     advance,
     playQueueOccurrence,
+    rowIntent,
     onMoveQueueItem,
     onMoveQueueItemTo,
     removeQueueOccurrence,

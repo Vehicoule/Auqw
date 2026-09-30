@@ -206,6 +206,8 @@ export function bind<A extends readonly unknown[]>(
 
 export type PressableProps = {
   readonly onPress?: (() => void) | undefined;
+  /** Touch-down advisory — earlier than onPress; used for row-intent warm. */
+  readonly onPressIn?: (() => void) | undefined;
   readonly onLongPress?: (() => void) | undefined;
   readonly delayLongPress?: number | undefined;
   readonly accessibilityLabel: string;
@@ -224,6 +226,7 @@ export type PressableProps = {
 
 export function Pressable({
   onPress,
+  onPressIn,
   onLongPress,
   delayLongPress,
   accessibilityLabel,
@@ -246,6 +249,7 @@ export function Pressable({
   return (
     <RNPressable
       onPress={onPress}
+      onPressIn={onPressIn}
       onLongPress={onLongPress}
       delayLongPress={delayLongPress}
       disabled={off}

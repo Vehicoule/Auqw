@@ -176,6 +176,7 @@ export function EntityScreen({
               tabIndex={list.rowTabIndex(index)}
               onFocusRow={() => list.onRowFocus(index)}
               onPress={item.onPress}
+              onIntent={item.onIntent}
               onAddToPlaylist={item.onAddToPlaylist}
               onContext={item.onContext}
             />

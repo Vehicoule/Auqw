@@ -36,6 +36,8 @@ export type PlaylistScreenProps = {
   readonly onRename?: ((name: string) => void) | undefined;
   readonly onDelete?: (() => void) | undefined;
   readonly onPressEntry?: ((entry: PlaylistEntryModel) => void) | undefined;
+  /** Advisory row intent — touch-down on a row; the caller warms it. */
+  readonly onRowIntent?: ((entry: PlaylistEntryModel) => void) | undefined;
   readonly onToggleLike?: ((entry: PlaylistEntryModel) => void) | undefined;
   readonly onContext?: ((entry: PlaylistEntryModel) => void) | undefined;
   readonly onRemoveEntry?: ((entry: PlaylistEntryModel) => void) | undefined;
@@ -69,6 +71,7 @@ export function PlaylistScreen({
   onRename,
   onDelete,
   onPressEntry,
+  onRowIntent,
   onToggleLike,
   onContext,
   onRemoveEntry,
@@ -257,6 +260,7 @@ export function PlaylistScreen({
                   : undefined
               }
               onPress={bind(onPressEntry, item)}
+              onIntent={bind(onRowIntent, item)}
               onToggleLike={bind(onToggleLike, item)}
               onContext={bind(onContext, item)}
               onRemove={bind(onRemoveEntry, item)}

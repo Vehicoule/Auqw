@@ -33,6 +33,12 @@ export type TrackRowProps = {
   readonly row: TrackRowModel;
   readonly badge?: string | null | undefined;
   readonly onPress?: (() => void) | undefined;
+  /**
+   * Advisory row intent — touch-down on this row makes it the
+   * likeliest next tap. Fires on press-in; the caller warms it
+   * (bounded, newest-wins) so a real tap adopts.
+   */
+  readonly onIntent?: (() => void) | undefined;
   readonly onLongPress?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
   readonly onContext?: (() => void) | undefined;
@@ -47,6 +53,7 @@ export function TrackRow({
   row,
   badge = null,
   onPress,
+  onIntent,
   onLongPress,
   onToggleLike,
   onContext,
@@ -153,6 +160,7 @@ export function TrackRow({
        */}
       <Pressable
         onPress={onPress}
+        onPressIn={onIntent}
         onLongPress={onLongPress ?? onContext}
         compact
         accessibilityLabel={rowLabel}
