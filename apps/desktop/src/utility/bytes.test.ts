@@ -4,7 +4,11 @@ import {
   assertEqual,
 } from '@auqw/application/testing';
 import type { PluginHostLike } from './host.ts';
-import { createStreamPump, type PumpPort } from './bytes.ts';
+import {
+  createStreamPump,
+  READ_RETRY_BACKOFF_MS,
+  type PumpPort,
+} from './bytes.ts';
 
 type Sent = Array<{ kind?: string; [key: string]: unknown }>;
 
@@ -306,5 +310,121 @@ export async function run(): Promise<void> {
       0,
       'invalid frames produced no reads',
     );
+  }
+
+  const napiTyped = (slug: string): Error => {
+    const thrown = new Error(`${slug}: detail`);
+    thrown.cause = new Error(
+      JSON.stringify({ code: slug, kind: slug, detail: 'd' }),
+    );
+    return thrown;
+  };
+  const wait = (ms: number): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
+  // A latched `transient`/`rate-limit` is the seam saying "next read
+  // re-drives me" — the pump re-reads in place instead of tearing the
+  // pipeline down (Media3 parity). Two failures then a success:
+  // bytes flow, no error frame, same position re-read.
+  {
+    const bytes = new Uint8Array(1024).fill(4);
+    let calls = 0;
+    const host = fakeHost(bytes, {
+      async streamRead(_h: string, position: number, length: number) {
+        calls += 1;
+        if (calls <= 2) {
+          throw napiTyped(calls === 1 ? 'transient' : 'rate-limit');
+        }
+        return Buffer.from(bytes.subarray(position, position + length));
+      },
+    });
+    const port = fakePort();
+    createStreamPump({ host: () => host, handle: 'h-8', port });
+    port.emitMessage({ kind: 'grant', bytes: 256 });
+    await wait(READ_RETRY_BACKOFF_MS * 3);
+    const data = port.sent.filter((m) => m.kind === 'data');
+    assert(data.length >= 1, 'bytes flow after the flap clears');
+    assertEqual(data[0]?.position, 0, 'retried at the same position');
+    assert(
+      port.sent.every((m) => m.kind !== 'error'),
+      'a recoverable latch never produces an error frame',
+    );
+    assertEqual(calls, 3, 'one read per attempt, no burst');
+  }
+
+  // A successful chunk resets the budget — a new flap earns fresh
+  // retries instead of spending down a lifetime cap.
+  {
+    const bytes = new Uint8Array(1024).fill(4);
+    let calls = 0;
+    const host = fakeHost(bytes, {
+      async streamRead(_h: string, position: number, length: number) {
+        calls += 1;
+        // Flap twice before each served chunk, twice.
+        if (calls % 3 !== 0) {
+          throw napiTyped('transient');
+        }
+        return Buffer.from(bytes.subarray(position, position + length));
+      },
+    });
+    const port = fakePort();
+    createStreamPump({ host: () => host, handle: 'h-9', port });
+    port.emitMessage({ kind: 'grant', bytes: 128 });
+    await wait(READ_RETRY_BACKOFF_MS * 3);
+    port.emitMessage({ kind: 'grant', bytes: 128 });
+    await wait(READ_RETRY_BACKOFF_MS * 3);
+    assertEqual(
+      port.sent.filter((m) => m.kind === 'data').length,
+      2,
+      'each recovered chunk pays out its credit',
+    );
+    assert(
+      port.sent.every((m) => m.kind !== 'error'),
+      'per-flap budget, not a lifetime cap',
+    );
+  }
+
+  // Budget spent: a seam that keeps re-latching reports the verdict
+  // honestly — the error rides the slug, the pump closes.
+  {
+    let calls = 0;
+    const host = fakeHost(new Uint8Array(1024).fill(4), {
+      async streamRead(): Promise<Buffer> {
+        calls += 1;
+        throw napiTyped('transient');
+      },
+    });
+    const port = fakePort();
+    createStreamPump({ host: () => host, handle: 'h-10', port });
+    port.emitMessage({ kind: 'grant', bytes: 256 });
+    await wait(READ_RETRY_BACKOFF_MS * 4);
+    const error = port.sent.find((m) => m.kind === 'error');
+    assert(error !== undefined, 'spent retry budget reports the verdict');
+    assertEqual(error?.['code'], 'transient');
+    assertEqual(
+      calls,
+      3,
+      'initial read + bounded re-drives, then honest death',
+    );
+    assert(port.closed, 'terminal verdict closes the pump');
+  }
+
+  // Dead-handle kinds are not re-drivable — one read, one verdict.
+  {
+    let calls = 0;
+    const host = fakeHost(new Uint8Array(1024).fill(4), {
+      async streamRead(): Promise<Buffer> {
+        calls += 1;
+        throw napiTyped('released');
+      },
+    });
+    const port = fakePort();
+    createStreamPump({ host: () => host, handle: 'h-11', port });
+    port.emitMessage({ kind: 'grant', bytes: 256 });
+    await settle();
+    const error = port.sent.find((m) => m.kind === 'error');
+    assert(error !== undefined, 'dead handle reports typed');
+    assertEqual(error?.['code'], 'released');
+    assertEqual(calls, 1, 'terminal kinds never retry in place');
   }
 }

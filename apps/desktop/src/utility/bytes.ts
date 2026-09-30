@@ -31,6 +31,29 @@ export type PumpPort = {
 const READ_LEN = 128 * 1024;
 const MAX_IN_FLIGHT_READS = 1;
 
+/**
+ * Seam verdicts the read retry can still beat in place: a latched
+ * `transient`/`rate-limit` surfaces on one read and the *next* read
+ * re-drives the seam pump (re-mint/refetch behind the same attach).
+ * Retrying there keeps the MSE pipeline alive through a flap the way
+ * Media3's in-place read retry does on mobile — every other kind is
+ * terminal for this handle (dead → the engine's re-prepare hop) or
+ * untyped (transport death → io-error). The budget caps how much
+ * silence a stalling upstream can buy before the verdict reports.
+ */
+const READ_RETRY_KINDS: ReadonlySet<string> = new Set([
+  'transient',
+  'rate-limit',
+]);
+const READ_RETRY_ATTEMPTS = 2;
+export const READ_RETRY_BACKOFF_MS = 250;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 export function createStreamPump(deps: {
   readonly host: () => PluginHostLike;
   readonly handle: string;
@@ -43,6 +66,9 @@ export function createStreamPump(deps: {
   let epoch = 0;
   let eof = false;
   let pumping = false;
+  // Re-drive budget for in-place latch kinds; a served chunk resets
+  // it — a new flap earns fresh retries.
+  let readRetries = 0;
   // Reads the stream at most one at a time; a seek while a read is in
   // flight just re-anchors — the in-flight chunk carries the old epoch
   // and the client drops it on arrival.
@@ -104,6 +130,7 @@ export function createStreamPump(deps: {
             send({ kind: 'eof', epoch });
             return;
           }
+          readRetries = 0;
           position += chunk.byteLength;
           credit -= chunk.byteLength;
           send({
@@ -120,11 +147,25 @@ export function createStreamPump(deps: {
             // post-seek grant's credit with nothing left to spend it.
             continue;
           }
+          const slug = napiSlug(thrown);
+          if (
+            slug !== null &&
+            READ_RETRY_KINDS.has(slug) &&
+            readRetries < READ_RETRY_ATTEMPTS
+          ) {
+            // The latch answered this read; re-reading re-drives the
+            // seam's own recovery under the same attach. The backoff
+            // keeps a re-latching seam from spinning the loop; close
+            // is re-checked by the while condition.
+            readRetries += 1;
+            await sleep(READ_RETRY_BACKOFF_MS);
+            continue;
+          }
           // A typed napi rejection carries its taxonomy slug — a
           // re-mint verdict like `provider-wall` must reach the
           // renderer verbatim; only untyped transport deaths are
           // io-error.
-          sendError(napiSlug(thrown) ?? 'io-error');
+          sendError(slug ?? 'io-error');
           return;
         }
       }

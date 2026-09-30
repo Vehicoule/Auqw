@@ -33,18 +33,19 @@ import type { UtilityHandler } from './router.ts';
  */
 const SLUG_KIND: Readonly<Record<string, ShellErrorKind>> = {
   'invalid-argument': 'invalid-request',
-  'not-found': 'invalid-request',
+  'not-found': 'not-found',
   'invalid-response': 'invalid-response',
   released: 'released',
-  evicted: 'released',
-  expired: 'released',
-  superseded: 'released',
+  evicted: 'evicted',
+  expired: 'expired',
+  superseded: 'superseded',
   cancelled: 'cancelled',
   unavailable: 'unavailable',
   'streams-capped': 'streams-capped',
   'rate-limit': 'rate-limit',
   transient: 'transient',
   'auth-required': 'auth-required',
+  'provider-wall': 'provider-wall',
   internal: 'internal',
 };
 
@@ -86,21 +87,6 @@ export function napiError(thrown: unknown): ShellError {
     );
   }
   return shellError('internal', 'host call failed');
-}
-
-/**
- * `napiError` for the handle-keyed stream ops (serve-url, open, read,
- * close, release, marks). Their only `not-found` source is the handle
- * lookup itself — the session is gone registry-side (reaped after the
- * detach TTL, superseded while detached, or already released) — which
- * is `released` semantics, not malformed args. Surfacing it as
- * `released` lets the session re-prepare instead of failing the item.
- */
-function napiStreamError(thrown: unknown): ShellError {
-  if (napiSlug(thrown) === 'not-found') {
-    return shellError('released', 'host call failed: not-found');
-  }
-  return napiError(thrown);
 }
 
 function validated<A>(
@@ -214,26 +200,26 @@ export function createStreamHandlers(deps: {
     },
 
     [CHANNELS.streamServeUrl]: napiCall(isStreamHandleArgs, 'stream:serve-url',
-      napiStreamError, (h, a) => ({ url: h.streamServeUrl(a.handle) })),
+      napiError, (h, a) => ({ url: h.streamServeUrl(a.handle) })),
 
     [CHANNELS.streamOpen]: napiCall(isStreamOpenArgs, 'stream:open',
-      napiStreamError, (h, a) => ({ remaining: h.streamOpen(a.handle, a.position) })),
+      napiError, (h, a) => ({ remaining: h.streamOpen(a.handle, a.position) })),
 
     [CHANNELS.streamRead]: napiCall(isStreamReadArgs, 'stream:read',
-      napiStreamError, async (h, a) => ({
+      napiError, async (h, a) => ({
         data: (await h.streamRead(a.handle, a.position, a.maxLen)).toString(
           'base64',
         ),
       })),
 
     [CHANNELS.streamClose]: napiCall(isStreamHandleArgs, 'stream:close',
-      napiStreamError, (h, a) => void h.streamClose(a.handle)),
+      napiError, (h, a) => void h.streamClose(a.handle)),
 
     [CHANNELS.streamRelease]: napiCall(isStreamHandleArgs, 'stream:release',
-      napiStreamError, (h, a) => void h.streamRelease(a.handle)),
+      napiError, (h, a) => void h.streamRelease(a.handle)),
 
     [CHANNELS.streamMarks]: napiCall(isStreamHandleArgs, 'stream:marks',
-      napiStreamError, (h, a) =>
+      napiError, (h, a) =>
         checked(isStreamMarksResult, 'stream:marks')(h.streamPhaseMarks(a.handle))),
 
     [CHANNELS.streamCancel]: napiCall(isStreamCancelArgs, 'stream:cancel', napiError,

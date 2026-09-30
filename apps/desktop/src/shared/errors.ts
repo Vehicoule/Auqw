@@ -16,6 +16,17 @@ const ERROR_KINDS = [
   'rate-limit',
   'auth-required',
   'streams-capped',
+  // Lifecycle verdicts ride verbatim too — laundering `provider-wall`
+  // into `internal`/`unavailable`, or `expired`/`evicted`/`superseded`/
+  // `not-found` into `released`/`invalid-request`, cost the app the
+  // kind it branches on (dead-handle re-prepare, provider-wall copy,
+  // superseded silence). Relabeling buys nothing: every one of these
+  // is already a first-class kind in the app taxonomy.
+  'evicted',
+  'expired',
+  'superseded',
+  'not-found',
+  'provider-wall',
   'permission-denied',
   'storage-full',
   'internal',

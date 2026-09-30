@@ -51,6 +51,11 @@ pub enum StreamError {
     RateLimited {
         /// Failure detail.
         message: String,
+        /// The server's `Retry-After` ask in milliseconds, when it sent
+        /// one — the pump sleeps it out (capped) before latching so the
+        /// reader's next attempt lands past the cooldown instead of
+        /// hammering inside it.
+        retry_after_ms: Option<u64>,
     },
     /// The provider capped the stream (repeated `403`/`416`) and the
     /// re-mint or zero-progress budget ran out.
@@ -116,7 +121,7 @@ impl StreamError {
         match self {
             Self::AuthRequired { message }
             | Self::Transient { message }
-            | Self::RateLimited { message }
+            | Self::RateLimited { message, .. }
             | Self::StreamsCapped { message }
             | Self::InvalidResponse { message }
             | Self::ProviderWall { message }
@@ -168,6 +173,7 @@ mod tests {
             (
                 StreamError::RateLimited {
                     message: "x".into(),
+                    retry_after_ms: None,
                 },
                 "rate-limit",
             ),

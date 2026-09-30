@@ -138,7 +138,10 @@ fn invoke_err_as_seam(kind: &str, message: String) -> auqw_stream::StreamError {
         "cancelled" => E::Cancelled,
         "expired" | "expired-resource" | "auth-expired" => E::Expired,
         "auth-required" => E::AuthRequired { message },
-        "rate-limit" => E::RateLimited { message },
+        "rate-limit" => E::RateLimited {
+            message,
+            retry_after_ms: None,
+        },
         "streams-capped" => E::StreamsCapped { message },
         "transient" | "timeout" => E::Transient { message },
         "provider-wall" => E::ProviderWall { message },

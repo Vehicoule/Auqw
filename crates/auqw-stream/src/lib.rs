@@ -105,6 +105,13 @@ pub struct StreamConfig {
     /// Backoff between transient retries — interruptible by cancel and,
     /// for speculative fill, by demand-read preemption.
     pub retry_backoff: Duration,
+    /// Upper bound on the `Retry-After` cooldown honored before a
+    /// `429` latches `rate-limit` — the provider's ask rides the seam
+    /// so the reader's re-drive lands past it instead of hammering
+    /// inside it. A longer ask stays a latched verdict: the consumer's
+    /// own retry cadence decides what a >cap cooldown means. The cap
+    /// must leave a full fetch attempt room inside `read_deadline`.
+    pub rate_limit_cooldown_cap: Duration,
     /// How long a prepared session may sit before `attach` fails it
     /// `Expired` and the reaper evicts it.
     pub prepare_ttl: Duration,
@@ -139,6 +146,8 @@ impl StreamConfig {
                 + Duration::from_secs(10),
             fetch_retries: 2,
             retry_backoff: Duration::from_millis(250),
+            // 20 s honored + a 60 s request fits the 90 s read bound.
+            rate_limit_cooldown_cap: Duration::from_secs(20),
             prepare_ttl: Duration::from_secs(120),
             reap_interval: Duration::from_secs(15),
             expiry_margin: Duration::from_secs(60),

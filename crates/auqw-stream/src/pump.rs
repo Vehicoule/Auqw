@@ -30,7 +30,7 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 
@@ -121,8 +121,9 @@ enum FetchOutcome {
     /// Any other status for the caller's dispatch (403/416/…); the
     /// body stream was dropped unread. On a `416`, the parsed
     /// `bytes */N` total rides along — the wire's authoritative EOF
-    /// evidence.
-    Status(u16, Option<u64>),
+    /// evidence. On a `429`, the `Retry-After` hint rides along for
+    /// the cooldown.
+    Status(u16, Option<u64>, Option<u64>),
 }
 
 /// Drive one range request end to end: await headers, and on a `206`
@@ -152,7 +153,8 @@ async fn drive_fetch(
     if resp.status != 206 {
         // `416` carries `Content-Range: bytes */N` — keep the total;
         // it confirms EOF without spending a re-mint. Range units are
-        // case-insensitive (RFC 9110 §14.1.1).
+        // case-insensitive (RFC 9110 §14.1.1). A `429`'s `Retry-After`
+        // rides to the cooldown.
         let range_total = if resp.status == 416 {
             resp.content_range
                 .as_deref()
@@ -160,7 +162,11 @@ async fn drive_fetch(
         } else {
             None
         };
-        return Ok(FetchOutcome::Status(resp.status, range_total));
+        return Ok(FetchOutcome::Status(
+            resp.status,
+            range_total,
+            resp.retry_after_ms,
+        ));
     }
     let declared = validate_206_head(session, resp.content_range.as_deref(), offset, len)?;
     let mut body = resp.body;
@@ -300,7 +306,7 @@ async fn fetch_chunk(
         match outcome {
             // Pieces already committed as the body streamed.
             FetchOutcome::Committed => return Outcome::Bytes,
-            FetchOutcome::Status(status, range_total) => match status {
+            FetchOutcome::Status(status, range_total, retry_after) => match status {
                 416 => {
                     // Adopt the wire total before any mint spend: when
                     // it is already authoritative, this 416 confirms
@@ -356,7 +362,7 @@ async fn fetch_chunk(
                     Ok(()) => transient_left = session.config.fetch_retries,
                 },
                 s => {
-                    let e = classify_status(s, offset);
+                    let e = classify_status(s, offset, retry_after);
                     match retry_or_stall(session, through, e, &mut transient_left).await {
                         Retry::Again => continue,
                         Retry::Stop(o) => return o,
@@ -389,8 +395,9 @@ fn stallable(e: &StreamError) -> bool {
 
 /// Apply the retry policy to one failed attempt: `Transient` retries
 /// with backoff until `fetch_retries` runs out, `RateLimited` latches
-/// straight away (a 429 wants real cooldown, not a 250 ms hammer),
-/// and everything else is terminal.
+/// after honoring the server's `Retry-After` ask (capped — a cooldown
+/// the parked read can still outlive), and everything else is
+/// terminal.
 async fn retry_or_stall(
     session: &Arc<SessionInner>,
     through: bool,
@@ -404,6 +411,27 @@ async fn retry_or_stall(
             Backoff::Preempted => Retry::Stop(Outcome::Preempted),
             Backoff::Cancelled => Retry::Stop(Outcome::Failed(StreamError::Cancelled)),
         };
+    }
+    if let StreamError::RateLimited {
+        retry_after_ms: Some(ms),
+        ..
+    } = &e
+    {
+        // The server named its cooldown: waiting it out here (bounded
+        // by `rate_limit_cooldown_cap`) means the reader's re-drive
+        // lands past the window instead of bouncing off it — the
+        // latch still lands after, so a consumer retry cadence never
+        // shrinks below the ask.
+        let wait = Duration::from_millis((*ms).min(
+            u64::try_from(session.config.rate_limit_cooldown_cap.as_millis()).unwrap_or(u64::MAX),
+        ));
+        match interruptible_sleep(session, through, wait).await {
+            Backoff::Waited => {}
+            Backoff::Preempted => return Retry::Stop(Outcome::Preempted),
+            Backoff::Cancelled => {
+                return Retry::Stop(Outcome::Failed(StreamError::Cancelled));
+            }
+        }
     }
     Retry::Stop(if stallable(&e) {
         Outcome::Stalled(e)
@@ -438,7 +466,18 @@ enum Backoff {
 /// Interruptible sleep between transient retries — a speculative
 /// fill's backoff yields to demand reads the same way its fetch does.
 async fn retry_backoff(session: &Arc<SessionInner>, through: bool) -> Backoff {
-    let sleep = tokio::time::sleep(session.config.retry_backoff);
+    interruptible_sleep(session, through, session.config.retry_backoff).await
+}
+
+/// A pump-side wait interruptible by cancel (both legs) and, for
+/// speculative fill, by demand-read preemption. `Backoff` doubles as
+/// the outcome: `Waited`/`Preempted`/`Cancelled`.
+async fn interruptible_sleep(
+    session: &Arc<SessionInner>,
+    through: bool,
+    wait: Duration,
+) -> Backoff {
+    let sleep = tokio::time::sleep(wait);
     tokio::pin!(sleep);
     if through {
         tokio::select! {
@@ -582,13 +621,16 @@ fn parse_content_range(cr: &str) -> Result<(u64, u64, Option<u64>), String> {
 /// `RateLimited`; every other `4xx` is a permanent verdict on this
 /// URL and ends the session honestly rather than parking retriable
 /// forever.
-fn classify_status(status: u16, offset: u64) -> StreamError {
+fn classify_status(status: u16, offset: u64, retry_after_ms: Option<u64>) -> StreamError {
     let msg = || format!("status {status} at offset {offset}");
     match status {
         401 => StreamError::Expired,
         404 | 410 => StreamError::NotFound,
         408 | 425 => StreamError::Transient { message: msg() },
-        429 => StreamError::RateLimited { message: msg() },
+        429 => StreamError::RateLimited {
+            message: msg(),
+            retry_after_ms,
+        },
         200..=499 => StreamError::InvalidResponse {
             message: format!("range request answered {status}, not 206, at {offset}"),
         },
@@ -663,6 +705,7 @@ mod tests {
                 Step::Reply(FetchResponse {
                     status,
                     content_range: (status == 416).then(|| "bytes */1024".to_string()),
+                    retry_after_ms: None,
                     body: stream_body(vec![]),
                 })
             })
@@ -755,6 +798,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 200,
             content_range: None,
+            retry_after_ms: None,
             body: stream_body(vec![0u8; 16]),
         })]));
         let task = spawn_pump(&s, fetch);
@@ -782,6 +826,7 @@ mod tests {
             let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
                 status: 206,
                 content_range: cr.map(str::to_string),
+                retry_after_ms: None,
                 body: stream_body(vec![1u8; 64]),
             })]));
             let task = spawn_pump(&s, fetch);
@@ -841,6 +886,7 @@ mod tests {
             Step::Reply(FetchResponse {
                 status: 403,
                 content_range: None,
+                retry_after_ms: None,
                 body: stream_body(vec![]),
             }),
             Step::Reply(resp(206, 128, 128, 1024)),
@@ -876,6 +922,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 403,
             content_range: None,
+            retry_after_ms: None,
             body: stream_body(vec![]),
         })]));
         let task = spawn_pump(&s, fetch);
@@ -907,6 +954,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 403,
             content_range: None,
+            retry_after_ms: None,
             body: stream_body(vec![]),
         })]));
         let task = spawn_pump(&s, fetch);
@@ -934,6 +982,7 @@ mod tests {
             Step::Reply(FetchResponse {
                 status: 403,
                 content_range: None,
+                retry_after_ms: None,
                 body: stream_body(vec![]),
             }),
             Step::Reply(resp(206, 128, 128, 1024)),
@@ -1009,6 +1058,7 @@ mod tests {
                     Step::Reply(FetchResponse {
                         status: 416,
                         content_range: None,
+                        retry_after_ms: None,
                         body: stream_body(vec![]),
                     })
                 })
@@ -1052,6 +1102,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 416,
             content_range: None,
+            retry_after_ms: None,
             body: stream_body(vec![]),
         })]));
         {
@@ -1078,6 +1129,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 404,
             content_range: None,
+            retry_after_ms: None,
             body: stream_body(vec![]),
         })]));
         let task = spawn_pump(&s, fetch);
@@ -1092,6 +1144,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 429,
             content_range: None,
+            retry_after_ms: None,
             body: stream_body(vec![]),
         })]));
         let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
@@ -1138,6 +1191,114 @@ mod tests {
         stop_pump(&s, task).await;
     }
 
+    /// A `429`'s `Retry-After` ask is slept out inside the pump —
+    /// capped — *before* the latch lands, so the reader's re-drive
+    /// lands past the provider's cooldown instead of hammering inside
+    /// it. The latch still lands at the ask+cap either way, still
+    /// costs exactly one request, and a re-drive then serves bytes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rate_limit_retry_after_slept_before_latch() {
+        let d = TestDir::new("ra-hint");
+        let s = session(config(&d), remint_ok());
+        let fetch = Arc::new(ScriptedFetch::new(vec![
+            Step::Reply(FetchResponse {
+                status: 429,
+                content_range: None,
+                retry_after_ms: Some(120),
+                body: stream_body(vec![]),
+            }),
+            Step::Reply(resp(206, 0, 128, 512)),
+        ]));
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        let t0 = Instant::now();
+        wait_until(|| latched(&s).is_some() || s.is_terminal()).await;
+        let slept = t0.elapsed();
+        assert!(
+            slept >= Duration::from_millis(100),
+            "the Retry-After ask must be slept out before latching: {slept:?}"
+        );
+        assert!(
+            matches!(latched(&s), Some(StreamError::RateLimited { .. })),
+            "{:?}",
+            latched(&s)
+        );
+        assert_eq!(
+            fetch
+                .requests
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1,
+            "the cooldown is a sleep, not a retry burst"
+        );
+
+        // First read surfaces the latched verdict; the re-drive lands
+        // a real fetch and bytes flow — the cooldown is behind it.
+        let first = tokio::task::spawn_blocking({
+            let s = Arc::clone(&s);
+            move || s.read(0, 128)
+        })
+        .await
+        .unwrap_or_else(|e| panic!("read join: {e}"));
+        assert!(
+            matches!(first, Err(StreamError::RateLimited { .. })),
+            "{first:?}"
+        );
+        let second = tokio::task::spawn_blocking({
+            let s = Arc::clone(&s);
+            move || s.read(0, 128)
+        })
+        .await
+        .unwrap_or_else(|e| panic!("read join: {e}"));
+        match second {
+            Ok(v) => assert_eq!(v.len(), 128),
+            Err(e) => panic!("re-drive after cooldown must serve bytes: {e:?}"),
+        }
+        let reqs = fetch
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            reqs.len() >= 2 && reqs[1].0 == 0,
+            "re-drive after latch must land a fresh fetch at the read offset: {reqs:?}"
+        );
+        stop_pump(&s, task).await;
+    }
+
+    /// A `Retry-After` beyond `rate_limit_cooldown_cap` is honored at
+    /// the cap, not the ask — a 30 s cooldown must not hold the pump
+    /// hostage for 30 s. The latch still lands after the capped wait.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rate_limit_retry_after_honored_at_cap_not_ask() {
+        let d = TestDir::new("ra-cap");
+        let s = session(config(&d), remint_ok());
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
+            status: 429,
+            content_range: None,
+            retry_after_ms: Some(30_000),
+            body: stream_body(vec![]),
+        })]));
+        let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
+        let t0 = Instant::now();
+        wait_until(|| latched(&s).is_some() || s.is_terminal()).await;
+        let slept = t0.elapsed();
+        assert!(
+            slept >= Duration::from_millis(400),
+            "the capped cooldown was not slept at all: {slept:?}"
+        );
+        assert!(
+            slept < Duration::from_secs(2),
+            "a 30 s ask must latch at the 500 ms cap, not the ask: {slept:?}"
+        );
+        assert!(
+            matches!(latched(&s), Some(StreamError::RateLimited { .. })),
+            "{:?}",
+            latched(&s)
+        );
+        stop_pump(&s, task).await;
+    }
+
     /// A permanent `4xx` is a terminal verdict on the URL, never a
     /// latch: `401` reports `Expired` (a dead mint — retriable upstream
     /// via re-resolve), `410` joins `404` as `NotFound`, and any other
@@ -1156,6 +1317,7 @@ mod tests {
             let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
                 status,
                 content_range: None,
+                retry_after_ms: None,
                 body: stream_body(vec![]),
             })]));
             let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
@@ -1277,6 +1439,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 403,
             content_range: None,
+            retry_after_ms: None,
             body: stream_body(vec![]),
         })]));
         let task = spawn_pump(&s, fetch);
@@ -1370,6 +1533,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 403,
             content_range: None,
+            retry_after_ms: None,
             body: stream_body(vec![]),
         })]));
         let task = spawn_pump(&s, fetch);
@@ -1423,6 +1587,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 403,
             content_range: None,
+            retry_after_ms: None,
             body: stream_body(vec![]),
         })]));
         let task = spawn_pump(&s, fetch);
@@ -1524,6 +1689,7 @@ mod tests {
         let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
             status: 206,
             content_range: Some("bytes 0-127/1024".into()),
+            retry_after_ms: None,
             body: Box::pin(futures_util::stream::once(async move {
                 open2.notified().await;
                 Ok(vec![1u8; 128])

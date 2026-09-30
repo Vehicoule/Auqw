@@ -54,6 +54,7 @@ pub(crate) fn test_config(dir: &TestDir) -> StreamConfig {
     c.stall = std::time::Duration::from_secs(2);
     c.read_deadline = std::time::Duration::from_secs(2);
     c.retry_backoff = std::time::Duration::from_millis(5);
+    c.rate_limit_cooldown_cap = std::time::Duration::from_millis(500);
     c
 }
 
@@ -69,6 +70,7 @@ pub(crate) fn resp(status: u16, offset: u64, len: u64, total: u64) -> FetchRespo
     FetchResponse {
         status,
         content_range: Some(format!("bytes {offset}-{end}/{total}")),
+        retry_after_ms: None,
         body: stream_body(vec![0xABu8; usize::try_from(len).unwrap_or(0)]),
     }
 }
