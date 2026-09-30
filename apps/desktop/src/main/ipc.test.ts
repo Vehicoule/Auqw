@@ -618,11 +618,21 @@ export async function run(): Promise<void> {
     assertDeepEqual(empty, { record: null });
     await custody({
       op: 'set',
-      record: { v: 1, refreshToken: 'grant-1', clientId: 'cid-1' },
+      record: {
+        v: 1,
+        refreshToken: 'grant-1',
+        clientId: 'cid-1',
+        grantClientId: 'issuer-1',
+      },
     });
     const roundTrip = await custody({ op: 'get' });
     assertDeepEqual(roundTrip, {
-      record: { v: 1, refreshToken: 'grant-1', clientId: 'cid-1' },
+      record: {
+        v: 1,
+        refreshToken: 'grant-1',
+        clientId: 'cid-1',
+        grantClientId: 'issuer-1',
+      },
     });
     await custody({ op: 'clear' });
     assertDeepEqual(await custody({ op: 'get' }), { record: null });

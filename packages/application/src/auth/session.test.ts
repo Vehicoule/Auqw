@@ -184,7 +184,12 @@ function collector(session: {
 function testCustodyValidator(): void {
   assert(isAuthCustodyRecord(EMPTY_AUTH_CUSTODY), 'empty record rejected');
   assert(
-    isAuthCustodyRecord({ v: 1, refreshToken: 'r', clientId: 'c' }),
+    isAuthCustodyRecord({
+      v: 1,
+      refreshToken: 'r',
+      clientId: 'c',
+      grantClientId: 'c',
+    }),
     'full record rejected',
   );
   for (const bad of [
@@ -192,6 +197,7 @@ function testCustodyValidator(): void {
     { v: 1 },
     { v: 2, refreshToken: null, clientId: null },
     { v: 1, refreshToken: 'r' },
+    { v: 1, refreshToken: 'r', clientId: 'c' },
     { v: 1, refreshToken: '', clientId: null },
     { v: 1, refreshToken: null, clientId: null, extra: 1 },
     { v: 1, refreshToken: 'x'.repeat(5000), clientId: null },
@@ -246,9 +252,10 @@ async function testRestoreGrant(): Promise<void> {
     v: 1,
     refreshToken: 'stored-refresh',
     clientId: 'stored-client',
+    grantClientId: 'issuer-client',
   });
   const { oauth, calls, refreshes } = fakeOAuth();
-  refreshes.push(ok(tokenGrant({ accessToken: 'fresh-access' })));
+  refreshes.push(ok(tokenGrant({ accessToken: 'fresh-access', refreshToken: null })));
   const applied: (string | null)[] = [];
   const clock = fakeClock();
   const session = createAuthSession({
@@ -261,12 +268,17 @@ async function testRestoreGrant(): Promise<void> {
   });
   const seen = collector(session);
   await session.restore();
+  // Stored grant → signed-in is published optimistically, but no
+  // bearer has reached the host slot yet.
+  assertEqual(session.snapshot().bearerLive, false);
   await flush();
   assertEqual(session.snapshot().status.state, 'signed-in');
-  // The boot refresh rode the stored grant and the override client.
+  assertEqual(session.snapshot().bearerLive, true);
+  // The boot refresh rode the stored grant under its ISSUING client —
+  // the override preference ('stored-client') must not leak in.
   assertEqual(calls.length, 1);
   assertEqual(calls[0]?.kind, 'refresh');
-  assertEqual(calls[0]?.creds.clientId, 'stored-client');
+  assertEqual(calls[0]?.creds.clientId, 'issuer-client');
   assertDeepEqual(applied, ['fresh-access']);
   // The stored grant published signed-in optimistically before the
   // exchange resolved — a cold/offline boot renders honestly.
@@ -451,9 +463,10 @@ async function testSignOut(): Promise<void> {
     v: 1,
     refreshToken: 'stored-refresh',
     clientId: 'kept-client',
+    grantClientId: 'kept-client',
   });
   const { oauth, refreshes } = fakeOAuth();
-  refreshes.push(ok(tokenGrant()));
+  refreshes.push(ok(tokenGrant({ refreshToken: null })));
   const order: string[] = [];
   const session = createAuthSession({
     custody,
@@ -548,9 +561,10 @@ async function testRenewLane(): Promise<void> {
     v: 1,
     refreshToken: 'stored-refresh',
     clientId: null,
+    grantClientId: null,
   });
   const { oauth, refreshes, calls } = fakeOAuth();
-  refreshes.push(ok(tokenGrant({ accessToken: 'access-a' })));
+  refreshes.push(ok(tokenGrant({ accessToken: 'access-a', refreshToken: null })));
   const applied: (string | null)[] = [];
   const clock = fakeClock();
   const session = createAuthSession({
@@ -565,7 +579,7 @@ async function testRenewLane(): Promise<void> {
   await flush();
   assertDeepEqual(applied, ['access-a']);
   // Expiry approaches — the armed timer fires a refresh.
-  refreshes.push(ok(tokenGrant({ accessToken: 'access-b' })));
+  refreshes.push(ok(tokenGrant({ accessToken: 'access-b', refreshToken: null })));
   clock.setNow(3_550_000);
   clock.fireNext();
   await flush();
@@ -589,9 +603,10 @@ async function testRenewTransientBackoff(): Promise<void> {
     v: 1,
     refreshToken: 'stored-refresh',
     clientId: null,
+    grantClientId: null,
   });
   const { oauth, refreshes } = fakeOAuth();
-  refreshes.push(ok(tokenGrant()));
+  refreshes.push(ok(tokenGrant({ refreshToken: null })));
   const applied: (string | null)[] = [];
   const clock = fakeClock();
   const session = createAuthSession({
@@ -612,7 +627,7 @@ async function testRenewTransientBackoff(): Promise<void> {
   assert(clock.armed.length === 1, 'retry not re-armed');
   assert(clock.armed[0]!.ms >= 30_000, 'retry armed too soon');
   // The retry succeeds — the slot gets the new bearer.
-  refreshes.push(ok(tokenGrant({ accessToken: 'access-c' })));
+  refreshes.push(ok(tokenGrant({ accessToken: 'access-c', refreshToken: null })));
   clock.fireNext();
   await flush();
   assertEqual(applied.at(-1), 'access-c');
@@ -625,9 +640,10 @@ async function testSignOutDuringRenew(): Promise<void> {
     v: 1,
     refreshToken: 'stored-refresh',
     clientId: null,
+    grantClientId: null,
   });
   const { oauth, refreshes } = fakeOAuth();
-  refreshes.push(ok(tokenGrant({ accessToken: 'access-a' })));
+  refreshes.push(ok(tokenGrant({ accessToken: 'access-a', refreshToken: null })));
   const applied: (string | null)[] = [];
   const clock = fakeClock();
   const session = createAuthSession({
@@ -699,6 +715,82 @@ async function testSignOutDuringGrantPersist(): Promise<void> {
   assertEqual(record.current?.refreshToken, null);
 }
 
+async function testRefreshRotation(): Promise<void> {
+  // A rotated refresh grant in the reply is persisted atomically and
+  // the next renewal rides the replacement.
+  const { custody, record } = fakeCustody({
+    v: 1,
+    refreshToken: 'stored-refresh',
+    clientId: null,
+    grantClientId: null,
+  });
+  const { oauth, refreshes } = fakeOAuth();
+  refreshes.push(
+    ok(tokenGrant({ accessToken: 'access-a', refreshToken: 'rotated-2' })),
+  );
+  let seenToken: string | null = null;
+  const orig = oauth.refreshAccessToken;
+  oauth.refreshAccessToken = (c, t) => {
+    seenToken = t;
+    return orig(c, t);
+  };
+  const clock = fakeClock();
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: clock.clock,
+  });
+  await session.restore();
+  await flush();
+  assertEqual(record.current?.refreshToken, 'rotated-2');
+  // The next renewal presents the rotated grant, not the stored one.
+  refreshes.push(ok(tokenGrant({ accessToken: 'access-b', refreshToken: null })));
+  clock.setNow(3_550_000);
+  clock.fireNext();
+  await flush();
+  assertEqual(seenToken, 'rotated-2');
+}
+
+async function testStaleBeginCannotClobber(): Promise<void> {
+  // A late-resolving beginDeviceFlow must not erase the newer
+  // sign-in attempt started after the old one was dismissed.
+  const { custody } = fakeCustody(null);
+  const { oauth } = fakeOAuth();
+  const b1 = deferred<Result<DeviceGrant>>();
+  const b2 = deferred<Result<DeviceGrant>>();
+  const queue = [b1, b2];
+  oauth.beginDeviceFlow = () => {
+    const next = queue.shift();
+    assert(next !== undefined, 'oauth: unscripted beginDeviceFlow');
+    return next.promise;
+  };
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  await session.restore();
+  session.beginSignIn();
+  await flush();
+  session.cancelSignIn();
+  session.beginSignIn();
+  await flush();
+  // Attempt A's begin resolves late — attempt B stays untouched.
+  b1.resolve(ok(deviceGrant({ userCode: 'AAAA-AAAA' })));
+  await flush();
+  assertEqual(session.snapshot().status.state, 'starting');
+  b2.resolve(ok(deviceGrant({ userCode: 'BBBB-BBBB' })));
+  await flush();
+  const st = session.snapshot().status;
+  assert(
+    st.state === 'authorizing' && st.userCode === 'BBBB-BBBB',
+    'newer sign-in clobbered by stale begin',
+  );
+  session.cancelSignIn();
+}
+
 async function testDuplicateBegin(): Promise<void> {
   const { custody } = fakeCustody(null);
   const { oauth, begins, pollDeferreds } = fakeOAuth();
@@ -737,5 +829,7 @@ export async function run(): Promise<void> {
   await testRenewTransientBackoff();
   await testSignOutDuringRenew();
   await testSignOutDuringGrantPersist();
+  await testRefreshRotation();
+  await testStaleBeginCannotClobber();
   await testDuplicateBegin();
 }

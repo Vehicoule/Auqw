@@ -60,6 +60,11 @@ export type AuthSnapshot = {
   readonly status: AuthStatus;
   /** The effective client_id override — null selects the default. */
   readonly clientId: string | null;
+  /**
+   * Whether a live access token currently sits in the host slot.
+   * `signed-in && !bearerLive` means linked-but-dead (boot restore
+   * pending or refresh failing) — recovery CTAs must still show. */
+  readonly bearerLive: boolean;
 };
 
 /**
@@ -72,29 +77,37 @@ export type AuthCustodyRecord = {
   readonly v: 1;
   readonly refreshToken: string | null;
   readonly clientId: string | null;
+  /**
+   * The client_id that minted `refreshToken` — a grant is bound to
+   * its issuer for life, so refresh exchanges keep using it even
+   * after the override preference moves.
+   */
+  readonly grantClientId: string | null;
 };
 
 export const EMPTY_AUTH_CUSTODY: AuthCustodyRecord = {
   v: 1,
   refreshToken: null,
   clientId: null,
+  grantClientId: null,
 };
 
 export function isAuthCustodyRecord(
   value: unknown,
 ): value is AuthCustodyRecord {
+  const idOk = (v: unknown) =>
+    v === null ||
+    (typeof v === 'string' && v.length > 0 && v.length <= 512);
   return (
     isRecord(value) &&
-    hasExactKeys(value, ['v', 'refreshToken', 'clientId']) &&
+    hasExactKeys(value, ['v', 'refreshToken', 'clientId', 'grantClientId']) &&
     value['v'] === 1 &&
     (value['refreshToken'] === null ||
       (typeof value['refreshToken'] === 'string' &&
         value['refreshToken'].length > 0 &&
         value['refreshToken'].length <= 4096)) &&
-    (value['clientId'] === null ||
-      (typeof value['clientId'] === 'string' &&
-        value['clientId'].length > 0 &&
-        value['clientId'].length <= 512))
+    idOk(value['clientId']) &&
+    idOk(value['grantClientId'])
   );
 }
 
@@ -222,13 +235,20 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     source: CancellationSource;
     grant: DeviceGrant;
     intervalMs: number;
+    /** Frozen at begin — editing the override mid-poll cannot
+     *  swap the client a grant is minted under. */
+    creds: OAuthCredentials;
   } | null = null;
   let pendingBegin: CancellationSource | null = null;
   let restored: Promise<void> | null = null;
   let renewChain: Promise<void> = Promise.resolve();
   let custodyChain: Promise<unknown> = Promise.resolve();
+  /** Issuer of the live `refreshToken` — refresh exchanges ride
+   *  this, never the moving override. */
+  let grantClientId: string | null = null;
+  let bearerLive = false;
   const listeners = new Set<() => void>();
-  let current: AuthSnapshot = { status, clientId: null };
+  let current: AuthSnapshot = { status, clientId: null, bearerLive };
 
   function publish(): void {
     const wire =
@@ -242,7 +262,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
             },
           }
         : status;
-    current = { status: wire, clientId: clientIdOverride };
+    current = { status: wire, clientId: clientIdOverride, bearerLive };
     for (const listener of [...listeners]) {
       try {
         listener();
@@ -252,9 +272,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     }
   }
 
-  function creds(): OAuthCredentials {
-    const clientId =
-      clientIdOverride ?? deps.clientId ?? DEFAULT_OAUTH_CLIENT_ID;
+  function credsFor(clientId: string): OAuthCredentials {
     // Secret resolution: an explicit env/dep secret always wins; the
     // default client's published secret applies only when the
     // effective id IS the default — pairing it with an override id
@@ -270,6 +288,23 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         ? { clientSecret }
         : {}),
     };
+  }
+
+  function creds(): OAuthCredentials {
+    return credsFor(
+      clientIdOverride ?? deps.clientId ?? DEFAULT_OAUTH_CLIENT_ID,
+    );
+  }
+
+  /** Exchange creds for a minted grant — bound to its issuer, not the
+   *  moving preference. */
+  function grantCreds(): OAuthCredentials {
+    return credsFor(
+      grantClientId ??
+        clientIdOverride ??
+        deps.clientId ??
+        DEFAULT_OAUTH_CLIENT_ID,
+    );
   }
 
   /** Every custody write is serialized — a RMW pair can interleave. */
@@ -346,8 +381,15 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
   async function applyAccess(grant: TokenGrant): Promise<void> {
     await Promise.resolve(deps.applyToken(grant.accessToken));
     accessExpiresAtMs = grant.expiresAtMs;
+    const flipped = !bearerLive;
+    bearerLive = true;
     renewFails = 0;
     armRenew();
+    if (flipped) {
+      // linked-but-dead → live transitions must reach subscribers —
+      // recovery CTAs key off the flag, not just the state.
+      publish();
+    }
   }
 
   /**
@@ -357,7 +399,9 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
    */
   async function dropGrant(): Promise<void> {
     refreshToken = null;
+    grantClientId = null;
     accessExpiresAtMs = 0;
+    bearerLive = false;
     disarmRenew();
     renewFails = 0;
     try {
@@ -369,6 +413,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       v: 1,
       refreshToken: null,
       clientId: clientIdOverride,
+      grantClientId: null,
     }).then(
       () => undefined,
       () => undefined,
@@ -391,7 +436,9 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     if (token === null) {
       return;
     }
-    const res = await oauth.refreshAccessToken(creds(), token);
+    // The grant rides its issuing client for life — the override
+    // preference may have moved since it was minted.
+    const res = await oauth.refreshAccessToken(grantCreds(), token);
     if (refreshToken !== token) {
       // The grant changed while the exchange was in flight — sign-out
       // or a newer grant owns the slot now; applying this late mint
@@ -399,8 +446,32 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       return;
     }
     if (res.ok) {
+      const grant = res.value;
+      if (grant.refreshToken !== null && grant.refreshToken !== token) {
+        // The issuer rotated the refresh grant — persist the
+        // replacement atomically before applying the access mint; a
+        // failed persist retries the lane against the new grant
+        // (the old one may already be dead).
+        refreshToken = grant.refreshToken;
+        const wrote = await writeCustody({
+          v: 1,
+          refreshToken: grant.refreshToken,
+          clientId: clientIdOverride,
+          grantClientId,
+        });
+        if (!wrote.ok) {
+          renewFails += 1;
+          armRenewRetry();
+          return;
+        }
+        if (refreshToken !== grant.refreshToken) {
+          // A sign-out interleaved inside the rotation write — the
+          // serialized null write already landed after ours.
+          return;
+        }
+      }
       try {
-        await applyAccess(res.value);
+        await applyAccess(grant);
       } catch (thrown) {
         // Host slot rejected — the grant is still good; retry.
         void thrown;
@@ -425,6 +496,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     }
     clientIdOverride = read.value.clientId;
     refreshToken = read.value.refreshToken;
+    grantClientId = read.value.grantClientId;
     if (refreshToken !== null && status.state === 'signed-out') {
       // The stored grant IS the signed-in state — publish before the
       // first exchange resolves so a cold/offline boot still renders
@@ -450,6 +522,12 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     let interval = intervalMs;
     for (;;) {
       const slept = await clock.sleep(interval, source.signal);
+      // Attempt identity — a dismissed/superseded attempt exits
+      // silently; the newer owner already holds flow + status.
+      let owned = flow;
+      if (owned === null || owned.source !== source) {
+        return;
+      }
       if (!slept || source.signal.cancelled) {
         endFlow();
         status = { state: 'signed-out' };
@@ -465,11 +543,9 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         publish();
         return;
       }
-      const res = await oauth.pollDeviceGrant(creds(), grant);
-      if (source.signal.cancelled) {
-        endFlow();
-        status = { state: 'signed-out' };
-        publish();
+      const res = await oauth.pollDeviceGrant(owned.creds, grant);
+      owned = flow;
+      if (owned === null || owned.source !== source) {
         return;
       }
       if (!res.ok) {
@@ -504,16 +580,15 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         publish();
         return;
       }
-      // granted — persist the refresh grant BEFORE publishing; a
-      // custody failure is a failed sign-in, not a session that
-      // silently won't survive a restart.
-      endFlow();
+      // granted — the attempt stays live through persistence so a
+      // sheet dismissal or sign-out can still veto the mint.
       const token = verdict.grant;
       if (token.refreshToken === null) {
         // A grant with no refresh_token can't outlive its ~1h access
         // token — signing in on it would strand the user mid-session
         // with no renew path, so it's a typed failure, not a silent
         // half-linked state.
+        endFlow();
         status = {
           state: 'failed',
           error: appError(
@@ -525,26 +600,42 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         return;
       }
       refreshToken = token.refreshToken;
+      grantClientId = owned.creds.clientId;
       const wrote = await writeCustody({
         v: 1,
         refreshToken: token.refreshToken,
         clientId: clientIdOverride,
+        grantClientId,
       });
-      if (!wrote.ok) {
-        refreshToken = null;
-        status = { state: 'failed', error: wrote.error };
-        publish();
+      if (flow?.source !== source || refreshToken !== token.refreshToken) {
+        // Dismissed (flow dropped) or signed out (grant swapped)
+        // while the write was in flight — retract the grant we just
+        // stored when we still own it, then leave the newer owner's
+        // state alone.
+        if (refreshToken === token.refreshToken) {
+          refreshToken = null;
+          grantClientId = null;
+          await writeCustody({
+            v: 1,
+            refreshToken: null,
+            clientId: clientIdOverride,
+            grantClientId: null,
+          });
+        }
         return;
       }
-      if (refreshToken !== token.refreshToken) {
-        // A sign-out landed mid-persist — custody's serialized writes
-        // already ended on the cleared record; do not resurrect the
-        // bearer or the signed-in state it belonged to.
+      if (!wrote.ok) {
+        refreshToken = null;
+        grantClientId = null;
+        endFlow();
+        status = { state: 'failed', error: wrote.error };
+        publish();
         return;
       }
       try {
         await applyAccess(token);
       } catch (thrown) {
+        endFlow();
         status = {
           state: 'failed',
           error: fromUnknown(thrown),
@@ -552,6 +643,12 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         publish();
         return;
       }
+      if (flow?.source !== source || refreshToken !== token.refreshToken) {
+        // A dismissal/sign-out interleaved inside applyAccess — the
+        // newer owner already cleared the slot; don't re-publish.
+        return;
+      }
+      endFlow();
       status = { state: 'signed-in' };
       publish();
       return;
@@ -589,17 +686,14 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       publish();
       void (async () => {
         await (restored ??= doRestore());
-        if (source.signal.cancelled) {
-          if (pendingBegin === source) {
-            pendingBegin = null;
-          }
+        // Attempt identity — a dismissed/superseded begin exits
+        // silently; the newer owner already holds pendingBegin/state.
+        if (pendingBegin !== source) {
           return;
         }
-        const begun = await oauth.beginDeviceFlow(creds());
-        if (source.signal.cancelled) {
-          pendingBegin = null;
-          status = { state: 'signed-out' };
-          publish();
+        const beginCreds = creds();
+        const begun = await oauth.beginDeviceFlow(beginCreds);
+        if (pendingBegin !== source) {
           return;
         }
         if (!begun.ok) {
@@ -612,6 +706,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
           source,
           grant: begun.value,
           intervalMs: begun.value.intervalMs,
+          creds: beginCreds,
         };
         status = {
           state: 'authorizing',
@@ -646,7 +741,9 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       flow = null;
       pendingBegin = null;
       refreshToken = null;
+      grantClientId = null;
       accessExpiresAtMs = 0;
+      bearerLive = false;
       disarmRenew();
       renewFails = 0;
       // Host slot first — a custody failure below must never leave a
@@ -664,6 +761,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         v: 1,
         refreshToken: null,
         clientId: clientIdOverride,
+        grantClientId: null,
       });
       if (!wrote.ok) {
         const cleared = await clearCustody();
@@ -696,6 +794,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         v: 1,
         refreshToken,
         clientId: next,
+        grantClientId,
       });
       if (!wrote.ok) {
         return wrote;

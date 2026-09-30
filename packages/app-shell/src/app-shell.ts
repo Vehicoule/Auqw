@@ -937,12 +937,15 @@ export function useAppShell<E extends { readonly type: string } = never>(
       likes: state.likes,
       repeat: state.repeat,
       shuffleOrder: state.shuffleOrder,
-      // The wall CTA only exists on a signed-out auth seam — `null`
-      // snapshot (no port) maps to undefined: no auth surface at all.
+      // The wall CTA only exists when the auth seam can't serve a
+      // bearer — `null` snapshot (no port) maps to undefined: no auth
+      // surface at all. A signed-in-but-dead link (bearerLive false —
+      // boot restore pending or refresh failing) still offers it.
       authSignedIn:
         authSnapshot === null
           ? undefined
-          : authSnapshot.status.state === 'signed-in',
+          : authSnapshot.status.state === 'signed-in' &&
+            authSnapshot.bearerLive,
     });
     // The model's position is a publish-time read — overlay the live
     // tick value so the transport position moves between publishes.

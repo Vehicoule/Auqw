@@ -15,9 +15,11 @@ export function createDesktopAuth(api: AuqwApi): AuthShellPort {
   let snap: AuthSnapshot = {
     status: { state: 'signed-out' },
     clientId: null,
+    bearerLive: false,
   };
   const listeners = new Set<() => void>();
   let wired = false;
+  let pushes = 0;
 
   function toStatus(status: AuthSnapshotPayload['status']): AuthStatus {
     // The wire error's `kind` is a slug — map back through the
@@ -42,6 +44,7 @@ export function createDesktopAuth(api: AuqwApi): AuthShellPort {
     snap = {
       status: toStatus(payload.status),
       clientId: payload.clientId,
+      bearerLive: payload.bearerLive,
     };
     for (const listener of [...listeners]) {
       try {
@@ -57,12 +60,22 @@ export function createDesktopAuth(api: AuqwApi): AuthShellPort {
       return;
     }
     wired = true;
-    api.auth.onState(apply);
+    api.auth.onState((payload) => {
+      pushes += 1;
+      apply(payload);
+    });
     // The pull lands AFTER the subscription is armed so a snapshot
-    // published between the two can't be missed.
+    // published between the two can't be missed — but a delayed pull
+    // reply must not roll back a push that already landed (the pull
+    // is only valid if nothing arrived since it was sent).
+    const gen = pushes;
     void api.auth
       .status()
-      .then(apply)
+      .then((payload) => {
+        if (pushes === gen) {
+          apply(payload);
+        }
+      })
       .catch(() => undefined);
   }
 

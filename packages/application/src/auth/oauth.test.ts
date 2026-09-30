@@ -218,9 +218,9 @@ async function testRefresh(): Promise<void> {
       body: {
         access_token: 'access-2',
         expires_in: 3_600,
-        // A rogue refresh_token field on a refresh reply must be
-        // dropped — the stored grant stays authoritative.
-        refresh_token: 'rotated-ignore-me',
+        // RFC 6749 §6 rotation — the replacement grant is preserved;
+        // the session layer persists it before the next renewal.
+        refresh_token: 'rotated-2',
       },
     },
   ]);
@@ -228,7 +228,7 @@ async function testRefresh(): Promise<void> {
   const refreshed = await oauth.refreshAccessToken(CREDS, 'refresh-1');
   assert(refreshed.ok, 'refresh failed');
   assertEqual(refreshed.value.accessToken, 'access-2');
-  assertEqual(refreshed.value.refreshToken, null);
+  assertEqual(refreshed.value.refreshToken, 'rotated-2');
   assertEqual(calls[0]?.pairs['grant_type'], 'refresh_token');
   assertEqual(calls[0]?.pairs['refresh_token'], 'refresh-1');
 }

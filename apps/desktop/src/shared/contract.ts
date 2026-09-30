@@ -1390,6 +1390,8 @@ export const isAuthSnapshot = v.object({
   status: isAuthStatusPayload,
   /** The user-supplied client_id override — null = built-in default. */
   clientId: v.nullable(v.boundedString(512)),
+  /** Live access token in the host slot — signed-in && false = dead link. */
+  bearerLive: v.boolean(),
 });
 
 export type AuthSnapshotPayload = v.Guarded<typeof isAuthSnapshot>;

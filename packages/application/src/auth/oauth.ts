@@ -305,10 +305,21 @@ export function createOAuthClient(deps: {
         );
       }
       const rawUrl = bounded(body['verification_url'], 512);
-      const verificationUrl =
+      // The reply rides TLS from oauth2.googleapis.com, but the URL
+      // is what the user opens to type the code — pin it to a real
+      // Google host anyway (no userinfo/port spoofing) so a mangled
+      // reply can never send the user elsewhere.
+      const urlHost =
         rawUrl !== null && rawUrl.startsWith('https://')
-          ? rawUrl
-          : OAUTH_VERIFICATION_URL;
+          ? (rawUrl.slice(8).split('/')[0]?.toLowerCase() ?? '')
+          : '';
+      const googleHost =
+        urlHost !== '' &&
+        !urlHost.includes('@') &&
+        !urlHost.includes(':') &&
+        (urlHost === 'google.com' || urlHost.endsWith('.google.com'));
+      const verificationUrl =
+        googleHost && rawUrl !== null ? rawUrl : OAUTH_VERIFICATION_URL;
       const expiresIn = boundedInt(body['expires_in'], 1, 86_400) ?? 1_800;
       const intervalS = boundedInt(body['interval'], 1, 300) ?? 5;
       return ok({
@@ -377,9 +388,9 @@ export function createOAuthClient(deps: {
       if (status >= 200 && status < 300 && slug === null) {
         const grant = readTokenGrant(body, now());
         if (grant !== null) {
-          // Refresh replies never carry a new refresh_token — the
-          // stored grant stays authoritative.
-          return ok({ ...grant, refreshToken: null });
+          // A rotated refresh_token rides the reply — RFC 6749 §6;
+          // the session persists the replacement before applying.
+          return ok(grant);
         }
       }
       // A dead grant (revoked, rotated, expired server-side) is

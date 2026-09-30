@@ -262,6 +262,7 @@ function fakeApi(): Rig {
           Promise.resolve({
             status: { state: 'signed-out' },
             clientId: null,
+            bearerLive: false,
           }),
         begin: () => Promise.resolve(),
         cancel: () => Promise.resolve(),
