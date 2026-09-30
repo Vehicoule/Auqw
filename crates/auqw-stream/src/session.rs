@@ -90,6 +90,12 @@ pub(crate) struct Shared {
     /// previously attached session survives the DataSource
     /// close→open window regardless of how long it has been playing.
     pub detached_since: Option<Instant>,
+    /// Earliest instant the next upstream fetch may leave — a
+    /// provider `Retry-After` window persisted session-wide. A leg
+    /// that gets preempted mid-cooldown retires, but the window does
+    /// not: whichever leg picks up next owes the remainder, so no
+    /// replacement request ever fires inside the provider's ask.
+    pub fetch_not_before: Option<Instant>,
 }
 
 /// Fetch-through backpressure shared across one registry's sessions:
@@ -258,6 +264,7 @@ impl SessionInner {
                 demand_published: 0,
                 transient_error: None,
                 detached_since: Some(Instant::now()),
+                fetch_not_before: None,
                 marks: PhaseMarks {
                     prepare_started_ms: now_ms(),
                     ..PhaseMarks::default()
@@ -688,6 +695,29 @@ impl SessionInner {
         }
         self.readers.notify_all();
         self.pump_notify.notify_one();
+    }
+
+    /// Record a provider `Retry-After` window so the next upstream
+    /// fetch — whichever leg runs it — waits out the remainder. Only
+    /// ever extends: a shorter later ask must not shrink a window the
+    /// provider already staked; over-waiting is honest, under-waiting
+    /// is the hammer the header exists to prevent.
+    pub(crate) fn set_cooldown(&self, until: Instant) {
+        if let Ok(mut sh) = lock(&self.shared) {
+            let next = sh.fetch_not_before.map_or(until, |prev| prev.max(until));
+            sh.fetch_not_before = Some(next);
+        }
+    }
+
+    /// Time left on the provider cooldown, if a `Retry-After` window
+    /// is still open. An elapsed window reads `None` — stale entries
+    /// need no sweep.
+    pub(crate) fn cooldown_remaining(&self) -> Option<Duration> {
+        lock(&self.shared)
+            .ok()
+            .and_then(|sh| sh.fetch_not_before)
+            .and_then(|until| until.checked_duration_since(Instant::now()))
+            .filter(|d| *d > Duration::ZERO)
     }
 
     /// The pump's next action — fetch-through first (demand reads

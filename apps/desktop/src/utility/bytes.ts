@@ -218,6 +218,9 @@ export function createStreamPump(deps: {
         epoch = raw.epoch;
         credit = 0;
         eof = false;
+        // A re-anchored read path earns its own flap budget — the old
+        // position's failures must not travel into the new epoch.
+        readRetries = 0;
         break;
       case 'close':
         close();

@@ -105,12 +105,13 @@ pub struct StreamConfig {
     /// Backoff between transient retries — interruptible by cancel and,
     /// for speculative fill, by demand-read preemption.
     pub retry_backoff: Duration,
-    /// Upper bound on the `Retry-After` cooldown honored before a
-    /// `429` latches `rate-limit` — the provider's ask rides the seam
-    /// so the reader's re-drive lands past it instead of hammering
-    /// inside it. A longer ask stays a latched verdict: the consumer's
-    /// own retry cadence decides what a >cap cooldown means. The cap
-    /// must leave a full fetch attempt room inside `read_deadline`.
+    /// Upper bound on the `Retry-After` window staked on the session
+    /// when a `429` lands — the provider's ask persists past the leg
+    /// that observed it, so the next fetch owes the window's remainder
+    /// instead of landing inside it. A longer ask is honored at the
+    /// cap: the consumer's retry cadence decides what a >cap cooldown
+    /// means. The cap must leave a full fetch attempt room inside
+    /// `read_deadline`.
     pub rate_limit_cooldown_cap: Duration,
     /// How long a prepared session may sit before `attach` fails it
     /// `Expired` and the reaper evicts it.

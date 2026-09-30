@@ -427,4 +427,40 @@ export async function run(): Promise<void> {
     assertEqual(error?.['code'], 'released');
     assertEqual(calls, 1, 'terminal kinds never retry in place');
   }
+
+  // A seek earns a fresh retry budget — retries burned at the old
+  // position must not strand reads at the re-anchored one. Fail at 0,
+  // seek mid-backoff to 700, fail once there, then serve: bytes flow.
+  {
+    const bytes = new Uint8Array(1024).fill(6);
+    let calls = 0;
+    const host = fakeHost(bytes, {
+      async streamRead(_h: string, position: number, length: number) {
+        calls += 1;
+        if (calls <= 2) {
+          throw napiTyped('transient');
+        }
+        return Buffer.from(bytes.subarray(position, position + length));
+      },
+    });
+    const port = fakePort();
+    createStreamPump({ host: () => host, handle: 'h-12', port });
+    port.emitMessage({ kind: 'grant', bytes: 256 });
+    // Let the first read fail and its backoff begin, then re-anchor.
+    await wait(50);
+    port.emitMessage({ kind: 'seek', position: 700, epoch: 1 });
+    port.emitMessage({ kind: 'grant', bytes: 128 });
+    await wait(READ_RETRY_BACKOFF_MS * 3);
+    const data = port.sent.filter((m) => m.kind === 'data');
+    assert(
+      data.length >= 1,
+      'post-seek reads earned a fresh retry budget',
+    );
+    assertEqual(data[data.length - 1]?.position, 700);
+    assertEqual(data[data.length - 1]?.epoch, 1);
+    assert(
+      port.sent.every((m) => m.kind !== 'error'),
+      "the old position's retries never stranded the new epoch",
+    );
+  }
 }

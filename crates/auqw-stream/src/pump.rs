@@ -286,6 +286,17 @@ async fn fetch_chunk(
         if let Err(e) = session.check_live() {
             return Outcome::Failed(e);
         }
+        // A provider `Retry-After` window outlives the leg that
+        // observed it — whichever leg picks up next owes the
+        // remainder before a request may leave. Preemption stays
+        // legal: the replacement re-checks the same deadline.
+        if let Some(wait) = session.cooldown_remaining() {
+            match interruptible_sleep(session, through, wait).await {
+                Backoff::Waited => {}
+                Backoff::Preempted => return Outcome::Preempted,
+                Backoff::Cancelled => return Outcome::Failed(StreamError::Cancelled),
+            }
+        }
         let outcome = match session.current_fetch() {
             Ok((url, mint_headers)) => {
                 match await_fetch(session, fetch, &url, &mint_headers, offset, len, through).await {
@@ -395,9 +406,9 @@ fn stallable(e: &StreamError) -> bool {
 
 /// Apply the retry policy to one failed attempt: `Transient` retries
 /// with backoff until `fetch_retries` runs out, `RateLimited` latches
-/// after honoring the server's `Retry-After` ask (capped — a cooldown
-/// the parked read can still outlive), and everything else is
-/// terminal.
+/// after staking the server's `Retry-After` ask as a session-wide
+/// fetch deadline (capped — a cooldown the parked read can still
+/// outlive), and everything else is terminal.
 async fn retry_or_stall(
     session: &Arc<SessionInner>,
     through: bool,
@@ -417,21 +428,16 @@ async fn retry_or_stall(
         ..
     } = &e
     {
-        // The server named its cooldown: waiting it out here (bounded
-        // by `rate_limit_cooldown_cap`) means the reader's re-drive
-        // lands past the window instead of bouncing off it — the
-        // latch still lands after, so a consumer retry cadence never
-        // shrinks below the ask.
+        // The server named its cooldown: stake it on the session
+        // (bounded by `rate_limit_cooldown_cap`) so whichever leg
+        // fetches next — this one resuming, or a demand that
+        // preempted the wait — owes the window's remainder instead
+        // of landing inside it. The latch still lands, so a
+        // consumer retry cadence never shrinks below the ask.
         let wait = Duration::from_millis((*ms).min(
             u64::try_from(session.config.rate_limit_cooldown_cap.as_millis()).unwrap_or(u64::MAX),
         ));
-        match interruptible_sleep(session, through, wait).await {
-            Backoff::Waited => {}
-            Backoff::Preempted => return Retry::Stop(Outcome::Preempted),
-            Backoff::Cancelled => {
-                return Retry::Stop(Outcome::Failed(StreamError::Cancelled));
-            }
-        }
+        session.set_cooldown(Instant::now() + wait);
     }
     Retry::Stop(if stallable(&e) {
         Outcome::Stalled(e)
@@ -1191,32 +1197,27 @@ mod tests {
         stop_pump(&s, task).await;
     }
 
-    /// A `429`'s `Retry-After` ask is slept out inside the pump —
-    /// capped — *before* the latch lands, so the reader's re-drive
-    /// lands past the provider's cooldown instead of hammering inside
-    /// it. The latch still lands at the ask+cap either way, still
-    /// costs exactly one request, and a re-drive then serves bytes.
+    /// A `429`'s `Retry-After` stakes a session-wide fetch deadline:
+    /// the latch lands honestly and fast, and whichever leg fetches
+    /// next — a demand re-drive or a fill resuming — owes the window's
+    /// remainder instead of landing inside it. Proof on real request
+    /// times: the replacement request fires no earlier than the ask,
+    /// the window cost exactly one request, and bytes then flow.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn rate_limit_retry_after_slept_before_latch() {
+    async fn rate_limit_retry_after_persists_into_next_fetch() {
         let d = TestDir::new("ra-hint");
         let s = session(config(&d), remint_ok());
         let fetch = Arc::new(ScriptedFetch::new(vec![
             Step::Reply(FetchResponse {
                 status: 429,
                 content_range: None,
-                retry_after_ms: Some(120),
+                retry_after_ms: Some(400),
                 body: stream_body(vec![]),
             }),
             Step::Reply(resp(206, 0, 128, 512)),
         ]));
         let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
-        let t0 = Instant::now();
         wait_until(|| latched(&s).is_some() || s.is_terminal()).await;
-        let slept = t0.elapsed();
-        assert!(
-            slept >= Duration::from_millis(100),
-            "the Retry-After ask must be slept out before latching: {slept:?}"
-        );
         assert!(
             matches!(latched(&s), Some(StreamError::RateLimited { .. })),
             "{:?}",
@@ -1229,11 +1230,12 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .len(),
             1,
-            "the cooldown is a sleep, not a retry burst"
+            "the cooldown is a window, not a retry burst"
         );
 
-        // First read surfaces the latched verdict; the re-drive lands
-        // a real fetch and bytes flow — the cooldown is behind it.
+        // First read surfaces the latched verdict; the re-drive's
+        // fetch must land past the window even though the observing
+        // leg is already gone.
         let first = tokio::task::spawn_blocking({
             let s = Arc::clone(&s);
             move || s.read(0, 128)
@@ -1252,7 +1254,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("read join: {e}"));
         match second {
             Ok(v) => assert_eq!(v.len(), 128),
-            Err(e) => panic!("re-drive after cooldown must serve bytes: {e:?}"),
+            Err(e) => panic!("re-drive past the window must serve bytes: {e:?}"),
         }
         let reqs = fetch
             .requests
@@ -1263,38 +1265,81 @@ mod tests {
             reqs.len() >= 2 && reqs[1].0 == 0,
             "re-drive after latch must land a fresh fetch at the read offset: {reqs:?}"
         );
+        let times = fetch
+            .request_times
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            times.len() >= 2 && times[1] - times[0] >= Duration::from_millis(350),
+            "the next fetch must land past the provider's ask, not inside it: {times:?}"
+        );
         stop_pump(&s, task).await;
     }
 
     /// A `Retry-After` beyond `rate_limit_cooldown_cap` is honored at
     /// the cap, not the ask — a 30 s cooldown must not hold the pump
-    /// hostage for 30 s. The latch still lands after the capped wait.
+    /// hostage for 30 s, but it may not be skipped either.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rate_limit_retry_after_honored_at_cap_not_ask() {
         let d = TestDir::new("ra-cap");
         let s = session(config(&d), remint_ok());
-        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(FetchResponse {
-            status: 429,
-            content_range: None,
-            retry_after_ms: Some(30_000),
-            body: stream_body(vec![]),
-        })]));
+        let fetch = Arc::new(ScriptedFetch::new(vec![
+            Step::Reply(FetchResponse {
+                status: 429,
+                content_range: None,
+                retry_after_ms: Some(30_000),
+                body: stream_body(vec![]),
+            }),
+            Step::Reply(resp(206, 0, 128, 512)),
+        ]));
         let task = spawn_pump(&s, Arc::clone(&fetch) as Arc<dyn Fetch>);
-        let t0 = Instant::now();
         wait_until(|| latched(&s).is_some() || s.is_terminal()).await;
-        let slept = t0.elapsed();
-        assert!(
-            slept >= Duration::from_millis(400),
-            "the capped cooldown was not slept at all: {slept:?}"
-        );
-        assert!(
-            slept < Duration::from_secs(2),
-            "a 30 s ask must latch at the 500 ms cap, not the ask: {slept:?}"
-        );
         assert!(
             matches!(latched(&s), Some(StreamError::RateLimited { .. })),
             "{:?}",
             latched(&s)
+        );
+
+        // First read surfaces the latch; the re-drive fires at the
+        // 500 ms cap — not the 30 s ask and not instantly.
+        let first = tokio::task::spawn_blocking({
+            let s = Arc::clone(&s);
+            move || s.read(0, 128)
+        })
+        .await
+        .unwrap_or_else(|e| panic!("read join: {e}"));
+        assert!(
+            matches!(first, Err(StreamError::RateLimited { .. })),
+            "{first:?}"
+        );
+        let second = tokio::task::spawn_blocking({
+            let s = Arc::clone(&s);
+            move || s.read(0, 128)
+        })
+        .await
+        .unwrap_or_else(|e| panic!("read join: {e}"));
+        match second {
+            Ok(v) => assert_eq!(v.len(), 128),
+            Err(e) => panic!("capped window must still serve bytes: {e:?}"),
+        }
+        let times = fetch
+            .request_times
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            times.len() >= 2,
+            "the re-drive must land a second request: {times:?}"
+        );
+        let gap = times[1] - times[0];
+        assert!(
+            gap >= Duration::from_millis(400),
+            "the capped window was not honored at all: {gap:?}"
+        );
+        assert!(
+            gap < Duration::from_secs(2),
+            "a 30 s ask must fire at the 500 ms cap, not the ask: {gap:?}"
         );
         stop_pump(&s, task).await;
     }
