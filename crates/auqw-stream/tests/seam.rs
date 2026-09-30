@@ -1101,6 +1101,72 @@ async fn claimed_session_stays_claimed_across_detach() {
     reg.release(&a).unwrap_or_else(|e| panic!("release: {e}"));
 }
 
+/// The registry-level reservation: `claim_if_live` is the atomic
+/// liveness+ownership commit for the deliver→attach window. A session
+/// killed between the caller's snapshot and the claim reports `false`
+/// — the stale handle can never ride a delivered `Prepared` slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claim_if_live_refuses_dead_and_unknown_sessions() {
+    let d = TestDir::new("claimlive");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let a = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    assert_eq!(
+        reg.claim_if_live(&a)
+            .unwrap_or_else(|e| panic!("claim_if_live: {e}")),
+        true,
+        "live session claims"
+    );
+    // Owner release ends the session regardless of the claim — a
+    // second reservation attempt must now refuse the dead handle.
+    reg.release(&a).unwrap_or_else(|e| panic!("release: {e}"));
+    assert_eq!(
+        reg.claim_if_live(&a)
+            .unwrap_or_else(|e| panic!("claim_if_live dead: {e}")),
+        false,
+        "dead session refused"
+    );
+    assert_eq!(
+        reg.claim_if_live("ghost")
+            .unwrap_or_else(|e| panic!("claim_if_live ghost: {e}")),
+        false,
+        "unknown handle refused"
+    );
+}
+
+/// A claimed session a release kills mid-window is refused — the
+/// termination still wins (the claim only guards unattached
+/// teardowns), so the reservation observes it and reports dead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claim_if_live_after_terminal_verdict_still_refuses() {
+    let d = TestDir::new("claimterm");
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::new(MapFetch::new(HashMap::new())),
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let a = reg
+        .prepare(source(1024), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    reg.cancel_if_unattached(&a)
+        .unwrap_or_else(|e| panic!("cancel: {e}"));
+    assert_eq!(
+        reg.claim_if_live(&a)
+            .unwrap_or_else(|e| panic!("claim_if_live: {e}")),
+        false,
+        "cancelled session refused"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hung_remint_is_bounded_by_mint_deadline() {
     let d = TestDir::new("mintdeadline");

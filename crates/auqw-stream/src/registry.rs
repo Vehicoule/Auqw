@@ -419,6 +419,19 @@ impl StreamRegistry {
         Ok(())
     }
 
+    /// [`Self::claim`] gated on liveness under the session lock:
+    /// `false` when the handle is unknown or already terminal — the
+    /// caller must not deliver it. This is the registry-level
+    /// reservation for the deliver→attach window: a session killed
+    /// between the caller's liveness snapshot and the claim can no
+    /// longer be marked owned and emitted `Prepared`.
+    ///
+    /// # Errors
+    /// [`StreamError::Internal`] on lock poisoning.
+    pub fn claim_if_live(&self, handle: &str) -> Result<bool, StreamError> {
+        Ok(self.lookup(handle)?.is_some_and(|s| s.claim_if_live()))
+    }
+
     /// Cancel only if the session is still unattached and unclaimed —
     /// the intent-flip path (`cancelPrepare` landing after `prepared`):
     /// an attached, playing consumer is untouched, and a claimed

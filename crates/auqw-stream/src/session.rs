@@ -316,6 +316,22 @@ impl SessionInner {
         sh.abandoned = false;
     }
 
+    /// Ownership commit gated on liveness, atomic under `shared`:
+    /// `false` when the session already ended (the caller reports the
+    /// handle dead instead of delivering it). `claim` alone could mark
+    /// a session killed between the caller's liveness check and here —
+    /// a stale handle would then ride the delivered slot. Poisoned
+    /// `shared` is recovered like `claim`.
+    pub(crate) fn claim_if_live(&self) -> bool {
+        let mut sh = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+        if sh.terminal.is_some() {
+            return false;
+        }
+        sh.claimed = true;
+        sh.abandoned = false;
+        true
+    }
+
     /// The handle's last ownership slot was cancelled. Attached, the
     /// session is only marked — a bookkeeping cancel must never end a
     /// playing stream, and `close` will drop `claimed` on the way out
