@@ -81,6 +81,13 @@ export type MiniPlayerProps = {
       contract). */
   readonly skipNext?: SkipPeek | null | undefined;
   readonly skipPrevious?: SkipPeek | null | undefined;
+  /** True when the forward walk finds no landing row but the cursor
+      still lives — the same swipe then drains the queue (advance()
+      stops at the tail / all-failed), ending playback. An actionable
+      edge: the row travels fully, the empty pill behind it reads as
+      the queue running out, and release commits onNext like any
+      landing. Distinct from a dead edge, which only rubber-bands. */
+  readonly nextEndsQueue?: boolean | undefined;
 };
 
 /** The incoming row inside the conveyor — art + meta mirroring the
@@ -135,6 +142,7 @@ export function MiniPlayer({
   interactive = true,
   skipNext,
   skipPrevious,
+  nextEndsQueue,
 }: MiniPlayerProps) {
   const theme = useTheme();
   const ios = platform === 'ios';
@@ -157,10 +165,12 @@ export function MiniPlayer({
   // Pan() cancels an in-flight swipe).
   const nextLive = useSharedValue(skipNext != null ? 1 : 0);
   const prevLive = useSharedValue(skipPrevious != null ? 1 : 0);
+  const nextDrains = useSharedValue(nextEndsQueue === true ? 1 : 0);
   useEffect(() => {
     nextLive.value = skipNext != null ? 1 : 0;
     prevLive.value = skipPrevious != null ? 1 : 0;
-  }, [skipNext, skipPrevious, nextLive, prevLive]);
+    nextDrains.value = nextEndsQueue === true ? 1 : 0;
+  }, [skipNext, skipPrevious, nextEndsQueue, nextLive, prevLive, nextDrains]);
   const progress =
     player.durationMs === null || player.durationMs <= 0
       ? 0
@@ -316,7 +326,15 @@ export function MiniPlayer({
           if (sheetProgress === undefined) return;
           if (sheetProgress.value > 0.001) return;
           const w = Math.max(1, rowW.value);
-          const allowed = e.translationX < 0 ? nextLive.value : prevLive.value;
+          // Forward is actionable without a landing row when it drains
+          // the queue — the empty pill behind the outgoing row is the
+          // honest preview of playback ending.
+          const allowed =
+            e.translationX < 0
+              ? nextLive.value !== 0 || nextDrains.value !== 0
+                ? 1
+                : 0
+              : prevLive.value;
           dragX.value = skipTravelPx(e.translationX, w, allowed !== 0);
           if (
             allowed !== 0 &&
@@ -360,7 +378,12 @@ export function MiniPlayer({
             return;
           }
           const w = Math.max(1, rowW.value);
-          const allowed = e.translationX < 0 ? nextLive.value : prevLive.value;
+          const allowed =
+            e.translationX < 0
+              ? nextLive.value !== 0 || nextDrains.value !== 0
+                ? 1
+                : 0
+              : prevLive.value;
           const atRest = sheetProgress.value <= 0.001;
           if (
             atRest &&
@@ -441,6 +464,7 @@ export function MiniPlayer({
     ticked,
     nextLive,
     prevLive,
+    nextDrains,
   ]);
   // The pill fades out inside the sheet's first stretch of travel —
   // the fade window ends exactly where the expanded content's reveal

@@ -965,6 +965,19 @@ export function StageSheet({
   });
   const dismissOn = risenOn || expanded;
 
+  // The backdrop's warm-up bound: mount it once the sheet has ever
+  // risen so the artwork resolver and full-size decode only run for
+  // a listener who actually opens the player — a queue that never
+  // expands never pays the fetch per track. Once warm it stays
+  // mounted across collapses and track changes, so a mid-drag morph
+  // never pays a resolver remount either.
+  const [backdropWarm, setBackdropWarm] = useState(risenOn);
+  useEffect(() => {
+    if (risenOn) {
+      setBackdropWarm(true);
+    }
+  }, [risenOn]);
+
   // Tap-to-seek on the waveform: the scrub pan only ever activates on
   // movement, so a plain tap resolves x→ms through the same commit
   // path. Callbacks live behind a ref — a deps-listed prop would
@@ -1649,12 +1662,14 @@ export function StageSheet({
             artwork and controls fade in through the pill's fade window
             and are fully present at the input gate. */}
         <Animated.View style={[StyleSheet.absoluteFill, contentStyle]}>
-          {/* Keep the backdrop mounted across mode switches AND the
-              parked sheet — remounting mid-morph would pay the artwork
-              resolver and decode during the drag. Its cost is bound to
-              track changes instead; non-player modes just hide it
-              under their flat stage. */}
-          {player.artworkUrl !== null && (
+          {/* Mount once the sheet has ever risen (backdropWarm) and
+              keep it mounted across collapses, track changes and mode
+              switches — remounting mid-morph would pay the artwork
+              resolver and decode during the drag, and mounting while
+              parked would fetch full-size art the listener never
+              opens. Non-player modes just hide it under the flat
+              stage. */}
+          {backdropWarm && player.artworkUrl !== null && (
             <View
               style={[
                 StyleSheet.absoluteFill,

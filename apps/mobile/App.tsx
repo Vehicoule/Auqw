@@ -2326,6 +2326,7 @@ function Main({
                   onDismiss={() => void session.stop()}
                   skipNext={skipPreview.next}
                   skipPrevious={skipPreview.previous}
+                  nextEndsQueue={skipPreview.nextEndsQueue}
                 />
               ) : undefined
             }

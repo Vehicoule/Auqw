@@ -106,6 +106,7 @@ import type {
 } from '@auqw/ui-shared';
 import {
   advanceTargetId,
+  skipTargetIds,
   failedSkipIds,
   playlistDownloadPlan,
   reportStoredDownloadError,
@@ -1193,18 +1194,18 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // target that would be gated away is a dead edge, not a false
   // promise.
   const skipPreview = useMemo(() => {
-    const { occurrences, currentOccurrenceId } = state.queue;
+    const { occurrences, currentOccurrenceId, blockedError } = state.queue;
     const failed = failedSkipIds(failedQueueErrors.current);
-    const peek = (method: 'next' | 'previous'): SkipPeek | null => {
-      const targetId = advanceTargetId({
-        method,
-        occurrences,
-        currentOccurrenceId,
-        dealtOrder: state.shuffleOrder,
-        failedIds: failed,
-        repeat: state.repeat,
-        positionMs,
-      });
+    const targets = skipTargetIds({
+      occurrences,
+      currentOccurrenceId,
+      dealtOrder: state.shuffleOrder,
+      failedIds: failed,
+      repeat: state.repeat,
+      positionMs,
+      blocked: blockedError !== undefined,
+    });
+    const peek = (targetId: string | null): SkipPeek | null => {
       if (targetId === null) {
         return null;
       }
@@ -1223,7 +1224,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
       }
       return skipPeekFor(queueModel, targetId);
     };
-    return { next: peek('next'), previous: peek('previous') };
+    return {
+      next: peek(targets.next),
+      previous: peek(targets.previous),
+      nextEndsQueue: targets.nextEndsQueue,
+    };
   }, [
     state.queue,
     state.shuffleOrder,
