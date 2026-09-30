@@ -360,10 +360,12 @@ silent write failures (dead-driver class). `attempt trace` shows
   atomic rename on finalize; `.part` size ≥ `committed_offset`
   (last chunk may be written-not-committed).
 
-### Mass materialization from play-result
-`auqw://play-result?i=N` calls addAndPlay but enqueues the WHOLE
-visible result list — one fire materialized ~50 recordings. After
-that, `auqw://download?i=N` has plenty of remote indices to hit.
+### Remote indices for download come from search, not play-result
+`auqw://play-result?i=N` calls addAndPlay on ONLY item i — it does
+not enqueue the visible list. The ~50 remote-index recordings seen
+in one gate run were materialized by the preceding `auqw://search`
+result ingest (each result find-or-creates a recording row). Fire
+search first; `auqw://download?i=N` then has indices to hit.
 
 ### Instrumented-mint pattern when the provider wall is ~100%
 When real resolves are environmentally blocked (bot-check rate too
@@ -383,10 +385,13 @@ TEMPORARY stub — revert before finishing, label evidence provisional:
   `expectedEncoding` (=`live.bytes` wire total) → honest restart at 0
   that masquerades as broken resume. With matching length, resume
   continues AT `committed_offset`.
-- To prove mint headers ride the wire, add a one-line `console.log`
-  of `init.headers` at the download `fetchImpl` wiring
-  (`apps/mobile/src/session/controller.ts`) — shows
-  `{...mintHeaders, Range}` per chunk in logcat. Revert both edits.
+- To prove mint headers ride the wire, log header NAMES only —
+  `console.log(Object.keys(init.headers ?? {}))` at the download
+  `fetchImpl` wiring (`apps/mobile/src/session/controller.ts`) —
+  shows `[...mintKeys, 'range']` per chunk in logcat. Never log raw
+  values: mint headers can carry signed request data and logcat
+  persists them (same rule as redacted tokens/URLs). Revert both
+  edits.
 
 ### Reactive force-stop for mid-flight catches
 Timed `am force-stop` is racy — chunk commits land in bursts
