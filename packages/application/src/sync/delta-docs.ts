@@ -3,7 +3,8 @@ import type { Result } from '../errors.ts';
 import type { CancellationSignal } from '../cancellation.ts';
 import { isSyncDelta } from './sync-engine.ts';
 import type { SyncCursor, SyncDelta } from './sync-engine.ts';
-import { MAX_SYNC_DOC_BYTES, utf8ByteLength } from './sync-wire.ts';
+import { utf8ByteLength } from '../utf8.ts';
+import { MAX_SYNC_DOC_BYTES } from './sync-wire.ts';
 
 /**
  * Clipboard delta exchange (settings sync panel): the journal's paged

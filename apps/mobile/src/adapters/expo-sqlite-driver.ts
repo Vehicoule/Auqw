@@ -8,9 +8,9 @@ import type {
   SqliteDriver,
   SqlRow,
 } from '@auqw/storage-sqlite';
-// The cancellation sentinel is package-internal: SqliteStorage's
+// The cancellation sentinel is the driver contract: SqliteStorage's
 // #mapError classifies thrown === CANCELLED as a typed `cancelled`.
-import { CANCELLED } from '../../../../packages/storage-sqlite/src/cancelled.ts';
+import { CANCELLED } from '@auqw/storage-sqlite';
 
 /**
  * The slice of `expo-sqlite`'s `SQLiteDatabase` the driver uses —

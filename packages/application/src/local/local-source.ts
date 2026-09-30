@@ -9,6 +9,7 @@ import {
 } from '../domain.ts';
 import { appError, err, ok, type Result } from '../errors.ts';
 import { createSha256 } from '../downloads/sha256.ts';
+import { utf8Encode } from '../utf8.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import type { LogPort } from '../ports/log.ts';
@@ -66,44 +67,8 @@ function fileIdFor(
 ): string {
   const input = `${sourceId}|${fingerprint}${docId === undefined ? '' : `|${docId}`}`;
   const h = createSha256();
-  h.update(utf8(input));
+  h.update(utf8Encode(input));
   return `lf-${h.digest()}`;
-}
-
-/**
- * UTF-8 encode without TextEncoder (lib: ES2023 — no DOM types).
- * Real UTF-8, not a mask: SAF doc ids may carry non-ASCII characters
- * and two ids that differ only above U+007F must hash differently.
- * Lone surrogates encode as their own code point — hashing needs
- * determinism, not validity.
- */
-function utf8(input: string): Uint8Array {
-  const out: number[] = [];
-  for (let i = 0; i < input.length; i++) {
-    const cp = input.codePointAt(i) ?? 0;
-    if (cp > 0xffff) {
-      i++; // low surrogate consumed with the pair
-    }
-    if (cp < 0x80) {
-      out.push(cp);
-    } else if (cp < 0x800) {
-      out.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
-    } else if (cp < 0x10000) {
-      out.push(
-        0xe0 | (cp >> 12),
-        0x80 | ((cp >> 6) & 0x3f),
-        0x80 | (cp & 0x3f),
-      );
-    } else {
-      out.push(
-        0xf0 | (cp >> 18),
-        0x80 | ((cp >> 12) & 0x3f),
-        0x80 | ((cp >> 6) & 0x3f),
-        0x80 | (cp & 0x3f),
-      );
-    }
-  }
-  return new Uint8Array(out);
 }
 
 /**

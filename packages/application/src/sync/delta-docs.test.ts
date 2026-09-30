@@ -12,7 +12,7 @@ import {
 } from './delta-docs.ts';
 import { createSyncEngine } from './sync-engine.ts';
 import type { LocalWrite, SyncCursor, SyncDelta } from './sync-engine.ts';
-import { utf8ByteLength } from './sync-wire.ts';
+import { utf8ByteLength } from '../utf8.ts';
 import {
   FakeClock,
   FakeLog,

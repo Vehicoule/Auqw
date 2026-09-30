@@ -1,5 +1,13 @@
 import type { CancellationSignal } from '@auqw/application';
 
+/**
+ * Cancellation sentinel shared by the storage implementation and its
+ * drivers. A driver throws it through the transaction boundary when
+ * the signal flips, and the storage layer maps it to a typed
+ * `cancelled` error.
+ */
+export const CANCELLED = Symbol('storage operation cancelled');
+
 export type SqlValue = string | number | null;
 export type SqlParams = readonly SqlValue[];
 export type SqlRow = Readonly<Record<string, SqlValue>>;
