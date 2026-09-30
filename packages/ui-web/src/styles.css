@@ -1428,7 +1428,9 @@
 }
 
 .uw-toggle--on .uw-toggle__thumb {
-  transform: translateX(20px);
+  /* travel = 46 track − 2×(1 border + 2 pad) − 22 thumb: mirrors the
+     OFF inset so both states sit 3px in — same as the native toggle. */
+  transform: translateX(18px);
   border-color: transparent;
 }
 
