@@ -360,12 +360,17 @@ silent write failures (dead-driver class). `attempt trace` shows
   atomic rename on finalize; `.part` size ≥ `committed_offset`
   (last chunk may be written-not-committed).
 
-### Remote indices for download come from search, not play-result
-`auqw://play-result?i=N` calls addAndPlay on ONLY item i — it does
-not enqueue the visible list. The ~50 remote-index recordings seen
-in one gate run were materialized by the preceding `auqw://search`
-result ingest (each result find-or-creates a recording row). Fire
-search first; `auqw://download?i=N` then has indices to hit.
+### Remote indices for download — st.recordings, not search results
+`auqw://download?i=N` indexes `st.recordings` (the materialized
+library). `auqw://search` only publishes the page + advisory prewarm
+— it writes NO library rows, so on an empty library every index is
+"out of range". Materialize first: `auqw://play-result?i=N` calls
+addAndPlay → upserts exactly that item (one row guaranteed per
+fire). In the API-36 gate one fire grew the table to ~50 rows —
+playback-driven ingest (queue-context/radio) materializes more;
+don't rely on the count, verify:
+`adb shell "run-as com.vehicoule.auqw sqlite3 files/SQLite/auqw.db
+'SELECT count(*) FROM recordings'"`.
 
 ### Instrumented-mint pattern when the provider wall is ~100%
 When real resolves are environmentally blocked (bot-check rate too
