@@ -968,15 +968,18 @@ export function StageSheet({
   // The backdrop's warm-up bound: mount it once the sheet has ever
   // risen so the artwork resolver and full-size decode only run for
   // a listener who actually opens the player — a queue that never
-  // expands never pays the fetch per track. Once warm it stays
-  // mounted across collapses and track changes, so a mid-drag morph
-  // never pays a resolver remount either.
+  // expands never pays the fetch per track. `risenOn` mounts it in
+  // the same commit the first rise renders in (a passive-effect latch
+  // alone would leave that rising sheet bare for a frame);
+  // `backdropWarm` then keeps it mounted across collapses and track
+  // changes, so a mid-drag morph never pays a resolver remount.
   const [backdropWarm, setBackdropWarm] = useState(risenOn);
   useEffect(() => {
     if (risenOn) {
       setBackdropWarm(true);
     }
   }, [risenOn]);
+  const backdropOn = risenOn || backdropWarm;
 
   // Tap-to-seek on the waveform: the scrub pan only ever activates on
   // movement, so a plain tap resolves x→ms through the same commit
@@ -1662,14 +1665,13 @@ export function StageSheet({
             artwork and controls fade in through the pill's fade window
             and are fully present at the input gate. */}
         <Animated.View style={[StyleSheet.absoluteFill, contentStyle]}>
-          {/* Mount once the sheet has ever risen (backdropWarm) and
-              keep it mounted across collapses, track changes and mode
-              switches — remounting mid-morph would pay the artwork
-              resolver and decode during the drag, and mounting while
-              parked would fetch full-size art the listener never
-              opens. Non-player modes just hide it under the flat
-              stage. */}
-          {backdropWarm && player.artworkUrl !== null && (
+          {/* Mount on the first rise commit and keep mounted across
+              collapses, track changes and mode switches — remounting
+              mid-morph would pay the artwork resolver and decode
+              during the drag, and mounting while parked would fetch
+              full-size art the listener never opens. Non-player
+              modes just hide it under the flat stage. */}
+          {backdropOn && player.artworkUrl !== null && (
             <View
               style={[
                 StyleSheet.absoluteFill,
