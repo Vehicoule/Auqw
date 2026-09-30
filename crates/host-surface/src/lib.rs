@@ -2332,8 +2332,7 @@ mod tests {
             Err(e) => panic!("release: {e}"),
         }
         assert!(
-            !reg
-                .claim_if_live(&warm.handle)
+            !reg.claim_if_live(&warm.handle)
                 .unwrap_or_else(|e| panic!("claim_if_live: {e}")),
             "a session dead at the claim must be refused"
         );
