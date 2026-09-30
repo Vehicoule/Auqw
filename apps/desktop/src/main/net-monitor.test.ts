@@ -258,9 +258,10 @@ async function probeStreakSurvivesNicFlap(): Promise<void> {
  */
 async function retryBackoffStretches(): Promise<void> {
   let t = 1_000;
+  let nic = true;
   const harness = manualProbe();
   const service = createNetService({
-    readOnline: () => true,
+    readOnline: () => nic,
     pollMs: 5,
     probe: harness.probe,
     probeIntervalMs: 1_000_000,
@@ -313,7 +314,34 @@ async function retryBackoffStretches(): Promise<void> {
     t += 1;
     await sleep(20);
     assertEqual(harness.pending.length, 1, 'cap binds at probeRetryMaxMs');
-    // Recovery publishes online and resets the streak.
+    // A NIC edge mid-streak restarts the retry cadence at base: the
+    // changed network deserves fresh fast evidence even though the
+    // latched offline verdict still needs a real success to clear.
+    harness.settle(false);
+    await flush();
+    nic = false;
+    await sleep(20);
+    assertEqual(harness.pending.length, 1, 'down edge re-arms a probe');
+    harness.settle(false);
+    await flush();
+    nic = true;
+    await sleep(20);
+    assertEqual(harness.pending.length, 1, 'up edge re-arms a probe');
+    harness.settle(false);
+    await flush();
+    assertDeepEqual(service.snapshot(), { online: false });
+    // streak=1 in the new generation → base gap, not the old cap.
+    t += 9;
+    await sleep(20);
+    assertEqual(harness.pending.length, 0);
+    t += 1;
+    await sleep(20);
+    assertEqual(
+      harness.pending.length,
+      1,
+      'a post-edge failure is back at base gap',
+    );
+    // Recovery publishes online and resets both streaks.
     harness.settle(true);
     await flush();
     assertDeepEqual(service.snapshot(), { online: true });

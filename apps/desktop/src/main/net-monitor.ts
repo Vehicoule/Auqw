@@ -124,7 +124,12 @@ export function createNetService(opts: {
   const destroyedHooked = new WeakSet<NetSender>();
   let nic = opts.readOnline();
   let online = nic;
+  // Two counters, two jobs: probeFailures gates the offline verdict
+  // (persists across NIC edges so a flap can't republish online on
+  // edge alone), retryStreak gates the re-probe backoff (resets on
+  // every edge — a changed network deserves fresh fast evidence).
   let probeFailures = 0;
+  let retryStreak = 0;
   let probeInFlight = false;
   let lastProbeSettledAt = 0;
   // A probe verdict is valid only for the NIC generation it started
@@ -166,6 +171,7 @@ export function createNetService(opts: {
     }
     lastProbeSettledAt = now();
     probeFailures = reachable ? 0 : probeFailures + 1;
+    retryStreak = reachable ? 0 : retryStreak + 1;
     if (reachable || probeFailures >= PROBE_FAIL_THRESHOLD) {
       publish(reachable);
     }
@@ -188,11 +194,12 @@ export function createNetService(opts: {
   // (probeRetryMs → … → probeRetryMaxMs). The stretch only starts once
   // the streak has actually latched the offline verdict
   // (PROBE_FAIL_THRESHOLD), so a flap keeps the snappy cadence that
-  // proves it isn't a real outage; any success or NIC edge resets the
-  // streak anyway.
+  // proves it isn't a real outage. Any success or NIC edge resets
+  // retryStreak — an edge means new network conditions, and the
+  // recovery check it may need is the whole point of the retry leg.
   function retryGap(): number {
     const shift = Math.min(
-      Math.max(0, probeFailures - PROBE_FAIL_THRESHOLD),
+      Math.max(0, retryStreak - PROBE_FAIL_THRESHOLD),
       4,
     );
     return Math.min(probeRetryMs * 2 ** shift, probeRetryMaxMs);
@@ -203,6 +210,7 @@ export function createNetService(opts: {
     if (nicNow !== nic) {
       nic = nicNow;
       probeGeneration += 1;
+      retryStreak = 0;
       if (opts.probe === undefined) {
         publish(nicNow);
       } else if (!nicNow) {

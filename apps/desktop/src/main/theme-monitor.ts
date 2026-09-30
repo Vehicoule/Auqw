@@ -445,6 +445,14 @@ export function createThemeMonitor(opts: {
         for (const sender of senders.keys()) {
           sendTo(sender, next);
         }
+        if (pollTimer !== null) {
+          // A changed read re-bases the poll: drop the idle-stretched
+          // timer so the settle re-arms at base cadence — a watch only
+          // covers its own files, and the sources the poll alone sees
+          // (portal accent, symlink retargets) deserve the fast gap.
+          clearTimeout(pollTimer);
+          pollTimer = null;
+        }
       })
       .catch(() => {
         // collect() isolates source failures already — keep the monitor.

@@ -542,7 +542,9 @@ export async function run(): Promise<void> {
 
   {
     // An idle stretch slows the poll geometrically; a read that
-    // reports a different source snaps the cadence back to pollMs.
+    // reports a different source snaps the cadence back to pollMs —
+    // the already-armed long-deadline timer is replaced, not ridden
+    // out.
     let collects = 0;
     const rig = env({
       // darkFlag is read once per collect — it is the collect counter.
@@ -554,28 +556,34 @@ export async function run(): Promise<void> {
     const monitor = createThemeMonitor({
       env: rig.env,
       pollMs: 10,
-      maxPollMs: 45,
+      maxPollMs: 200,
     });
     const sender = new CollectingSender();
     monitor.attach(sender);
     await sleep(0);
     assertEqual(collects, 1, 'the attach read runs immediately');
-    // Unchanged reads: gaps 10 → 20 → 40 → 45 → 45. A fixed 10 ms
-    // poll would collect ~11 times in this window; the idle ramp
-    // must not come anywhere near that.
-    await sleep(110);
+    // Unchanged reads: gaps 10 → 20 → 40 → 80 → 160 → 200. A fixed
+    // 10 ms poll would collect ~18 times in this window; the idle
+    // ramp must not come anywhere near that. The timer outstanding
+    // at the end was armed ~160 ms out — long enough that a correct
+    // re-arm below is the only way a poll lands in 25 ms.
+    await sleep(180);
     assert(
-      collects >= 3 && collects <= 7,
-      `idle reads stretch the poll (got ${collects} collects in ~110ms)`,
+      collects >= 3 && collects <= 6,
+      `idle reads stretch the poll (got ${collects} collects in ~180ms)`,
     );
     // The watch fires and the read now parses a palette — a changed
-    // result publishes and resets the next gap to pollMs.
+    // result publishes AND re-arms the poll at base cadence (the old
+    // ~160 ms deadline is cleared).
     rig.files.set(`/home/test/${OMARCHY_CONFIG}`, OMARCHY_TOML);
     rig.fireWatch(`/home/test/${OMARCHY_CONFIG}`);
     await sleep(0);
     const settled = collects;
-    await sleep(15);
-    assert(collects > settled, 'a changed read restores base cadence');
+    await sleep(25);
+    assert(
+      collects > settled,
+      'a changed read re-arms the poll at base cadence',
+    );
     monitor.stop();
   }
 
