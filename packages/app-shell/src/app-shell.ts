@@ -26,6 +26,7 @@ import {
   previewImport,
   queuedOccurrenceFor,
   queuedOccurrenceForRef,
+  redactSensitive,
   selectionFromSettings,
 } from '@auqw/application';
 import type {
@@ -1105,6 +1106,18 @@ export function useAppShell<E extends { readonly type: string } = never>(
     localeTick,
   ]);
 
+  // An ended queue surfaces itself: when playback goes idle with the
+  // queue's occurrences still listed, the stage rides queue mode so
+  // its rows stay replayable instead of vanishing behind the empty
+  // pane. An explicit later pick stands — the effect only fires on the
+  // transition back to idle.
+  const playbackIdle = state.playback.type === 'idle';
+  useEffect(() => {
+    if (playbackIdle && queueModel.ended) {
+      setStageMode('queue');
+    }
+  }, [playbackIdle, queueModel.ended]);
+
   const libraryModel = useMemo(() => {
     // ports.localCatalog: local index rows (provenance 'local')
     // shadow the session's in-memory copies — a scan commits fresher
@@ -1441,7 +1454,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       lastFailure:
         lastPlayFailure === null
           ? null
-          : `${lastPlayFailure.kind} · ${lastPlayFailure.message}`,
+          : `${lastPlayFailure.kind} · ${redactSensitive(lastPlayFailure.message)}`,
       persistence:
         state.persistenceError === undefined
           ? 'ok'
