@@ -15,12 +15,14 @@
 
 /**
  * Any scheme's URL, not just http(s): `ws://`, `wss://`, `file://`.
- * The scheme run is bounded ({0,127}) because an unbounded `*` ahead of
- * the required `:` backtracks once per candidate character at every
- * start position — quadratic on a long identifier run with no `://`.
- * No real scheme approaches 128 chars, so nothing redactable is lost.
+ * The pre-`://` run is any non-space, non-slash span bounded to 128 —
+ * a bounded quantifier keeps each start attempt linear (CodeQL's
+ * js/polynomial-redos), while anchoring on the run itself rather than
+ * a leading letter means a scheme longer than the cap still matches on
+ * its tail, so the authority and query — where credentials live — can
+ * never outrun the mask.
  */
-const URL_LIKE = /[a-z][a-z0-9+.-]{0,127}:\/\/[^\s]*/gi;
+const URL_LIKE = /[^\s/]{1,128}:\/\/[^\s]*/gi;
 
 /**
  * Header-style secrets. The value runs to the end of the line, because
