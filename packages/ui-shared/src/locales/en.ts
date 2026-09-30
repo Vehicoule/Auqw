@@ -430,6 +430,7 @@ export const en = {
   'settings.diag.attemptTrace': 'attempt trace',
   'settings.diag.attempts': { one: '{count} attempt', other: '{count} attempts' },
   'settings.diag.last': 'last: {value}',
+  'settings.diag.lastFailure': 'last failure',
   'settings.diag.persistence': 'persistence',
   'settings.diag.persistenceValue.ok': 'ok',
   'settings.diag.persistenceValue.degraded': 'degraded',

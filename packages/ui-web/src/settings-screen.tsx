@@ -432,6 +432,12 @@ export function SettingsScreen({
             </DiagV>
           </DiagRow>
           <Hairline />
+          <DiagRow k={t('settings.diag.lastFailure')}>
+            <DiagV color={diagnostics.lastFailure === null ? 'secondary' : 'warn'}>
+              {diagnostics.lastFailure ?? t('settings.diag.none')}
+            </DiagV>
+          </DiagRow>
+          <Hairline />
           <DiagRow k={t('settings.diag.persistence')}>
             <DiagV color={diagnostics.persistence === 'ok' ? 'secondary' : 'warn'}>
               {t(`settings.diag.persistenceValue.${diagnostics.persistence}`)}

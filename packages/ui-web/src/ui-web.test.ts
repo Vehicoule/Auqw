@@ -53,6 +53,7 @@ const {
   SettingsScreen,
   Sheet,
   StageSheet,
+  StageIdlePane,
   ThemeProvider,
   TrackRow,
   TransferScreen,
@@ -638,6 +639,14 @@ function render(node: ReactNode): string {
   check('chrome tabs are a nav landmark', markup.includes('<nav'));
   check('chrome marks the active tab', markup.includes('aria-selected="true"'));
   check('chrome renders the stage column', markup.includes('uw-stage-col'));
+  check(
+    'stage column carries its own head strip',
+    markup.includes('uw-stage-head'),
+  );
+  check(
+    'stage head offers the collapse control',
+    markup.includes('hide player'),
+  );
   check('chrome renders the world toolbar', markup.includes('uw-world-bar'));
   check(
     'chrome has no separate stage stop control',
@@ -650,6 +659,25 @@ function render(node: ReactNode): string {
   for (const item of fixtureNavItems) {
     assertIncludes('chrome renders tab', markup, item.label);
   }
+}
+{
+  // Nothing loaded, ended queue on the surface: the stage keeps its
+  // chrome — the floating segment stays mounted with queue active.
+  const markup = render(
+    h(StageIdlePane, { mode: 'queue', queue: fixtureQueueModel }),
+  );
+  check('idle stage keeps the floating segment', markup.includes('uw-stage__segment'));
+  check('idle stage renders the ended queue', markup.includes('uw-queue'));
+  check(
+    'idle stage marks queue mode on',
+    markup.includes('uw-segment__item--on'),
+  );
+}
+{
+  // Nothing queued at all: the empty pane, segment still mounted.
+  const markup = render(h(StageIdlePane, { mode: 'player' }));
+  check('idle stage without queue shows the empty pane', markup.includes('uw-state'));
+  check('idle stage without queue keeps the segment', markup.includes('uw-stage__segment'));
 }
 {
   const markup = render(

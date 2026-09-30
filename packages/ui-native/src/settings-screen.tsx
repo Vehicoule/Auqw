@@ -227,6 +227,19 @@ export function SettingsScreen({
         <Hairline />
         <View style={{ flexDirection: 'row' }}>
           <Text variant="metadata" color="secondary" style={{ flex: 1 }}>
+            {t('settings.diag.lastFailure')}
+          </Text>
+          <Text
+            variant="metadata"
+            color={diagnostics.lastFailure === null ? 'secondary' : 'warn'}
+            style={{ flexShrink: 1 }}
+          >
+            {diagnostics.lastFailure ?? t('settings.diag.none')}
+          </Text>
+        </View>
+        <Hairline />
+        <View style={{ flexDirection: 'row' }}>
+          <Text variant="metadata" color="secondary" style={{ flex: 1 }}>
             {t('settings.diag.persistence')}
           </Text>
           <Text variant="metadata" color={persistenceColor}>

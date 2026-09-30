@@ -9,7 +9,7 @@ export { EmptyState, ErrorState, LoadingState } from './states.tsx';
 export { DesktopChrome } from './chrome.tsx';
 export { AppStack, PushScreen, SheetScreen, StackItem } from './stack.tsx';
 export { MiniPlayer } from './mini-player.tsx';
-export { NowPlayingScreen, StageSheet } from './now-playing-screen.tsx';
+export { NowPlayingScreen, StageSheet, StageIdlePane } from './now-playing-screen.tsx';
 export {
   applyPendingMove,
   idsEqual,

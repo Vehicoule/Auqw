@@ -421,6 +421,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   // ---- diagnostics + overlay stack --------------------------------
   const [attempts, setAttempts] = useState<readonly AttemptTrace[]>([]);
+  // Diagnostics surface — the settings screen names the last verdict
+  // the funnel reported (kept after the player recovers).
+  const [lastPlayFailure, setLastPlayFailure] = useState<AppError | null>(
+    null,
+  );
   const resultMeta = useRef(new Map<string, TrackMetadata>());
   // Entity pages keep a fetch per ref so popping back to a deeper
   // screen restores its loaded content.
@@ -1433,6 +1438,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       attemptCount: attempts.length,
       lastAttemptLabel:
         attempts[0] === undefined ? null : attemptLabel(attempts[0]),
+      lastFailure:
+        lastPlayFailure === null
+          ? null
+          : `${lastPlayFailure.kind} · ${lastPlayFailure.message}`,
       persistence:
         state.persistenceError === undefined
           ? 'ok'
@@ -1447,6 +1456,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       controller,
       attempts,
       pendingReviews,
+      lastPlayFailure,
       localeTick,
     ],
   );
@@ -1539,6 +1549,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         }
         lastPlayErrorRef.current = error;
       }
+      setLastPlayFailure(error);
       reportResult(action, { ok: false, error });
       if (isMatchGate(error)) {
         // Land the user on the fresh pending row: a stale 'resolved'

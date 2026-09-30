@@ -1919,6 +1919,12 @@
   pointer-events: none;
 }
 
+/* Idle-stage panes (the ended queue / empty state) scroll under the
+   floating segment like the loaded queue does. */
+.uw-stage > .uw-screen[data-scroll='true'] {
+  padding-bottom: var(--uw-segment-reserve);
+}
+
 .uw-stage__segment .uw-segment__item {
   pointer-events: auto;
 }
@@ -2321,17 +2327,29 @@
 .uw-chrome[data-stage='closed'] .uw-stage-col {
   display: none;
 }
-/* No header strip on the stage column — the player runs edge to
-   edge; the floating stop/dismiss (uw-stage__stop) is its only
-   overlay control. */
-/* macOS traffic lights pin over the stage column's top-left. The
-   stage reserves the strip itself so full-bleed artwork still covers
-   it; a non-stage body (the empty state) gets the same clearance. */
-[data-platform='darwin'] .uw-chrome[data-stage='open'] .uw-stage {
-  padding-top: var(--uw-titlebar-h);
+/* The stage column's head strip — the sidebar's own header bar,
+   aligned with the world toolbar's height so the two columns share
+   one chrome line. It doubles as the column's drag grip; the traffic
+   lights pin over its left on macOS. */
+.uw-stage-head {
+  flex: none;
+  height: var(--uw-titlebar-h);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--spacing-sm);
+  -webkit-app-region: drag;
 }
-[data-platform='darwin'] .uw-chrome[data-stage='open'] .uw-stage-col__body:not(:has(> .uw-stage)) {
-  padding-top: var(--uw-titlebar-h);
+.uw-stage-head__fill {
+  flex: 1;
+}
+/* Children of a drag strip drag by default — the collapse button
+   opts out; the fill stays the grip. */
+.uw-stage-head > .uw-icon-btn {
+  -webkit-app-region: no-drag;
+}
+/* macOS traffic lights pin over the stage column's top-left. */
+[data-platform='darwin'] .uw-stage-head {
+  padding-left: 96px;
 }
 .uw-stage-col__body {
   flex: 1;

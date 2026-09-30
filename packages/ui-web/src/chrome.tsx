@@ -163,6 +163,17 @@ export function DesktopChrome({
   return (
     <div className="uw-chrome" data-stage={open ? 'open' : 'closed'}>
       <aside className="uw-stage-col">
+        <div className="uw-stage-head">
+          <span className="uw-stage-head__fill" />
+          <IconButton
+            icon="chevron-left"
+            size={32}
+            iconSize={14}
+            color="var(--text-secondary)"
+            ariaLabel={t('chrome.stage.hide')}
+            onPress={() => setOpen(false)}
+          />
+        </div>
         <div className="uw-stage-col__body">{stage}</div>
       </aside>
       {/* Only visible under the 860px overlay breakpoint — tap-outside

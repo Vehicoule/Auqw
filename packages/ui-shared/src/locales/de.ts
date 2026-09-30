@@ -448,6 +448,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'settings.diag.attemptTrace': 'versuchsverlauf',
   'settings.diag.attempts': { one: '{count} versuch', other: '{count} versuche' },
   'settings.diag.last': 'zuletzt: {value}',
+  'settings.diag.lastFailure': 'letzter fehler',
   'settings.diag.persistence': 'persistenz',
   'settings.diag.persistenceValue.ok': 'ok',
   'settings.diag.persistenceValue.degraded': 'beeinträchtigt',

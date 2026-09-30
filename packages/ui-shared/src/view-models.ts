@@ -297,6 +297,12 @@ export type DiagnosticsModel = {
   readonly providerIds: readonly string[];
   readonly attemptCount: number;
   readonly lastAttemptLabel: string | null;
+  /**
+   * The last failed playback verdict as `kind · message` — the leg
+   * that actually died (resolve vs stream vs media), kept after the
+   * player recovers so the settings screen can name it.
+   */
+  readonly lastFailure: string | null;
   readonly persistence: 'ok' | 'degraded' | 'failed';
   readonly persistenceDetail: string | null;
   /**

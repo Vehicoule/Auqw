@@ -13,6 +13,8 @@ import type { IconButtonProps } from './primitives.tsx';
 import { WaveformSeek } from './progress.tsx';
 import { useOverlayDismiss } from './stack.tsx';
 import { QueueList } from './queue-list.tsx';
+import { QueueScreen } from './queue-screen.tsx';
+import type { QueueScreenProps } from './queue-screen.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import { t } from '@auqw/ui-shared';
 import type {
@@ -637,6 +639,65 @@ export function StageSheet({ expanded, onExpandChange, ...rest }: StageSheetProp
       data-sheet="stage"
     >
       <NowPlayingScreen {...rest} />
+    </div>
+  );
+}
+
+export type StageIdlePaneProps = {
+  readonly mode: StageMode;
+  readonly onModeChange?: ((mode: StageMode) => void) | undefined;
+  /**
+   * The ended queue — rendered while the mode is 'queue'. Undefined
+   * (nothing ever queued, or a non-queue mode selected) falls back to
+   * the stage's empty pane.
+   */
+  readonly queue?: QueueModel | undefined;
+  readonly queueReordering?: QueueScreenProps['reordering'];
+  readonly onToggleQueueReorder?: QueueScreenProps['onToggleReorder'];
+  readonly onPressQueueItem?: QueueScreenProps['onPressItem'];
+  readonly onRemoveQueueItem?: QueueScreenProps['onRemoveItem'];
+  readonly onMoveQueueItem?: QueueScreenProps['onMoveItem'];
+  readonly onMoveQueueItemTo?: QueueScreenProps['onMoveItemTo'];
+};
+
+/**
+ * The stage column while nothing is loaded — the ended queue or the
+ * empty pane under the same chrome as the loaded stage: the floating
+ * mode segment stays put, so the column never reads as a bare list.
+ */
+export function StageIdlePane({
+  mode,
+  onModeChange,
+  queue,
+  queueReordering,
+  onToggleQueueReorder,
+  onPressQueueItem,
+  onRemoveQueueItem,
+  onMoveQueueItem,
+  onMoveQueueItemTo,
+}: StageIdlePaneProps) {
+  return (
+    <div className="uw-stage" data-mode={mode}>
+      {mode === 'queue' && queue !== undefined ? (
+        <QueueScreen
+          queue={queue}
+          reordering={queueReordering}
+          onToggleReorder={onToggleQueueReorder}
+          onPressItem={onPressQueueItem}
+          onRemoveItem={onRemoveQueueItem}
+          onMoveItem={onMoveQueueItem}
+          onMoveItemTo={onMoveQueueItemTo}
+        />
+      ) : (
+        <EmptyState
+          title={t('stage.empty')}
+          hint={t('stage.emptyHint')}
+          icon="note"
+        />
+      )}
+      <div className="uw-stage__segment">
+        <ModeSegment mode={mode} onSelect={onModeChange} />
+      </div>
     </div>
   );
 }
