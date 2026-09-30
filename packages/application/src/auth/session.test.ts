@@ -1222,6 +1222,47 @@ async function testPendingWriteFailureFailsBegin(): Promise<void> {
   );
 }
 
+async function testOverrideDoesNotReviveFailedPending(): Promise<void> {
+  // Pending write parked in flight; an override write queues behind
+  // it. The pending write then fails — the queued write must not
+  // resurrect the code it snapshotted before the failure.
+  const writes: AuthCustodyRecord[] = [];
+  const gate = deferred<Result<void>>();
+  let calls = 0;
+  const custody: AuthCustody = {
+    read: () => Promise.resolve(ok(null)),
+    write: (next) => {
+      writes.push(next);
+      calls += 1;
+      return calls === 1 ? gate.promise : Promise.resolve(ok(undefined));
+    },
+    clear: () => Promise.resolve(ok(undefined)),
+  };
+  const { oauth, begins } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  await flush();
+  assertEqual(writes.length, 1, 'pending write never queued');
+  assertEqual(writes[0]?.pendingFlow?.deviceCode, 'dev-code');
+  const override = session.setClientOverride('new-client');
+  gate.resolve(err(appError('unavailable', 'seal failed')));
+  await flush();
+  await override;
+  assertEqual(writes.length, 2, 'override write never landed');
+  assertEqual(writes[1]?.clientId, 'new-client');
+  assertEqual(
+    writes[1]?.pendingFlow,
+    undefined,
+    'override resurrected the failed pending code',
+  );
+}
+
 async function testDeniedClearsPendingRecord(): Promise<void> {
   const { custody, record } = fakeCustody(null);
   const { oauth, begins, polls } = fakeOAuth();
@@ -1275,4 +1316,5 @@ export async function run(): Promise<void> {
   await testExpiredPendingMintsFresh();
   await testDeniedClearsPendingRecord();
   await testPendingWriteFailureFailsBegin();
+  await testOverrideDoesNotReviveFailedPending();
 }

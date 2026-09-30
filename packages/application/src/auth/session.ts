@@ -313,7 +313,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
    *  either way (the predecessor may already be dead server-side). */
   let pendingGrantWrite: {
     readonly token: string;
-    readonly record: AuthCustodyRecord;
+    readonly record: () => AuthCustodyRecord;
   } | null = null;
   let persistDisarm: (() => void) | null = null;
   /** Issuer of the live `refreshToken` — refresh exchanges ride
@@ -386,9 +386,14 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
 
   /** Every custody write is serialized — a RMW pair can interleave. */
   function writeCustody(
-    record: AuthCustodyRecord,
+    record: AuthCustodyRecord | (() => AuthCustodyRecord),
   ): Promise<Result<void>> {
-    const next = custodyChain.then(() => custody.write(record));
+    // A thunk defers field capture to execution — the queued write
+    // reads the CURRENT pendingFlow instead of a stale snapshot taken
+    // before earlier writes resolved.
+    const next = custodyChain.then(() =>
+      custody.write(typeof record === 'function' ? record() : record),
+    );
     custodyChain = next.then(
       () => undefined,
       () => undefined,
@@ -618,14 +623,14 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     } catch {
       // A dead host still loses the bearer — custody clearing proceeds.
     }
-    await writeCustody({
-      v: 1,
+    await writeCustody(() => ({
+      v: 1 as const,
       refreshToken: null,
       clientId: clientIdOverride,
       grantClientId: null,
       // A live device flow isn't tied to the dead grant — keep it.
       ...(pendingFlow !== null ? { pendingFlow } : {}),
-    }).then(
+    })).then(
       () => undefined,
       () => undefined,
     );
@@ -666,14 +671,15 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         // failed persist retries the lane against the new grant
         // (the old one may already be dead).
         refreshToken = grant.refreshToken;
-        const record = {
+        const record = () => ({
           v: 1 as const,
           refreshToken: grant.refreshToken,
           clientId: clientIdOverride,
           grantClientId,
-          // A live device flow outlives this rotation too.
+          // A live device flow outlives this rotation too — evaluated
+          // when the write executes, not when it queued.
           ...(pendingFlow !== null ? { pendingFlow } : {}),
-        };
+        });
         const wrote = await writeCustody(record);
         if (!wrote.ok) {
           // Keep exchanging on the rotated grant (the predecessor may
@@ -916,14 +922,14 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         if (refreshToken === token.refreshToken) {
           refreshToken = null;
           grantClientId = null;
-          await writeCustody({
-            v: 1,
+          await writeCustody(() => ({
+            v: 1 as const,
             refreshToken: null,
             clientId: clientIdOverride,
             grantClientId: null,
             // A newer attempt's pending flow outlives this retract.
             ...(pendingFlow !== null ? { pendingFlow } : {}),
-          });
+          }));
         }
         return;
       }
@@ -1171,15 +1177,15 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         );
       }
       const next = trimmed === '' ? null : trimmed;
-      const wrote = await writeCustody({
-        v: 1,
+      const wrote = await writeCustody(() => ({
+        v: 1 as const,
         refreshToken,
         clientId: next,
         grantClientId,
         // Editing the preference must not erase a live pending flow —
         // its own clientId field already pins the code's issuer.
         ...(pendingFlow !== null ? { pendingFlow } : {}),
-      });
+      }));
       if (!wrote.ok) {
         return wrote;
       }
