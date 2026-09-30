@@ -399,23 +399,29 @@ impl PluginHost {
             Prep::Cancelled
         } else {
             match stream.adopt_reusable(&plugin_id, &source_ref) {
-                Ok(Some(info)) if !stream.is_live(&info.handle) => Prep::Dead,
                 Ok(Some(info)) => {
                     // The claim lands before the slot inside the same
                     // admission critical section — a supersede scan
                     // doesn't hold `prepared_handles`, so the session
                     // must already read claimed before its ownership
-                    // slot is ever visible to `cancel`.
-                    let _ = stream.claim(&info.handle);
-                    admission.prepared.insert(
-                        request_id.clone(),
-                        PreparedSlot {
-                            handle: info.handle.clone(),
-                            delivered: false,
-                            generation: prepared_generation,
-                        },
-                    );
-                    Prep::Owned(info)
+                    // slot is ever visible to `cancel`. The claim IS
+                    // the liveness check, atomic under the session's
+                    // shared lock: a session killed between
+                    // `adopt_reusable` and here reports dead instead of
+                    // delivering a stale handle.
+                    if stream.claim_if_live(&info.handle).unwrap_or(false) {
+                        admission.prepared.insert(
+                            request_id.clone(),
+                            PreparedSlot {
+                                handle: info.handle.clone(),
+                                delivered: false,
+                                generation: prepared_generation,
+                            },
+                        );
+                        Prep::Owned(info)
+                    } else {
+                        Prep::Dead
+                    }
                 }
                 _ => {
                     // No reusable session — the invoke fallback keeps
@@ -560,7 +566,17 @@ impl PluginHost {
                                     // and this commit (cap evict, expiry) must not
                                     // hand out a live-looking handle either — the
                                     // same abandoned path, reported 'not-found'.
-                                    let dead = !registry.is_live(&prepared.handle);
+                                    // The claim IS the liveness check, atomic
+                                    // under the session's shared lock — and it
+                                    // runs only when the slot will be delivered:
+                                    // a cancelled request must not leave a
+                                    // claimed session `cancel_if_unattached`
+                                    // can't reach.
+                                    let claimed = !was_cancelled
+                                        && registry
+                                            .claim_if_live(&prepared.handle)
+                                            .unwrap_or(false);
+                                    let dead = !claimed;
                                     if was_cancelled || dead {
                                         // Any tombstone a racing `cancel` parked
                                         // for this id is spent — the failure below
@@ -585,9 +601,9 @@ impl PluginHost {
                                         delivery_ticket =
                                             Some(prepared_delivery.track(request_id.clone()));
                                         // Same commit order as the
-                                        // adoption path: claimed
-                                        // before the slot is visible.
-                                        let _ = registry.claim(&prepared.handle);
+                                        // adoption path: the session is
+                                        // already claimed (above) before
+                                        // the slot is ever visible.
                                         m.insert(
                                             request_id.clone(),
                                             PreparedSlot {
