@@ -1,12 +1,18 @@
 import { assert, assertDeepEqual, assertEqual } from '@auqw/application/testing';
 import { CHANNELS } from '../shared/channels.ts';
-import { createNetService } from './net-monitor.ts';
+import {
+  createFetchProbe,
+  createNetService,
+} from './net-monitor.ts';
 import type { NetSender } from './net-monitor.ts';
 
 class CollectingSender implements NetSender {
   readonly sent: Array<{ channel: string; payload: unknown }> = [];
   send(channel: string, payload: unknown): void {
     this.sent.push({ channel, payload });
+  }
+  last(): unknown {
+    return this.sent.at(-1)?.payload;
   }
 }
 
@@ -33,7 +39,13 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function run(): Promise<void> {
+/** Flush the microtask queue so a settled probe's publish has run. */
+async function flush(): Promise<void> {
+  await sleep(0);
+}
+
+/** NIC-view only: diff-poll fan-out, refcount, dead-sender isolation. */
+async function nicViewFanout(): Promise<void> {
   let online = true;
   const service = createNetService({
     readOnline: () => online,
@@ -109,4 +121,171 @@ export async function run(): Promise<void> {
   } finally {
     service.stop();
   }
+}
+
+/**
+ * A manually settled probe: each call parks a resolver the test fires in
+ * order, so probe verdicts drive the publish path deterministically.
+ */
+function manualProbe() {
+  const pending: Array<(reachable: boolean) => void> = [];
+  return {
+    pending,
+    probe: () =>
+      new Promise<boolean>((resolve) => {
+        pending.push(resolve);
+      }),
+    /** Settle the oldest parked probe. */
+    settle(reachable: boolean): void {
+      const resolve = pending.shift();
+      assert(resolve !== undefined, 'no probe in flight');
+      resolve(reachable);
+    },
+  };
+}
+
+/** Probe-gated publish: the verdict — not the NIC view — is the truth. */
+async function probeVerdictGatesPublish(): Promise<void> {
+  let nic = true;
+  const harness = manualProbe();
+  const service = createNetService({
+    readOnline: () => nic,
+    pollMs: 5,
+    probe: harness.probe,
+    probeIntervalMs: 20,
+    probeRetryMs: 8,
+  });
+  try {
+    // The construction probe is already parked; NIC view says online
+    // until the first verdict lands.
+    assertEqual(harness.pending.length, 1, 'boot probe fired');
+    assertDeepEqual(service.snapshot(), { online: true });
+    const a = new CollectingSender();
+    service.attach(a);
+    assertDeepEqual(a.last(), { online: true });
+    harness.settle(true);
+    await flush();
+    assertEqual(a.sent.length, 1, 'healthy verdict republishes nothing');
+
+    // Dead upstream with the link still up: two failing probes take the
+    // surface offline — one failure alone cannot.
+    await sleep(30);
+    assert(harness.pending.length >= 1, 're-verify probe fired');
+    harness.settle(false);
+    await flush();
+    assertDeepEqual(service.snapshot(), { online: true }, 'one fail tolerated');
+    await sleep(15);
+    harness.settle(false);
+    await flush();
+    assertDeepEqual(service.snapshot(), { online: false });
+    assertDeepEqual(a.last(), { online: false });
+
+    // The NIC never moved — a healed upstream is still found on the
+    // retry cadence and publishes back online.
+    await sleep(15);
+    harness.settle(true);
+    await flush();
+    assertDeepEqual(service.snapshot(), { online: true });
+    assertDeepEqual(a.last(), { online: true });
+
+    // NIC dropping publishes offline immediately — no probe wait.
+    nic = false;
+    await sleep(15);
+    assertDeepEqual(service.snapshot(), { online: false });
+    assertDeepEqual(a.last(), { online: false });
+    const sentBefore = a.sent.length;
+    // The down-edge parks a probe in the older generation; a NIC flap
+    // bumps the generation so its settle is discarded and a fresh
+    // probe takes the verdict — stale state can't reverse the edge.
+    nic = true;
+    await sleep(15);
+    assert(harness.pending.length >= 1, 'down edge re-armed a probe');
+    harness.settle(true);
+    await flush();
+    assertDeepEqual(service.snapshot(), { online: false }, 'stale settle discarded');
+    assert(harness.pending.length >= 1, 'fresh probe re-armed');
+    harness.settle(true);
+    await flush();
+    assertDeepEqual(service.snapshot(), { online: true });
+    assert(a.sent.length > sentBefore, 'rescue pushed an event');
+  } finally {
+    service.stop();
+  }
+}
+
+/** An up-edge with a still-failing probe streak stays offline. */
+async function probeStreakSurvivesNicFlap(): Promise<void> {
+  let nic = true;
+  const harness = manualProbe();
+  const service = createNetService({
+    readOnline: () => nic,
+    pollMs: 5,
+    probe: harness.probe,
+    probeIntervalMs: 10,
+    probeRetryMs: 5,
+  });
+  try {
+    harness.settle(false);
+    await sleep(20);
+    harness.settle(false);
+    await flush();
+    assertDeepEqual(service.snapshot(), { online: false });
+    // NIC flap while the streak is hot: the edge alone must not
+    // republish online — only a verdict from this generation may.
+    nic = false;
+    await sleep(15);
+    nic = true;
+    await sleep(15);
+    assertDeepEqual(service.snapshot(), { online: false });
+    // The down-edge probe settles stale under the new generation —
+    // discarded, then re-armed; its replacement decides.
+    harness.settle(true);
+    await flush();
+    assertDeepEqual(service.snapshot(), { online: false });
+    harness.settle(true);
+    await flush();
+    assertDeepEqual(service.snapshot(), { online: true });
+  } finally {
+    service.stop();
+  }
+}
+
+/** createFetchProbe: status gate, transport failure, and timeout. */
+async function fetchProbeVerdicts(): Promise<void> {
+  const okProbe = createFetchProbe(async () => ({ status: 204 }), {
+    url: 'https://canary.test/generate_204',
+    expectedStatus: 204,
+  });
+  assert(await okProbe(), 'expected status is reachable');
+  const portalProbe = createFetchProbe(async () => ({ status: 200 }), {
+    url: 'https://canary.test/generate_204',
+    expectedStatus: 204,
+  });
+  assert(
+    !(await portalProbe()),
+    'a rewritten 200 is a captive portal, not internet',
+  );
+  const deadProbe = createFetchProbe(
+    async () => {
+      throw new Error('getaddrinfo ENOTFOUND');
+    },
+    { url: 'https://canary.test/generate_204', expectedStatus: 204 },
+  );
+  assert(!(await deadProbe()), 'transport failure is unreachable');
+  const hungProbe = createFetchProbe(
+    () => new Promise<{ status: number }>(() => {}),
+    {
+      url: 'https://canary.test/generate_204',
+      expectedStatus: 204,
+      timeoutMs: 15,
+    },
+  );
+  assert(!(await hungProbe()), 'a hung request times out unreachable');
+}
+
+export async function run(): Promise<void> {
+  await nicViewFanout();
+  await probeVerdictGatesPublish();
+  await probeStreakSurvivesNicFlap();
+  await fetchProbeVerdicts();
 }

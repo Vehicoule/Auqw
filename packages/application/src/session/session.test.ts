@@ -6619,6 +6619,14 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['offlineProjectionNulls', offlineProjectionNulls],
   ['offlinePinnedOwnedStillPlays', offlinePinnedOwnedStillPlays],
   ['connectivityEdgeReprojects', connectivityEdgeReprojects],
+  [
+    'reconnectRearmsConnectivityBlockedQueue',
+    reconnectRearmsConnectivityBlockedQueue,
+  ],
+  ['nonEdgeCallDoesNotAutoplay', nonEdgeCallDoesNotAutoplay],
+  ['reconnectKeepsLegacyBotWall', reconnectKeepsLegacyBotWall],
+  ['reconnectKeepsVerdictBlocks', reconnectKeepsVerdictBlocks],
+  ['reconnectKeepsCleanPause', reconnectKeepsCleanPause],
   ['syncEmitAfterCommit', syncEmitAfterCommit],
   ['syncEmitFailureKeepsDomainWrite', syncEmitFailureKeepsDomainWrite],
   ['applySyncedEntriesRemoteInsert', applySyncedEntriesRemoteInsert],
@@ -7187,6 +7195,210 @@ async function connectivityEdgeReprojects(): Promise<void> {
     'youtube-music',
     'reconnect restores provider ref',
   );
+}
+
+// A reconnect re-arms a queue parked on connectivity weather: the
+// blocked row was interrupted play intent, so the edge fires the same
+// explicit retry the surface's play button would.
+async function reconnectRearmsConnectivityBlockedQueue(): Promise<void> {
+  let online = false;
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1')],
+        currentOccurrenceId: 'o1',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    new Map(),
+    () => online,
+  );
+  await restoreOk(r);
+  // Park the queue on weather: an offline play of a remote ref fails
+  // typed 'unavailable' before any prepare spends the network.
+  const started = r.session.playOccurrence('o1');
+  await pump();
+  const outcome = await started;
+  assert(!outcome.ok && outcome.error.kind === 'unavailable');
+  assertEqual(readyOf(r).queue.blockedError?.kind, 'unavailable');
+  assertEqual(calls(r, 'prepare').length, 0, 'offline gate precedes prepare');
+  // A still-offline edge must not spend the network.
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 0, 'offline edge does not re-arm');
+  online = true;
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 1, 'reconnect re-fires the row');
+  const snap = readyOf(r).queue;
+  assertEqual(snap.mode, 'playing', 're-arm restores play intent');
+  assertEqual(snap.blockedError, undefined, 'block cleared by the retry');
+  // A duplicate edge is inert — the cleared block gates a second fire.
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 1, 'no second attempt on repeat');
+}
+
+// `connectivityChanged` also fires for non-edge reasons (boot
+// re-derive, media ownership) — a weather block must re-arm only on
+// a proven offline→online transition, never on a housekeeping call
+// that happens to run while online.
+async function nonEdgeCallDoesNotAutoplay(): Promise<void> {
+  let online = true;
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1')],
+        currentOccurrenceId: 'o1',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    new Map(),
+    () => online,
+  );
+  await restoreOk(r);
+  const started = r.session.playOccurrence('o1');
+  await pump();
+  assert(r.player.settlePrepare(err(appError('unavailable', 'gone'))));
+  await pump();
+  assert(!(await started).ok);
+  assertEqual(readyOf(r).queue.blockedError?.kind, 'unavailable');
+  assertEqual(calls(r, 'prepare').length, 1);
+  // Housekeeping calls while online never re-arm — no transition was
+  // observed even though the block is weather.
+  r.session.connectivityChanged();
+  await pump();
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 1, 'non-edge call does not autoplay');
+  // The real flap still re-arms.
+  online = false;
+  r.session.connectivityChanged();
+  online = true;
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 2, 'real edge re-arms');
+}
+
+// A legacy bot wall (transient kind + bot-check detail) is a provider
+// verdict wearing a weather kind — reconnects must not retry it.
+async function reconnectKeepsLegacyBotWall(): Promise<void> {
+  let online = true;
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1')],
+        currentOccurrenceId: 'o1',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    new Map(),
+    () => online,
+  );
+  await restoreOk(r);
+  const started = r.session.playOccurrence('o1');
+  await pump();
+  // The engine's own bot-wall gate already denies the transient
+  // auto-retry, so the verdict parks as a block on first failure.
+  assert(r.player.settlePrepare(err(appError('transient', 'io: bot-check'))));
+  await pump();
+  assert(!(await started).ok);
+  assertEqual(readyOf(r).queue.blockedError?.kind, 'transient');
+  online = false;
+  r.session.connectivityChanged();
+  online = true;
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(
+    calls(r, 'prepare').length,
+    1,
+    'legacy bot wall stays parked through the flap',
+  );
+  assertEqual(readyOf(r).queue.blockedError?.kind, 'transient');
+}
+
+// Verdict blocks are not weather: a reconnect must not fire them.
+async function reconnectKeepsVerdictBlocks(): Promise<void> {
+  let online = true;
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1')],
+        currentOccurrenceId: 'o1',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    new Map(),
+    () => online,
+  );
+  await restoreOk(r);
+  const started = r.session.playOccurrence('o1');
+  await pump();
+  // A bot wall parks the queue on the provider's verdict — reconnects
+  // don't clear walls, so the block must survive the edge.
+  const preparesBefore = calls(r, 'prepare').length;
+  assert(
+    r.player.settlePrepare(
+      err(appError('provider-wall', 'bot-check')),
+    ),
+    'pending prepare',
+  );
+  await pump();
+  assert(!(await started).ok);
+  assertEqual(readyOf(r).queue.blockedError?.kind, 'provider-wall');
+  online = false;
+  r.session.connectivityChanged();
+  online = true;
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(
+    calls(r, 'prepare').length,
+    preparesBefore,
+    'verdict block stays parked through the flap',
+  );
+  assertEqual(readyOf(r).queue.blockedError?.kind, 'provider-wall');
+}
+
+// A clean pause is a decision, not weather — reconnect leaves it.
+async function reconnectKeepsCleanPause(): Promise<void> {
+  let online = false;
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1')],
+        currentOccurrenceId: 'o1',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    new Map(),
+    () => online,
+  );
+  await restoreOk(r);
+  online = true;
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 0, 'clean pause stays paused');
+  assertEqual(readyOf(r).queue.mode, 'paused');
 }
 
 // Owned bytes beat an auto-pick: a recording with local playback

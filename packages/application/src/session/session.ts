@@ -3,8 +3,14 @@ import type {
   CancellationSignal,
   OperationContext,
 } from '../cancellation.ts';
-import type { AppError, Result } from '../errors.ts';
-import { appError, err, fromUnknown, ok } from '../errors.ts';
+import type { AppError, ErrorKind, Result } from '../errors.ts';
+import {
+  appError,
+  err,
+  fromUnknown,
+  isBotCheckWall,
+  ok,
+} from '../errors.ts';
 import type {
   DownloadRecord,
   EntityKind,
@@ -269,6 +275,25 @@ export type SessionDeps = {
 const OP_DEADLINE_MS = 15_000;
 
 /**
+ * Verdict kinds a reconnect may re-attempt: connectivity weather — the
+ * block was "the network is gone", not a verdict on the row. Permanent
+ * kinds (not-found, auth-required, …), server-imposed waits
+ * (rate-limit, streams-capped), and bot walls keep their block.
+ */
+const CONNECTIVITY_RETRY_KINDS: ReadonlySet<ErrorKind> = new Set([
+  'unavailable',
+  'transient',
+  'timeout',
+]);
+
+/** A weather block is retried only on a proven reconnect edge. */
+function isConnectivityRetryable(error: AppError): boolean {
+  return (
+    CONNECTIVITY_RETRY_KINDS.has(error.kind) && !isBotCheckWall(error)
+  );
+}
+
+/**
  * How long a provider-answered lyrics 'unavailable' suppresses a
  * refetch for the same recording. The persisted lyricsCache only
  * holds served payloads — a miss cannot be a row — so without this
@@ -484,6 +509,14 @@ export class Session {
   #publishSource: PublishSource | undefined;
   #playerUnsub: () => void;
   #disposed = false;
+  /**
+   * The connectivity value the session last sampled in
+   * `connectivityChanged` — the re-arm must see a real false→true
+   * transition; callers also fire the hook for non-edge reasons
+   * (boot re-derive, media ownership) where an old weather block
+   * must not suddenly autoplay. `undefined` = never sampled.
+   */
+  #lastOnline: boolean | undefined;
   readonly #localPlaybackFor: (recordingId: string) => string | null;
   readonly #isOnline: () => boolean;
   readonly #isMetered: () => boolean;
@@ -1527,12 +1560,34 @@ export class Session {
    * native queue so offline items lose their remote refs (and regain
    * them on reconnect), cancels in-flight speculative mapping, and
    * re-evaluates the successor/radio triggers under the new truth.
+   * On a reconnect it also re-arms a queue parked on connectivity
+   * weather — that block is interrupted play intent, not a verdict.
    */
   connectivityChanged(): void {
+    // Sample before the readiness gate so an edge observed before
+    // restore still lands in the baseline the first ready call diffs.
+    const wasOnline = this.#lastOnline;
+    const isOnline = this.#isOnline();
+    this.#lastOnline = isOnline;
     if (!this.#requireReady().ok) {
       return;
     }
     this.#derived();
+    const r = this.#ready;
+    if (r === null || wasOnline !== false || !isOnline) {
+      return;
+    }
+    const queue = r.queue.snapshot();
+    if (
+      queue.mode === 'paused' &&
+      queue.currentOccurrenceId !== null &&
+      queue.blockedError !== undefined &&
+      isConnectivityRetryable(queue.blockedError)
+    ) {
+      // `resume()` is the explicit retry the surface would fire: it
+      // clears the block, ticks 'playing', and re-attempts the row.
+      this.#own(this.#playback.resume());
+    }
   }
 
   /**

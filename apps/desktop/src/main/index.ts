@@ -42,7 +42,7 @@ import {
 } from '../shared/contract.ts';
 import type { ChromeSchemePayload } from '../shared/contract.ts';
 import { registerChannels } from './ipc.ts';
-import { createNetService } from './net-monitor.ts';
+import { createFetchProbe, createNetService } from './net-monitor.ts';
 import { createThemeMonitor } from './theme-monitor.ts';
 import { createSecureStore } from './secure-store.ts';
 import { createSupervisor } from './supervisor.ts';
@@ -257,6 +257,13 @@ async function main(): Promise<void> {
   });
   const netService = createNetService({
     readOnline: () => net.isOnline(),
+    // The NIC view can't tell "link up" from "internet works" (dead
+    // upstream, captive portal) — the probe verifies against the same
+    // connectivity canary the Android monitor's VALIDATED flag uses.
+    probe: createFetchProbe((url, init) => net.fetch(url, init), {
+      url: 'https://connectivitycheck.gstatic.com/generate_204',
+      expectedStatus: 204,
+    }),
   });
   // OS theme source for the 'adaptive' setting: Linux reads Omarchy
   // colors.toml / KDE kdeglobals / the GNOME 47+ portal accent via
