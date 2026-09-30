@@ -93,6 +93,12 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
       }
     }
     const destination = new File(directory, artifact.name);
+    // downloadFileAsync rejects an existing destination — a retry of
+    // the SAME release (e.g. granted unknown-sources after
+    // 'needs-permission') must clear its own prior APK first.
+    if (destination.exists) {
+      destination.delete();
+    }
     const file = await File.downloadFileAsync(artifact.url, destination);
     const result = await AuqwExpo.installApk(file.uri);
     return result.status === 'needs-permission'
