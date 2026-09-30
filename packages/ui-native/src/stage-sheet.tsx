@@ -502,7 +502,7 @@ export type StageSheetProps = {
   /**
    * Real measured waveform peaks (canonical `PEAKS_RESOLUTION`
    * pairs) for the Stage seek — Android extractor output normalized
-   * JS-side. Absent/null keeps the seeded pattern, which is also
+   * JS-side. Absent/null keeps the flat placeholder, which is also
    * the pending and failure fallback.
    */
   readonly peaks?: readonly WaveformPeak[] | null | undefined;
@@ -1325,7 +1325,6 @@ export function StageSheet({
                 durationMs={player.durationMs}
                 onSeek={onSeek}
                 trackKey={meta.trackKey}
-                seed={meta.waveformSeed}
                 peaks={peaks}
                 loading={meta.waveformLoading}
                 visible={expanded && activeMode === 'player'}

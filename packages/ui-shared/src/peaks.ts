@@ -12,8 +12,8 @@ import type { WaveformPeak } from '@auqw/application';
  * gamma lift, and `resamplePeaks` maps that profile onto whatever
  * bar count the layout produces. A zeroed profile is the honest
  * rendering of silence or empty input; callers falling back to the
- * seeded pattern (`waveformPeaks` in waveform.ts) do so on null
- * input, not on zeros.
+ * placeholder baseline (`waveformPlaceholder` in waveform.ts) do so
+ * on null input, not on zeros.
  */
 export type { WaveformPeak } from '@auqw/application';
 
@@ -168,7 +168,7 @@ export function peaksFromChannels(
  * range (so real transients survive aggregation); upsampled
  * positions linearly interpolate each side. Input shorter than one
  * bucket or empty yields zeroed pairs — the caller decides whether
- * zeros or the seeded pattern is the right fallback.
+ * zeros or the placeholder baseline is the right fallback.
  */
 export function resamplePeaks(
   peaks: readonly WaveformPeak[],

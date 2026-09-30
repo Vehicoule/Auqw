@@ -550,14 +550,6 @@ export async function createSessionController(
     ids,
     log: createLog(),
   });
-  // Startup sweep: reap anything the OS already reclaimed and honor
-  // a budget shrunk last launch. Fire-and-forget — the cache
-  // serializes it behind any early `get` calls itself.
-  void artworkCache.sweep({
-    requestId: ids.next('artwork-sweep'),
-    deadlineMs: clock.nowMs() + 60_000,
-    signal: new CancellationSource().signal,
-  });
   // Media-owner subscriptions made in start() — dispose() detaches
   // them so a second boot or an unmounted app can't double-fire.
   const mediaUnsubs: Array<() => void> = [];
@@ -671,6 +663,17 @@ export async function createSessionController(
         return;
       }
       localSource = buildLocalSource(loaded.value);
+      // Startup sweep: reap anything the OS already reclaimed and
+      // honor a budget shrunk last launch. Deferred past the boot
+      // loads — run at construction it queues a full-state read plus
+      // a stat per cached file on the same serialized storage tail
+      // restore() and this load wait on. Fire-and-forget — the cache
+      // serializes it behind any early `get` calls itself.
+      void artworkCache.sweep({
+        requestId: ids.next('artwork-sweep'),
+        deadlineMs: clock.nowMs() + 60_000,
+        signal: new CancellationSource().signal,
+      });
       // Re-band pending downloads when the queue moves: a track that
       // becomes now-playing jumps the line.
       let queueRevision = readyOr((s) => s.queue.revision, 0);

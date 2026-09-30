@@ -6,7 +6,7 @@ import {
   t,
   waveformBarExtent,
   waveformBarLayout,
-  waveformPeaks,
+  waveformPlaceholder,
 } from '@auqw/ui-shared';
 import type { WaveformPeak } from '@auqw/ui-shared';
 import { Artwork, Text } from './primitives.tsx';
@@ -472,12 +472,11 @@ export type WaveformSeekProps = {
    *  hold so a track change never displays the previous track's
    *  committed position. */
   readonly trackKey?: string | null | undefined;
-  readonly seed?: string | undefined;
   /**
    * Real measured peaks at the canonical resolution (`peaks.ts`),
-   * resampled to the bar count. Absent/null keeps the seeded
-   * `waveformPeaks` pattern — extraction is lazy, so the seeded
-   * bars are both the pending state and the failure fallback.
+   * resampled to the bar count. Absent/null renders the honest
+   * `waveformPlaceholder` baseline — extraction is lazy, so the
+   * flat bars are both the pending state and the failure fallback.
    */
   readonly peaks?: readonly WaveformPeak[] | null | undefined;
   readonly loading?: boolean | undefined;
@@ -492,7 +491,6 @@ export function WaveformSeek({
   durationMs,
   onSeek,
   trackKey,
-  seed = 'auqw',
   peaks,
   loading = false,
   labels = true,
@@ -528,8 +526,8 @@ export function WaveformSeek({
     () =>
       peaks !== undefined && peaks !== null && peaks.length > 0
         ? resamplePeaks(peaks, layout.count)
-        : waveformPeaks(seed, layout.count),
-    [peaks, seed, layout.count],
+        : waveformPlaceholder(layout.count),
+    [peaks, layout.count],
   );
   const [dLow, dMid, dHigh] = useMemo(
     () => partitionBars(layout.xs, bars),

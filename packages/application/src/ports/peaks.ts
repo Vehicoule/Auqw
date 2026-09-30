@@ -15,8 +15,8 @@ export type PeaksRequest = {
 /**
  * Decorative extraction bound shared by every `PeaksPort`: decoded
  * PCM for a track past this is a renderer-paid spike, so ports refuse
- * (or the tracker cancels) — the seeded pattern stays. Exported so
- * the port and the tracker apply the same bound.
+ * (or the tracker cancels) — the placeholder baseline stays.
+ * Exported so the port and the tracker apply the same bound.
  */
 export const PEAKS_MAX_DECODE_MS = 8 * 60 * 1000;
 
@@ -35,8 +35,8 @@ export type WaveformPeak = {
 
 /**
  * Waveform-peak extraction for the Stage seek bar. Peaks are
- * decoration, never semantics: callers render the seeded amplitude
- * pattern until this resolves and on any failure. Implementations
+ * decoration, never semantics: callers render a flat placeholder
+ * baseline until this resolves and on any failure. Implementations
  * return one normalized pair per bucket at the shared canonical
  * resolution (`PEAKS_RESOLUTION` in ui-shared); renderers resample to
  * their bar count.

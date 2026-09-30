@@ -37,12 +37,38 @@ function useArtworkResolver(): ArtworkResolver | null {
 }
 
 /**
+ * Session-lifetime answers from the resolver, keyed by url. A row
+ * remounting after list virtualization would otherwise paint its
+ * placeholder for at least a frame while the already-answered
+ * lookup repeats; seeding `uri` from the memo restores the image on
+ * the first paint. Bounded; a cached file that turns out unreadable
+ * drops its memo entry via `markRemote` so the next mount resolves
+ * afresh rather than trusting a path the OS may have reclaimed.
+ */
+const RESOLVED_MEMO_MAX = 512;
+const resolvedUriMemo = new Map<string, string>();
+
+/** LRU-ish insert: overwrite refreshes recency, bound evicts oldest. */
+function memoizeUri(url: string, uri: string): void {
+  resolvedUriMemo.delete(url);
+  resolvedUriMemo.set(url, uri);
+  while (resolvedUriMemo.size > RESOLVED_MEMO_MAX) {
+    const oldest = resolvedUriMemo.keys().next();
+    if (oldest.done) {
+      break;
+    }
+    resolvedUriMemo.delete(oldest.value);
+  }
+}
+
+/**
  * What an artwork image should render. `pending` is true while the
  * resolver is looking up a cacheable url — the render path shows its
  * placeholder then, never the remote url: giving `Image` the remote
  * source up front would double-fetch every cache miss (one request
  * from the component, one from the cache's own downloader). On a
- * hit the file uri lands quickly; on a miss or failure `uri` falls
+ * hit the file uri lands quickly; a url the memo already answered
+ * paints its file immediately; on a miss or failure `uri` falls
  * back to the remote url as exactly one source. `markRemote` lets
  * the render path drop a cached file that turns out unreadable (the
  * cache dir is OS-reclaimable, so an entry can outlive its file).
@@ -62,24 +88,39 @@ export function useResolvedArtworkUri(url: string | null): {
   } | null>(null);
   const cacheable =
     resolve !== null && url !== null && url.startsWith('https://');
+  const memoized = url !== null ? resolvedUriMemo.get(url) : undefined;
   useEffect(() => {
     if (!cacheable || url === null) {
       return;
     }
     const source = new CancellationSource();
     void resolve(url, source.signal)
-      .then((fileUri) => setOutcome({ url, uri: fileUri }))
+      .then((fileUri) => {
+        // A live answer refreshes the memo; an empty one clears it —
+        // null means the cache holds nothing, so a stale memo entry
+        // would only keep painting a path that no longer resolves.
+        if (fileUri !== null) {
+          memoizeUri(url, fileUri);
+        } else {
+          resolvedUriMemo.delete(url);
+        }
+        setOutcome({ url, uri: fileUri });
+      })
       .catch(() => setOutcome({ url, uri: null }));
     return () => source.cancel();
   }, [url, resolve, cacheable]);
   return {
     uri:
-      outcome !== null && outcome.url === url && outcome.uri !== null
-        ? outcome.uri
-        : url,
-    pending: cacheable && (outcome === null || outcome.url !== url),
+      outcome !== null && outcome.url === url
+        ? (outcome.uri ?? url)
+        : (memoized ?? url),
+    pending:
+      cacheable &&
+      (outcome === null || outcome.url !== url) &&
+      memoized === undefined,
     markRemote: () => {
       if (url !== null) {
+        resolvedUriMemo.delete(url);
         setOutcome({ url, uri: null });
       }
     },

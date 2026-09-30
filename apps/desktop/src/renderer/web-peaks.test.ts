@@ -228,7 +228,7 @@ export async function run(): Promise<void> {
   }
 
   // A read parked on an unfetched hole aborts rather than stealing
-  // the element's demand priority — 'unavailable', seeded stays.
+  // the element's demand priority — 'unavailable', placeholder stays.
   {
     const chunks = new Map<number, Uint8Array>([
       [0, new Uint8Array(64)],
@@ -280,7 +280,7 @@ export async function run(): Promise<void> {
     assert(!result.ok && result.error.kind === 'released');
   }
 
-  // Decode failure maps to invalid-response — the seeded pattern stays.
+  // Decode failure maps to invalid-response — the placeholder stays.
   {
     const stream = fakeStream({
       chunks: new Map<number, Uint8Array>([

@@ -197,7 +197,8 @@ export type NowPlayingScreenProps = StageScreenHandlers & {
   readonly repeat?: 'off' | 'all' | 'one' | undefined;
   readonly download?: DownloadChip | null | undefined;
   /** Real measured peaks for the playing recording; null/undefined
-   * keeps the seeded pattern (pending state and failure fallback). */
+   * renders the flat placeholder (pending state and failure
+   * fallback). */
   readonly peaks?: readonly WaveformPeak[] | null | undefined;
 };
 
@@ -505,7 +506,6 @@ export function NowPlayingScreen({
               durationMs={player.durationMs}
               onSeek={onSeek}
               trackKey={meta.trackKey}
-              seed={meta.waveformSeed}
               peaks={peaks}
               loading={meta.waveformLoading}
             />

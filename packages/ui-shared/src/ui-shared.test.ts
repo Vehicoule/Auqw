@@ -30,7 +30,7 @@ import type { DownloadProgress, Result } from '@auqw/application';
 import {
   waveformBarExtent,
   waveformBarLayout,
-  waveformPeaks,
+  waveformPlaceholder,
 } from './waveform.ts';
 import {
   PEAKS_RESOLUTION,
@@ -614,35 +614,27 @@ assertEqual(
 );
 setLocale('en');
 
-// waveformPeaks: deterministic per seed, every arm inside its clamp.
-const bars = waveformPeaks('track-a', 60);
+// waveformPlaceholder: flat zero-amplitude bars — honest 'no
+// measurement yet', never a fabricated shape standing in for data.
+const bars = waveformPlaceholder(60);
 assertEqual(bars.length, 60);
 assert(
-  bars.every((p) => p.up >= 0.12 && p.up <= 1 && p.down >= 0.08 && p.down <= 1),
-  'every arm stays inside its seeded clamp',
-);
-assertEqual(
-  JSON.stringify(bars),
-  JSON.stringify(waveformPeaks('track-a', 60)),
-  'same seed and count is deterministic',
+  bars.every((p) => p.up === 0 && p.down === 0),
+  'every placeholder arm is zero',
 );
 assert(
-  JSON.stringify(bars) !== JSON.stringify(waveformPeaks('track-b', 60)),
-  'a different seed produces a different pattern',
+  new Set(bars).size === bars.length,
+  'each bar is its own object — no shared instance to mutate',
 );
-assert(
-  bars.some((p) => Math.abs(p.up - p.down) > 0.02),
-  'seeded pairs are asymmetric — up and down differ',
-);
-assertEqual(waveformPeaks('track-a', 0).length, 0, 'count 0 yields no bars');
 assertEqual(
-  waveformPeaks('track-a', -3).length,
+  waveformPlaceholder(0).length,
+  0,
+  'count 0 yields no bars',
+);
+assertEqual(
+  waveformPlaceholder(-3).length,
   0,
   'negative count yields no bars',
-);
-assert(
-  new Set(bars.map((p) => p.up)).size > 10,
-  'the pattern actually varies bar to bar',
 );
 
 // waveformBarLayout: count from width, bars centered
