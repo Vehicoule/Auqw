@@ -26,10 +26,10 @@
     },
     {
       "id": "lyrics-lrclib",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "abi": "0.3.0",
-      "digest": "sha256:03791e67e15cb678659dca8ce9bc0f01443511e786a0532120072b60d1a32339",
-      "source": "release:../auqw-plugins/releases/lyrics-lrclib/0.1.3"
+      "digest": "sha256:307c2397b1877f47975195d7f58d0d9aef7e96823ead9407f9f950aff7e379c7",
+      "source": "release:../auqw-plugins/releases/lyrics-lrclib/0.1.4"
     }
   ]
 }

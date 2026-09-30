@@ -265,6 +265,25 @@ export type SessionDeps = {
 };
 
 const OP_DEADLINE_MS = 15_000;
+
+/**
+ * How long a provider-answered lyrics 'unavailable' suppresses a
+ * refetch for the same recording. The persisted lyricsCache only
+ * holds served payloads — a miss cannot be a row — so without this
+ * every pane open retries a lookup that just proved there is nothing
+ * to find. The TTL is short enough that genuinely-missed tracks
+ * re-prove themselves on a later session while the record may simply
+ * have landed on the provider since.
+ */
+const LYRICS_MISS_TTL_MS = 30 * 60_000;
+
+/** A session-lifetime negative lyrics answer; never persisted. */
+type LyricsMiss = {
+  readonly provider: string;
+  readonly providerVersion: string | null;
+  readonly durationMs: number | null;
+  readonly fetchedMs: number;
+};
 /**
  * The projection input the Ready mirror does not carry: match
  * reviews, the disposable lyrics cache, and device-local download /
@@ -436,6 +455,7 @@ export class Session {
   #ownedWork = new Set<Promise<unknown>>();
   #deadlineWork = new Set<Promise<unknown>>();
   readonly #lyricsSerial = new Serializer();
+  readonly #lyricsMisses = new Map<string, LyricsMiss>();
   /**
    * The one storage lane: every commit — session writes, review ops,
    * the import swap — serializes through it, so a read-modify-write
@@ -2013,6 +2033,28 @@ export class Session {
       return err(routed.error);
     }
     const provider = routed.value;
+    // A miss the provider already answered suppresses the refetch —
+    // but only under the same freshness rule as a real row: provider,
+    // version, and the recording's duration must all still hold, so a
+    // plugin upgrade or corrected metadata re-proves the lookup.
+    const nowMs = this.#safeNow();
+    const miss = this.#lyricsMisses.get(recordingId);
+    if (
+      miss !== undefined &&
+      nowMs !== null &&
+      miss.provider === provider.id &&
+      miss.providerVersion === provider.version &&
+      miss.durationMs === recording.durationMs &&
+      nowMs >= miss.fetchedMs &&
+      nowMs - miss.fetchedMs < LYRICS_MISS_TTL_MS
+    ) {
+      return ok(
+        lyricsSheet(
+          { kind: 'unavailable', matched: null },
+          { provider: miss.provider, fetchedMs: miss.fetchedMs, cached: true },
+        ),
+      );
+    }
     const source = new CancellationSource();
     const unlink = context?.signal.subscribe(() => {
       source.cancel();
@@ -2031,26 +2073,50 @@ export class Session {
         durationMs: recording.durationMs,
         isrc: recording.isrc,
       };
-      const fetched = await retryBounded({
-        deadlineMs,
-        signal: source.signal,
-        clock: this.#clock,
-        call: (signal) =>
-          boundedOp(
-            this.#hostCore,
-            source,
-            'lyrics',
-            (ctx) => provider.getLyrics({ query, prefer: 'synced' }, ctx),
-            signal,
-            deadlineMs,
-          ),
-      });
+      // LRCLIB intermittently 503s — the default single retry at
+      // 300 ms lands inside the same blip; three attempts at an 800 ms
+      // base give a transient window a real chance to clear, all
+      // under the one op deadline.
+      const fetchLyrics = (prefer: 'synced' | 'plain') =>
+        retryBounded({
+          deadlineMs,
+          signal: source.signal,
+          clock: this.#clock,
+          maxAttempts: 3,
+          baseBackoffMs: 800,
+          call: (signal) =>
+            boundedOp(
+              this.#hostCore,
+              source,
+              'lyrics',
+              (ctx) => provider.getLyrics({ query, prefer }, ctx),
+              signal,
+              deadlineMs,
+            ),
+        });
+      const fetched = await fetchLyrics('synced');
       if (!fetched.ok) {
         return err(fetched.error);
       }
-      const accepted = applyAcceptance(fetched.value, {
+      let accepted = applyAcceptance(fetched.value, {
         durationMs: recording.durationMs,
       });
+      // 'unavailable' on the synced walk only proves no timed lines —
+      // a provider that also declares lyrics.plain may hold plain-only
+      // records the synced flavor could never serve. One second call
+      // rescues them; an error there is surfaced like the first's.
+      if (
+        accepted.kind === 'unavailable' &&
+        provider.capabilities.includes('lyrics.plain')
+      ) {
+        const plain = await fetchLyrics('plain');
+        if (!plain.ok) {
+          return err(plain.error);
+        }
+        accepted = applyAcceptance(plain.value, {
+          durationMs: recording.durationMs,
+        });
+      }
       const fetchedMs = this.#safeNow();
       const entry =
         fetchedMs === null
@@ -2062,6 +2128,21 @@ export class Session {
             accepted,
             fetchedMs,
           );
+      // 'unavailable' can never be a persisted row — book it in the
+      // session miss map instead so re-opens do not storm the
+      // provider; a served result clears any stale miss.
+      if (accepted.kind === 'unavailable') {
+        if (fetchedMs !== null) {
+          this.#lyricsMisses.set(recording.id, {
+            provider: provider.id,
+            providerVersion: provider.version,
+            durationMs: recording.durationMs,
+            fetchedMs,
+          });
+        }
+      } else {
+        this.#lyricsMisses.delete(recording.id);
+      }
       if (entry !== null) {
         const next = [
           ...r.lyricsCache.filter((e) => e.recordingId !== recording.id),

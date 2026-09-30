@@ -435,6 +435,47 @@ async function failedOutcomeKinds(): Promise<void> {
   assert(!r4.ok && r4.error.kind === 'internal');
 }
 
+// 4b. A guest's `retry_after=<secs>` message hint lands on the error's
+// retryAfterMs — the retry policy honors the provider's own cooldown.
+async function retryAfterHint(): Promise<void> {
+  const { host, p } = rig();
+  const call = p.search(
+    { query: 'x', limit: 1, storefront: null },
+    ctx().context,
+  );
+  await flush();
+  host.fail(
+    host.requests[0]!.requestId,
+    'rate-limit',
+    'rate-limit: lrclib status 429 retry_after=30',
+  );
+  const r1 = await call;
+  assert(!r1.ok && r1.error.kind === 'rate-limit');
+  assertEqual(r1.error.retryAfterMs, 30_000, 'hint parsed to ms');
+
+  // No hint → no retryAfterMs; a malformed one is ignored.
+  const plain = p.search(
+    { query: 'x', limit: 1, storefront: null },
+    ctx().context,
+  );
+  await flush();
+  host.fail(host.requests[1]!.requestId, 'rate-limit', 'slow down');
+  const r2 = await plain;
+  assert(!r2.ok && r2.error.retryAfterMs === undefined);
+  const weird = p.search(
+    { query: 'x', limit: 1, storefront: null },
+    ctx().context,
+  );
+  await flush();
+  host.fail(
+    host.requests[2]!.requestId,
+    'rate-limit',
+    'retry_after=abc retry_after=',
+  );
+  const r3 = await weird;
+  assert(!r3.ok && r3.error.retryAfterMs === undefined);
+}
+
 // 5. Signal cancellation aborts the host request and settles cancelled;
 // a late success must not clobber the cancelled settle.
 async function cancellation(): Promise<void> {
@@ -771,6 +812,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentCorrelation', concurrentCorrelation],
   ['malformedResults', malformedResults],
   ['failedOutcomeKinds', failedOutcomeKinds],
+  ['retryAfterHint', retryAfterHint],
   ['cancellation', cancellation],
   ['preCancelled', preCancelled],
   ['dispose', dispose],

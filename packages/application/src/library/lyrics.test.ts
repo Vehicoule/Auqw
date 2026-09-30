@@ -1,7 +1,7 @@
 import { CancellationSource } from '../cancellation.ts';
 import type { OperationContext } from '../cancellation.ts';
 import type { Recording, Settings, SourceRef } from '../domain.ts';
-import { appError, ok } from '../errors.ts';
+import { appError, err, ok } from '../errors.ts';
 import type {
   LyricsLine,
   LyricsMatch,
@@ -607,6 +607,9 @@ async function rejections(): Promise<void> {
   await r.session.restore();
 
   // A drifted record is rejected: unavailable sheet, nothing cached.
+  // Absence is only proven once BOTH flavors are dry — the synced
+  // miss falls back to the declared plain capability first, then
+  // books a session miss for the TTL window.
   const drifted = r.session.getLyrics('r1');
   await pump();
   lrclib.settleLyrics(
@@ -616,14 +619,24 @@ async function rejections(): Promise<void> {
       matched: { ...MATCHED, durationMs: 600_000 },
     }),
   );
+  await pump();
+  lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null }));
   const sheet = await drifted;
   assert(sheet.ok && sheet.value.kind === 'unavailable');
   assert(
     !r.storage.commits.some((c) => c.batch.lyricsCache !== undefined),
     'rejections are not cached',
   );
-  // The rejection did not stick: the next call refetches honestly.
-  assertEqual(lyricsCalls(lrclib), 1);
+  // Inside the miss window the re-open serves the booked miss — a
+  // real provider cannot change its answer in seconds — and past the
+  // TTL the lookup re-proves itself.
+  const missed = await r.session.getLyrics('r1');
+  assert(
+    missed.ok && missed.value.kind === 'unavailable' && missed.value.cached,
+    'a fresh miss serves without a round trip',
+  );
+  assertEqual(lyricsCalls(lrclib), 2, 'miss suppresses the refetch');
+  r.clock.advance(31 * 60_000);
 
   // Non-monotonic synced degrades to plain — and that is what caches.
   const degraded = r.session.getLyrics('r1');
@@ -648,11 +661,19 @@ async function rejections(): Promise<void> {
   )?.batch.lyricsCache?.[0];
   assert(stored?.kind === 'plain', 'the downgrade is what persists');
 
-  // Provider-reported absence is honest and never cached — r2 keeps
-  // refetching rather than freezing a miss.
+  // Provider-reported absence books a session miss for a short TTL —
+  // a pane re-open serves it without storming the provider, then the
+  // miss ages out and the lookup re-proves itself. Absence is only
+  // proven once BOTH flavors are dry: the synced miss falls back to
+  // the declared plain capability first.
   const absent = r.session.getLyrics('r2');
   await pump();
   lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null }));
+  await pump();
+  assert(
+    lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null })),
+    'synced absence falls back to the plain capability',
+  );
   const absentSheet = await absent;
   assert(absentSheet.ok && absentSheet.value.kind === 'unavailable');
   assertEqual(
@@ -661,18 +682,35 @@ async function rejections(): Promise<void> {
     1,
     'only the plain downgrade was ever committed',
   );
-  const refetch = r.session.getLyrics('r2');
-  await pump();
+  const refetchSheet = await r.session.getLyrics('r2');
   assert(
-    lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null })),
-    'absence refetches instead of caching',
+    refetchSheet.ok &&
+      refetchSheet.value.kind === 'unavailable' &&
+      refetchSheet.value.cached,
+    'a fresh miss serves without a round trip',
   );
-  await refetch;
+  assertEqual(lyricsCalls(lrclib), 5, 'miss suppresses the refetch');
+
+  // The miss ages out: past its TTL the lookup re-proves honestly.
+  r.clock.advance(31 * 60_000);
+  const reproof = r.session.getLyrics('r2');
+  await pump();
+  lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null }));
+  await pump();
+  lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null }));
+  const reSheet = await reproof;
+  assert(
+    reSheet.ok &&
+      reSheet.value.kind === 'unavailable' &&
+      !reSheet.value.cached,
+    'aged-out miss refetches',
+  );
+  assertEqual(lyricsCalls(lrclib), 7);
 
   // Meanwhile r1's downgraded plain is a hit — no round trip.
   const cached = await r.session.getLyrics('r1');
   assert(cached.ok && cached.value.kind === 'plain' && cached.value.cached);
-  assertEqual(lyricsCalls(lrclib), 4);
+  assertEqual(lyricsCalls(lrclib), 7);
   await r.session.dispose();
 }
 
@@ -961,6 +999,162 @@ async function cancellation(): Promise<void> {
   await r.session.dispose();
 }
 
+// A dual-capability provider whose synced walk comes back dry still
+// declares lyrics.plain — the same query with prefer:'plain' rescues
+// the records the synced flavor could never serve (a plain-only
+// record defers inside the synced waterfall).
+async function plainFallbackRescuesSyncedAbsence(): Promise<void> {
+  const lrclib = new FakeProvider('lyrics-lrclib', [
+    'lyrics.plain',
+    'lyrics.synced',
+  ]);
+  const r = rig(persisted({ recordings: [recording('r1')] }), [lrclib]);
+  await r.session.restore();
+  const pending = r.session.getLyrics('r1');
+  await pump();
+  lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null }));
+  await pump();
+  // The fallback fires the same query at the plain capability.
+  const calls = lrclib.calls.filter((c) => c.method === 'getLyrics');
+  assertEqual(calls.length, 2, 'synced absence falls back once');
+  assertDeepEqual(
+    (calls[1]?.input as { prefer?: string })?.prefer,
+    'plain',
+  );
+  lrclib.settleLyrics(
+    ok({ kind: 'plain', text: 'only words', matched: MATCHED }),
+  );
+  const sheet = await pending;
+  assert(
+    sheet.ok && sheet.value.kind === 'plain',
+    'plain answer serves after the synced miss',
+  );
+  const stored = r.storage.commits.find(
+    (c) => c.batch.lyricsCache !== undefined,
+  )?.batch.lyricsCache?.[0];
+  assert(stored?.kind === 'plain', 'the rescued plain caches');
+  await r.session.dispose();
+}
+
+// A provider that declares only lyrics.plain gets no second call —
+// the fallback never pays a round trip it cannot use.
+async function noFallbackWithoutPlainCapability(): Promise<void> {
+  const syncedOnly = new FakeProvider('synced-lyrics', ['lyrics.synced']);
+  const r = rig(persisted({ recordings: [recording('r1')] }), [syncedOnly]);
+  await r.session.restore();
+  const pending = r.session.getLyrics('r1');
+  await pump();
+  syncedOnly.settleLyrics(ok({ kind: 'unavailable', matched: null }));
+  const sheet = await pending;
+  assert(sheet.ok && sheet.value.kind === 'unavailable');
+  assertEqual(lyricsCalls(syncedOnly), 1, 'no fallback without the cap');
+  await r.session.dispose();
+}
+
+// A hard failure on the plain fallback surfaces as an error — absence
+// is not proven when the second flavor could not answer.
+async function fallbackFailureSurfaces(): Promise<void> {
+  const lrclib = new FakeProvider('lyrics-lrclib', [
+    'lyrics.plain',
+    'lyrics.synced',
+  ]);
+  const r = rig(persisted({ recordings: [recording('r1')] }), [lrclib]);
+  await r.session.restore();
+  const pending = r.session.getLyrics('r1');
+  await pump();
+  lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null }));
+  await pump();
+  // A non-retryable failure — absence was never proven.
+  lrclib.settleLyrics(err(appError('invalid-response', 'bad payload')));
+  const out = await pending;
+  assert(!out.ok && out.error.kind === 'invalid-response');
+  // The failure books no miss: the next open refetches honestly.
+  const again = r.session.getLyrics('r1');
+  await pump();
+  lrclib.settleLyrics(
+    ok({ kind: 'plain', text: 'words', matched: MATCHED }),
+  );
+  const sheet = await again;
+  assert(sheet.ok && sheet.value.kind === 'plain');
+  await r.session.dispose();
+}
+
+// LRCLIB's intermittent 503s sit inside 'transient': the op retries
+// across the blip — three bounded attempts under one deadline — then
+// the successful attempt's verdict stands.
+async function transientRetryCrossesTheBlip(): Promise<void> {
+  const lrclib = new FakeProvider('lyrics-lrclib', [
+    'lyrics.plain',
+    'lyrics.synced',
+  ]);
+  const r = rig(persisted({ recordings: [recording('r1')] }), [lrclib]);
+  await r.session.restore();
+  const pending = r.session.getLyrics('r1');
+  await pump();
+  lrclib.settleLyrics(err(appError('transient', 'upstream 503')));
+  await pump();
+  r.clock.advance(800);
+  await pump();
+  assertEqual(lyricsCalls(lrclib), 2, 'first transient retried');
+  lrclib.settleLyrics(err(appError('transient', 'upstream 503')));
+  await pump();
+  r.clock.advance(1600);
+  await pump();
+  assertEqual(lyricsCalls(lrclib), 3, 'second transient retried');
+  lrclib.settleLyrics(ok({ kind: 'plain', text: 'words', matched: MATCHED }));
+  const sheet = await pending;
+  assert(sheet.ok && sheet.value.kind === 'plain', 'retry crosses the blip');
+  await r.session.dispose();
+}
+
+// A booked miss is keyed on the recording's duration: corrected
+// metadata re-proves the lookup instead of serving the stale miss.
+async function durationChangeReprovesMiss(): Promise<void> {
+  const lrclib = new FakeProvider('lyrics-lrclib', [
+    'lyrics.plain',
+    'lyrics.synced',
+  ]);
+  const r = rig(persisted({ recordings: [recording('r1')] }), [lrclib]);
+  await r.session.restore();
+  const pending = r.session.getLyrics('r1');
+  await pump();
+  lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null }));
+  await pump();
+  lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null }));
+  await pending;
+  // A duration change — e.g. the provider re-reports the track at a
+  // corrected length — makes the booked miss stale.
+  const upserted = await r.session.enqueueMetadata({
+    sourceRef: trackRef('itunes', 'it-r1'),
+    title: 'Song r1',
+    artist: 'Artist',
+    album: 'Album',
+    durationMs: 240_000,
+    releaseYear: 2020,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    storefront: 'US',
+  });
+  assert(upserted.ok, 'metadata refresh lands');
+  const pending2 = r.session.getLyrics('r1');
+  await pump();
+  assertEqual(lyricsCalls(lrclib), 3, 'duration change refetches');
+  // The match must honestly carry the corrected duration — the
+  // drift rule collapses a stale-duration record to unavailable.
+  lrclib.settleLyrics(
+    ok({
+      kind: 'plain',
+      text: 'words',
+      matched: { ...MATCHED, durationMs: 240_000 },
+    }),
+  );
+  const sheet = await pending2;
+  assert(sheet.ok && sheet.value.kind === 'plain');
+  assertEqual(lyricsCalls(lrclib), 3, 'no fallback spent on a plain hit');
+  await r.session.dispose();
+}
+
 export async function run(): Promise<void> {
   syncedAcceptance();
   otherAcceptance();
@@ -975,4 +1169,9 @@ export async function run(): Promise<void> {
   await nullVersionProviderRefetchesLegacy();
   await failures();
   await cancellation();
+  await plainFallbackRescuesSyncedAbsence();
+  await noFallbackWithoutPlainCapability();
+  await fallbackFailureSurfaces();
+  await transientRetryCrossesTheBlip();
+  await durationChangeReprovesMiss();
 }
