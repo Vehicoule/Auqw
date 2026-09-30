@@ -447,7 +447,7 @@ export function Artwork({
   style,
 }: ArtworkProps) {
   const theme = useTheme();
-  const { uri, pending, markRemote } = useResolvedArtworkUri(url);
+  const { uri, pending, markSourceError } = useResolvedArtworkUri(url);
   const r = cornerRadius ?? theme.radius.thumb;
   return (
     <View
@@ -511,7 +511,7 @@ export function Artwork({
               : { width: size, height: size }
           }
           resizeMode="cover"
-          onError={markRemote}
+          onError={markSourceError}
           accessibilityIgnoresInvertColors
         />
       )}

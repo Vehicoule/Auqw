@@ -26,7 +26,7 @@ import {
   resamplePeaks,
   t,
   waveformBarLayout,
-  waveformPeaks,
+  waveformPlaceholder,
 } from '@auqw/ui-shared';
 import type { WaveformPeak } from '@auqw/ui-shared';
 import { progressPathState } from './motion';
@@ -515,12 +515,11 @@ export type WaveformSeekProps = {
   readonly onSeek?:
     | ((ms: number, expectedOccurrenceId?: string) => void)
     | undefined;
-  readonly seed?: string | undefined;
   /**
    * Real measured peaks at the canonical resolution (`peaks.ts`),
-   * resampled to the bar count. Absent/null keeps the seeded
-   * `waveformPeaks` pattern — extraction is lazy, so the seeded
-   * bars are both the pending state and the failure fallback.
+   * resampled to the bar count. Absent/null renders the honest
+   * `waveformPlaceholder` baseline — extraction is lazy, so the
+   * flat bars are both the pending state and the failure fallback.
    */
   readonly peaks?: readonly WaveformPeak[] | null | undefined;
   readonly loading?: boolean | undefined;
@@ -536,7 +535,6 @@ export function WaveformSeek({
   positionMs,
   durationMs,
   onSeek,
-  seed = 'auqw',
   peaks,
   loading = false,
   labels = true,
@@ -558,8 +556,8 @@ export function WaveformSeek({
     () =>
       peaks !== undefined && peaks !== null && peaks.length > 0
         ? resamplePeaks(peaks, layout.count)
-        : waveformPeaks(seed, layout.count),
-    [peaks, seed, layout.count],
+        : waveformPlaceholder(layout.count),
+    [peaks, layout.count],
   );
   const groups = useMemo(() => partitionBars(layout.xs, bars), [layout, bars]);
   const allBars = useMemo<BarGroup>(
@@ -646,8 +644,8 @@ export function WaveformSeek({
     bloom.value = 0;
     bloom.value = theme.reducedMotion ? 1 : withTiming(1, { duration: 320 });
     // `peaks` is a second amplitude source: when real bars land they
-    // replay the same stagger a new seed would.
-  }, [bloom, seed, peaks, theme.reducedMotion]);
+    // replay the same stagger a track change would.
+  }, [bloom, trackKey, peaks, theme.reducedMotion]);
   useEffect(() => {
     if (isLoading && visible && !theme.reducedMotion) {
       shimmer.value = 0;

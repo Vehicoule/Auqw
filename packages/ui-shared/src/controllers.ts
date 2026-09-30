@@ -1628,7 +1628,6 @@ export type StageMetaView = {
   readonly recovery: 'sign-in' | null;
   /** Queue-occurrence key for per-track transient state; null off-queue. */
   readonly trackKey: string | null;
-  readonly waveformSeed: string;
   readonly waveformLoading: boolean;
 };
 
@@ -1640,7 +1639,6 @@ export function stageMetaView(player: PlayerModel): StageMetaView {
     errorMessage: player.errorMessage,
     recovery: player.recovery,
     trackKey: player.occurrenceId,
-    waveformSeed: `${player.title}|${player.artist ?? ''}`,
     waveformLoading:
       player.status === 'preparing' || player.durationMs === null,
   };

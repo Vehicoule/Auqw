@@ -25,7 +25,7 @@ const MAX_UNKNOWN_DURATION_BYTES =
  * runs the shared `normalizePeakWindows` so both platforms produce
  * the same normalized contract. iOS has no decoder path: the seam
  * methods are absent there and every call surfaces 'unavailable',
- * keeping the seeded pattern.
+ * keeping the placeholder baseline.
  */
 export function createExpoPeaksPort(native: AuqwPeaksNative): PeaksPort {
   return {

@@ -28,7 +28,8 @@ const MAX_PEAK_BYTES = 24 * 1024 * 1024;
  * `decodeAudioData` expands the whole compressed buffer to per-channel
  * PCM before peak bucketing: 8 min of stereo 48 kHz is ~184 MiB of
  * Float32s. That's the transient spike the renderer pays for a bar
- * row — tracks longer than this keep the seeded pattern. The shared
+ * row — tracks longer than this keep the placeholder baseline. The
+ * shared
  * contract constant (`PEAKS_MAX_DECODE_MS`) is the same bound the
  * tracker applies when a late duration lands mid-sweep.
  */
@@ -54,7 +55,7 @@ const FIRST_READ_TIMEOUT_MS = 15_000;
  * in ~ms, so a read parked past this means the position is an
  * unfetched hole — chasing it would queue demand that outranks the
  * element's own (demand serves min position first), stalling playback
- * for a decoration. Abort instead; the seeded pattern stays.
+ * for a decoration. Abort instead; the placeholder baseline stays.
  */
 const PARK_TIMEOUT_MS = 400;
 
@@ -118,7 +119,7 @@ function fromBase64(data: string): Uint8Array {
  * already committed, because a `read` parked on a hole queues demand
  * that serves minimum-position-first — chasing an unfetched gap would
  * starve the element's own mid-track demand for a decoration. The
- * seeded pattern stays whenever a pull outruns the stream's fill.
+ * placeholder stays whenever a pull outruns the stream's fill.
  */
 export function createWebPeaksPort(deps: {
   readonly stream: StreamClient;
@@ -317,7 +318,7 @@ export function createWebPeaksPort(deps: {
         return bytes;
       }
       // A decode failure means the bytes weren't audio as expected —
-      // `invalid-response`, and the renderer keeps the seeded pattern.
+      // `invalid-response`, and the renderer keeps the placeholder.
       const decoded = await decode(bytes.value).then(
         (audio) => ok(audio),
         () => err(appError('invalid-response', 'audio decode failed')),

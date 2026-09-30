@@ -550,14 +550,6 @@ export async function createSessionController(
     ids,
     log: createLog(),
   });
-  // Startup sweep: reap anything the OS already reclaimed and honor
-  // a budget shrunk last launch. Fire-and-forget — the cache
-  // serializes it behind any early `get` calls itself.
-  void artworkCache.sweep({
-    requestId: ids.next('artwork-sweep'),
-    deadlineMs: clock.nowMs() + 60_000,
-    signal: new CancellationSource().signal,
-  });
   // Media-owner subscriptions made in start() — dispose() detaches
   // them so a second boot or an unmounted app can't double-fire.
   const mediaUnsubs: Array<() => void> = [];
@@ -791,6 +783,18 @@ export async function createSessionController(
       if (inited.ok) {
         session.connectivityChanged();
       }
+      // Startup sweep: reap anything the OS already reclaimed and
+      // honor a budget shrunk last launch. Launched after the boot
+      // loads AND download-ledger init — a populated cache would
+      // otherwise queue a full-state read plus a stat per file on
+      // the serialized storage tail ahead of boot-critical writes.
+      // Fire-and-forget — the cache serializes it behind any early
+      // `get` calls itself.
+      void artworkCache.sweep({
+        requestId: ids.next('artwork-sweep'),
+        deadlineMs: clock.nowMs() + 60_000,
+        signal: new CancellationSource().signal,
+      });
       // Bounded refold shared by inbound merges and the bring-up
       // reconcile: attempt 1 folds the fresh batch, retries refold
       // the session's retained pending with [] — the backstop is

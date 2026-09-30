@@ -209,6 +209,36 @@ const NEGATIVE_CACHE_KINDS: ReadonlySet<ErrorKind> = new Set([
 ]);
 
 /**
+ * How long the mirrored section is trusted before a fresh load. The
+ * section carries `settings` (the budget) alongside the entries, and
+ * settings writes have no notification path into this cache — the
+ * sweep-on-shrink call covers shrink, but a grown budget or an import
+ * would otherwise stay invisible until the next boot. One reload per
+ * minute of activity bounds that staleness without putting a
+ * full-state read back on every lookup.
+ */
+const SECTION_REFRESH_MS = 60_000;
+
+/**
+ * Access-time touches write back on a delay: a list mount can touch
+ * dozens of rows and one debounced commit covers the whole burst,
+ * where one write-through commit per touch serialized a full section
+ * rewrite behind every image. Structural changes (inserts, reaps,
+ * evictions) still commit before returning — only the LRU timestamp
+ * rides the delay.
+ */
+const TOUCH_FLUSH_DELAY_MS = 3_000;
+
+/**
+ * Extra flushes a failed commit earns before the cycle gives up.
+ * The delay doubles per attempt (6s, 12s, 24s after the initial
+ * 3s) — bounded so a persistently wedged writer isn't retried in a
+ * tight loop; the dirty mark survives the last retry so the next
+ * touch re-arms a fresh cycle instead of dropping recency for good.
+ */
+const TOUCH_FLUSH_RETRY_MAX = 3;
+
+/**
  * Bounded LRU on-disk artwork cache (docs/specs/data.md: ~200 MB,
  * managed in settings). Entries persist in the `artworkCache`
  * section of StoragePort; files live in the paths port's directory.
@@ -219,6 +249,13 @@ const NEGATIVE_CACHE_KINDS: ReadonlySet<ErrorKind> = new Set([
  * would lose each other's rows. Downloads run *outside* the tail so
  * misses for different urls transfer in parallel; gets for the same
  * url coalesce onto one in-flight record (search-session's pattern).
+ *
+ * The section is mirrored in memory after first load: a row-list
+ * mount turns into dozens of gets and a full-state load plus a
+ * write-through commit per image serialized the whole mount behind
+ * one tail. Hits read the mirror and stat the file; the LRU touch
+ * persists on a debounced flush, and a commit failure discards the
+ * mirror so the next operation reloads storage truth.
  */
 export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
   let tail: Promise<unknown> = Promise.resolve();
@@ -231,6 +268,22 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
    */
   const failures = new Map<string, Failure>();
   const owned = new Set<Promise<unknown>>();
+  /**
+   * The persisted section mirrored in memory. `artworkCache` has a
+   * single writer — this cache (imports and diagnostics leave it
+   * alone) — so after the first load the mirror is authoritative and
+   * reads stop hitting storage. Structural mutations write through;
+   * on a commit failure the mirror may claim rows storage never saw,
+   * so it is discarded and the next operation reloads storage truth.
+   */
+  let cached: {
+    readonly data: Section;
+    readonly loadedAtMs: number;
+  } | null = null;
+  /** Mirror holds access times newer than the last committed write. */
+  let touchDirty = false;
+  let touchFlushScheduled = false;
+  let touchRetryCount = 0;
 
   /** Defensive clock read: unsafe values never reach downstream math. */
   function safeNow(): number | null {
@@ -294,6 +347,136 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       return;
     }
     own(call(() => deps.log.write({ level: 'warn', message, atMs })));
+  }
+
+  /**
+   * The touch flush's own context: bookkeeping must not inherit a
+   * list caller's signal — a row unmounting mid-touch must not abort
+   * the persistence of every touch in the batch.
+   */
+  function flushContext(): OperationContext {
+    return {
+      requestId: deps.ids.next('artwork'),
+      deadlineMs: (safeNow() ?? 0) + 30_000,
+      signal: new CancellationSource().signal,
+    };
+  }
+
+  /**
+   * Debounced write-back of access-time touches. The first dirty
+   * touch schedules one commit TOUCH_FLUSH_DELAY_MS later covering
+   * the whole burst. A failed commit — or a failed sleep — re-arms
+   * on a doubling backoff up to TOUCH_FLUSH_RETRY_MAX times: a
+   * transient write failure shouldn't have to wait for a lucky
+   * next hit, and a restart after the last retry is the only way
+   * recency is actually lost. Retries exhausted keeps the dirty
+   * mark (and the backoff counter, so no tight loop); the next
+   * touch re-arms the cycle at that delay.
+   */
+  function scheduleTouchFlush(): void {
+    if (touchFlushScheduled) {
+      return;
+    }
+    touchFlushScheduled = true;
+    const delayMs = TOUCH_FLUSH_DELAY_MS * 2 ** touchRetryCount;
+    const work = (async (): Promise<void> => {
+      try {
+        const slept = await call(() =>
+          deps.clock.sleep(
+            delayMs,
+            new CancellationSource().signal,
+          ),
+        );
+        if (!slept.ok) {
+          return;
+        }
+        await serialized(async (): Promise<Result<void>> => {
+          const live = cached;
+          if (!touchDirty || live === null) {
+            touchDirty = false;
+            return ok(undefined);
+          }
+          touchDirty = false;
+          const committed = await commitSection(
+            live.data.entries,
+            flushContext(),
+          );
+          if (!committed.ok) {
+            touchDirty = true;
+            warn('artwork cache touch flush failed');
+          }
+          return ok(undefined);
+        });
+      } finally {
+        touchFlushScheduled = false;
+        if (!touchDirty) {
+          touchRetryCount = 0;
+        } else if (touchRetryCount < TOUCH_FLUSH_RETRY_MAX) {
+          touchRetryCount += 1;
+          scheduleTouchFlush();
+        }
+      }
+    })();
+    own(work);
+  }
+
+  /**
+   * Hands out the mirrored section, loading on first use and
+   * refreshing once the copy outlives SECTION_REFRESH_MS (or `force`
+   * is set — the sweep judges against the freshest budget). A
+   * refresh carries the mirror's unflushed access times onto the
+   * fresh rows so persisted staleness never regresses LRU order.
+   */
+  async function ensureSection(
+    context: OperationContext,
+    force = false,
+  ): Promise<Result<Section>> {
+    const now = safeNow();
+    if (
+      !force &&
+      cached !== null &&
+      (now === null || now - cached.loadedAtMs <= SECTION_REFRESH_MS)
+    ) {
+      return ok(cached.data);
+    }
+    const loaded = await loadSection(context);
+    if (!loaded.ok) {
+      return loaded;
+    }
+    const fresh = loaded.value;
+    if (cached !== null) {
+      for (const entry of fresh.entries.values()) {
+        const live = cached.data.entries.get(entry.url);
+        if (
+          live !== undefined &&
+          live.lastAccessedMs > entry.lastAccessedMs
+        ) {
+          entry.lastAccessedMs = live.lastAccessedMs;
+        }
+      }
+    }
+    cached = { data: fresh, loadedAtMs: now ?? 0 };
+    return ok(fresh);
+  }
+
+  /**
+   * Commits the mirrored entries after a structural mutation. A
+   * success persists every pending touch too, clearing the dirty
+   * mark; a failure means the mirror diverged from storage (it may
+   * name rows storage never wrote or have dropped rows it did keep),
+   * so it is discarded — the next operation reloads storage truth.
+   */
+  async function commitMirror(
+    entries: ReadonlyMap<string, ArtworkCacheEntry>,
+    context: OperationContext,
+  ): Promise<Result<void>> {
+    const committed = await commitSection(entries, context);
+    touchDirty = false;
+    if (!committed.ok) {
+      cached = null;
+      return committed;
+    }
+    return ok(undefined);
   }
 
   /**
@@ -410,13 +593,15 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     context: OperationContext,
     record: Inflight,
   ): Promise<Result<ArtworkLookup>> {
-    // Phase 1 (serialized): a present entry is touched write-through,
-    // but only after proving its file still exists — the directory is
-    // OS-reclaimable, so a row can outlive its file. A reaped entry is
-    // dropped and the url re-downloads like any absent one.
+    // Phase 1 (serialized): a present entry answers from the mirror
+    // after proving its file still exists — the directory is
+    // OS-reclaimable, so a row can outlive its file. A reaped entry
+    // is dropped and the url re-downloads like any absent one. The
+    // access-time touch updates memory now and writes back via the
+    // debounced flush, not a per-hit commit.
     const probed = await serialized(
       async (): Promise<Result<Probe>> => {
-        const section = await loadSection(context);
+        const section = await ensureSection(context);
         if (!section.ok) {
           return section;
         }
@@ -433,7 +618,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         const entries = section.value.entries;
         if (!present.value) {
           entries.delete(url);
-          const committed = await commitSection(entries, context);
+          const committed = await commitMirror(entries, context);
           return committed.ok ? ok<Probe>(null) : committed;
         }
         const now = safeNow();
@@ -443,8 +628,9 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
           );
         }
         entry.lastAccessedMs = now;
-        const committed = await commitSection(entries, context);
-        return committed.ok ? ok<Probe>(entry.filePath) : committed;
+        touchDirty = true;
+        scheduleTouchFlush();
+        return ok<Probe>(entry.filePath);
       },
     );
     if (!probed.ok) {
@@ -526,9 +712,11 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
       failures.delete(url);
     }
 
-    // Phase 2 (serialized): insert under the current budget.
+    // Phase 2 (serialized): insert under the mirrored budget — it
+    // can lag a just-changed cap by up to SECTION_REFRESH_MS; a
+    // shrink's follow-up sweep refreshes the mirror immediately.
     return serialized(async (): Promise<Result<ArtworkLookup>> => {
-      const section = await loadSection(context);
+      const section = await ensureSection(context);
       if (!section.ok) {
         return section;
       }
@@ -554,7 +742,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         // the tracked file; refresh size + access time in place.
         existing.bytes = bytes;
         existing.lastAccessedMs = now;
-        const committed = await commitSection(entries, context);
+        const committed = await commitMirror(entries, context);
         if (!committed.ok) {
           return committed;
         }
@@ -580,7 +768,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         url,
         context.signal,
       );
-      const committed = await commitSection(entries, context);
+      const committed = await commitMirror(entries, context);
       if (!committed.ok) {
         // Without its row the new file is orphaned; remove it.
         await removeDest();
@@ -730,7 +918,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         if (context.signal.cancelled) {
           return err(cancelledError());
         }
-        const section = await loadSection(context);
+        const section = await ensureSection(context, true);
         if (!section.ok) {
           return section;
         }
@@ -772,7 +960,7 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         );
         firstError ??= eviction.firstError;
         if (reaped > 0 || eviction.evicted > 0) {
-          const committed = await commitSection(entries, context);
+          const committed = await commitMirror(entries, context);
           if (!committed.ok) {
             return committed;
           }

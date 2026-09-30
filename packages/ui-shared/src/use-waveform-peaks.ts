@@ -8,13 +8,13 @@ export type { PeaksTarget } from '@auqw/application';
  * Real waveform peaks for the currently playing recording — lazily
  * extracted on track change, cached per attempt (`recordingId|attemptId`
  * — a re-prepared stream never inherits the attempt it replaced), a
- * `null` entry marks a settled failure so the seeded pattern sticks
- * without re-pulling on every render, and a small LRU bounds memory.
- * A cancelled extraction never caches — revisiting the track retries.
- * Returns `null` while pending or on failure — the renderer falls
- * back to the seeded pattern. The lifecycle itself lives in
- * `@auqw/application`'s `peaks-tracker.ts`; this hook only bridges it
- * to React.
+ * `null` entry marks a settled failure so the placeholder baseline
+ * sticks without re-pulling on every render, and a small LRU bounds
+ * memory. A cancelled extraction never caches — revisiting the
+ * track retries. Returns `null` while pending or on failure — the
+ * renderer falls back to `waveformPlaceholder`. The lifecycle itself
+ * lives in `@auqw/application`'s `peaks-tracker.ts`; this hook only
+ * bridges it to React.
  */
 export function useWaveformPeaks(
   port: PeaksPort | null,

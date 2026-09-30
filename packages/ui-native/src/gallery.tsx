@@ -465,13 +465,12 @@ function GalleryBody({
           peaks={fixtureWaveformPeaks}
         />
         <Text variant="metadata" color="secondary">
-          seeded fallback · no peaks yet
+          placeholder baseline · no peaks yet
         </Text>
         <WaveformSeek
           positionMs={90_000}
           durationMs={180_000}
           onSeek={noop}
-          seed="Self Aware|Temper City"
         />
         <Text variant="metadata" color="secondary">
           loading · shimmer baseline

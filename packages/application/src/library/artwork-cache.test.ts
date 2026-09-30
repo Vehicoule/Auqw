@@ -283,13 +283,24 @@ async function missAndHit(): Promise<void> {
   assertEqual(row?.bytes, 8 * MB);
   assertEqual(row?.lastAccessedMs, 1_000);
 
-  // Second get hits: no re-download, lastAccessedMs writes through.
+  // Second get hits: no re-download; the touch is write-behind —
+  // storage still shows the insert's timestamp until the flush.
   r.clock.advance(500);
   const hit = await r.cache.get(A, ctx());
   assert(hit.ok, 'hit get failed');
   assertEqual(hit.value.hit, true);
   assertEqual(hit.value.filePath, destOf(A));
   assertEqual(r.fetch.calls.length, 1, 'hit must not download');
+  const pending = await r.storage.load(ctx());
+  assert(pending.ok);
+  assertEqual(
+    pending.value.artworkCache[0]?.lastAccessedMs,
+    1_000,
+    'touch is not yet persisted',
+  );
+  // The debounced flush lands the touch in one commit.
+  r.clock.advance(3_000);
+  await pump();
   const after = await r.storage.load(ctx());
   assert(after.ok);
   assertEqual(after.value.artworkCache[0]?.lastAccessedMs, 1_500);
@@ -880,6 +891,130 @@ async function getExistsErrorIsHonest(): Promise<void> {
   assertEqual(r.fetch.calls.length, 0);
 }
 
+async function hitsServeFromMirror(): Promise<void> {
+  const r = rig(
+    persisted({
+      artworkCache: [seed(A, 8 * MB, 10), seed(B, 8 * MB, 20)],
+    }),
+  );
+  const a = await r.cache.get(A, ctx());
+  const b = await r.cache.get(B, ctx());
+  const a2 = await r.cache.get(A, ctx());
+  assert(
+    a.ok && a.value.hit && b.ok && b.value.hit && a2.ok && a2.value.hit,
+    'expected hits',
+  );
+  // The section loads once; every later hit reads the mirror — the
+  // row-mount storm's per-hit full-state load is gone.
+  assertEqual(r.storage.loads.length, 1, 'repeat hits read the mirror');
+  assertEqual(r.storage.commits.length, 0, 'no per-hit commit');
+  // One debounced flush persists the whole burst of touches.
+  r.clock.advance(3_000);
+  await pump();
+  assertEqual(r.storage.commits.length, 1, 'one flush for the burst');
+  const stored = await r.storage.load(ctx());
+  assert(stored.ok);
+  assertEqual(stored.value.artworkCache[0]?.lastAccessedMs, 1_000);
+  assertEqual(stored.value.artworkCache[1]?.lastAccessedMs, 1_000);
+  assertEqual(r.storage.loads.length, 2, 'only the read-back loaded');
+}
+
+async function mirrorRefreshesAfterTtl(): Promise<void> {
+  const r = rig(persisted({ artworkCache: [seed(A, 8 * MB, 10)] }));
+  const first = await r.cache.get(A, ctx());
+  const second = await r.cache.get(A, ctx());
+  assert(first.ok && second.ok, 'hits failed');
+  assertEqual(r.storage.loads.length, 1, 'hits stay on the mirror');
+  // Past the refresh window the next hit reloads — a budget change
+  // from settings or an import is picked up within the window.
+  r.clock.advance(61_000);
+  const late = await r.cache.get(A, ctx());
+  assert(late.ok && late.value.hit, 'refreshed get must still hit');
+  assertEqual(r.storage.loads.length, 2, 'stale mirror reloaded');
+}
+
+async function commitFailureDropsMirror(): Promise<void> {
+  const r = rig(persisted({ artworkCache: [seed(A, 8 * MB, 10)] }));
+  const warm = await r.cache.get(A, ctx());
+  assert(warm.ok && warm.value.hit, 'warm hit failed');
+  // A structural mutation whose commit fails leaves the mirror
+  // claiming a deletion storage never applied — it is discarded.
+  r.paths.missing.add(destOf(A));
+  r.storage.failNext(appError('transient', 'db write failed'));
+  const failed = await r.cache.get(A, ctx());
+  assert(!failed.ok && failed.error.kind === 'transient');
+  assertEqual(r.fetch.calls.length, 0, 'never reached download');
+  assertEqual(r.storage.loads.length, 1, 'no reload on the mirror');
+  // The next get reloads storage truth: the row is back, its file
+  // still missing, so it reaps again and this commit lands.
+  r.fetch.respondBytes(4 * MB);
+  const healed = await r.cache.get(A, ctx());
+  assert(healed.ok, 'reloaded get failed');
+  assertEqual(healed.value.hit, false, 'reaped row re-downloads');
+  assertEqual(r.storage.loads.length, 2, 'mirror rebuilt from storage');
+  assertDeepEqual(await storedUrls(r.storage), [A]);
+}
+
+async function touchFlushRetriesOnFailure(): Promise<void> {
+  const r = rig(persisted({ artworkCache: [seed(A, 8 * MB, 10)] }));
+  const warm = await r.cache.get(A, ctx());
+  assert(warm.ok && warm.value.hit, 'warm hit failed');
+  r.clock.advance(500);
+  const hit = await r.cache.get(A, ctx());
+  assert(hit.ok && hit.value.hit, 'hit failed');
+  // Fail the first scheduled flush — the retry cycle re-arms on
+  // its own and lands the touch without another get scheduling it.
+  r.storage.failNext(appError('transient', 'db write failed'));
+  r.clock.advance(3_000);
+  await pump();
+  // The failed commit never reached the applied log.
+  assertEqual(r.storage.commits.length, 0, 'failed flush unapplied');
+  const still = await r.storage.load(ctx());
+  assert(still.ok);
+  assertEqual(
+    still.value.artworkCache[0]?.lastAccessedMs,
+    10,
+    'failed flush persisted nothing',
+  );
+  // The retry fires after a doubled delay (3s → 6s).
+  r.clock.advance(7_000);
+  await pump();
+  assertEqual(r.storage.commits.length, 1, 'retry committed once');
+  const after = await r.storage.load(ctx());
+  assert(after.ok);
+  assertEqual(
+    after.value.artworkCache[0]?.lastAccessedMs,
+    1_500,
+    'retry landed the touch',
+  );
+}
+
+async function sweepSeesUnflushedTouches(): Promise<void> {
+  // A touch still waiting on the debounced flush must count for
+  // recency — the sweep's fresh load carries the mirror's newer
+  // access times forward instead of regressing LRU order.
+  const r = rig(
+    persisted({
+      artworkCache: [
+        seed(A, 8 * MB, 10),
+        seed(B, 8 * MB, 20),
+        seed(C, 8 * MB, 30),
+      ],
+      settings: { ...SETTINGS, artworkCacheBytes: 17 * MB },
+    }),
+  );
+  const hit = await r.cache.get(A, ctx());
+  assert(hit.ok && hit.value.hit, 'expected hit');
+  // A was touched at 1000 but the flush has not run; a persisted-only
+  // sweep would still call it oldest. The mirror's time wins: B
+  // evicts instead of A.
+  const swept = await r.cache.sweep(ctx());
+  assert(swept.ok, 'sweep failed');
+  assertEqual(swept.value.evicted, 1);
+  assertEqual(r.paths.removed.join(','), destOf(B));
+  assertDeepEqual(await storedUrls(r.storage), [A, C]);
+}
+
 async function sweepReapsMissing(): Promise<void> {
   const r = rig(
     persisted({
@@ -942,6 +1077,11 @@ export async function run(): Promise<void> {
   await budgetResolution();
   await osReapedFileScoresMiss();
   await getExistsErrorIsHonest();
+  await hitsServeFromMirror();
+  await mirrorRefreshesAfterTtl();
+  await commitFailureDropsMirror();
+  await touchFlushRetriesOnFailure();
+  await sweepSeesUnflushedTouches();
   await sweepReapsMissing();
   await sweepExistsErrorKeepsRow();
 }
