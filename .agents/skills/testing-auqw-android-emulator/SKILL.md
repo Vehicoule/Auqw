@@ -279,3 +279,11 @@ unchanged before flagging).
   the checkout — recreate it from the recipe in the sync section above
   (createSyncService on 0.0.0.0:0, in-memory engine, 45 s pair codes,
   reachable at 10.0.2.2).
+
+## Auth / device-flow gates (post-#209)
+
+- **Metro is `pnpm start` (expo start) from `apps/mobile/`** — `pnpm exec react-native start` fails (no @react-native-community/cli dep).
+- **Poll-lifecycle proof without log lines**: the OAuth token poll emits no logs. Verify via the settings row: it stays 'working...' ('authorizing') after sheet dismissal, and the reopened sheet shows the SAME userCode (a fresh begin always mints a new code — same code = resume proof).
+- **Process-death resume**: `adb shell am force-stop com.vehicoule.auqw` mid-authorizing → cold relaunch → row still 'working...' → sheet shows same code (pendingFlow survived in expo-secure-store).
+- **Cold-boot recovery**: if the emulator is down — `DISPLAY=:0 emulator -avd auqw -no-snapshot-save -gpu swiftshader_indirect` + `adb wait-for-device` + wait for `sys.boot_completed`.
+- **Debug ↔ release installs**: both variants share the debug signing key — `adb install -r` between them preserves app data.
