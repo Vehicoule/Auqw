@@ -1795,6 +1795,79 @@ export async function run(): Promise<void> {
     assert(port.closed, 'dead session closed its port');
   }
 
+  // A typed pump verdict BEFORE MSE readiness skips the loopback —
+  // re-serving the same dead stream would launder the kind to
+  // transient through the element.
+  {
+    const audio = fakeAudio();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(media),
+    });
+    await player.prepare({
+      provider: 'youtube-music',
+      sourceRef: 'track:walled',
+      identity,
+    });
+    const playing = player.play({ handle: 'h-1', identity });
+    await settle();
+    port.feed({
+      kind: 'error',
+      epoch: 0,
+      code: 'provider-wall',
+      message: 'bot-check',
+    });
+    const played = await playing;
+    assert(
+      !played.ok && played.error.kind === 'provider-wall',
+      `early wall rides the taxonomy, got ${JSON.stringify(played)}`,
+    );
+    assert(
+      !stream.calls.some((c) => c.method === 'serveUrl'),
+      'no loopback for a typed verdict',
+    );
+  }
+
+  // A transport death before readiness keeps the loopback leg — the
+  // session may still have bytes the pump never reached.
+  {
+    const audio = fakeAudio();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(media),
+    });
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    const playing = player.play({ handle: 'h-1', identity });
+    await settle();
+    port.feed({
+      kind: 'error',
+      epoch: 0,
+      code: 'io-error',
+      message: 'read died',
+    });
+    await playing;
+    assert(
+      stream.calls.some((c) => c.method === 'serveUrl'),
+      'transport death still takes the loopback',
+    );
+  }
+
   // A stop before the MSE attach settles aborts it directly — the
   // unresolved attach has no activeMse to drop, so without the
   // pending-attach registry its pump lease would outlive the dead op.
