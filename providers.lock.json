@@ -28,7 +28,7 @@
       "id": "lyrics-lrclib",
       "version": "0.1.4",
       "abi": "0.3.0",
-      "digest": "sha256:307c2397b1877f47975195d7f58d0d9aef7e96823ead9407f9f950aff7e379c7",
+      "digest": "sha256:6e759cabd05b35dd0b3baa070f217dd7ad9aa1377fd6c7eab2b838ab6cea3203",
       "source": "release:../auqw-plugins/releases/lyrics-lrclib/0.1.4"
     }
   ]

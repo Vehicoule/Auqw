@@ -281,7 +281,8 @@ const LYRICS_MISS_TTL_MS = 30 * 60_000;
 type LyricsMiss = {
   readonly provider: string;
   readonly providerVersion: string | null;
-  readonly durationMs: number | null;
+  /** The lookup as issued — the miss only stands for these fields. */
+  readonly query: LyricsQuery;
   readonly fetchedMs: number;
 };
 /**
@@ -577,6 +578,10 @@ export class Session {
         swapReady: () => {
           this.#ready = null;
           this.#state = { type: 'unhydrated' };
+          // An imported library's recordings never proved their
+          // lyrics lookups — misses the previous Ready remembered
+          // would suppress the first honest fetch for them.
+          this.#lyricsMisses.clear();
         },
         restore: () => {
           // A fresh load, never a shared in-flight restore: the memo
@@ -2035,8 +2040,9 @@ export class Session {
     const provider = routed.value;
     // A miss the provider already answered suppresses the refetch —
     // but only under the same freshness rule as a real row: provider,
-    // version, and the recording's duration must all still hold, so a
-    // plugin upgrade or corrected metadata re-proves the lookup.
+    // version, and every field the lookup was issued with must all
+    // still hold, so a plugin upgrade or any corrected metadata
+    // (title fix, artist tag, new album, new ISRC) re-proves it.
     const nowMs = this.#safeNow();
     const miss = this.#lyricsMisses.get(recordingId);
     if (
@@ -2044,7 +2050,11 @@ export class Session {
       nowMs !== null &&
       miss.provider === provider.id &&
       miss.providerVersion === provider.version &&
-      miss.durationMs === recording.durationMs &&
+      miss.query.title === recording.title &&
+      miss.query.artist === recording.artist &&
+      miss.query.album === recording.album &&
+      miss.query.durationMs === recording.durationMs &&
+      miss.query.isrc === recording.isrc &&
       nowMs >= miss.fetchedMs &&
       nowMs - miss.fetchedMs < LYRICS_MISS_TTL_MS
     ) {
@@ -2105,8 +2115,13 @@ export class Session {
       // a provider that also declares lyrics.plain may hold plain-only
       // records the synced flavor could never serve. One second call
       // rescues them; an error there is surfaced like the first's.
+      // The gate is BOTH capabilities: when the provider lacks
+      // lyrics.synced, prefer:'synced' already mapped to the plain
+      // capability upstream — a second call would re-issue the same
+      // request verbatim.
       if (
         accepted.kind === 'unavailable' &&
+        provider.capabilities.includes('lyrics.synced') &&
         provider.capabilities.includes('lyrics.plain')
       ) {
         const plain = await fetchLyrics('plain');
@@ -2136,7 +2151,7 @@ export class Session {
           this.#lyricsMisses.set(recording.id, {
             provider: provider.id,
             providerVersion: provider.version,
-            durationMs: recording.durationMs,
+            query,
             fetchedMs,
           });
         }

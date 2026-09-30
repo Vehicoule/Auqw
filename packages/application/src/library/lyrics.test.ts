@@ -31,6 +31,7 @@ import {
 } from './lyrics.ts';
 import { isLyricsCacheEntry } from './library.ts';
 import type { LyricsCacheEntry } from './library.ts';
+import { exportLibrary } from './export-import.ts';
 
 const MATCHED: LyricsMatch = {
   title: 'Song r1',
@@ -1051,6 +1052,26 @@ async function noFallbackWithoutPlainCapability(): Promise<void> {
   await r.session.dispose();
 }
 
+// The plain-only mirror image: prefer:'synced' already resolved to
+// the provider's plain capability upstream, so its 'unavailable' IS
+// the plain answer — a fallback call would re-issue the same request.
+async function plainOnlyProviderSkipsDuplicateFallback(): Promise<void> {
+  const plainOnly = new FakeProvider('plain-lyrics', ['lyrics.plain']);
+  const r = rig(persisted({ recordings: [recording('r1')] }), [plainOnly]);
+  await r.session.restore();
+  const pending = r.session.getLyrics('r1');
+  await pump();
+  plainOnly.settleLyrics(ok({ kind: 'unavailable', matched: null }));
+  const sheet = await pending;
+  assert(sheet.ok && sheet.value.kind === 'unavailable');
+  assertEqual(
+    lyricsCalls(plainOnly),
+    1,
+    'plain-only provider takes no duplicate fallback',
+  );
+  await r.session.dispose();
+}
+
 // A hard failure on the plain fallback surfaces as an error — absence
 // is not proven when the second flavor could not answer.
 async function fallbackFailureSurfaces(): Promise<void> {
@@ -1155,6 +1176,84 @@ async function durationChangeReprovesMiss(): Promise<void> {
   await r.session.dispose();
 }
 
+// The miss is keyed on the whole lookup, not the duration alone: a
+// metadata correction that leaves duration untouched — a retagged
+// artist — re-proves it all the same.
+async function metadataChangeReprovesMiss(): Promise<void> {
+  const lrclib = new FakeProvider('lyrics-lrclib', [
+    'lyrics.plain',
+    'lyrics.synced',
+  ]);
+  const r = rig(persisted({ recordings: [recording('r1')] }), [lrclib]);
+  await r.session.restore();
+  const pending = r.session.getLyrics('r1');
+  await pump();
+  lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null }));
+  await pump();
+  lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null }));
+  await pending;
+  const upserted = await r.session.enqueueMetadata({
+    sourceRef: trackRef('itunes', 'it-r1'),
+    title: 'Song r1',
+    artist: 'Corrected Artist',
+    album: 'Album',
+    durationMs: 300_000,
+    releaseYear: 2020,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    storefront: 'US',
+  });
+  assert(upserted.ok, 'metadata refresh lands');
+  const pending2 = r.session.getLyrics('r1');
+  await pump();
+  assertEqual(lyricsCalls(lrclib), 3, 'artist change refetches');
+  lrclib.settleLyrics(ok({ kind: 'plain', text: 'words', matched: MATCHED }));
+  const sheet = await pending2;
+  assert(sheet.ok && sheet.value.kind === 'plain');
+  await r.session.dispose();
+}
+
+// Importing a library replaces Ready wholesale — misses the old
+// library proved must not suppress the imported recordings' first
+// honest lookups, even when the same recording id lands again.
+async function importLibraryClearsMisses(): Promise<void> {
+  const lrclib = new FakeProvider('lyrics-lrclib', [
+    'lyrics.plain',
+    'lyrics.synced',
+  ]);
+  const r = rig(persisted({ recordings: [recording('r1')] }), [lrclib]);
+  await r.session.restore();
+  const pending = r.session.getLyrics('r1');
+  await pump();
+  lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null }));
+  await pump();
+  lrclib.settleLyrics(ok({ kind: 'unavailable', matched: null }));
+  await pending;
+  assertEqual(lyricsCalls(lrclib), 2, 'miss booked');
+  const doc = await exportLibrary(
+    new FakeStorage(persisted({ recordings: [recording('r1')] })),
+    new FakeClock(3_000),
+    {
+      requestId: 't',
+      deadlineMs: 60_000,
+      signal: new CancellationSource().signal,
+    },
+  );
+  assert(doc.ok);
+  const imported = await r.session.importLibrary(doc.value.json);
+  assert(imported.ok, 'import resolves');
+  const importedId = readyOf(r).recordings[0]?.id;
+  assert(importedId !== undefined, 'imported recording present');
+  const pending2 = r.session.getLyrics(importedId);
+  await pump();
+  assertEqual(lyricsCalls(lrclib), 3, 'imported recording refetches');
+  lrclib.settleLyrics(ok({ kind: 'plain', text: 'words', matched: MATCHED }));
+  const sheet = await pending2;
+  assert(sheet.ok && sheet.value.kind === 'plain');
+  await r.session.dispose();
+}
+
 export async function run(): Promise<void> {
   syncedAcceptance();
   otherAcceptance();
@@ -1171,7 +1270,10 @@ export async function run(): Promise<void> {
   await cancellation();
   await plainFallbackRescuesSyncedAbsence();
   await noFallbackWithoutPlainCapability();
+  await plainOnlyProviderSkipsDuplicateFallback();
   await fallbackFailureSurfaces();
   await transientRetryCrossesTheBlip();
   await durationChangeReprovesMiss();
+  await metadataChangeReprovesMiss();
+  await importLibraryClearsMisses();
 }
