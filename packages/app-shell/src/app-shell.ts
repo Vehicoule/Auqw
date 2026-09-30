@@ -3001,15 +3001,21 @@ export function useAppShell<E extends { readonly type: string } = never>(
     setSearchFocusTick((n) => n + 1);
   }, [clearOverlays]);
   // Every open lands on the player pane — a hidden stage that reopens
-  // must not revive the last mode.
+  // must not revive the last mode. Except an idle stage with an ended
+  // queue: it reopens on the queue so its rows stay replayable — the
+  // same surface the idle-transition effect picks while it's open.
   const setStageOpenFor = useCallback(
     (open: boolean) => {
       if (open) {
-        setStageMode('player');
+        setStageMode(
+          state.playback.type === 'idle' && queueModel.ended
+            ? 'queue'
+            : 'player',
+        );
       }
       setStageOpen(open);
     },
-    [],
+    [state.playback.type, queueModel.ended],
   );
 
   const toggleReordering = useCallback(() => {
