@@ -745,4 +745,41 @@ export async function run(): Promise<void> {
       'hole-only probes defer to sequential reads',
     );
   }
+
+  // Failed decodes never count toward the coarse threshold — an
+  // all-zero "measured" profile would be fabricated bars.
+  {
+    const { file } = fakeWebm({
+      clusters: [0, 5000, 10000, 15000].map((tc, i) => ({
+        tc,
+        payload: 64 + i,
+      })),
+      cues: true,
+    });
+    const stream = fakeStream({ probeFile: file });
+    const coarseEmits: number[] = [];
+    const port = createWebPeaksPort({
+      stream,
+      decode: () => Promise.reject(new Error('undecodable')),
+      sampledMinTotalBytes: 1,
+      coarseProbes: 4,
+      refineProbes: 2,
+    });
+    const result = await port.peaks(
+      {
+        handle: 'h-s5',
+        durationMs: 20_000,
+        onCoarse: () => {
+          coarseEmits.push(1);
+        },
+      },
+      context(),
+    );
+    assert(!result.ok, 'a stream that cannot decode fails honestly');
+    assertEqual(
+      coarseEmits.length,
+      0,
+      'no coarse emission without a single measured sample',
+    );
+  }
 }

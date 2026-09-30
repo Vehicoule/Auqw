@@ -50,6 +50,8 @@ type Inflight = {
   readonly source: CancellationSource;
   /** Latest pull args — a `durationMs` update rides the live sweep. */
   target: PeaksTarget;
+  /** Content key — dedupes pulls across attempt ids for one recording. */
+  readonly key: string;
 };
 
 export type PeaksTrackerDeps = {
@@ -111,6 +113,14 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
   const ids = deps.ids ?? processIds;
   const store = deps.store;
   const cache = new Map<string, readonly WaveformPeak[] | null>();
+  /**
+   * Which content keys hold a *finished* profile. `onCoarse` writes
+   * real-but-partial bars under the key; a coarse-only entry still
+   * renders via `get` but must never convince a later pull the work
+   * is done — extraction continues (or restarts) until the port
+   * settles a final result or a persisted profile lands.
+   */
+  const finalized = new Set<string>();
   // Terminal nulls judged under a declared over-cap duration are
   // duration-dependent (the port's declared-length gate, unlike the
   // PCM ceiling): a later pull carrying a corrected durationMs under
@@ -126,15 +136,18 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
       }
       cache.delete(oldest);
       gatedNullMs.delete(oldest);
+      finalized.delete(oldest);
     }
   }
 
   function pull(target: PeaksTarget): void {
     const { id } = target;
     const key = contentKey(id);
-    // A settled profile under the content key serves every later
-    // attempt — the peaks describe the recording, not the mint.
-    if (cache.has(key)) {
+    // A *finished* profile under the content key serves every later
+    // attempt — the peaks describe the recording, not the mint. A
+    // coarse-only entry is preliminary: it renders while extraction
+    // still owes a final result, so it never short-circuits work.
+    if (finalized.has(key)) {
       const value = cache.get(key);
       cache.delete(key);
       cache.set(key, value ?? null);
@@ -150,15 +163,16 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
       ) {
         gatedNullMs.delete(id);
         cache.delete(id);
-      } else {
-        // Cache hit (including a settled `null`): reinsert so the
-        // revisit bumps recency — the Map's iteration order is the LRU
-        // order eviction walks.
+      } else if (!Array.isArray(cache.get(id))) {
+        // Settled `null`: reinsert so the revisit bumps recency — the
+        // Map's iteration order is the LRU order eviction walks.
         const value = cache.get(id);
         cache.delete(id);
         cache.set(id, value ?? null);
         return;
       }
+      // An array under the bare id is a coarse profile — bars to show
+      // while extraction continues, not a reason to stop.
     }
     const live = inflight.get(id);
     if (live !== undefined) {
@@ -185,9 +199,17 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
       live.target = target;
       return;
     }
+    // A live sweep for the same content already covers this pull —
+    // its coarse and final results land under the same key.
+    for (const running of inflight.values()) {
+      if (running.key === key) {
+        return;
+      }
+    }
     const entry: Inflight = {
       source: new CancellationSource(),
       target,
+      key,
     };
     inflight.set(id, entry);
 
@@ -219,6 +241,7 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
         }
         if (result.ok) {
           cache.set(key, result.value);
+          finalized.add(key);
           // Clear this attempt's own failure sentinel — but never
           // the content row just written (key === id when the caller
           // passes a bare recording id).
@@ -318,6 +341,7 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
           }
           if (persisted !== null && persisted.length > 0) {
             cache.set(key, persisted);
+            finalized.add(key);
             inflight.delete(id);
             evict();
             onChange?.();

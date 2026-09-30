@@ -41,12 +41,24 @@ export function createPeaksCacheStore(
   return {
     async load(recordingId) {
       try {
-        const rows = await driver.transaction((conn) =>
-          conn.query<{ recording_id: string; peaks_json: string }>(
-            'SELECT peaks_json FROM peaks_cache WHERE recording_id = ?',
-            [recordingId],
-          ),
-        );
+        // The LRU bound prunes on last-touch order, so a hit bumps the
+        // row's recency in the same transaction — a frequently played
+        // profile can't be evicted by newer saves while it's still read.
+        const rows = await driver.transaction(async (conn) => {
+          const hit = await conn.query<{
+            recording_id: string;
+            peaks_json: string;
+          }>('SELECT peaks_json FROM peaks_cache WHERE recording_id = ?', [
+            recordingId,
+          ]);
+          if (hit.length > 0) {
+            await conn.execute(
+              'UPDATE peaks_cache SET fetched_ms = ? WHERE recording_id = ?',
+              [now(), recordingId],
+            );
+          }
+          return hit;
+        });
         const json = rows[0]?.['peaks_json'];
         if (typeof json !== 'string') {
           return null;

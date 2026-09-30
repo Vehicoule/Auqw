@@ -570,11 +570,22 @@ export function createWebPeaksPort(deps: {
     // measured edge grows the estimate as samples land — a late
     // durationMs re-pull reuses the now-committed extents for free.
     let totalMs = request.durationMs ?? 0;
-    const sparse: SparseWindows = new Array<PeakWindow | null>(
+    // Bucketing is DEFERRED: every decoded sample keeps its PCM until
+    // emit time, so a still-growing totalMs never strands earlier
+    // buckets under a stale width — each emitted profile rebuilds all
+    // windows under the then-current estimate. Retention is bounded by
+    // the same PCM budget the whole-file path pays; past it a sample
+    // merges eagerly into `overflow` under the estimate at hand.
+    const samples: {
+      mediaMs: number;
+      channels: Float32Array[];
+      pcmMs: number;
+    }[] = [];
+    const overflow: SparseWindows = new Array<PeakWindow | null>(
       PEAKS_RESOLUTION,
     ).fill(null);
-    const measured = (): number =>
-      sparse.reduce((n, w) => n + (w === null ? 0 : 1), 0);
+    let retainedPcmBytes = 0;
+    let applied = 0;
 
     const apply = async (
       assembled: Uint8Array,
@@ -590,8 +601,39 @@ export function createWebPeaksPort(deps: {
       }
       const pcmMs = (audio.length / audio.sampleRate) * 1000;
       totalMs = Math.max(totalMs, mediaMs + pcmMs);
-      mergeSample(sparse, mediaMs, channels, pcmMs, totalMs);
+      const pcmBytes = audio.length * audio.numberOfChannels * 4;
+      if (retainedPcmBytes + pcmBytes <= maxPcmBytes) {
+        retainedPcmBytes += pcmBytes;
+        samples.push({ mediaMs, channels, pcmMs });
+      } else {
+        mergeSample(overflow, mediaMs, channels, pcmMs, totalMs);
+      }
+      applied += 1;
       return true;
+    };
+
+    // Rebuild the dense profile under the current duration estimate —
+    // called at coarse-emit and at settle, so an estimate that kept
+    // growing remaps every sample consistently rather than painting
+    // early windows across the whole bar row.
+    const buildProfile = (): readonly WaveformPeak[] => {
+      const windows: SparseWindows = new Array<PeakWindow | null>(
+        PEAKS_RESOLUTION,
+      ).fill(null);
+      for (const s of samples) {
+        mergeSample(windows, s.mediaMs, s.channels, s.pcmMs, totalMs);
+      }
+      for (let i = 0; i < PEAKS_RESOLUTION; i += 1) {
+        const o = overflow[i];
+        if (o != null) {
+          const w = windows[i];
+          windows[i] =
+            w == null
+              ? o
+              : { up: Math.max(w.up, o.up), down: Math.max(w.down, o.down) };
+        }
+      }
+      return normalizePeakWindows(fillSparseWindows(windows));
     };
 
     // Free coverage: the head already carries the first complete
@@ -612,9 +654,20 @@ export function createWebPeaksPort(deps: {
     const positions: { byte: number; mediaMs: number | null }[] = [];
     if (cues.length > 0) {
       const wanted = coarseProbes + refineProbes;
-      const stride = Math.max(1, Math.floor(cues.length / wanted));
-      for (let i = 0; i < cues.length && positions.length < wanted; i += stride) {
-        const cue = cues[i]!;
+      // Evenly spaced indexes across the WHOLE cue range, including
+      // the last entry — a plain stride skips the tail whenever cues
+      // outnumber the probe budget.
+      const picked = new Set<number>();
+      for (let i = 0; i < wanted; i += 1) {
+        const idx =
+          wanted === 1
+            ? 0
+            : Math.round((i * (cues.length - 1)) / (wanted - 1));
+        if (picked.has(idx)) {
+          continue;
+        }
+        picked.add(idx);
+        const cue = cues[idx]!;
         // A cue landing inside the head's already-committed span is
         // still probed — the seam serves committed extents for free,
         // and the assemble+decode cost is the real spend either way.
@@ -635,7 +688,6 @@ export function createWebPeaksPort(deps: {
     }
 
     let next = 0;
-    let probed = 0;
     let coarseSent = false;
     const probeOne = async (): Promise<void> => {
       while (next < positions.length) {
@@ -673,19 +725,17 @@ export function createWebPeaksPort(deps: {
           concatBytes([init, buf.subarray(clusterAt, end)]),
           mediaMs,
         );
-        probed += 1;
-        // Coarse boundary: once the first batch has landed enough
-        // measured buckets, emit the filled profile — real bars in
-        // the sub-200 ms window; the rest of the flight refines
-        // under it without a visual pop.
+        // Coarse boundary: once enough MEASURED samples have landed
+        // (a failed decode never counts — zeros are not bars), emit
+        // the filled profile — real bars in the sub-200 ms window;
+        // the rest of the flight refines under it without a pop.
         if (
           !coarseSent &&
-          probed + (seeded ? 1 : 0) >=
-            Math.max(2, Math.floor(coarseProbes / 2)) &&
+          applied >= Math.max(2, Math.floor(coarseProbes / 2)) &&
           onCoarse !== undefined
         ) {
           coarseSent = true;
-          onCoarse(normalizePeakWindows(fillSparseWindows(sparse)));
+          onCoarse(buildProfile());
         }
       }
     };
@@ -696,12 +746,12 @@ export function createWebPeaksPort(deps: {
     if (context.signal.cancelled) {
       return err(appError('cancelled', 'peak extraction cancelled'));
     }
-    if (measured() === 0) {
+    if (applied === 0) {
       // Every sample failed — the bytes aren't what the head claimed;
       // the whole-file pull may still decode. 'null' = fall back.
       return ok(null);
     }
-    return ok(normalizePeakWindows(fillSparseWindows(sparse)));
+    return ok(buildProfile());
   }
 
   return {

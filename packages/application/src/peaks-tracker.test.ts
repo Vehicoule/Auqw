@@ -523,4 +523,42 @@ export async function run(): Promise<void> {
       'a fresh attempt re-earns the sweep',
     );
   }
+
+  // A coarse-only entry renders but never counts as done: cancel the
+  // flight mid-coarse and the next pull re-extracts; only a finished
+  // profile skips work.
+  {
+    const coarse: readonly WaveformPeak[] = [{ up: 0.2, down: 0.1 }];
+    const { calls, port } = fakePort();
+    const tracker = createPeaksTracker({ port, clock: new FakeClock() });
+    tracker.pull(target('r-12|a1', 'h1'));
+    await settle();
+    calls[0]!.request.onCoarse?.(coarse);
+    tracker.cancel('r-12|a1');
+    // The stale completion belongs to the cancelled generation.
+    calls[0]!.resolve(ok(PEAKS));
+    await settle();
+    assertEqual(
+      tracker.get('r-12|a2'),
+      coarse,
+      'the partial profile still renders',
+    );
+    tracker.pull(target('r-12|a2', 'h2'));
+    await settle();
+    assertEqual(
+      calls.length,
+      2,
+      'a coarse-only cache never skips refinement',
+    );
+    calls[1]!.resolve(ok(PEAKS));
+    await settle();
+    assertEqual(
+      tracker.get('r-12|a2'),
+      PEAKS,
+      'the finished result lands under the same key',
+    );
+    tracker.pull(target('r-12|a3', 'h3'));
+    await settle();
+    assertEqual(calls.length, 2, 'a finished profile does skip work');
+  }
 }

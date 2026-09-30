@@ -452,19 +452,35 @@ impl StreamRegistry {
             }
             FetchOutcome::Status(416, range_total, _) => {
                 // Same wire rule as the pump: a `bytes */N` total is
-                // authoritative EOF evidence; without it the bare
-                // refusal still confirms *this* position empty but
-                // cannot set the session ceiling (a dead signed URL
-                // is indistinguishable — the element's demand owns
-                // the re-mint that disambiguates).
+                // authoritative — a refusal AT/PAST it confirms EOF;
+                // one covering the probe position is self-contradictory
+                // and must not set a ceiling it can't honor.
                 if let Some(total) = range_total {
                     session.check_total(total)?;
+                    if position < total {
+                        return Err(StreamError::InvalidResponse {
+                            message: format!(
+                                "416 at offset {position} but Content-Range declares total {total}"
+                            ),
+                        });
+                    }
                     session.mark_eof_below(total);
+                    return Ok(ProbeRead {
+                        bytes: Vec::new(),
+                        total: session.effective_total()?,
+                        eof: true,
+                    });
                 }
+                // Bare refusal: ambiguous between real EOF and a dead
+                // signed URL, and the probe never re-mints to
+                // disambiguate — it confirms only what the known total
+                // already proves; otherwise the position is simply
+                // unprobed (`eof: false` like an unfetched hole).
+                let proven = matches!(session.effective_total()?, Some(t) if position >= t);
                 Ok(ProbeRead {
                     bytes: Vec::new(),
                     total: session.effective_total()?,
-                    eof: true,
+                    eof: proven,
                 })
             }
             FetchOutcome::Status(429, _, retry_after_ms) => {

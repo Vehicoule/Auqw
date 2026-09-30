@@ -78,6 +78,38 @@ const TESTS: [string, () => Promise<void>][] = [
     },
   ],
   [
+    'lruReadsRefreshRecency',
+    async () => {
+      const driver = new NodeSqliteDriver();
+      const storage = new SqliteStorage(driver, SETTINGS);
+      const loaded = await storage.load(ctx());
+      assert(loaded.ok, 'storage initializes');
+      let tick = 0;
+      const peaks = createPeaksCacheStore(driver, () => ++tick);
+      await peaks.save('cold-a', profile(4));
+      await peaks.save('hot', profile(4));
+      await peaks.save('cold-b', profile(4));
+      for (let i = 0; i < 253; i++) {
+        await peaks.save(`cold-${i}`, profile(4));
+      }
+      // At capacity now; the hot row is the oldest after 'cold-a' has
+      // already evicted — reads alone keep it alive.
+      await peaks.load('hot');
+      for (let i = 0; i < 5; i++) {
+        await peaks.save(`cold-new-${i}`, profile(4));
+      }
+      assert(
+        (await peaks.load('hot')) !== null,
+        'a row kept hot by reads survives write-age eviction',
+      );
+      assertEqual(
+        await peaks.load('cold-b'),
+        null,
+        'an untouched older row still evicts',
+      );
+    },
+  ],
+  [
     'corruptRowIsNull',
     async () => {
       const driver = new NodeSqliteDriver();
