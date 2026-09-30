@@ -279,7 +279,8 @@ async function scenarioLyrics() {
   await pump();
   lrclib.settleLyrics(err(appError('transient', 'down')));
   await pump();
-  clock.advance(500);
+  // The lyrics retry backs off at an 800 ms base — cross it.
+  clock.advance(800);
   await pump();
   lrclib.settleLyrics(ok({ kind: 'plain', text: 'words', matched: null }));
   const sheet = await pending;

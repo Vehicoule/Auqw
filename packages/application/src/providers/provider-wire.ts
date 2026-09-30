@@ -124,14 +124,11 @@ export function decodeProviderOutcome<T>(
   decode: ProviderDecoder<T>,
 ): Result<T> {
   if (outcome.type === 'failed') {
-    return err(
-      appError(
-        kindOf(outcome.kind),
-        typeof outcome.message === 'string' && outcome.message.length > 0
-          ? outcome.message
-          : 'plugin request failed',
-      ),
-    );
+    const message =
+      typeof outcome.message === 'string' && outcome.message.length > 0
+        ? outcome.message
+        : 'plugin request failed';
+    return err(appError(kindOf(outcome.kind), message, retryAfterMsOf(message)));
   }
   let parsed: unknown;
   try {
@@ -141,6 +138,19 @@ export function decodeProviderOutcome<T>(
   }
   const decoded = decode(parsed);
   return decoded === null ? err(invalidProviderResult()) : ok(decoded);
+}
+
+/**
+ * A `failed` wire outcome carries no structured retry hint — guests
+ * ride the provider's cooldown in the message as `retry_after=<secs>`
+ * (the convention both lyrics-lrclib and deezer use for upstream
+ * Retry-After). Parses it into AppError.retryAfterMs so the retry
+ * policy honors the provider's own window instead of guessing one.
+ * The value is capped by the 10-digit literal, always a safe ms.
+ */
+function retryAfterMsOf(message: string): number | undefined {
+  const m = /\bretry_after=(\d{1,10})/.exec(message);
+  return m === null ? undefined : Number(m[1]) * 1000;
 }
 
 function isOptInt(
