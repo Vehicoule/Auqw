@@ -193,7 +193,7 @@ export function PlatformTabs({
         {...(accessory != null && Platform.OS === 'ios'
           ? {
               renderBottomAccessoryView: () => (
-                <View style={{ paddingHorizontal: 4 }}>{accessory}</View>
+                <View style={{ paddingHorizontal: theme.spacing.xs }}>{accessory}</View>
               ),
             }
           : {})}

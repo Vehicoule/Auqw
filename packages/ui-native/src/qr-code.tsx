@@ -3,6 +3,7 @@ import { View } from 'react-native';
 import Svg, { Path, Rect } from 'react-native-svg';
 import { encode } from 'uqr';
 import { t } from '@auqw/ui-shared';
+import { useTheme } from './theme.tsx';
 
 /**
  * QR payload rendered as an inline react-native-svg — uqr produces
@@ -18,6 +19,7 @@ export function QrCode({
   readonly data: string;
   readonly size?: number | undefined;
 }) {
+  const theme = useTheme();
   const { d, modules } = useMemo(() => {
     const { data: matrix } = encode(data, { ecc: 'M' });
     const parts: string[] = [];
@@ -42,8 +44,8 @@ export function QrCode({
       accessible
       style={{
         backgroundColor: 'white',
-        borderRadius: 12,
-        padding: 12,
+        borderRadius: theme.radius.float,
+        padding: theme.spacing.md,
         alignSelf: 'center',
       }}
     >

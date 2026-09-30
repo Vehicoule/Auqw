@@ -1003,7 +1003,7 @@ export function EqBars({
         flexDirection: 'row',
         alignItems: 'flex-end',
         height: size,
-        gap: 2,
+        gap: theme.spacing.xxs,
       }}
     >
       {EQ_HEIGHTS.map((h, i) => (

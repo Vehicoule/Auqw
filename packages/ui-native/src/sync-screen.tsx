@@ -145,7 +145,7 @@ function PeerRow({
 }) {
   const theme = useTheme();
   return (
-    <View style={{ padding: 14, gap: theme.spacing.xs }}>
+    <View style={{ padding: theme.spacing.screen, gap: theme.spacing.xs }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: theme.spacing.sm }}>
         <Text variant="body" color="primary" style={{ flex: 1 }} numberOfLines={1}>
           {peer.name}
@@ -232,7 +232,7 @@ function PairForm({
     },
   ];
   return (
-    <View style={{ padding: 14, gap: theme.spacing.sm }}>
+    <View style={{ padding: theme.spacing.screen, gap: theme.spacing.sm }}>
       <Text variant="metadata" color="secondary">
         {t('sync.form.help')}
       </Text>
@@ -325,7 +325,7 @@ function PayloadPasteForm({
   return (
     <View
       style={{
-        padding: 14,
+        padding: theme.spacing.screen,
         gap: theme.spacing.sm,
       }}
     >
@@ -376,7 +376,7 @@ function ShareSection({
 }) {
   const theme = useTheme();
   return (
-    <View style={{ padding: 14, gap: theme.spacing.sm }}>
+    <View style={{ padding: theme.spacing.screen, gap: theme.spacing.sm }}>
       <Text variant="metadata" color="secondary">
         {t('sync.shareHint')}
       </Text>
@@ -441,8 +441,8 @@ function ShareSection({
         style={({ pressed }) => [
           {
             alignSelf: 'flex-start',
-            paddingHorizontal: 18,
-            paddingVertical: 8,
+            paddingHorizontal: theme.spacing.lg,
+            paddingVertical: theme.spacing.sm,
             borderRadius: theme.radius.control,
             backgroundColor: share.active
               ? theme.colors.hairline
@@ -480,7 +480,7 @@ function NearbyRow({
   const [code, setCode] = useState('');
   const ready = /^[0-9]{6}$/.test(code);
   return (
-    <View style={{ padding: 14, gap: theme.spacing.xs }}>
+    <View style={{ padding: theme.spacing.screen, gap: theme.spacing.xs }}>
       <Pressable
         onPress={() => setOpen((v) => !v)}
         disabled={onPair === undefined}
@@ -547,7 +547,7 @@ function NearbyRow({
             accessibilityRole="button"
             style={({ pressed }) => [
               {
-                paddingHorizontal: 18,
+                paddingHorizontal: theme.spacing.lg,
                 justifyContent: 'center',
                 borderRadius: theme.radius.control,
                 backgroundColor: theme.colors.accent,
@@ -626,7 +626,7 @@ export function SyncScreen({
           style={{
             marginHorizontal: theme.spacing.screen,
             marginTop: theme.spacing.xl,
-            padding: 14,
+            padding: theme.spacing.screen,
             borderRadius: theme.radius.control,
             borderWidth: theme.strokes.hairline,
             borderColor: theme.colors.hairline,
@@ -664,7 +664,7 @@ export function SyncScreen({
 
           {nearbyPeers !== undefined && onPairNearby !== undefined && (
             <Section title={t('sync.nearby')}>
-              <View style={{ padding: 14 }}>
+              <View style={{ padding: theme.spacing.screen }}>
                 <Text variant="metadata" color="secondary">
                   {nearbyPeers.length === 0
                     ? t('sync.nearby.none')
@@ -688,7 +688,7 @@ export function SyncScreen({
             <Section title={t('sync.section.devices')}>
               {model.peers.map((peer, i) => (
                 <View key={peer.key}>
-                  {i > 0 && <Hairline style={{ marginLeft: 14 }} />}
+                  {i > 0 && <Hairline style={{ marginLeft: theme.spacing.screen }} />}
                   <PeerRow
                     peer={peer}
                     onSyncNow={onSyncNow}
@@ -716,7 +716,7 @@ export function SyncScreen({
                     accessibilityLabel={t('sync.scanA11y')}
                     accessibilityRole="button"
                     style={({ pressed }) => [
-                      { padding: 14 },
+                      { padding: theme.spacing.screen },
                       pressed && { opacity: 0.6 },
                     ]}
                   >
@@ -750,7 +750,7 @@ export function SyncScreen({
                 style={{
                   flexDirection: 'row',
                   gap: theme.spacing.md,
-                  padding: 14,
+                  padding: theme.spacing.screen,
                 }}
               >
                 {(

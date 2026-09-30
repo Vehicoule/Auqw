@@ -105,7 +105,7 @@ export function TrackRow({
       style={{
         flexDirection: 'row',
         alignItems: 'center',
-        gap: 11,
+        gap: theme.spacing.md,
         minHeight: theme.sizes.trackRow * theme.textScale,
         paddingHorizontal: theme.spacing.sm,
         borderRadius: theme.radius.control,
@@ -132,7 +132,7 @@ export function TrackRow({
           ) : (
             // Paired chevrons: clamp vertical slop so their hit
             // regions can't overlap and misroute the move direction.
-            <View style={{ gap: 2 }}>
+            <View style={{ gap: theme.spacing.xxs }}>
               <IconButton
                 icon="chevron-up"
                 size={20}
@@ -175,7 +175,7 @@ export function TrackRow({
             minWidth: 0,
             flexDirection: 'row',
             alignItems: 'center',
-            gap: 11,
+            gap: theme.spacing.md,
             borderRadius: theme.radius.control,
           },
           pressed && { backgroundColor: theme.colors.fg08 },
@@ -210,7 +210,7 @@ export function TrackRow({
               variant="metadata"
               color="secondary"
               numberOfLines={1}
-              style={{ marginTop: 2 }}
+              style={{ marginTop: theme.spacing.xxs }}
             >
               {sub}
             </Text>

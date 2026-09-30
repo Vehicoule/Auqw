@@ -29,19 +29,19 @@ function Toggle({ enabled }: { readonly enabled: boolean }) {
       style={{
         width: 46,
         height: 26,
-        borderRadius: 13,
+        borderRadius: theme.radius.pill,
         backgroundColor: enabled ? theme.colors.accent : theme.colors.fg18,
         borderWidth: theme.strokes.hairline,
         borderColor: enabled ? 'transparent' : theme.colors.hairline,
         justifyContent: 'center',
-        paddingHorizontal: 2,
+        paddingHorizontal: theme.spacing.xxs,
       }}
     >
       <View
         style={{
           width: 22,
           height: 22,
-          borderRadius: 11,
+          borderRadius: theme.radius.pill,
           backgroundColor: theme.colors.thumb,
           borderWidth: theme.strokes.hairline,
           borderColor: enabled ? 'transparent' : theme.colors.fg40,
@@ -168,7 +168,7 @@ export function SettingsScreen({
           >
             {group.rows.map((row, i) => (
               <View key={row.key}>
-                {i > 0 && <Hairline style={{ marginLeft: 14 }} />}
+                {i > 0 && <Hairline style={{ marginLeft: theme.spacing.screen }} />}
                 <SettingsRow
                   row={row}
                   onSelectRow={onSelectRow}
@@ -198,7 +198,7 @@ export function SettingsScreen({
           borderWidth: theme.strokes.hairline,
           borderColor: theme.colors.hairline,
           backgroundColor: theme.colors.raised,
-          padding: 14,
+          padding: theme.spacing.screen,
           gap: theme.spacing.sm,
         }}
       >

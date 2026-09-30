@@ -129,7 +129,7 @@ function transportVariant(
       side: { borderRadius: 12 },
       main: { borderRadius: 12, backgroundColor: theme.colors.raised },
       play: {
-        borderRadius: 16,
+        borderRadius: theme.radius.float,
         backgroundColor: theme.colors.accent,
         width: 56,
         height: 44,
@@ -137,13 +137,13 @@ function transportVariant(
     };
   }
   const glass: ViewStyle = {
-    borderRadius: 999,
+    borderRadius: theme.radius.pill,
     backgroundColor: theme.colors.glass,
     borderWidth: theme.strokes.hairline,
     borderColor: theme.colors.hairline,
   };
   return {
-    side: { borderRadius: 999 },
+    side: { borderRadius: theme.radius.pill },
     main: glass,
     play: { ...glass, width: 56, height: 56 },
   };
@@ -214,7 +214,7 @@ export function TransportControls({
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: theme.spacing.xs + 2,
+        gap: theme.spacing.xs + theme.spacing.xxs,
       }}
     >
       {button(view.like, view.like.liked ? c.liked : c.textSecondary)}
@@ -283,8 +283,11 @@ function ModeSegmentPill({
     <View
       style={{
         flexDirection: 'row',
-        gap: 2,
+        gap: theme.spacing.xxs,
         backgroundColor: theme.colors.raised,
+        /* 3px pad is deliberate (web parity): 44 + 2×3 + 2×hairline
+           lands the float at the 52px chrome height — the mini
+           player's. Don't pull it onto the spacing scale. */
         padding: 3,
         borderRadius: theme.radius.pill,
         borderWidth: theme.strokes.hairline,
@@ -1029,7 +1032,7 @@ export function StageSheet({
         variant="metadata"
         color="secondary"
         numberOfLines={1}
-        style={{ marginTop: 3 }}
+        style={{ marginTop: theme.spacing.xxs }}
       >
         {lyricsHeader.subtitle}
       </Text>
@@ -1132,7 +1135,7 @@ export function StageSheet({
             style={{
               width: 36,
               height: 4,
-              borderRadius: 2,
+              borderRadius: theme.radius.pill,
               backgroundColor: colors.fg40,
             }}
           />
@@ -1242,7 +1245,7 @@ export function StageSheet({
                   variant="body"
                   color="primary"
                   numberOfLines={1}
-                  style={{ marginTop: 4 }}
+                  style={{ marginTop: theme.spacing.xs }}
                 >
                   {meta.artistLabel}
                 </Text>
@@ -1251,7 +1254,7 @@ export function StageSheet({
                     variant="metadata"
                     color="secondary"
                     numberOfLines={1}
-                    style={{ marginTop: 3 }}
+                    style={{ marginTop: theme.spacing.xxs }}
                   >
                     {meta.albumLabel}
                   </Text>
@@ -1261,7 +1264,7 @@ export function StageSheet({
                     variant="metadata"
                     color="warn"
                     numberOfLines={2}
-                    style={{ marginTop: 3 }}
+                    style={{ marginTop: theme.spacing.xxs }}
                   >
                     {meta.errorMessage}
                   </Text>
