@@ -1,4 +1,5 @@
 export { useAppShell } from './app-shell.ts';
+export { defaultSettings, repairedSettings } from './provider-slots.ts';
 export {
   advanceTargetId,
   playlistDownloadPlan,

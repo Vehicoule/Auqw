@@ -52,3 +52,4 @@ export * from './providers/provider-wire.ts';
 export * from './auth/oauth.ts';
 export * from './auth/session.ts';
 export * from './update.ts';
+export * from './utf8.ts';

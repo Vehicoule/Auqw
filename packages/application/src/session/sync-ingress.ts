@@ -16,7 +16,7 @@ import {
   unsyncedWrites,
 } from '../sync/sync-projection.ts';
 import type { SyncProjectionInput } from '../sync/sync-projection.ts';
-import { utf8ByteLength } from '../sync/sync-wire.ts';
+import { utf8ByteLength } from '../utf8.ts';
 import type { ProviderCapability } from '../ports/provider.ts';
 import type { StorageBatch, StoragePort } from '../ports/storage.ts';
 import { Serializer } from './serializer.ts';

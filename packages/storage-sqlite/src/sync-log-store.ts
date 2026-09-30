@@ -17,7 +17,7 @@ import {
   isSyncCursor,
   ok,
 } from '@auqw/application';
-import { CANCELLED } from './cancelled.ts';
+import { CANCELLED } from './driver.ts';
 import type { SyncCursor } from '@auqw/application';
 import type {
   SqliteConnection,

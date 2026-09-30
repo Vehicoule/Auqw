@@ -24,14 +24,12 @@ import type {
   MaterializedRecord,
   MergeOutcome,
   PlayerPort,
-  ProviderCapability,
   QueueSnapshot,
   Result,
-  Settings,
   StoragePort,
 } from '@auqw/application';
 import { SqliteStorage } from '@auqw/storage-sqlite';
-import { SLOT_META } from '@auqw/ui-shared';
+import { defaultSettings, repairedSettings } from '@auqw/app-shell';
 import type { AuqwApi } from '../shared/contract.ts';
 import { toFileUri } from '../shared/local-paths.ts';
 import { createDesktopConnectivity } from './connectivity.ts';
@@ -49,124 +47,6 @@ import { createSqliteDriver } from './sqlite-driver.ts';
 import { shellToAppError } from './ipc-errors.ts';
 import { createWebPlayerPort } from './web-player.ts';
 import type { MediaSessionLike, WebPlayerPort } from './web-player.ts';
-
-/** First provider declaring the slot's capability — the shipped id
- *  preferred, then any declarer; null when nothing can serve it. */
-function pickProvider(
-  providers: readonly PluginProvider[],
-  capabilities: readonly ProviderCapability[],
-  preferred: string,
-): string | null {
-  const declares = (p: PluginProvider) =>
-    capabilities.some((capability) => p.capabilities.includes(capability));
-  return (
-    providers.find((p) => p.id === preferred && declares(p))?.id ??
-    providers.find(declares)?.id ??
-    null
-  );
-}
-
-/**
- * Defaults for a fresh install — identical to the mobile controller's
- * (docs/specs/providers.md: quality ≈ 128 kbps inside the 1–512 bound,
- * storefront null defers to system-locale → API-default resolution,
- * theme 'system' and prefetch true match the domain Settings contract).
- * The provider slots are derived per boot: the constructor requires
- * the defaults to name injected providers, and a runtime plugin dir
- * may lack the mobile bundle's exact ids — prefer the shipped ids,
- * else the first provider declaring the slot's capability. A set with
- * no declarer for a required slot cannot boot — an id alone would
- * only route every search/playback into `unsupported`.
- */
-function defaultSettings(
-  providers: readonly PluginProvider[],
-): Settings {
-  const catalog = pickProvider(
-    providers,
-    SLOT_META.catalogProvider.capabilities,
-    'deezer',
-  );
-  const playback = pickProvider(
-    providers,
-    SLOT_META.playbackProvider.capabilities,
-    'youtube-music',
-  );
-  const missing = [
-    ...(catalog === null ? ['catalog.search'] : []),
-    ...(playback === null ? ['playback.resolve'] : []),
-  ];
-  if (catalog === null || playback === null) {
-    throw new Error(
-      `no provider declares ${missing.join(' / ')} — the plugin set cannot serve a session`,
-    );
-  }
-  return {
-    catalogProvider: catalog,
-    playbackProvider: playback,
-    storefront: null,
-    qualityKbps: 128,
-    theme: 'system',
-    prefetch: true,
-  };
-}
-
-/**
- * Reconciles restored settings against the providers this boot loaded:
- * persisted slots name ids picked under an earlier plugin dir, and a
- * removed plugin strands every op routed to it. Required slots are
- * repicked through the capability map (a declarer is guaranteed by the
- * boot gate); optional overrides drop to `null` (auto routing) rather
- * than resurrecting a provider that cannot serve them. Returns null
- * when nothing needed repair.
- */
-function repairedSettings(
-  settings: Settings,
-  providers: readonly PluginProvider[],
-): Settings | null {
-  const declares = (
-    id: string | null | undefined,
-    capabilities: readonly ProviderCapability[],
-  ): boolean => {
-    const provider = providers.find((p) => p.id === id);
-    return (
-      provider !== undefined &&
-      capabilities.some((capability) =>
-        provider.capabilities.includes(capability),
-      )
-    );
-  };
-  const next = { ...settings };
-  let changed = false;
-  const repick = (
-    slot: 'catalogProvider' | 'playbackProvider',
-    preferred: string,
-  ): void => {
-    if (declares(settings[slot], SLOT_META[slot].capabilities)) {
-      return;
-    }
-    const repaired = pickProvider(
-      providers,
-      SLOT_META[slot].capabilities,
-      preferred,
-    );
-    if (repaired !== null) {
-      next[slot] = repaired;
-      changed = true;
-    }
-  };
-  repick('catalogProvider', 'deezer');
-  repick('playbackProvider', 'youtube-music');
-  for (const slot of ['lyricsProvider', 'radioProvider'] as const) {
-    if (
-      settings[slot] != null &&
-      !declares(settings[slot], SLOT_META[slot].capabilities)
-    ) {
-      next[slot] = null;
-      changed = true;
-    }
-  }
-  return changed ? next : null;
-}
 
 export type SessionController = {
   readonly session: Session;

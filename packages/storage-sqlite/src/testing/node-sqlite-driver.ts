@@ -1,7 +1,7 @@
 import { rmSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import type { CancellationSignal } from '@auqw/application';
-import { CANCELLED } from '../cancelled.ts';
+import { CANCELLED } from '../driver.ts';
 import type {
   SqliteConnection,
   SqliteDriver,

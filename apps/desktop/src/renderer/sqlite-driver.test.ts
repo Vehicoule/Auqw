@@ -10,7 +10,7 @@ import type {
   AuqwStorage,
   StorageExecuteResult,
 } from '../shared/contract.ts';
-import { CANCELLED } from '../../../../packages/storage-sqlite/src/cancelled.ts';
+import { CANCELLED } from '@auqw/storage-sqlite';
 import { createSqliteDriver } from './sqlite-driver.ts';
 
 type Call = {

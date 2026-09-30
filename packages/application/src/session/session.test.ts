@@ -40,7 +40,7 @@ import {
   sourceRefRecordId,
   TOMBSTONE_FIELD,
 } from '../sync/sync-engine.ts';
-import { utf8ByteLength } from '../sync/sync-wire.ts';
+import { utf8ByteLength } from '../utf8.ts';
 import {
   FakeClock,
   FakeLog,
