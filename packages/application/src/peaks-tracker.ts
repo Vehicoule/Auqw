@@ -127,6 +127,15 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
   // the cap must re-issue rather than serve the stale refusal.
   const gatedNullMs = new Map<string, number>();
   const inflight = new Map<string, Inflight>();
+  /**
+   * The newest pull that deduped onto a shared sweep, per content
+   * key. The dedupe only drops the DUPLICATE work — the request
+   * itself is still owed: if the active sweep dies without a
+   * finished profile (cancel, transient death past retry), the
+   * waiting target is promoted into its own extraction instead of
+   * silently losing its bars.
+   */
+  const pending = new Map<string, PeaksTarget>();
 
   function evict(): void {
     while (cache.size > cacheLimit) {
@@ -190,6 +199,7 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
         // a reveal — its own terminal failure must still cache.)
         inflight.delete(id);
         live.source.cancel();
+        promotePending(live.key);
         return;
       }
       // A re-pull under the same id (durationMs landed mid-sweep)
@@ -200,9 +210,12 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
       return;
     }
     // A live sweep for the same content already covers this pull —
-    // its coarse and final results land under the same key.
+    // its coarse and final results land under the same key. The
+    // target is remembered, not dropped: a sweep that dies without
+    // finishing owes the waiter its own extraction.
     for (const running of inflight.values()) {
       if (running.key === key) {
+        pending.set(key, target);
         return;
       }
     }
@@ -293,6 +306,7 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
           return;
         }
         inflight.delete(id);
+        promotePending(entry.key);
         onChange?.();
       };
       void port
@@ -343,6 +357,7 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
             cache.set(key, persisted);
             finalized.add(key);
             inflight.delete(id);
+            pending.delete(key);
             evict();
             onChange?.();
             return;
@@ -359,15 +374,40 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
     attempt(1);
   }
 
+  /**
+   * An inflight entry for `key` ended — hand the next pull to the
+   * newest waiting target. `pull` re-walks every gate: a finished
+   * profile or the waiter's own terminal sentinel short-circuits it,
+   * so promotion costs nothing when the sweep actually delivered.
+   */
+  function promotePending(key: string): void {
+    const target = pending.get(key);
+    if (target === undefined) {
+      return;
+    }
+    pending.delete(key);
+    if (finalized.has(key)) {
+      return;
+    }
+    pull(target);
+  }
+
   return {
     pull,
     cancel(id) {
       const entry = inflight.get(id);
       if (entry === undefined) {
+        // The id may sit in `pending` — a deduped waiter the caller
+        // abandoned before its sweep ever started.
+        const key = contentKey(id);
+        if (pending.get(key)?.id === id) {
+          pending.delete(key);
+        }
         return;
       }
       inflight.delete(id);
       entry.source.cancel();
+      promotePending(entry.key);
     },
     get(id) {
       // Content key first — a settled (or coarse) profile outranks

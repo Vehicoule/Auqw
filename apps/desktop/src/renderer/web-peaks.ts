@@ -574,16 +574,21 @@ export function createWebPeaksPort(deps: {
     // emit time, so a still-growing totalMs never strands earlier
     // buckets under a stale width — each emitted profile rebuilds all
     // windows under the then-current estimate. Retention is bounded by
-    // the same PCM budget the whole-file path pays; past it a sample
-    // merges eagerly into `overflow` under the estimate at hand.
+    // the same PCM budget the whole-file path pays; past it the PCM
+    // compresses to a fixed-width peak row kept WITH the sample's own
+    // media time — the window re-projects onto the final timeline at
+    // emit like any retained sample instead of freezing stale buckets.
+    const OVERFLOW_WINDOWS = 64;
     const samples: {
       mediaMs: number;
       channels: Float32Array[];
       pcmMs: number;
     }[] = [];
-    const overflow: SparseWindows = new Array<PeakWindow | null>(
-      PEAKS_RESOLUTION,
-    ).fill(null);
+    const overflowed: {
+      mediaMs: number;
+      pcmMs: number;
+      windows: readonly PeakWindow[];
+    }[] = [];
     let retainedPcmBytes = 0;
     let applied = 0;
 
@@ -606,7 +611,11 @@ export function createWebPeaksPort(deps: {
         retainedPcmBytes += pcmBytes;
         samples.push({ mediaMs, channels, pcmMs });
       } else {
-        mergeSample(overflow, mediaMs, channels, pcmMs, totalMs);
+        overflowed.push({
+          mediaMs,
+          pcmMs,
+          windows: peakWindowsFromChannels(channels, OVERFLOW_WINDOWS),
+        });
       }
       applied += 1;
       return true;
@@ -623,14 +632,33 @@ export function createWebPeaksPort(deps: {
       for (const s of samples) {
         mergeSample(windows, s.mediaMs, s.channels, s.pcmMs, totalMs);
       }
-      for (let i = 0; i < PEAKS_RESOLUTION; i += 1) {
-        const o = overflow[i];
-        if (o != null) {
-          const w = windows[i];
-          windows[i] =
-            w == null
-              ? o
-              : { up: Math.max(w.up, o.up), down: Math.max(w.down, o.down) };
+      // Retention-capped samples re-project their own window row onto
+      // the timeline under the same final estimate — nearest-window
+      // lookup, max merge into the shared row.
+      const bucketMs = totalMs / PEAKS_RESOLUTION;
+      if (bucketMs > 0) {
+        for (const s of overflowed) {
+          const first = Math.floor(s.mediaMs / bucketMs);
+          const span = Math.max(
+            1,
+            Math.min(PEAKS_RESOLUTION, Math.ceil(s.pcmMs / bucketMs)),
+          );
+          for (let j = 0; j < span && first + j < PEAKS_RESOLUTION; j++) {
+            const i = first + j;
+            if (i < 0) {
+              continue;
+            }
+            const w =
+              s.windows[Math.floor((j * s.windows.length) / span)]!;
+            const prev = windows[i] ?? null;
+            windows[i] =
+              prev === null
+                ? w
+                : {
+                    up: Math.max(prev.up, w.up),
+                    down: Math.max(prev.down, w.down),
+                  };
+          }
         }
       }
       return normalizePeakWindows(fillSparseWindows(windows));

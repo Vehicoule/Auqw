@@ -561,4 +561,46 @@ export async function run(): Promise<void> {
     await settle();
     assertEqual(calls.length, 2, 'a finished profile does skip work');
   }
+
+  // A deduped pull is owed its sweep: when the covering extraction is
+  // cancelled mid-flight, the waiting target promotes into its own.
+  {
+    const { calls, port } = fakePort();
+    const tracker = createPeaksTracker({ port, clock: new FakeClock() });
+    tracker.pull(target('r-13|a1', 'h1'));
+    await settle();
+    tracker.pull(target('r-13|a2', 'h2'));
+    await settle();
+    assertEqual(calls.length, 1, 'the second pull dedupes onto the sweep');
+    tracker.cancel('r-13|a1');
+    await settle();
+    assertEqual(
+      calls.length,
+      2,
+      'the waiting attempt promotes its own extraction',
+    );
+    assertEqual(
+      calls[1]!.request.handle,
+      'h2',
+      "the promoted sweep runs the waiter's handle",
+    );
+    calls[1]!.resolve(ok(PEAKS));
+    await settle();
+    assertEqual(tracker.get('r-13|a2'), PEAKS, 'the waiter lands its bars');
+  }
+
+  // A waiting pull cancelled before promotion stays dead — the
+  // covering sweep's later death revives nothing.
+  {
+    const { calls, port } = fakePort();
+    const tracker = createPeaksTracker({ port, clock: new FakeClock() });
+    tracker.pull(target('r-14|a1', 'h1'));
+    await settle();
+    tracker.pull(target('r-14|a2', 'h2'));
+    await settle();
+    tracker.cancel('r-14|a2');
+    tracker.cancel('r-14|a1');
+    await settle();
+    assertEqual(calls.length, 1, 'a cancelled waiter never promotes');
+  }
 }
