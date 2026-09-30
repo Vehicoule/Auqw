@@ -294,7 +294,15 @@ type StreamWarm = {
  * track that never became a recording.
  */
 export type PrewarmFocus =
-  | { readonly kind: 'recording'; readonly id: string }
+  | {
+      readonly kind: 'recording';
+      readonly id: string;
+      /** The row's own pin (a playlist entry's selectedRef, resolved
+          through the same preference rule the play path applies) —
+          picked over the recording default exactly as the tap's
+          attempt would, so the warm lands on the ref that plays. */
+      readonly ref?: SourceRef | null;
+    }
   | { readonly kind: 'occurrence'; readonly id: string }
   | { readonly kind: 'track'; readonly track: TrackMetadata };
 
@@ -3214,17 +3222,24 @@ export class PlaybackEngine {
             (o) => o.occurrenceId === focus.id,
           );
           if (occurrence !== undefined) {
-            this.#surfaceKeys.add(`o:${focus.id}`);
+            // 'f:o'-namespaced so the next focus hand's `f:` replace
+            // kills this pending resolve — a stale result must never
+            // displace the row actually under the finger. The `f:o`
+            // prefix still dies with its occurrence in #surfaceWant.
+            const key = `f:o${focus.id}`;
+            this.#surfaceKeys.add(key);
             pendRow(occurrence.recordingId, {
               occurrenceId: focus.id,
-              backlogKey: `o:${focus.id}`,
+              backlogKey: key,
             });
           }
         }
       } else if (focus.kind === 'recording') {
         const rec = r.recordings.find((x) => x.id === focus.id);
         const ref =
-          rec === undefined ? null : this.#host.pickRef(rec, null);
+          rec === undefined
+            ? null
+            : this.#host.pickRef(rec, focus.ref ?? null);
         if (
           ref !== null &&
           isTrackRef(ref) &&
@@ -3976,11 +3991,17 @@ export class PlaybackEngine {
       if (e === undefined) {
         continue;
       }
-      // An 'o:'-keyed entry lives and dies with its queue row — a
-      // removed occurrence's resolved ref mints nothing.
+      // An occurrence-keyed entry lives and dies with its queue row
+      // — a removed occurrence's resolved ref mints nothing. `o:` is
+      // a viewport hand; `f:o` is a focus hand's pending resolve.
+      const occId = e.key.startsWith('o:')
+        ? e.key.slice(2)
+        : e.key.startsWith('f:o')
+          ? e.key.slice(3)
+          : null;
       const gone =
-        e.key.startsWith('o:') &&
-        !snap.occurrences.some((o) => o.occurrenceId === e.key.slice(2));
+        occId !== null &&
+        !snap.occurrences.some((o) => o.occurrenceId === occId);
       if (
         gone ||
         !this.#surfaceKeys.has(e.key) ||

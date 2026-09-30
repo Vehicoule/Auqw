@@ -6760,6 +6760,11 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
     viewportOccurrenceRemovedSkipsMint,
   ],
   ['enqueueWarmsNewOccurrence', enqueueWarmsNewOccurrence],
+  [
+    'focusOccurrenceStaleResolveDrops',
+    focusOccurrenceStaleResolveDrops,
+  ],
+  ['focusRecordingPinWinsDefault', focusRecordingPinWinsDefault],
 ] as const;
 
 // The materialized rebuild: the durable log's surviving records
@@ -8955,6 +8960,67 @@ async function enqueueWarmsNewOccurrence(): Promise<void> {
   await pump();
   assertEqual(calls(r, 'prepare').length, 0, 'warm adopted: no prepare');
   assert((await started).ok, 'playOccurrence failed');
+}
+
+/** A stale occurrence focus's late resolve can't displace the newer
+    focused row — its 'f:o' key dies with the f: replace. */
+async function focusOccurrenceStaleResolveDrops(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rF', [ref('youtube-music', 'yF')]),
+        recording('rB', [ref('itunes', 'iB')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oF', 'rF'),
+        occurrence('oB', 'rB'),
+      ]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({ focus: { kind: 'occurrence', id: 'oB' } });
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    'focused unresolved row asks candidates',
+  );
+  r.session.prewarm({ focus: { kind: 'recording', id: 'rF' } });
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'newest focus mints');
+  assertEqual(warmInput(r).sourceRef, 'yF', 'focused row warmed');
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'yB', 'Song rB', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(
+    calls(r, 'prewarm').length,
+    1,
+    'stale focus resolve mints nothing over the newer hand',
+  );
+  assertEqual(warmInput(r).sourceRef, 'yF', 'focused warm kept');
+}
+
+/** A recording focus carrying the row's pin warms the pinned ref —
+    the same ref the tap's attempt would pick. */
+async function focusRecordingPinWinsDefault(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('rP', [ref('youtube-music', 'yA')])],
+      queue: stoppedQueue([occurrence('oA', 'rP')]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({
+    focus: { kind: 'recording', id: 'rP', ref: ref('youtube-music', 'yPin') },
+  });
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'pinned focus mints');
+  assertEqual(
+    warmInput(r).sourceRef,
+    'yPin',
+    'row pin warmed, not the recording default',
+  );
 }
 
 export async function run(): Promise<void> {

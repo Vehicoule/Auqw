@@ -513,6 +513,11 @@ export type StageSheetProps = {
   readonly onPressQueueItem?: ((occurrenceId: string) => void) | undefined;
   /** Advisory row intent — touch-down on a row; the host warms it. */
   readonly onQueueRowIntent?: ((occurrenceId: string) => void) | undefined;
+  /** Advisory viewport report — occurrence ids on screen; the host
+      warms the set as a wholesale hand. */
+  readonly onQueueViewport?:
+  | ((occurrenceIds: readonly string[]) => void)
+  | undefined;
   readonly onRemoveQueueItem?: ((occurrenceId: string) => void) | undefined;
   readonly onToggleQueueReorder?: (() => void) | undefined;
   readonly onMoveQueueItem?:
@@ -561,6 +566,7 @@ export function StageSheet({
   onModeChange,
   onPressQueueItem,
   onQueueRowIntent,
+  onQueueViewport,
   onRemoveQueueItem,
   onToggleQueueReorder,
   onMoveQueueItem,
@@ -1043,6 +1049,7 @@ export function StageSheet({
           contentPaddingBottom={segmentReserve}
           onPressItem={onPressQueueItem}
           onRowIntent={onQueueRowIntent}
+          onViewportRows={onQueueViewport}
           onRemoveItem={onRemoveQueueItem}
           onMoveItem={onMoveQueueItem}
           onMoveItemTo={onMoveQueueItemTo}
@@ -1055,6 +1062,7 @@ export function StageSheet({
       segmentReserve,
       onPressQueueItem,
       onQueueRowIntent,
+      onQueueViewport,
       onRemoveQueueItem,
       onMoveQueueItem,
       onMoveQueueItemTo,

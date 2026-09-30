@@ -875,6 +875,7 @@ function Main({
     advance,
     playQueueOccurrence,
     rowIntent,
+    onQueueViewport,
     onMoveQueueItem,
     onMoveQueueItemTo,
     removeQueueOccurrence,
@@ -886,6 +887,7 @@ function Main({
     playCollectionRows,
     playPlaylist,
     playPlaylistEntry,
+    playRefFor,
     entityPlayAll,
     onEntityRowPress,
     entityRowMeta,
@@ -2105,7 +2107,11 @@ function Main({
             }}
             onPressEntry={playPlaylistEntry}
             onRowIntent={(entry) =>
-              rowIntent({ kind: 'recording', id: entry.recordingId })
+              rowIntent({
+                kind: 'recording',
+                id: entry.recordingId,
+                ref: playRefFor(entry.recordingId, entry.selectedRef),
+              })
             }
             onToggleLike={(entry) => void session.toggleLike(entry.recordingId)}
             onContext={(entry) =>
@@ -2396,6 +2402,7 @@ function Main({
               onQueueRowIntent={(id) =>
                 rowIntent({ kind: 'occurrence', id })
               }
+              onQueueViewport={onQueueViewport}
               onRemoveQueueItem={removeQueueOccurrence}
               onToggleQueueReorder={toggleReordering}
               onMoveQueueItem={onMoveQueueItem}

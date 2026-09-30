@@ -1203,6 +1203,38 @@ export function useAppShell<E extends { readonly type: string } = never>(
     }
   }, [queueRowsVisible, queueModel, session]);
 
+  // Queue viewability: lists that can report their visible rows
+  // (native FlatList) refine the model-based first-9 hand as the
+  // viewport moves — a row scrolled to is the likelier tap. Same
+  // trailing debounce as row-intent so scroll churn cancels into the
+  // settled set instead of re-issuing resolves.
+  const queueViewportTimer = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const onQueueViewport = useCallback(
+    (occurrenceIds: readonly string[]) => {
+      const timer = queueViewportTimer.current;
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+      queueViewportTimer.current = setTimeout(() => {
+        queueViewportTimer.current = null;
+        if (occurrenceIds.length > 0) {
+          session.prewarm({ occurrenceIds });
+        }
+      }, 120);
+    },
+    [session],
+  );
+  useEffect(
+    () => () => {
+      if (queueViewportTimer.current !== null) {
+        clearTimeout(queueViewportTimer.current);
+      }
+    },
+    [],
+  );
+
   const libraryModel = useMemo(() => {
     // ports.localCatalog: local index rows (provenance 'local')
     // shadow the session's in-memory copies — a scan commits fresher
@@ -3341,6 +3373,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     advance,
     playQueueOccurrence,
     rowIntent,
+    onQueueViewport,
     onMoveQueueItem,
     onMoveQueueItemTo,
     removeQueueOccurrence,
@@ -3352,6 +3385,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     playCollectionRows,
     playPlaylist,
     playPlaylistEntry,
+    playRefFor,
     entityPlayAll,
     onEntityRowPress,
     reportPlay,
