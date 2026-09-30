@@ -463,4 +463,20 @@ export async function run(): Promise<void> {
       "the old position's retries never stranded the new epoch",
     );
   }
+
+  // A typed streamOpen failure — the session died between open and
+  // attach — rides its taxonomy slug verbatim, same as a read verdict.
+  {
+    const host = fakeHost(new Uint8Array(0), {
+      streamOpen() {
+        throw napiTyped('expired');
+      },
+    });
+    const port = fakePort();
+    createStreamPump({ host: () => host, handle: 'h-13', port });
+    const error = port.sent.find((m) => m.kind === 'error');
+    assert(error !== undefined, 'typed open failure sent an error frame');
+    assertEqual(error?.['code'], 'expired');
+    assert(port.closed, 'failed attach closed the port');
+  }
 }

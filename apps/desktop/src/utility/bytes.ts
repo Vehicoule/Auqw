@@ -198,8 +198,11 @@ export function createStreamPump(deps: {
     opened = true;
     const ready: PumpReady = { kind: 'ready', remaining, epoch };
     send(ready);
-  } catch {
-    sendError('unavailable');
+  } catch (thrown: unknown) {
+    // A typed attach failure rides verbatim — a session that died
+    // between open and attach (expired/evicted/released/superseded)
+    // reports its real verdict, not a generic one.
+    sendError(napiSlug(thrown) ?? 'unavailable');
     return;
   }
 
