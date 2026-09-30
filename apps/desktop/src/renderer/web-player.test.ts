@@ -1797,8 +1797,15 @@ export async function run(): Promise<void> {
 
   // A typed pump verdict BEFORE MSE readiness skips the loopback —
   // re-serving the same dead stream would launder the kind to
-  // transient through the element.
-  {
+  // transient through the element. rate-limit/streams-capped are
+  // retryable but belong to the app's retry policy, not an in-band
+  // reattach that burns the same latched verdict.
+  for (const code of [
+    'provider-wall',
+    'rate-limit',
+    'streams-capped',
+    'released',
+  ]) {
     const audio = fakeAudio();
     const port = new FakePort();
     const stream = fakeStream({
@@ -1820,24 +1827,24 @@ export async function run(): Promise<void> {
     port.feed({
       kind: 'error',
       epoch: 0,
-      code: 'provider-wall',
-      message: 'bot-check',
+      code,
+      message: 'verdict',
     });
     const played = await playing;
     assert(
-      !played.ok && played.error.kind === 'provider-wall',
-      `early wall rides the taxonomy, got ${JSON.stringify(played)}`,
+      !played.ok && played.error.kind === code,
+      `early ${code} rides the taxonomy, got ${JSON.stringify(played)}`,
     );
     assert(
       !stream.calls.some((c) => c.method === 'serveUrl'),
-      'no loopback for a typed verdict',
+      `no loopback for ${code}`,
     );
   }
 
   // A recoverable pump code before readiness keeps the loopback too —
   // the session latches a transient read failure and a fresh attach
   // (which the serve leg performs) clears it.
-  for (const code of ['io-error', 'transient', 'rate-limit']) {
+  for (const code of ['io-error', 'transient']) {
     const audio = fakeAudio();
     const port = new FakePort();
     const stream = fakeStream({
