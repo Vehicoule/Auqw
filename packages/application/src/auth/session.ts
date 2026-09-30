@@ -106,13 +106,6 @@ export type AuthCustodyRecord = {
   readonly pendingFlow?: AuthPendingFlow | undefined;
 };
 
-export const EMPTY_AUTH_CUSTODY: AuthCustodyRecord = {
-  v: 1,
-  refreshToken: null,
-  clientId: null,
-  grantClientId: null,
-};
-
 function isPendingFlow(value: unknown): value is AuthPendingFlow {
   const numOk = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
   return (

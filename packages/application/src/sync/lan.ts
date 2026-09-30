@@ -173,29 +173,19 @@ export function isPairableLanHost(host: string): boolean {
 }
 
 /**
- * One dialable address out of a resolved advert's list — the LAN gate
- * decides what MAY be dialed, this picks which SHOULD be dialed first.
- * Ranked: non-loopback IPv4 > any other v6 > bare `fe80::` > loopback.
- * A link-local literal without a zone has no egress interface and
+ * Every pairable address of a resolved advert, best-first (stable
+ * sort — equal ranks keep resolver order), deduped and
+ * bracket-stripped so each entry is dialable as-is. The LAN gate
+ * decides what MAY be dialed; this ranks what SHOULD be dialed first:
+ * non-loopback IPv4 > any other v6 > bare `fe80::` > loopback. A
+ * link-local literal without a zone has no egress interface and
  * always fails to connect, so it stays a last resort even though the
  * gate accepts it. Loopback ranks below even that for DISCOVERY: a
  * remote advert's `127.0.0.1`/`::1` points at the browsing machine,
  * not the advertiser — it only stays selectable so a co-located test
  * advert (sim host on the same box) still resolves when it's the only
- * candidate. Null when no pairable address exists (e.g. only publics).
- */
-export function pickDialableHost(
-  addresses: readonly string[],
-): string | null {
-  return dialableHostsRanked(addresses)[0] ?? null;
-}
-
-/**
- * Every pairable address of a resolved advert, best-first under the
- * ranking above (stable sort — equal ranks keep resolver order),
- * deduped and bracket-stripped so each entry is dialable as-is. A
- * dial tries them in order: the first-ranked literal can sit behind
- * a dead route while a lower-ranked one still answers.
+ * candidate. A dial tries them in order: the first-ranked literal can
+ * sit behind a dead route while a lower-ranked one still answers.
  */
 export function dialableHostsRanked(
   addresses: readonly string[],

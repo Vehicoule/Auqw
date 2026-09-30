@@ -22,26 +22,12 @@ function toggle(
   return [...likes, { entityKind, targetId, likedAtMs: nowMs }];
 }
 
-const has = (
-  likes: readonly Like[],
-  entityKind: LikeEntityKind,
-  targetId: string,
-): boolean =>
-  likes.some((l) => l.entityKind === entityKind && l.targetId === targetId);
-
 export function toggleTrackLike(
   likes: readonly Like[],
   recordingId: string,
   nowMs: number,
 ): readonly Like[] {
   return toggle(likes, 'track', recordingId, nowMs, 'recordingId');
-}
-
-export function isTrackLiked(
-  likes: readonly Like[],
-  recordingId: string,
-): boolean {
-  return has(likes, 'track', recordingId);
 }
 
 /**
@@ -58,12 +44,4 @@ export function toggleEntityLike(
     throw new TypeError('kind must be album or artist');
   }
   return toggle(likes, kind, entityId, nowMs, 'entityId');
-}
-
-export function isEntityLiked(
-  likes: readonly Like[],
-  kind: EntityKind,
-  entityId: string,
-): boolean {
-  return has(likes, kind, entityId);
 }

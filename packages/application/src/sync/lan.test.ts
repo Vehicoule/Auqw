@@ -1,5 +1,8 @@
-import { pickDialableHost } from './lan.ts';
+import { dialableHostsRanked } from './lan.ts';
 import { assert, assertEqual } from '../testing/assert.ts';
+
+const pickDialableHost = (addresses: readonly string[]): string | null =>
+  dialableHostsRanked(addresses)[0] ?? null;
 
 function ordering(): void {
   assertEqual(

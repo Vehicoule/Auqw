@@ -12,7 +12,6 @@ import type { AppError, Result } from '../errors.ts';
 import type { CancellationSignal } from '../cancellation.ts';
 import { assert, assertDeepEqual, assertEqual } from '../testing/assert.ts';
 import {
-  EMPTY_AUTH_CUSTODY,
   createAuthSession,
   isAuthCustodyRecord,
 } from './session.ts';
@@ -181,6 +180,13 @@ function collector(session: {
 // ------------------------------------------------------------------
 // Custody record shape
 // ------------------------------------------------------------------
+
+const EMPTY_AUTH_CUSTODY: AuthCustodyRecord = {
+  v: 1,
+  refreshToken: null,
+  clientId: null,
+  grantClientId: null,
+};
 
 function testCustodyValidator(): void {
   assert(isAuthCustodyRecord(EMPTY_AUTH_CUSTODY), 'empty record rejected');

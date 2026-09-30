@@ -1258,15 +1258,6 @@ export const fixtureWaveformPeaks: readonly WaveformPeak[] = (() => {
 // ---- gallery scenario tuples -----------------------------------------
 // `[label, model]` rows both galleries iterate over identically.
 
-export const fixturePlayerStates: readonly (readonly [
-  string,
-  PlayerModel,
-])[] = [
-  ['playing', fixturePlayerPlaying],
-  ['paused', fixturePlayerPaused],
-  ['buffering', fixturePlayerBuffering],
-];
-
 export const fixtureLyricsScenarios: readonly (readonly [
   string,
   LyricsModel,
