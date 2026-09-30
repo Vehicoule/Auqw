@@ -76,6 +76,9 @@ const config: ExpoConfig = {
     // -Pauqw.abis=arm64-v8a (ships arm64 only); x86_64 stays in the
     // default for emulator debug builds.
     './plugins/with-release-abis.cjs',
+    // The stream seam serves audio over plain HTTP on loopback —
+    // cleartext stays permitted for 127.0.0.1/localhost only.
+    './plugins/with-loopback-cleartext.cjs',
     [
       'expo-navigation-bar',
       {
