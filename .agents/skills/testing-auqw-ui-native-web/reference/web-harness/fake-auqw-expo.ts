@@ -111,7 +111,9 @@ const CANNED_TRACK = {
   album: 'Mock Album',
   duration_ms: 64_000,
   release_year: 2024,
-  artwork: null,
+  // The wire codec requires an array — `null` fails `isArtworkList`
+  // and every catalog.search reply decodes as invalid-response.
+  artwork: [],
   explicit: null,
   genre: 'Test',
   storefront: 'US',
