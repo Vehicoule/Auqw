@@ -1,11 +1,20 @@
-import type { EntityKind } from '../domain.ts';
-import {
-  isEntityLiked,
-  isTrackLiked,
-  toggleEntityLike,
-  toggleTrackLike,
-} from './likes.ts';
+import type { EntityKind, Like, LikeEntityKind } from '../domain.ts';
+import { toggleEntityLike, toggleTrackLike } from './likes.ts';
 import { assert, assertEqual } from '../testing/assert.ts';
+
+const has = (
+  likes: readonly Like[],
+  entityKind: LikeEntityKind,
+  targetId: string,
+): boolean =>
+  likes.some((l) => l.entityKind === entityKind && l.targetId === targetId);
+const isTrackLiked = (likes: readonly Like[], targetId: string): boolean =>
+  has(likes, 'track', targetId);
+const isEntityLiked = (
+  likes: readonly Like[],
+  kind: EntityKind,
+  targetId: string,
+): boolean => has(likes, kind, targetId);
 
 export function run(): void {
   let likes = toggleTrackLike([], 'rec-1', 100);

@@ -41,7 +41,7 @@ import {
   createNobleIdentity,
   createNobleSyncCrypto,
 } from '../../../mobile/src/adapters/noble-sync-crypto.ts';
-import { createMemoryKeys } from './sync-keys.ts';
+import { createMemoryKeys } from './testing/memory-keys.ts';
 import { nodeNoise } from './noise-node.ts';
 import { createSyncService, type SyncService } from './sync-server.ts';
 import { isRecord } from '../shared/check.ts';

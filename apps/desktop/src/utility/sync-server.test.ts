@@ -40,8 +40,8 @@ import { isShellError, shellError } from '../shared/errors.ts';
 import { isRecord } from '../shared/check.ts';
 import { MAX_SYNC_DOC_BYTES } from '../shared/contract.ts';
 import { nodeNoise } from './noise-node.ts';
+import { createMemoryKeys } from './testing/memory-keys.ts';
 import {
-  createMemoryKeys,
   type SyncDeviceRecord,
   type SyncKeys,
 } from './sync-keys.ts';
