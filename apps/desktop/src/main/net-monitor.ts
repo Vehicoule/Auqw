@@ -106,11 +106,16 @@ export function createNetService(opts: {
   probeIntervalMs?: number;
   /** Re-probe cadence while probes are failing — recovery detection. */
   probeRetryMs?: number;
+  /** Cap for the geometric stretch of probeRetryMs under sustained
+      failure — an upstream outage for hours pays ~1 canary/min instead
+      of one every probeRetryMs. */
+  probeRetryMaxMs?: number;
   now?: () => number;
 }): NetService {
   const pollMs = opts.pollMs ?? 2_000;
   const probeIntervalMs = opts.probeIntervalMs ?? 30_000;
   const probeRetryMs = opts.probeRetryMs ?? 8_000;
+  const probeRetryMaxMs = opts.probeRetryMaxMs ?? 60_000;
   const now = opts.now ?? Date.now;
   const senders = new Map<NetSender, number>();
   // A `destroyed` hook is registered once per sender and outlives a
@@ -179,6 +184,20 @@ export function createNetService(opts: {
     );
   }
 
+  // Sustained failure stretches the re-probe gap geometrically
+  // (probeRetryMs → … → probeRetryMaxMs). The stretch only starts once
+  // the streak has actually latched the offline verdict
+  // (PROBE_FAIL_THRESHOLD), so a flap keeps the snappy cadence that
+  // proves it isn't a real outage; any success or NIC edge resets the
+  // streak anyway.
+  function retryGap(): number {
+    const shift = Math.min(
+      Math.max(0, probeFailures - PROBE_FAIL_THRESHOLD),
+      4,
+    );
+    return Math.min(probeRetryMs * 2 ** shift, probeRetryMaxMs);
+  }
+
   function tick(): void {
     const nicNow = opts.readOnline();
     if (nicNow !== nic) {
@@ -203,7 +222,7 @@ export function createNetService(opts: {
       !probeInFlight &&
       (lastProbeSettledAt === 0 ||
         now() - lastProbeSettledAt >=
-          (probeFailures > 0 ? probeRetryMs : probeIntervalMs))
+          (probeFailures > 0 ? retryGap() : probeIntervalMs))
     ) {
       fireProbe();
     }

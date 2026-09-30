@@ -375,7 +375,10 @@ async function boot(): Promise<void> {
       renderState();
     })();
   });
-  setInterval(renderState, 500);
+  // The readout follows the element's own ticks — paused or hidden
+  // playback emits nothing, so no interval is needed.
+  audio.addEventListener('timeupdate', renderState);
+  audio.addEventListener('durationchange', renderState);
 }
 
 void boot();

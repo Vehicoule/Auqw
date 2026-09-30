@@ -498,6 +498,15 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const [online, setOnline] = useState<boolean | null>(null);
   useEffect(() => ports.subscribeOnline(setOnline), [ports.subscribeOnline]);
 
+  // Foreground/active stream — optional port; absent = always active.
+  // While inactive the interpolated-position clock feeding the lyrics
+  // surface stops ticking (nothing is visible to render).
+  const [appActive, setAppActive] = useState(true);
+  useEffect(
+    () => ports.subscribeAppActive?.(setAppActive),
+    [ports.subscribeAppActive],
+  );
+
   // ---- toast bus ---------------------------------------------------
   // reportResult routes its text through the module sink; the pill
   // self-clears.
@@ -2311,7 +2320,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     },
     [session],
   );
-  const lyricsVisible = stageOpen && stageMode === 'lyrics';
+  const lyricsVisible =
+    stageOpen && stageMode === 'lyrics' && appActive;
   const lyricsPositionMs = useSmoothedPosition(
     stagePlayer?.positionMs ?? 0,
     playback.type === 'playing',

@@ -686,6 +686,17 @@ function Main({
           unsub();
         };
       },
+      // Foreground edges drive the shell's appActive gate: the
+      // interpolated-position clock feeding lyrics keeps ticking under
+      // background audio (JS timers still run) but renders nothing —
+      // off-screen ticks only burn battery.
+      subscribeAppActive: (listener) => {
+        listener(AppState.currentState === 'active');
+        const sub = AppState.addEventListener('change', (next) => {
+          listener(next === 'active');
+        });
+        return () => sub.remove();
+      },
       // localPlayable stays unset: on native the owned-bytes check IS
       // the attachable set — the player plays downloads and scanned
       // local files directly. (Desktop passes its capability probe
