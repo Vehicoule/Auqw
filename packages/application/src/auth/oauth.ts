@@ -127,18 +127,20 @@ export function createFetchOAuthHttp(
         timeoutMs !== undefined
           ? setTimeout(() => ctrl?.abort(), timeoutMs)
           : null;
-      let resp: { readonly status: number; text(): Promise<string> };
       try {
-        resp = await fetchFn(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body,
-          ...(ctrl !== null ? { signal: ctrl.signal } : {}),
-        });
-      } catch {
-        return err(appError('unavailable', 'oauth: network failure'));
-      }
-      try {
+        let resp: { readonly status: number; text(): Promise<string> };
+        try {
+          resp = await fetchFn(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body,
+            ...(ctrl !== null ? { signal: ctrl.signal } : {}),
+          });
+        } catch {
+          return err(appError('unavailable', 'oauth: network failure'));
+        }
         // The deadline must cover the BODY too — fetch resolves on
         // headers; a peer stalling the body would otherwise hang past
         // the timeout with no abort armed.
