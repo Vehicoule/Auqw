@@ -140,8 +140,17 @@ export type OverlayScreenProps = {
 
 export function PushScreen({ stackKey, onDismissed, children }: OverlayScreenProps) {
   useOverlayDismiss(onDismissed);
+  // Pushes are pages, not modals — but focus still enters on mount
+  // and returns to the invoker on pop, like the sheet host.
+  const ref = useOverlayFocus<HTMLDivElement>();
   return (
-    <div className="uw-push" data-stack={stackKey} role="presentation">
+    <div
+      ref={ref}
+      className="uw-push"
+      data-stack={stackKey}
+      role="presentation"
+      tabIndex={-1}
+    >
       {children}
     </div>
   );

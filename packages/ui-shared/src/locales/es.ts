@@ -99,6 +99,8 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'queue.title': 'cola',
   'queue.count': { one: '{count} pista', other: '{count} pistas' },
   'queue.empty': 'la cola está vacía',
+  'queue.emptyHint':
+    'añade pistas desde la acción añadir-a-cola de cualquier fila',
   'queue.nowPlaying': 'sonando ahora',
   'queue.upNext': 'a continuación',
   'queue.history': 'historial',

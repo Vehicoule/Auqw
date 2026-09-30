@@ -56,7 +56,13 @@ export function QueueList({
   // mode switches too.
   const listScrollY = useRef(0);
   if (queue.items.length === 0) {
-    return <EmptyState title={t('queue.empty')} icon="queue" />;
+    return (
+      <EmptyState
+        title={t('queue.empty')}
+        hint={t('queue.emptyHint')}
+        icon="queue"
+      />
+    );
   }
   // Display order (nowPlaying → upNext → history) is not the canonical
   // order the engine indexes — move calls translate through

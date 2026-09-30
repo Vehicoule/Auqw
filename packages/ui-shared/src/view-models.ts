@@ -1967,6 +1967,15 @@ export function settingsGroups(
   return groups;
 }
 
+/**
+ * Destructive value/navigation rows arm a two-tap confirm on both
+ * platforms — toggles flip state but never destroy, so they stay
+ * one-press.
+ */
+export function settingsRowConfirms(row: SettingsRowModel): boolean {
+  return row.destructive === true && row.kind !== 'toggle';
+}
+
 /* ------------------------------------------------------------------ */
 /* Sync — LAN pairing panel: listener status, device list, the minted  */
 /* pairing offer. The shapes mirror the desktop `api.sync.*` contract  */

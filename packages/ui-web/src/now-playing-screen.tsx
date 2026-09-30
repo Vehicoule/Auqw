@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   Artwork,
   Icon,
@@ -11,7 +12,7 @@ import {
 } from './primitives.tsx';
 import type { IconButtonProps } from './primitives.tsx';
 import { WaveformSeek } from './progress.tsx';
-import { useOverlayDismiss } from './stack.tsx';
+import { useOverlayDismiss, useOverlayFocus } from './stack.tsx';
 import { QueueList } from './queue-list.tsx';
 import { QueueScreen } from './queue-screen.tsx';
 import type { QueueScreenProps } from './queue-screen.tsx';
@@ -564,7 +565,11 @@ export function NowPlayingScreen({
         <div style={paneHidden('queue')}>
           <div className="uw-stage__queue">
             {queue === undefined ? (
-              <EmptyState title={t('queue.empty')} icon="queue" />
+              <EmptyState
+                title={t('queue.empty')}
+                hint={t('queue.emptyHint')}
+                icon="queue"
+              />
             ) : (
               <>
                 {reorder !== null && (
@@ -634,14 +639,28 @@ export function StageSheet({ expanded, onExpandChange, ...rest }: StageSheetProp
     return null;
   }
   return (
+    <StageSheetDialog>
+      <NowPlayingScreen {...rest} />
+    </StageSheetDialog>
+  );
+}
+
+// Separate component so focus entry/restore tracks the expanded
+// mount boundary exactly (StageSheet itself stays mounted while
+// collapsed) — the Sheet/SheetDialog split.
+function StageSheetDialog({ children }: { readonly children: ReactNode }) {
+  const dialogRef = useOverlayFocus<HTMLDivElement>();
+  return (
     <div
+      ref={dialogRef}
       className="uw-sheet-host"
       role="dialog"
       aria-modal="true"
       aria-label={t('stage.sheetA11y')}
       data-sheet="stage"
+      tabIndex={-1}
     >
-      <NowPlayingScreen {...rest} />
+      {children}
     </div>
   );
 }

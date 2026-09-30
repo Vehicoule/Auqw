@@ -99,6 +99,8 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'queue.title': 'warteschlange',
   'queue.count': { one: '{count} titel', other: '{count} titel' },
   'queue.empty': 'warteschlange ist leer',
+  'queue.emptyHint':
+    'titel über „zur warteschlange hinzufügen“ in einer zeile hinzufügen',
   'queue.nowPlaying': 'läuft gerade',
   'queue.upNext': 'als nächstes',
   'queue.history': 'verlauf',
