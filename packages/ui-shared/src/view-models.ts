@@ -864,6 +864,8 @@ function countByRecordingId(
  * order otherwise; rows already marked failed drop out of both.
  * Under repeat=all an exhausted forward walk wraps to the first
  * unmarked row in both walks — matching the cursor's own wrap rules.
+ * A null cursor (an ended or never-started queue) yields null —
+ * the engine's next() is a no-op there that never wraps.
  */
 export function nextQueueDestination(input: {
   readonly queue: {
@@ -877,13 +879,16 @@ export function nextQueueDestination(input: {
   readonly repeat: RepeatMode;
 }): string | null {
   const { queue, repeat, failedIds } = input;
+  // A null cursor means the queue ended (or never started): the
+  // engine's advance() fails 'no-result' on it before any wrap — no
+  // destination exists even under repeat=all.
+  if (queue.currentOccurrenceId === null) {
+    return null;
+  }
   const walk =
     input.dealtOrder ?? queue.occurrences.map((o) => o.occurrenceId);
   const unmarked = (id: string): boolean => failedIds?.has(id) !== true;
-  const pos =
-    queue.currentOccurrenceId === null
-      ? -1
-      : walk.indexOf(queue.currentOccurrenceId);
+  const pos = walk.indexOf(queue.currentOccurrenceId);
   const next = pos >= 0 ? walk.slice(pos + 1).find(unmarked) : undefined;
   if (next !== undefined) {
     return next;
@@ -893,7 +898,8 @@ export function nextQueueDestination(input: {
   }
   // The wrap picks the first unmarked head — the same edge the engine
   // makes after `next()` stops at the tail; all-failed ends the walk
-  // instead of replaying a known-dead row.
+  // instead of replaying a known-dead row. A cursor missing from the
+  // deal (pos < 0) wraps too — the dealt branch wraps it the same way.
   return walk.find(unmarked) ?? null;
 }
 

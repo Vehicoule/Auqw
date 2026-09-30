@@ -584,7 +584,13 @@ export function StageSheet({
   const travelPx = travelProp ?? internalTravel;
   const internalAnchor = useSharedValue(-1);
   const anchor = anchorProp ?? internalAnchor;
-  const dragStart = useSharedValue(0);
+  // Each detector snapshots its own drag start — the recognizers
+  // mount concurrently (grab strip plus each kept-alive pane's
+  // chrome), and a shared baseline would let a second finger's
+  // onBegin rewrite the first gesture's start mid-drag.
+  const grabDragStart = useSharedValue(0);
+  const lyricsChromeDragStart = useSharedValue(0);
+  const queueChromeDragStart = useSharedValue(0);
   const { activeMode, select: selectMode } = useStageMode(
     mode,
     onModeChange,
@@ -680,20 +686,20 @@ export function StageSheet({
   // works from any mode while the scrollable lists keep their own
   // scroll gesture.
   const makeSheetPan = useCallback(
-    () =>
+    (start: SharedValue<number>) =>
       Gesture.Pan()
         .activeOffsetY(8)
         // Horizontal drift past ±16px fails the recognizer — the
         // cancelled finalize must not commit an anchor (see below).
         .failOffsetX([-16, 16])
         .onBegin(() => {
-          dragStart.value = progress.value;
+          start.value = progress.value;
         })
         .onUpdate((e) => {
           const travel = Math.max(1, travelPx.value);
           progress.value = Math.min(
             1,
-            Math.max(0, dragStart.value - e.translationY / travel),
+            Math.max(0, start.value - e.translationY / travel),
           );
         })
         .onFinalize((e, success) => {
@@ -715,7 +721,7 @@ export function StageSheet({
           }
           const target =
             resolveStageAnchor(
-              dragStart.value,
+              start.value,
               progress.value,
               e.velocityY,
             ) === 'expanded'
@@ -737,15 +743,23 @@ export function StageSheet({
       travelPx,
       theme.reducedMotion,
       progress,
-      dragStart,
       anchor,
       commitAnchor,
       expanded,
     ],
   );
-  const pan = useMemo(makeSheetPan, [makeSheetPan]);
-  const lyricsChromePan = useMemo(makeSheetPan, [makeSheetPan]);
-  const queueChromePan = useMemo(makeSheetPan, [makeSheetPan]);
+  const pan = useMemo(
+    () => makeSheetPan(grabDragStart),
+    [makeSheetPan, grabDragStart],
+  );
+  const lyricsChromePan = useMemo(
+    () => makeSheetPan(lyricsChromeDragStart),
+    [makeSheetPan, lyricsChromeDragStart],
+  );
+  const queueChromePan = useMemo(
+    () => makeSheetPan(queueChromeDragStart),
+    [makeSheetPan, queueChromeDragStart],
+  );
 
   const restCorner = theme.radius.float;
   const animatedStyle = useAnimatedStyle(() => {
@@ -1314,7 +1328,7 @@ export function StageSheet({
                 seed={meta.waveformSeed}
                 peaks={peaks}
                 loading={meta.waveformLoading}
-                visible={expanded}
+                visible={expanded && activeMode === 'player'}
               />
             </View>
           </GestureDetector>

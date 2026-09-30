@@ -300,7 +300,7 @@ struct LiveRequest {
 /// `LiveRequest`'s: a dead slot can be pruned and the id re-admitted
 /// while a stale delivery is still unwinding, so post-delivery
 /// bookkeeping (the `delivered` flip, the adopt path's liveness
-/// removal) touches only the slot its own request committed.
+/// flip) touches only the slot its own request committed.
 struct PreparedSlot {
     handle: String,
     delivered: bool,
@@ -2220,7 +2220,7 @@ mod tests {
         }
         occupied.wait();
         let (tx, rx) = deliver_chan();
-        match host.start_prepare(id, "vid".into(), "req-gap".into(), move |rid, o| {
+        match host.start_prepare(id.clone(), "vid".into(), "req-gap".into(), move |rid, o| {
             let tx = tx.clone();
             async move {
                 let _ = tx.send((rid, o));
@@ -2251,12 +2251,90 @@ mod tests {
                 panic!("delivered a dead handle: {}", stream.handle)
             }
         }
+        // The slot stays, flipped delivered like the live path's
+        // post-wire flip — a `cancel` landing after the Failed outcome
+        // then takes the delivered branch (consuming the slot; the dead
+        // handle's `abandon` is a no-op) instead of tombstoning an id
+        // whose terminal outcome already shipped.
+        assert!(
+            host.prepared_handles
+                .lock()
+                .ok()
+                .and_then(|m| m.get("req-gap").map(|s| s.delivered))
+                .unwrap_or(false),
+            "the dead session's slot must read delivered"
+        );
+        host.cancel("req-gap".to_string());
         assert!(
             host.prepared_handles
                 .lock()
                 .map(|m| !m.contains_key("req-gap"))
                 .unwrap_or(false),
-            "the dead session's ownership slot is removed"
+            "the delivered-branch cancel consumes the slot"
+        );
+        assert!(
+            host.cancelled_requests
+                .lock()
+                .map(|c| !c.contains_key("req-gap"))
+                .unwrap_or(false),
+            "a post-Failed cancel must not tombstone the id"
+        );
+        // The id is immediately reusable: a fresh warm adopts under it
+        // instead of the reuse being pre-cancelled by a stale stone.
+        let warm2 = mint_warm(&reg, &id, "vid");
+        let (tx2, rx2) = deliver_chan();
+        match host.start_prepare(id, "vid".into(), "req-gap".into(), move |rid, o| {
+            let tx = tx2.clone();
+            async move {
+                let _ = tx.send((rid, o));
+            }
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("re-admission: {e}"),
+        }
+        let (_rid, outcome2) = match rx2.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(v) => v,
+            Err(e) => panic!("outcome2: {e}"),
+        };
+        match outcome2 {
+            PrepareOutcome::Prepared { stream, .. } => {
+                assert_eq!(stream.handle, warm2.handle)
+            }
+            PrepareOutcome::Failed { kind, .. } => {
+                panic!("a stale tombstone pre-cancelled the reuse: {kind}")
+            }
+        }
+    }
+
+    /// The invoke path's commit verdict claims liveness atomically: a
+    /// live session comes out claimed — exempt from a concurrent
+    /// prepare's `supersede_unattached` scan — and a session already
+    /// dead at the claim is refused. The atomic check closes the
+    /// check→commit window a racing supersede could otherwise kill in.
+    #[test]
+    fn commit_verdict_claims_liveness_atomically() {
+        let (_host, reg, _dir) = stream_host("claim-verdict");
+        let warm = mint_warm(&reg, "prov", "vid");
+        assert!(
+            reg.claim_if_live(&warm.handle)
+                .unwrap_or_else(|e| panic!("claim_if_live: {e}")),
+            "a live session must read committable"
+        );
+        // Claimed by the verdict itself: a newer prepare's supersede
+        // scan skips it — this is the ordering the commit relies on.
+        mint_warm(&reg, "prov", "other");
+        assert!(
+            reg.is_live(&warm.handle),
+            "the claimed session was superseded after the verdict"
+        );
+        match reg.release(&warm.handle) {
+            Ok(()) => {}
+            Err(e) => panic!("release: {e}"),
+        }
+        assert!(
+            !reg.claim_if_live(&warm.handle)
+                .unwrap_or_else(|e| panic!("claim_if_live: {e}")),
+            "a session dead at the claim must be refused"
         );
     }
 

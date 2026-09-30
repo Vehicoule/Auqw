@@ -1296,7 +1296,7 @@ export type StageScreenHandlers = StageQueueHandlers & {
    * stage's top-right in every mode; omitted hides the control.
    */
   readonly onStopPlayback?: MaybeFn;
-  readonly onSeek?: MaybeFn<[ms: number]>;
+  readonly onSeek?: MaybeFn<[ms: number, expectedOccurrenceId?: string]>;
   readonly onRetryLyrics?: MaybeFn;
   readonly onStartRadio?: MaybeFn;
   readonly onStopRadio?: MaybeFn;

@@ -512,7 +512,9 @@ function partitionBars(
 export type WaveformSeekProps = {
   readonly positionMs: number;
   readonly durationMs: number | null;
-  readonly onSeek?: ((ms: number) => void) | undefined;
+  readonly onSeek?:
+    | ((ms: number, expectedOccurrenceId?: string) => void)
+    | undefined;
   readonly seed?: string | undefined;
   /**
    * Real measured peaks at the canonical resolution (`peaks.ts`),
@@ -621,11 +623,18 @@ export function WaveformSeek({
     if (scrubActive.current) {
       return;
     }
+    // A mounted-but-hidden control (the sheet's kept-alive panes)
+    // snaps rather than animates — the timing would rebuild the
+    // bars path every frame for a waveform no one can see.
+    if (!visible) {
+      fill.value = progress;
+      return;
+    }
     const duration = delta > 0.05 ? theme.motion.state : 900;
     fill.value = theme.reducedMotion
       ? progress
       : withTiming(progress, { duration });
-  }, [fill, progress, theme.motion.state, theme.reducedMotion]);
+  }, [fill, progress, theme.motion.state, theme.reducedMotion, visible]);
   useEffect(
     () => () => {
       clearTimer(settleTimer);
@@ -707,6 +716,7 @@ export function WaveformSeek({
         cancelScrub();
         return;
       }
+      const begunOn = gestureKey.current;
       gestureKey.current = undefined;
       scrubActive.current = false;
       scrubSec.current = -1;
@@ -714,7 +724,10 @@ export function WaveformSeek({
       if (durationMs !== null && durationMs > 0) {
         const ms = Math.round(fraction * durationMs);
         hold(ms);
-        onSeek?.(ms);
+        // The begun-on key rides to the session too — the ref
+        // compare covers flips React already rendered; the
+        // session guard covers the sub-frame window before it.
+        onSeek?.(ms, begunOn ?? undefined);
       }
       // Optimistic fill: when no position tick confirms the seek
       // (paused playback, noop onSeek) fall back to the real
@@ -848,7 +861,7 @@ export function WaveformSeek({
   const a11ySeek = useCallback(
     (ms: number) => {
       hold(ms);
-      onSeek?.(ms);
+      onSeek?.(ms, trackKeyRef.current ?? undefined);
     },
     [hold, onSeek],
   );

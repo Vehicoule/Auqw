@@ -348,6 +348,37 @@ assertEqual(
   null,
   'a fully-marked deal has no destination even under repeat=all',
 );
+// An ended (or never-started) queue has a null cursor: the engine's
+// next() is a no-op there that never wraps — advance() fails
+// 'no-result' — so no destination exists even under repeat=all.
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: null },
+    repeat: 'all',
+    failedIds: failed,
+  }),
+  null,
+  'ended queue under repeat=all never wraps — the engine refuses a null cursor',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: null },
+    dealtOrder: ['occ-2', 'occ-8', 'occ-4'],
+    repeat: 'all',
+    failedIds: failed,
+  }),
+  null,
+  'a null cursor stays null under shuffle — the engine checks it before the deal',
+);
+assertEqual(
+  nextQueueDestination({
+    queue: { occurrences: fixtureQueue.occurrences, currentOccurrenceId: null },
+    repeat: 'off',
+    failedIds: failed,
+  }),
+  null,
+  'ended queue under repeat=off has no destination',
+);
 
 const settings = toSettingsModel(fixtureSettings, fixtureDiagnostics, {});
 assertEqual(settings.rows.length, fixtureSettingsModel.rows.length);

@@ -138,7 +138,9 @@ export function progressOf(positionMs: number, durationMs: number | null): numbe
 function useScrubCommit(
   positionMs: number,
   durationMs: number | null,
-  onSeek: ((ms: number) => void) | undefined,
+  onSeek:
+    | ((ms: number, expectedOccurrenceId?: string) => void)
+    | undefined,
   trackKey: string | null | undefined,
 ): {
   readonly enabled: boolean;
@@ -214,10 +216,11 @@ function useScrubCommit(
       heldBaseline.current = positionRef.current;
       // The hold belongs to the track the gesture began on — a
       // mid-drag track change commits nothing on the new track.
-      heldKey.current =
+      const begunOn =
         gestureKey.current !== undefined
           ? gestureKey.current
           : trackKeyRef.current;
+      heldKey.current = begunOn;
       gestureKey.current = undefined;
       setHeldMs(rounded);
       stopHoldTimer();
@@ -225,7 +228,10 @@ function useScrubCommit(
         heldTimer.current = null;
         setHeldMs(null);
       }, 800);
-      onSeek?.(rounded);
+      // The begun-on key rides to the session too — the ref
+      // compare covers flips React already rendered; the session
+      // guard covers the sub-frame window before it.
+      onSeek?.(rounded, begunOn ?? undefined);
     },
     [onSeek],
   );
@@ -459,7 +465,9 @@ function partitionBars(
 export type WaveformSeekProps = {
   readonly positionMs: number;
   readonly durationMs: number | null;
-  readonly onSeek?: ((ms: number) => void) | undefined;
+  readonly onSeek?:
+    | ((ms: number, expectedOccurrenceId?: string) => void)
+    | undefined;
   /** Identity of the track on the player — scopes the optimistic
    *  hold so a track change never displays the previous track's
    *  committed position. */
