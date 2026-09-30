@@ -723,6 +723,8 @@ export async function run(): Promise<void> {
       'https://[::1]/x',
       'https://[fd00::1]/x',
       'https://[::ffff:10.0.0.1]/x',
+      'https://[::ffff:7f00:1]/x',
+      'https://[::ffff:c0a8:101]/x',
     ]) {
       const denied = await fetchCall(
         CHANNELS.transferFetch,
@@ -786,10 +788,52 @@ export async function run(): Promise<void> {
       requestId: 'f-stall',
     });
     assert(abortStall.ok, 'abort reaches a mid-read body');
+
+    // A requestId reused while the stale read is still settling
+    // belongs to the new fetch — the stale cleanup must not delete it.
+    scripted.set(
+      'https://cdn.example/reused',
+      new Response('zz', { status: 206 }),
+    );
+    const reHeadPromise = fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-stall', 'https://cdn.example/reused'),
+    );
     const stalledBody = await pendingBody;
     assert(
       !stalledBody.ok && stalledBody.error.kind === 'cancelled',
       'mid-read abort surfaces cancelled',
+    );
+    const reHead = await reHeadPromise;
+    assert(reHead.ok, 'requestId reusable after abort');
+    const reBody = await fetchCall(CHANNELS.transferFetchBody, {
+      requestId: 'f-stall',
+    });
+    assert(
+      reBody.ok &&
+        (reBody.result as { data: string }).data ===
+          Buffer.from('zz').toString('base64'),
+      'reused id keeps its own response',
+    );
+
+    // A minted header Node fetch can't encode (≥0x100 codepoint —
+    // native admits the UTF-8 obs-text) refuses non-retryably BEFORE
+    // the request, never TypeError→transient.
+    scripted.set('https://cdn.example/uni', new Response('x'));
+    const seenBefore = seen.length;
+    const uniArgs = argsFor('f-uni', 'https://cdn.example/uni');
+    const uni = await fetchCall(CHANNELS.transferFetch, {
+      ...uniArgs,
+      headers: { 'x-client': 'Ā' },
+    });
+    assert(
+      !uni.ok && uni.error.kind === 'invalid-request',
+      'unencodable header refuses non-retryably',
+    );
+    assertEqual(
+      seen.length,
+      seenBefore,
+      'no fetch issued for unencodable header',
     );
 
     // Aborting a parked response frees the requestId; unknown ids are

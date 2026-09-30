@@ -823,9 +823,11 @@ export function createTransferService(
         .map((g) => parseInt(g, 16))
         .filter((n) => !Number.isNaN(n));
       if (hex.length >= 2) {
-        const a = (hex[hex.length - 2] ?? 0) >> 8;
-        const b = (hex[hex.length - 2] ?? 0) & 0xff;
-        return isPrivateFetchHost(`${a}.${b}.0.0`);
+        const hi = hex[hex.length - 2] ?? 0;
+        const lo = hex[hex.length - 1] ?? 0;
+        return isPrivateFetchHost(
+          `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`,
+        );
       }
     }
     return false;
@@ -888,6 +890,21 @@ export function createTransferService(
     fetches.set(args.requestId, live);
     try {
       let target = parseFetchUrl(args.url);
+      // Node fetch demands ByteString header values (chars ≤0xff);
+      // a native-valid mint can admit ≥0x100 codepoints (UTF-8
+      // obs-text) this transport can't represent — refuse it
+      // non-retryably rather than letting the TypeError surface as
+      // a 'transient' that retries forever.
+      for (const [name, value] of Object.entries(args.headers)) {
+        for (const ch of value) {
+          if ((ch.codePointAt(0) ?? 0) > 0xff) {
+            throw shellError(
+              'invalid-request',
+              `fetch header '${name}' is not byte-encodable`,
+            );
+          }
+        }
+      }
       // Manual hops like the pump's: the scheme is re-validated each
       // hop (a downgrade or a loop never passes) and the minted
       // headers ride verbatim.
@@ -953,7 +970,11 @@ export function createTransferService(
         headers: [...response.headers.entries()],
       };
     } catch (thrown) {
-      fetches.delete(args.requestId);
+      // Delete only our own entry — an abort may already have freed
+      // the id and a new fetch may now own it.
+      if (fetches.get(args.requestId) === live) {
+        fetches.delete(args.requestId);
+      }
       clearTimeout(live.timer);
       asFetchError(live, thrown);
     }
@@ -998,7 +1019,11 @@ export function createTransferService(
     } catch (thrown) {
       asFetchError(live, thrown);
     } finally {
-      fetches.delete(args.requestId);
+      // Same guard — a same-id fetch registered after an abort is
+      // not ours to remove.
+      if (fetches.get(args.requestId) === live) {
+        fetches.delete(args.requestId);
+      }
       clearTimeout(live.timer);
     }
   }
