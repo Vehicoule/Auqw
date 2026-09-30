@@ -73,6 +73,32 @@ export function isDeadHandleError(thrown: unknown): boolean {
 }
 
 /**
+ * A dead-handle throw raised by the driver's own native call — marked
+ * at the call site (via `guardNative`) so a transaction callback that
+ * fails with a look-alike message never replays `work`: non-database
+ * effects inside `work` cannot be rolled back and must not run twice.
+ */
+class DeadHandle extends Error {
+  readonly detail: Error;
+  constructor(detail: Error) {
+    super(detail.message);
+    this.name = 'DeadHandle';
+    this.detail = detail;
+  }
+}
+
+const guardNative = async <T>(call: Promise<T>): Promise<T> => {
+  try {
+    return await call;
+  } catch (thrown) {
+    if (isDeadHandleError(thrown)) {
+      throw new DeadHandle(thrown);
+    }
+    throw thrown;
+  }
+};
+
+/**
  * SqliteDriver over `expo-sqlite`.
  *
  * The transaction boundary is a manual `BEGIN IMMEDIATE` / `COMMIT` /
@@ -106,7 +132,19 @@ export async function createExpoSqliteDriver(
   // driver is handed out.
   const openLive = async (): Promise<ExpoSqliteDb> => {
     const db = await io.openDb(name);
-    await db.execAsync('PRAGMA foreign_keys = ON');
+    try {
+      await guardNative(db.execAsync('PRAGMA foreign_keys = ON'));
+    } catch (thrown) {
+      // A half-opened registration stays cached on Android — close the
+      // probe handle before the caller retries or propagates (the
+      // close itself may be the call that is dead).
+      try {
+        await db.closeAsync();
+      } catch {
+        // Best-effort.
+      }
+      throw thrown;
+    }
     return db;
   };
 
@@ -147,7 +185,9 @@ export async function createExpoSqliteDriver(
     try {
       return await run(db);
     } catch (thrown) {
-      if (!isDeadHandleError(thrown)) {
+      // Only a marked native failure replays — a callback error with a
+      // look-alike message propagates without re-running `work`.
+      if (!(thrown instanceof DeadHandle)) {
         throw thrown;
       }
     }
@@ -163,9 +203,11 @@ export async function createExpoSqliteDriver(
   // The device path of the main database, resolved from SQLite itself
   // so the backup lands next to the file it preserves.
   const mainFile = async (db: ExpoSqliteDb): Promise<string | null> => {
-    const rows = await db.getAllAsync<{ name: string; file: string }>(
-      'PRAGMA database_list',
-      [],
+    const rows = await guardNative(
+      db.getAllAsync<{ name: string; file: string }>(
+        'PRAGMA database_list',
+        [],
+      ),
     );
     const file = rows.find((r) => r.name === 'main')?.file;
     return typeof file === 'string' && file.length > 0 ? file : null;
@@ -182,8 +224,10 @@ export async function createExpoSqliteDriver(
         // VACUUM INTO refuses an existing target: a stale image from a
         // failed attempt is replaced so retries stay retryable.
         await io.deleteIfExists(`${file}.bak-${tag}`);
-        await db.execAsync(
-          `VACUUM INTO '${file.replaceAll("'", "''")}.bak-${tag}'`,
+        await guardNative(
+          db.execAsync(
+            `VACUUM INTO '${file.replaceAll("'", "''")}.bak-${tag}'`,
+          ),
         );
       });
     },
@@ -205,12 +249,14 @@ export async function createExpoSqliteDriver(
         // Re-asserted per transaction before BEGIN (same discipline as
         // the bundled NodeSqliteDriver): a no-op pragma is cheap, a
         // silently unenforced FK is not.
-        await db.execAsync('PRAGMA foreign_keys = ON');
+        await guardNative(db.execAsync('PRAGMA foreign_keys = ON'));
         checkCancelled(signal);
         const connection: SqliteConnection = {
           async execute(sql, params = [], statementSignal) {
             checkCancelled(statementSignal ?? signal);
-            const result = await db.runAsync(sql, [...params]);
+            const result = await guardNative(
+              db.runAsync(sql, [...params]),
+            );
             return {
               changes: result.changes,
               lastInsertRowId: result.lastInsertRowId,
@@ -222,7 +268,9 @@ export async function createExpoSqliteDriver(
             statementSignal?: CancellationSignal,
           ): Promise<readonly T[]> {
             checkCancelled(statementSignal ?? signal);
-            const rows = await db.getAllAsync<T>(sql, [...params]);
+            const rows = await guardNative(
+              db.getAllAsync<T>(sql, [...params]),
+            );
             for (const row of rows) {
               checkRow(row);
             }
@@ -234,15 +282,17 @@ export async function createExpoSqliteDriver(
             checkCancelled(statementSignal ?? signal);
             for (const statement of statements) {
               checkCancelled(statementSignal ?? signal);
-              await db.runAsync(statement.sql, [...statement.params]);
+              await guardNative(
+                db.runAsync(statement.sql, [...statement.params]),
+              );
             }
           },
         };
-        await db.execAsync('BEGIN IMMEDIATE');
+        await guardNative(db.execAsync('BEGIN IMMEDIATE'));
         try {
           const value = await work(connection);
           checkCancelled(signal);
-          await db.execAsync('COMMIT');
+          await guardNative(db.execAsync('COMMIT'));
           return value;
         } catch (thrown) {
           try {

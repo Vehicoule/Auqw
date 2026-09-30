@@ -182,9 +182,45 @@ export async function run(): Promise<void> {
     const r = rig(dead, live);
     const driver = await createExpoSqliteDriver(undefined, r.io);
     assertEqual(r.opened.length, 2, 'creation retried the open once');
+    assert(dead.closed, 'the failed probe handle is closed, not held');
     const result = await driver.transaction(work);
     assertEqual(result, 'done');
     assertEqual(r.opened.length, 2, 'no extra opens for a live handle');
+  }
+
+  // A callback error that merely mentions a dead resource propagates
+  // without reopening or replaying `work` — only failures from the
+  // driver's own native calls are marked.
+  {
+    const first = new FakeDb();
+    const r = rig(first);
+    const driver = await createExpoSqliteDriver(undefined, r.io);
+    const lookAlike = new Error('database is closed');
+    let calls = 0;
+    let caught: unknown;
+    try {
+      await driver.transaction(async () => {
+        calls += 1;
+        throw lookAlike;
+      });
+    } catch (thrown) {
+      caught = thrown;
+    }
+    assert(caught === lookAlike, 'callback error propagates untouched');
+    assertEqual(calls, 1, 'work never replays on a look-alike error');
+    assertEqual(r.opened.length, 1, 'no re-open for a callback failure');
+  }
+
+  // A handle whose liveness probe fails is closed, not abandoned —
+  // failed opens leave no cached registration behind.
+  {
+    const dead = new FakeDb();
+    dead.failExec = npe();
+    const live = new FakeDb();
+    const r = rig(dead, live);
+    await createExpoSqliteDriver(undefined, r.io);
+    assert(dead.closed, 'failed probe handle closed before the retry');
+    assertEqual(r.opened.length, 2);
   }
 
   // Non-dead errors stay honest: no re-open, the throw propagates.
