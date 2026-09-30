@@ -92,5 +92,32 @@ When you only need `packages/ui-native` components — not the session/download 
 - **Canned-fake bit-rot heuristic**: wire-codec tightening silently kills canned replies — a `catalog.search` returning `invalid-response`/`error.unexpected` means diff the canned object against `isTrackMetadata`/`toTrackMetadata` in `packages/application/src/providers/provider-wire.ts` + `domain.ts` FIRST (this session's instance: `CANNED_TRACK.artwork: null` → `[]`).
 - **`pkill -f 'pat[t]ern'`** — bracket a character so the pattern can't match your own exec shell's command line and kill it.
 
+# Suggested additions to testing-auqw-ui-native-web (verified 2026-09-30 on devin/1790807912-tab-latency)
+
+- **react-dom is now already pinned at 19.2.3 in apps/mobile
+  package.json** (dependencies, not devDeps) — check before blindly
+  `pnpm add -D react-dom react-native-web`; only react-native-web was
+  missing this run.
+- **`browser_console` tool cannot eval in the harness Chrome** — it
+  launches with a separate `--user-data-dir` and no remote-debugging
+  port, so CDP attaches elsewhere/fails. Use in-window devtools:
+  `ctrl+shift+i` while the harness window is focused, then Console tab —
+  all the same evals work (`document.querySelector('input').focus()`,
+  pane-structure checks).
+- **The `__connStrip` buttons overlap the settings navbar item's lower
+  hitbox** — at ~1050px window the settings gear sits at ~y688
+  (screenshot space) while the strip sits at ~y704; a tap at the strip's
+  Y silently hits a conn button instead of the tab. Aim ABOVE the strip
+  or hide it first.
+- **Keep-alive structural check that works on RNW**: hidden panes are
+  sibling divs with inline `display:'none'` and computed
+  `pointer-events:none`:
+  `[...document.querySelectorAll('#root div')].filter(d=>d.style.display==='none')`
+  → one per hidden tab, each with mounted descendants; stash an input
+  node and compare identity across switches for no-remount proof.
+- **Navbar tab hitboxes**: the four items are at the bottom bar — home /
+  explore / library / settings(gear). The gear is unlabeled — zoom the
+  bar if a click doesn't switch.
+
 ## Devin Secrets Needed
 - none

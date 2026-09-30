@@ -7,6 +7,7 @@ export { WaveformSeek } from './progress.tsx';
 export { TrackRow } from './track-row.tsx';
 export { EmptyState, ErrorState, LoadingState } from './states.tsx';
 export { DesktopChrome } from './chrome.tsx';
+export { WorldPanes } from './world-panes.tsx';
 export { AppStack, PushScreen, SheetScreen, StackItem } from './stack.tsx';
 export { MiniPlayer } from './mini-player.tsx';
 export { NowPlayingScreen, StageSheet, StageIdlePane } from './now-playing-screen.tsx';

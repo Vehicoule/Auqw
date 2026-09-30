@@ -58,6 +58,7 @@ const {
   ThemeProvider,
   TrackRow,
   TransferScreen,
+  WorldPanes,
   applyPendingMove,
   globalKeyAction,
   toSyncPanel,
@@ -608,6 +609,58 @@ function render(node: ReactNode): string {
   check('search field is an input', markup.includes('type="search"'));
   assertIncludes('search results header', markup, 'matches');
   check('search result rows render as listitems', markup.includes('role="listitem"'));
+}
+{
+  const markup = render(
+    h(SearchScreen, {
+      state: fixtureSearchStates[0]!,
+      autoFocus: true,
+    }),
+  );
+  check(
+    'autofocus input carries the reveal-focus marker',
+    markup.includes('data-autofocus'),
+  );
+}
+
+// ---- markup: world panes (keep-alive tab host) --------------------------------
+
+{
+  const pane = (key: string) => h('div', null, `pane-${key}`);
+  const markup = render(
+    h(WorldPanes, {
+      keys: ['home', 'explore', 'library', 'settings'],
+      activeKey: 'explore',
+      renderPane: pane,
+    }),
+  );
+  check(
+    'world panes: the active pane renders its content',
+    markup.includes('pane-explore'),
+  );
+  check(
+    'world panes: hidden panes mount their wrappers only (content warms post-commit)',
+    !markup.includes('pane-home') && !markup.includes('pane-library'),
+  );
+  check(
+    'world panes: hidden wrappers are display:none + inert + aria-hidden',
+    markup.includes('display:none') &&
+      markup.includes('inert') &&
+      markup.includes('aria-hidden="true"'),
+  );
+}
+{
+  const markup = render(
+    h(WorldPanes, {
+      keys: ['home', 'explore'],
+      activeKey: 'mystery',
+      renderPane: (key: string) => h('div', null, `pane-${key}`),
+    }),
+  );
+  check(
+    'world panes: an unknown active key renders through the fallback',
+    markup.includes('pane-mystery'),
+  );
 }
 
 // ---- markup: every screen under one provider (smoke) ----------------------------

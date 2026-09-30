@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { ImageSourcePropType, Keyboard, Platform, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import TabView, { useBottomTabBarHeight } from 'react-native-bottom-tabs';
@@ -46,6 +47,7 @@ type Route = {
   title: string;
   focusedIcon: ImageSourcePropType | AppleIcon;
   unfocusedIcon?: ImageSourcePropType;
+  lazy?: boolean;
 };
 
 function routeFor(item: NavItemModel): Route {
@@ -138,10 +140,35 @@ export function PlatformTabs({
   // for the keyboard, keeping the dock just above the IME.
   const [tabBarHeight, setTabBarHeight] = useState<number | null>(null);
   const insets = useSafeAreaInsets();
+
+  // Two halves of the per-switch cost on top of the native host's
+  // scene keep-alive:
+  // 1. Scenes stay mounted natively once `loaded`, but renderScene was
+  //    still invoked for every loaded route on every app render —
+  //    each position tick reconciled the whole mounted world. Cache
+  //    one element per route: the focused scene rebuilds (live props),
+  //    a hidden scene freezes on its last element and rebuilds at
+  //    focus — the same commit, so nothing stale is ever visible.
+  // 2. A first visit still cold-mounted the scene on the gesture.
+  //    After the first commit the warm flag flips getLazy to eager,
+  //    mounting the remaining scenes off the gesture path.
+  const [warm, setWarm] = useState(false);
+  useEffect(() => setWarm(true), []);
+  const built = useRef(new Map<string, ReactNode>());
+  const sceneFor = (key: string): ReactNode => {
+    const prev = built.current.get(key);
+    if (key === activeKey || prev === undefined) {
+      const element = renderTab(key);
+      built.current.set(key, element);
+      return element;
+    }
+    return prev;
+  };
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
       <TabView
         navigationState={{ index, routes }}
+        getLazy={({ route }) => (warm ? false : route.lazy)}
         renderScene={({ route }) => (
           <View
             style={{
@@ -150,7 +177,7 @@ export function PlatformTabs({
               paddingBottom: androidDock ? ACCESSORY_RESERVE : 0,
             }}
           >
-            {renderTab(route.key)}
+            {sceneFor(route.key)}
             {/* Scenes draw edge-to-edge — scrolled content passes
                 under the status bar mid-scroll and collides with the
                 clock/icons. An opaque canvas band over the inset area

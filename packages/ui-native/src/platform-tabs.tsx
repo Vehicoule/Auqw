@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -17,7 +18,13 @@ export type PlatformTabsProps = {
   readonly tabBarHidden?: boolean | undefined;
 };
 
-// Non-native fallback (web/desktop): the app's own navbar + docked accessory.
+// Non-native fallback (web/desktop): the app's own navbar + docked
+// accessory. Panes keep-alive like the native tab host does (and like
+// the ui-web WorldPanes): a switch used to be a conditional mount that
+// paid a full cold mount per screen. Visited panes stay mounted under
+// display:'none'; a hidden pane freezes on its last-built element and
+// rebuilds at activation — the same commit — so no per-render
+// reconcile runs across the mounted world.
 export function PlatformTabs({
   items,
   activeKey,
@@ -28,10 +35,41 @@ export function PlatformTabs({
 }: PlatformTabsProps) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  // Warm-mount the hidden panes after the first commit — first visits
+  // then flip display instead of cold-mounting on the gesture.
+  const [warm, setWarm] = useState(false);
+  useEffect(() => setWarm(true), []);
+  const built = useRef(new Map<string, ReactNode>());
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
       <View style={{ flex: 1 }}>
-        {renderTab(activeKey)}
+        {items.map((item) => {
+          const active = item.key === activeKey;
+          const prev = built.current.get(item.key);
+          let element = prev;
+          if (active || (warm && prev === undefined)) {
+            element = renderTab(item.key);
+            built.current.set(item.key, element);
+          }
+          return (
+            <View
+              key={item.key}
+              style={active ? { flex: 1 } : { display: 'none' }}
+              pointerEvents={active ? 'auto' : 'none'}
+              accessibilityElementsHidden={!active}
+              importantForAccessibility={
+                active ? 'auto' : 'no-hide-descendants'
+              }
+            >
+              {element}
+            </View>
+          );
+        })}
+        {/* An activeKey outside `items` still renders — the pane set is
+            a keep-alive policy, not a filter on what may show. */}
+        {items.some((item) => item.key === activeKey)
+          ? null
+          : renderTab(activeKey)}
         {/* Same solid-inset band as the native scenes — covers the
             status bar area so scrolled content can't collide with
             the clock/icons (0-height where there is no inset). */}
