@@ -633,8 +633,10 @@ export function createWebPeaksPort(deps: {
         mergeSample(windows, s.mediaMs, s.channels, s.pcmMs, totalMs);
       }
       // Retention-capped samples re-project their own window row onto
-      // the timeline under the same final estimate — nearest-window
-      // lookup, max merge into the shared row.
+      // the timeline under the same final estimate. Each destination
+      // bucket max-merges EVERY source window its interval intersects —
+      // a sample squeezed below its window count must not drop the
+      // transients a skipped window was carrying.
       const bucketMs = totalMs / PEAKS_RESOLUTION;
       if (bucketMs > 0) {
         for (const s of overflowed) {
@@ -643,13 +645,30 @@ export function createWebPeaksPort(deps: {
             1,
             Math.min(PEAKS_RESOLUTION, Math.ceil(s.pcmMs / bucketMs)),
           );
+          const wLen = s.windows.length;
           for (let j = 0; j < span && first + j < PEAKS_RESOLUTION; j++) {
             const i = first + j;
             if (i < 0) {
               continue;
             }
-            const w =
-              s.windows[Math.floor((j * s.windows.length) / span)]!;
+            // Source windows covering this bucket's share of the
+            // sample: [k0, k1] inclusive.
+            const k0 = Math.floor((j * wLen) / span);
+            const k1 = Math.floor(((j + 1) * wLen - 1) / span);
+            let w: PeakWindow | null = null;
+            for (let k = k0; k <= k1 && k < wLen; k += 1) {
+              const sw = s.windows[k]!;
+              w =
+                w === null
+                  ? sw
+                  : {
+                      up: Math.max(w.up, sw.up),
+                      down: Math.max(w.down, sw.down),
+                    };
+            }
+            if (w === null) {
+              continue;
+            }
             const prev = windows[i] ?? null;
             windows[i] =
               prev === null

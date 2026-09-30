@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -180,6 +180,31 @@ export async function run(): Promise<void> {
       assert(listener !== undefined, `no handler for ${channel}`);
       return listener(event, args);
     };
+
+    // Contract coverage: every channel the preload surface calls must
+    // reach a registered handler (invoke → handle, send → on) — an
+    // unwired channel fails silently for the user, the caller only
+    // sees "no handler registered". `stream:probe` shipped that way.
+    {
+      const preloadSrc = readFileSync(
+        new URL('../preload/index.ts', import.meta.url),
+        'utf8',
+      );
+      for (const m of preloadSrc.matchAll(/invoke\(CHANNELS\.(\w+)/g)) {
+        const channel = CHANNELS[m[1] as keyof typeof CHANNELS];
+        assert(
+          ipc.handlers.has(channel),
+          `preload invokes '${channel}' but main registers no handler`,
+        );
+      }
+      for (const m of preloadSrc.matchAll(/\.send\(CHANNELS\.(\w+)/g)) {
+        const channel = CHANNELS[m[1] as keyof typeof CHANNELS];
+        assert(
+          ipc.handlers.has(channel) || ipc.listeners.has(channel),
+          `preload sends '${channel}' but main registers nothing`,
+        );
+      }
+    }
 
     // app:meta
     const meta = await invoke(CHANNELS.appMeta, undefined);
