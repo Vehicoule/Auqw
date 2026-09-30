@@ -16,6 +16,7 @@
 import { appError, err, ok } from '../errors.ts';
 import type { AppError, Result } from '../errors.ts';
 import { isRecord } from '../domain.ts';
+import type { CancellationSignal } from '../cancellation.ts';
 
 export const OAUTH_DEVICE_CODE_URL =
   'https://oauth2.googleapis.com/device/code';
@@ -49,8 +50,20 @@ export interface OAuthHttp {
   postForm(
     url: string,
     pairs: Record<string, string>,
+    req?: OAuthRequestOptions,
   ): Promise<Result<OAuthHttpResponse>>;
 }
+
+/**
+ * Per-call bounds — every exchange is deadline-capped so a hung
+ * endpoint can't stall a flow past its own expiry, and a flow's
+ * cancellation aborts the in-flight request instead of leaving it
+ * outstanding after dismissal.
+ */
+export type OAuthRequestOptions = {
+  readonly timeoutMs?: number;
+  readonly signal?: CancellationSignal;
+};
 
 export type OAuthHttpResponse = {
   readonly status: number;
@@ -70,6 +83,7 @@ type OAuthFetch = (
     readonly method: string;
     readonly headers: Record<string, string>;
     readonly body: string;
+    readonly signal?: AbortSignalLike;
   },
 ) => Promise<{
   readonly status: number;
@@ -78,26 +92,56 @@ type OAuthFetch = (
 
 declare const fetch: OAuthFetch;
 
+/** Minimal abort surface — lib-free like the fetch declaration. */
+type AbortSignalLike = { readonly aborted: boolean };
+declare const AbortController: {
+  new (): { readonly signal: AbortSignalLike; abort(): void };
+};
+
+declare const setTimeout: (
+  callback: () => void,
+  ms: number,
+) => { unref?(): void };
+declare const clearTimeout: (timer: unknown) => void;
+
 export function createFetchOAuthHttp(
   fetchFn: OAuthFetch = fetch,
 ): OAuthHttp {
   return {
-    async postForm(url, pairs) {
+    async postForm(url, pairs, req) {
       const body = Object.entries(pairs)
         .map(
           ([k, v]) =>
             `${encodeURIComponent(k)}=${encodeURIComponent(v)}`,
         )
         .join('&');
+      // One controller per request — the deadline and the caller's
+      // cancellation signal both abort the same fetch.
+      const timeoutMs = req?.timeoutMs;
+      const ctrl =
+        timeoutMs !== undefined || req?.signal !== undefined
+          ? new AbortController()
+          : null;
+      const off = req?.signal?.subscribe(() => ctrl?.abort()) ?? null;
+      const timer =
+        timeoutMs !== undefined
+          ? setTimeout(() => ctrl?.abort(), timeoutMs)
+          : null;
       let resp: { readonly status: number; text(): Promise<string> };
       try {
         resp = await fetchFn(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body,
+          ...(ctrl !== null ? { signal: ctrl.signal } : {}),
         });
       } catch {
         return err(appError('unavailable', 'oauth: network failure'));
+      } finally {
+        if (timer !== null) {
+          clearTimeout(timer);
+        }
+        off?.();
       }
       // Device-flow errors answer HTTP 400 with a JSON `error` body —
       // parse before judging so pending/denied/expired surface
@@ -234,6 +278,7 @@ export interface OAuthClient {
   /** Start a device flow — the user-facing pair rides the grant. */
   beginDeviceFlow(
     creds: OAuthCredentials,
+    req?: OAuthRequestOptions,
   ): Promise<Result<DeviceGrant>>;
   /**
    * One poll of the token endpoint against an in-flight grant.
@@ -243,11 +288,13 @@ export interface OAuthClient {
   pollDeviceGrant(
     creds: OAuthCredentials,
     grant: DeviceGrant,
+    req?: OAuthRequestOptions,
   ): Promise<Result<DevicePollVerdict>>;
   /** `grant_type=refresh_token` — `invalid_grant` maps to auth-expired. */
   refreshAccessToken(
     creds: OAuthCredentials,
     refreshToken: string,
+    req?: OAuthRequestOptions,
   ): Promise<Result<TokenGrant>>;
 }
 
@@ -280,11 +327,15 @@ export function createOAuthClient(deps: {
   }
 
   return {
-    async beginDeviceFlow(creds) {
-      const resp = await http.postForm(OAUTH_DEVICE_CODE_URL, {
-        client_id: creds.clientId,
-        scope: OAUTH_SCOPE,
-      });
+    async beginDeviceFlow(creds, req) {
+      const resp = await http.postForm(
+        OAUTH_DEVICE_CODE_URL,
+        {
+          client_id: creds.clientId,
+          scope: OAUTH_SCOPE,
+        },
+        req,
+      );
       if (!resp.ok) {
         return resp;
       }
@@ -331,13 +382,14 @@ export function createOAuthClient(deps: {
       });
     },
 
-    async pollDeviceGrant(creds, grant) {
+    async pollDeviceGrant(creds, grant, req) {
       const resp = await http.postForm(
         OAUTH_TOKEN_URL,
         credentialPairs(creds, {
           device_code: grant.deviceCode,
           grant_type: OAUTH_DEVICE_GRANT,
         }),
+        req,
       );
       if (!resp.ok) {
         return resp;
@@ -372,13 +424,14 @@ export function createOAuthClient(deps: {
       return endpointError(resp.value, 'token');
     },
 
-    async refreshAccessToken(creds, refreshToken) {
+    async refreshAccessToken(creds, refreshToken, req) {
       const resp = await http.postForm(
         OAUTH_TOKEN_URL,
         credentialPairs(creds, {
           refresh_token: refreshToken,
           grant_type: OAUTH_REFRESH_GRANT,
         }),
+        req,
       );
       if (!resp.ok) {
         return resp;

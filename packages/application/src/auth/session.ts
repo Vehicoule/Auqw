@@ -213,6 +213,9 @@ const RENEW_MIN_DELAY_MS = 5_000;
 const RENEW_RETRY_BASE_MS = 30_000;
 const RENEW_RETRY_MAX_MS = 600_000;
 const SLOWDOWN_STEP_MS = 5_000;
+/** Per-exchange deadline — a hung endpoint can't stall a flow past
+ *  its device-code expiry or park a renewal forever. */
+const OAUTH_REQUEST_TIMEOUT_MS = 15_000;
 /** UI/wire bound on a published failure message — verbose provider
  *  bodies are truncated at publish, not at each producer, so the
  *  `auth:state` contract's 1024-char bound can never drop a snapshot. */
@@ -241,8 +244,20 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
   } | null = null;
   let pendingBegin: CancellationSource | null = null;
   let restored: Promise<void> | null = null;
+  /** A failed custody read is NOT an absent record — record-changing
+   *  verbs refuse while it stands so a transient store error can't
+   *  overwrite a real stored grant with the unloaded in-memory view. */
+  let restoreFailed = false;
   let renewChain: Promise<void> = Promise.resolve();
   let custodyChain: Promise<unknown> = Promise.resolve();
+  /** A rotation write that failed — retried on its own lane until the
+   *  grant changes hands; the in-memory grant rides the replacement
+   *  either way (the predecessor may already be dead server-side). */
+  let pendingGrantWrite: {
+    readonly token: string;
+    readonly record: AuthCustodyRecord;
+  } | null = null;
+  let persistDisarm: (() => void) | null = null;
   /** Issuer of the live `refreshToken` — refresh exchanges ride
    *  this, never the moving override. */
   let grantClientId: string | null = null;
@@ -335,6 +350,52 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     }
   }
 
+  function disarmPersist(): void {
+    if (persistDisarm !== null) {
+      persistDisarm();
+      persistDisarm = null;
+    }
+    pendingGrantWrite = null;
+  }
+
+  async function persistRetry(): Promise<void> {
+    const pending = pendingGrantWrite;
+    if (pending === null) {
+      return;
+    }
+    if (refreshToken !== pending.token) {
+      pendingGrantWrite = null;
+      return;
+    }
+    const wrote = await writeCustody(pending.record);
+    if (refreshToken !== pending.token) {
+      // The grant moved while the write was in flight — the newer
+      // owner's write is already serialized behind it.
+      return;
+    }
+    if (wrote.ok) {
+      pendingGrantWrite = null;
+      return;
+    }
+    persistDisarm = clock.arm(RENEW_RETRY_BASE_MS, () => {
+      persistDisarm = null;
+      void persistRetry();
+    });
+  }
+
+  function armPersistRetry(): void {
+    // Rearm the timer only — disarmPersist() would also drop the
+    // pending record this retry exists to write.
+    if (persistDisarm !== null) {
+      persistDisarm();
+      persistDisarm = null;
+    }
+    persistDisarm = clock.arm(RENEW_RETRY_BASE_MS, () => {
+      persistDisarm = null;
+      void persistRetry();
+    });
+  }
+
   /**
    * The simple-timer refresh policy: re-mint 60 s before the
    * provider-stated expiry (min 5 s out), and on a transient failure
@@ -403,6 +464,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     accessExpiresAtMs = 0;
     bearerLive = false;
     disarmRenew();
+    disarmPersist();
     renewFails = 0;
     try {
       await deps.applyToken(null);
@@ -438,7 +500,9 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     }
     // The grant rides its issuing client for life — the override
     // preference may have moved since it was minted.
-    const res = await oauth.refreshAccessToken(grantCreds(), token);
+    const res = await oauth.refreshAccessToken(grantCreds(), token, {
+      timeoutMs: OAUTH_REQUEST_TIMEOUT_MS,
+    });
     if (refreshToken !== token) {
       // The grant changed while the exchange was in flight — sign-out
       // or a newer grant owns the slot now; applying this late mint
@@ -453,13 +517,21 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         // failed persist retries the lane against the new grant
         // (the old one may already be dead).
         refreshToken = grant.refreshToken;
-        const wrote = await writeCustody({
-          v: 1,
+        const record = {
+          v: 1 as const,
           refreshToken: grant.refreshToken,
           clientId: clientIdOverride,
           grantClientId,
-        });
+        };
+        const wrote = await writeCustody(record);
         if (!wrote.ok) {
+          // Keep exchanging on the rotated grant (the predecessor may
+          // already be revoked) while its custody write retries on the
+          // persist lane — the grant stays in memory until durable.
+          if (refreshToken === grant.refreshToken) {
+            pendingGrantWrite = { token: grant.refreshToken, record };
+            armPersistRetry();
+          }
           renewFails += 1;
           armRenewRetry();
           return;
@@ -486,11 +558,30 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     }
     renewFails += 1;
     armRenewRetry();
+    if (bearerLive && clock.now() >= accessExpiresAtMs) {
+      // The slot's bearer has expired while renewals keep failing —
+      // nothing usable sits in the host; say so (recovery CTAs key
+      // off liveness) and clear the stale token.
+      bearerLive = false;
+      try {
+        await deps.applyToken(null);
+      } catch {
+        // The flag is the truth consumers read; the host write is
+        // best-effort against a possibly-dead sink.
+      }
+      publish();
+    }
   }
 
   async function doRestore(): Promise<void> {
     const read = await custody.read();
-    if (!read.ok || read.value === null) {
+    if (!read.ok) {
+      restoreFailed = true;
+      publish();
+      return;
+    }
+    restoreFailed = false;
+    if (read.value === null) {
       publish();
       return;
     }
@@ -507,6 +598,18 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     if (refreshToken !== null) {
       renewQueued();
     }
+  }
+
+  /**
+   * The memoized restore — retried per call while the last read
+   * failed, so a transient store error heals on the next verb
+   * instead of persisting as an unseen-record risk for the session.
+   */
+  async function ensureRestore(): Promise<void> {
+    if (restored === null || restoreFailed) {
+      restored = doRestore();
+    }
+    await restored;
   }
 
   function endFlow(): void {
@@ -543,7 +646,10 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         publish();
         return;
       }
-      const res = await oauth.pollDeviceGrant(owned.creds, grant);
+      const res = await oauth.pollDeviceGrant(owned.creds, grant, {
+        timeoutMs: OAUTH_REQUEST_TIMEOUT_MS,
+        signal: source.signal,
+      });
       owned = flow;
       if (owned === null || owned.source !== source) {
         return;
@@ -555,6 +661,20 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         return;
       }
       const verdict = res.value;
+      // A granted reply wins even past the code's deadline — the
+      // credential is real; only continuations re-check expiry.
+      if (
+        verdict.type !== 'granted' &&
+        clock.now() >= grant.expiresAtMs
+      ) {
+        endFlow();
+        status = {
+          state: 'failed',
+          error: appError('expired', 'oauth: device code expired'),
+        };
+        publish();
+        return;
+      }
       if (verdict.type === 'pending') {
         continue;
       }
@@ -595,6 +715,17 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
             'invalid-response',
             'oauth: grant carried no refresh token',
           ),
+        };
+        publish();
+        return;
+      }
+      if (restoreFailed) {
+        // The store never read clean — persisting over unknown
+        // contents could destroy a grant we never loaded.
+        endFlow();
+        status = {
+          state: 'failed',
+          error: appError('unavailable', 'oauth: custody read failed'),
         };
         publish();
         return;
@@ -666,8 +797,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     },
 
     restore() {
-      restored ??= doRestore();
-      return restored;
+      return ensureRestore();
     },
 
     beginSignIn() {
@@ -685,14 +815,26 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       status = { state: 'starting' };
       publish();
       void (async () => {
-        await (restored ??= doRestore());
+        await ensureRestore();
         // Attempt identity — a dismissed/superseded begin exits
         // silently; the newer owner already holds pendingBegin/state.
         if (pendingBegin !== source) {
           return;
         }
+        if (restoreFailed) {
+          pendingBegin = null;
+          status = {
+            state: 'failed',
+            error: appError('unavailable', 'oauth: custody read failed'),
+          };
+          publish();
+          return;
+        }
         const beginCreds = creds();
-        const begun = await oauth.beginDeviceFlow(beginCreds);
+        const begun = await oauth.beginDeviceFlow(beginCreds, {
+          timeoutMs: OAUTH_REQUEST_TIMEOUT_MS,
+          signal: source.signal,
+        });
         if (pendingBegin !== source) {
           return;
         }
@@ -735,7 +877,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     },
 
     async signOut() {
-      await (restored ??= doRestore());
+      await ensureRestore();
       pendingBegin?.cancel();
       flow?.source.cancel();
       flow = null;
@@ -745,6 +887,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       accessExpiresAtMs = 0;
       bearerLive = false;
       disarmRenew();
+      disarmPersist();
       renewFails = 0;
       // Host slot first — a custody failure below must never leave a
       // live bearer reachable.
@@ -788,7 +931,12 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
           appError('invalid-message', 'oauth: client id too long'),
         );
       }
-      await (restored ??= doRestore());
+      await ensureRestore();
+      if (restoreFailed) {
+        return err(
+          appError('unavailable', 'oauth: custody read failed'),
+        );
+      }
       const next = trimmed === '' ? null : trimmed;
       const wrote = await writeCustody({
         v: 1,

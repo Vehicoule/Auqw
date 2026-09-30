@@ -791,6 +791,107 @@ async function testStaleBeginCannotClobber(): Promise<void> {
   session.cancelSignIn();
 }
 
+async function testBearerLiveExpires(): Promise<void> {
+  // Renewals failing past the access expiry flip the liveness flag
+  // off and clear the stale token from the host slot.
+  const { custody } = fakeCustody({
+    v: 1,
+    refreshToken: 'r1',
+    clientId: null,
+    grantClientId: null,
+  });
+  const { oauth, refreshes } = fakeOAuth();
+  refreshes.push(ok(tokenGrant({ refreshToken: null })));
+  const clock = fakeClock(0);
+  const applied: (string | null)[] = [];
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: clock.clock,
+  });
+  await session.restore();
+  await flush();
+  assertEqual(session.snapshot().bearerLive, true);
+  refreshes.push(err(appError('unavailable', 'oauth: refresh 500')));
+  clock.setNow(3_610_001);
+  clock.fireNext();
+  await flush();
+  assertEqual(session.snapshot().bearerLive, false);
+  assert(applied.includes(null), 'stale bearer never cleared');
+}
+
+async function testCustodyReadFailGatesVerbs(): Promise<void> {
+  // A failed custody read must not become an empty record — verbs
+  // that would write the unloaded view refuse until a read succeeds.
+  const { custody, record } = fakeCustody({
+    v: 1,
+    refreshToken: 'r-stored',
+    clientId: 'kept',
+    grantClientId: null,
+  });
+  const origRead = custody.read;
+  custody.read = () =>
+    Promise.resolve(err(appError('unavailable', 'store: io')));
+  const { oauth, refreshes } = fakeOAuth();
+  refreshes.push(ok(tokenGrant({ accessToken: 'a1', refreshToken: null })));
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  await session.restore();
+  const denied = await session.setClientOverride('other');
+  assert(!denied.ok, 'override accepted despite unread custody');
+  assertEqual(denied.error.kind, 'unavailable');
+  // Nothing was written over the unread record.
+  assertEqual(record.current?.refreshToken, 'r-stored');
+  // The store heals — the next restore retries and recovers.
+  custody.read = origRead;
+  await session.restore();
+  assertEqual(session.snapshot().status.state, 'signed-in');
+}
+
+async function testRotationPersistRetry(): Promise<void> {
+  // A failed rotation write keeps retrying on the persist lane —
+  // the in-memory grant rides the replacement meanwhile.
+  const { custody, record } = fakeCustody({
+    v: 1,
+    refreshToken: 'r1',
+    clientId: null,
+    grantClientId: null,
+  });
+  const { oauth, refreshes } = fakeOAuth();
+  refreshes.push(ok(tokenGrant({ accessToken: 'a1', refreshToken: 'r2' })));
+  const origWrite = custody.write;
+  let failNext = 1;
+  custody.write = (rec) => {
+    if (failNext > 0) {
+      failNext -= 1;
+      return Promise.resolve(err(appError('unavailable', 'store: io')));
+    }
+    return origWrite(rec);
+  };
+  const clock = fakeClock(0);
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: clock.clock,
+  });
+  await session.restore();
+  await flush();
+  // The immediate write failed — record still holds r1; a persist
+  // retry is armed alongside the renew retry.
+  assertEqual(record.current?.refreshToken, 'r1');
+  clock.fireNext(); // fires the persist retry (armed first)
+  await flush();
+  assertEqual(record.current?.refreshToken, 'r2');
+}
+
 async function testDuplicateBegin(): Promise<void> {
   const { custody } = fakeCustody(null);
   const { oauth, begins, pollDeferreds } = fakeOAuth();
@@ -831,5 +932,8 @@ export async function run(): Promise<void> {
   await testSignOutDuringGrantPersist();
   await testRefreshRotation();
   await testStaleBeginCannotClobber();
+  await testBearerLiveExpires();
+  await testCustodyReadFailGatesVerbs();
+  await testRotationPersistRetry();
   await testDuplicateBegin();
 }
