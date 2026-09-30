@@ -331,6 +331,56 @@ kill as its own command).
   sheet which shows the typed inline error `guest failure (transient):
   transient: bot-check` — that's the correct surface, not a crash.
 
+# Suggested additions to testing-auqw-desktop-electron (verified 2026-09-30 on devin/1790807912-tab-latency)
+
+## World (top-level) tab notes — keep-alive era
+- **Settings is NOT a tab pill on desktop.** WorldTabs shows only
+  home/explore/library; settings = the `≡` WorldMenu at the world-bar's
+  right end → "settings" row. Automation should click ≡ then the row.
+- **World-bar start icons move to the far left when the stage column is
+  hidden.** With the stage open they sit at ~x389/412 (screenshot space);
+  stage closed they jump to ~x82/104. The ≡ menu and window controls stay
+  far-right regardless. Re-map before clicking.
+- **<860px real width breakpoint**: the stage column becomes a floating
+  overlay with a dimming scrim (`uw-stage-scrim`) over the world column —
+  the whole world column looks dimmed + a small ✕ appears. Click the dim
+  area to dismiss (collapses the stage back). This is designed behavior,
+  not a modal bug.
+- **Electron enforces a ~522px real minimum window height** — `wmctrl -e`
+  requests below that get clamped silently (`wmctrl -lG` reports the
+  clamped size). And a maximized window ignores `-e` entirely — remove
+  `maximized_vert,maximized_horz` first.
+- **Scroll-preservation trick for keep-alive testing**: shrink the window
+  (e.g. 700x522) so a short pane's content overflows — then scroll,
+  switch tabs, back. The library pane is nearly empty on a fresh profile
+  and won't scroll at desktop size.
+- **Local folder scans land recordings in sqlite but NOT in the library
+  pane list.** `settings → add local folder` (GTK dialog) imports files —
+  verify via `sqlite3 ~/.config/auqw-desktop/auqw.db
+  "select count(*) from recordings"`. Local recordings surface ONLY via
+  search (`local:` provenance, same as mobile). To give the library pane
+  content, create a playlist via a catalog row's list-plus tail button →
+  "new playlist" → name → the card lands in "your library".
+- **Row actions sheet on catalog rows has NO 'like'** — only
+  enqueue/playlist/album/artist. Liking is recording-kind only.
+- **Keep-alive instrumentation (devtools Ctrl+Shift+I)**: stash node refs
+  then switch tabs via UI and re-check identity — the definitive
+  no-remount proof:
+  `window.__p=document.querySelector('.uw-world__content').children[2];
+   window.__inp=document.querySelector('input[data-autofocus]')` → after
+  switches `children[2]===__p` and `querySelector('input[data-autofocus]')===__inp`.
+  Pane divs: active = inline `display:contents`, hidden = `display:none`
+  + `inert` + `aria-hidden="true"`, each with mounted children.
+- **`/` global shortcut**: document keydown on the chrome —
+  focus-search action selects explore + refocuses the input in place
+  (no remount). While the input is focused, '/' inserts literally
+  (editable guard) — correct, not a bug.
+- **youtube-music bot-check surface**: row press → NOW PLAYING shows the
+  track with 'couldn't play' + warn glyph + 'radio · growing' UP NEXT
+  fills; player pane shows 'the provider is refusing requests right now
+  · sign in to fix playback'. Expected on datacenter IPs — the queue
+  still populates and stage panes stay exercisable.
+
 ## Devin Secrets Needed
 
 None — the napi artifact is a local cargo build output.

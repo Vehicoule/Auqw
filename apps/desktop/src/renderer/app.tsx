@@ -76,6 +76,7 @@ import {
   Text,
   ThemeProvider,
   TransferScreen,
+  WorldPanes,
   ValueFieldSheet,
   entityIdForRef,
   languageOptionKey,
@@ -119,6 +120,11 @@ import { createWebPeaksPort } from './web-peaks.ts';
 // seed the UI language from the system tag so those first screens
 // translate too; Main still pins the persisted language afterwards.
 setLocale(resolveLocale(undefined, systemLocaleTag()));
+
+// The world column's keep-alive panes — every nav destination the
+// shell can land on (settings rides the menu, not the segment, but is
+// still a world pane).
+const WORLD_PANE_KEYS = navItems().map((item) => item.key);
 
 function App() {
   const [attempt, setAttempt] = useState(0);
@@ -842,22 +848,24 @@ function Main({
   } = shell;
 
   // Metadata-targeted sheet openers — search rows and entity rows
-  // share the {kind:'metadata'} target shape.
-  const metaPick = (meta: TrackMetadata | undefined) => {
+  // share the {kind:'metadata'} target shape. Stable identities keep
+  // the world-pane elements memoized (a fresh lambda would bust the
+  // pane memo on every render).
+  const metaPick = useCallback((meta: TrackMetadata | undefined) => {
     if (meta !== undefined) {
       setPickerFor({ kind: 'metadata', meta });
     }
-  };
-  const metaActions = (meta: TrackMetadata | undefined) => {
+  }, []);
+  const metaActions = useCallback((meta: TrackMetadata | undefined) => {
     if (meta !== undefined) {
       setActionsFor({ kind: 'metadata', meta });
     }
-  };
+  }, []);
 
   useEffect(() => {
     if (tab !== 'settings') {
-      // Reset the anchor tick: leaving the tab unmounts the section
-      // ref, and a stale tick would re-scroll on the next mount.
+      // Reset the anchor tick so a stale value can't re-scroll the
+      // (kept-alive) settings pane on the next visit.
       setSyncFocusTick(0);
       return;
     }
@@ -1015,85 +1023,142 @@ function Main({
       });
   }, [beginImportRead, onImportFileChosen, cancelImportRead]);
 
+  // World-pane elements memoized per tab: WorldPanes keeps every
+  // visited pane mounted (the switch is a display flip), and identical
+  // inputs hand back the identical element so React bails out of
+  // reconciling the pane entirely — a switch with no data change costs
+  // no screen render at all. Deps enumerate every input the element
+  // closes over; anything missing would freeze that prop stale, so
+  // keep the list exhaustive with the JSX below.
+  const homeEl = useMemo(
+    () => (
+      <HomeScreen
+        model={homeModel}
+        onPressCard={onHomeCardPress}
+        onResume={onPlayPause}
+      />
+    ),
+    [homeModel, onHomeCardPress, onPlayPause],
+  );
+  const exploreEl = useMemo(
+    () => (
+      <SearchScreen
+        state={searchModel}
+        query={query}
+        onQueryChange={setQuery}
+        onSubmit={submitSearch}
+        onCancel={cancelSearch}
+        onRetry={retrySearch}
+        onResultPress={onResultPress}
+        onRowIntent={(row) => {
+          const meta = resultMetaFor(row.key);
+          if (meta !== undefined) {
+            rowIntent({ kind: 'track', track: meta });
+          }
+        }}
+        onAddToPlaylist={(row) => metaPick(resultMetaFor(row.key))}
+        onContext={(row) => metaActions(resultMetaFor(row.key))}
+        recents={searchRecents}
+        onRecentPress={applySearchText}
+        suggestions={suggestions}
+        onSuggestionPress={applySearchText}
+        autoFocus
+        focusSignal={searchFocusTick}
+      />
+    ),
+    [
+      searchModel,
+      query,
+      submitSearch,
+      cancelSearch,
+      retrySearch,
+      onResultPress,
+      rowIntent,
+      resultMetaFor,
+      metaPick,
+      metaActions,
+      searchRecents,
+      applySearchText,
+      suggestions,
+      searchFocusTick,
+    ],
+  );
+  const libraryEl = useMemo(
+    () => (
+      <LibraryScreen
+        model={libraryModel}
+        onPressItem={(id) => void playRecording(id)}
+        onRowIntent={(id) => rowIntent({ kind: 'recording', id })}
+        onToggleLike={(id) => void session.toggleLike(id)}
+        onAddToPlaylist={(id) =>
+          setPickerFor({ kind: 'recording', recordingId: id })
+        }
+        onContext={(id) =>
+          setActionsFor({ kind: 'recording', recordingId: id })
+        }
+        onOpenCollection={(key) =>
+          pushOverlay({ type: 'collection', key })
+        }
+        onOpenCard={onOpenCard}
+        onOpenArtist={(artist) => {
+          if (artist.entityRef !== null) {
+            openEntity(artist.entityRef);
+          }
+        }}
+        onCreatePlaylist={onCreatePlaylist}
+      />
+    ),
+    [
+      libraryModel,
+      playRecording,
+      rowIntent,
+      session,
+      pushOverlay,
+      onOpenCard,
+      openEntity,
+      onCreatePlaylist,
+    ],
+  );
+  const settingsEl = useMemo(
+    () => (
+      <SettingsScreen
+        model={settingsModel}
+        onSelectRow={onSettingsSelect}
+        onToggleRow={onSettingsToggle}
+        onOpenCorrections={() => pushOverlay({ type: 'corrections' })}
+        sync={syncModel}
+        syncFocusTick={syncFocusTick}
+        onPairDevice={onPairDevice}
+        onUnpairDevice={onUnpairDevice}
+        onSyncNow={onSyncNow}
+        onExportDelta={onExportDelta}
+        onImportDelta={onImportDelta}
+      />
+    ),
+    [
+      settingsModel,
+      onSettingsSelect,
+      onSettingsToggle,
+      pushOverlay,
+      syncModel,
+      syncFocusTick,
+      onPairDevice,
+      onUnpairDevice,
+      onSyncNow,
+      onExportDelta,
+      onImportDelta,
+    ],
+  );
   const renderTabScreen = (key: string) => {
     switch (key) {
       case 'explore':
-        return (
-          <SearchScreen
-            key={searchFocusTick}
-            state={searchModel}
-            query={query}
-            onQueryChange={setQuery}
-            onSubmit={submitSearch}
-            onCancel={cancelSearch}
-            onRetry={retrySearch}
-            onResultPress={onResultPress}
-            onRowIntent={(row) => {
-              const meta = resultMetaFor(row.key);
-              if (meta !== undefined) {
-                rowIntent({ kind: 'track', track: meta });
-              }
-            }}
-            onAddToPlaylist={(row) => metaPick(resultMetaFor(row.key))}
-            onContext={(row) => metaActions(resultMetaFor(row.key))}
-            recents={searchRecents}
-            onRecentPress={applySearchText}
-            suggestions={suggestions}
-            onSuggestionPress={applySearchText}
-            autoFocus
-          />
-        );
+        return exploreEl;
       case 'library':
-        return (
-          <LibraryScreen
-            model={libraryModel}
-            onPressItem={(id) => void playRecording(id)}
-            onRowIntent={(id) => rowIntent({ kind: 'recording', id })}
-            onToggleLike={(id) => void session.toggleLike(id)}
-            onAddToPlaylist={(id) =>
-              setPickerFor({ kind: 'recording', recordingId: id })
-            }
-            onContext={(id) =>
-              setActionsFor({ kind: 'recording', recordingId: id })
-            }
-            onOpenCollection={(key) =>
-              pushOverlay({ type: 'collection', key })
-            }
-            onOpenCard={onOpenCard}
-            onOpenArtist={(artist) => {
-              if (artist.entityRef !== null) {
-                openEntity(artist.entityRef);
-              }
-            }}
-            onCreatePlaylist={onCreatePlaylist}
-          />
-        );
+        return libraryEl;
       case 'settings':
-        return (
-          <SettingsScreen
-            model={settingsModel}
-            onSelectRow={onSettingsSelect}
-            onToggleRow={onSettingsToggle}
-            onOpenCorrections={() =>
-              pushOverlay({ type: 'corrections' })
-            }
-            sync={syncModel}
-            syncFocusTick={syncFocusTick}
-            onPairDevice={onPairDevice}
-            onUnpairDevice={onUnpairDevice}
-            onSyncNow={onSyncNow}
-            onExportDelta={onExportDelta}
-            onImportDelta={onImportDelta}
-          />
-        );
+        return settingsEl;
       default:
-        return (
-          <HomeScreen
-            model={homeModel}
-            onPressCard={onHomeCardPress}
-            onResume={onPlayPause}
-          />
-        );
+        return homeEl;
     }
   };
 
@@ -1335,7 +1400,14 @@ function Main({
               )
             }
           >
-            {renderTabScreen(tab)}
+            {/* Keep-alive panes: the tab switch flips display instead
+                of remounting the screen — the cold mount per switch was
+                the tab-latency complaint. */}
+            <WorldPanes
+              keys={WORLD_PANE_KEYS}
+              activeKey={tab}
+              renderPane={renderTabScreen}
+            />
             {/* Pushed pages scope to the world column so the stage's
                 playback controls stay reachable while they're up. */}
             {overlayStack.map((entry) => {

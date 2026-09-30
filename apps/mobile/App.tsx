@@ -1986,6 +1986,126 @@ function Main({
     borderWidth: theme.strokes.hairline,
     borderColor: theme.colors.hairline,
   };
+  // World-pane elements memoized per tab: the tab host keeps every
+  // visited pane mounted (the switch hides/shows instead of remounting),
+  // and identical inputs hand back the identical element so React bails
+  // out of reconciling the pane entirely — a switch with no data change
+  // costs no screen render at all. Deps enumerate every input the
+  // element closes over; keep the list exhaustive with the JSX below.
+  const exploreEl = useMemo(
+    () => (
+      <SearchScreen
+        state={searchModel}
+        query={query}
+        topInset={topInset}
+        onQueryChange={setQuery}
+        onSubmit={submitSearch}
+        onCancel={cancelSearch}
+        onRetry={retrySearch}
+        onResultPress={onResultPress}
+        onRowIntent={(row) => {
+          const meta = resultMetaFor(row.key);
+          if (meta !== undefined) {
+            rowIntent({ kind: 'track', track: meta });
+          }
+        }}
+        onContext={(row) => {
+          const meta = resultMetaFor(row.key);
+          if (meta !== undefined) {
+            setActionsFor({ kind: 'metadata', meta });
+          }
+        }}
+        recents={searchRecents}
+        onRecentPress={applySearchText}
+        suggestions={suggestions}
+        onSuggestionPress={applySearchText}
+      />
+    ),
+    [
+      searchModel,
+      query,
+      topInset,
+      submitSearch,
+      cancelSearch,
+      retrySearch,
+      onResultPress,
+      rowIntent,
+      resultMetaFor,
+      searchRecents,
+      applySearchText,
+      suggestions,
+    ],
+  );
+  const libraryEl = useMemo(
+    () => (
+      <LibraryScreen
+        model={libraryModel}
+        topInset={topInset}
+        onPressItem={(id) => void playRecording(id)}
+        onRowIntent={(id) => rowIntent({ kind: 'recording', id })}
+        onToggleLike={(id) => void session.toggleLike(id)}
+        onContext={(id) =>
+          setActionsFor({ kind: 'recording', recordingId: id })
+        }
+        onOpenCollection={(key) =>
+          pushOverlay({ type: 'collection', key })
+        }
+        onPlayCollection={(key) =>
+          playCollectionRows(libraryModel.collectionRows[key])
+        }
+        onOpenCard={onOpenCard}
+        onOpenArtist={(artist) => {
+          if (artist.entityRef !== null) {
+            openEntity(artist.entityRef);
+          }
+        }}
+        onCreatePlaylist={onCreatePlaylist}
+      />
+    ),
+    [
+      libraryModel,
+      topInset,
+      playRecording,
+      rowIntent,
+      session,
+      pushOverlay,
+      playCollectionRows,
+      onOpenCard,
+      openEntity,
+      onCreatePlaylist,
+    ],
+  );
+  const settingsEl = useMemo(
+    () => (
+      <SettingsScreen
+        model={settingsModel}
+        topInset={topInset}
+        onSelectRow={onSettingsSelect}
+        onToggleRow={onSettingsToggle}
+        onOpenCorrections={() => pushOverlay({ type: 'corrections' })}
+      />
+    ),
+    [
+      settingsModel,
+      topInset,
+      onSettingsSelect,
+      onSettingsToggle,
+      pushOverlay,
+    ],
+  );
+  const homeEl = useMemo(
+    () => (
+      <HomeScreen
+        model={homeModel}
+        topInset={topInset}
+        onPressCard={onHomeCardPress}
+        onResume={() =>
+          void session.resume().then((r) => reportPlay('action.resume', r))
+        }
+      />
+    ),
+    [homeModel, topInset, onHomeCardPress, session, reportPlay],
+  );
   if (galleryActive) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
@@ -1997,83 +2117,13 @@ function Main({
   const renderTabScreen = (key: string) => {
     switch (key) {
       case 'explore':
-        return (
-          <SearchScreen
-            state={searchModel}
-            query={query}
-            topInset={topInset}
-            onQueryChange={setQuery}
-            onSubmit={submitSearch}
-            onCancel={cancelSearch}
-            onRetry={retrySearch}
-            onResultPress={onResultPress}
-            onRowIntent={(row) => {
-              const meta = resultMetaFor(row.key);
-              if (meta !== undefined) {
-                rowIntent({ kind: 'track', track: meta });
-              }
-            }}
-            onContext={(row) => {
-              const meta = resultMetaFor(row.key);
-              if (meta !== undefined) {
-                setActionsFor({ kind: 'metadata', meta });
-              }
-            }}
-            recents={searchRecents}
-            onRecentPress={applySearchText}
-            suggestions={suggestions}
-            onSuggestionPress={applySearchText}
-          />
-        );
+        return exploreEl;
       case 'library':
-        return (
-          <LibraryScreen
-            model={libraryModel}
-            topInset={topInset}
-            onPressItem={(id) => void playRecording(id)}
-            onRowIntent={(id) => rowIntent({ kind: 'recording', id })}
-            onToggleLike={(id) => void session.toggleLike(id)}
-            onContext={(id) =>
-              setActionsFor({ kind: 'recording', recordingId: id })
-            }
-            onOpenCollection={(key) =>
-              pushOverlay({ type: 'collection', key })
-            }
-            onPlayCollection={(key) =>
-              playCollectionRows(libraryModel.collectionRows[key])
-            }
-            onOpenCard={onOpenCard}
-            onOpenArtist={(artist) => {
-              if (artist.entityRef !== null) {
-                openEntity(artist.entityRef);
-              }
-            }}
-            onCreatePlaylist={onCreatePlaylist}
-          />
-        );
+        return libraryEl;
       case 'settings':
-        return (
-          <SettingsScreen
-            model={settingsModel}
-            topInset={topInset}
-            onSelectRow={onSettingsSelect}
-            onToggleRow={onSettingsToggle}
-            onOpenCorrections={() =>
-              pushOverlay({ type: 'corrections' })
-            }
-          />
-        );
+        return settingsEl;
       default:
-        return (
-          <HomeScreen
-            model={homeModel}
-            topInset={topInset}
-            onPressCard={onHomeCardPress}
-            onResume={() =>
-              void session.resume().then((r) => reportPlay('action.resume', r))
-            }
-          />
-        );
+        return homeEl;
     }
   };
 
