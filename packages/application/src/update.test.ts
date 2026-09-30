@@ -120,6 +120,34 @@ export async function run(): Promise<void> {
   assertEqual(releases.length, 1);
   assertDeepEqual(parseReleases({}), []);
 
+  // asset names must arrive as basenames — a `..`/separator would
+  // escape every platform's staging dir at join() time
+  const escaped = parseRelease({
+    ...RELEASE_JSON,
+    assets: [
+      {
+        name: '../escape.apk',
+        browser_download_url:
+          'https://github.com/Vehicoule/Auqw/releases/download/v0.0.1-alpha.18/escape.apk',
+      },
+      {
+        name: 'sub\\dir.apk',
+        browser_download_url:
+          'https://github.com/Vehicoule/Auqw/releases/download/v0.0.1-alpha.18/dir.apk',
+      },
+      {
+        name: '..',
+        browser_download_url:
+          'https://github.com/Vehicoule/Auqw/releases/download/v0.0.1-alpha.18/dotdot',
+      },
+      RELEASE_JSON.assets[0],
+    ],
+  })!;
+  assertDeepEqual(
+    escaped.assets.map((a) => a.name),
+    ['auqw-0.0.1-alpha.18-android-arm64-v8a.apk'],
+  );
+
   // ---- latestNewer + pickArtifact ----
 
   const older = parseRelease({
@@ -490,6 +518,55 @@ export async function run(): Promise<void> {
     // only the retry reached the download port — the hung first run
     // never got that far
     assertEqual(calls.downloads, 1);
+  }
+
+  // a second begin while the first run is still inside fetchText
+  // must not start a second pipeline — the latch is set
+  // synchronously, before the first publish exists
+  {
+    let releaseSums: ((body: string) => void) | null = null;
+    const { calls, ports } = fakePorts();
+    const applier = createUpdateApplier({
+      ...ports,
+      fetchText: () =>
+        new Promise<string>((resolve) => {
+          releaseSums = resolve;
+        }),
+    });
+    applier.begin(APK_TARGET);
+    applier.begin(APK_TARGET);
+    await settle();
+    releaseSums!(`${GOOD_HEX}  ${APK_NAME}\n`);
+    await settle();
+    assertEqual(calls.downloads, 1, 'concurrent begins must not double-run');
+    assertEqual(applier.snapshot().state, 'applied');
+  }
+
+  // cancel while the checksum is hashing must keep the run from
+  // reaching apply — hash is not abortable, so the generation check
+  // between stages is the only gate
+  {
+    let resolveHash: ((hex: string) => void) | null = null;
+    const { calls, ports } = fakePorts();
+    const applier = createUpdateApplier({
+      ...ports,
+      sha256Hex: () =>
+        new Promise<string>((resolve) => {
+          resolveHash = resolve;
+        }),
+    });
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'verifying');
+    applier.cancel();
+    assertEqual(applier.snapshot().state, 'idle');
+    resolveHash!(GOOD_HEX);
+    await settle();
+    assertEqual(
+      calls.applies,
+      0,
+      'a run cancelled mid-verify must never reach apply',
+    );
   }
 
   // service.apply() gates: no-op while not 'available', and merges

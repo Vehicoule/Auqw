@@ -124,9 +124,11 @@ export function createDesktopUpdate(api: AuqwApi): UpdateShellPort {
     },
     get action() {
       // The banner label follows the capability, except when the
-      // release ships no artifact this build can consume — then the
-      // page is all there is.
-      return snap.status.state === 'available' && snap.status.artifact === null
+      // release can't prove the artifact — no artifact at all, or
+      // one it ships without checksums: an unverifiable artifact
+      // never installs, so the page is the honest affordance.
+      return snap.status.state === 'available' &&
+        (snap.status.artifact === null || snap.status.checksums === null)
         ? 'open'
         : capability;
     },
@@ -149,7 +151,8 @@ export function createDesktopUpdate(api: AuqwApi): UpdateShellPort {
       if (
         capability !== 'open' &&
         snap.status.state === 'available' &&
-        snap.status.artifact !== null
+        snap.status.artifact !== null &&
+        snap.status.checksums !== null
       ) {
         void api.update.apply().catch(() => undefined);
       } else {

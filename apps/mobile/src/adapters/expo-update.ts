@@ -11,6 +11,7 @@ import {
 import type { UpdateApplyPorts, UpdateTarget } from '@auqw/application';
 import type { UpdateShellPort } from '@auqw/app-shell';
 import { notify, t } from '@auqw/ui-shared';
+import { holdDownloadForeground } from './download-foreground.ts';
 
 // APKs self-update only from this repo's own release downloads — an
 // off-repo asset URL is a failed install, not an installer payload.
@@ -66,6 +67,13 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
           if (!res.ok) {
             throw appError('transient', `checksums fetch ${res.status}`);
           }
+          // RN fetch can't bound a streamed body — the declared
+          // length is the only gate: a sums file is kilobytes, so a
+          // body over the cap is invalid-response, not a read.
+          const declared = Number(res.headers.get('content-length'));
+          if (Number.isFinite(declared) && declared > 1024 * 1024) {
+            throw appError('invalid-response', 'checksums body over 1 MiB');
+          }
           return res.text();
         },
         download: async (url, path, onProgress, signal) => {
@@ -84,12 +92,19 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
           }
           // The dataSync foreground service keeps the fetch alive
           // through backgrounding — the APK outlives a user switching
-          // apps mid-download.
-          try {
-            void AuqwExpo.downloadsActiveChanged(1).catch(() => undefined);
-          } catch {
-            // the seam is Android-only; anywhere else this is a no-op
-          }
+          // apps mid-download. The hold is a REF through
+          // download-foreground: the service counts every download,
+          // so releasing must never zero a live media transfer.
+          const releaseForeground = holdDownloadForeground((count) => {
+            try {
+              return Promise.resolve(
+                AuqwExpo.downloadsActiveChanged(count),
+              ).catch(() => undefined);
+            } catch {
+              // the seam is Android-only; anywhere else this is a no-op
+              return Promise.resolve();
+            }
+          });
           try {
             await File.downloadFileAsync(url, destination, {
               idempotent: true,
@@ -101,11 +116,7 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
                 ),
             });
           } finally {
-            try {
-              void AuqwExpo.downloadsActiveChanged(0).catch(() => undefined);
-            } catch {
-              // same — a missing seam never fails the download
-            }
+            releaseForeground();
           }
         },
         sha256Hex: (path) => {
@@ -186,11 +197,15 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
     check: (kind) => {
       void service.check(kind);
     },
-    // Read live, not at construction — a release that ships no APK
-    // asset advertises 'open' so the banner label matches act().
+    // Read live, not at construction — a release that ships no APK,
+    // or one it can't prove with checksums, advertises 'open': an
+    // unverifiable artifact never installs.
     get action(): 'open' | 'install' {
       const status = service.snapshot().status;
-      return canInstall && status.state === 'available' && status.artifact !== null
+      return canInstall &&
+        status.state === 'available' &&
+        status.artifact !== null &&
+        status.checksums !== null
         ? 'install'
         : 'open';
     },
@@ -203,7 +218,12 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
         return;
       }
       const status = snapshot.status;
-      if (status.state !== 'available' || status.artifact === null || !canInstall) {
+      if (
+        status.state !== 'available' ||
+        status.artifact === null ||
+        status.checksums === null ||
+        !canInstall
+      ) {
         const url =
           status.state === 'available' ? status.url : UPDATE_RELEASES_PAGE;
         void Linking.openURL(url).catch(() => undefined);

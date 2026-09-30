@@ -183,8 +183,15 @@ export function parseRelease(value: unknown): UpdateRelease | null {
     }
     const name = asset['name'];
     const download = asset['browser_download_url'];
+    // The name becomes a path component on every platform's staging
+    // — it must arrive already a basename: a `..` or separator would
+    // escape the staging dir at join() time.
     return typeof name === 'string' &&
       name.length > 0 &&
+      !name.includes('/') &&
+      !name.includes('\\') &&
+      name !== '.' &&
+      name !== '..' &&
       typeof download === 'string' &&
       download.startsWith('https://')
       ? [{ name, url: download }]
@@ -636,6 +643,11 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
   // Generation guard: a stale run (post-cancel, post-begin) must
   // never publish over a newer state.
   let generation = 0;
+  // In-flight latch, set synchronously in begin: live() only sees
+  // the published states, but a run between begin and its first
+  // publish would otherwise admit a second begin — two downloads
+  // racing one staging path.
+  let running = false;
 
   function publish(next: UpdateApplyStatus): void {
     state = next;
@@ -663,6 +675,10 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
         publish(next);
       }
     };
+    // A cancelled/superseded run must not only stop publishing — it
+    // must stop ACTING (a later stage like apply or remove writes
+    // the same staging path its successor may have just claimed).
+    const stale = (): boolean => gen !== generation || signal.aborted;
     const { version, artifact, checksums } = target;
     // The staged file — removed whenever this run dies before the
     // apply leg consumed it (failed download, rejected checksum,
@@ -676,6 +692,9 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
         throw appError('unavailable', 'release ships no checksums for this platform');
       }
       const body = await ports.fetchText(checksums.url, signal);
+      if (stale()) {
+        return;
+      }
       const expected = parseSha256Sums(body).get(artifact.name);
       if (expected === undefined) {
         throw appError(
@@ -697,8 +716,14 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
           publishIfCurrent({ state: 'downloading', version, receivedBytes, totalBytes }),
         signal,
       );
+      if (stale()) {
+        return;
+      }
       publishIfCurrent({ state: 'verifying', version });
       const actual = await ports.sha256Hex(path);
+      if (stale()) {
+        return;
+      }
       if (actual.toLowerCase() !== expected) {
         // The catch's sweep removes the staged file — the verdict
         // itself is the important part: 'artifact-rejected', never
@@ -710,6 +735,9 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       }
       publishIfCurrent({ state: 'applying', version });
       const outcome = await ports.apply(path, artifact);
+      if (stale()) {
+        return;
+      }
       // The apply leg consumed the file (renamed into place, spawned
       // as the installer, revealed in Finder) — cleanup is its
       // responsibility now, not the sweep's.
@@ -734,6 +762,7 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
     } finally {
       if (gen === generation) {
         controller = null;
+        running = false;
       }
     }
   }
@@ -747,9 +776,15 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       };
     },
     begin(target) {
-      if (live() || state.state === 'ready-to-restart' || state.state === 'applied') {
+      if (
+        running ||
+        live() ||
+        state.state === 'ready-to-restart' ||
+        state.state === 'applied'
+      ) {
         return;
       }
+      running = true;
       generation += 1;
       const gen = generation;
       controller = new AbortController();
@@ -762,6 +797,10 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       generation += 1;
       controller?.abort();
       controller = null;
+      // The latch releases with the abort — the dying run can no
+      // longer publish, remove, or apply (stale checks), so a fresh
+      // begin is safe to claim the staging path.
+      running = false;
       if (live()) {
         publish({ state: 'idle' });
       }

@@ -19,7 +19,8 @@ import type {
 } from 'electron';
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { once } from 'node:events';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import {
   chmodSync,
   closeSync,
@@ -426,6 +427,7 @@ async function main(): Promise<void> {
     }
   }
   const appimagePath = process.env['APPIMAGE'];
+  const CHECKSUMS_MAX_BYTES = 1024 * 1024;
   const updateApplyPorts: UpdateApplyPorts | undefined =
     updateCapability === 'open'
       ? undefined
@@ -443,7 +445,28 @@ async function main(): Promise<void> {
             if (!res.ok) {
               throw shellError('transient', `checksums fetch ${res.status}`);
             }
-            return res.text();
+            const body = res.body;
+            if (body === null) {
+              return '';
+            }
+            // Sums files are kilobytes — stream-cap the read so a
+            // runaway or hostile body can't inflate main memory.
+            const parts: Buffer[] = [];
+            let size = 0;
+            for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
+              if (signal.aborted) {
+                throw new DOMException('aborted', 'AbortError');
+              }
+              size += chunk.byteLength;
+              if (size > CHECKSUMS_MAX_BYTES) {
+                throw shellError(
+                  'invalid-response',
+                  'checksums body over 1 MiB',
+                );
+              }
+              parts.push(Buffer.from(chunk));
+            }
+            return Buffer.concat(parts).toString('utf8');
           },
           download: async (url, path, onProgress, signal) => {
             const res = await net.fetch(url, {
@@ -456,31 +479,28 @@ async function main(): Promise<void> {
             const total =
               Number.isFinite(declared) && declared > 0 ? declared : null;
             const part = `${path}.part`;
-            const out = createWriteStream(part);
             let received = 0;
+            const source = Readable.fromWeb(
+              res.body as unknown as import('node:stream/web').ReadableStream,
+            );
+            source.on('data', (chunk: Uint8Array) => {
+              received += chunk.byteLength;
+              onProgress(received, total);
+            });
             try {
-              for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-                if (signal.aborted) {
-                  throw new DOMException('aborted', 'AbortError');
-                }
-                received += chunk.byteLength;
-                if (!out.write(chunk)) {
-                  await once(out, 'drain');
-                }
-                onProgress(received, total);
-              }
+              // pipeline owns the stream's whole error surface — a
+              // write failure (ENOSPC, unwritable stage) rejects here
+              // instead of crashing main on an unhandled 'error'.
+              await pipeline(source, createWriteStream(part));
             } catch (thrown) {
-              out.destroy();
               rmSync(part, { force: true });
+              // An abort can surface as a generic stream error — map
+              // it so the applier sees its cancel contract.
+              if (signal.aborted) {
+                throw new DOMException('aborted', 'AbortError');
+              }
               throw thrown;
             }
-            await new Promise<void>((resolve, reject) => {
-              out.end((error: Error | null | undefined) =>
-                error === null || error === undefined
-                  ? resolve()
-                  : reject(error),
-              );
-            });
             // The file lands whole or not at all — a verify never
             // hashes a half-fetched stream.
             renameSync(part, path);
@@ -509,25 +529,43 @@ async function main(): Promise<void> {
             }
             if (process.platform === 'win32') {
               // Assisted NSIS setup installs over the running install
-              // dir — spawn detached, then get out of its way.
-              const child = spawn(path, [], {
-                detached: true,
-                stdio: 'ignore',
+              // dir — spawn detached, then get out of its way. The
+              // quit only schedules once 'spawn' proves the setup
+              // actually launched: a refused spawn is a retryable
+              // 'failed', never an app.exit with no installer.
+              return new Promise<'installed'>((resolve, reject) => {
+                const child = spawn(path, [], {
+                  detached: true,
+                  stdio: 'ignore',
+                });
+                child.once('error', (thrown) => {
+                  reject(
+                    shellError(
+                      'transient',
+                      `installer spawn: ${thrown.message}`,
+                    ),
+                  );
+                });
+                child.once('spawn', () => {
+                  child.unref();
+                  setTimeout(() => app.quit(), 250).unref();
+                  resolve('installed');
+                });
               });
-              child.unref();
-              setTimeout(() => app.quit(), 250).unref();
-              return Promise.resolve('installed' as const);
             }
             if (process.platform === 'darwin') {
               // A dmg can't self-apply: the verified file reveals in
               // Finder and mounts — drag-to-Applications is the
-              // user's move.
+              // user's move. openPath resolves its error text rather
+              // than rejecting, so a failed mount must still land
+              // 'failed' (retryable), not a false 'installed'.
               shell.showItemInFolder(path);
-              void shell.openPath(path).then(
-                () => undefined,
-                () => undefined,
-              );
-              return Promise.resolve('installed' as const);
+              return shell.openPath(path).then((error) => {
+                if (error !== '') {
+                  throw shellError('transient', `dmg open: ${error}`);
+                }
+                return 'installed' as const;
+              });
             }
             return Promise.reject(
               shellError(
