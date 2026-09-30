@@ -259,11 +259,14 @@ export function parseSha256Sums(text: string): ReadonlyMap<string, string> {
   const map = new Map<string, string>();
   for (const line of text.split('\n')) {
     // "<hex>  <name>" (text mode) or "<hex> *<name>" (binary mode).
-    const match = /^([0-9a-fA-F]{64}) [ *](.+?)\s*$/.exec(line);
-    if (match === null) {
+    // Trailing space trims in code: a lazy tail in the pattern would
+    // backtrack over every interior space run — quadratic on repeats.
+    const match = /^([0-9a-fA-F]{64}) [ *](.+)$/.exec(line);
+    const name = match?.[2]?.trimEnd();
+    if (name === undefined || name === '') {
       continue;
     }
-    map.set(match[2]!, match[1]!.toLowerCase());
+    map.set(name, match![1]!.toLowerCase());
   }
   return map;
 }
