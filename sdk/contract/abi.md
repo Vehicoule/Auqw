@@ -73,8 +73,10 @@ store is namespaced per plugin id; no cross-plugin reads.
   must be fetched with — typically the minting client's `User-Agent`;
   the host sends them verbatim on every range request including its
   one redirect hop, and a mint without them still rides a
-  host-minted `auqw/*` UA. Host-controlled names are rejected
-  (`invalid-response`): `range`, `host`, `content-length`,
+  host-minted `auqw/*` UA. Names are case-insensitive — two keys
+  folding to one name is rejected like a host-owned name; values are
+  ≤512 characters of printable bytes. Host-controlled names are
+  rejected (`invalid-response`): `range`, `host`, `content-length`,
   `connection`, `transfer-encoding`, `accept-encoding`, `te`,
   `trailer`, `upgrade`, `expect`, `keep-alive`, `proxy-authenticate`,
   `proxy-authorization`, `www-authenticate`, `authorization`,
