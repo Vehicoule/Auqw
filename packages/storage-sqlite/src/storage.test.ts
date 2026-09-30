@@ -2239,6 +2239,101 @@ async function duplicateLyricsRejected(): Promise<void> {
   driver.close();
 }
 
+// Cold-restart proof at the file level: write every section, close the
+// driver, reopen the same file on a fresh driver, and load — a dead
+// connection (the mobile dead-handle class) must never lose a row.
+async function fileReopen(): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'auqw-reopen-'));
+  try {
+    const dbPath = join(dir, 'auqw.db');
+    const sections = ownedSections();
+    const queue: QueueSnapshot = {
+      revision: 4,
+      occurrences: [
+        occurrence('o1', 'r1', ref('youtube-music', 'y1')),
+        occurrence('o2', 'r2'),
+      ],
+      currentOccurrenceId: 'o1',
+      positionMs: 3_210,
+      mode: 'paused',
+    };
+    const settings: Settings = {
+      ...SETTINGS,
+      theme: 'dark',
+      language: 'en',
+      artworkCacheBytes: 268435456,
+    };
+    const downloads: DownloadRecord[] = [download('r1')];
+    const localSources: LocalSource[] = [
+      {
+        sourceId: 'src-1',
+        treeUri: 'content://tree/music',
+        label: 'Music',
+        addedMs: 10,
+        lastScanMs: null,
+      },
+    ];
+    const localFiles: LocalFile[] = [
+      {
+        fileId: 'lf-1',
+        sourceId: 'src-1',
+        docId: 'doc-42',
+        size: 4_194_304,
+        fingerprint: 'fp-abc',
+        modifiedMs: 1_700_000_000_000,
+        title: 'Local Song',
+        artist: null,
+        album: null,
+        durationMs: null,
+        genre: null,
+        recordingId: 'r3',
+      },
+    ];
+    {
+      const driver = new NodeSqliteDriver(dbPath);
+      const storage = new SqliteStorage(driver, SETTINGS);
+      const committed = await storage.commit(
+        {
+          ...sections,
+          queue,
+          settings,
+          downloads,
+          localSources,
+          localFiles,
+        },
+        ctx().context,
+      );
+      assert(committed.ok, 'seed commit');
+      driver.close();
+    }
+    // Cold restart: a fresh driver on the same file loads every row.
+    {
+      const driver = new NodeSqliteDriver(dbPath);
+      const storage = new SqliteStorage(driver, SETTINGS);
+      const state = await loadOk(storage);
+      assertDeepEqual(state.recordings, sections.recordings);
+      assertDeepEqual(state.likes, sections.likes);
+      assertDeepEqual(state.entities, sections.entities);
+      assertDeepEqual(state.entitySourceRefs, sections.entitySourceRefs);
+      assertDeepEqual(state.playlists, sections.playlists);
+      assertDeepEqual(state.playlistEntries, sections.playlistEntries);
+      assertDeepEqual(state.playHistory, sections.playHistory);
+      assertDeepEqual(state.playCounts, sections.playCounts);
+      assertDeepEqual(state.matchReviews, sections.matchReviews);
+      assertDeepEqual(state.lyricsCache, sections.lyricsCache);
+      assertDeepEqual(state.artworkCache, sections.artworkCache);
+      assertDeepEqual(state.downloads, downloads);
+      assertDeepEqual(state.localSources, localSources);
+      assertDeepEqual(state.localFiles, localFiles);
+      assertDeepEqual(state.queue, queue);
+      assertDeepEqual(state.settings, settings);
+      driver.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['concurrentOperations', concurrentOperations],
   ['initializeAndCoalesce', initializeAndCoalesce],
@@ -2283,6 +2378,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['largeRemovalCommits', largeRemovalCommits],
   ['duplicateLyricsRejected', duplicateLyricsRejected],
   ['recordingsMergeUndefined', recordingsMergeUndefined],
+  ['fileReopen', fileReopen],
 ];
 
 for (const [name, fn] of TESTS) {

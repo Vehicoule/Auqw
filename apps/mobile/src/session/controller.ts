@@ -49,6 +49,7 @@ import {
   createExpoConnectivity,
   createUnwatchedConnectivity,
 } from '../adapters/expo-connectivity.ts';
+import { openDatabaseAsync } from 'expo-sqlite';
 import { createExpoSqliteDriver } from '../adapters/expo-sqlite-driver.ts';
 import { createExpoTagReader } from '../adapters/expo-tag-reader.ts';
 import { createExpoTransfer } from '../adapters/expo-transfer.ts';
@@ -378,7 +379,15 @@ export async function createSessionController(
       ),
   );
   const defaults = defaultSettings(providers);
-  const sqliteDriver = await createExpoSqliteDriver(options.databasePath);
+  const sqliteDriver = await createExpoSqliteDriver(options.databasePath, {
+    openDb: openDatabaseAsync,
+    deleteIfExists: async (filePath) => {
+      const file = new File(`file://${filePath}`);
+      if (file.exists) {
+        file.delete();
+      }
+    },
+  });
   const storage = new SqliteStorage(sqliteDriver, defaults);
   // Sync-log tables ride the same file + driver — the shared
   // transaction tail serializes sync writes with library writes.
