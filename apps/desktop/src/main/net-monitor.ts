@@ -24,20 +24,104 @@ export interface NetService {
 }
 
 /**
+ * A real-internet check: resolves true when an upstream round-trip
+ * actually completed. Implementations must be bounded — a probe that
+ * never settles freezes the monitor's state machine.
+ */
+export type NetProbe = () => Promise<boolean>;
+
+/**
+ * Consecutive probe failures needed to publish offline — one dropped
+ * round-trip can't flap the surface. A single success publishes online:
+ * an answered canary is positive proof.
+ */
+const PROBE_FAIL_THRESHOLD = 2;
+
+/**
+ * An HTTP-canary {@link NetProbe}: true only on the expected status —
+ * a captive portal's rewritten 200 is reachable HTTP but is not real
+ * internet, and the surfaces' verdicts stay honest by reading it as
+ * offline. Any transport failure, or a response that never lands inside
+ * `timeoutMs`, counts as unreachable. The timeout races the request
+ * rather than relying on `signal`, so a fetch implementation that
+ * ignores aborts still can't stall the monitor.
+ */
+export function createFetchProbe(
+  fetchImpl: (
+    url: string,
+    init: { method: string; signal?: AbortSignal },
+  ) => Promise<{ status: number }>,
+  opts: {
+    url: string;
+    expectedStatus: number;
+    timeoutMs?: number;
+  },
+): NetProbe {
+  const timeoutMs = opts.timeoutMs ?? 4_000;
+  return () => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve(false);
+      }, timeoutMs);
+      // Unref'd like the poll timer — a pending probe must never hold
+      // the process open. Browser-typed configs return a number.
+      if (typeof timer === 'object' && timer !== null) {
+        (timer as { unref?: () => void }).unref?.();
+      }
+    });
+    const verdict = fetchImpl(opts.url, {
+      method: 'GET',
+      signal: controller.signal,
+    }).then(
+      (res) => res.status === opts.expectedStatus,
+      () => false,
+    );
+    return Promise.race([verdict, timedOut]).finally(() => {
+      clearTimeout(timer);
+    });
+  };
+}
+
+/**
  * Chromium exposes online state in the main process but no change event,
  * so transitions are detected by polling `readOnline` and diffing.
+ *
+ * The NIC view alone lies in both directions — a captive portal or dead
+ * upstream reads "online", and a network stack Chromium can't see reads
+ * "offline" — so when `probe` is provided it is the verdict of record:
+ * NIC edges only re-arm it early (and a down-edge publishes offline
+ * without waiting on the round-trip), while a slow cadence catches the
+ * changes no NIC transition can — upstream dying or healing while the
+ * link stays up. Without `probe` the service degrades to the NIC view.
  */
 export function createNetService(opts: {
   readOnline(): boolean;
   pollMs?: number;
+  /** Real-internet check; omit to publish the raw NIC view. */
+  probe?: NetProbe;
+  /** Re-verify cadence while the last probe verdict is healthy. */
+  probeIntervalMs?: number;
+  /** Re-probe cadence while probes are failing — recovery detection. */
+  probeRetryMs?: number;
+  now?: () => number;
 }): NetService {
   const pollMs = opts.pollMs ?? 2_000;
+  const probeIntervalMs = opts.probeIntervalMs ?? 30_000;
+  const probeRetryMs = opts.probeRetryMs ?? 8_000;
+  const now = opts.now ?? Date.now;
   const senders = new Map<NetSender, number>();
   // A `destroyed` hook is registered once per sender and outlives a
   // full detach (drop is reference-based and stays correct), so
   // re-attachment must never stack another copy of it.
   const destroyedHooked = new WeakSet<NetSender>();
-  let online = opts.readOnline();
+  let nic = opts.readOnline();
+  let online = nic;
+  let probeFailures = 0;
+  let probeInFlight = false;
+  let lastProbeSettledAt = 0;
 
   function drop(sender: NetSender): void {
     senders.delete(sender);
@@ -53,19 +137,68 @@ export function createNetService(opts: {
     }
   }
 
-  function tick(): void {
-    const now = opts.readOnline();
-    if (now === online) {
+  function publish(next: boolean): void {
+    if (next === online) {
       return;
     }
-    online = now;
+    online = next;
     for (const sender of senders.keys()) {
-      sendTo(sender, { online });
+      sendTo(sender, { online: next });
+    }
+  }
+
+  function probeSettled(reachable: boolean): void {
+    probeInFlight = false;
+    lastProbeSettledAt = now();
+    probeFailures = reachable ? 0 : probeFailures + 1;
+    if (reachable || probeFailures >= PROBE_FAIL_THRESHOLD) {
+      publish(reachable);
+    }
+  }
+
+  function fireProbe(): void {
+    const probe = opts.probe;
+    if (probe === undefined || probeInFlight) {
+      return;
+    }
+    probeInFlight = true;
+    void probe().then(probeSettled, () => probeSettled(false));
+  }
+
+  function tick(): void {
+    const nicNow = opts.readOnline();
+    if (nicNow !== nic) {
+      nic = nicNow;
+      if (opts.probe === undefined) {
+        publish(nicNow);
+      } else if (!nicNow) {
+        // The link is down: nothing upstream is reachable — publish
+        // now and let the next probe verdict re-prove connectivity
+        // rather than holding the edge hostage to a timeout.
+        publish(false);
+      }
+      // Every NIC edge re-arms the probe: an up-edge has to be verified
+      // before "online" is real, and a down-edge may itself be a
+      // Chromium blind spot (a tunnel it can't see) the probe disproves.
+      fireProbe();
+      return;
+    }
+    if (
+      opts.probe !== undefined &&
+      !probeInFlight &&
+      (lastProbeSettledAt === 0 ||
+        now() - lastProbeSettledAt >=
+          (probeFailures > 0 ? probeRetryMs : probeIntervalMs))
+    ) {
+      fireProbe();
     }
   }
 
   const timer = setInterval(tick, pollMs);
   timer.unref();
+  // The first verdict lands before renderers attach, so snapshot() and
+  // the attach push already carry probed truth instead of the NIC guess.
+  fireProbe();
 
   return {
     snapshot() {

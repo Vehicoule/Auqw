@@ -3,7 +3,7 @@ import type {
   CancellationSignal,
   OperationContext,
 } from '../cancellation.ts';
-import type { AppError, Result } from '../errors.ts';
+import type { AppError, ErrorKind, Result } from '../errors.ts';
 import { appError, err, fromUnknown, ok } from '../errors.ts';
 import type {
   DownloadRecord,
@@ -265,6 +265,18 @@ export type SessionDeps = {
 };
 
 const OP_DEADLINE_MS = 15_000;
+
+/**
+ * Verdict kinds a reconnect may re-attempt: connectivity weather — the
+ * block was "the network is gone", not a verdict on the row. Permanent
+ * kinds (not-found, auth-required, …), server-imposed waits
+ * (rate-limit, streams-capped), and bot walls keep their block.
+ */
+const CONNECTIVITY_RETRY_KINDS: ReadonlySet<ErrorKind> = new Set([
+  'unavailable',
+  'transient',
+  'timeout',
+]);
 
 /**
  * How long a provider-answered lyrics 'unavailable' suppresses a
@@ -1525,12 +1537,29 @@ export class Session {
    * native queue so offline items lose their remote refs (and regain
    * them on reconnect), cancels in-flight speculative mapping, and
    * re-evaluates the successor/radio triggers under the new truth.
+   * On a reconnect it also re-arms a queue parked on connectivity
+   * weather — that block is interrupted play intent, not a verdict.
    */
   connectivityChanged(): void {
     if (!this.#requireReady().ok) {
       return;
     }
     this.#derived();
+    const r = this.#ready;
+    if (r === null || !this.#isOnline()) {
+      return;
+    }
+    const queue = r.queue.snapshot();
+    if (
+      queue.mode === 'paused' &&
+      queue.currentOccurrenceId !== null &&
+      queue.blockedError !== undefined &&
+      CONNECTIVITY_RETRY_KINDS.has(queue.blockedError.kind)
+    ) {
+      // `resume()` is the explicit retry the surface would fire: it
+      // clears the block, ticks 'playing', and re-attempts the row.
+      this.#own(this.#playback.resume());
+    }
   }
 
   /**
