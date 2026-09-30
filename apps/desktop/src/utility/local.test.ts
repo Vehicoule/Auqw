@@ -4,6 +4,7 @@ import {
   chmod,
   mkdir,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -548,6 +549,168 @@ export async function run(): Promise<void> {
     assert(
       !turnRead.ok && turnRead.error?.kind === 'permission-denied',
       'a symlink-escape read is permission-denied',
+    );
+
+    // Anchor swaps: the grant is bound to the path that was picked,
+    // so renaming the granted name aside and wearing a symlink at it
+    // can never re-point confinement at the link's target. The swap
+    // targets are fresh files the gate has never judged — a cached
+    // verdict can't stand in for the check under test.
+    const swapTarget = join(root, 'swap-target.wav');
+    await writeFile(swapTarget, Buffer.alloc(8, 0xee));
+
+    // A picked FILE grant: rename the file aside, symlink its name at
+    // the outside target — resolve and read must stay denied.
+    const pickedSwap = join(root, 'picked-swap.wav');
+    await writeFile(pickedSwap, Buffer.alloc(16, 4));
+    const pickedAdd = await call(CHANNELS.localAdd, {
+      paths: [pickedSwap],
+    });
+    assert(pickedAdd.ok, 'picked file for the anchor swap');
+    const pickedTree = (pickedAdd.result as {
+      picks: { treeUri: string }[];
+    }).picks[0];
+    dbW.prepare(
+      `INSERT INTO local_sources (source_id, tree_uri, label, added_ms)
+       VALUES ('src-swap', ?, 'swap', 1)`,
+    ).run(pickedTree?.treeUri ?? '');
+    dbW.prepare(
+      `INSERT INTO local_files
+       (file_id, source_id, doc_id, size, fingerprint, recording_id)
+       VALUES ('lf-swap', 'src-swap', 'picked-swap.wav', 16, 'fps',
+               'rec-1')`,
+    ).run();
+    const pickedSwapUri = pathToFileURL(pickedSwap).href;
+    const pickedPre = await call(CHANNELS.localResolve, {
+      uri: pickedSwapUri,
+    });
+    assert(
+      pickedPre.ok &&
+        (pickedPre.result as { uri: string | null }).uri !== null,
+      'a picked file resolves before the swap',
+    );
+    const pickedParked = `${pickedSwap}.parked`;
+    await rename(pickedSwap, pickedParked);
+    await symlink(swapTarget, pickedSwap);
+    const pickedPost = await call(CHANNELS.localResolve, {
+      uri: pickedSwapUri,
+    });
+    assert(
+      pickedPost.ok &&
+        (pickedPost.result as { uri: string | null }).uri === null,
+      'a swapped picked-file anchor refuses resolve',
+    );
+    const pickedPostRead = await call(CHANNELS.localRead, {
+      uri: pickedSwapUri,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !pickedPostRead.ok &&
+        pickedPostRead.error?.kind === 'permission-denied',
+      'a swapped picked-file anchor refuses read',
+    );
+    await rm(pickedSwap);
+    await rename(pickedParked, pickedSwap);
+
+    // A picked DIR grant: rename the root aside, symlink its name at
+    // an outside dir holding the same relative names — the indexed
+    // row confined under the minted root must not follow.
+    const anchorDir = join(root, 'anchored');
+    await mkdir(anchorDir);
+    await writeFile(join(anchorDir, 'inner.wav'), Buffer.alloc(8, 6));
+    const anchorAdd = await call(CHANNELS.localAdd, {
+      paths: [anchorDir],
+    });
+    assert(anchorAdd.ok, 'picked dir for the anchor swap');
+    const anchorTree = (anchorAdd.result as {
+      picks: { treeUri: string }[];
+    }).picks[0];
+    dbW.prepare(
+      `INSERT INTO local_sources (source_id, tree_uri, label, added_ms)
+       VALUES ('src-anchor', ?, 'anchored', 1)`,
+    ).run(anchorTree?.treeUri ?? '');
+    dbW.prepare(
+      `INSERT INTO local_files
+       (file_id, source_id, doc_id, size, fingerprint, recording_id)
+       VALUES ('lf-anchor', 'src-anchor', 'inner.wav', 8, 'fpa',
+               'rec-1')`,
+    ).run();
+    const anchorUri = pathToFileURL(join(anchorDir, 'inner.wav')).href;
+    const anchorPre = await call(CHANNELS.localResolve, {
+      uri: anchorUri,
+    });
+    assert(
+      anchorPre.ok &&
+        (anchorPre.result as { uri: string | null }).uri !== null,
+      'an indexed dir row resolves before the swap',
+    );
+    const relocated = join(root, 'relocated');
+    await mkdir(relocated);
+    await writeFile(join(relocated, 'inner.wav'), Buffer.alloc(8, 0xee));
+    const anchorParked = `${anchorDir}.parked`;
+    await rename(anchorDir, anchorParked);
+    await symlink(relocated, anchorDir);
+    const anchorPost = await call(CHANNELS.localResolve, {
+      uri: anchorUri,
+    });
+    assert(
+      anchorPost.ok &&
+        (anchorPost.result as { uri: string | null }).uri === null,
+      'a swapped dir anchor refuses resolve',
+    );
+    const anchorPostRead = await call(CHANNELS.localRead, {
+      uri: anchorUri,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !anchorPostRead.ok &&
+        anchorPostRead.error?.kind === 'permission-denied',
+      'a swapped dir anchor refuses read',
+    );
+    await rm(anchorDir);
+    await rename(anchorParked, anchorDir);
+    const anchorBack = await call(CHANNELS.localResolve, {
+      uri: anchorUri,
+    });
+    assert(
+      anchorBack.ok &&
+        (anchorBack.result as { uri: string | null }).uri !== null,
+      'a restored dir anchor resolves again',
+    );
+
+    // The media dir itself: same swap against the managed-downloads
+    // root — a ledger row must not follow the dir's new target.
+    const outsideMedia = join(root, 'outside-media');
+    await mkdir(outsideMedia);
+    await writeFile(join(outsideMedia, 'dl-1'), Buffer.alloc(8, 0xee));
+    const mediaParked = `${mediaDir}.parked`;
+    await rename(mediaDir, mediaParked);
+    await symlink(outsideMedia, mediaDir);
+    const mediaPost = await call(CHANNELS.localResolve, { uri: dlUri });
+    assert(
+      mediaPost.ok &&
+        (mediaPost.result as { uri: string | null }).uri === null,
+      'a swapped media anchor refuses resolve',
+    );
+    const mediaPostRead = await call(CHANNELS.localRead, {
+      uri: dlUri,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !mediaPostRead.ok &&
+        mediaPostRead.error?.kind === 'permission-denied',
+      'a swapped media anchor refuses read',
+    );
+    await rm(mediaDir);
+    await rename(mediaParked, mediaDir);
+    const mediaBack = await call(CHANNELS.localResolve, { uri: dlUri });
+    assert(
+      mediaBack.ok &&
+        (mediaBack.result as { uri: string | null }).uri !== null,
+      'a restored media anchor resolves again',
     );
   } finally {
     local.close();

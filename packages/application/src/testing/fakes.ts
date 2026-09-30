@@ -729,6 +729,9 @@ export class FakeStorage implements StoragePort {
 
   load(context: OperationContext): Promise<Result<PersistedState>> {
     this.loads.push(context);
+    if (context.signal.cancelled) {
+      return Promise.resolve(cancelled());
+    }
     if (this.#deferNextLoad) {
       this.#deferNextLoad = false;
       const deferred = new Deferred<Result<PersistedState>>();

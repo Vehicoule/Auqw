@@ -4025,6 +4025,86 @@ async function successorMapping(): Promise<void> {
       'stale mapping task applies nothing',
     );
   }
+  // A permanently-failed dealt successor stays in the walk flagged
+  // skipsForward — the map spends its candidates call on the first
+  // unflagged row, the one the service will actually attach.
+  {
+    const r = rig(
+      persisted({
+        recordings: [
+          recording('rA', [ref('itunes', 'a')]),
+          recording('rB', [ref('itunes', 'b')]),
+          recording('rC', [ref('itunes', 'c')]),
+        ],
+        queue: {
+          revision: 2,
+          occurrences: [
+            occurrence('oA', 'rA'),
+            occurrence('oB', 'rB'),
+            occurrence('oC', 'rC'),
+          ],
+          currentOccurrenceId: null,
+          positionMs: 0,
+          mode: 'stopped',
+        },
+      }),
+    );
+    await restoreOk(r);
+    // oB's own candidates return nothing — 'no-result' is a permanent
+    // verdict, so the row is flagged out of the forward walk without
+    // gaining a resolved ref.
+    const failed = r.session.playOccurrence('oB');
+    await pump();
+    assert(r.ytm.settleCandidates(ok([])), 'oB candidates pending');
+    await pump();
+    assert(!(await failed).ok, 'oB attempt fails honest-unavailable');
+    assert(
+      r.player.projections.at(-1)?.items[1]?.skipsForward === true,
+      'the permanent verdict flags oB',
+    );
+    // The dealt-window warm has also queued oC — drain every pending
+    // call so the slice below counts only what oA's run produces.
+    while (r.ytm.pendingCount('candidates') > 0) {
+      r.ytm.settleCandidatesAt(0, ok([]));
+      await pump();
+    }
+    const settled = r.ytm.calls.filter(
+      (c) => c.method === 'candidates',
+    ).length;
+    // Drive oA's attempt manually: a warm-lane candidates call for oC
+    // queues ahead of the attempt's own, so drain the older pendings
+    // with a non-match and settle only the newest — the attempt's.
+    const playing = r.session.playOccurrence('oA');
+    await pump();
+    while (r.ytm.pendingCount('candidates') > 1) {
+      r.ytm.settleCandidatesAt(0, ok([]));
+      await pump();
+    }
+    assertEqual(
+      r.ytm.pendingCount('candidates'),
+      1,
+      'attempt candidates pending',
+    );
+    r.ytm.settleCandidates(
+      ok([meta('youtube-music', 'ytm-a', 'Song rA', 'Artist', 300_000)]),
+    );
+    await pump();
+    r.player.emit(preparedEvent(lastPrepareIdentity(r), 'h-oA'));
+    await pump();
+    assert(r.player.settlePrepare(ok('req-oA')), 'pending prepare');
+    assert((await playing).ok);
+    await pump();
+    const titles = r.ytm.calls
+      .filter((c) => c.method === 'candidates')
+      .slice(settled)
+      .map((c) => (c.input as { query: { title: string } }).query.title);
+    assert(!titles.includes('Song rB'), 'the flagged row is never mapped');
+    assert(
+      titles.includes('Song rC'),
+      'the first unflagged successor is mapped',
+    );
+    await r.session.dispose();
+  }
 }
 
 async function duplicatePrepareSafety(): Promise<void> {

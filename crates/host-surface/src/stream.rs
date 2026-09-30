@@ -697,16 +697,22 @@ impl PluginHost {
                                 // A tombstone a racing `cancel` parked
                                 // for this id is spent — the Failed
                                 // below is this request's own outcome.
-                                // Remove only this generation's slot:
-                                // a re-admitted request may already
-                                // own the id.
                                 if let Ok(mut t) = cancelled_requests.lock() {
                                     t.remove(&request_id);
                                 }
-                                if m.get(&request_id)
-                                    .is_some_and(|s| s.generation == prepared_generation)
-                                {
-                                    m.remove(&request_id);
+                                // Flip rather than remove: the Failed below
+                                // IS this request's terminal outcome, so its
+                                // slot reads delivered like the live path's
+                                // post-wire flip — a `cancel` landing after
+                                // it takes the delivered branch (`abandon`
+                                // no-ops on a dead session) instead of
+                                // tombstoning an id whose outcome already
+                                // shipped. Still generation-guarded: a
+                                // re-admitted request may already own the id.
+                                if let Some(slot) = m.get_mut(&request_id) {
+                                    if slot.generation == prepared_generation {
+                                        slot.delivered = true;
+                                    }
                                 }
                             }
                             dead

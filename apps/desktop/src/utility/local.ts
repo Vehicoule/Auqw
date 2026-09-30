@@ -334,25 +334,30 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
     }
   }
 
-  // Verdicts memoized per URI — waveform reads hit the same URI per
-  // 1 MiB chunk, and a full index scan per chunk multiplies realpaths
-  // by library size. Freshness is `PRAGMA data_version`: the index db
-  // is a read-only accessor — every write arrives via the storage
-  // service's connection, and data_version bumps on exactly those
-  // commits (inserts, deletes, AND updates — a file's doc move or a
-  // download leaving 'available' re-opens the scan). O(1) per call.
-  // If the pragma is unavailable the stamp falls back to a content
-  // hash over the gate-relevant columns (string work, still no fs).
-  // The verdict belongs to the PATH the URI resolved to, not the URI
-  // string — a re-pointed symlink keeps its URI while moving the
-  // target, so a hit must match the realpath computed this call. `real`
-  // is re-derived fresh above on every call; only the index scan is
-  // memoized.
-  const gateCache = new Map<
-    string,
-    { readonly real: string; readonly allowed: string | null }
-  >();
+  // Verdicts memoized by resolved path — waveform reads hit the same
+  // file per 1 MiB chunk, and a full index scan per chunk multiplies
+  // realpaths by library size. Keying by the realpath (not the request
+  // spelling) makes alias spellings of one file share a verdict and
+  // binds each entry to the path it was minted for — a re-pointed
+  // symlink resolves to a new key, not a stale hit. The map is
+  // bounded and FIFO-evicted so a renderer spraying distinct targets
+  // can't grow it without limit. Freshness is `PRAGMA data_version`:
+  // the index db is a read-only accessor — every write arrives via
+  // the storage service's connection, and data_version bumps on
+  // exactly those commits (inserts, deletes, AND updates — a file's
+  // doc move or a download leaving 'available' re-opens the scan).
+  // O(1) per call. If the pragma is unavailable the stamp falls back
+  // to a content hash over the gate-relevant columns (string work,
+  // still no fs).
+  const GATE_CACHE_MAX = 4096;
+  const gateCache = new Map<string, string | null>();
   let gateStamp = '';
+  // The media dir's canonical anchor, pinned once it first resolves
+  // — confinement compares against the path the grant was minted
+  // under, so a post-grant swap of the dir itself (rename aside +
+  // symlink at its name) can't relocate the root to the link's
+  // target. A null answer retries: the dir may not exist yet.
+  let mediaAnchor: string | undefined;
   function indexStamp(db: DatabaseSync): string {
     try {
       const row = db
@@ -417,16 +422,22 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
       gateCache.clear();
       gateStamp = stamp;
     }
-    const cached = gateCache.get(uri);
-    if (cached !== undefined && cached.real === real) {
-      return cached.allowed;
+    const cached = gateCache.get(real);
+    if (cached !== undefined) {
+      return cached;
     }
     const allowed = await gateLocalPath(db, abs, real);
     // An index write mid-evaluation voids the verdict — only cache
     // when the stamp still matches, so an in-flight scan can never
     // repopulate the table with pre-mutation answers.
     if (indexStamp(db) === stamp) {
-      gateCache.set(uri, { real, allowed });
+      if (gateCache.size >= GATE_CACHE_MAX) {
+        const oldest = gateCache.keys().next().value;
+        if (oldest !== undefined) {
+          gateCache.delete(oldest);
+        }
+      }
+      gateCache.set(real, allowed);
     }
     return allowed;
   }
@@ -455,7 +466,10 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
           asIo('local resolve failed', thrown);
         }
       }
-      const mediaReal = await realpathChecked(options.mediaDir);
+      if (mediaAnchor === undefined) {
+        mediaAnchor =
+          (await realpathChecked(options.mediaDir)) ?? undefined;
+      }
       for (const row of rows) {
         if (typeof row['filePath'] !== 'string') {
           continue;
@@ -468,8 +482,8 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         if (
           nameReal !== null &&
           nameReal === real &&
-          mediaReal !== null &&
-          pathConfined(mediaReal, nameReal)
+          mediaAnchor !== undefined &&
+          pathConfined(mediaAnchor, nameReal)
         ) {
           return real;
         }
@@ -495,20 +509,20 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
           continue;
         }
       }
-      // …and still confine under its own tree root realpath — an
-      // indexed file swapped for a symlink pointing out stays denied.
+      // …and still confined under the grant's canonical root. The
+      // anchor is the mint-time realpath stored in the treeUri — it
+      // is NEVER re-resolved here, so renaming the grant aside and
+      // wearing a symlink at its name can't re-point confinement at
+      // the link's target (re-resolving would make `real === anchor`
+      // a tautology for the file kind).
       const tree = parseTree(row.treeUri);
       if (tree === null) {
         continue;
       }
-      const rootReal = await realpathChecked(tree.absPath);
-      if (rootReal === null) {
-        continue;
-      }
       if (
         tree.kind === 'file'
-          ? real === rootReal
-          : pathConfined(rootReal, real)
+          ? real === tree.absPath
+          : pathConfined(tree.absPath, real)
       ) {
         return real;
       }

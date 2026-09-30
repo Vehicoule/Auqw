@@ -477,6 +477,65 @@ export async function run(): Promise<void> {
       });
     }
 
+    // The begun-on occurrence rides to the session as the expected
+    // key: a drag commit names the track it started on, and a
+    // keyboard/AT commit names the rendered track — the session
+    // drops a seek whose occurrence already flipped ahead of the
+    // re-render.
+    {
+      const container = win.document.createElement('div');
+      win.document.body.appendChild(container);
+      const root = createRoot(container);
+      const seeks: [number, string | undefined][] = [];
+      const render = (trackKey: string) =>
+        createElement(WaveformSeek, {
+          positionMs: 10_000,
+          durationMs: 180_000,
+          trackKey,
+          labels: false,
+          onSeek: (ms, expectedOccurrenceId) =>
+            seeks.push([ms, expectedOccurrenceId]),
+        });
+      await act(async () => {
+        root.render(render('occ-a'));
+      });
+      const input = container.querySelector('input');
+      assert(input !== null, 'the range input rendered');
+      await act(async () => {
+        pointer(input, 'pointerdown');
+      });
+      await act(async () => {
+        slide(input, 120_000);
+      });
+      await act(async () => {
+        pointer(input, 'pointerup');
+      });
+      assertEqual(seeks.length, 1, 'the drag committed its release');
+      assertEqual(seeks[0]?.[0], 120_000, 'the commit lands at release');
+      assertEqual(
+        seeks[0]?.[1],
+        'occ-a',
+        'a drag commit names the track it began on',
+      );
+      // The track flips while idle — a keyboard commit names the
+      // key it rendered against.
+      await act(async () => {
+        root.render(render('occ-b'));
+      });
+      await act(async () => {
+        key(input, 'ArrowRight');
+      });
+      assertEqual(seeks.length, 2, 'the arrow step committed');
+      assertEqual(
+        seeks[1]?.[1],
+        'occ-b',
+        'a keyboard commit names the rendered track',
+      );
+      await act(async () => {
+        root.unmount();
+      });
+    }
+
     // Arrows during a pending seek publish step from the held
     // target, not the stale published position — each press must
     // advance the hold it just set.

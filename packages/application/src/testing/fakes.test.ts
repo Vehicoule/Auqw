@@ -150,6 +150,17 @@ async function storageTests(): Promise<void> {
   const again = await storage.load(ctx());
   assert(again.ok && again.value.queue.revision === 0);
 
+  // A pre-cancelled signal resolves cancelled — the same upfront
+  // check the real adapter and FakeSyncLogStore.load make.
+  const preCancelled = new CancellationSource();
+  preCancelled.cancel();
+  const cancelledLoad = await storage.load({
+    requestId: 'r-pre',
+    deadlineMs: 10_000,
+    signal: preCancelled.signal,
+  });
+  assert(!cancelledLoad.ok && cancelledLoad.error.kind === 'cancelled');
+
   // Clone-on-commit: mutating the batch after commit cannot alter it.
   // The like's target must exist — the fake now validates the merged
   // document exactly like sqlite does.

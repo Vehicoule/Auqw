@@ -2820,9 +2820,13 @@ export class PlaybackEngine {
       return;
     }
     // The cursor's real successor is the dealt one under shuffle —
-    // prefetch what the service will actually attach next.
+    // prefetch what the service will actually attach next: the first
+    // row no forward move steps over, same as #successorWarmRef.
     const { snap, walk, pos } = this.#dealtWalk(r);
-    const successorId = pos >= 0 ? walk[pos + 1] : undefined;
+    const successorId =
+      pos >= 0
+        ? walk.slice(pos + 1).find((id) => !r.queue.isUnplayable(id))
+        : undefined;
     const successor = snap.occurrences.find(
       (o) => o.occurrenceId === successorId,
     );
@@ -2909,7 +2913,8 @@ export class PlaybackEngine {
       // Recheck it is still the immediate successor of the same
       // current under the same playback provider, and that the
       // resolved ref actually wins selection precedence. Successor
-      // means walk space — the dealt position under shuffle.
+      // means walk space — the dealt position under shuffle, stepping
+      // over flagged rows exactly like the pick did.
       const snapNow = ready2.queue.snapshot();
       const walkNow =
         this.#host.dealtOrder(ready2) ??
@@ -2918,7 +2923,12 @@ export class PlaybackEngine {
         snapNow.currentOccurrenceId === null
           ? -1
           : walkNow.indexOf(snapNow.currentOccurrenceId);
-      const immediateId = posNow >= 0 ? walkNow[posNow + 1] : undefined;
+      const immediateId =
+        posNow >= 0
+          ? walkNow
+              .slice(posNow + 1)
+              .find((id) => !ready2.queue.isUnplayable(id))
+          : undefined;
       const immediate = snapNow.occurrences.find(
         (o) => o.occurrenceId === immediateId,
       );
