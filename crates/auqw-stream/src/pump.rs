@@ -134,18 +134,20 @@ async fn drive_fetch(
     session: &Arc<SessionInner>,
     fetch: &dyn Fetch,
     url: &str,
+    mint_headers: &[(String, String)],
     offset: u64,
     len: u64,
 ) -> Result<FetchOutcome, StreamError> {
     let resp = fetch
-        .get_range(
+        .get_range(crate::fetch::RangeRequest {
             url,
             offset,
-            len,
-            session.config.stall,
-            session.config.request_deadline,
-            session.cancel.clone(),
-        )
+            max_len: len,
+            headers: mint_headers,
+            stall: session.config.stall,
+            deadline: session.config.request_deadline,
+            cancel: session.cancel.clone(),
+        })
         .await?;
     if resp.status != 206 {
         // `416` carries `Content-Range: bytes */N` — keep the total;
@@ -198,12 +200,13 @@ async fn await_fetch(
     session: &Arc<SessionInner>,
     fetch: &dyn Fetch,
     url: &str,
+    mint_headers: &[(String, String)],
     offset: u64,
     len: u64,
     through: bool,
 ) -> FetchWait {
     use crate::session::DemandCover;
-    let fut = drive_fetch(session, fetch, url, offset, len);
+    let fut = drive_fetch(session, fetch, url, mint_headers, offset, len);
     tokio::pin!(fut);
     if through {
         return tokio::select! {
@@ -277,12 +280,14 @@ async fn fetch_chunk(
         if let Err(e) = session.check_live() {
             return Outcome::Failed(e);
         }
-        let outcome = match session.current_url() {
-            Ok(url) => match await_fetch(session, fetch, &url, offset, len, through).await {
-                FetchWait::Done(r) => r,
-                FetchWait::Preempted => return Outcome::Preempted,
-                FetchWait::Cancelled => return Outcome::Failed(StreamError::Cancelled),
-            },
+        let outcome = match session.current_fetch() {
+            Ok((url, mint_headers)) => {
+                match await_fetch(session, fetch, &url, &mint_headers, offset, len, through).await {
+                    FetchWait::Done(r) => r,
+                    FetchWait::Preempted => return Outcome::Preempted,
+                    FetchWait::Cancelled => return Outcome::Failed(StreamError::Cancelled),
+                }
+            }
             Err(e) => return Outcome::Failed(e),
         };
         let outcome = match outcome {
@@ -633,6 +638,7 @@ mod tests {
                     bitrate_kbps: None,
                     content_length: Some(1024),
                     expires_at_ms: None,
+                    headers: Vec::new(),
                     source_ref: "vid".into(),
                     provider: "test".into(),
                 })

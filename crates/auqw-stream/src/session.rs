@@ -416,9 +416,10 @@ impl SessionInner {
         true
     }
 
-    /// The URL the pump fetches next (current mint).
-    pub(crate) fn current_url(&self) -> Result<String, StreamError> {
-        Ok(lock(&self.core)?.source.url.clone())
+    /// The URL + fetch headers the pump sends next (current mint).
+    pub(crate) fn current_fetch(&self) -> Result<(String, Vec<(String, String)>), StreamError> {
+        let core = lock(&self.core)?;
+        Ok((core.source.url.clone(), core.source.headers.clone()))
     }
 
     /// The host re-mint closure.
@@ -528,6 +529,9 @@ impl SessionInner {
         core.source.content_length = source.content_length;
         core.source.itag = source.itag;
         core.source.bitrate_kbps = source.bitrate_kbps;
+        // A re-mint may switch rungs — the new mint's fetch identity
+        // replaces the old one's wholesale.
+        core.source.headers = source.headers;
         sh.marks.mint_ms = Some(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
         Ok(())
     }

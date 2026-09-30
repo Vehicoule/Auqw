@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use auqw_stream::{
-    Fetch, FetchResponse, PreparedSource, Remint, ReqwestFetch, StreamConfig, StreamError,
-    StreamRegistry,
+    Fetch, FetchResponse, PreparedSource, RangeRequest, Remint, ReqwestFetch, StreamConfig,
+    StreamError, StreamRegistry,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -68,6 +68,7 @@ fn source(len: u64) -> PreparedSource {
         bitrate_kbps: Some(129),
         content_length: Some(len),
         expires_at_ms: None,
+        headers: Vec::new(),
         source_ref: "vid".into(),
         provider: "test".into(),
     }
@@ -127,6 +128,7 @@ struct MapFetch {
     pages: Mutex<HashMap<u64, VecDeque<Step>>>,
     requests: Mutex<Vec<(u64, u64)>>,
     urls: Mutex<Vec<String>>,
+    mint_headers: Mutex<Vec<Vec<(String, String)>>>,
     in_flight: AtomicU32,
 }
 
@@ -136,6 +138,7 @@ impl MapFetch {
             pages: Mutex::new(pages),
             requests: Mutex::new(Vec::new()),
             urls: Mutex::new(Vec::new()),
+            mint_headers: Mutex::new(Vec::new()),
             in_flight: AtomicU32::new(0),
         }
     }
@@ -173,24 +176,22 @@ impl MapFetch {
 impl Fetch for MapFetch {
     fn get_range<'a>(
         &'a self,
-        url: &'a str,
-        offset: u64,
-        max_len: u64,
-        _stall: Duration,
-        _deadline: Duration,
-        _cancel: CancellationToken,
+        req: RangeRequest<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>> {
         if let Ok(mut r) = self.requests.lock() {
-            r.push((offset, max_len));
+            r.push((req.offset, req.max_len));
         }
         if let Ok(mut u) = self.urls.lock() {
-            u.push(url.to_string());
+            u.push(req.url.to_string());
+        }
+        if let Ok(mut h) = self.mint_headers.lock() {
+            h.push(req.headers.to_vec());
         }
         let step = self
             .pages
             .lock()
             .ok()
-            .and_then(|mut p| p.get_mut(&offset).and_then(VecDeque::pop_front))
+            .and_then(|mut p| p.get_mut(&req.offset).and_then(VecDeque::pop_front))
             .unwrap_or(Step::Hang);
         self.in_flight.fetch_add(1, Ordering::Relaxed);
         Box::pin(async move {
@@ -1993,13 +1994,10 @@ async fn reader_is_served_from_the_first_body_piece() {
     impl Fetch for FirstPieceOnly {
         fn get_range<'a>(
             &'a self,
-            _url: &'a str,
-            offset: u64,
-            max_len: u64,
-            _stall: Duration,
-            _deadline: Duration,
-            _cancel: CancellationToken,
+            req: RangeRequest<'a>,
         ) -> Pin<Box<dyn Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>> {
+            let offset = req.offset;
+            let max_len = req.max_len;
             Box::pin(async move {
                 let mut sent = false;
                 let body = Box::pin(futures_util::stream::poll_fn(move |cx| {

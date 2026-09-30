@@ -646,6 +646,25 @@
           ],
           "minimum": 0,
           "maximum": 4294967295
+        },
+        "headers": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Request headers the mint requires on every stream fetch (e.g. the minting client's User-Agent). Host-controlled names (range, host, content-length, connection, transfer-encoding, accept-encoding, te, trailer, upgrade, expect, keep-alive, proxy-authenticate, proxy-authorization, www-authenticate, authorization, cookie, set-cookie) are rejected.",
+          "maxProperties": 16,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[!#$%&'*+\\-.^_`|~0-9A-Za-z]+$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
         }
       }
     },

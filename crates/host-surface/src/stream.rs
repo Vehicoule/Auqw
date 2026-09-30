@@ -232,6 +232,7 @@ impl Remint for PluginRemint {
                 bitrate_kbps: resource.bitrate_kbps,
                 content_length: resource.content_length,
                 expires_at_ms: resource.expires_at_ms,
+                headers: resource.headers,
                 source_ref,
                 provider,
             })
@@ -299,6 +300,7 @@ fn prepare_outcome(
         bitrate_kbps: resource.bitrate_kbps,
         content_length: resource.content_length,
         expires_at_ms: resource.expires_at_ms,
+        headers: resource.headers,
         source_ref,
         provider,
     };
@@ -912,6 +914,7 @@ impl PluginHost {
             bitrate_kbps: None,
             content_length,
             expires_at_ms,
+            headers: Vec::new(),
         };
         let remint: Arc<dyn Remint> = if remintable {
             Arc::new(DevRemint {
