@@ -101,6 +101,11 @@ assertEqual(
   ),
   'the provider is refusing requests right now — try again later',
 );
+// The dedicated kind lands the same line without any sniffing.
+assertEqual(
+  errorText(appError('provider-wall', 'provider-wall: bot-check')),
+  'the provider is refusing requests right now — try again later',
+);
 assertEqual(
   errorText(appError('transient', 'socket hangup')),
   'something interrupted that — try again',

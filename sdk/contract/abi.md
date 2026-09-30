@@ -131,8 +131,10 @@ the typing surface is independent of the configured catalog provider.
 
 Guest-visible taxonomy (kebab-case): `no-result`, `not-applicable`,
 `unsupported`, `auth-required`, `auth-expired`, `rate-limit`, `transient`,
-`expired-resource`, `permission-denied`, `invalid-response`, `timeout`,
-`cancelled`.
+`provider-wall`, `expired-resource`, `permission-denied`,
+`invalid-response`, `timeout`, `cancelled`. `provider-wall` names a
+provider-side refusal of the session's visitor/IP itself (a bot-check
+wall): terminal for the request, never a verdict on the row.
 
 Host-only kinds (produced by the host itself, never sent to the guest):
 `budget-exceeded`, `guest-trap`, `invalid-message`, `artifact-rejected`.

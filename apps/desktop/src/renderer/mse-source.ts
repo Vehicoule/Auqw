@@ -90,6 +90,18 @@ export class MseAborted extends Error {
   }
 }
 
+/** A pump-reported death: `code` is the pump's taxonomy slug
+ * (`io-error`/`closed` for transport; a stream verdict like
+ * `provider-wall` when a re-mint failed typed). */
+export class PumpFailure extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'PumpFailure';
+    this.code = code;
+  }
+}
+
 export interface MseSource {
   readonly url: string;
   seekTo(positionMs: number): void;
@@ -827,7 +839,7 @@ function runSession(
         // the bridge synthesizes it (at epoch 0) when the port itself
         // dies, which is transport-terminal regardless of epoch.
         if (raw.epoch === epoch || raw.code === 'closed') {
-          fail(new Error(`pump ${raw.code}: ${raw.message}`));
+          fail(new PumpFailure(raw.code, `pump ${raw.code}: ${raw.message}`));
         }
         break;
       case 'ready':

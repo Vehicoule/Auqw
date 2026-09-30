@@ -1795,6 +1795,87 @@ export async function run(): Promise<void> {
     assert(port.closed, 'dead session closed its port');
   }
 
+  // A typed pump verdict BEFORE MSE readiness skips the loopback —
+  // re-serving the same dead stream would launder the kind to
+  // transient through the element. rate-limit/streams-capped are
+  // retryable but belong to the app's retry policy, not an in-band
+  // reattach that burns the same latched verdict.
+  for (const code of [
+    'provider-wall',
+    'rate-limit',
+    'streams-capped',
+    'released',
+  ]) {
+    const audio = fakeAudio();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(media),
+    });
+    await player.prepare({
+      provider: 'youtube-music',
+      sourceRef: 'track:walled',
+      identity,
+    });
+    const playing = player.play({ handle: 'h-1', identity });
+    await settle();
+    port.feed({
+      kind: 'error',
+      epoch: 0,
+      code,
+      message: 'verdict',
+    });
+    const played = await playing;
+    assert(
+      !played.ok && played.error.kind === code,
+      `early ${code} rides the taxonomy, got ${JSON.stringify(played)}`,
+    );
+    assert(
+      !stream.calls.some((c) => c.method === 'serveUrl'),
+      `no loopback for ${code}`,
+    );
+  }
+
+  // A recoverable pump code before readiness keeps the loopback too —
+  // the session latches a transient read failure and a fresh attach
+  // (which the serve leg performs) clears it.
+  for (const code of ['io-error', 'transient']) {
+    const audio = fakeAudio();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mse: fakeMseFactories(media),
+    });
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    const playing = player.play({ handle: 'h-1', identity });
+    await settle();
+    port.feed({
+      kind: 'error',
+      epoch: 0,
+      code,
+      message: 'read died',
+    });
+    await playing;
+    assert(
+      stream.calls.some((c) => c.method === 'serveUrl'),
+      `recoverable ${code} still takes the loopback`,
+    );
+  }
+
   // A stop before the MSE attach settles aborts it directly — the
   // unresolved attach has no activeMse to drop, so without the
   // pending-attach registry its pump lease would outlive the dead op.

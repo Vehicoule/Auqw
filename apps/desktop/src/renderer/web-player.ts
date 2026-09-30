@@ -23,6 +23,7 @@ import { rawToAppError } from './ipc-errors.ts';
 import {
   attachMseSource,
   MseAborted,
+  PumpFailure,
   type MseFactories,
   type MseSource,
 } from './mse-source.ts';
@@ -68,6 +69,11 @@ type ErrorKind = AppError['kind'];
 type StatusState = Extract<PlayerEvent, { type: 'status' }>['state'];
 type Settled = { url: string; source: MseSource | null };
 type AttachLeg = { url: string; settle: Promise<Settled>; abort(): void };
+
+/** Pump codes whose retry belongs to the app's policy, not an in-band
+ * reattach — a loopback GET would burn the same latched verdict and
+ * launder the kind (and its retryAfter) through the element. */
+const POLICY_RETRY_CODES = new Set(['rate-limit', 'streams-capped']);
 
 const toError = (thrown: unknown): AppError =>
   rawToAppError(thrown, 'stream call failed');
@@ -292,7 +298,17 @@ export function createWebPlayerPort(deps: {
         return;
       }
       dropMse();
-      status('failed', appError('transient', error.message));
+      // Transport codes stay transient weather; a taxonomy slug from
+      // a re-mint rides verbatim — a provider wall laundered to
+      // 'transient' would retry the same refusal and toast the
+      // generic interruption copy instead of the wall's.
+      const kind =
+        error instanceof PumpFailure &&
+        error.code !== 'io-error' &&
+        error.code !== 'closed'
+          ? appErrorKind(error.code)
+          : 'transient';
+      status('failed', appError(kind, error.message));
     });
   }
 
@@ -371,6 +387,27 @@ export function createWebPlayerPort(deps: {
           async (thrown): Promise<Settled> => {
             if (thrown instanceof MseAborted) {
               throw thrown;
+            }
+            // A terminal pump verdict isn't an MSE refusal — the
+            // loopback would re-serve the same dead stream and
+            // launder the kind to transient through the element.
+            // Weather codes keep the fallback: a fresh attach on
+            // the live session clears its latched read failure.
+            if (
+              thrown instanceof PumpFailure &&
+              thrown.code !== 'io-error' &&
+              thrown.code !== 'closed'
+            ) {
+              const mapped = appError(
+                appErrorKind(thrown.code),
+                thrown.message,
+              );
+              if (
+                !mapped.retryable ||
+                POLICY_RETRY_CODES.has(thrown.code)
+              ) {
+                throw mapped;
+              }
             }
             const served = await stream.serveUrl({ handle });
             return { url: served.url, source: null };

@@ -10,6 +10,7 @@ export type ErrorKind =
   | 'auth-expired'
   | 'rate-limit'
   | 'transient'
+  | 'provider-wall'
   | 'expired-resource'
   | 'permission-denied'
   | 'invalid-response'
@@ -73,6 +74,7 @@ export const ERROR_KIND_BY_SLUG: Readonly<Record<ErrorSlug, ErrorKind>> = {
   'auth-expired': 'auth-expired',
   'rate-limit': 'rate-limit',
   transient: 'transient',
+  'provider-wall': 'provider-wall',
   'expired-resource': 'expired-resource',
   'permission-denied': 'permission-denied',
   'invalid-response': 'invalid-response',
@@ -116,20 +118,22 @@ export function appError(
 }
 
 /**
- * A provider-side bot wall wears `transient` plus the guest's
- * `bot-check` detail. `AppError` carries no detail field, but every
- * leg between the guest and the engine prepends its own
- * `{kind}: ` prefix to the message (the guest SDK renders
- * `{kind}: {detail}`, the host wraps it `guest failure ({kind}): …`),
- * so the detail always survives as the LAST `:`-separated segment —
- * `"guest failure (transient): transient: bot-check"`. A bot wall is
- * per-IP/per-visitor provider truth, not weather: retry policies
- * treat it as terminal and the row stays unmarked.
+ * A provider-side bot wall — the upstream refused the session's
+ * visitor/IP itself. Guests on ABI ≥0.3.0 emit the `provider-wall`
+ * kind directly; earlier guests wore `transient` plus a `bot-check`
+ * detail, and `AppError` carries no detail field — but every leg
+ * between the guest and the engine prepends its own `{kind}: ` prefix
+ * to the message, so the legacy detail survives as the LAST
+ * `:`-separated segment (`"guest failure (transient): transient:
+ * bot-check"`). Both shapes are the same verdict: per-IP/per-visitor
+ * provider truth, not weather — retry policies treat it as terminal
+ * and the row stays unmarked.
  */
 export function isBotCheckWall(error: AppError): boolean {
   return (
-    error.kind === 'transient' &&
-    error.message.split(':').at(-1)?.trim() === 'bot-check'
+    error.kind === 'provider-wall' ||
+    (error.kind === 'transient' &&
+      error.message.split(':').at(-1)?.trim() === 'bot-check')
   );
 }
 

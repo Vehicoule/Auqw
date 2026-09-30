@@ -67,6 +67,14 @@ pub enum StreamError {
         /// Failure detail.
         message: String,
     },
+    /// A provider-side bot wall — the upstream refused the session's
+    /// visitor/IP outright. Terminal for the session: a re-mint asks
+    /// the same wall, so the pump's transient-retry leg does not apply.
+    #[error("provider-wall: {message}")]
+    ProviderWall {
+        /// Failure detail.
+        message: String,
+    },
     /// Host-side failure: cache I/O, runtime, or configuration.
     #[error("internal: {message}")]
     Internal {
@@ -93,6 +101,7 @@ impl StreamError {
             Self::RateLimited { .. } => "rate-limit",
             Self::StreamsCapped { .. } => "streams-capped",
             Self::InvalidResponse { .. } => "invalid-response",
+            Self::ProviderWall { .. } => "provider-wall",
             Self::Internal { .. } => "internal",
             Self::NotFound => "not-found",
         }
@@ -110,6 +119,7 @@ impl StreamError {
             | Self::RateLimited { message }
             | Self::StreamsCapped { message }
             | Self::InvalidResponse { message }
+            | Self::ProviderWall { message }
             | Self::Internal { message } => message.clone(),
             _ => self.kind().to_string(),
         }
@@ -148,6 +158,12 @@ mod tests {
                     message: "x".into(),
                 },
                 "transient",
+            ),
+            (
+                StreamError::ProviderWall {
+                    message: "x".into(),
+                },
+                "provider-wall",
             ),
             (
                 StreamError::RateLimited {
