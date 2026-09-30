@@ -1187,6 +1187,31 @@ async function testExpiredPendingMintsFresh(): Promise<void> {
   assertEqual(session.snapshot().status.state, 'signed-in');
 }
 
+async function testPendingWriteFailureFailsBegin(): Promise<void> {
+  // The sealed write rejects — a code that can't survive
+  // interruption is never offered; the failure is typed.
+  const failing: AuthCustody = {
+    read: () => Promise.resolve(ok(null)),
+    write: () =>
+      Promise.resolve(err(appError('unavailable', 'seal failed'))),
+    clear: () => Promise.resolve(ok(undefined)),
+  };
+  const { oauth, begins, calls } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  const session = createAuthSession({
+    custody: failing,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  await flush();
+  const status = session.snapshot().status;
+  assert(status.state === 'failed', 'pending-write failure still ran');
+  assertEqual(status.error.kind, 'unavailable');
+  assertEqual(calls.filter((c) => c.kind === 'poll').length, 0);
+}
+
 async function testDeniedClearsPendingRecord(): Promise<void> {
   const { custody, record } = fakeCustody(null);
   const { oauth, begins, polls } = fakeOAuth();
@@ -1239,4 +1264,5 @@ export async function run(): Promise<void> {
   await testBootResumesPendingFlow();
   await testExpiredPendingMintsFresh();
   await testDeniedClearsPendingRecord();
+  await testPendingWriteFailureFailsBegin();
 }

@@ -608,7 +608,6 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
   async function dropGrant(): Promise<void> {
     refreshToken = null;
     grantClientId = null;
-    pendingFlow = null;
     accessExpiresAtMs = 0;
     bearerLive = false;
     disarmRenew();
@@ -624,6 +623,8 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
       refreshToken: null,
       clientId: clientIdOverride,
       grantClientId: null,
+      // A live device flow isn't tied to the dead grant — keep it.
+      ...(pendingFlow !== null ? { pendingFlow } : {}),
     }).then(
       () => undefined,
       () => undefined,
@@ -670,6 +671,8 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
           refreshToken: grant.refreshToken,
           clientId: clientIdOverride,
           grantClientId,
+          // A live device flow outlives this rotation too.
+          ...(pendingFlow !== null ? { pendingFlow } : {}),
         };
         const wrote = await writeCustody(record);
         if (!wrote.ok) {
@@ -918,6 +921,8 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
             refreshToken: null,
             clientId: clientIdOverride,
             grantClientId: null,
+            // A newer attempt's pending flow outlives this retract.
+            ...(pendingFlow !== null ? { pendingFlow } : {}),
           });
         }
         return;
@@ -1052,9 +1057,10 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
           intervalMs: begun.value.intervalMs,
           creds: beginCreds,
         };
-        // Persist the in-flight grant — a dismissed sheet or a killed
-        // process must never discard the code the user is approving;
-        // resume hooks re-arm the same poll on top of it.
+        // Persist the in-flight grant BEFORE offering the code — a
+        // dismissed sheet or a killed process must never discard it,
+        // and a code that can't survive interruption isn't worth
+        // showing.
         pendingFlow = {
           deviceCode: begun.value.deviceCode,
           userCode: begun.value.userCode,
@@ -1063,7 +1069,16 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
           expiresAtMs: begun.value.expiresAtMs,
           clientId: beginCreds.clientId,
         };
-        void writePending(pendingFlow);
+        const pendingWrote = await writePending(pendingFlow);
+        if (pendingBegin !== source) {
+          return;
+        }
+        if (!pendingWrote.ok) {
+          endFlow();
+          status = { state: 'failed', error: pendingWrote.error };
+          publish();
+          return;
+        }
         status = {
           state: 'authorizing',
           userCode: begun.value.userCode,
@@ -1158,6 +1173,9 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         refreshToken,
         clientId: next,
         grantClientId,
+        // Editing the preference must not erase a live pending flow —
+        // its own clientId field already pins the code's issuer.
+        ...(pendingFlow !== null ? { pendingFlow } : {}),
       });
       if (!wrote.ok) {
         return wrote;
