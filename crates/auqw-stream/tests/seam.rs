@@ -212,6 +212,7 @@ fn chunk(offset: u64, len: u64, total: u64, byte: u8) -> FetchResponse {
     FetchResponse {
         status: 206,
         content_range: Some(format!("bytes {}-{}/{}", offset, offset + len - 1, total)),
+        retry_after_ms: None,
         body: stream_body(vec![byte; usize::try_from(len).unwrap_or(0)]),
     }
 }
@@ -1224,6 +1225,7 @@ async fn hung_remint_is_bounded_by_mint_deadline() {
         VecDeque::from([Step::Reply(FetchResponse {
             status: 403,
             content_range: None,
+            retry_after_ms: None,
             body: stream_body(vec![]),
         })]),
     );
@@ -1275,6 +1277,7 @@ async fn malformed_content_range_never_echoes_server_text() {
         Step::Reply(FetchResponse {
             status: 206,
             content_range: Some("bytes sig=SECRET-echo/9".into()),
+            retry_after_ms: None,
             body: stream_body(vec![1u8]),
         })
     };
@@ -1312,11 +1315,13 @@ async fn eof_ceiling_serves_reads_and_prunes_demand() {
             Step::Reply(FetchResponse {
                 status: 416,
                 content_range: None,
+                retry_after_ms: None,
                 body: stream_body(vec![]),
             }),
             Step::Reply(FetchResponse {
                 status: 416,
                 content_range: None,
+                retry_after_ms: None,
                 body: stream_body(vec![]),
             }),
         ]),
@@ -1371,11 +1376,13 @@ async fn contradictory_416_total_fails_instead_of_eof() {
             Step::Reply(FetchResponse {
                 status: 416,
                 content_range: Some("bytes */1024".into()),
+                retry_after_ms: None,
                 body: stream_body(vec![]),
             }),
             Step::Reply(FetchResponse {
                 status: 416,
                 content_range: Some("bytes */1024".into()),
+                retry_after_ms: None,
                 body: stream_body(vec![]),
             }),
         ]),
@@ -2011,6 +2018,7 @@ async fn reader_is_served_from_the_first_body_piece() {
                 Ok(FetchResponse {
                     status: 206,
                     content_range: Some(format!("bytes {offset}-{}/1024", offset + max_len - 1)),
+                    retry_after_ms: None,
                     body,
                 })
             })
@@ -2054,6 +2062,7 @@ async fn covered_demand_read_is_served_by_the_in_flight_fill() {
         VecDeque::from([Step::Reply(FetchResponse {
             status: 206,
             content_range: Some("bytes 0-127/1024".into()),
+            retry_after_ms: None,
             body: Box::pin(futures_util::stream::once(async move {
                 open2.notified().await;
                 Ok(vec![9u8; 128])

@@ -54,6 +54,7 @@ pub(crate) fn test_config(dir: &TestDir) -> StreamConfig {
     c.stall = std::time::Duration::from_secs(2);
     c.read_deadline = std::time::Duration::from_secs(2);
     c.retry_backoff = std::time::Duration::from_millis(5);
+    c.rate_limit_cooldown_cap = std::time::Duration::from_millis(500);
     c
 }
 
@@ -69,6 +70,7 @@ pub(crate) fn resp(status: u16, offset: u64, len: u64, total: u64) -> FetchRespo
     FetchResponse {
         status,
         content_range: Some(format!("bytes {offset}-{end}/{total}")),
+        retry_after_ms: None,
         body: stream_body(vec![0xABu8; usize::try_from(len).unwrap_or(0)]),
     }
 }
@@ -82,6 +84,9 @@ pub(crate) struct ScriptedFetch {
     /// `(offset, max_len)` of each range request seen, in order —
     /// tests assert fetch behaviour off this directly.
     pub(crate) requests: Mutex<Vec<(u64, u64)>>,
+    /// Issue instant of each request, in order — cooldown windows
+    /// are asserted on real elapsed time, not offsets.
+    pub(crate) request_times: Mutex<Vec<std::time::Instant>>,
     /// Mint headers seen on each request, in call order.
     pub(crate) mint_headers: Mutex<Vec<Vec<(String, String)>>>,
 }
@@ -98,6 +103,7 @@ impl ScriptedFetch {
         Self {
             steps: Mutex::new(steps.into()),
             requests: Mutex::new(Vec::new()),
+            request_times: Mutex::new(Vec::new()),
             mint_headers: Mutex::new(Vec::new()),
         }
     }
@@ -112,6 +118,9 @@ impl Fetch for ScriptedFetch {
     > {
         if let Ok(mut r) = self.requests.lock() {
             r.push((req.offset, req.max_len));
+        }
+        if let Ok(mut t) = self.request_times.lock() {
+            t.push(std::time::Instant::now());
         }
         if let Ok(mut h) = self.mint_headers.lock() {
             h.push(req.headers.to_vec());

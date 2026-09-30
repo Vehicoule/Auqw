@@ -103,14 +103,26 @@ export async function run(): Promise<void> {
     `message redacted: ${mapped.message}`,
   );
   // Seam kinds pass through under their own names — laundering them
-  // into `io-error`/`unavailable` dropped retryability and made the
-  // two renderer maps disagree on one failure.
-  for (const slug of [
-    'transient',
-    'rate-limit',
-    'auth-required',
-    'streams-capped',
-  ] as const) {
+  // into `io-error`/`unavailable`/`released` dropped retryability,
+  // hid lifecycle verdicts behind generic copy, and made the two
+  // renderer maps disagree on one failure.
+  const verbatimRetryable = {
+    transient: true,
+    'rate-limit': true,
+    'auth-required': false,
+    'streams-capped': true,
+    'provider-wall': false,
+    evicted: false,
+    expired: false,
+    superseded: false,
+    'not-found': false,
+    internal: true,
+    released: false,
+    cancelled: false,
+  } as const;
+  for (const slug of Object.keys(verbatimRetryable) as Array<
+    keyof typeof verbatimRetryable
+  >) {
     const seamError = new Error('x');
     (seamError as { cause?: unknown }).cause = {
       message: `{"code":"${slug}","kind":"${slug}","detail":"d"}`,
@@ -119,7 +131,7 @@ export async function run(): Promise<void> {
     assertEqual(mappedSeam.kind, slug, `${slug} rides through verbatim`);
     assertEqual(
       mappedSeam.retryable,
-      slug !== 'auth-required',
+      verbatimRetryable[slug],
       `${slug} retryable flag`,
     );
   }
@@ -287,8 +299,31 @@ export async function run(): Promise<void> {
     assert(false, 'napi rejection must surface typed');
   } catch (thrown) {
     assert(
-      isRecord(thrown) && thrown['kind'] === 'released',
-      'a dead-handle not-found reports released so callers re-prepare',
+      isRecord(thrown) && thrown['kind'] === 'not-found',
+      'a dead-handle not-found reports verbatim so callers re-prepare',
+    );
+  }
+
+  // The same verbatim ride covers a provider wall — before, it
+  // laundered into `internal` and lost the bot-check copy.
+  const walled = fakeRuntime(
+    fakeHost({
+      streamServeUrl() {
+        const e = new Error('boom');
+        (e as { cause?: unknown }).cause = {
+          message: '{"code":"provider-wall"}',
+        };
+        throw e;
+      },
+    }),
+  );
+  try {
+    await walled.handlers['stream:serve-url']?.({ handle: 'walled' });
+    assert(false, 'napi rejection must surface typed');
+  } catch (thrown) {
+    assert(
+      isRecord(thrown) && thrown['kind'] === 'provider-wall',
+      'provider-wall rides verbatim, never internal',
     );
   }
 }

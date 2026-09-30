@@ -1159,6 +1159,7 @@ mod tests {
                     status: 206,
                     // `bytes s-e/*` — the wire's unknown-total form.
                     content_range: Some(format!("bytes {}-{}/*", off, off + 127)),
+                    retry_after_ms: None,
                     body: stream_body(vec![0xCDu8; 128]),
                 })
             })
@@ -1397,11 +1398,13 @@ mod tests {
             Step::Reply(FetchResponse {
                 status: 206,
                 content_range: Some("bytes 0-127/*".into()),
+                retry_after_ms: None,
                 body: stream_body(vec![0xABu8; 128]),
             }),
             Step::Reply(FetchResponse {
                 status: 206,
                 content_range: Some("bytes 128-255/*".into()),
+                retry_after_ms: None,
                 body: stream_body(vec![0xABu8; 128]),
             }),
             Step::Reply(resp(206, 448, 128, 2048)),
@@ -1450,11 +1453,13 @@ mod tests {
             Step::Reply(FetchResponse {
                 status: 206,
                 content_range: Some("bytes 0-127/*".into()),
+                retry_after_ms: None,
                 body: stream_body(vec![0xABu8; 128]),
             }),
             Step::Reply(FetchResponse {
                 status: 206,
                 content_range: Some("bytes 128-255/*".into()),
+                retry_after_ms: None,
                 body: stream_body(vec![0xABu8; 128]),
             }),
             Step::Reply(resp(206, 511, 128, 2048)),
@@ -1518,6 +1523,7 @@ mod tests {
                 Step::Reply(FetchResponse {
                     status: 206,
                     content_range: Some(format!("bytes {off}-{}/*", off + 127)),
+                    retry_after_ms: None,
                     body: stream_body(vec![0xABu8; 128]),
                 })
             })
@@ -1526,6 +1532,7 @@ mod tests {
             Step::Reply(FetchResponse {
                 status: 416,
                 content_range: Some("bytes */*".into()),
+                retry_after_ms: None,
                 body: stream_body(vec![]),
             })
         }));
@@ -1575,11 +1582,13 @@ mod tests {
             Step::Reply(FetchResponse {
                 status: 416,
                 content_range: Some("bytes */*".into()),
+                retry_after_ms: None,
                 body: stream_body(vec![]),
             }),
             Step::Reply(FetchResponse {
                 status: 416,
                 content_range: Some("bytes */*".into()),
+                retry_after_ms: None,
                 body: stream_body(vec![]),
             }),
         ];

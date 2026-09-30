@@ -50,6 +50,9 @@ pub struct FetchResponse {
     pub status: u16,
     /// Raw `Content-Range` header value, when the server sent one.
     pub content_range: Option<String>,
+    /// `Retry-After` as milliseconds, when the server sent a
+    /// delta-seconds value — carried for the 429 path's cooldown.
+    pub retry_after_ms: Option<u64>,
     /// Body pieces in wire order — the impl caps total yield at
     /// `max_len + 1` so a bad server cannot stream unbounded memory.
     /// Dropping the stream aborts the request.
@@ -304,6 +307,7 @@ impl Fetch for ReqwestFetch {
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
+            let retry_after_ms = retry_after_ms(resp.headers());
             let cap = max_len.saturating_add(1);
             let body_cancel = cancel.clone();
             let body: BodyStream = Box::pin(futures_util::stream::unfold(
@@ -365,16 +369,59 @@ impl Fetch for ReqwestFetch {
             Ok(FetchResponse {
                 status,
                 content_range,
+                retry_after_ms,
                 body,
             })
         })
     }
 }
 
+/// `Retry-After` in milliseconds — delta-seconds only. The HTTP-date
+/// form (rare on API 429s, and a clock comparison the seam would have
+/// to trust) is treated as absent: no hint is still an honest
+/// rate-limit. Digits-only parse — a leading `+` is not a duration.
+fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    raw.parse::<u64>().ok().map(|s| s.saturating_mul(1000))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::follow_target;
+    use super::{follow_target, retry_after_ms};
+
+    /// `Retry-After` extraction: delta-seconds only — digits parse to
+    /// milliseconds (saturating), everything else (HTTP-date, sign,
+    /// fraction, empty) is no-hint, which is still an honest
+    /// rate-limit rather than a malformed cooldown.
+    #[test]
+    fn retry_after_parses_delta_seconds() {
+        let cases = [
+            ("1", Some(1_000)),
+            ("0", Some(0)),
+            (" 5 ", Some(5_000)),
+            ("18446744073709552", Some(u64::MAX)), // seconds ×1000 overflows → saturate
+            ("Wed, 21 Oct 2015 07:28:00 GMT", None),
+            ("-1", None),
+            ("1.5", None),
+            ("", None),
+        ];
+        for (raw, want) in cases {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::RETRY_AFTER,
+                raw.parse().unwrap_or_else(|_| panic!("header {raw:?}")),
+            );
+            assert_eq!(retry_after_ms(&headers), want, "header {raw:?}");
+        }
+    }
 
     // Real local HTTP verifies the production adapter, independently of pump fakes.
     // `want` are request-line/header fragments the wire request must carry;
@@ -416,6 +463,66 @@ mod tests {
             let _ = wait.recv_timeout(std::time::Duration::from_secs(5));
         });
         (url, release, worker)
+    }
+
+    /// A raw one-shot reply — arbitrary status line + extra headers,
+    /// empty body. For wire-verifying non-206 branches of the adapter.
+    fn serve_raw(
+        status: &'static str,
+        headers: &'static [&'static str],
+    ) -> (
+        String,
+        std::sync::mpsc::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/range", listener.local_addr().unwrap());
+        let (release, wait) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            socket
+                .write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n").as_bytes())
+                .unwrap();
+            for h in headers {
+                socket.write_all(format!("{h}\r\n").as_bytes()).unwrap();
+            }
+            socket.write_all(b"\r\n").unwrap();
+            let _ = wait.recv_timeout(std::time::Duration::from_secs(5));
+        });
+        (url, release, worker)
+    }
+
+    /// A real `429` wire response carrying `Retry-After` must surface
+    /// on [`FetchResponse::retry_after_ms`] — the whole seam depends on
+    /// the header reaching the pump, not being dropped at the socket.
+    #[tokio::test]
+    async fn retry_after_header_rides_the_response() {
+        use super::*;
+        let (url, release, worker) = serve_raw("429 Too Many Requests", &["Retry-After: 2"]);
+        let fetch = ReqwestFetch::new().unwrap();
+        let response = fetch
+            .get_range(RangeRequest {
+                url: &url,
+                offset: 0,
+                max_len: 4,
+                headers: &[],
+                stall: Duration::from_secs(2),
+                deadline: Duration::from_secs(3),
+                cancel: CancellationToken::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.status, 429);
+        assert_eq!(response.retry_after_ms, Some(2_000));
+        let _ = release.send(());
+        worker.join().unwrap();
     }
 
     #[tokio::test]
