@@ -27,6 +27,7 @@ const WEBM_CLUSTER = 0x1f43b675;
 const WEBM_SEGMENT = 0x18538067;
 const WEBM_INFO = 0x1549a966;
 const WEBM_TIMECODE_SCALE = 0x2ad7b1;
+const WEBM_CLUSTER_TIMECODE = 0xe7;
 const WEBM_CUES = 0x1c53bb6b;
 const WEBM_CUE_POINT = 0xbb;
 const WEBM_CUE_TIME = 0xb3;
@@ -351,6 +352,112 @@ function webmWalk(buf: Uint8Array): WebmWalk | null {
     scaleMs,
     cues: cues.map((c) => ({ mediaMs: c.mediaMs * scaleMs, byte: c.byte })),
   };
+}
+
+/**
+ * End offset of the Cluster element at `start` — the element's
+ * declared end clamped to the buffer, so a tail-truncated cluster
+ * still yields its complete leading span for decode assembly.
+ * `-1` when `start` isn't a header-shaped Cluster.
+ */
+export function webmClusterEnd(buf: Uint8Array, start: number): number {
+  if (!isClusterAt(buf, start)) {
+    return -1;
+  }
+  const size = readVint(buf, start + 4);
+  if (size === null) {
+    return -1;
+  }
+  const dataStart = start + 4 + size.length;
+  if (size.unknown) {
+    const next = findClusterSig(buf, dataStart);
+    return next === -1 ? buf.length : next;
+  }
+  return Math.min(dataStart + size.value, buf.length);
+}
+
+/**
+ * The Cluster's Timecode child (ms, scaled) — `null` when it can't be
+ * read in `buf` (truncated header region) — the caller then can't map
+ * the sample honestly and must skip it rather than guess.
+ */
+export function webmClusterTimecode(
+  buf: Uint8Array,
+  clusterStart: number,
+  scaleMs: number,
+): number | null {
+  if (!isClusterAt(buf, clusterStart)) {
+    return null;
+  }
+  const size = readVint(buf, clusterStart + 4);
+  if (size === null) {
+    return null;
+  }
+  const dataStart = clusterStart + 4 + size.length;
+  let timecode: number | null = null;
+  eachChild(
+    buf,
+    dataStart,
+    Math.min(dataStart + 128, buf.length),
+    (id, cStart, cLen) => {
+      if (id === WEBM_CLUSTER_TIMECODE && timecode === null) {
+        timecode = readUint(buf, cStart, cLen);
+      }
+    },
+  );
+  return timecode === null ? null : timecode * scaleMs;
+}
+
+/**
+ * The byte sequence of a Cues element id — `1C 53 BB 6B`. Scanned in
+ * raw tail probes: a false candidate fails the size-vint or bounds
+ * check before any payload is trusted.
+ */
+function findCuesSig(buf: Uint8Array, from: number): number {
+  let pos = buf.indexOf(0x1c, from);
+  while (pos !== -1 && pos + 4 <= buf.length) {
+    if (u32be(buf, pos) === WEBM_CUES) {
+      return pos;
+    }
+    pos = buf.indexOf(0x1c, pos + 1);
+  }
+  return -1;
+}
+
+/**
+ * Cues parsed out of an arbitrary mid-file buffer — how the peaks
+ * extractor reads the seek index from a tail probe when the head
+ * didn't carry one. Every candidate signature must survive a full
+ * size-vint + in-bounds check and a complete parse; cues it yields
+ * are deduped by cluster byte (a signature inside Cues payload could
+ * echo the id). `segDataStart`/`scaleMs` come from the head carve —
+ * cue positions are absolute file offsets, mediaMs scale-relative.
+ */
+export function webmCuesIn(
+  buf: Uint8Array,
+  segDataStart: number,
+  scaleMs: number,
+): WebmCue[] {
+  const cues: WebmCue[] = [];
+  const seen = new Set<number>();
+  let pos = findCuesSig(buf, 0);
+  while (pos !== -1) {
+    const size = readVint(buf, pos + 4);
+    if (size !== null && !size.unknown) {
+      const dataStart = pos + 4 + size.length;
+      if (dataStart + size.value <= buf.length) {
+        for (const cue of parseCues(buf, dataStart, size.value, segDataStart)) {
+          if (!seen.has(cue.byte)) {
+            seen.add(cue.byte);
+            cues.push({ mediaMs: cue.mediaMs * scaleMs, byte: cue.byte });
+          }
+        }
+      }
+    }
+    pos = findCuesSig(buf, pos + 1);
+  }
+  cues.sort((a, b) => a.byte - b.byte);
+  return cues;
 }
 
 // ---- mp4 box walker ------------------------------------------------------

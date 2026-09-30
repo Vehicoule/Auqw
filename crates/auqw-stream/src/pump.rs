@@ -115,7 +115,8 @@ enum FetchWait {
 }
 
 /// What one range request produced once headers arrived.
-enum FetchOutcome {
+/// `pub(crate)` so the registry's probe path shares the wire rules.
+pub(crate) enum FetchOutcome {
     /// A validated `206` — its body streamed into piecewise commits.
     Committed,
     /// Any other status for the caller's dispatch (403/416/…); the
@@ -131,7 +132,7 @@ enum FetchOutcome {
 /// piece as it lands — a parked reader wakes at the first network
 /// frame instead of the whole chunk. Any other status returns for the
 /// caller's remint/classify dispatch with the body unread.
-async fn drive_fetch(
+pub(crate) async fn drive_fetch(
     session: &Arc<SessionInner>,
     fetch: &dyn Fetch,
     url: &str,
@@ -627,7 +628,11 @@ fn parse_content_range(cr: &str) -> Result<(u64, u64, Option<u64>), String> {
 /// `RateLimited`; every other `4xx` is a permanent verdict on this
 /// URL and ends the session honestly rather than parking retriable
 /// forever.
-fn classify_status(status: u16, offset: u64, retry_after_ms: Option<u64>) -> StreamError {
+pub(crate) fn classify_status(
+    status: u16,
+    offset: u64,
+    retry_after_ms: Option<u64>,
+) -> StreamError {
     let msg = || format!("status {status} at offset {offset}");
     match status {
         401 => StreamError::Expired,

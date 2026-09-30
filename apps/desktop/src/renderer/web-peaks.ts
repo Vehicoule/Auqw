@@ -5,9 +5,24 @@ import type {
   OperationContext,
   PeaksPort,
   Result,
+  WaveformPeak,
 } from '@auqw/application';
-import { PEAKS_RESOLUTION, peaksFromChannels } from '@auqw/ui-shared';
+import {
+  normalizePeakWindows,
+  PEAKS_RESOLUTION,
+  peakWindowsFromChannels,
+  peaksFromChannels,
+} from '@auqw/ui-shared';
+import type { PeakWindow } from '@auqw/ui-shared';
 import { isRecord } from '../shared/check.ts';
+import {
+  carve,
+  resyncScan,
+  webmClusterEnd,
+  webmClusterTimecode,
+  webmCuesIn,
+} from './containers.ts';
+import type { WebmCue } from './containers.ts';
 import type { StreamClient } from './web-player.ts';
 
 /** Minimal decoded-audio surface — what `decodeAudioData` returns. */
@@ -15,6 +30,8 @@ export type DecodedAudio = {
   readonly numberOfChannels: number;
   /** Frame count — AudioBuffer.length. */
   readonly length: number;
+  /** Frames per second — AudioBuffer.sampleRate. */
+  readonly sampleRate: number;
   getChannelData(index: number): Float32Array;
 };
 
@@ -59,6 +76,33 @@ const FIRST_READ_TIMEOUT_MS = 15_000;
  */
 const PARK_TIMEOUT_MS = 400;
 
+/* ---- sampled extraction bounds ------------------------------------------
+ * Probes are bounded ranged reads through `stream:probe` — they commit
+ * into the session's sparse store, so every fetched byte is real media
+ * data the player could later serve, never a discarded duplicate. The
+ * caps keep a decoration's total spend under ~4 MiB.
+ */
+/** Head probe: the seam's own chunk bound also caps one probe call. */
+const HEAD_PROBE_BYTES = 256 * 1024;
+/** One sampled-cluster probe — comfortably over one ~5 s WebM cluster
+ * at music bitrates, still bounded enough that a probe is cheap. */
+const SAMPLE_PROBE_BYTES = 128 * 1024;
+/** Tail probe that seeks the Cues index when the head didn't carry it. */
+const TAIL_PROBE_BYTES = 128 * 1024;
+/** Round-1 sample count — enough buckets for the coarse profile. */
+const COARSE_PROBES = 10;
+/** Round-2 refinement probes — densify before the final result. */
+const REFINE_PROBES = 14;
+/** Probe flights overlap; the seam serves committed hits instantly. */
+const PROBE_CONCURRENCY = 4;
+/**
+ * Small files are already inside the pump's speculative head fill —
+ * the legacy sequential pull serves them from committed bytes without
+ * spending probe requests, so sampled extraction only pays off past
+ * this total.
+ */
+const SAMPLED_MIN_TOTAL_BYTES = 4 * 1024 * 1024;
+
 /** Stream/local-read failure slugs → the peaks port's app kinds:
  * dead-handle slugs collapse to 'released', contract violations to
  * 'invalid-response', anything else reads transient. */
@@ -74,9 +118,22 @@ const ERROR_KIND_BY_SLUG: Readonly<Record<string, ErrorKind>> = {
   'invalid-message': 'invalid-response',
 };
 
-function toError(thrown: unknown): AppError {
+/**
+ * Probe failures are per-sample, never verdicts — a probe's 'expired'
+ * is a mint the element's own demand is already re-minting, and a
+ * 'rate-limit' is a provider cooldown that expires; both read
+ * 'transient' here so a skipped sample can't settle the request.
+ */
+const PROBE_KIND_BY_SLUG: Readonly<Record<string, ErrorKind>> = {
+  ...ERROR_KIND_BY_SLUG,
+  expired: 'transient',
+  'rate-limit': 'transient',
+  'streams-capped': 'transient',
+};
+
+function toError(thrown: unknown, kinds = ERROR_KIND_BY_SLUG): AppError {
   if (isRecord(thrown) && typeof thrown['kind'] === 'string') {
-    const kind = ERROR_KIND_BY_SLUG[thrown['kind']] ?? 'transient';
+    const kind = kinds[thrown['kind']] ?? 'transient';
     const message =
       typeof thrown['message'] === 'string' && thrown['message'].length > 0
         ? thrown['message']
@@ -103,23 +160,108 @@ function fromBase64(data: string): Uint8Array {
   return out;
 }
 
+function concatBytes(parts: readonly Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const p of parts) {
+    total += p.length;
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
+
 /**
- * Desktop/web `PeaksPort`: pull bytes off the live stream handle and
- * decode them with WebAudio, then bucket to the canonical resolution.
+ * A sparse bucket row — `null` marks a window no sample covered.
+ * Interpolation fills the gaps for display; a bucket is only ever
+ * fabricated at render time, from measured neighbors — never by a
+ * seeded pattern.
+ */
+type SparseWindows = (PeakWindow | null)[];
+
+/** Assign one decoded sample's per-bucket windows into the sparse
+ * row; overlapping coverage takes the louder measure — a bucket must
+ * keep a real transient, not average it away. */
+function mergeSample(
+  sparse: SparseWindows,
+  mediaMs: number,
+  channels: readonly Float32Array[],
+  pcmMs: number,
+  totalMs: number,
+): void {
+  const bucketMs = totalMs / PEAKS_RESOLUTION;
+  if (!(bucketMs > 0) || pcmMs <= 0) {
+    return;
+  }
+  const first = Math.floor(mediaMs / bucketMs);
+  const buckets = Math.max(
+    1,
+    Math.min(PEAKS_RESOLUTION, Math.ceil(pcmMs / bucketMs)),
+  );
+  const windows = peakWindowsFromChannels(channels, buckets);
+  for (let j = 0; j < windows.length && first + j < PEAKS_RESOLUTION; j++) {
+    const i = first + j;
+    if (i < 0) {
+      continue;
+    }
+    const w = windows[j]!;
+    const prev = sparse[i] ?? null;
+    sparse[i] =
+      prev === null
+        ? w
+        : { up: Math.max(prev.up, w.up), down: Math.max(prev.down, w.down) };
+  }
+}
+
+/**
+ * Sparse → dense: unmeasured buckets take their nearest measured
+ * neighbor (ties prefer the earlier one — a seek bar reads
+ * left-to-right). All-empty input is honest zeros.
+ */
+function fillSparseWindows(sparse: SparseWindows): PeakWindow[] {
+  return Array.from({ length: PEAKS_RESOLUTION }, (_, i) => {
+    const w = sparse[i];
+    if (w != null) {
+      return w;
+    }
+    for (let d = 1; d < PEAKS_RESOLUTION; d++) {
+      const a = i - d >= 0 ? sparse[i - d] : undefined;
+      if (a != null) {
+        return a;
+      }
+      const b = i + d < PEAKS_RESOLUTION ? sparse[i + d] : undefined;
+      if (b != null) {
+        return b;
+      }
+    }
+    return { up: 0, down: 0 };
+  });
+}
+
+/**
+ * Desktop/web `PeaksPort`: sample container bytes off the live stream
+ * handle with bounded `stream:probe` reads and decode each sample with
+ * WebAudio, then bucket to the canonical resolution.
  *
  * The handle is borrowed, never owned — the port only ever calls
- * positional `stream:read`, which touches `read_pos` upward-only:
+ * positional reads, which touch `read_pos` upward-only:
  * `stream:open` re-anchors the session's speculative fill (`attach`
  * resets `read_pos` on every call, so opening at 0 would rewind a
  * mid-track pump's read-ahead window), and `stream:close`/`release`
  * would detach the session and wake every parked reader (the MSE
  * pump) as `cancelled`.
  *
- * Extraction is opportunistic: reads beyond the first must hit bytes
- * already committed, because a `read` parked on a hole queues demand
- * that serves minimum-position-first — chasing an unfetched gap would
- * starve the element's own mid-track demand for a decoration. The
- * placeholder stays whenever a pull outruns the stream's fill.
+ * Extraction is sampled, not sequential: probes fetch scattered
+ * cluster/segment windows without queuing pump demand, so real peaks
+ * land inside a round-trip or two instead of trailing the whole-file
+ * pull. A coarse profile emits on `request.onCoarse` as soon as the
+ * first probe round decodes; the returned promise resolves the
+ * refined profile. Whole-file pull remains the honest fallback for
+ * local files, small streams, and containers the sampler can't
+ * address (non-fragmented mp4, unknown formats).
  */
 export function createWebPeaksPort(deps: {
   readonly stream: StreamClient;
@@ -146,6 +288,12 @@ export function createWebPeaksPort(deps: {
   readonly maxPcmBytes?: number;
   readonly firstReadTimeoutMs?: number;
   readonly parkTimeoutMs?: number;
+  /** Sampled-path knobs — tests shrink them. */
+  readonly headProbeBytes?: number;
+  readonly sampleProbeBytes?: number;
+  readonly coarseProbes?: number;
+  readonly refineProbes?: number;
+  readonly sampledMinTotalBytes?: number;
   readonly now?: () => number;
 }): PeaksPort {
   const maxBytes = deps.maxBytes ?? MAX_PEAK_BYTES;
@@ -156,6 +304,11 @@ export function createWebPeaksPort(deps: {
   const firstReadTimeoutMs =
     deps.firstReadTimeoutMs ?? FIRST_READ_TIMEOUT_MS;
   const parkTimeoutMs = deps.parkTimeoutMs ?? PARK_TIMEOUT_MS;
+  const headProbeBytes = deps.headProbeBytes ?? HEAD_PROBE_BYTES;
+  const sampleProbeBytes = deps.sampleProbeBytes ?? SAMPLE_PROBE_BYTES;
+  const coarseProbes = deps.coarseProbes ?? COARSE_PROBES;
+  const refineProbes = deps.refineProbes ?? REFINE_PROBES;
+  const sampledMinTotal = deps.sampledMinTotalBytes ?? SAMPLED_MIN_TOTAL_BYTES;
   const now = deps.now ?? (() => Date.now());
 
   // Lazily minted — AudioContext decodes off-thread in Chromium, so a
@@ -220,6 +373,40 @@ export function createWebPeaksPort(deps: {
     return raced;
   }
 
+  /**
+   * One bounded probe against the seam. `{bytes:null}` marks an
+   * unfetched hole a `fetch:false` probe refused to chase; probe
+   * errors map through the retriable-kind table — a skipped sample
+   * never settles the request.
+   */
+  async function probe(
+    handle: string,
+    position: number,
+    maxLen: number,
+    fetch: boolean,
+    context: OperationContext,
+  ): Promise<Result<{ bytes: Uint8Array | null; total: number | null }>> {
+    if (context.signal.cancelled) {
+      return err(appError('cancelled', 'peak extraction cancelled'));
+    }
+    if (now() > context.deadlineMs) {
+      return err(appError('timeout', 'peak extraction deadline'));
+    }
+    const probeFn = deps.stream.probe;
+    if (typeof probeFn !== 'function') {
+      return err(appError('unavailable', 'stream:probe not supported'));
+    }
+    try {
+      const r = await probeFn({ handle, position, maxLen, fetch });
+      return ok({
+        bytes: r.eof || r.data.length > 0 ? fromBase64(r.data) : null,
+        total: r.total,
+      });
+    } catch (thrown) {
+      return err(toError(thrown, PROBE_KIND_BY_SLUG));
+    }
+  }
+
   async function pullBytes(
     handle: string,
     cap: number,
@@ -282,13 +469,239 @@ export function createWebPeaksPort(deps: {
         ),
       );
     }
-    const out = new Uint8Array(total);
-    let at = 0;
-    for (const chunk of chunks) {
-      out.set(chunk, at);
-      at += chunk.byteLength;
+    return ok(concatBytes(chunks));
+  }
+
+  /** Decode + gate + bucket a contiguous file — the legacy path's
+   * shared tail for local files and structural fallbacks. */
+  async function decodeWhole(
+    bytes: Uint8Array,
+  ): Promise<Result<readonly WaveformPeak[]>> {
+    const decoded = await decode(bytes).then(
+      (audio) => ok(audio),
+      () => err(appError('invalid-response', 'audio decode failed')),
+    );
+    if (!decoded.ok) {
+      return decoded;
     }
-    return ok(out);
+    const pcmBytes =
+      decoded.value.length * decoded.value.numberOfChannels * 4;
+    if (pcmBytes > maxPcmBytes) {
+      return err(
+        appError('budget-exceeded', 'decoded audio too large for peaks'),
+      );
+    }
+    const channels: Float32Array[] = [];
+    for (let c = 0; c < decoded.value.numberOfChannels; c++) {
+      channels.push(decoded.value.getChannelData(c));
+    }
+    return ok(peaksFromChannels(channels, PEAKS_RESOLUTION));
+  }
+
+  /**
+   * Decode one probe buffer assembled as `init + segment window`:
+   * WebM accepts init followed by any cluster, so a synthetic doc of
+   * [init, cluster] decodes just that cluster's PCM. A decode failure
+   * marks the sample unusable — its buckets stay unmeasured, never
+   * fabricated.
+   */
+  async function decodeSample(
+    assembled: Uint8Array,
+  ): Promise<DecodedAudio | null> {
+    const decoded = await decode(assembled).then(
+      (audio) => ok(audio),
+      () => err(appError('invalid-response', 'audio decode failed')),
+    );
+    if (!decoded.ok) {
+      return null;
+    }
+    const pcmBytes =
+      decoded.value.length * decoded.value.numberOfChannels * 4;
+    if (pcmBytes > maxPcmBytes) {
+      return null;
+    }
+    return decoded.value;
+  }
+
+  /**
+   * Sampled WebM extraction: the head probe hands over init + (usually)
+   * the first clusters; a tail probe finds Cues when the head didn't
+   * carry them; per-sample probes fetch one cluster window each and a
+   * synthetic `init + cluster` doc decodes it off-thread. Bucket
+   * positions come from cue times or the cluster's own Timecode
+   * element — never a guessed offset.
+   */
+  async function sampledWebm(
+    head: Uint8Array,
+    total: number | null,
+    segDataStart: number,
+    scaleMs: number,
+    boundaries: readonly number[],
+    headCues: readonly WebmCue[],
+    request: { durationMs: number | null },
+    context: OperationContext,
+    handle: string,
+    onCoarse: ((peaks: readonly WaveformPeak[]) => void) | undefined,
+  ): Promise<Result<readonly WaveformPeak[] | null>> {
+    const initEnd = boundaries[0];
+    if (initEnd === undefined || initEnd <= 0) {
+      return ok(null); // no cluster boundary in the head — legacy path
+    }
+    const init = head.subarray(0, initEnd);
+
+    // The Cues index rides the head on some muxes; otherwise one tail
+    // probe finds it (it's the standard tail element). No index at all
+    // degrades to uniform byte probes + per-cluster timecodes.
+    let cues = headCues;
+    if (cues.length === 0 && total !== null && total > TAIL_PROBE_BYTES) {
+      const tail = await probe(
+        handle,
+        total - TAIL_PROBE_BYTES,
+        TAIL_PROBE_BYTES,
+        true,
+        context,
+      );
+      if (tail.ok && tail.value.bytes !== null) {
+        cues = webmCuesIn(tail.value.bytes, segDataStart, scaleMs);
+      }
+    }
+
+    // The duration map: declared duration wins; otherwise the furthest
+    // measured edge grows the estimate as samples land — a late
+    // durationMs re-pull reuses the now-committed extents for free.
+    let totalMs = request.durationMs ?? 0;
+    const sparse: SparseWindows = new Array<PeakWindow | null>(
+      PEAKS_RESOLUTION,
+    ).fill(null);
+    const measured = (): number =>
+      sparse.reduce((n, w) => n + (w === null ? 0 : 1), 0);
+
+    const apply = async (
+      assembled: Uint8Array,
+      mediaMs: number,
+    ): Promise<boolean> => {
+      const audio = await decodeSample(assembled);
+      if (audio === null || audio.sampleRate <= 0) {
+        return false;
+      }
+      const channels: Float32Array[] = [];
+      for (let c = 0; c < audio.numberOfChannels; c++) {
+        channels.push(audio.getChannelData(c));
+      }
+      const pcmMs = (audio.length / audio.sampleRate) * 1000;
+      totalMs = Math.max(totalMs, mediaMs + pcmMs);
+      mergeSample(sparse, mediaMs, channels, pcmMs, totalMs);
+      return true;
+    };
+
+    // Free coverage: the head already carries the first complete
+    // clusters — decode them in one assembled doc (they're contiguous
+    // from cluster 0, so the PCM maps to [tc0, tc0 + pcmMs]).
+    let seeded = false;
+    if (boundaries.length > 0) {
+      const last = boundaries[boundaries.length - 1]!;
+      const end = webmClusterEnd(head, last);
+      const tc0 = webmClusterTimecode(head, boundaries[0]!, scaleMs);
+      if (end > initEnd && tc0 !== null) {
+        seeded = await apply(head.subarray(0, end), tc0);
+      }
+    }
+
+    // Sample targets: cue-keyed when the index exists (byte-exact
+    // cluster starts), else a uniform byte grid resynced per probe.
+    const positions: { byte: number; mediaMs: number | null }[] = [];
+    if (cues.length > 0) {
+      const wanted = coarseProbes + refineProbes;
+      const stride = Math.max(1, Math.floor(cues.length / wanted));
+      for (let i = 0; i < cues.length && positions.length < wanted; i += stride) {
+        const cue = cues[i]!;
+        // A cue landing inside the head's already-committed span is
+        // still probed — the seam serves committed extents for free,
+        // and the assemble+decode cost is the real spend either way.
+        positions.push({ byte: cue.byte, mediaMs: cue.mediaMs });
+      }
+    } else if (total !== null && totalMs > 0) {
+      const spanStart = segDataStart;
+      const wanted = coarseProbes + refineProbes;
+      for (let i = 0; i < wanted; i++) {
+        const byte = Math.floor(
+          spanStart + ((total - spanStart) * (i + 0.5)) / wanted,
+        );
+        positions.push({ byte, mediaMs: null });
+      }
+    }
+    if (positions.length === 0 && !seeded) {
+      return ok(null); // nowhere honest to sample — legacy path
+    }
+
+    let next = 0;
+    let probed = 0;
+    let coarseSent = false;
+    const probeOne = async (): Promise<void> => {
+      while (next < positions.length) {
+        if (context.signal.cancelled || now() > context.deadlineMs) {
+          return;
+        }
+        const target = positions[next]!;
+        next += 1;
+        const r = await probe(
+          handle,
+          target.byte,
+          sampleProbeBytes,
+          true,
+          context,
+        );
+        if (!r.ok || r.value.bytes === null || r.value.bytes.length === 0) {
+          continue;
+        }
+        const buf = r.value.bytes;
+        // Cue path lands on the cluster element; uniform probes resync
+        // to the first header-shaped cluster in the window.
+        const clusterAt =
+          target.mediaMs !== null ? 0 : resyncScan(buf, 'webm');
+        const end = clusterAt < 0 ? -1 : webmClusterEnd(buf, clusterAt);
+        if (clusterAt < 0 || end === -1 || end <= clusterAt) {
+          continue;
+        }
+        const mediaMs =
+          target.mediaMs ??
+          webmClusterTimecode(buf, clusterAt, scaleMs);
+        if (mediaMs === null) {
+          continue;
+        }
+        await apply(
+          concatBytes([init, buf.subarray(clusterAt, end)]),
+          mediaMs,
+        );
+        probed += 1;
+        // Coarse boundary: once the first batch has landed enough
+        // measured buckets, emit the filled profile — real bars in
+        // the sub-200 ms window; the rest of the flight refines
+        // under it without a visual pop.
+        if (
+          !coarseSent &&
+          probed + (seeded ? 1 : 0) >=
+            Math.max(2, Math.floor(coarseProbes / 2)) &&
+          onCoarse !== undefined
+        ) {
+          coarseSent = true;
+          onCoarse(normalizePeakWindows(fillSparseWindows(sparse)));
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: PROBE_CONCURRENCY }, () => probeOne()),
+    );
+
+    if (context.signal.cancelled) {
+      return err(appError('cancelled', 'peak extraction cancelled'));
+    }
+    if (measured() === 0) {
+      // Every sample failed — the bytes aren't what the head claimed;
+      // the whole-file pull may still decode. 'null' = fall back.
+      return ok(null);
+    }
+    return ok(normalizePeakWindows(fillSparseWindows(sparse)));
   }
 
   return {
@@ -301,9 +714,64 @@ export function createWebPeaksPort(deps: {
           appError('budget-exceeded', 'track too long for decorative peaks'),
         );
       }
-      // Unknown duration can't gate on time — bound the encoded pull
-      // by the lowest plausible bitrate instead, so decoded PCM stays
-      // under the same ceiling the duration gate enforces.
+
+      const localUri = deps.localUriFor?.(request.handle) ?? null;
+
+      // ---- sampled path: webm over the probe seam --------------------
+      // Local files and seam-less handles keep the legacy pull — disk
+      // reads don't wait on a pump. A probeless `stream` (older shell)
+      // also falls straight through.
+      if (localUri === null && typeof deps.stream.probe === 'function') {
+        const head = await probe(
+          request.handle,
+          0,
+          headProbeBytes,
+          true,
+          context,
+        );
+        if (head.ok && head.value.bytes !== null && head.value.bytes.length > 0) {
+          const carved = carve(head.value.bytes);
+          const total = head.value.total;
+          if (
+            carved.kind === 'ok' &&
+            carved.container === 'webm' &&
+            carved.boundaries.length > 0 &&
+            (total === null || total > sampledMinTotal)
+          ) {
+            const sampled = await sampledWebm(
+              head.value.bytes,
+              total,
+              carved.segDataStart,
+              carved.scaleMs,
+              carved.boundaries,
+              carved.cues,
+              request,
+              context,
+              request.handle,
+              request.onCoarse,
+            );
+            if (!sampled.ok) {
+              return sampled;
+            }
+            if (sampled.value !== null) {
+              return ok(sampled.value);
+            }
+            // sampled.value === null → structural fallback below.
+          }
+        } else if (!head.ok) {
+          // The head probe's own failure (dead handle, cooldown) is
+          // the honest result — the fallback pull would hit the same
+          // session state with worse accounting.
+          if (
+            head.error.kind === 'released' ||
+            head.error.kind === 'cancelled'
+          ) {
+            return err(head.error);
+          }
+        }
+      }
+
+      // ---- legacy whole-file path ------------------------------------
       const cap =
         request.durationMs === null
           ? Math.min(maxBytes, maxUnknownDurationBytes)
@@ -317,33 +785,7 @@ export function createWebPeaksPort(deps: {
       if (!bytes.ok) {
         return bytes;
       }
-      // A decode failure means the bytes weren't audio as expected —
-      // `invalid-response`, and the renderer keeps the placeholder.
-      const decoded = await decode(bytes.value).then(
-        (audio) => ok(audio),
-        () => err(appError('invalid-response', 'audio decode failed')),
-      );
-      if (!decoded.ok) {
-        return decoded;
-      }
-      // Belt for the gates above: a container that decodes wider than
-      // its duration suggests (multichannel, high sample rate, a lying
-      // header) stops here rather than bucketing a giant buffer. This
-      // is 'budget-exceeded', not 'not-applicable' — the PCM ceiling is
-      // duration-independent, so the failure is terminal even when
-      // durationMs arrived late.
-      const pcmBytes =
-        decoded.value.length * decoded.value.numberOfChannels * 4;
-      if (pcmBytes > maxPcmBytes) {
-        return err(
-          appError('budget-exceeded', 'decoded audio too large for peaks'),
-        );
-      }
-      const channels: Float32Array[] = [];
-      for (let c = 0; c < decoded.value.numberOfChannels; c++) {
-        channels.push(decoded.value.getChannelData(c));
-      }
-      return ok(peaksFromChannels(channels, PEAKS_RESOLUTION));
+      return decodeWhole(bytes.value);
     },
   };
 }

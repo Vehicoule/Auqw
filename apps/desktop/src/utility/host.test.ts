@@ -89,6 +89,9 @@ export async function run(): Promise<void> {
     async streamRead() {
       return Buffer.alloc(0);
     },
+    async streamProbe() {
+      return { data: Buffer.alloc(0), total: null, eof: true };
+    },
     streamClose() {},
     streamRelease() {},
     streamPhaseMarks() {

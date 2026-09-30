@@ -21,6 +21,7 @@ import {
   isStorageQueryResult,
   isStreamMarksResult,
   isStreamOpenResult,
+  isStreamProbeResult,
   isStreamReadResult,
   isStreamServeUrlResult,
   isStringArray,
@@ -373,6 +374,8 @@ const api: AuqwApi = {
       invoke(CHANNELS.streamOpen, args, isStreamOpenResult),
     read: (args) =>
       invoke(CHANNELS.streamRead, args, isStreamReadResult),
+    probe: (args) =>
+      invoke(CHANNELS.streamProbe, args, isStreamProbeResult),
     close: (args) =>
       invoke(CHANNELS.streamClose, args, isUndefinedResult),
     release: (args) =>

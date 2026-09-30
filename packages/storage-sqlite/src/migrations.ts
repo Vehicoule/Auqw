@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 10;
+export const CURRENT_SCHEMA_VERSION = 11;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -35,6 +35,7 @@ const KNOWN_TABLES: readonly string[] = Object.freeze([
   'sync_meta',
   'sync_divergence_dropped',
   'sync_peer_marks',
+  'peaks_cache',
 ]);
 
 const MIGRATION_1: readonly string[] = [
@@ -379,6 +380,24 @@ const MIGRATION_10: readonly string[] = [
 )`,
 ];
 
+/**
+ * v10 -> v11: `peaks_cache` — waveform peak profiles keyed by
+ * recording id (content identity). Device-local like the other
+ * caches: no `PersistedState` section, so export/import and sync
+ * never carry it; rows are written and pruned directly by
+ * `peaks-cache.ts`, outside the section-commit machinery. No FK into
+ * `recordings` — a waveform can settle for a track the catalog never
+ * persisted, and a cleared library must not silently wipe peaks the
+ * user will want the next time the track surfaces.
+ */
+const MIGRATION_11: readonly string[] = [
+  `CREATE TABLE peaks_cache (
+  recording_id TEXT PRIMARY KEY,
+  peaks_json TEXT NOT NULL,
+  fetched_ms INTEGER NOT NULL CHECK (fetched_ms >= 0)
+)`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
@@ -391,6 +410,7 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_8]),
   Object.freeze([...MIGRATION_9]),
   Object.freeze([...MIGRATION_10]),
+  Object.freeze([...MIGRATION_11]),
 ]);
 
 const CREATED_OBJECT_NAME =

@@ -1,6 +1,10 @@
 import { CancellationSource } from './cancellation.ts';
 import { PEAKS_MAX_DECODE_MS } from './ports/peaks.ts';
-import type { PeaksPort, WaveformPeak } from './ports/peaks.ts';
+import type {
+  PeaksPort,
+  PeaksStore,
+  WaveformPeak,
+} from './ports/peaks.ts';
 import type { ClockPort } from './ports/clock.ts';
 import type { IdPort } from './ports/runtime.ts';
 import { createIds } from './runtime-impls.ts';
@@ -9,10 +13,11 @@ import type { Result } from './errors.ts';
 
 /**
  * What the tracker needs to fetch — the live playback session fields.
- * `id` is the cache identity: the caller builds it as
- * `recordingId|attemptId` so a re-prepared stream (a new attempt, a
- * new handle, possibly new bytes) never inherits peaks — or a cached
- * failure — from the attempt it replaced.
+ * `id` is `${recordingId}|${attemptId}`: successes cache under the
+ * recordingId alone (content identity — a re-prepared stream replays
+ * the same audio, so peaks and coarse profiles carry across attempts
+ * and warm adoptions), while failures still key by the full attempt
+ * id — one attempt's terminal refusal never poisons a later prepare.
  */
 export type PeaksTarget = {
   readonly id: string;
@@ -64,7 +69,22 @@ export type PeaksTrackerDeps = {
   readonly retryDelayMs?: number;
   /** A durationMs update past this cancels the live sweep outright. */
   readonly maxDurationMs?: number;
+  /**
+   * Persisted peaks keyed by recordingId — a store hit renders the
+   * last finished profile instantly and skips re-extraction (peaks
+   * are a decoration of content identity; a remaster under the same
+   * recordingId is the documented staleness trade-off). `undefined`
+   * keeps the tracker memory-only.
+   */
+  readonly store?: PeaksStore | undefined;
 };
+
+/** The recording id half of `${recordingId}|${attemptId}` — content
+ * identity for success caching and the persisted store. */
+function contentKey(id: string): string {
+  const cut = id.lastIndexOf('|');
+  return cut === -1 ? id : id.slice(0, cut);
+}
 
 /**
  * Extraction state for waveform peaks, split from the React hook so
@@ -89,6 +109,7 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
   const maxDurationMs = deps.maxDurationMs ?? PEAKS_MAX_DECODE_MS;
   const clock = deps.clock;
   const ids = deps.ids ?? processIds;
+  const store = deps.store;
   const cache = new Map<string, readonly WaveformPeak[] | null>();
   // Terminal nulls judged under a declared over-cap duration are
   // duration-dependent (the port's declared-length gate, unlike the
@@ -110,6 +131,15 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
 
   function pull(target: PeaksTarget): void {
     const { id } = target;
+    const key = contentKey(id);
+    // A settled profile under the content key serves every later
+    // attempt — the peaks describe the recording, not the mint.
+    if (cache.has(key)) {
+      const value = cache.get(key);
+      cache.delete(key);
+      cache.set(key, value ?? null);
+      return;
+    }
     if (cache.has(id)) {
       const judgedMs = gatedNullMs.get(id);
       const updatedMs = target.durationMs;
@@ -188,7 +218,19 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
           return;
         }
         if (result.ok) {
-          cache.set(id, result.value);
+          cache.set(key, result.value);
+          // Clear this attempt's own failure sentinel — but never
+          // the content row just written (key === id when the caller
+          // passes a bare recording id).
+          if (id !== key) {
+            cache.delete(id);
+          }
+          gatedNullMs.delete(id);
+          // Fire-and-forget persist — a dropped write only costs the
+          // next cold start its instant render, never correctness.
+          if (store !== undefined) {
+            void store.save(key, result.value).catch(() => {});
+          }
           evict();
         } else if (
           !provisionalCap &&
@@ -232,7 +274,24 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
       };
       void port
         .peaks(
-          { handle: entry.target.handle, durationMs: sentMs },
+          {
+            handle: entry.target.handle,
+            durationMs: sentMs,
+            // A coarse-but-measured profile renders the moment it
+            // exists — cached under the content key so the final
+            // result overwrites it in place (and a cancelled sweep
+            // still leaves real data behind for the next pull).
+            onCoarse: (coarse) => {
+              if (
+                !entry.source.signal.cancelled &&
+                !Array.isArray(cache.get(key))
+              ) {
+                cache.set(key, coarse);
+                evict();
+                onChange?.();
+              }
+            },
+          },
           {
             requestId: ids.next(`peaks-${id}-${n}`),
             deadlineMs: clock.nowMs() + deadlineMs,
@@ -247,6 +306,32 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
           settle(err(appError('internal', 'peaks: port rejected'))),
         );
     };
+    // A persisted profile is the first lookup — instant repeat
+    // render with zero bytes spent. It resolves inside the inflight
+    // discipline so a cancel during the load abandons cleanly.
+    if (store !== undefined) {
+      void store
+        .load(key)
+        .then((persisted) => {
+          if (entry.source.signal.cancelled) {
+            return;
+          }
+          if (persisted !== null && persisted.length > 0) {
+            cache.set(key, persisted);
+            inflight.delete(id);
+            evict();
+            onChange?.();
+            return;
+          }
+          attempt(1);
+        })
+        .catch(() => {
+          if (!entry.source.signal.cancelled) {
+            attempt(1);
+          }
+        });
+      return;
+    }
     attempt(1);
   }
 
@@ -261,7 +346,9 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
       entry.source.cancel();
     },
     get(id) {
-      return cache.get(id);
+      // Content key first — a settled (or coarse) profile outranks
+      // any attempt-scoped failure sentinel for the same recording.
+      return cache.get(contentKey(id)) ?? cache.get(id);
     },
   };
 }

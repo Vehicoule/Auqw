@@ -425,4 +425,102 @@ export async function run(): Promise<void> {
     await settle();
     assertEqual(calls.length, 1, 'a cancelled retry never fires');
   }
+
+  // A settled profile is content-keyed: a later attempt for the same
+  // recording (re-prepare, warm adopt) inherits it with zero pulls.
+  {
+    const { calls, port } = fakePort(() => ok(PEAKS));
+    const tracker = createPeaksTracker({ port, clock: new FakeClock() });
+    tracker.pull(target('r-8|a1', 'h1'));
+    await settle();
+    assertEqual(calls.length, 1, 'first attempt extracts');
+    tracker.pull(target('r-8|a2', 'h2'));
+    await settle();
+    assertEqual(
+      calls.length,
+      1,
+      'the same recording never re-extracts across attempts',
+    );
+    assertEqual(
+      tracker.get('r-8|a2'),
+      PEAKS,
+      'the new attempt reads the content-keyed profile',
+    );
+  }
+
+  // A persisted store hit skips extraction entirely.
+  {
+    const { calls, port } = fakePort(() => ok(PEAKS));
+    const stored: readonly WaveformPeak[] = [{ up: 0.9, down: 0.8 }];
+    const tracker = createPeaksTracker({
+      port,
+      clock: new FakeClock(),
+      store: {
+        load: (id) =>
+          Promise.resolve(id === 'r-9' ? stored : null),
+        save: () => Promise.resolve(),
+      },
+    });
+    tracker.pull(target('r-9|a1'));
+    await settle();
+    assertEqual(
+      calls.length,
+      0,
+      'a persisted profile never pays an extraction',
+    );
+    assertEqual(tracker.get('r-9|a1'), stored, 'the stored row serves');
+  }
+
+  // A coarse profile lands under the content key mid-flight; the
+  // final result supersedes it in place.
+  {
+    const coarse: readonly WaveformPeak[] = [{ up: 0.3, down: 0.2 }];
+    const { calls, port } = fakePort();
+    let changes = 0;
+    const tracker = createPeaksTracker({
+      port,
+      clock: new FakeClock(),
+      onChange: () => changes++,
+    });
+    tracker.pull(target('r-10|a1'));
+    await settle();
+    assertEqual(calls.length, 1, 'extraction in flight');
+    calls[0]!.request.onCoarse?.(coarse);
+    assertEqual(
+      tracker.get('r-10|a1'),
+      coarse,
+      'coarse bars render before the refined result',
+    );
+    calls[0]!.resolve(ok(PEAKS));
+    await settle();
+    assertEqual(
+      tracker.get('r-10|a1'),
+      PEAKS,
+      'the refined profile replaces coarse in place',
+    );
+    assertEqual(changes, 2, 'coarse then final — one notify each');
+  }
+
+  // A settled failure stays attempt-scoped: the next attempt for the
+  // same recording pulls instead of inheriting the null.
+  {
+    const { calls, port } = fakePort(() =>
+      err(appError('budget-exceeded', 'too big')),
+    );
+    const tracker = createPeaksTracker({ port, clock: new FakeClock() });
+    tracker.pull(target('r-11|a1', 'h1'));
+    await settle();
+    assertEqual(
+      tracker.get('r-11|a1'),
+      null,
+      'the failure sentinel caches under the attempt',
+    );
+    tracker.pull(target('r-11|a2', 'h2'));
+    await settle();
+    assertEqual(
+      calls.length,
+      2,
+      'a fresh attempt re-earns the sweep',
+    );
+  }
 }

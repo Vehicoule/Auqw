@@ -219,6 +219,7 @@ function fakeApi(): Rig {
         serveUrl: () => Promise.reject(new Error('seam: inject player')),
         open: () => Promise.reject(new Error('seam: inject player')),
         read: () => Promise.reject(new Error('seam: inject player')),
+        probe: () => Promise.reject(new Error('seam: inject player')),
         close: () => Promise.reject(new Error('seam: inject player')),
         release: () => Promise.reject(new Error('seam: inject player')),
         marks: () => Promise.reject(new Error('seam: inject player')),

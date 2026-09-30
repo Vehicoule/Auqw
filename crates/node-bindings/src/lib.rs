@@ -486,6 +486,34 @@ impl TryFrom<surface::StreamPhaseMarks> for StreamPhaseMarks {
     }
 }
 
+/// One `streamProbe` result: contiguous bytes at the requested
+/// position, the best-known stream total, and a confirmed-EOF flag.
+#[napi(object)]
+pub struct StreamProbeResult {
+    /// Contiguous bytes from `position` — empty on a confirmed EOF
+    /// and on a fetch-disabled hole (`eof` distinguishes them).
+    #[napi(js_name = "data")]
+    pub data: Buffer,
+    /// Best-known stream total, when one exists.
+    #[napi(js_name = "total")]
+    pub total: Option<f64>,
+    /// `position` is confirmed at/past end-of-stream.
+    #[napi(js_name = "eof")]
+    pub eof: bool,
+}
+
+impl TryFrom<surface::StreamProbeResult> for StreamProbeResult {
+    type Error = Error;
+
+    fn try_from(r: surface::StreamProbeResult) -> Result<Self> {
+        Ok(Self {
+            data: Buffer::from(r.bytes),
+            total: opt_u64_out(r.total, "total")?,
+            eof: r.eof,
+        })
+    }
+}
+
 /// Machine-readable boundary rejection. napi's `Status` is a fixed
 /// enum — the taxonomy slug and the variant's fields can't ride in
 /// `code`, so they go in `cause`: `err.cause` is a nested `Error`
@@ -845,6 +873,37 @@ impl JsPluginHost {
         })
         .await
         .map_err(|e| worker_err("stream read worker", e))?
+    }
+
+    /// Probing read for decorative consumers (waveform peaks): a
+    /// committed hit serves already-buffered bytes; on a hole with
+    /// `fetch` enabled it issues ONE bounded ranged GET through the
+    /// session's own fetch and commits the bytes so later readers
+    /// serve them for free. Queues no pump demand, never parks,
+    /// moves no read position. Deliberately a promise like
+    /// `streamRead` — the fetch runs on the host runtime.
+    #[napi(js_name = "streamProbe")]
+    pub async fn stream_probe(
+        &self,
+        handle: String,
+        position: f64,
+        max_len: f64,
+        fetch: bool,
+    ) -> Result<StreamProbeResult> {
+        let position = u64_field(position, "position", 0)?;
+        let max_len = u64_field(max_len, "maxLen", 1)?;
+        let inner = Arc::clone(&self.inner);
+        inner
+            .runtime_handle()
+            .spawn(async move {
+                inner
+                    .stream_probe(handle, position, max_len, fetch)
+                    .await
+                    .map_err(stream_err)
+                    .and_then(StreamProbeResult::try_from)
+            })
+            .await
+            .map_err(|e| worker_err("stream probe worker", e))?
     }
 
     /// Session close: detaches the consumer; the session stays live

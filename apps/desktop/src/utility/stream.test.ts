@@ -45,6 +45,9 @@ function fakeHost(overrides: Partial<PluginHostLike> = {}): PluginHostLike {
     async streamRead() {
       return Buffer.from('chunk');
     },
+    async streamProbe() {
+      return { data: Buffer.from('probe'), total: 512, eof: false };
+    },
     streamClose() {},
     streamRelease() {},
     streamPhaseMarks() {

@@ -329,6 +329,26 @@ export const isStreamReadResult = v.object({
   data: v.string(MAX_READ_LEN * 2),
 });
 
+export type StreamProbeArgs = v.Guarded<typeof isStreamProbeArgs>;
+
+export const isStreamProbeArgs = v.object({
+  handle: v.boundedString(512),
+  position: v.int(),
+  maxLen: v.refine(v.int(), (n) => n > 0 && n <= MAX_READ_LEN),
+  /** `false` = committed-bytes-only (peek semantics); default fetches. */
+  fetch: v.optional(v.boolean()),
+});
+
+/** `stream:probe` result — bytes ride base64; `eof` distinguishes a
+ * confirmed end-of-stream from a fetch-disabled hole. */
+type StreamProbeResult = v.Guarded<typeof isStreamProbeResult>;
+
+export const isStreamProbeResult = v.object({
+  data: v.string(MAX_READ_LEN * 2),
+  total: v.nullable(v.int()),
+  eof: v.boolean(),
+});
+
 type StreamServeUrlResult = v.Guarded<
   typeof isStreamServeUrlResult
 >;
@@ -1589,6 +1609,7 @@ export type AuqwApi = {
     ) => Promise<StreamServeUrlResult>;
     readonly open: (args: StreamOpenArgs) => Promise<StreamOpenResult>;
     readonly read: (args: StreamReadArgs) => Promise<StreamReadResult>;
+    readonly probe: (args: StreamProbeArgs) => Promise<StreamProbeResult>;
     readonly close: (args: StreamHandleArgs) => Promise<void>;
     readonly release: (args: StreamHandleArgs) => Promise<void>;
     readonly marks: (args: StreamHandleArgs) => Promise<StreamMarksResult>;

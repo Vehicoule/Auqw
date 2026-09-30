@@ -22,6 +22,7 @@ import type {
   ImportPreview,
   LocalFileSource,
   PeaksPort,
+  PeaksStore,
   ProviderPort,
   ReadySession,
   Result,
@@ -285,6 +286,12 @@ export interface AppShellPorts<E> {
    * Android MediaExtractor path, null where none exists (iOS).
    */
   readonly peaksPort?: PeaksPort | null | undefined;
+  /**
+   * Persisted waveform peaks keyed by recording id — repeat plays
+   * render instantly and skip re-extraction entirely. `undefined`
+   * keeps peaks memory-only (fresh pull per session).
+   */
+  readonly peaksStore?: PeaksStore | null | undefined;
 
   /**
    * Settings-model platform inputs the factory cannot derive:

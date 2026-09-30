@@ -113,6 +113,8 @@ import { createDesktopUpdate } from './update.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { shellToAppError } from './ipc-errors.ts';
+import { createPeaksCacheStore } from '@auqw/storage-sqlite';
+import { createSqliteDriver } from './sqlite-driver.ts';
 import { createWebPeaksPort } from './web-peaks.ts';
 
 // Boot and gate strings render before the ready settings arrive —
@@ -600,6 +602,13 @@ function Main({
     [controller],
   );
 
+  // Persisted peaks — one device-local `peaks_cache` table; repeat
+  // plays render the stored profile instantly without re-extraction.
+  const peaksStore = useMemo(
+    () => createPeaksCacheStore(createSqliteDriver(window.auqw.storage)),
+    [],
+  );
+
   // The shared shell composition — every state/callback surface the
   // mobile shell builds identically lives in useAppShell; this file
   // keeps only the platform seams (connectivity, the local-playback
@@ -657,6 +666,7 @@ function Main({
         }
       },
       peaksPort,
+      peaksStore,
       settingsExtras: () => ({
         // The probe surface only exists once rehydrateMedia ran —
         // gate the rows on it instead of dead-pressing behind a null
