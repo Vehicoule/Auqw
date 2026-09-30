@@ -17,13 +17,22 @@ import type {
   TitleBarOverlay,
   WebContents,
 } from 'electron';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { once } from 'node:events';
 import {
+  chmodSync,
   closeSync,
   constants,
+  createReadStream,
+  createWriteStream,
   fstatSync,
+  mkdirSync,
   openSync,
+  readdirSync,
   readSync,
+  renameSync,
+  rmSync,
   watch,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -52,7 +61,12 @@ import {
   createNearbyPushService,
   createUpdateStatePushService,
 } from './sync-events.ts';
-import { createDesktopUpdate, updateTargetFor } from './update.ts';
+import type { UpdateApplyPorts } from '@auqw/application';
+import {
+  createDesktopUpdate,
+  updateCapabilityFor,
+  updateTargetFor,
+} from './update.ts';
 import {
   createSyncKeysHandler,
   migrateSyncCustody,
@@ -395,11 +409,142 @@ async function main(): Promise<void> {
   const authStatePush = createAuthStatePushService();
   const updateStatePush = createUpdateStatePushService();
   // Release update check — lives in main because the renderer CSP
-  // admits only 'self'. The one egress is the GitHub releases list;
-  // the renderer sees validated snapshots + verbs over `update:*`.
+  // admits only 'self'. The egress is the GitHub releases list plus
+  // (past 'open') the artifact + its SHA256SUMS row; the renderer sees
+  // validated snapshots + verbs over `update:*`.
+  const updateTarget = updateTargetFor(process.platform, process.env);
+  const updateCapability = updateCapabilityFor(updateTarget, process.env);
+  // Non-AppImage formats stage under userData/updates — swept on boot
+  // so an interrupted run never accumulates stale artifacts. The
+  // AppImage leg stages a `.new` sibling of the running image instead
+  // so the apply rename stays atomic (same filesystem).
+  const updatesStageDir = join(userDataPath, 'updates');
+  if (updateCapability !== 'open') {
+    mkdirSync(updatesStageDir, { recursive: true });
+    for (const name of readdirSync(updatesStageDir)) {
+      rmSync(join(updatesStageDir, name), { force: true, recursive: true });
+    }
+  }
+  const appimagePath = process.env['APPIMAGE'];
+  const updateApplyPorts: UpdateApplyPorts | undefined =
+    updateCapability === 'open'
+      ? undefined
+      : {
+          stagePath: (artifact) =>
+            updateTarget.os === 'linux' &&
+            updateTarget.prefer === 'appimage' &&
+            appimagePath !== undefined
+              ? `${appimagePath}.new`
+              : join(updatesStageDir, artifact.name),
+          fetchText: async (url, signal) => {
+            const res = await net.fetch(url, {
+              signal: signal as AbortSignal,
+            });
+            if (!res.ok) {
+              throw shellError('transient', `checksums fetch ${res.status}`);
+            }
+            return res.text();
+          },
+          download: async (url, path, onProgress, signal) => {
+            const res = await net.fetch(url, {
+              signal: signal as AbortSignal,
+            });
+            if (res.status < 200 || res.status >= 300 || res.body === null) {
+              throw shellError('transient', `artifact fetch ${res.status}`);
+            }
+            const declared = Number(res.headers.get('content-length'));
+            const total =
+              Number.isFinite(declared) && declared > 0 ? declared : null;
+            const part = `${path}.part`;
+            const out = createWriteStream(part);
+            let received = 0;
+            try {
+              for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+                if (signal.aborted) {
+                  throw new DOMException('aborted', 'AbortError');
+                }
+                received += chunk.byteLength;
+                if (!out.write(chunk)) {
+                  await once(out, 'drain');
+                }
+                onProgress(received, total);
+              }
+            } catch (thrown) {
+              out.destroy();
+              rmSync(part, { force: true });
+              throw thrown;
+            }
+            await new Promise<void>((resolve, reject) => {
+              out.end((error: Error | null | undefined) =>
+                error === null || error === undefined
+                  ? resolve()
+                  : reject(error),
+              );
+            });
+            // The file lands whole or not at all — a verify never
+            // hashes a half-fetched stream.
+            renameSync(part, path);
+            onProgress(received, total);
+          },
+          sha256Hex: (path) =>
+            new Promise<string>((resolve, reject) => {
+              const hash = createHash('sha256');
+              createReadStream(path)
+                .on('data', (chunk) => hash.update(chunk))
+                .on('end', () => resolve(hash.digest('hex')))
+                .on('error', reject);
+            }),
+          apply: (path, artifact) => {
+            if (
+              updateTarget.os === 'linux' &&
+              updateTarget.prefer === 'appimage' &&
+              appimagePath !== undefined
+            ) {
+              // Atomic same-dir rename over the running image — Linux
+              // swaps the inode under the live process and the new
+              // bytes take over on the next exec.
+              chmodSync(path, 0o755);
+              renameSync(path, appimagePath);
+              return Promise.resolve('relaunch' as const);
+            }
+            if (process.platform === 'win32') {
+              // Assisted NSIS setup installs over the running install
+              // dir — spawn detached, then get out of its way.
+              const child = spawn(path, [], {
+                detached: true,
+                stdio: 'ignore',
+              });
+              child.unref();
+              setTimeout(() => app.quit(), 250).unref();
+              return Promise.resolve('installed' as const);
+            }
+            if (process.platform === 'darwin') {
+              // A dmg can't self-apply: the verified file reveals in
+              // Finder and mounts — drag-to-Applications is the
+              // user's move.
+              shell.showItemInFolder(path);
+              void shell.openPath(path).then(
+                () => undefined,
+                () => undefined,
+              );
+              return Promise.resolve('installed' as const);
+            }
+            return Promise.reject(
+              shellError(
+                'not-implemented',
+                `no apply path for ${artifact.name}`,
+              ),
+            );
+          },
+          remove: (path) => {
+            rmSync(path, { force: true });
+            rmSync(`${path}.part`, { force: true });
+            return Promise.resolve();
+          },
+        };
   const updateService = createDesktopUpdate({
     currentVersion: app.getVersion(),
-    target: updateTargetFor(process.platform, process.env),
+    target: updateTarget,
     fetchJson: async (url) => {
       const res = await net.fetch(url, {
         headers: { accept: 'application/vnd.github+json' },
@@ -410,6 +555,16 @@ async function main(): Promise<void> {
       };
     },
     openExternal: (url) => shell.openExternal(url),
+    capability: updateCapability,
+    ...(updateApplyPorts !== undefined ? { applyPorts: updateApplyPorts } : {}),
+    ...(updateCapability === 'install' && updateTarget.os === 'linux'
+      ? {
+          relaunch: () => {
+            app.relaunch();
+            app.exit(0);
+          },
+        }
+      : {}),
   });
   updateService.subscribe((snapshot) => updateStatePush.notify(snapshot));
   const supervisor = createSupervisor({

@@ -532,6 +532,7 @@ export const es: Readonly<Record<MessageId, Message>> = {
 
   // ---- toasts ------------------------------------------------------------
   'toast.failed': '{action} falló — {detail}',
+  'toast.updated': 'actualizado a v{version}',
   'toast.storefrontCode': 'la tienda debe ser un código de país de dos letras',
 
   // ---- error reasons -----------------------------------------------------
@@ -613,9 +614,26 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'update.value.current': 'al día',
   'update.value.available': 'v{version} disponible',
   'update.value.failed': 'comprobación fallida — toca para reintentar',
+  'update.value.downloading': 'descargando — {percent}%',
+  'update.value.downloadingUnknown': 'descargando — {mb} mb',
+  'update.value.verifying': 'verificando…',
+  'update.value.applying': 'instalando…',
+  'update.value.restart': 'reinicia para terminar',
+  'update.value.applied': 'entregado al instalador',
+  'update.value.applyFailed': 'actualización fallida — toca para reintentar',
   'update.banner': 'actualización disponible — v{version}',
+  'update.banner.downloading': 'descargando actualización — {percent}%',
+  'update.banner.downloadingUnknown': 'descargando actualización — {mb} mb',
+  'update.banner.verifying': 'verificando actualización…',
+  'update.banner.applying': 'instalando actualización…',
+  'update.banner.restart': 'v{version} lista — reinicia para actualizar',
+  'update.banner.failed': 'actualización fallida — inténtalo de nuevo',
   'update.action.open': 'obtener',
+  'update.action.download': 'descargar',
   'update.action.install': 'instalar',
+  'update.action.restart': 'reiniciar',
+  'update.action.retry': 'reintentar',
+  'update.action.cancel': 'cancelar',
   'update.dismiss': 'descartar',
 
   // ---- offline banner ----------------------------------------------------

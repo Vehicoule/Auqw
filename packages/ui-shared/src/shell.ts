@@ -320,6 +320,12 @@ export function setToastSink(
   toastSink = sink;
 }
 
+/** A non-error line through the same toast sink — sparingly used
+    (post-install "updated" receipt), errors still go reportResult. */
+export function notify(text: string): void {
+  toastSink?.(text);
+}
+
 export function reportResult(
   action: MessageId,
   result: Result<unknown>,

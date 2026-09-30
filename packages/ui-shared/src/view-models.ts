@@ -28,6 +28,8 @@ import type {
   SourceRef,
   SyncClientStatus,
   TrackMetadata,
+  UpdateApplyStatus,
+  UpdateSnapshot,
   UpdateStatus,
 } from '@auqw/application';
 import {
@@ -1678,6 +1680,7 @@ export function toSettingsModel(
     readonly update?:
       | {
           readonly status: UpdateStatus;
+          readonly apply: UpdateApplyStatus;
           readonly currentVersion: string;
         }
       | undefined;
@@ -1826,8 +1829,11 @@ export function toSettingsModel(
             nav(
               'checkUpdate',
               t('settings.checkUpdate'),
-              updateRowValue(media.update.status),
-              media.update.status.state !== 'checking',
+              updateRowValue(media.update.status, media.update.apply),
+              media.update.status.state !== 'checking' &&
+                media.update.apply.state !== 'downloading' &&
+                media.update.apply.state !== 'verifying' &&
+                media.update.apply.state !== 'applying',
             ),
           ]),
     ],
@@ -1835,8 +1841,28 @@ export function toSettingsModel(
   };
 }
 
-/** The check row's value — the update status reduced to one line. */
-function updateRowValue(status: UpdateStatus): string | null {
+/** The check row's value — check status reduced to one line, with the
+    apply pipeline taking precedence while it runs. */
+function updateRowValue(
+  status: UpdateStatus,
+  apply: UpdateApplyStatus,
+): string | null {
+  switch (apply.state) {
+    case 'downloading':
+      return downloadProgressText(apply, 'update.value.downloading', 'update.value.downloadingUnknown');
+    case 'verifying':
+      return t('update.value.verifying');
+    case 'applying':
+      return t('update.value.applying');
+    case 'ready-to-restart':
+      return t('update.value.restart');
+    case 'applied':
+      return t('update.value.applied');
+    case 'failed':
+      return t('update.value.applyFailed');
+    case 'idle':
+      break;
+  }
   switch (status.state) {
     case 'idle':
       return t('update.value.idle');
@@ -1851,35 +1877,125 @@ function updateRowValue(status: UpdateStatus): string | null {
   }
 }
 
+/** '42%' when the server told us a length, '12 mb' when it didn't. */
+function downloadProgressText(
+  apply: UpdateApplyStatus & { readonly state: 'downloading' },
+  knownKey: MessageId,
+  unknownKey: MessageId,
+): string {
+  const percent =
+    apply.totalBytes !== null && apply.totalBytes > 0
+      ? Math.min(100, Math.round((100 * apply.receivedBytes) / apply.totalBytes))
+      : null;
+  return percent !== null
+    ? t(knownKey, { percent: `${percent}` })
+    : t(unknownKey, {
+        mb: `${Math.floor(apply.receivedBytes / (1024 * 1024))}`,
+      });
+}
+
 /**
- * The dismissible update banner — present only while a newer release
- * is known and the user hasn't dismissed THIS version this session
- * (dismissal is per-version: a newer release re-surfaces it).
- * `actionLabel` advertises what the platform's port will actually do.
+ * The dismissible update banner — present while a newer release is
+ * known and the user hasn't dismissed THIS version this session
+ * (dismissal is per-version: a newer release re-surfaces it). The
+ * apply pipeline reshapes it: 'cancelable' means the action button
+ * aborts the in-flight work, and 'applied' hands the story to the OS
+ * surface so the banner retires itself.
  */
 export type UpdateBannerModel = {
   readonly version: string;
   readonly label: string;
-  readonly actionLabel: string;
+  /** null hides the action entirely — a phase with no honest
+      affordance (mid-apply) shows the label alone. */
+  readonly actionLabel: string | null;
+  /** The action aborts the pipeline (cancel) rather than starting it. */
+  readonly cancelable: boolean;
 };
 
 export function toUpdateBanner(
-  snapshot: { readonly status: UpdateStatus } | null,
-  action: 'open' | 'install',
+  snapshot: UpdateSnapshot | null,
+  action: 'open' | 'download' | 'install',
   dismissedVersion: string | null,
 ): UpdateBannerModel | null {
   if (snapshot === null || snapshot.status.state !== 'available') {
     return null;
   }
-  if (snapshot.status.version === dismissedVersion) {
+  const version = snapshot.status.version;
+  const apply = snapshot.apply;
+  // A dismissed live run finishes silently — the user already said
+  // "not now"; the result still applies where the OS surface owns
+  // the rest ('applied', 'ready-to-restart').
+  if (apply.state !== 'idle' && version === dismissedVersion) {
+    return null;
+  }
+  switch (apply.state) {
+    case 'downloading':
+      return {
+        version,
+        label: downloadProgressText(
+          apply,
+          'update.banner.downloading',
+          'update.banner.downloadingUnknown',
+        ),
+        actionLabel: t('update.action.cancel'),
+        cancelable: true,
+      };
+    case 'verifying':
+      return {
+        version,
+        label: t('update.banner.verifying'),
+        actionLabel: t('update.action.cancel'),
+        cancelable: true,
+      };
+    case 'applying':
+      // The installer already holds the file — nothing honest to
+      // abort into, so no action affordance at all.
+      return {
+        version,
+        label: t('update.banner.applying'),
+        actionLabel: null,
+        cancelable: false,
+      };
+    case 'ready-to-restart':
+      if (version === dismissedVersion) {
+        return null;
+      }
+      return {
+        version,
+        label: t('update.banner.restart', { version }),
+        actionLabel: t('update.action.restart'),
+        cancelable: false,
+      };
+    case 'applied':
+      // The installer / file manager owns the story now.
+      return null;
+    case 'failed':
+      if (version === dismissedVersion) {
+        return null;
+      }
+      return {
+        version,
+        label: t('update.banner.failed'),
+        actionLabel: t('update.action.retry'),
+        cancelable: false,
+      };
+    case 'idle':
+      break;
+  }
+  if (version === dismissedVersion) {
     return null;
   }
   return {
-    version: snapshot.status.version,
-    label: t('update.banner', { version: snapshot.status.version }),
+    version,
+    label: t('update.banner', { version }),
     actionLabel: t(
-      action === 'install' ? 'update.action.install' : 'update.action.open',
+      action === 'install'
+        ? 'update.action.install'
+        : action === 'download'
+          ? 'update.action.download'
+          : 'update.action.open',
     ),
+    cancelable: false,
   };
 }
 

@@ -499,6 +499,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
 
   // ---- toasts ------------------------------------------------------------
   'toast.failed': '{action} 失败 — {detail}',
+  'toast.updated': '已更新至 v{version}',
   'toast.storefrontCode': '商店必须是两位字母国家代码',
 
   // ---- error reasons -----------------------------------------------------
@@ -579,9 +580,26 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'update.value.current': '已是最新',
   'update.value.available': '有 v{version} 可用',
   'update.value.failed': '检查失败 — 点按重试',
+  'update.value.downloading': '下载中 — {percent}%',
+  'update.value.downloadingUnknown': '下载中 — {mb} mb',
+  'update.value.verifying': '校验中…',
+  'update.value.applying': '安装中…',
+  'update.value.restart': '重启以完成更新',
+  'update.value.applied': '已交给安装程序',
+  'update.value.applyFailed': '更新失败 — 点按重试',
   'update.banner': '有可用更新 — v{version}',
+  'update.banner.downloading': '正在下载更新 — {percent}%',
+  'update.banner.downloadingUnknown': '正在下载更新 — {mb} mb',
+  'update.banner.verifying': '正在校验更新…',
+  'update.banner.applying': '正在安装更新…',
+  'update.banner.restart': 'v{version} 已就绪 — 重启以更新',
+  'update.banner.failed': '更新失败 — 请重试',
   'update.action.open': '获取',
+  'update.action.download': '下载',
   'update.action.install': '安装',
+  'update.action.restart': '重启',
+  'update.action.retry': '重试',
+  'update.action.cancel': '取消',
   'update.dismiss': '忽略',
 
   // ---- offline banner ----------------------------------------------------

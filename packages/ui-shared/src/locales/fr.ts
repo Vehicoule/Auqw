@@ -526,6 +526,7 @@ export const fr: Readonly<Record<MessageId, Message>> = {
 
   // ---- toasts ------------------------------------------------------------
   'toast.failed': '{action} a échoué — {detail}',
+  'toast.updated': 'mis à jour en v{version}',
   'toast.storefrontCode': 'la boutique doit être un code pays à deux lettres',
 
   // ---- error reasons -----------------------------------------------------
@@ -607,9 +608,26 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'update.value.current': 'à jour',
   'update.value.available': 'v{version} disponible',
   'update.value.failed': 'vérification échouée — toucher pour réessayer',
+  'update.value.downloading': 'téléchargement — {percent}%',
+  'update.value.downloadingUnknown': 'téléchargement — {mb} mo',
+  'update.value.verifying': 'vérification…',
+  'update.value.applying': 'installation…',
+  'update.value.restart': 'redémarrer pour finir',
+  'update.value.applied': "transmis à l'installateur",
+  'update.value.applyFailed': 'mise à jour échouée — toucher pour réessayer',
   'update.banner': 'mise à jour disponible — v{version}',
+  'update.banner.downloading': 'téléchargement de la mise à jour — {percent}%',
+  'update.banner.downloadingUnknown': 'téléchargement de la mise à jour — {mb} mo',
+  'update.banner.verifying': 'vérification de la mise à jour…',
+  'update.banner.applying': 'installation de la mise à jour…',
+  'update.banner.restart': 'v{version} prête — redémarrer pour mettre à jour',
+  'update.banner.failed': 'mise à jour échouée — réessayer',
   'update.action.open': "l'obtenir",
+  'update.action.download': 'télécharger',
   'update.action.install': 'installer',
+  'update.action.restart': 'redémarrer',
+  'update.action.retry': 'réessayer',
+  'update.action.cancel': 'annuler',
   'update.dismiss': 'ignorer',
 
   // ---- offline banner ----------------------------------------------------

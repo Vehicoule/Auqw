@@ -141,14 +141,21 @@ export async function run(): Promise<void> {
         snapshot: () => ({
           status: { state: 'idle' },
           currentVersion: '0.1.0',
+          apply: { state: 'idle' },
+          capability: 'open' as const,
         }),
         check: () =>
           Promise.resolve({
             status: { state: 'idle' },
             currentVersion: '0.1.0',
+            apply: { state: 'idle' } as const,
+            capability: 'open' as const,
           }),
         subscribe: () => () => undefined,
         open: () => Promise.resolve(),
+        apply: () => Promise.resolve(),
+        cancel: () => Promise.resolve(),
+        restart: () => Promise.resolve(),
       },
       updateState: {
         attach: () => undefined,

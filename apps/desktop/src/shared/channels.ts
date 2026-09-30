@@ -119,6 +119,12 @@ export const CHANNELS = {
   updateStatus: 'update:status',
   updateCheck: 'update:check',
   updateOpen: 'update:open',
+  /** Begin the verified download→apply pipeline (capability-gated). */
+  updateApply: 'update:apply',
+  /** Abort the live apply. */
+  updateCancel: 'update:cancel',
+  /** Relaunch into a self-replaced binary (AppImage leg only). */
+  updateRestart: 'update:restart',
   /** Main→renderer push of each new update snapshot. */
   updateState: 'update:state',
   updateSubscribe: 'update:subscribe',

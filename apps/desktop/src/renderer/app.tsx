@@ -1463,16 +1463,18 @@ function Main({
               <Text variant="metadata" color="secondary">
                 {updateBanner.label}
               </Text>
-              <button
-                type="button"
-                className="uw-pressable"
-                style={{ padding: '2px 8px', borderRadius: 999 }}
-                onClick={onUpdateBannerAct}
-              >
-                <Text variant="metadata" color="accent">
-                  {updateBanner.actionLabel}
-                </Text>
-              </button>
+              {updateBanner.actionLabel !== null && (
+                <button
+                  type="button"
+                  className="uw-pressable"
+                  style={{ padding: '2px 8px', borderRadius: 999 }}
+                  onClick={onUpdateBannerAct}
+                >
+                  <Text variant="metadata" color="accent">
+                    {updateBanner.actionLabel}
+                  </Text>
+                </button>
+              )}
               <IconButton
                 icon="close"
                 size={20}

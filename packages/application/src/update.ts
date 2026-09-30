@@ -220,6 +220,54 @@ export function latestNewer(
   return best;
 }
 
+/** The per-platform SHA256SUMS asset name the release workflow
+ *  publishes (`tooling/checksums.mjs` — "<hex>  <name>" lines). The
+ *  Android file takes a platform name because its job runs on an
+ *  ubuntu runner (`runner.os` would collide with desktop Linux). */
+export function checksumsNameFor(target: UpdateTarget): string | null {
+  switch (target.os) {
+    case 'android':
+      return 'SHA256SUMS-Android.txt';
+    case 'linux':
+      return 'SHA256SUMS-Linux.txt';
+    case 'mac':
+      return 'SHA256SUMS-macOS.txt';
+    case 'win':
+      return 'SHA256SUMS-Windows.txt';
+    case 'other':
+      return null;
+  }
+}
+
+/** The checksums asset covering this target's artifact, if shipped. */
+export function pickChecksums(
+  assets: readonly UpdateArtifact[],
+  target: UpdateTarget,
+): UpdateArtifact | null {
+  const name = checksumsNameFor(target);
+  return name === null
+    ? null
+    : (assets.find((asset) => asset.name === name) ?? null);
+}
+
+/**
+ * `SHA256SUMS-*.txt` body → name → hex. Lines are `<hex>  <name>`
+ * (sha256sum -c compatible); anything else — comment, blank, odd
+ * width — is skipped rather than poisoning the whole map.
+ */
+export function parseSha256Sums(text: string): ReadonlyMap<string, string> {
+  const map = new Map<string, string>();
+  for (const line of text.split('\n')) {
+    // "<hex>  <name>" (text mode) or "<hex> *<name>" (binary mode).
+    const match = /^([0-9a-fA-F]{64}) [ *](.+?)\s*$/.exec(line);
+    if (match === null) {
+      continue;
+    }
+    map.set(match[2]!, match[1]!.toLowerCase());
+  }
+  return map;
+}
+
 /** The artifact this target installs, if the release ships one. */
 export function pickArtifact(
   assets: readonly UpdateArtifact[],
@@ -259,12 +307,49 @@ export type UpdateStatus =
       /** This platform's artifact — null when the release ships none
        *  or this platform only opens the page. */
       readonly artifact: UpdateArtifact | null;
+      /** This platform's SHA256SUMS asset — the integrity check every
+       *  self-install path verifies before the install hand-off. Null
+       *  when the release predates checksum publishing or ships no
+       *  file for this platform: an unverifiable artifact must not
+       *  self-install. */
+      readonly checksums: UpdateArtifact | null;
     }
   | { readonly state: 'failed'; readonly error: AppError };
+
+/**
+ * The apply pipeline — what happens after 'available' once the
+ * platform's install affordance runs. Shared vocabulary: every
+ * self-install leg is download (byte progress) → verify (the
+ * SHA256SUMS line for this artifact) → apply (the platform's own
+ * install mechanic). 'ready-to-restart' is the terminal pre-quit
+ * state for formats that self-apply on relaunch (AppImage);
+ * 'applied' means an OS surface took over (APK sheet, NSIS
+ * installer, Finder-revealed dmg); 'failed' is retryable by the
+ * same affordance that started it.
+ */
+export type UpdateApplyStatus =
+  | { readonly state: 'idle' }
+  | {
+      readonly state: 'downloading';
+      readonly version: string;
+      readonly receivedBytes: number;
+      /** null when the server sends no Content-Length. */
+      readonly totalBytes: number | null;
+    }
+  | { readonly state: 'verifying'; readonly version: string }
+  | { readonly state: 'applying'; readonly version: string }
+  | { readonly state: 'ready-to-restart'; readonly version: string }
+  | { readonly state: 'applied'; readonly version: string }
+  | {
+      readonly state: 'failed';
+      readonly version: string;
+      readonly error: AppError;
+    };
 
 export type UpdateSnapshot = {
   readonly status: UpdateStatus;
   readonly currentVersion: string;
+  readonly apply: UpdateApplyStatus;
 };
 
 export type UpdateCheckKind = 'boot' | 'manual';
@@ -290,6 +375,15 @@ export interface UpdateService {
    * same settled snapshot.
    */
   check(kind: UpdateCheckKind): Promise<UpdateSnapshot>;
+  /**
+   * Begin the apply pipeline for the currently-'available' release —
+   * no-op while the status is anything else, the release ships no
+   * artifact, or no applier is wired (open-page platforms never
+   * reach here).
+   */
+  apply(): void;
+  /** Abort an in-flight apply — back to 'idle'; no-op otherwise. */
+  cancelApply(): void;
 }
 
 /** Normalize whatever the check threw into the taxonomy. */
@@ -320,18 +414,25 @@ export function createUpdateService(deps: {
   readonly fetchJson: UpdateFetchJson;
   /** Override for tests; production default is the releases list. */
   readonly releasesUrl?: string;
+  /** The platform's apply leg — absent on open-page platforms. */
+  readonly applier?: UpdateApplier;
 }): UpdateService {
   const url = deps.releasesUrl ?? UPDATE_RELEASES_URL;
   let snapshot: UpdateSnapshot = {
     status: { state: 'idle' },
     currentVersion: deps.currentVersion,
+    apply: { state: 'idle' },
   };
   let booted = false;
   let inflight: Promise<UpdateSnapshot> | null = null;
   const listeners = new Set<() => void>();
 
   function publish(status: UpdateStatus): void {
-    snapshot = { status, currentVersion: deps.currentVersion };
+    snapshot = {
+      status,
+      currentVersion: deps.currentVersion,
+      apply: deps.applier?.snapshot() ?? { state: 'idle' },
+    };
     for (const listener of [...listeners]) {
       try {
         listener();
@@ -340,6 +441,10 @@ export function createUpdateService(deps: {
       }
     }
   }
+
+  // Apply progress republishes under the unchanged check status —
+  // one feed carries both halves of the seam.
+  deps.applier?.subscribe(() => publish(snapshot.status));
 
   async function run(): Promise<UpdateSnapshot> {
     publish({ state: 'checking' });
@@ -366,6 +471,7 @@ export function createUpdateService(deps: {
           version: latest.version,
           url: latest.url,
           artifact: pickArtifact(latest.assets, deps.target),
+          checksums: pickChecksums(latest.assets, deps.target),
         });
       }
     } catch (thrown) {
@@ -396,6 +502,266 @@ export function createUpdateService(deps: {
         inflight = null;
       });
       return inflight;
+    },
+    apply() {
+      const status = snapshot.status;
+      if (
+        status.state !== 'available' ||
+        status.artifact === null ||
+        deps.applier === undefined
+      ) {
+        return;
+      }
+      deps.applier.begin({
+        version: status.version,
+        artifact: status.artifact,
+        checksums: status.checksums,
+      });
+    },
+    cancelApply() {
+      deps.applier?.cancel();
+    },
+  };
+}
+
+// ---- the apply pipeline ----------------------------------------------
+
+/** What `begin` needs out of the settled 'available' payload. */
+export type UpdateApplyTarget = {
+  readonly version: string;
+  readonly artifact: UpdateArtifact;
+  readonly checksums: UpdateArtifact | null;
+};
+
+/** Minimal abort surface — lib-free like oauth's declaration. A real
+    `AbortSignal`/`AbortController` assigns to these on both runtimes. */
+type AbortSignalLike = { readonly aborted: boolean };
+type AbortControllerLike = {
+  readonly signal: AbortSignalLike;
+  abort(): void;
+};
+declare const AbortController: { new (): AbortControllerLike };
+
+/**
+ * What the platform supplies for a self-install. Each port is a thin
+ * platform call — the applier owns ordering, progress publishes,
+ * checksum gating, and the taxonomy so every leg (Electron net.fetch
+ * → fs, RN File.downloadFileAsync → FileHandle) stays a three-line
+ * transport exactly like `UpdateFetchJson`.
+ */
+export interface UpdateApplyPorts {
+  /** Absolute staging path the artifact downloads to. */
+  stagePath(artifact: UpdateArtifact): string;
+  /** Fetch a small text asset — the per-platform SHA256SUMS file. */
+  fetchText(url: string, signal: AbortSignalLike): Promise<string>;
+  /** Stream-download to the staged path; reports byte progress and
+      rejects on abort. A retry may overwrite a leftover file. */
+  download(
+    url: string,
+    path: string,
+    onProgress: (receivedBytes: number, totalBytes: number | null) => void,
+    signal: AbortSignalLike,
+  ): Promise<void>;
+  /** Lowercase hex SHA-256 of the file at path. */
+  sha256Hex(path: string): Promise<string>;
+  /** The platform's own install mechanic over a verified file —
+   *  resolves 'relaunch' when the on-disk binary was replaced and a
+   *  restart applies it (AppImage), 'installed' when an OS surface
+   *  took over (APK installer sheet, NSIS setup, Finder-revealed dmg). */
+  apply(path: string, artifact: UpdateArtifact): Promise<'relaunch' | 'installed'>;
+  /** Best-effort staged-file removal — a rejected artifact never
+      stays behind for a later verify to trip on. */
+  remove(path: string): Promise<void>;
+}
+
+export interface UpdateApplier {
+  /** Latest apply state — stable reference between publishes. */
+  snapshot(): UpdateApplyStatus;
+  /** Change feed — fires once per state transition (and per progress
+      tick while 'downloading'). */
+  subscribe(listener: () => void): () => void;
+  /** Start the pipeline; no-op while a run is live or already
+      terminal ('ready-to-restart', 'applied'). */
+  begin(target: UpdateApplyTarget): void;
+  /** Abort the live run — publishes 'idle' so the affordance returns
+      to its install label. */
+  cancel(): void;
+}
+
+function applyError(thrown: unknown): AppError {
+  if (
+    thrown !== null &&
+    typeof thrown === 'object' &&
+    'kind' in thrown &&
+    typeof (thrown as { kind: unknown }).kind === 'string'
+  ) {
+    const kind = appErrorKind((thrown as { kind: string }).kind);
+    if (kind !== 'internal') {
+      const message =
+        'message' in thrown &&
+        typeof (thrown as { message: unknown }).message === 'string'
+          ? (thrown as { message: string }).message
+          : 'update apply failed';
+      return appError(kind, message);
+    }
+  }
+  return appError('transient', 'update apply failed');
+}
+
+/** AbortError (DOMException name or coded) — a cancel is user intent,
+    never a failure. */
+function isAbort(thrown: unknown): boolean {
+  return (
+    thrown !== null &&
+    typeof thrown === 'object' &&
+    (('name' in thrown && (thrown as { name: unknown }).name === 'AbortError') ||
+      ('kind' in thrown && (thrown as { kind: unknown }).kind === 'cancelled'))
+  );
+}
+
+/**
+ * download → verify → apply, as a published state machine. The
+ * checksum file is fetched FIRST — a release that can't prove the
+ * artifact fails before any bytes land. Verification failure removes
+ * the staged file and reports 'artifact-rejected', never 'transient':
+ * a checksum mismatch is tamper/corruption evidence, not a blip.
+ */
+export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
+  let state: UpdateApplyStatus = { state: 'idle' };
+  const listeners = new Set<() => void>();
+  let controller: AbortControllerLike | null = null;
+  // Generation guard: a stale run (post-cancel, post-begin) must
+  // never publish over a newer state.
+  let generation = 0;
+
+  function publish(next: UpdateApplyStatus): void {
+    state = next;
+    for (const listener of [...listeners]) {
+      try {
+        listener();
+      } catch {
+        // a throwing subscriber must not wedge the publisher
+      }
+    }
+  }
+
+  const live = (): boolean =>
+    state.state === 'downloading' ||
+    state.state === 'verifying' ||
+    state.state === 'applying';
+
+  async function run(
+    target: UpdateApplyTarget,
+    gen: number,
+    signal: AbortSignalLike,
+  ): Promise<void> {
+    const publishIfCurrent = (next: UpdateApplyStatus): void => {
+      if (gen === generation) {
+        publish(next);
+      }
+    };
+    const { version, artifact, checksums } = target;
+    // The staged file — removed whenever this run dies before the
+    // apply leg consumed it (failed download, rejected checksum,
+    // apply throw): an unconsumed artifact never stays behind.
+    let path: string | null = null;
+    try {
+      // Integrity metadata rides first: no sums asset → the artifact
+      // is unverifiable and the honest answer is refusal (the open-page
+      // path still serves this release).
+      if (checksums === null) {
+        throw appError('unavailable', 'release ships no checksums for this platform');
+      }
+      const body = await ports.fetchText(checksums.url, signal);
+      const expected = parseSha256Sums(body).get(artifact.name);
+      if (expected === undefined) {
+        throw appError(
+          'invalid-response',
+          'artifact absent from the release checksums',
+        );
+      }
+      path = ports.stagePath(artifact);
+      publishIfCurrent({
+        state: 'downloading',
+        version,
+        receivedBytes: 0,
+        totalBytes: null,
+      });
+      await ports.download(
+        artifact.url,
+        path,
+        (receivedBytes, totalBytes) =>
+          publishIfCurrent({ state: 'downloading', version, receivedBytes, totalBytes }),
+        signal,
+      );
+      publishIfCurrent({ state: 'verifying', version });
+      const actual = await ports.sha256Hex(path);
+      if (actual.toLowerCase() !== expected) {
+        // The catch's sweep removes the staged file — the verdict
+        // itself is the important part: 'artifact-rejected', never
+        // 'transient' — a mismatch is tamper/corruption evidence.
+        throw appError(
+          'artifact-rejected',
+          'downloaded artifact fails its published checksum',
+        );
+      }
+      publishIfCurrent({ state: 'applying', version });
+      const outcome = await ports.apply(path, artifact);
+      // The apply leg consumed the file (renamed into place, spawned
+      // as the installer, revealed in Finder) — cleanup is its
+      // responsibility now, not the sweep's.
+      path = null;
+      publishIfCurrent(
+        outcome === 'relaunch'
+          ? { state: 'ready-to-restart', version }
+          : { state: 'applied', version },
+      );
+    } catch (thrown) {
+      if (gen !== generation) {
+        return;
+      }
+      if (path !== null) {
+        void ports.remove(path).catch(() => undefined);
+      }
+      if (isAbort(thrown)) {
+        publish({ state: 'idle' });
+      } else {
+        publish({ state: 'failed', version, error: applyError(thrown) });
+      }
+    } finally {
+      if (gen === generation) {
+        controller = null;
+      }
+    }
+  }
+
+  return {
+    snapshot: () => state,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    begin(target) {
+      if (live() || state.state === 'ready-to-restart' || state.state === 'applied') {
+        return;
+      }
+      generation += 1;
+      const gen = generation;
+      controller = new AbortController();
+      const signal = controller.signal;
+      // The publish happens inside run's try so the state lands
+      // before any synchronous port throw could misorder events.
+      void run(target, gen, signal);
+    },
+    cancel() {
+      generation += 1;
+      controller?.abort();
+      controller = null;
+      if (live()) {
+        publish({ state: 'idle' });
+      }
     },
   };
 }

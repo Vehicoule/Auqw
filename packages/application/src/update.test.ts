@@ -1,13 +1,21 @@
 import {
+  checksumsNameFor,
   compareVersions,
+  createUpdateApplier,
   createUpdateService,
   latestNewer,
   parseRelease,
   parseReleases,
+  parseSha256Sums,
   parseVersionTag,
   pickArtifact,
+  pickChecksums,
 } from './update.ts';
-import type { UpdateFetchJson } from './update.ts';
+import type {
+  UpdateApplyPorts,
+  UpdateApplyTarget,
+  UpdateFetchJson,
+} from './update.ts';
 import { assert, assertDeepEqual, assertEqual } from './testing/assert.ts';
 
 const RELEASE_JSON = {
@@ -45,6 +53,11 @@ const RELEASE_JSON = {
       name: 'SHA256SUMS-Linux.txt',
       browser_download_url:
         'https://github.com/Vehicoule/Auqw/releases/download/v0.0.1-alpha.18/SHA256SUMS-Linux.txt',
+    },
+    {
+      name: 'SHA256SUMS-Android.txt',
+      browser_download_url:
+        'https://github.com/Vehicoule/Auqw/releases/download/v0.0.1-alpha.18/SHA256SUMS-Android.txt',
     },
   ],
 };
@@ -95,7 +108,7 @@ export async function run(): Promise<void> {
   const parsed = parseRelease(RELEASE_JSON);
   assert(parsed !== null);
   assertEqual(parsed.version, '0.0.1-alpha.18');
-  assertEqual(parsed.assets.length, 6);
+  assertEqual(parsed.assets.length, 7);
 
   // drafts and non-version tags drop out
   assertEqual(parseRelease({ ...RELEASE_JSON, draft: true }), null);
@@ -143,6 +156,44 @@ export async function run(): Promise<void> {
   );
   assertEqual(pickArtifact(assets, { os: 'other' }), null);
   assertEqual(pickArtifact([], { os: 'android' }), null);
+
+  // ---- checksums pick + parse ----
+
+  assertEqual(checksumsNameFor({ os: 'android' }), 'SHA256SUMS-Android.txt');
+  assertEqual(
+    checksumsNameFor({ os: 'linux', prefer: 'appimage' }),
+    'SHA256SUMS-Linux.txt',
+  );
+  assertEqual(checksumsNameFor({ os: 'mac' }), 'SHA256SUMS-macOS.txt');
+  assertEqual(checksumsNameFor({ os: 'win' }), 'SHA256SUMS-Windows.txt');
+  assertEqual(checksumsNameFor({ os: 'other' }), null);
+
+  assertEqual(
+    pickChecksums(assets, { os: 'android' })?.name,
+    'SHA256SUMS-Android.txt',
+  );
+  assertEqual(
+    pickChecksums(assets, { os: 'linux', prefer: 'flatpak' })?.name,
+    'SHA256SUMS-Linux.txt',
+  );
+  // the fixture ships no Windows sums — an unverifiable artifact
+  // carries null, and a null checksums never self-installs
+  assertEqual(pickChecksums(assets, { os: 'win' }), null);
+  assertEqual(pickChecksums(assets, { os: 'other' }), null);
+
+  const HEX64 = 'a'.repeat(64);
+  const sums = parseSha256Sums(
+    `${HEX64}  file-a.apk\n` +
+      `${'B'.repeat(64)} *file-b.exe\n` +
+      'not-a-sum line\n' +
+      `${'c'.repeat(63)} too-short.txt\n` +
+      `  ${'d'.repeat(64)}  leading-space.txt\n`,
+  );
+  assertEqual(sums.get('file-a.apk'), HEX64);
+  assertEqual(sums.get('file-b.exe'), 'b'.repeat(64));
+  assertEqual(sums.get('too-short.txt'), undefined);
+  assertEqual(sums.get('not-a-sum line'), undefined);
+  assertEqual(sums.size, 2);
 
   // ---- service ----
 
@@ -267,4 +318,201 @@ export async function run(): Promise<void> {
   });
   assertEqual((await failed.check('boot')).status.state, 'failed');
   assertEqual((await failed.check('manual')).status.state, 'available');
+
+  // ---- apply pipeline ----
+
+  const settle = async (): Promise<void> => {
+    for (let i = 0; i < 30; i += 1) {
+      await Promise.resolve();
+    }
+  };
+  const APK_NAME = 'auqw-0.0.1-alpha.18-android-arm64-v8a.apk';
+  const APK_URL = `https://github.com/Vehicoule/Auqw/releases/download/v0.0.1-alpha.18/${APK_NAME}`;
+  const GOOD_HEX = 'f'.repeat(64);
+  const APK_TARGET: UpdateApplyTarget = {
+    version: '0.0.1-alpha.18',
+    artifact: { name: APK_NAME, url: APK_URL },
+    checksums: {
+      name: 'SHA256SUMS-Android.txt',
+      url: 'https://github.com/Vehicoule/Auqw/releases/download/v0.0.1-alpha.18/SHA256SUMS-Android.txt',
+    },
+  };
+  const fakePorts = (overrides?: {
+    readonly sumsBody?: string;
+    readonly applyOutcome?: 'relaunch' | 'installed';
+    readonly shaHex?: string;
+    readonly hangDownload?: boolean;
+  }): {
+    calls: { downloads: number; applies: number; removed: string[]; progress: number[] };
+    ports: UpdateApplyPorts;
+  } => {
+    const calls = {
+      downloads: 0,
+      applies: 0,
+      removed: [] as string[],
+      progress: [] as number[],
+    };
+    return {
+      calls,
+      ports: {
+        stagePath: (artifact) => `/stage/${artifact.name}`,
+        fetchText: () =>
+          Promise.resolve(
+            overrides?.sumsBody ?? `${GOOD_HEX}  ${APK_NAME}\n`,
+          ),
+        download: (_url, _path, onProgress, _signal) => {
+          calls.downloads += 1;
+          if (overrides?.hangDownload === true) {
+            return new Promise(() => {});
+          }
+          onProgress(512, 1024);
+          onProgress(1024, 1024);
+          return Promise.resolve();
+        },
+        sha256Hex: () =>
+          Promise.resolve(overrides?.shaHex ?? GOOD_HEX),
+        apply: () => {
+          calls.applies += 1;
+          return Promise.resolve(overrides?.applyOutcome ?? 'installed');
+        },
+        remove: (path) => {
+          calls.removed.push(path);
+          return Promise.resolve();
+        },
+      },
+    };
+  };
+
+  // happy path → 'applied'; progress ticks publish receivedBytes
+  {
+    const { calls, ports } = fakePorts();
+    const applier = createUpdateApplier(ports);
+    const states: string[] = [];
+    applier.subscribe(() => states.push(applier.snapshot().state));
+    applier.begin(APK_TARGET);
+    await settle();
+    assertDeepEqual(
+      states,
+      ['downloading', 'downloading', 'downloading', 'verifying', 'applying', 'applied'],
+    );
+    assertEqual(calls.downloads, 1);
+    assertEqual(calls.applies, 1);
+    assertEqual(applier.snapshot().state, 'applied');
+    // 'applied' is terminal — a second begin is a no-op
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(calls.downloads, 1);
+  }
+
+  // 'relaunch' outcome lands 'ready-to-restart'
+  {
+    const { ports } = fakePorts({ applyOutcome: 'relaunch' });
+    const applier = createUpdateApplier(ports);
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'ready-to-restart');
+  }
+
+  // no checksums → refuse BEFORE any bytes land
+  {
+    const { calls, ports } = fakePorts();
+    const applier = createUpdateApplier(ports);
+    applier.begin({ ...APK_TARGET, checksums: null });
+    await settle();
+    assertEqual(applier.snapshot().state, 'failed');
+    const snap = applier.snapshot();
+    assert(snap.state === 'failed');
+    assertEqual(snap.error.kind, 'unavailable');
+    assertEqual(calls.downloads, 0, 'unverifiable artifact must not download');
+  }
+
+  // artifact absent from the sums file → 'invalid-response'
+  {
+    const { calls, ports } = fakePorts({ sumsBody: `${GOOD_HEX}  other.apk\n` });
+    const applier = createUpdateApplier(ports);
+    applier.begin(APK_TARGET);
+    await settle();
+    const snap = applier.snapshot();
+    assert(snap.state === 'failed');
+    assertEqual(snap.error.kind, 'invalid-response');
+    assertEqual(calls.downloads, 0);
+  }
+
+  // checksum mismatch → 'artifact-rejected' + staged file removed
+  {
+    const { calls, ports } = fakePorts({ shaHex: '0'.repeat(64) });
+    const applier = createUpdateApplier(ports);
+    applier.begin(APK_TARGET);
+    await settle();
+    const snap = applier.snapshot();
+    assert(snap.state === 'failed');
+    assertEqual(snap.error.kind, 'artifact-rejected');
+    assertDeepEqual(calls.removed, [`/stage/${APK_NAME}`]);
+    assertEqual(calls.applies, 0, 'a rejected artifact never installs');
+  }
+
+  // a failed run is retryable by begin — same affordance
+  {
+    const { calls, ports } = fakePorts({ shaHex: '0'.repeat(64) });
+    const applier = createUpdateApplier(ports);
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'failed');
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(calls.downloads, 2, 'failed apply retries through begin');
+  }
+
+  // cancel mid-download → back to 'idle'; the stale run's settles
+  // can't publish over it (generation guard)
+  {
+    let hang = true;
+    const { calls, ports } = fakePorts();
+    const applier = createUpdateApplier({
+      ...ports,
+      download: (url, path, onProgress, signal) =>
+        hang
+          ? new Promise<void>(() => {})
+          : ports.download(url, path, onProgress, signal),
+    });
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'downloading');
+    applier.cancel();
+    assertEqual(applier.snapshot().state, 'idle');
+    await settle();
+    assertEqual(applier.snapshot().state, 'idle');
+    // and a fresh begin still runs after the cancel
+    hang = false;
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'applied');
+    // only the retry reached the download port — the hung first run
+    // never got that far
+    assertEqual(calls.downloads, 1);
+  }
+
+  // service.apply() gates: no-op while not 'available', and merges
+  // the applier feed into the snapshot
+  {
+    const { calls, ports } = fakePorts();
+    const svc = createUpdateService({
+      currentVersion: '0.0.1-alpha.1',
+      target: { os: 'android' },
+      fetchJson: scriptedFetch([{ status: 200, body: [RELEASE_JSON] }])
+        .fetchJson,
+      applier: createUpdateApplier(ports),
+    });
+    svc.apply();
+    await settle();
+    assertEqual(calls.downloads, 0, 'apply before any check is a no-op');
+    const settled2 = await svc.check('boot');
+    assert(settled2.status.state === 'available');
+    assertEqual(settled2.status.checksums?.name, 'SHA256SUMS-Android.txt');
+    svc.apply();
+    await settle();
+    const snap = svc.snapshot();
+    assertEqual(snap.apply.state, 'applied');
+    assertEqual(calls.downloads, 1);
+  }
 }

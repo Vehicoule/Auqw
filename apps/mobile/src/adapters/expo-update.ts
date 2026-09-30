@@ -1,22 +1,16 @@
 import { Linking, Platform } from 'react-native';
-import { Directory, File, Paths } from 'expo-file-system';
+import { Directory, File, FileMode, Paths } from 'expo-file-system';
 import * as AuqwExpo from 'auqw-expo';
 import {
   UPDATE_RELEASES_PAGE,
   appError,
-  appErrorKind,
+  createSha256,
+  createUpdateApplier,
   createUpdateService,
-  err,
-  ok,
 } from '@auqw/application';
-import type {
-  AppError,
-  Result,
-  UpdateArtifact,
-  UpdateTarget,
-} from '@auqw/application';
+import type { UpdateApplyPorts, UpdateTarget } from '@auqw/application';
 import type { UpdateShellPort } from '@auqw/app-shell';
-import { reportResult } from '@auqw/ui-shared';
+import { notify, t } from '@auqw/ui-shared';
 
 // APKs self-update only from this repo's own release downloads — an
 // off-repo asset URL is a failed install, not an installer payload.
@@ -26,19 +20,137 @@ const RELEASE_DOWNLOAD_PREFIX =
 
 /**
  * The mobile UpdateShellPort: the shared release check over RN
- * `fetch`, and an install affordance that on Android actually
- * installs — the APK is fetched into `Paths.cache/auqw-update/` (the
- * FileProvider's only exported root — see the auqw-expo manifest) and
- * handed to the system package installer. When the unknown-sources
- * gate refuses, the module opens this app's page of that settings
- * surface and returns 'needs-permission', which lands as a toast —
- * never a claimed install. On every other platform, and on Android
- * when the release ships no APK asset, `action` degrades to 'open'
- * and `act()` opens the release page instead.
+ * `fetch`, and the shared apply pipeline over `File.downloadFileAsync`
+ * — byte progress, AbortSignal cancel, SHA256SUMS verification before
+ * the APK is handed to the system package installer. The download
+ * counts against the dataSync foreground service so a switch to
+ * another app doesn't suspend a ~150 MB fetch. When the
+ * unknown-sources gate refuses, installApk opens this app's page of
+ * that settings surface and returns 'needs-permission', which lands
+ * as a retryable 'failed' apply — never a claimed install. On every
+ * other platform, and on Android when the release ships no APK asset,
+ * `action` degrades to 'open' and `act()` opens the release page.
  */
 export function createExpoUpdate(currentVersion: string): UpdateShellPort {
   const target: UpdateTarget =
     Platform.OS === 'android' ? { os: 'android' } : { os: 'other' };
+  // The seam probe answers capability, not grant — the unknown-
+  // sources switch is per-user and only checked at install time.
+  const canInstall =
+    Platform.OS === 'android' && AuqwExpo.hasApkInstaller();
+  const android = Platform.OS === 'android';
+
+  const applier = canInstall
+    ? createUpdateApplier({
+        stagePath: (artifact) => {
+          const directory = new Directory(Paths.cache, 'auqw-update');
+          if (!directory.exists) {
+            directory.create({ intermediates: true, idempotent: true });
+          }
+          // Each release's APK has a fresh name — without the sweep
+          // every update leaves last release's artifact behind in app
+          // storage. Best-effort: a stubborn stale file never blocks.
+          for (const entry of directory.list()) {
+            if (entry.name !== artifact.name) {
+              try {
+                entry.delete();
+              } catch {
+                // stale-cache cleanup is housekeeping, not the apply's job
+              }
+            }
+          }
+          return new File(directory, artifact.name).uri;
+        },
+        fetchText: async (url, signal) => {
+          const res = await fetch(url, { signal: signal as AbortSignal });
+          if (!res.ok) {
+            throw appError('transient', `checksums fetch ${res.status}`);
+          }
+          return res.text();
+        },
+        download: async (url, path, onProgress, signal) => {
+          if (!url.startsWith(RELEASE_DOWNLOAD_PREFIX)) {
+            throw appError(
+              'invalid-response',
+              'artifact is not a repo release asset',
+            );
+          }
+          const destination = new File(path);
+          // idempotent: a retry of the SAME release (e.g. granted
+          // unknown-sources after 'needs-permission') overwrites its
+          // own prior APK.
+          if (destination.exists) {
+            destination.delete();
+          }
+          // The dataSync foreground service keeps the fetch alive
+          // through backgrounding — the APK outlives a user switching
+          // apps mid-download.
+          try {
+            void AuqwExpo.downloadsActiveChanged(1).catch(() => undefined);
+          } catch {
+            // the seam is Android-only; anywhere else this is a no-op
+          }
+          try {
+            await File.downloadFileAsync(url, destination, {
+              idempotent: true,
+              signal: signal as AbortSignal,
+              onProgress: (progress) =>
+                onProgress(
+                  progress.bytesWritten,
+                  progress.totalBytes > 0 ? progress.totalBytes : null,
+                ),
+            });
+          } finally {
+            try {
+              void AuqwExpo.downloadsActiveChanged(0).catch(() => undefined);
+            } catch {
+              // same — a missing seam never fails the download
+            }
+          }
+        },
+        sha256Hex: (path) => {
+          const handle = new File(path).open(FileMode.ReadOnly);
+          const hasher = createSha256();
+          try {
+            // Chunked like the transfer digest — a whole-APK JS
+            // allocation can OOM a memory-constrained phone.
+            for (;;) {
+              const chunk = handle.readBytes(1024 * 1024);
+              if (chunk.length === 0) {
+                break;
+              }
+              hasher.update(chunk);
+            }
+          } finally {
+            try {
+              handle.close();
+            } catch {
+              // a failed close changes nothing about the digest
+            }
+          }
+          return Promise.resolve(hasher.digest());
+        },
+        apply: async (path) => {
+          const result = await AuqwExpo.installApk(path);
+          if (result.status === 'needs-permission') {
+            throw appError(
+              'permission-denied',
+              'unknown-sources install blocked',
+            );
+          }
+          return 'installed';
+        },
+        remove: (path) => {
+          try {
+            new File(path).delete();
+          } catch {
+            // best-effort — the stagePath sweep also catches strays
+          }
+          return Promise.resolve();
+        },
+      } satisfies UpdateApplyPorts)
+    : undefined;
+
   const service = createUpdateService({
     currentVersion,
     target,
@@ -48,62 +160,24 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
       });
       return { status: res.status, body: await res.json().catch(() => null) };
     },
+    ...(applier !== undefined ? { applier } : {}),
   });
-  // The seam probe answers capability, not grant — the unknown-
-  // sources switch is per-user and only checked at act() time.
-  const canInstall =
-    Platform.OS === 'android' && AuqwExpo.hasApkInstaller();
-  let installing = false;
 
-  function installError(thrown: unknown): AppError {
-    if (
-      thrown !== null &&
-      typeof thrown === 'object' &&
-      'kind' in thrown &&
-      typeof (thrown as { kind: unknown }).kind === 'string'
-    ) {
-      const kind = appErrorKind((thrown as { kind: string }).kind);
-      if (kind !== 'internal') {
-        return appError(kind, 'update install failed');
+  if (android) {
+    // Post-install receipt: a marker one release behind the running
+    // build proves the APK install actually landed (the OS sheet is
+    // fire-and-forget) — toast it, then stamp the marker forward.
+    // Cache survives updates; a cleared cache just re-stamps.
+    const marker = new File(Paths.cache, 'auqw-version');
+    try {
+      const seen = marker.exists ? marker.textSync().trim() : null;
+      if (seen !== null && seen !== currentVersion) {
+        notify(t('toast.updated', { version: currentVersion }));
       }
+      marker.write(currentVersion);
+    } catch {
+      // a lost marker is one missed toast, not a failed boot
     }
-    return appError('transient', 'update install failed');
-  }
-
-  async function install(artifact: UpdateArtifact): Promise<Result<void>> {
-    if (!artifact.url.startsWith(RELEASE_DOWNLOAD_PREFIX)) {
-      return err(
-        appError('invalid-response', 'artifact is not a repo release asset'),
-      );
-    }
-    const directory = new Directory(Paths.cache, 'auqw-update');
-    if (!directory.exists) {
-      directory.create({ intermediates: true, idempotent: true });
-    }
-    // Each release's APK has a fresh name — without the sweep every
-    // update leaves last release's artifact behind in app storage.
-    // Best-effort: a stubborn stale file never blocks the install.
-    for (const entry of directory.list()) {
-      if (entry.name !== artifact.name) {
-        try {
-          entry.delete();
-        } catch {
-          // stale-cache cleanup is housekeeping, not the install's job
-        }
-      }
-    }
-    const destination = new File(directory, artifact.name);
-    // downloadFileAsync rejects an existing destination — a retry of
-    // the SAME release (e.g. granted unknown-sources after
-    // 'needs-permission') must clear its own prior APK first.
-    if (destination.exists) {
-      destination.delete();
-    }
-    const file = await File.downloadFileAsync(artifact.url, destination);
-    const result = await AuqwExpo.installApk(file.uri);
-    return result.status === 'needs-permission'
-      ? err(appError('permission-denied', 'unknown-sources install blocked'))
-      : ok(undefined);
   }
 
   return {
@@ -121,24 +195,25 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
         : 'open';
     },
     act() {
-      const status = service.snapshot().status;
-      const url = status.state === 'available' ? status.url : UPDATE_RELEASES_PAGE;
+      const snapshot = service.snapshot();
+      const applyState = snapshot.apply.state;
+      // A live or settled apply ignores the affordance — cancel is
+      // the banner's own verb; 'applied' is terminal for the run.
+      if (applyState !== 'idle' && applyState !== 'failed') {
+        return;
+      }
+      const status = snapshot.status;
       if (status.state !== 'available' || status.artifact === null || !canInstall) {
+        const url =
+          status.state === 'available' ? status.url : UPDATE_RELEASES_PAGE;
         void Linking.openURL(url).catch(() => undefined);
         return;
       }
-      if (installing) {
-        return;
-      }
-      installing = true;
-      void install(status.artifact)
-        .then((result) => reportResult('update.action.install', result))
-        .catch((thrown: unknown) =>
-          reportResult('update.action.install', err(installError(thrown))),
-        )
-        .finally(() => {
-          installing = false;
-        });
+      // 'idle' starts the pipeline; 'failed' retries it.
+      service.apply();
+    },
+    cancel() {
+      service.cancelApply();
     },
   };
 }
