@@ -180,9 +180,10 @@ recording so reviewers see range pulls live.
 - The PRODUCT UI is stricter: `src/renderer/controller.ts` throws
   `'no plugin providers available'` when the plugin dir is empty → boot dies
   at `[ui] boot failed: internal` and nothing interactive ever renders.
-  Stage providers first (reads `providers.lock.json`):
+  Stage providers first — from the REPO ROOT (the script and
+  `providers.lock.json` are root-level):
   `node tooling/sync-plugins.mjs apps/desktop/plugins`
-  then `export AUQW_PLUGIN_DIR=$PWD/plugins` (from `apps/desktop`).
+  then `cd apps/desktop && export AUQW_PLUGIN_DIR=$PWD/plugins`.
   itunes/deezer/youtube-music/lyrics-lrclib all stage cleanly with outbound
   HTTPS.
 - youtube-music `playback.resolve` takes an 11-char video ID as `source_ref`
