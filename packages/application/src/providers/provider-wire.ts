@@ -309,11 +309,12 @@ const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,64}$/;
 /**
  * Wire `headers` → the resource's fetch headers, mirroring the
  * plugin-host decoder exactly: ≤16 entries, RFC 9110 token names ≤64
- * unique after lowercase-folding, values 1–512 chars of visible text
- * (0x20–0x7e | 0x80–0xff — the bound is then byte-exact since every
- * admitted char is a single byte). Absent/null → `{}`; any violation
- * poisons the whole resolve result, exactly as the native decoder's
- * `invalid-response`.
+ * unique after lowercase-folding, values 1–512 UTF-8 bytes of visible
+ * text (each byte 0x20–0x7e | 0x80–0xff). The native rule runs at the
+ * byte level: a codepoint below 0x80 must itself be printable ASCII;
+ * at ≥0x80 its whole UTF-8 encoding is all-≥0x80 bytes and admitted.
+ * Absent/null → `{}`; any violation poisons the whole resolve
+ * result, exactly as the native decoder's `invalid-response`.
  */
 function toMintHeaders(value: unknown): Record<string, string> | null {
   if (value === undefined || value === null) {
@@ -340,15 +341,24 @@ function toMintHeaders(value: unknown): Record<string, string> | null {
     if (typeof headerValue !== 'string' || headerValue.length === 0) {
       return null;
     }
-    // Byte-exact bound: admitted chars are ≤0xff, so each is one byte
-    // (ASCII) or two (0x80–0xff in UTF-8).
     let byteLen = 0;
     for (const ch of headerValue) {
       const code = ch.codePointAt(0) ?? 0;
-      if (code < 0x20 || code === 0x7f || code > 0xff) {
-        return null;
+      if (code < 0x80) {
+        // Single byte — must be visible ASCII (DEL excluded).
+        if (code < 0x20 || code === 0x7f) {
+          return null;
+        }
+        byteLen += 1;
+      } else {
+        // A lone surrogate can't encode — and can't arrive over the
+        // native JSON boundary either; reject rather than diverge.
+        if (code >= 0xd800 && code <= 0xdfff) {
+          return null;
+        }
+        // Every UTF-8 byte of a ≥0x80 codepoint is ≥0x80 — admitted.
+        byteLen += code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
       }
-      byteLen += code < 0x80 ? 1 : 2;
     }
     if (byteLen > 512) {
       return null;

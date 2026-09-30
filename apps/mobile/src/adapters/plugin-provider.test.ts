@@ -964,6 +964,17 @@ async function resolveHeaders(): Promise<void> {
       'x-ref': 'r',
     });
   }
+  // ≥0x80 codepoints encode to all-≥0x80 UTF-8 bytes — the native
+  // byte-level rule admits them; the TS decoder must agree.
+  for (const [label, headerValue] of [
+    ['2-byte char', 'Ā'],
+    ['4-byte char', '\u{1F3B5}'],
+    ['exactly 512 bytes', 'Ā'.repeat(256)],
+  ] as const) {
+    const host = new FakeHost();
+    const r = await succeed(host, { 'x-client': headerValue });
+    assert(r.ok, `unicode accepted: ${label}`);
+  }
 
   // Every malformed shape → invalid-response, like the native decoder.
   const rejected: readonly [string, unknown][] = [
@@ -975,7 +986,10 @@ async function resolveHeaders(): Promise<void> {
     ['empty value', { 'user-agent': '' }],
     ['non-string value', { 'user-agent': 7 }],
     ['control char', { 'user-agent': 'UA\r\nInjected: x' }],
+    ['DEL', { 'user-agent': 'UA\x7f' }],
+    ['lone surrogate', { 'user-agent': 'UA\ud800' }],
     ['over-long value', { 'user-agent': 'x'.repeat(513) }],
+    ['over 512 bytes multibyte', { 'user-agent': 'Ā'.repeat(257) }],
     ['over 16 entries', Object.fromEntries(
       Array.from({ length: 17 }, (_, i) => [`x-${i}`, 'v']),
     )],

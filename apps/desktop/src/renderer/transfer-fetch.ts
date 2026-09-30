@@ -66,6 +66,13 @@ export function createTransferFetch(
         // live response for a cancelled download.
         throw new DownloadFailure('cancelled', 'cancelled');
       }
+      // The policy only ever buffers a 206 body — anything else is
+      // status + headers for a re-mint verdict, so release the parked
+      // response now instead of holding its socket to the backstop.
+      const released = head.status !== 206;
+      if (released) {
+        void api.fetchAbort({ requestId }).catch(() => undefined);
+      }
       const headers = new Map(
         head.headers.map(([name, value]) => [name.toLowerCase(), value]),
       );
@@ -75,6 +82,12 @@ export function createTransferFetch(
           get: (name: string) => headers.get(name.toLowerCase()) ?? null,
         },
         arrayBuffer: async () => {
+          if (released) {
+            throw new DownloadFailure(
+              'invalid-response',
+              'non-206 response body was released',
+            );
+          }
           try {
             if (signal.cancelled) {
               throw new DownloadFailure('cancelled', 'cancelled');

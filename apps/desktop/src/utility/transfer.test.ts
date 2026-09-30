@@ -555,19 +555,24 @@ export async function run(): Promise<void> {
   const fetchRoot = mkdtempSync(join(tmpdir(), 'auqw-tfetch-'));
   try {
     const seen: { url: string; headers: HeadersInit | undefined }[] = [];
-    const scripted = new Map<string, Response>();
+    const scripted = new Map<
+      string,
+      Response | ((init?: RequestInit) => Response)
+    >();
     const fakeFetch = ((
       input: RequestInfo | URL,
       init?: RequestInit,
     ): Promise<Response> => {
       const url = String(input);
       seen.push({ url, headers: init?.headers });
-      const response = scripted.get(url);
-      if (response === undefined) {
+      const entry = scripted.get(url);
+      if (entry === undefined) {
         // Node's own transport failure is a TypeError.
         return Promise.reject(new TypeError('fetch failed'));
       }
-      return Promise.resolve(response);
+      return Promise.resolve(
+        typeof entry === 'function' ? entry(init) : entry,
+      );
     }) as typeof fetch;
     const svc = createTransferService({
       mediaDir: join(fetchRoot, 'media'),
@@ -703,6 +708,88 @@ export async function run(): Promise<void> {
     assert(
       !failed.ok && failed.error.kind === 'transient',
       'transport failure is retryable',
+    );
+
+    // Private/loopback literals refuse before any fetch is issued —
+    // minted urls are public CDN endpoints, so this bridge must not
+    // reach private https services past the renderer's CSP.
+    for (const target of [
+      'https://127.0.0.1/x',
+      'https://10.0.0.9/x',
+      'https://169.254.169.254/latest',
+      'https://192.168.1.1/x',
+      'https://172.16.0.1/x',
+      'https://localhost/x',
+      'https://[::1]/x',
+      'https://[fd00::1]/x',
+      'https://[::ffff:10.0.0.1]/x',
+    ]) {
+      const denied = await fetchCall(
+        CHANNELS.transferFetch,
+        argsFor('f-deny', target),
+      );
+      assert(
+        !denied.ok && denied.error.kind === 'invalid-request',
+        `private target refused: ${target}`,
+      );
+    }
+    // A redirect INTO a private host refuses at the hop.
+    scripted.set(
+      'https://cdn.example/private',
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://169.254.169.254/meta' },
+      }),
+    );
+    const privHop = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-priv', 'https://cdn.example/private'),
+    );
+    assert(
+      !privHop.ok && privHop.error.kind === 'invalid-response',
+      'redirect to a private host refused',
+    );
+    assert(
+      seen.every((entry) => !entry.url.includes('169.254')),
+      'no private fetch issued',
+    );
+
+    // A stalled body read stays abort-reachable: the entry and its
+    // backstop live through the read, so fetchAbort cancels the
+    // in-flight reader instead of finding nothing to abort.
+    scripted.set(
+      'https://cdn.example/stall',
+      (init) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start: (controller) => {
+              // Never enqueues — the stall the chunk timeout meets;
+              // undici ties the body to the request signal, so an
+              // abort errors the pending read the same way.
+              init?.signal?.addEventListener('abort', () => {
+                controller.error(new DOMException('aborted', 'AbortError'));
+              });
+            },
+          }),
+          { status: 206, headers: { 'content-range': 'bytes 0-3/8' } },
+        ),
+    );
+    const stalled = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-stall', 'https://cdn.example/stall'),
+    );
+    assert(stalled.ok);
+    const pendingBody = fetchCall(CHANNELS.transferFetchBody, {
+      requestId: 'f-stall',
+    });
+    const abortStall = await fetchCall(CHANNELS.transferFetchAbort, {
+      requestId: 'f-stall',
+    });
+    assert(abortStall.ok, 'abort reaches a mid-read body');
+    const stalledBody = await pendingBody;
+    assert(
+      !stalledBody.ok && stalledBody.error.kind === 'cancelled',
+      'mid-read abort surfaces cancelled',
     );
 
     // Aborting a parked response frees the requestId; unknown ids are

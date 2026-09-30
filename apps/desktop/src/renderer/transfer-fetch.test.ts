@@ -201,6 +201,37 @@ async function preCancelled(): Promise<void> {
   );
 }
 
+async function non206Releases(): Promise<void> {
+  // A 403/416 head is re-mint verdict — never read — so the parked
+  // response is aborted immediately instead of holding its socket.
+  const api = fakeApi({
+    head: { status: 403, headers: [] },
+  });
+  const fetch = createTransferFetch(api, new SequenceIds());
+  const source = new CancellationSource();
+  const response = await fetch(
+    'https://cdn.example/x',
+    { headers: {} },
+    source.signal,
+  );
+  assertEqual(response.status, 403);
+  assertDeepEqual(
+    api.calls,
+    ['fetch:fetch-1:https://cdn.example/x', 'fetchAbort:fetch-1'],
+    'non-206 head aborts the parked fetch',
+  );
+  try {
+    await response.arrayBuffer();
+    assert(false, 'must throw');
+  } catch (thrown) {
+    assert(
+      thrown instanceof DownloadFailure &&
+        thrown.kind === 'invalid-response',
+      'released body refuses a read',
+    );
+  }
+}
+
 async function bodyErrorMaps(): Promise<void> {
   const api = fakeApi({
     bodyError: shellError('invalid-response', 'oversize'),
@@ -229,5 +260,6 @@ export async function run(): Promise<void> {
   await shellErrorKinds();
   await callerCancelAborts();
   await preCancelled();
+  await non206Releases();
   await bodyErrorMaps();
 }

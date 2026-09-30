@@ -112,6 +112,9 @@ type LiveFetch = {
   readonly controller: AbortController;
   readonly timer: NodeJS.Timeout;
   response: Response | null;
+  /** `fetchBody` has been issued — no second read, but the entry stays
+   * registered so abort/backstop still reach the in-flight read. */
+  consumed: boolean;
   timedOut: boolean;
 };
 /** Reserved finalize-internal namespace: the parked incumbent of an
@@ -757,6 +760,77 @@ export function createTransferService(
   const fetches = new Map<string, LiveFetch>();
   const fetchImpl = options.fetchImpl ?? fetch;
 
+  /**
+   * Minted urls are public CDN endpoints — a fetch that names a
+   * private or loopback target is either a bug or a renderer trying
+   * to ride the bridge past its own CSP. Refuse literal private
+   * hosts; a hostile name resolved via public DNS is the residual
+   * hole every http client shares.
+   */
+  function isPrivateFetchHost(hostname: string): boolean {
+    const host = hostname.toLowerCase().replace(/\.$/, '');
+    if (host === 'localhost' || host.endsWith('.localhost')) {
+      return true;
+    }
+    const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+    if (v4 !== null) {
+      const octets = v4.slice(1).map(Number);
+      const [a, b] = [octets[0] ?? 0, octets[1] ?? 0];
+      return (
+        octets.every((o) => o <= 255) &&
+        (a === 0 ||
+          a === 10 ||
+          a === 127 ||
+          (a === 100 && b >= 64 && b <= 127) ||
+          (a === 169 && b === 254) ||
+          (a === 172 && b >= 16 && b <= 31) ||
+          (a === 192 && b === 168) ||
+          (a === 198 && (b === 18 || b === 19)) ||
+          a >= 224)
+      );
+    }
+    // `new URL` returns IPv6 literals bracketed.
+    const inner = host.startsWith('[') ? host.slice(1, -1) : host;
+    if (inner === '::1' || inner === '::') {
+      return true;
+    }
+    // fe80::/10 link-local — first hextet fe80–febf.
+    const firstHextet = parseInt(inner.split(':')[0] ?? '', 16);
+    if (
+      !Number.isNaN(firstHextet) &&
+      firstHextet >= 0xfe80 &&
+      firstHextet <= 0xfebf
+    ) {
+      return true;
+    }
+    if (
+      !Number.isNaN(firstHextet) &&
+      firstHextet >= 0xfc00 &&
+      firstHextet <= 0xfdff
+    ) {
+      return true; // ULA fc00::/7
+    }
+    if (inner.startsWith('::ffff:')) {
+      // IPv4-mapped — last 32 bits decide.
+      const tail = inner.slice('::ffff:'.length);
+      const mappedV4 =
+        /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(tail);
+      if (mappedV4 !== null) {
+        return isPrivateFetchHost(tail);
+      }
+      const groups = tail.split(':');
+      const hex = groups
+        .map((g) => parseInt(g, 16))
+        .filter((n) => !Number.isNaN(n));
+      if (hex.length >= 2) {
+        const a = (hex[hex.length - 2] ?? 0) >> 8;
+        const b = (hex[hex.length - 2] ?? 0) & 0xff;
+        return isPrivateFetchHost(`${a}.${b}.0.0`);
+      }
+    }
+    return false;
+  }
+
   function parseFetchUrl(raw: string): URL {
     let url: URL;
     try {
@@ -767,6 +841,9 @@ export function createTransferService(
     // Same belt as the policy's fetch site: minted urls are https only.
     if (url.protocol !== 'https:') {
       throw shellError('invalid-request', 'fetch url must be https');
+    }
+    if (isPrivateFetchHost(url.hostname)) {
+      throw shellError('invalid-request', 'fetch url is not public');
     }
     return url;
   }
@@ -805,6 +882,7 @@ export function createTransferService(
         live.controller.abort();
       }, FETCH_HARD_TIMEOUT_MS),
       response: null,
+      consumed: false,
       timedOut: false,
     };
     fetches.set(args.requestId, live);
@@ -843,6 +921,12 @@ export function createTransferService(
             'fetch redirected off https',
           );
         }
+        if (isPrivateFetchHost(next.hostname)) {
+          throw shellError(
+            'invalid-response',
+            'fetch redirected to a non-public host',
+          );
+        }
         target = next;
         // Drop the hop's body before following so its socket frees.
         void response.body?.cancel().catch(() => undefined);
@@ -877,13 +961,17 @@ export function createTransferService(
 
   async function fetchBody(args: TransferFetchIdArgs): Promise<unknown> {
     const live = fetches.get(args.requestId);
-    if (live === undefined || live.response === null) {
+    if (
+      live === undefined ||
+      live.response === null ||
+      live.consumed
+    ) {
       throw shellError('invalid-request', 'unknown or consumed fetch');
     }
-    // Single-use: consumed now, so a second pull or an abort fails
-    // instead of double-reading the stream.
-    fetches.delete(args.requestId);
-    clearTimeout(live.timer);
+    // Single-use by flag, not by deletion: the entry and its backstop
+    // stay registered for the whole read — a mid-read stall keeps a
+    // socket `fetchAbort` (or the timeout) can still cancel.
+    live.consumed = true;
     const response = live.response;
     try {
       const reader = response.body?.getReader();
@@ -909,6 +997,9 @@ export function createTransferService(
       return { data: Buffer.concat(parts).toString('base64') };
     } catch (thrown) {
       asFetchError(live, thrown);
+    } finally {
+      fetches.delete(args.requestId);
+      clearTimeout(live.timer);
     }
   }
 
