@@ -287,3 +287,55 @@ unchanged before flagging).
 - **Process-death resume**: `adb shell am force-stop com.vehicoule.auqw` mid-authorizing → cold relaunch → row still 'working...' → sheet shows same code (pendingFlow survived in expo-secure-store).
 - **Cold-boot recovery**: if the emulator is down — `DISPLAY=:0 emulator -avd auqw -no-snapshot-save -gpu swiftshader_indirect` + `adb wait-for-device` + wait for `sys.boot_completed`.
 - **Debug ↔ release installs**: both variants share the debug signing key — `adb install -r` between them preserves app data.
+
+## Native bindings .so missing → build it (post-#215)
+
+'couldn't start' with `UnsatisfiedLinkError: libauqw_mobile_bindings.so`
+means `modules/auqw-expo/android/src/main/jniLibs/` was never populated
+and no sibling worktree exists to copy from. Build instead:
+
+```bash
+rustup target add x86_64-linux-android          # once per box
+AUQW_ANDROID_ABIS=x86_64 \
+ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/30.0.16248370 \
+  bash tooling/build-android-bindings.sh        # ~2-4 min cold
+cd apps/mobile/android && ./gradlew assembleDebug  # incremental ~10 s
+adb install -r app/build/outputs/apk/debug/app-x86_64-debug.apk
+```
+
+## sync-plugins: sibling releases can lag origin/main (post-#215)
+
+`pnpm sync-plugins` fails `ENOENT ... releases/<plugin>/<pinned>` when
+`~/repos/Auqw-plugins` is behind the lock's pinned version. Stage the
+pinned dirs without switching that repo's branch:
+
+```bash
+git -C ~/repos/Auqw-plugins fetch
+git -C ~/repos/Auqw-plugins checkout origin/main -- releases/<plugin>/<version>
+pnpm sync-plugins
+```
+
+## Local recordings + stage-sheet tricks (post-#215)
+
+- `auqw://local-add` imports surface in **search**, not library rows —
+  library `items` renders likes only (`toLibraryModel`). Imported rows
+  appear in search results as `local:<id>` keys with a `local ·` prefix
+  note and play fully offline.
+- `auqw://open?tab=queue` expands the stage sheet directly into QUEUE
+  mode — skips the flaky mini-player tap/morph; then tap the `player`
+  segment to reach transport + the `add to playlist` icon (top-right of
+  metadata). Fire `auqw://pause` right after starting short probe
+  tracks so the mini player stays alive during multi-step flows.
+- `add to playlist` → 'new playlist' dashed row → `input text <name>` +
+  `keyevent 66` submits.
+- `wmctrl -b add,maximized_*` is ignored by the emulator window —
+  resize explicitly: `wmctrl -i -r <winid> -e 0,10,30,430,710`.
+
+## Persistence ground truth (post-#215)
+
+Settings → DIAGNOSTICS → `persistence` row reads ok/degraded/failed
+straight from `state.persistenceError` — the on-screen verdict for
+silent write failures (dead-driver class). `attempt trace` shows
+`lf-req-N` local resolves. Cross-check with collection tiles
+(liked/downloads/top 50/history counts, tap for rows) and
+`[journey] local-add …` / `rescan <id>: +added` logcat lines.
