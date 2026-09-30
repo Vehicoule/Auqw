@@ -17,6 +17,7 @@ import {
   resolveLocale,
   setLocale,
   settingsGroups,
+  settingsRowConfirms,
   t,
   toAuthSheetModel,
   toHomeModel,
@@ -1486,6 +1487,24 @@ const tap = (s: string) => {
   assertEqual(
     signedIn.rows.find((r) => r.key === 'authClientId')?.value,
     'custom-id',
+  );
+
+  // settingsRowConfirms — both ports gate their two-tap arm on it.
+  assert(
+    settingsRowConfirms(signOutRow!),
+    'destructive value row arms a confirm',
+  );
+  const themeRow = settingsGrouped.rows.find((r) => r.key === 'theme');
+  assert(themeRow !== undefined, 'theme row missing');
+  assert(
+    !settingsRowConfirms(themeRow),
+    'non-destructive row fires directly',
+  );
+  const toggleRow = settingsGrouped.rows.find((r) => r.kind === 'toggle');
+  assert(toggleRow !== undefined, 'toggle row missing');
+  assert(
+    !settingsRowConfirms({ ...toggleRow!, destructive: true }),
+    'a destructive toggle still fires directly',
   );
 }
 

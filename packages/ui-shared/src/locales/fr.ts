@@ -98,6 +98,8 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'queue.title': "file d'attente",
   'queue.count': { one: '{count} titre', other: '{count} titres' },
   'queue.empty': 'la file est vide',
+  'queue.emptyHint':
+    "ajoute des titres via l'action d'ajout à la file de n'importe quelle ligne",
   'queue.nowPlaying': 'lecture en cours',
   'queue.upNext': 'à suivre',
   'queue.history': 'historique',

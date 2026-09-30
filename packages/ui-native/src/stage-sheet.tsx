@@ -1402,7 +1402,11 @@ export function StageSheet({
             // No list to scroll — the pane is drag chrome.
             <GestureDetector gesture={queueChromePan}>
               <View style={{ flex: 1 }}>
-                <EmptyState title={t('queue.empty')} icon="queue" />
+                <EmptyState
+                  title={t('queue.empty')}
+                  hint={t('queue.emptyHint')}
+                  icon="queue"
+                />
               </View>
             </GestureDetector>
           ) : (

@@ -99,6 +99,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'queue.title': '队列',
   'queue.count': '{count} 首',
   'queue.empty': '队列为空',
+  'queue.emptyHint': '通过任意行的“加入队列”操作添加曲目',
   'queue.nowPlaying': '正在播放',
   'queue.upNext': '接下来',
   'queue.history': '播放历史',

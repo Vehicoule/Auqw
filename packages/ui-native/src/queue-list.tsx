@@ -112,7 +112,13 @@ export function QueueList({
     },
   );
   if (queue.items.length === 0) {
-    return <EmptyState title={t('queue.empty')} icon="queue" />;
+    return (
+      <EmptyState
+        title={t('queue.empty')}
+        hint={t('queue.emptyHint')}
+        icon="queue"
+      />
+    );
   }
   // Display order (nowPlaying → upNext → history) is the order the
   // session's move contract indexes — under shuffle it is the dealt

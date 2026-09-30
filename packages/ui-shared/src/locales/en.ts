@@ -98,6 +98,7 @@ export const en = {
   'queue.title': 'queue',
   'queue.count': { one: '{count} track', other: '{count} tracks' },
   'queue.empty': 'queue is empty',
+  'queue.emptyHint': "add tracks from any row's add-to-queue action",
   'queue.nowPlaying': 'now playing',
   'queue.upNext': 'up next',
   'queue.history': 'history',

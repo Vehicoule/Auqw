@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { CapsLabel, DiagPressRow, Hairline, Icon, Pressable, Text } from './primitives.tsx';
 import { focusTargetAfterRemoval } from './settings-focus.ts';
-import { settingsGroups, t } from '@auqw/ui-shared';
+import { settingsGroups, settingsRowConfirms, t } from '@auqw/ui-shared';
 import type {
   SettingsModel,
   SettingsRowModel,
@@ -177,7 +177,7 @@ function SettingsRow({
   const label = `${row.label}${row.value === null ? '' : `, ${row.value}`}`;
   // Destructive rows confirm in place — the playlist delete's two-tap:
   // the first press arms, the armed slot splits into commit + cancel.
-  const confirms = row.destructive === true && row.kind !== 'toggle';
+  const confirms = settingsRowConfirms(row);
   // Arm state must not outlive the row it was armed on — a re-rendered
   // (disabled, rekeyed) row silently drops any pending confirm.
   useEffect(() => {

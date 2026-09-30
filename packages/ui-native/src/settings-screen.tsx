@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import {
@@ -7,7 +8,7 @@ import {
   Pressable,
   Text,
 } from './primitives.tsx';
-import { settingsGroups, t } from '@auqw/ui-shared';
+import { settingsGroups, settingsRowConfirms, t } from '@auqw/ui-shared';
 import type { SettingsModel, SettingsRowModel } from '@auqw/ui-shared';
 
 export type SettingsScreenProps = {
@@ -62,6 +63,68 @@ function SettingsRow({
   readonly onToggleRow?: ((key: string) => void) | undefined;
 }) {
   const theme = useTheme();
+  const [armed, setArmed] = useState(false);
+  const interactive =
+    row.kind === 'toggle'
+      ? onToggleRow !== undefined
+      : onSelectRow !== undefined;
+  // Destructive rows confirm in place — the playlist delete's
+  // two-tap: the first press arms, the armed slot splits into
+  // commit + cancel (same rule the web port renders).
+  const confirms = settingsRowConfirms(row);
+  // Arm state must not outlive the row it was armed on — a
+  // re-rendered (disabled, rekeyed) row drops any pending confirm.
+  useEffect(() => {
+    if (!confirms || !interactive || !row.enabled) {
+      setArmed(false);
+    }
+  }, [confirms, interactive, row.enabled, row.key]);
+  if (armed && interactive) {
+    const confirmLabel = t('settings.confirmAction', {
+      action: row.label,
+    });
+    return (
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          // A long translated label or folder name wraps instead of
+          // pushing cancel past the card's clipped edge.
+          flexWrap: 'wrap',
+          minHeight: theme.sizes.touch,
+          paddingHorizontal: theme.spacing.screen,
+          gap: theme.spacing.xl,
+        }}
+      >
+        <Pressable
+          onPress={() => {
+            setArmed(false);
+            onSelectRow?.(row.key);
+          }}
+          accessibilityLabel={confirmLabel}
+          accessibilityRole="button"
+          style={({ pressed }) => [
+            { flexShrink: 1 },
+            pressed && { opacity: 0.6 },
+          ]}
+        >
+          <Text variant="body" color="warn">
+            {confirmLabel}
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() => setArmed(false)}
+          accessibilityLabel={t('common.cancel')}
+          accessibilityRole="button"
+          style={({ pressed }) => [pressed && { opacity: 0.6 }]}
+        >
+          <Text variant="body" color="secondary">
+            {t('common.cancel')}
+          </Text>
+        </Pressable>
+      </View>
+    );
+  }
   // `enabled` is the toggle's checked state (kind 'toggle') and the
   // disabled flag on every other kind — an off navigation/value row
   // renders visibly inert, never a live control that dead-presses.
@@ -69,9 +132,13 @@ function SettingsRow({
   return (
     <Pressable
       onPress={
-        row.kind === 'toggle'
-          ? bind(onToggleRow, row.key)
-          : bind(onSelectRow, row.key)
+        !interactive
+          ? undefined
+          : row.kind === 'toggle'
+            ? bind(onToggleRow, row.key)
+            : confirms
+              ? () => setArmed(true)
+              : bind(onSelectRow, row.key)
       }
       disabled={row.kind !== 'toggle' && !row.enabled}
       accessibilityLabel={`${row.label}${row.value === null ? '' : `, ${row.value}`}`}

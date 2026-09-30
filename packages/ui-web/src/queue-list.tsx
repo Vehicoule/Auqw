@@ -225,7 +225,13 @@ export function QueueList({
     }
   }, [queue.items, list, useAbsolute, onMoveItem]);
   if (queue.items.length === 0) {
-    return <EmptyState title={t('queue.empty')} icon="queue" />;
+    return (
+      <EmptyState
+        title={t('queue.empty')}
+        hint={t('queue.emptyHint')}
+        icon="queue"
+      />
+    );
   }
   const canReorder = onMoveItem !== undefined || onMoveItemTo !== undefined;
   const orderedIds = pendingIds.current ?? displayIds;

@@ -47,6 +47,7 @@ const {
   NowPlayingScreen,
   PairingSheet,
   PlaylistScreen,
+  PushScreen,
   QueueScreen,
   RowActionsSheet,
   SearchScreen,
@@ -549,6 +550,10 @@ function render(node: ReactNode): string {
     }),
   );
   check('expanded stage sheet mounts', expanded.includes('role="dialog"'));
+  check(
+    'expanded stage sheet takes focus on mount',
+    expanded.includes('tabindex="-1"'),
+  );
   const collapsed = render(
     h(StageSheet, {
       player: fixturePlayerPlaying,
@@ -557,6 +562,35 @@ function render(node: ReactNode): string {
     }),
   );
   check('collapsed stage sheet unmounts', !collapsed.includes('role="dialog"'));
+}
+{
+  const markup = render(
+    h(PushScreen, {
+      stackKey: 'entity',
+      onDismissed: () => {},
+      children: h('div'),
+    }),
+  );
+  check('push host renders', markup.includes('uw-push'));
+  check(
+    'push host takes focus on mount',
+    markup.includes('tabindex="-1"'),
+  );
+}
+{
+  const emptyQueue = toQueueModel({
+    queue: { ...fixtureQueue, occurrences: [], currentOccurrenceId: null },
+    recordings: fixtureRecordings,
+    likes: fixtureLikes,
+    unavailableRecordingIds: fixtureUnavailableIds,
+  });
+  const markup = render(h(QueueScreen, { queue: emptyQueue }));
+  assertIncludes('empty queue state renders', markup, 'queue is empty');
+  assertIncludes(
+    'empty queue points at the next action',
+    markup,
+    'add-to-queue action',
+  );
 }
 
 // ---- markup: search ------------------------------------------------------------
