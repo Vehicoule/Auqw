@@ -562,6 +562,7 @@ export const fixturePlayerPlaying: PlayerModel = {
   canPrevious: false,
   canNext: true,
   errorMessage: null,
+  recovery: null,
 };
 
 export const fixturePlayerPaused: PlayerModel = {

@@ -199,6 +199,25 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'sheets.autoClear': 'automatisch — der systemsprache folgen',
   'sheets.closeA11y': 'dialog schließen',
 
+  'auth.sheet.title': 'google-anmeldung',
+  'auth.sheet.intro':
+    'google-konto verknüpfen — die wiedergabe läuft weiter, wenn der anbieter anonyme sitzungen blockt',
+  'auth.sheet.starting': 'anmeldecode wird geholt…',
+  'auth.sheet.codeHint': 'diesen code auf der geöffneten seite eingeben',
+  'auth.sheet.waiting': 'warte auf deine freigabe…',
+  'auth.sheet.copyCode': 'code kopieren',
+  'auth.sheet.copied': 'kopiert',
+  'auth.sheet.openLink': 'google.com/device öffnen',
+  'auth.sheet.linked':
+    'konto verknüpft — die wiedergabe nutzt es, wenn der anbieter anonyme sitzungen blockt',
+  'auth.sheet.signOut': 'abmelden',
+  'auth.sheet.retry': 'erneut versuchen',
+  'auth.clientId.title': 'oauth-client-id',
+  'auth.clientId.placeholder': 'client-id — leer setzt auf standard zurück',
+  'auth.clientId.clear': 'auf den eingebauten client zurücksetzen',
+  'auth.wall.cta': 'anmelden, um die wiedergabe zu reparieren',
+  'auth.wall.ctaA11y': 'anmelden, um die wiedergabe zu reparieren',
+
   // ---- entity screen ------------------------------------------------------
   'entity.kind.playlist': 'playlist',
   'entity.kind.album': 'album',
@@ -419,6 +438,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'settings.heading.sync': 'sync',
   'settings.section.appearance': 'darstellung',
   'settings.section.providers': 'anbieter',
+  'settings.section.account': 'konto',
   'settings.section.playback': 'wiedergabe',
   'settings.section.downloads': 'downloads',
   'settings.section.localFiles': 'lokale dateien',
@@ -441,6 +461,12 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'settings.lyricsProvider': 'songtext-anbieter',
   'settings.radioProvider': 'radio-anbieter',
   'settings.storefront': 'storefront',
+  'settings.googleAuth': 'google-anmeldung',
+  'settings.googleAuthValue.linked': 'verknüpft',
+  'settings.googleAuthValue.working': 'läuft…',
+  'settings.googleAuthValue.failed': 'fehlgeschlagen — tippen zum wiederholen',
+  'settings.googleAuthSignOut': 'von google abmelden',
+  'settings.authClientId': 'oauth-client-id',
   'settings.quality': 'qualität',
   'settings.prefetch': 'vorladen',
   'settings.downloadMetered': 'downloads über mobilfunk',
@@ -553,6 +579,10 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'action.cancelDownload': 'download abbrechen',
   'action.openAlbum': 'album öffnen',
   'action.openArtist': 'künstler öffnen',
+  'action.signInGoogle': 'google-anmeldung',
+  'action.signOutGoogle': 'google-abmeldung',
+  'action.authClientId': 'oauth-client-id speichern',
+  'action.clearAuthClientId': 'oauth-client-id zurücksetzen',
 
   // ---- picker option details ---------------------------------------------
   'optionDetail.default': 'standard',

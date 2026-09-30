@@ -14,6 +14,7 @@ import {
 } from '@auqw/application';
 import type {
   AppError,
+  AuthSnapshot,
   CancellationSignal,
   DownloadManager,
   DownloadRecord,
@@ -73,6 +74,34 @@ export type ExportWrite =
 /** Platform seams + the genuine behavior divergences. Every member is
     optional unless noted; an absent flag takes the documented
     default. */
+/**
+ * OAuth session trust — the platform's custody/exchange seam exposed
+ * to the shell as status snapshots + verbs. Token material never
+ * crosses it: the sign-in sheet renders `userCode`/`verificationUrl`
+ * (the user-facing pair) and nothing else leaves the platform side.
+ * `copyText`/`openUrl` ride this port rather than a generic platform
+ * seam because the sheet is their only consumer.
+ */
+export interface AuthShellPort {
+  /** The latest snapshot — stable ref between publishes. */
+  snapshot(): AuthSnapshot;
+  /** Change feed — drives the sheet + the signed-in settings row. */
+  subscribe(listener: () => void): () => void;
+  /** Start a device flow — duplicate calls while live are no-ops. */
+  beginSignIn(): void;
+  /** Sheet dismissal — cancels an in-flight poll, resets 'failed'. */
+  cancelSignIn(): void;
+  /** Drops the grant: custody, host slot, memory. */
+  signOut(): Promise<Result<void>>;
+  /** Forces an immediate renewal attempt — the linked-but-dead
+   *  recovery affordance a wall CTA can offer without a sign-out. */
+  retryNow(): void;
+  /** The advanced client_id override — null restores the default. */
+  setClientOverride(clientId: string | null): Promise<Result<void>>;
+  copyText(text: string): void;
+  openUrl(url: string): void;
+}
+
 export interface AppShellPorts<E> {
   /**
    * Connectivity edge stream — REQUIRED. Desktop:
@@ -246,6 +275,13 @@ export interface AppShellPorts<E> {
     json: string,
     name: string,
   ) => Promise<ExportWrite>;
+
+  /**
+   * OAuth session trust — present on both apps; absent only in
+   * reduced/test harnesses, where the sign-in row and the wall CTA
+   * omit themselves.
+   */
+  readonly auth?: AuthShellPort | undefined;
 }
 
 export interface AppShellDeps<E = never> {

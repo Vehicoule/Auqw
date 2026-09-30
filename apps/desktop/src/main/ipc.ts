@@ -5,6 +5,8 @@ import type {
   PickFolderArgs,
 } from '../shared/contract.ts';
 import {
+  isAuthOpenUrlArgs,
+  isAuthSetClientArgs,
   isLocalAddArgs,
   isLocalProbeArgs,
   isLocalReadArgs,
@@ -105,6 +107,17 @@ export interface ChannelDeps {
     readonly attach: (sender: NetSender) => void;
     readonly detach: (sender: NetSender) => void;
   };
+  /** `auth:state` push registry — same refcounted sender pattern. */
+  readonly authState: {
+    readonly attach: (sender: NetSender) => void;
+    readonly detach: (sender: NetSender) => void;
+  };
+  /**
+   * The device-flow verification URL — main-side `shell.openExternal`
+   * behind a google.com allowlist (the renderer's CSP can't open
+   * externals itself).
+   */
+  readonly openUrl: (url: string) => Promise<void>;
   readonly pickFolder: (
     args: PickFolderArgs,
     sender: NetSender,
@@ -336,6 +349,20 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
   fwd(CHANNELS.localList, noArgs),
   fwd(CHANNELS.localPlayback, noArgs),
   fwd(CHANNELS.localSweep, noArgs),
+  // OAuth session trust — the utility's auth service owns the device
+  // flow, custody, and refresh; these forward verbatim.
+  fwd(CHANNELS.authStatus, noArgs),
+  fwd(CHANNELS.authBegin, noArgs),
+  fwd(CHANNELS.authCancel, noArgs),
+  fwd(CHANNELS.authSignOut, noArgs),
+  fwd(CHANNELS.authSetClient, isAuthSetClientArgs),
+  fwd(CHANNELS.authRetry, noArgs),
+  // The verification-URL open stays in main — the utility owns no
+  // shell.openExternal, and the allowlist lives at the dep.
+  [
+    CHANNELS.authOpenUrl,
+    channel(isAuthOpenUrlArgs, (args, deps) => deps.openUrl(args.url)),
+  ],
 ];
 
 /**
@@ -574,6 +601,11 @@ export function registerChannels(
       CHANNELS.syncNearbySubscribe,
       CHANNELS.syncNearbyUnsubscribe,
       deps.syncNearby,
+    ],
+    [
+      CHANNELS.authSubscribe,
+      CHANNELS.authUnsubscribe,
+      deps.authState,
     ],
   ];
   for (const [sub, unsub, registry] of subscriptions) {

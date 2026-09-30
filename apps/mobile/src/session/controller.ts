@@ -258,6 +258,12 @@ export type SessionController = {
    */
   setPotProvider(url: string | null): void;
   /**
+   * Live OAuth access-token update — the host merges it into every
+   * session-trust payload; `null` clears the slot and restores the
+   * anonymous ladder. Sync (UniFFI binding) — never awaited.
+   */
+  setAuthToken(token: string | null): void;
+  /**
    * Post-restore bring-up: loads persisted state once more, builds
    * the local source over it, and inits the download ledger. Call
    * after `session.restore()` — storage commits must not interleave
@@ -620,6 +626,10 @@ export async function createSessionController(
     // function — the provider keeps its boot value rather than
     // crashing the sync-status effect that calls this.
     setPotProvider: (url) => host.setPotProvider?.(url),
+    // A stale native module predating the auth seam has no such
+    // function — applyToken treats the absence like setPotProvider
+    // does: the host keeps its boot (anonymous) slot.
+    setAuthToken: (token) => host.setAuthToken?.(token),
     async start(signal) {
       // Post-restore reconcile: persisted slots name ids picked under
       // an earlier bundle or synced from a peer — repick any slot whose

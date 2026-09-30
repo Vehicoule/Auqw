@@ -1358,6 +1358,56 @@ export const isLocalSweepResult = v.object({
   ),
 });
 
+// ------------------------------------------------------------------
+// auth:* — OAuth session-trust surface. The renderer sees status
+// snapshots and verbs only; refresh/access tokens never cross this
+// boundary (custody + token exchange live in utility/main).
+// ------------------------------------------------------------------
+
+const isAuthStatusPayload = v.union(
+  v.object({ state: v.literal('signed-out') }),
+  v.object({ state: v.literal('starting') }),
+  v.object({
+    state: v.literal('authorizing'),
+    userCode: v.boundedString(64),
+    verificationUrl: v.boundedString(512),
+    expiresAtMs: v.finite(),
+  }),
+  v.object({ state: v.literal('signed-in') }),
+  v.object({
+    state: v.literal('failed'),
+    error: v.object({
+      kind: v.boundedString(64),
+      message: v.boundedString(1024),
+      retryable: v.boolean(),
+      retryAfterMs: v.optional(v.finite()),
+    }),
+  }),
+);
+
+/** `auth:status` reply + `auth:state` push payload. */
+export const isAuthSnapshot = v.object({
+  status: isAuthStatusPayload,
+  /** The user-supplied client_id override — null = built-in default. */
+  clientId: v.nullable(v.boundedString(512)),
+  /** Live access token in the host slot — signed-in && false = dead link. */
+  bearerLive: v.boolean(),
+});
+
+export type AuthSnapshotPayload = v.Guarded<typeof isAuthSnapshot>;
+
+export type AuthSetClientArgs = v.Guarded<typeof isAuthSetClientArgs>;
+
+export const isAuthSetClientArgs = v.object({
+  clientId: v.nullable(v.boundedString(512)),
+});
+
+export type AuthOpenUrlArgs = v.Guarded<typeof isAuthOpenUrlArgs>;
+
+export const isAuthOpenUrlArgs = v.object({
+  url: v.boundedString(2048),
+});
+
 /**
  * The `window.auqw` surface the preload exposes. Every method resolves
  * with a validated payload and rejects with a `ShellError`-shaped value.
@@ -1480,6 +1530,27 @@ export type AuqwApi = {
     readonly list: () => Promise<LocalListResult>;
     readonly playback: () => Promise<LocalPlaybackResult>;
     readonly sweep: () => Promise<LocalSweepResult>;
+  };
+  /**
+   * OAuth session trust — status snapshots + flow verbs only. Token
+   * material never crosses: custody lives in main's sealed store and
+   * the token exchange runs in the utility process.
+   */
+  readonly auth: {
+    readonly status: () => Promise<AuthSnapshotPayload>;
+    readonly begin: () => Promise<void>;
+    readonly cancel: () => Promise<void>;
+    readonly signOut: () => Promise<void>;
+    /** The advanced client_id override — null restores the default. */
+    readonly setClient: (clientId: string | null) => Promise<void>;
+    /** Forces an immediate renewal attempt — the linked-but-dead
+     *  recovery affordance. */
+    readonly retry: () => Promise<void>;
+    /** Opens the device-flow verification URL — allowlisted in main. */
+    readonly openUrl: (url: string) => Promise<void>;
+    readonly onState: (
+      listener: (snapshot: AuthSnapshotPayload) => void,
+    ) => () => void;
   };
 };
 

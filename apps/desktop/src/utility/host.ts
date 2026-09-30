@@ -71,6 +71,13 @@ export type PluginHostLike = {
    * running host. `null` restores anonymous resolves.
    */
   setPotProvider(url: string | null): void;
+  /**
+   * napi `set_auth_token(&self, token: Option<String>)` — the access
+   * token merges into every session-trust payload; `null` (and any
+   * off-contract value) clears the slot, restoring the anonymous
+   * ladder. The bearer itself never crosses the renderer.
+   */
+  setAuthToken(token: string | null): void;
 };
 
 /** Fuel budgets match the mobile host's values (200M/entry, 2G total). */
@@ -218,6 +225,13 @@ export function createHostRuntime(opts: {
    * `AUQW_POT_PROVIDER_URL` wins over it when set.
    */
   potProviderUrl?: () => string | null;
+  /**
+   * Live OAuth access token for session-trust payloads — a thunk so a
+   * token minted before the bindings loaded still reaches the
+   * PluginHost constructor (the utility restores custody before the
+   * first stream call forces a host load).
+   */
+  authToken?: () => string | null;
 }): {
   host(): PluginHostLike;
   /**
@@ -266,6 +280,7 @@ export function createHostRuntime(opts: {
         (envPotUrl !== undefined && envPotUrl.trim() !== ''
           ? envPotUrl
           : opts.potProviderUrl?.()) ?? undefined;
+      const authToken = opts.authToken?.();
       host = new mod.PluginHost({
         fuelPerEntry: FUEL_PER_ENTRY,
         fuelTotal: FUEL_TOTAL,
@@ -277,6 +292,11 @@ export function createHostRuntime(opts: {
         prefer: ['audio/webm', 'audio/mp4'],
         ...(potUrl !== undefined && potUrl !== ''
           ? { potProviderUrl: potUrl }
+          : {}),
+        // A token restored before this lazy load rides the constructor
+        // — live updates go through setAuthToken instead.
+        ...(authToken !== undefined && authToken !== null
+          ? { authToken }
           : {}),
       });
       bindingsError = undefined;

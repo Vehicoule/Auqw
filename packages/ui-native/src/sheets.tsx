@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ScrollView, TextInput, useWindowDimensions, View } from 'react-native';
 import { useTheme } from './theme.tsx';
@@ -6,6 +6,7 @@ import { Artwork, bind, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { t } from '@auqw/ui-shared';
 import type {
+  AuthSheetModel,
   LanguageOption,
   ProviderPickerOption,
 } from '@auqw/ui-shared';
@@ -503,6 +504,200 @@ export function AddToPlaylistSheet({
             {t('common.newPlaylist')}
           </Text>
         </SheetRow>
+      )}
+    </SheetScaffold>
+  );
+}
+
+/**
+ * OAuth device-flow sheet — mirrors the web AuthSheet; the shared
+ * shell drives the poll and this renders the status union. Dismissal
+ * is the caller's cancel — no flow state lives here.
+ */
+export function AuthSheet({
+  model,
+  onCopyCode,
+  onOpenLink,
+  onRetry,
+  onSignOut,
+  onDismiss,
+}: {
+  readonly model: AuthSheetModel;
+  readonly onCopyCode?: ((code: string) => void) | undefined;
+  readonly onOpenLink?: ((url: string) => void) | undefined;
+  readonly onRetry?: (() => void) | undefined;
+  readonly onSignOut?: (() => void) | undefined;
+  readonly onDismiss?: (() => void) | undefined;
+}) {
+  const theme = useTheme();
+  const code = model.userCode;
+  const [copied, setCopied] = useState(false);
+  useEffect(() => setCopied(false), [code]);
+  useEffect(() => {
+    if (!copied) {
+      return;
+    }
+    const timer = setTimeout(() => setCopied(false), 1_500);
+    return () => clearTimeout(timer);
+  }, [copied]);
+  return (
+    <SheetScaffold title={t('auth.sheet.title')} onDismiss={onDismiss}>
+      {model.state === 'signed-out' && (
+        <Text variant="body" color="secondary">
+          {t('auth.sheet.intro')}
+        </Text>
+      )}
+      {model.state === 'starting' && (
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: theme.spacing.md,
+            minHeight: theme.sizes.touch,
+          }}
+        >
+          <Icon name="spinner" size={15} color={theme.colors.accent} />
+          <Text variant="body" color="secondary">
+            {t('auth.sheet.starting')}
+          </Text>
+        </View>
+      )}
+      {model.state === 'authorizing' && (
+        <>
+          <Text variant="body" color="secondary">
+            {t('auth.sheet.codeHint')}
+          </Text>
+          {code !== null && (
+            <View
+              accessibilityLabel={code}
+              style={{
+                alignItems: 'center',
+                paddingVertical: theme.spacing.md,
+                borderRadius: theme.radius.float,
+                backgroundColor: theme.colors.fg08,
+              }}
+            >
+              <Text
+                variant="heading"
+                color="bright"
+                style={{ letterSpacing: 2, fontVariant: ['tabular-nums'] }}
+              >
+                {code}
+              </Text>
+            </View>
+          )}
+          {code !== null && onCopyCode !== undefined && (
+            <SheetRow
+              onPress={() => {
+                onCopyCode(code);
+                setCopied(true);
+              }}
+              accessibilityLabel={t('auth.sheet.copyCode')}
+            >
+              <Icon
+                name={copied ? 'check' : 'note'}
+                size={15}
+                color={
+                  copied ? theme.colors.accent : theme.colors.textSecondary
+                }
+              />
+              <Text
+                variant="body"
+                color={copied ? 'accent' : 'primary'}
+              >
+                {copied ? t('auth.sheet.copied') : t('auth.sheet.copyCode')}
+              </Text>
+            </SheetRow>
+          )}
+          {model.verificationUrl !== null && onOpenLink !== undefined && (
+            <SheetRow
+              onPress={() => onOpenLink(model.verificationUrl as string)}
+              accessibilityLabel={t('auth.sheet.openLink')}
+            >
+              <Icon
+                name="chevron-right"
+                size={15}
+                color={theme.colors.textSecondary}
+              />
+              <Text variant="body" color="primary">
+                {t('auth.sheet.openLink')}
+              </Text>
+            </SheetRow>
+          )}
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: theme.spacing.md,
+              minHeight: theme.sizes.touch,
+            }}
+          >
+            <Icon name="spinner" size={15} color={theme.colors.accent} />
+            <Text variant="metadata" color="secondary">
+              {t('auth.sheet.waiting')}
+            </Text>
+          </View>
+        </>
+      )}
+      {model.state === 'signed-in' && (
+        <>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: theme.spacing.md,
+              minHeight: theme.sizes.touch,
+            }}
+          >
+            <Icon name="check" size={15} color={theme.colors.accent} />
+            <Text variant="body" color="secondary">
+              {t('auth.sheet.linked')}
+            </Text>
+          </View>
+          {onSignOut !== undefined && (
+            <SheetRow
+              onPress={onSignOut}
+              accessibilityLabel={t('auth.sheet.signOut')}
+            >
+              <Icon name="close" size={15} color={theme.colors.warn} />
+              <Text variant="body" color="warn">
+                {t('auth.sheet.signOut')}
+              </Text>
+            </SheetRow>
+          )}
+        </>
+      )}
+      {model.state === 'failed' && (
+        <>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: theme.spacing.md,
+              minHeight: theme.sizes.touch,
+            }}
+          >
+            <Icon name="warn" size={15} color={theme.colors.warn} />
+            <Text variant="body" color="warn">
+              {model.errorMessage ?? t('error.generic')}
+            </Text>
+          </View>
+          {onRetry !== undefined && (
+            <SheetRow
+              onPress={onRetry}
+              accessibilityLabel={t('auth.sheet.retry')}
+            >
+              <Icon
+                name="spinner"
+                size={15}
+                color={theme.colors.textSecondary}
+              />
+              <Text variant="body" color="primary">
+                {t('auth.sheet.retry')}
+              </Text>
+            </SheetRow>
+          )}
+        </>
       )}
     </SheetScaffold>
   );

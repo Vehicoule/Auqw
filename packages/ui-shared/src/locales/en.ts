@@ -188,6 +188,26 @@ export const en = {
   'sheets.autoClear': 'auto — defer to system locale',
   'sheets.closeA11y': 'close sheet',
 
+  // ---- auth (OAuth device flow) -------------------------------------------
+  'auth.sheet.title': 'google sign-in',
+  'auth.sheet.intro':
+    'link a google account — playback keeps working when the provider walls anonymous sessions',
+  'auth.sheet.starting': 'getting a sign-in code…',
+  'auth.sheet.codeHint': 'enter this code on the page that opens',
+  'auth.sheet.waiting': 'waiting for you to approve…',
+  'auth.sheet.copyCode': 'copy code',
+  'auth.sheet.copied': 'copied',
+  'auth.sheet.openLink': 'open google.com/device',
+  'auth.sheet.linked':
+    'account linked — playback uses it when the provider walls anonymous sessions',
+  'auth.sheet.signOut': 'sign out',
+  'auth.sheet.retry': 'try again',
+  'auth.clientId.title': 'oauth client id',
+  'auth.clientId.placeholder': 'client id — blank resets to default',
+  'auth.clientId.clear': 'reset to the built-in client',
+  'auth.wall.cta': 'sign in to fix playback',
+  'auth.wall.ctaA11y': 'sign in to fix playback',
+
   // ---- entity screen ------------------------------------------------------
   'entity.kind.playlist': 'playlist',
   'entity.kind.album': 'album',
@@ -400,6 +420,7 @@ export const en = {
   'settings.heading.sync': 'sync',
   'settings.section.appearance': 'appearance',
   'settings.section.providers': 'providers',
+  'settings.section.account': 'account',
   'settings.section.playback': 'playback',
   'settings.section.downloads': 'downloads',
   'settings.section.localFiles': 'local files',
@@ -422,6 +443,12 @@ export const en = {
   'settings.lyricsProvider': 'lyrics provider',
   'settings.radioProvider': 'radio provider',
   'settings.storefront': 'storefront',
+  'settings.googleAuth': 'google sign-in',
+  'settings.googleAuthValue.linked': 'linked',
+  'settings.googleAuthValue.working': 'working…',
+  'settings.googleAuthValue.failed': 'failed — tap to retry',
+  'settings.googleAuthSignOut': 'sign out of google',
+  'settings.authClientId': 'oauth client id',
   'settings.quality': 'quality',
   'settings.prefetch': 'prefetch',
   'settings.downloadMetered': 'downloads on cellular',
@@ -534,6 +561,10 @@ export const en = {
   'action.cancelDownload': 'cancel download',
   'action.openAlbum': 'open album',
   'action.openArtist': 'open artist',
+  'action.signInGoogle': 'google sign-in',
+  'action.signOutGoogle': 'google sign-out',
+  'action.authClientId': 'save oauth client id',
+  'action.clearAuthClientId': 'reset oauth client id',
 
   // ---- picker option details ---------------------------------------------
   'optionDetail.default': 'default',

@@ -17,6 +17,8 @@ import type {
   IpcMainLike,
 } from './ipc.ts';
 import { registerChannels } from './ipc.ts';
+import { createAuthCustodyHandler } from './auth-custody.ts';
+import { isShellError } from '../shared/errors.ts';
 import { createSecureStore } from './secure-store.ts';
 import type { SafeStorageLike } from './secure-store.ts';
 
@@ -131,6 +133,11 @@ export async function run(): Promise<void> {
         attach: () => undefined,
         detach: () => undefined,
       },
+      authState: {
+        attach: () => undefined,
+        detach: () => undefined,
+      },
+      openUrl: () => Promise.resolve(),
       secure: createSecureStore({ dir: join(dir, 'secure'), safeStorage: WORKING_STORAGE }),
       utility: {
         request: (channel, args) => {
@@ -516,6 +523,139 @@ export async function run(): Promise<void> {
       { channel: 'storage:rollback', args: { txId: 'tx-8' } },
     ]);
     beginGate = null;
+
+    // ---- auth (OAuth session trust) ------------------------------------
+    // The renderer-facing verbs forward verbatim to the utility's auth
+    // service — custody, polling, and token application live there.
+    for (const channel of [
+      CHANNELS.authStatus,
+      CHANNELS.authBegin,
+      CHANNELS.authCancel,
+      CHANNELS.authSignOut,
+      CHANNELS.authRetry,
+    ]) {
+      const forwarded = await invoke(channel, undefined);
+      assert(forwarded.ok, `${channel} did not forward`);
+      assertDeepEqual(forwarded.result, {
+        routed: channel,
+        args: undefined,
+      });
+    }
+    const setClient = await invoke(CHANNELS.authSetClient, {
+      clientId: 'custom-client-id',
+    });
+    assert(setClient.ok, 'auth:setClient rejected a valid override');
+    assertDeepEqual(setClient.result, {
+      routed: 'auth:setClient',
+      args: { clientId: 'custom-client-id' },
+    });
+    // Clearing the override carries null; malformed args never reach
+    // the utility.
+    const clearClient = await invoke(CHANNELS.authSetClient, {
+      clientId: null,
+    });
+    assert(clearClient.ok);
+    const badClient = await invoke(CHANNELS.authSetClient, {
+      clientId: 'x'.repeat(600),
+    });
+    assert(!badClient.ok && badClient.error.kind === 'invalid-request');
+    // The verification-URL open is the only outbound URL the renderer
+    // can request — the google.com allowlist lives at the dep.
+    let opened: string | null = null;
+    const depsOpen: ChannelDeps = {
+      ...deps,
+      openUrl: (url) => {
+        opened = url;
+        return Promise.resolve();
+      },
+    };
+    const ipcOpen = new FakeIpcMain();
+    registerChannels(ipcOpen, depsOpen);
+    const open = await ipcOpen.handlers.get(CHANNELS.authOpenUrl)?.(
+      event,
+      { url: 'https://www.google.com/device' },
+    );
+    assert(open !== undefined && open.ok, 'auth:openUrl rejected');
+    assertEqual(opened, 'https://www.google.com/device');
+    const badOpen = await ipcOpen.handlers.get(CHANNELS.authOpenUrl)?.(
+      event,
+      { url: 42 },
+    );
+    assert(
+      badOpen !== undefined &&
+        !badOpen.ok &&
+        badOpen.error.kind === 'invalid-request',
+    );
+    // auth:state subscription refcounts through the push registry.
+    let attached = 0;
+    let detached = 0;
+    const depsPush: ChannelDeps = {
+      ...deps,
+      authState: {
+        attach: () => {
+          attached += 1;
+        },
+        detach: () => {
+          detached += 1;
+        },
+      },
+    };
+    const ipcPush = new FakeIpcMain();
+    registerChannels(ipcPush, depsPush);
+    ipcPush.listeners.get(CHANNELS.authSubscribe)?.(event);
+    ipcPush.listeners.get(CHANNELS.authUnsubscribe)?.(event);
+    assertEqual(attached, 1);
+    assertEqual(detached, 1);
+
+    // ---- auth:custody service handler (utility→main, not renderer) --
+    // The sealed record round-trips through a real file-backed store;
+    // a corrupt payload surfaces typed rather than as absent custody.
+    const authSecure = createSecureStore({
+      dir: join(dir, 'auth-secure'),
+      safeStorage: WORKING_STORAGE,
+    });
+    const custody = createAuthCustodyHandler({ secure: authSecure });
+    const empty = await custody({ op: 'get' });
+    assertDeepEqual(empty, { record: null });
+    await custody({
+      op: 'set',
+      record: {
+        v: 1,
+        refreshToken: 'grant-1',
+        clientId: 'cid-1',
+        grantClientId: 'issuer-1',
+      },
+    });
+    const roundTrip = await custody({ op: 'get' });
+    assertDeepEqual(roundTrip, {
+      record: {
+        v: 1,
+        refreshToken: 'grant-1',
+        clientId: 'cid-1',
+        grantClientId: 'issuer-1',
+      },
+    });
+    await custody({ op: 'clear' });
+    assertDeepEqual(await custody({ op: 'get' }), { record: null });
+    // Malformed ops throw a typed shellError.
+    await custody({ op: 'nuke' }).then(
+      () => assert(false, 'bad op accepted'),
+      (thrown: unknown) => {
+        assert(
+          isShellError(thrown) && thrown.kind === 'invalid-request',
+          'bad op threw untyped',
+        );
+      },
+    );
+    await custody({ op: 'set', record: { v: 2, refreshToken: 3 } }).then(
+      () => assert(false, 'bad record accepted'),
+      (thrown: unknown) => {
+        assert(
+          isShellError(thrown) && thrown.kind === 'invalid-request',
+          'bad record threw untyped',
+        );
+      },
+    );
 
     // every handler rejection still produces a well-formed envelope
     const depsThrow: ChannelDeps = {

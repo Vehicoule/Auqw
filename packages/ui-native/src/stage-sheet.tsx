@@ -485,6 +485,13 @@ export type StageSheetProps = {
   readonly download?: import('@auqw/ui-shared').DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
   readonly onAddToPlaylist?: (() => void) | undefined;
+  /**
+   * Provider-wall recovery affordance — fires when the user taps the
+   * 'sign in to fix playback' CTA (`player.recovery === 'sign-in'`).
+   * The shell binds it to the auth sheet opener; omitted renders the
+   * plain error line exactly as before.
+   */
+  readonly onRecovery?: (() => void) | undefined;
   readonly shuffle?: boolean | undefined;
   readonly onToggleShuffle?: (() => void) | undefined;
   readonly repeat?: 'off' | 'all' | 'one' | undefined;
@@ -539,6 +546,7 @@ export function StageSheet({
   download = null,
   onDownload,
   onAddToPlaylist,
+  onRecovery,
   shuffle = false,
   onToggleShuffle,
   repeat = 'off',
@@ -1231,6 +1239,24 @@ export function StageSheet({
                     {meta.errorMessage}
                   </Text>
                 )}
+                {meta.recovery === 'sign-in' &&
+                  onRecovery !== undefined && (
+                    <Pressable
+                      onPress={onRecovery}
+                      accessibilityLabel={t('auth.wall.ctaA11y')}
+                      style={{
+                        alignSelf: 'flex-start',
+                        justifyContent: 'center',
+                        marginTop: theme.spacing.xxs,
+                        paddingHorizontal: theme.spacing.sm,
+                        borderRadius: theme.radius.control,
+                      }}
+                    >
+                      <Text variant="label" color="accent">
+                        {t('auth.wall.cta')}
+                      </Text>
+                    </Pressable>
+                  )}
               </View>
               {/* Ownership actions hug the right edge of the meta
                   line — download state icon first, then the

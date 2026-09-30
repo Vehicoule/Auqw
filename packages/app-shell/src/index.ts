@@ -11,6 +11,7 @@ export type {
   AppShellController,
   AppShellDeps,
   AppShellPorts,
+  AuthShellPort,
   ExportWrite,
   ShellOverlay,
   ShellSheetAction,

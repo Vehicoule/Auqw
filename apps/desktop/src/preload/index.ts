@@ -3,6 +3,7 @@ import type { IpcRendererEvent } from 'electron';
 import { CHANNELS } from '../shared/channels.ts';
 import {
   isAppMeta,
+  isAuthSnapshot,
   isHostPluginsResult,
   isLocalAddResult,
   isLocalListResult,
@@ -438,6 +439,25 @@ const api: AuqwApi = {
       invoke(CHANNELS.localPlayback, undefined, isLocalPlaybackResult),
     sweep: () =>
       invoke(CHANNELS.localSweep, undefined, isLocalSweepResult),
+  },
+  auth: {
+    status: () => invoke(CHANNELS.authStatus, undefined, isAuthSnapshot),
+    begin: () => invoke(CHANNELS.authBegin, undefined, isUndefinedResult),
+    cancel: () =>
+      invoke(CHANNELS.authCancel, undefined, isUndefinedResult),
+    signOut: () =>
+      invoke(CHANNELS.authSignOut, undefined, isUndefinedResult),
+    setClient: (clientId) =>
+      invoke(CHANNELS.authSetClient, { clientId }, isUndefinedResult),
+    retry: () => invoke(CHANNELS.authRetry, undefined, isUndefinedResult),
+    openUrl: (url) =>
+      invoke(CHANNELS.authOpenUrl, { url }, isUndefinedResult),
+    onState: subscribeTo(
+      CHANNELS.authState,
+      CHANNELS.authSubscribe,
+      CHANNELS.authUnsubscribe,
+      isAuthSnapshot,
+    ),
   },
 };
 

@@ -1301,6 +1301,13 @@ export type StageScreenHandlers = StageQueueHandlers & {
   readonly onStartRadio?: MaybeFn;
   readonly onStopRadio?: MaybeFn;
   readonly onModeChange?: MaybeFn<[mode: StageMode]>;
+  /**
+   * Provider-wall recovery affordance — fires when the user taps the
+   * 'sign in to fix playback' CTA (`player.recovery === 'sign-in'`).
+   * The shell binds it to the auth sheet opener; omitted renders the
+   * plain error line exactly as before.
+   */
+  readonly onRecovery?: MaybeFn;
 };
 
 /** Stage tab order — shared by both platforms. */
@@ -1613,6 +1620,12 @@ export type StageMetaView = {
   readonly artistLabel: string;
   readonly albumLabel: string | null;
   readonly errorMessage: string | null;
+  /**
+   * The provider-wall recovery affordance — 'sign-in' offers the OAuth
+   * device flow under the error line; surfaces bind it to their auth
+   * opener (the model already gates on the wall verdict + signed-out).
+   */
+  readonly recovery: 'sign-in' | null;
   /** Queue-occurrence key for per-track transient state; null off-queue. */
   readonly trackKey: string | null;
   readonly waveformSeed: string;
@@ -1625,6 +1638,7 @@ export function stageMetaView(player: PlayerModel): StageMetaView {
     artistLabel: player.artist ?? '—',
     albumLabel: player.albumLabel,
     errorMessage: player.errorMessage,
+    recovery: player.recovery,
     trackKey: player.occurrenceId,
     waveformSeed: `${player.title}|${player.artist ?? ''}`,
     waveformLoading:

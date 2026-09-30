@@ -8,6 +8,7 @@ import {
   net,
   safeStorage,
   screen,
+  shell,
   systemPreferences,
   utilityProcess,
 } from 'electron';
@@ -34,6 +35,7 @@ import type { ShellError } from '../shared/errors.ts';
 import { fromUnknown, isShellError, shellError } from '../shared/errors.ts';
 import { redactSensitive } from '../shared/redact.ts';
 import {
+  isAuthSnapshot,
   isChromeSchemePayload,
   isSyncAppliedEvent,
   isSyncNearbyEvent,
@@ -46,6 +48,7 @@ import { createSecureStore } from './secure-store.ts';
 import { createSupervisor } from './supervisor.ts';
 import {
   createAppliedPushService,
+  createAuthStatePushService,
   createNearbyPushService,
 } from './sync-events.ts';
 import {
@@ -53,6 +56,7 @@ import {
   migrateSyncCustody,
   syncHasPairedDevices,
 } from './sync-keys.ts';
+import { createAuthCustodyHandler } from './auth-custody.ts';
 import type { WindowState } from './window-state.ts';
 import {
   loadWindowState,
@@ -124,6 +128,11 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     'AUQW_SYNC_NAME',
     'AUQW_SYNC_NO_MDNS',
     'AUQW_POT_PROVIDER_URL',
+    // Advanced OAuth overrides — the utility owns the token exchange,
+    // so an explicitly-set client credential must reach it (opt-in
+    // allowlist entries, not ambient env passthrough).
+    'AUQW_OAUTH_CLIENT_ID',
+    'AUQW_OAUTH_CLIENT_SECRET',
   ];
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -235,6 +244,13 @@ async function main(): Promise<void> {
   await migrateSyncCustody(join(userDataPath, 'secure'), syncSecureDir);
   const syncSecure = createSecureStore({
     dir: syncSecureDir,
+    safeStorage,
+  });
+  // OAuth custody has the same property: its own sealed dir reachable
+  // only through the `auth:custody` service channel — a sandboxed
+  // renderer's `secure:*` keys never touch the refresh grant.
+  const authSecure = createSecureStore({
+    dir: join(userDataPath, 'auth-secure'),
     safeStorage,
   });
   const netService = createNetService({
@@ -367,6 +383,7 @@ async function main(): Promise<void> {
   });
   const appliedPush = createAppliedPushService();
   const nearbyPush = createNearbyPushService();
+  const authStatePush = createAuthStatePushService();
   const supervisor = createSupervisor({
     fork: () =>
       utilityProcess.fork(UTILITY, [], {
@@ -383,6 +400,21 @@ async function main(): Promise<void> {
         secure: syncSecure,
         dir: syncSecureDir,
       }),
+      // OAuth custody — the refresh grant's sealed record lives in the
+      // auth-secure store, reachable only through this channel.
+      'auth:custody': createAuthCustodyHandler({ secure: authSecure }),
+      // Utility→main→renderer push: each published auth snapshot
+      // forwards to subscribed renderers on `auth:state`.
+      'auth:state': async (args) => {
+        if (!isAuthSnapshot(args)) {
+          throw shellError(
+            'invalid-request',
+            'auth:state expects a snapshot',
+          );
+        }
+        authStatePush.notify(args);
+        return undefined;
+      },
       // Utility→main→renderer push: the sync service posts after every
       // applyDelta; subscribed renderers pull sync:drainApplied on it.
       'sync:applied': async (args) => {
@@ -445,8 +477,32 @@ async function main(): Promise<void> {
     theme: themeMonitor,
     syncApplied: appliedPush,
     syncNearby: nearbyPush,
+    authState: authStatePush,
     secure,
     utility: supervisor,
+    // The device flow's verification URL opens in the system browser —
+    // allowlisted to google.com hosts so the channel can't be a
+    // generic openExternal primitive for arbitrary renderer input.
+    openUrl: (url) => {
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return Promise.reject(
+          shellError('invalid-request', 'auth:openUrl bad url'),
+        );
+      }
+      const host = parsed.hostname;
+      if (
+        parsed.protocol !== 'https:' ||
+        (host !== 'google.com' && !host.endsWith('.google.com'))
+      ) {
+        return Promise.reject(
+          shellError('invalid-request', 'auth:openUrl refused host'),
+        );
+      }
+      return shell.openExternal(url);
+    },
     // Brokers the stream pump channel — the utility child gets one end
     // with the attach message, the renderer the other via postMessage.
     messageChannel: () => new MessageChannelMain(),
@@ -503,6 +559,7 @@ async function main(): Promise<void> {
     themeMonitor.stop();
     appliedPush.stop();
     nearbyPush.stop();
+    authStatePush.stop();
     supervisor.shutdown();
   });
 }

@@ -443,6 +443,52 @@ function testPlayerMapper(): void {
     failed.errorMessage !== null && failed.errorMessage.length > 0,
     'failed carries error message',
   );
+  // Provider-wall recovery — the 'sign-in' CTA exists only on a
+  // bot-check verdict AND a signed-out auth seam; a signed-in user or
+  // a platform with no auth surface gets the plain error line.
+  const wall = {
+    type: 'failed' as const,
+    recordingId: 'rec-roads',
+    occurrenceId: 'occ-5',
+    identity: fixtureIdentity,
+    error: {
+      kind: 'transient' as const,
+      message: 'innertube: bot-check',
+      retryable: true,
+    },
+  };
+  assertEqual(
+    toPlayerModel({ ...base, playback: wall, authSignedIn: false })
+      ?.recovery,
+    'sign-in',
+  );
+  assertEqual(
+    toPlayerModel({ ...base, playback: wall, authSignedIn: true })
+      ?.recovery,
+    null,
+    'signed-in must not offer sign-in',
+  );
+  assertEqual(
+    toPlayerModel({ ...base, playback: wall })?.recovery,
+    null,
+    'no auth seam must not offer sign-in',
+  );
+  assertEqual(
+    toPlayerModel({
+      ...base,
+      playback: {
+        ...wall,
+        error: {
+          kind: 'transient' as const,
+          message: 'socket timeout',
+          retryable: true,
+        },
+      },
+      authSignedIn: false,
+    })?.recovery,
+    null,
+    'non-wall failures never offer sign-in',
+  );
   // Bookkeeping verdicts never paint the player line: 'cancelled' is
   // a torn-down intent, 'superseded' an overtaken play — the row
   // still reads failed, but never wears interruption copy.

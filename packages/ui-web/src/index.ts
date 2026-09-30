@@ -31,6 +31,7 @@ export { PlaylistScreen } from './playlist-screen.tsx';
 export { EntityScreen } from './entity-screen.tsx';
 export {
   AddToPlaylistSheet,
+  AuthSheet,
   NameField,
   PairingSheet,
   ProviderPickerSheet,

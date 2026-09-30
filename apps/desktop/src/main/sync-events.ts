@@ -1,5 +1,9 @@
 import { CHANNELS } from '../shared/channels.ts';
-import type { SyncAppliedEvent, SyncNearbyEvent } from '../shared/contract.ts';
+import type {
+  AuthSnapshotPayload,
+  SyncAppliedEvent,
+  SyncNearbyEvent,
+} from '../shared/contract.ts';
 import type { NetSender } from './net-monitor.ts';
 
 /**
@@ -65,4 +69,13 @@ export function createAppliedPushService(): PushService<SyncAppliedEvent> {
 
 export function createNearbyPushService(): PushService<SyncNearbyEvent> {
   return createPushService<SyncNearbyEvent>(CHANNELS.syncNearby);
+}
+
+/**
+ * `auth:state` — the utility's auth session publishes each new
+ * snapshot through main to subscribed renderers (sign-in flow
+ * progress, signed-in/out transitions).
+ */
+export function createAuthStatePushService(): PushService<AuthSnapshotPayload> {
+  return createPushService<AuthSnapshotPayload>(CHANNELS.authState);
 }

@@ -51,6 +51,7 @@ function fakeHost(overrides: Partial<PluginHostLike> = {}): PluginHostLike {
       return { mintMs: 12, attachMs: 30 };
     },
     setPotProvider() {},
+    setAuthToken() {},
     ...overrides,
   };
 }
