@@ -122,6 +122,10 @@ export function createNetService(opts: {
   let probeFailures = 0;
   let probeInFlight = false;
   let lastProbeSettledAt = 0;
+  // A probe verdict is valid only for the NIC generation it started
+  // under — an edge increments this so an in-flight probe's settle
+  // can't overwrite the state the edge just published.
+  let probeGeneration = 0;
 
   function drop(sender: NetSender): void {
     senders.delete(sender);
@@ -147,8 +151,14 @@ export function createNetService(opts: {
     }
   }
 
-  function probeSettled(reachable: boolean): void {
+  function probeSettled(generation: number, reachable: boolean): void {
     probeInFlight = false;
+    if (generation !== probeGeneration) {
+      // Stale verdict from before the last NIC transition — discard it
+      // and re-arm so the current generation gets its own verdict soon.
+      fireProbe();
+      return;
+    }
     lastProbeSettledAt = now();
     probeFailures = reachable ? 0 : probeFailures + 1;
     if (reachable || probeFailures >= PROBE_FAIL_THRESHOLD) {
@@ -162,13 +172,18 @@ export function createNetService(opts: {
       return;
     }
     probeInFlight = true;
-    void probe().then(probeSettled, () => probeSettled(false));
+    const generation = probeGeneration;
+    void probe().then(
+      (reachable) => probeSettled(generation, reachable),
+      () => probeSettled(generation, false),
+    );
   }
 
   function tick(): void {
     const nicNow = opts.readOnline();
     if (nicNow !== nic) {
       nic = nicNow;
+      probeGeneration += 1;
       if (opts.probe === undefined) {
         publish(nicNow);
       } else if (!nicNow) {

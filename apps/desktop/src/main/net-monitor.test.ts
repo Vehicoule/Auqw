@@ -194,12 +194,16 @@ async function probeVerdictGatesPublish(): Promise<void> {
     assertDeepEqual(service.snapshot(), { online: false });
     assertDeepEqual(a.last(), { online: false });
     const sentBefore = a.sent.length;
-    // The down-edge re-arms a probe: a Chromium blind spot that can
-    // still reach upstream is rescued by the verdict.
+    // The down-edge parks a probe in the older generation; a NIC flap
+    // bumps the generation so its settle is discarded and a fresh
+    // probe takes the verdict — stale state can't reverse the edge.
     nic = true;
     await sleep(15);
-    const parked = harness.pending.length;
-    assert(parked >= 1, 'down edge re-armed a probe');
+    assert(harness.pending.length >= 1, 'down edge re-armed a probe');
+    harness.settle(true);
+    await flush();
+    assertDeepEqual(service.snapshot(), { online: false }, 'stale settle discarded');
+    assert(harness.pending.length >= 1, 'fresh probe re-armed');
     harness.settle(true);
     await flush();
     assertDeepEqual(service.snapshot(), { online: true });
@@ -227,11 +231,16 @@ async function probeStreakSurvivesNicFlap(): Promise<void> {
     await flush();
     assertDeepEqual(service.snapshot(), { online: false });
     // NIC flap while the streak is hot: the edge alone must not
-    // republish online — only a real verdict may.
+    // republish online — only a verdict from this generation may.
     nic = false;
     await sleep(15);
     nic = true;
     await sleep(15);
+    assertDeepEqual(service.snapshot(), { online: false });
+    // The down-edge probe settles stale under the new generation —
+    // discarded, then re-armed; its replacement decides.
+    harness.settle(true);
+    await flush();
     assertDeepEqual(service.snapshot(), { online: false });
     harness.settle(true);
     await flush();
