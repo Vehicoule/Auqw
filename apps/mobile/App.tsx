@@ -1986,14 +1986,6 @@ function Main({
     borderWidth: theme.strokes.hairline,
     borderColor: theme.colors.hairline,
   };
-  if (galleryActive) {
-    return (
-      <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
-        <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
-        <GalleryScreen />
-      </View>
-    );
-  }
   // World-pane elements memoized per tab: the tab host keeps every
   // visited pane mounted (the switch hides/shows instead of remounting),
   // and identical inputs hand back the identical element so React bails
@@ -2114,6 +2106,14 @@ function Main({
     ),
     [homeModel, topInset, onHomeCardPress, session, reportPlay],
   );
+  if (galleryActive) {
+    return (
+      <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
+        <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+        <GalleryScreen />
+      </View>
+    );
+  }
   const renderTabScreen = (key: string) => {
     switch (key) {
       case 'explore':
