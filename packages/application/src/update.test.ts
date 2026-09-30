@@ -244,6 +244,17 @@ export async function run(): Promise<void> {
   assert(offlineSnap.status.state === 'failed');
   assertEqual(offlineSnap.status.error.kind, 'transient');
 
+  // a 200 whose body isn't the releases list fails the check — it
+  // must not land as 'current'
+  const malformed = createUpdateService({
+    currentVersion: '0.0.1',
+    target: { os: 'other' },
+    fetchJson: () => Promise.resolve({ status: 200, body: '<html>' }),
+  });
+  const malformedSnap = await malformed.check('manual');
+  assert(malformedSnap.status.state === 'failed');
+  assertEqual(malformedSnap.status.error.kind, 'invalid-response');
+
   // a failed boot check doesn't consume the one-boot budget —
   // a later manual retry still fetches
   const failed = createUpdateService({

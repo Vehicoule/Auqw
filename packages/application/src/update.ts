@@ -351,6 +351,11 @@ export function createUpdateService(deps: {
       if (reply.status < 200 || reply.status >= 300) {
         throw appError('transient', `github responded ${reply.status}`);
       }
+      // A 200 whose body isn't the list is a failed check, not
+      // 'current' — malformed payloads must not read as "up to date".
+      if (!Array.isArray(reply.body)) {
+        throw appError('invalid-response', 'releases payload was not a list');
+      }
       const releases = parseReleases(reply.body);
       const latest = latestNewer(releases, deps.currentVersion);
       if (latest === null) {

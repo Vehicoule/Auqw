@@ -18,6 +18,12 @@ import type {
 import type { UpdateShellPort } from '@auqw/app-shell';
 import { reportResult } from '@auqw/ui-shared';
 
+// APKs self-update only from this repo's own release downloads — an
+// off-repo asset URL is a failed install, not an installer payload.
+// (Same allowlist shape as the desktop open gate.)
+const RELEASE_DOWNLOAD_PREFIX =
+  'https://github.com/Vehicoule/Auqw/releases/download/';
+
 /**
  * The mobile UpdateShellPort: the shared release check over RN
  * `fetch`, and an install affordance that on Android actually
@@ -65,14 +71,28 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
   }
 
   async function install(artifact: UpdateArtifact): Promise<Result<void>> {
+    if (!artifact.url.startsWith(RELEASE_DOWNLOAD_PREFIX)) {
+      return err(
+        appError('invalid-response', 'artifact is not a repo release asset'),
+      );
+    }
     const directory = new Directory(Paths.cache, 'auqw-update');
     if (!directory.exists) {
       directory.create({ intermediates: true, idempotent: true });
     }
-    const destination = new File(directory, artifact.name);
-    if (destination.exists) {
-      destination.delete();
+    // Each release's APK has a fresh name — without the sweep every
+    // update leaves last release's artifact behind in app storage.
+    // Best-effort: a stubborn stale file never blocks the install.
+    for (const entry of directory.list()) {
+      if (entry.name !== artifact.name) {
+        try {
+          entry.delete();
+        } catch {
+          // stale-cache cleanup is housekeeping, not the install's job
+        }
+      }
     }
+    const destination = new File(directory, artifact.name);
     const file = await File.downloadFileAsync(artifact.url, destination);
     const result = await AuqwExpo.installApk(file.uri);
     return result.status === 'needs-permission'
@@ -86,7 +106,14 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
     check: (kind) => {
       void service.check(kind);
     },
-    action: canInstall ? 'install' : 'open',
+    // Read live, not at construction — a release that ships no APK
+    // asset advertises 'open' so the banner label matches act().
+    get action(): 'open' | 'install' {
+      const status = service.snapshot().status;
+      return canInstall && status.state === 'available' && status.artifact !== null
+        ? 'install'
+        : 'open';
+    },
     act() {
       const status = service.snapshot().status;
       const url = status.state === 'available' ? status.url : UPDATE_RELEASES_PAGE;
