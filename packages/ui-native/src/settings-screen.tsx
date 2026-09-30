@@ -88,6 +88,9 @@ function SettingsRow({
         style={{
           flexDirection: 'row',
           alignItems: 'center',
+          // A long translated label or folder name wraps instead of
+          // pushing cancel past the card's clipped edge.
+          flexWrap: 'wrap',
           minHeight: theme.sizes.touch,
           paddingHorizontal: theme.spacing.screen,
           gap: theme.spacing.xl,
@@ -100,7 +103,10 @@ function SettingsRow({
           }}
           accessibilityLabel={confirmLabel}
           accessibilityRole="button"
-          style={({ pressed }) => [pressed && { opacity: 0.6 }]}
+          style={({ pressed }) => [
+            { flexShrink: 1 },
+            pressed && { opacity: 0.6 },
+          ]}
         >
           <Text variant="body" color="warn">
             {confirmLabel}
