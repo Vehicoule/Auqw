@@ -35,7 +35,12 @@ jobs:
   desktop:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # ubuntu-22.04, not -latest: the napi bindings .node links the
+        # runner's glibc — a 24.04-built artifact demands GLIBC_2.38 at
+        # dlopen and hard-fails the utility host on every older distro
+        # (22.04, Debian 12). Building on 22.04 keeps the artifact
+        # loadable on glibc ≥ 2.35, still forward-compatible newer.
+        os: [ubuntu-22.04, macos-latest, windows-latest]
       # All-or-nothing publish: `needs: [gate, desktop, android]` gates
       # the release job on the whole matrix, so one failed platform (or
       # a failed gate) blocks the release until fixed — a partial asset
