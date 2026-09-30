@@ -198,6 +198,7 @@ export function SearchScreen({
               tabIndex={list.rowTabIndex(index)}
               onFocusRow={() => list.onRowFocus(index)}
               onPress={row.onPress}
+              onIntent={row.onIntent}
               onToggleLike={row.onToggleLike}
               onAddToPlaylist={row.onAddToPlaylist}
               onContext={row.onContext}

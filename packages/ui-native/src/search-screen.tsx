@@ -268,6 +268,7 @@ export function SearchScreen({
             <TrackRow
               row={item.row}
               onPress={item.onPress}
+              onIntent={item.onIntent}
               onToggleLike={item.onToggleLike}
               onContext={item.onContext}
             />

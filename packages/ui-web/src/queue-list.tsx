@@ -72,6 +72,8 @@ export type QueueListProps = {
   readonly reordering?: boolean | undefined;
   readonly scrollEnabled?: boolean | undefined;
   readonly onPressItem?: ((occurrenceId: string) => void) | undefined;
+  /** Advisory intent — hover/focus on a row; the caller warms it. */
+  readonly onRowIntent?: ((occurrenceId: string) => void) | undefined;
   readonly onRemoveItem?: ((occurrenceId: string) => void) | undefined;
   readonly onMoveItem?:
     | ((occurrenceId: string, direction: -1 | 1) => void)
@@ -89,6 +91,7 @@ export function QueueList({
   reordering = false,
   scrollEnabled = true,
   onPressItem,
+  onRowIntent,
   onRemoveItem,
   onMoveItem,
   onMoveItemTo,
@@ -336,6 +339,11 @@ export function QueueList({
                 : onPressItem === undefined
                   ? undefined
                   : () => onPressItem(item.occurrenceId)
+            }
+            onIntent={
+              onRowIntent === undefined
+                ? undefined
+                : () => onRowIntent(item.occurrenceId)
             }
             onRemove={
               onRemoveItem === undefined || item.current || reordering

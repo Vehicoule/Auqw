@@ -10,6 +10,8 @@ export type CollectionScreenProps = {
   readonly onBack?: (() => void) | undefined;
   readonly onPlayAll?: (() => void) | undefined;
   readonly onPressItem?: ((row: CollectionRowModel) => void) | undefined;
+  /** Advisory row intent — hover/focus on a row; the host warms it. */
+  readonly onRowIntent?: ((row: CollectionRowModel) => void) | undefined;
   readonly onToggleLike?: ((row: CollectionRowModel) => void) | undefined;
   readonly onAddToPlaylist?: ((row: CollectionRowModel) => void) | undefined;
   readonly onContext?: ((row: CollectionRowModel) => void) | undefined;
@@ -30,6 +32,7 @@ export function CollectionScreen({
   onBack,
   onPlayAll,
   onPressItem,
+  onRowIntent,
   onToggleLike,
   onAddToPlaylist,
   onContext,
@@ -88,6 +91,7 @@ export function CollectionScreen({
               tabIndex={list.rowTabIndex(index)}
               onFocusRow={() => list.onRowFocus(index)}
               onPress={bindTo(onPressItem, item)}
+              onIntent={bindTo(onRowIntent, item)}
               onToggleLike={bindTo(onToggleLike, item)}
               onAddToPlaylist={bindTo(onAddToPlaylist, item)}
               onContext={bindTo(onContext, item)}

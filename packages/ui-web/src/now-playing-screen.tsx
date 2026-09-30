@@ -273,6 +273,7 @@ export function NowPlayingScreen({
   onStopRadio,
   onModeChange,
   onPressQueueItem,
+  onQueueRowIntent,
   onRemoveQueueItem,
   onToggleQueueReorder,
   onMoveQueueItem,
@@ -345,6 +346,7 @@ export function NowPlayingScreen({
           reordering={queueReordering}
           scrollEnabled={queueScrollEnabled}
           onPressItem={onPressQueueItem}
+          onRowIntent={onQueueRowIntent}
           onRemoveItem={onRemoveQueueItem}
           onMoveItem={onMoveQueueItem}
           onMoveItemTo={onMoveQueueItemTo}
@@ -355,6 +357,7 @@ export function NowPlayingScreen({
       queueReordering,
       queueScrollEnabled,
       onPressQueueItem,
+      onQueueRowIntent,
       onRemoveQueueItem,
       onMoveQueueItem,
       onMoveQueueItemTo,
@@ -655,6 +658,7 @@ export type StageIdlePaneProps = {
   readonly queueReordering?: QueueScreenProps['reordering'];
   readonly onToggleQueueReorder?: QueueScreenProps['onToggleReorder'];
   readonly onPressQueueItem?: QueueScreenProps['onPressItem'];
+  readonly onQueueRowIntent?: QueueScreenProps['onRowIntent'];
   readonly onRemoveQueueItem?: QueueScreenProps['onRemoveItem'];
   readonly onMoveQueueItem?: QueueScreenProps['onMoveItem'];
   readonly onMoveQueueItemTo?: QueueScreenProps['onMoveItemTo'];
@@ -672,6 +676,7 @@ export function StageIdlePane({
   queueReordering,
   onToggleQueueReorder,
   onPressQueueItem,
+  onQueueRowIntent,
   onRemoveQueueItem,
   onMoveQueueItem,
   onMoveQueueItemTo,
@@ -684,6 +689,7 @@ export function StageIdlePane({
           reordering={queueReordering}
           onToggleReorder={onToggleQueueReorder}
           onPressItem={onPressQueueItem}
+          onRowIntent={onQueueRowIntent}
           onRemoveItem={onRemoveQueueItem}
           onMoveItem={onMoveQueueItem}
           onMoveItemTo={onMoveQueueItemTo}

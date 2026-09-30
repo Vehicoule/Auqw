@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { FlatList } from 'react-native';
+import type { ViewToken } from 'react-native';
 import DraggableFlatList, {
   ScaleDecorator,
 } from 'react-native-draggable-flatlist';
@@ -25,10 +26,26 @@ export function QueueList({
   scrollEnabled = true,
   contentPaddingBottom = 0,
   onPressItem,
+  onRowIntent,
+  onViewportRows,
   onRemoveItem,
   onMoveItem,
   onMoveItemTo,
 }: QueueListProps) {
+  // FlatList requires a stable onViewableItemsChanged — rebind it
+  // per render and the list throws, so the latest callback lives in
+  // a ref the stable callback reads through.
+  const viewportRows = useRef(onViewportRows);
+  viewportRows.current = onViewportRows;
+  const viewableChanged = useRef(
+    ({ viewableItems }: { viewableItems: ViewToken[] }) => {
+      const ids = viewableItems
+        .map((token) => token.item as QueueItemModel)
+        .filter((item) => item.section !== 'nowPlaying')
+        .map((item) => item.occurrenceId);
+      viewportRows.current?.(ids);
+    },
+  );
   // The draggable list animates to the raw drop slot; a drop outside
   // up-next is clamped on write, so the list remounts to re-render
   // from the model — otherwise it keeps showing the rejected landing.
@@ -71,6 +88,11 @@ export function QueueList({
             ? undefined
             : () => onPressItem(item.occurrenceId)
         }
+        onIntent={
+          onRowIntent === undefined
+            ? undefined
+            : () => onRowIntent(item.occurrenceId)
+        }
         onRemove={
           onRemoveItem === undefined || item.current || reordering
             ? undefined
@@ -101,6 +123,7 @@ export function QueueList({
         keyExtractor={(item) => item.occurrenceId}
         scrollEnabled={scrollEnabled}
         scrollEventThrottle={64}
+        onViewableItemsChanged={viewableChanged.current}
         onScroll={(event) => {
           listScrollY.current = event.nativeEvent.contentOffset.y;
         }}
@@ -170,6 +193,7 @@ export function QueueList({
       scrollEnabled={scrollEnabled}
       initialNumToRender={15}
       scrollEventThrottle={64}
+      onViewableItemsChanged={viewableChanged.current}
       onScroll={(event) => {
         listScrollY.current = event.nativeEvent.contentOffset.y;
       }}

@@ -31,6 +31,12 @@ export type TrackRowProps = {
   readonly row: TrackRowModel;
   readonly badge?: string | null | undefined;
   readonly onPress?: (() => void) | undefined;
+  /**
+   * Advisory row intent — the pointer/focus landing on this row makes
+   * it the likeliest next tap. Fires on hover and keyboard focus; the
+   * caller warms it (bounded, newest-wins) so a real tap adopts.
+   */
+  readonly onIntent?: (() => void) | undefined;
   readonly onToggleLike?: (() => void) | undefined;
   /**
    * Direct add-to-playlist affordance — the design's row anatomy puts
@@ -53,6 +59,7 @@ export function TrackRow({
   row,
   badge = null,
   onPress,
+  onIntent,
   onToggleLike,
   onAddToPlaylist,
   onContext,
@@ -78,6 +85,7 @@ export function TrackRow({
       data-liked={row.liked ? 'true' : undefined}
       data-download={row.download ?? undefined}
       role="listitem"
+      onMouseEnter={onIntent}
     >
       {reorderControls !== 'none' && (
         <div className="uw-track-row__reorder">
@@ -117,7 +125,14 @@ export function TrackRow({
         ariaSelected={row.playing}
         className="uw-track-row__main"
         tabIndex={tabIndex}
-        onFocus={onFocusRow}
+        onFocus={
+          onFocusRow === undefined && onIntent === undefined
+            ? undefined
+            : () => {
+                onFocusRow?.();
+                onIntent?.();
+              }
+        }
       >
         <span className="uw-track-row__art">
           <Artwork url={row.artworkUrl} size={40} dimmed={unavailable} />

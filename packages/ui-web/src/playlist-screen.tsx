@@ -32,6 +32,8 @@ export type PlaylistScreenProps = {
   readonly onRename?: ((name: string) => void) | undefined;
   readonly onDelete?: (() => void) | undefined;
   readonly onPressEntry?: ((entry: PlaylistEntryModel) => void) | undefined;
+  /** Advisory row intent — hover/focus on a row; the host warms it. */
+  readonly onRowIntent?: ((entry: PlaylistEntryModel) => void) | undefined;
   readonly onToggleLike?: ((entry: PlaylistEntryModel) => void) | undefined;
   readonly onAddToPlaylist?: ((entry: PlaylistEntryModel) => void) | undefined;
   readonly onContext?: ((entry: PlaylistEntryModel) => void) | undefined;
@@ -73,6 +75,7 @@ export function PlaylistScreen({
   onRename,
   onDelete,
   onPressEntry,
+  onRowIntent,
   onToggleLike,
   onAddToPlaylist,
   onContext,
@@ -243,6 +246,7 @@ export function PlaylistScreen({
                 onMoveUp={moveCtl(-1)}
                 onMoveDown={moveCtl(1)}
                 onPress={bindTo(onPressEntry, entry)}
+                onIntent={bindTo(onRowIntent, entry)}
                 onToggleLike={bindTo(onToggleLike, entry)}
                 onAddToPlaylist={bindTo(onAddToPlaylist, entry)}
                 onContext={bindTo(onContext, entry)}

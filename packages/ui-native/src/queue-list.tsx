@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
+import { useRef } from 'react';
 import { FlatList, View } from 'react-native';
+import type { ViewToken } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
@@ -65,6 +67,15 @@ export type QueueListProps = {
       scroll fully clear of it. */
   readonly contentPaddingBottom?: number | undefined;
   readonly onPressItem?: ((occurrenceId: string) => void) | undefined;
+  /** Advisory row intent — touch-down on a row; the caller warms it. */
+  readonly onRowIntent?: ((occurrenceId: string) => void) | undefined;
+  /** Advisory viewport report — the occurrence ids currently on
+      screen (display order, nowPlaying excluded — it is already
+      playing, a warm would mint dead bytes). The caller warms the
+      set as a wholesale hand. */
+  readonly onViewportRows?:
+  | ((occurrenceIds: readonly string[]) => void)
+  | undefined;
   readonly onRemoveItem?: ((occurrenceId: string) => void) | undefined;
   readonly onMoveItem?:
   | ((occurrenceId: string, direction: -1 | 1) => void)
@@ -80,10 +91,26 @@ export function QueueList({
   scrollEnabled = true,
   contentPaddingBottom = 0,
   onPressItem,
+  onRowIntent,
+  onViewportRows,
   onRemoveItem,
   onMoveItem,
   onMoveItemTo,
 }: QueueListProps) {
+  // FlatList requires a stable onViewableItemsChanged — rebind it
+  // per render and the list throws, so the latest callback lives in
+  // a ref the stable callback reads through.
+  const viewportRows = useRef(onViewportRows);
+  viewportRows.current = onViewportRows;
+  const viewableChanged = useRef(
+    ({ viewableItems }: { viewableItems: ViewToken[] }) => {
+      const ids = viewableItems
+        .map((token) => token.item as QueueItemModel)
+        .filter((item) => item.section !== 'nowPlaying')
+        .map((item) => item.occurrenceId);
+      viewportRows.current?.(ids);
+    },
+  );
   if (queue.items.length === 0) {
     return <EmptyState title={t('queue.empty')} icon="queue" />;
   }
@@ -114,6 +141,7 @@ export function QueueList({
       keyExtractor={(item) => item.occurrenceId}
       scrollEnabled={scrollEnabled}
       initialNumToRender={15}
+      onViewableItemsChanged={viewableChanged.current}
       contentContainerStyle={{ paddingBottom: contentPaddingBottom }}
       renderItem={({ item, index }) => (
         <QueueRowChrome
@@ -127,6 +155,11 @@ export function QueueList({
               onPressItem === undefined || reordering
                 ? undefined
                 : () => onPressItem(item.occurrenceId)
+            }
+            onIntent={
+              onRowIntent === undefined
+                ? undefined
+                : () => onRowIntent(item.occurrenceId)
             }
             onRemove={
               onRemoveItem === undefined || item.current || reordering

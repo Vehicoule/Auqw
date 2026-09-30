@@ -320,6 +320,7 @@ export function LibraryScreen({
                 tabIndex={list.rowTabIndex(index)}
                 onFocusRow={() => list.onRowFocus(index)}
                 onPress={item.onPress}
+                onIntent={item.onIntent}
                 onToggleLike={item.onToggleLike}
                 onAddToPlaylist={item.onAddToPlaylist}
                 onContext={item.onContext}

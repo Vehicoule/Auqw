@@ -6742,6 +6742,29 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['streamWarmStaleAdoptionRepairs', streamWarmStaleAdoptionRepairs],
   ['streamWarmDenyCapEvicts', streamWarmDenyCapEvicts],
   ['streamWarmSurfaceOutranksFailed', streamWarmSurfaceOutranksFailed],
+  [
+    'viewportOccurrenceWarmAdopts',
+    viewportOccurrenceWarmAdopts,
+  ],
+  [
+    'viewportOccurrenceResolvesThenMints',
+    viewportOccurrenceResolvesThenMints,
+  ],
+  [
+    'focusRecordingResolvesAndMints',
+    focusRecordingResolvesAndMints,
+  ],
+  ['focusNewestHandWins', focusNewestHandWins],
+  [
+    'viewportOccurrenceRemovedSkipsMint',
+    viewportOccurrenceRemovedSkipsMint,
+  ],
+  ['enqueueWarmsNewOccurrence', enqueueWarmsNewOccurrence],
+  [
+    'focusOccurrenceStaleResolveDrops',
+    focusOccurrenceStaleResolveDrops,
+  ],
+  ['focusRecordingPinWinsDefault', focusRecordingPinWinsDefault],
 ] as const;
 
 // The materialized rebuild: the durable log's surviving records
@@ -8736,6 +8759,268 @@ async function streamWarmSurfaceOutranksFailed(): Promise<void> {
   r.session.prewarm({ sourceRefs: [ref('youtube-music', 'yB')] });
   await pump();
   assertEqual(warmInput(r).sourceRef, 'yB', 'surface hand warms under failed');
+}
+
+/** The viewport hand mints a resolved queue row — its tap adopts. */
+async function viewportOccurrenceWarmAdopts(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oA', 'rA'),
+        occurrence('oB', 'rB'),
+      ]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({ occurrenceIds: ['oB'] });
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'viewport hand mints');
+  const input = warmInput(r);
+  assertEqual(input.sourceRef, 'yB', 'viewport row ref warmed');
+  assert(r.player.settlePrewarm(ok('req-warm-1')), 'pending prewarm');
+  r.player.emit(warmPrepared(input.identity, 'h-warmB'));
+  await pump();
+  const started = r.session.playOccurrence('oB');
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 0, 'warm adopted: no prepare');
+  const play = calls(r, 'play').at(-1);
+  assertEqual(
+    (play?.input as { handle: string } | undefined)?.handle,
+    'h-warmB',
+    'plays the warm handle',
+  );
+  assert((await started).ok, 'playOccurrence failed');
+}
+
+/** A viewport row needing a resolve is resolved, pinned, minted. */
+async function viewportOccurrenceResolvesThenMints(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('itunes', 'iB')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oA', 'rA'),
+        occurrence('oB', 'rB'),
+      ]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({ occurrenceIds: ['oB'] });
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 0, 'no mint before resolve');
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    'unresolved viewport row asks candidates',
+  );
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'yB', 'Song rB', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.occurrences[1]?.selectedRef?.id,
+    'yB',
+    'warm pins the handed occurrence',
+  );
+  assertEqual(calls(r, 'prewarm').length, 1, 'resolved row mints');
+  const input = warmInput(r);
+  assertEqual(input.sourceRef, 'yB');
+  assert(r.player.settlePrewarm(ok('req-warm-1')), 'pending prewarm');
+  r.player.emit(warmPrepared(input.identity, 'h-warmB'));
+  await pump();
+  const started = r.session.playOccurrence('oB');
+  await pump();
+  assertEqual(
+    calls(r, 'prepare').length,
+    0,
+    'resolved-and-minted row adopts: no prepare',
+  );
+  assert((await started).ok, 'playOccurrence failed');
+}
+
+/** The focus hand resolves a non-queue recording and mints it. */
+async function focusRecordingResolvesAndMints(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rE', [ref('itunes', 'iE')]),
+      ],
+      queue: stoppedQueue([occurrence('oA', 'rA')]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({ focus: { kind: 'recording', id: 'rE' } });
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    'focused unmapped row asks candidates',
+  );
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'yE', 'Song rE', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'focused row mints');
+  assertEqual(warmInput(r).sourceRef, 'yE', 'matched ref warmed');
+}
+
+/** A newer focus replaces the older hand — the slot retargets. */
+async function focusNewestHandWins(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rE', [ref('youtube-music', 'yE')]),
+      ],
+      queue: stoppedQueue([occurrence('oA', 'rA')]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({ focus: { kind: 'recording', id: 'rA' } });
+  await pump();
+  const first = warmInput(r);
+  assertEqual(first.sourceRef, 'yA', 'first focus warms');
+  assert(r.player.settlePrewarm(ok('req-warm-1')), 'pending prewarm');
+  r.player.emit(warmPrepared(first.identity, 'h-a'));
+  await pump();
+  r.session.prewarm({ focus: { kind: 'recording', id: 'rE' } });
+  await pump();
+  const released = calls(r, 'release').map(
+    (c) => (c.input as { handle: string }).handle,
+  );
+  assert(released.includes('h-a'), 'retarget releases the stale warm');
+  assertEqual(calls(r, 'prewarm').length, 2, 'newest focus re-warms');
+  assertEqual(warmInput(r).sourceRef, 'yE', 'newest focus ref warmed');
+}
+
+/** A handed occurrence deleted mid-resolve mints nothing. */
+async function viewportOccurrenceRemovedSkipsMint(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('itunes', 'iB')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oA', 'rA'),
+        occurrence('oB', 'rB'),
+      ]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({ occurrenceIds: ['oB'] });
+  await pump();
+  assertEqual(r.ytm.pendingCount('candidates'), 1, 'resolve issued');
+  assert((await r.session.removeOccurrence('oB')).ok, 'row removed');
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'yB', 'Song rB', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(
+    calls(r, 'prewarm').length,
+    0,
+    'a removed row never mints',
+  );
+}
+
+/** A just-enqueued row is warmed by the enqueue hand — its tap adopts. */
+async function enqueueWarmsNewOccurrence(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r2', [ref('itunes', 'i2')])],
+    }),
+  );
+  await restoreOk(r);
+  const enq = await r.session.enqueueRecording('r2');
+  assert(enq.ok, 'enqueue failed');
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    'enqueued row asks candidates',
+  );
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'y2', 'Song r2', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'enqueued row mints');
+  const input = warmInput(r);
+  assertEqual(input.sourceRef, 'y2');
+  assert(r.player.settlePrewarm(ok('req-warm-1')), 'pending prewarm');
+  r.player.emit(warmPrepared(input.identity, 'h-warm'));
+  await pump();
+  const started = r.session.playOccurrence(enq.value);
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 0, 'warm adopted: no prepare');
+  assert((await started).ok, 'playOccurrence failed');
+}
+
+/** A stale occurrence focus's late resolve can't displace the newer
+    focused row — its 'f:o' key dies with the f: replace. */
+async function focusOccurrenceStaleResolveDrops(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rF', [ref('youtube-music', 'yF')]),
+        recording('rB', [ref('itunes', 'iB')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oF', 'rF'),
+        occurrence('oB', 'rB'),
+      ]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({ focus: { kind: 'occurrence', id: 'oB' } });
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    'focused unresolved row asks candidates',
+  );
+  r.session.prewarm({ focus: { kind: 'recording', id: 'rF' } });
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'newest focus mints');
+  assertEqual(warmInput(r).sourceRef, 'yF', 'focused row warmed');
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'yB', 'Song rB', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(
+    calls(r, 'prewarm').length,
+    1,
+    'stale focus resolve mints nothing over the newer hand',
+  );
+  assertEqual(warmInput(r).sourceRef, 'yF', 'focused warm kept');
+}
+
+/** A recording focus carrying the row's pin warms the pinned ref —
+    the same ref the tap's attempt would pick. */
+async function focusRecordingPinWinsDefault(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('rP', [ref('youtube-music', 'yA')])],
+      queue: stoppedQueue([occurrence('oA', 'rP')]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({
+    focus: { kind: 'recording', id: 'rP', ref: ref('youtube-music', 'yPin') },
+  });
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'pinned focus mints');
+  assertEqual(
+    warmInput(r).sourceRef,
+    'yPin',
+    'row pin warmed, not the recording default',
+  );
 }
 
 export async function run(): Promise<void> {

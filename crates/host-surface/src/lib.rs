@@ -31,7 +31,7 @@ use auqw_plugin_host::{
     invoke, load, Attempt, Budgets, FileKeyValueStore, GuestLogEntry, HostServices, HttpTraceEntry,
     KeyValueStore, LoadedPlugin, Manifest, MemoryKeyValueStore, ReqwestClient, SystemClock,
 };
-use auqw_stream::{StreamConfig, StreamRegistry};
+use auqw_stream::{ReqwestFetch, StreamConfig, StreamRegistry};
 use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::runtime::Runtime;
@@ -545,10 +545,18 @@ impl PluginHost {
         // shell config, so a failure here fails the host.
         let stream = match &config.stream_path {
             Some(path) => Some(Arc::new(
-                StreamRegistry::new(StreamConfig::new(path.into()), runtime.handle().clone())
-                    .map_err(|e| HostError::Runtime {
-                        detail: format!("stream: {e}"),
-                    })?,
+                StreamRegistry::with_fetch(
+                    StreamConfig::new(path.into()),
+                    runtime.handle().clone(),
+                    // One client pool serves guest HTTP and stream
+                    // fetches: a probe's keep-alive CDN connection is
+                    // idle in the shared pool when the pump's first
+                    // range request lands, skipping TCP+TLS setup.
+                    Arc::new(ReqwestFetch::with_client(http.client())),
+                )
+                .map_err(|e| HostError::Runtime {
+                    detail: format!("stream: {e}"),
+                })?,
             )),
             None => None,
         };

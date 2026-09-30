@@ -101,6 +101,8 @@ export function queueSectionLabel(key: QueueSectionKey): string {
 export type QueueScreenHandlers = {
   readonly onToggleReorder?: MaybeFn;
   readonly onPressItem?: MaybeFn<[occurrenceId: string]>;
+  /** Advisory row intent — hover/focus/long-press; the host warms the row. */
+  readonly onRowIntent?: MaybeFn<[occurrenceId: string]>;
   readonly onRemoveItem?: MaybeFn<[occurrenceId: string]>;
   readonly onMoveItem?: MaybeFn<[occurrenceId: string, direction: -1 | 1]>;
   readonly onMoveItemTo?: MaybeFn<[occurrenceId: string, toIndex: number]>;
@@ -502,6 +504,8 @@ export function useTransferScreenController({
 
 export type LibraryScreenHandlers = {
   readonly onPressItem?: MaybeFn<[recordingId: string]>;
+  /** Advisory row intent — hover/focus/long-press; the host warms the row. */
+  readonly onRowIntent?: MaybeFn<[recordingId: string]>;
   readonly onToggleLike?: MaybeFn<[recordingId: string]>;
   readonly onAddToPlaylist?: MaybeFn<[recordingId: string]>;
   readonly onContext?: MaybeFn<[recordingId: string]>;
@@ -561,6 +565,7 @@ export type LibraryCardView = {
 export type LibraryRowView = {
   readonly row: TrackRowModel;
   readonly onPress: MaybeFn;
+  readonly onIntent: MaybeFn;
   readonly onToggleLike: MaybeFn;
   readonly onAddToPlaylist: MaybeFn;
   readonly onContext: MaybeFn;
@@ -677,6 +682,7 @@ export function libraryScreenView(
   }: LibraryControls,
   {
     onPressItem,
+    onRowIntent,
     onToggleLike,
     onAddToPlaylist,
     onContext,
@@ -795,6 +801,7 @@ export function libraryScreenView(
             rows: model.recentlyAdded.map((item) => ({
               row: item,
               onPress: bind(onPressItem, item.key),
+              onIntent: bind(onRowIntent, item.key),
               onToggleLike: bind(onToggleLike, item.key),
               onAddToPlaylist: bind(onAddToPlaylist, item.key),
               onContext: bind(onContext, item.key),
@@ -847,6 +854,8 @@ export type EntityScreenHandlers = {
   readonly onShuffleAll?: MaybeFn;
   readonly onToggleLike?: MaybeFn;
   readonly onPressItem?: MaybeFn<[row: TrackRowModel]>;
+  /** Advisory row intent — hover/focus/long-press; the host warms the row. */
+  readonly onRowIntent?: MaybeFn<[row: TrackRowModel]>;
   readonly onAddToPlaylist?: MaybeFn<[row: TrackRowModel]>;
   readonly onContext?: MaybeFn<[row: TrackRowModel]>;
   readonly onLoadMore?: MaybeFn;
@@ -864,6 +873,7 @@ export type EntityPillView = {
 export type EntityRowView = {
   readonly row: TrackRowModel;
   readonly onPress: MaybeFn;
+  readonly onIntent: MaybeFn;
   readonly onAddToPlaylist: MaybeFn;
   readonly onContext: MaybeFn;
 };
@@ -921,6 +931,7 @@ export function useEntityScreenController({
   onShuffleAll,
   onToggleLike,
   onPressItem,
+  onRowIntent,
   onAddToPlaylist,
   onContext,
   onLoadMore,
@@ -990,6 +1001,7 @@ export function useEntityScreenController({
           rows: model.items.map((item) => ({
             row: item,
             onPress: bind(onPressItem, item),
+            onIntent: bind(onRowIntent, item),
             onAddToPlaylist: bind(onAddToPlaylist, item),
             onContext: bind(onContext, item),
           })),
@@ -1015,6 +1027,8 @@ export type SearchScreenHandlers = {
   readonly onCancel?: MaybeFn;
   readonly onRetry?: MaybeFn;
   readonly onResultPress?: MaybeFn<[row: TrackRowModel]>;
+  /** Advisory row intent — hover/focus/long-press; the host warms the row. */
+  readonly onRowIntent?: MaybeFn<[row: TrackRowModel]>;
   readonly onToggleLike?: MaybeFn<[row: TrackRowModel]>;
   readonly onAddToPlaylist?: MaybeFn<[row: TrackRowModel]>;
   readonly onContext?: MaybeFn<[row: TrackRowModel]>;
@@ -1045,6 +1059,7 @@ export type SearchFieldView = {
 export type SearchRowView = {
   readonly row: TrackRowModel;
   readonly onPress: MaybeFn;
+  readonly onIntent: MaybeFn;
   readonly onToggleLike: MaybeFn;
   readonly onAddToPlaylist: MaybeFn;
   readonly onContext: MaybeFn;
@@ -1130,6 +1145,7 @@ export function useSearchScreenController({
   onCancel,
   onRetry,
   onResultPress,
+  onRowIntent,
   onToggleLike,
   onAddToPlaylist,
   onContext,
@@ -1261,6 +1277,7 @@ export function useSearchScreenController({
             rows: state.results.map((row) => ({
               row,
               onPress: bind(onResultPress, row),
+              onIntent: bind(onRowIntent, row),
               onToggleLike: bind(onToggleLike, row),
               onAddToPlaylist: bind(onAddToPlaylist, row),
               onContext: bind(onContext, row),
@@ -1274,6 +1291,8 @@ export function useSearchScreenController({
 
 export type StageQueueHandlers = {
   readonly onPressQueueItem?: MaybeFn<[occurrenceId: string]>;
+  /** Advisory row intent — hover/focus/long-press; the host warms the row. */
+  readonly onQueueRowIntent?: MaybeFn<[occurrenceId: string]>;
   readonly onRemoveQueueItem?: MaybeFn<[occurrenceId: string]>;
   readonly onToggleQueueReorder?: MaybeFn;
   readonly onMoveQueueItem?: MaybeFn<[occurrenceId: string, direction: -1 | 1]>;

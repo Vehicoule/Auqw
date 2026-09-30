@@ -86,9 +86,13 @@ impl ReqwestClient {
             // mobile targets share one trust store.
             let mut roots = rustls::RootCertStore::empty();
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            let tls = rustls::ClientConfig::builder()
+            let mut tls = rustls::ClientConfig::builder()
                 .with_root_certificates(roots)
                 .with_no_client_auth();
+            // This client is shared with the stream pump — keep the
+            // fetch transport's h1-only advertisement so no build is
+            // negotiated into a protocol hyper can't serve.
+            tls.alpn_protocols = vec![b"http/1.1".to_vec()];
             builder.use_preconfigured_tls(tls)
         };
         let client = builder.build().map_err(|e| HttpError {
@@ -97,6 +101,14 @@ impl ReqwestClient {
             bytes_received: 0,
         })?;
         Ok(Self { client })
+    }
+
+    /// Clone of the inner [`reqwest::Client`] (cheap — Arc'd pool).
+    /// The stream transport wraps it so CDN connections a guest probe
+    /// opened stay pooled for the pump's first range fetch.
+    #[must_use]
+    pub fn client(&self) -> reqwest::Client {
+        self.client.clone()
     }
 }
 

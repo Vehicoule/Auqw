@@ -17,6 +17,8 @@ export type CollectionScreenProps = {
   readonly onBack?: (() => void) | undefined;
   readonly onPlayAll?: (() => void) | undefined;
   readonly onPressItem?: ((row: CollectionRowModel) => void) | undefined;
+  /** Advisory row intent — touch-down on a row; the caller warms it. */
+  readonly onRowIntent?: ((row: CollectionRowModel) => void) | undefined;
   readonly onToggleLike?: ((row: CollectionRowModel) => void) | undefined;
   readonly onContext?: ((row: CollectionRowModel) => void) | undefined;
 };
@@ -37,6 +39,7 @@ export function CollectionScreen({
   onBack,
   onPlayAll,
   onPressItem,
+  onRowIntent,
   onToggleLike,
   onContext,
 }: CollectionScreenProps) {
@@ -84,6 +87,7 @@ export function CollectionScreen({
               row={item.row}
               badge={item.badge}
               onPress={bind(onPressItem, item)}
+              onIntent={bind(onRowIntent, item)}
               onToggleLike={bind(onToggleLike, item)}
               onContext={bind(onContext, item)}
             />
