@@ -1,6 +1,6 @@
 ---
 name: testing-auqw-desktop-electron
-description: How to launch and exercise the auqw Electron desktop shell (apps/desktop) live on the X desktop — env knobs, dev-gate audio path, ranged fixture, and how to prove sound on a VM with no audio device.
+description: How to launch and exercise the auqw Electron desktop shell (apps/desktop) live on the X desktop — env knobs, plugin staging required for product-UI boot, dev-gate audio path, product-UI driving (dialogs, tabs, transport, waveform capture), ranged fixture, and how to prove sound on a VM with no audio device.
 ---
 
 # Testing the auqw desktop Electron shell end-to-end
@@ -76,6 +76,36 @@ those merge, this skill has nothing to run against.
   must stay a single stable PID across the run, and the launch log must show
   no respawn/crash lines (dbus + ALSA noise is normal on this box).
 
+## Driving the product UI (app.html)
+
+- **GTK "Add a local folder" dialog recipe**: Enter key and the "Select
+  Folder" button both return `no-result` cancellations. Works reliably:
+  `wmctrl -a "Add a local folder"` to activate the separate GTK window,
+  `Ctrl+L` → type the absolute path → click **"Open"** (bottom right).
+  `settings.addLocalFolder failed: no-result` console lines mean the pick
+  was cancelled — retry with the recipe, not a bug.
+- **Nav tab coordinates MOVE when the stage column toggles**: the
+  home/explore/library strip is centered in the world column. With the
+  stage pane open they sit around x≈440/500/560; after hiding the stage
+  (≡ at ~934,13) they shift right to ≈590/650/710. Re-zoom the strip
+  before clicking instead of reusing coordinates.
+- **Enqueue vs switch**: during an active queue/radio session, pressing a
+  search-result row ENQUEUES (the "radio · growing" chip auto-fills
+  UP NEXT). Pressing a row inside the queue pane (stage "queue" tab)
+  switches playback immediately. To switch fast, use the transport next
+  (>) button at ~(197,672).
+- **Waveform baseline capture**: the flat zero-amplitude placeholder only
+  renders for ~1-2s after a track switch — click next (>) and screenshot
+  within ~1s. Bars are flat lines at 0:00, then real amplitude bars land.
+  Seek = click anywhere on the WaveformSeek strip (~y620); position
+  display + played region jump.
+- **Artwork surfaces**: provider catalog rows (deezer search — e.g.
+  "daft punk") all carry https art. Art also renders on queue
+  NOW PLAYING/UP NEXT rows, liked collection rows, home "recently liked"
+  + "search results" tiles, artist tiles, and the stage album-art
+  backdrop. Local files honestly have `artwork: []` — monogram tiles are
+  correct, NOT missing-art bugs.
+
 ## Proving sound on a VM with no audio hardware
 
 This box has no `/dev/snd`, no pulseaudio/pipewire, and `pactl` is absent —
@@ -88,6 +118,7 @@ end-to-end proof:
 2. The fixture's request log showing `-> 206` responses — proves bytes
    flowed upstream → Rust loopback → renderer.
 
+`player phase observed` console lines also confirm state transitions.
 Show `tail -f` of the fixture log in a konsole beside the window during the
 recording so reviewers see range pulls live.
 
@@ -146,6 +177,14 @@ recording so reviewers see range pulls live.
   `AUQW_PLUGIN_DIR=/abs/path/to/apps/desktop/plugins` — main only defaults it
   for packaged builds. Without it `#provider` stays empty and the provider
   path logs `prepare failed — no plugins loaded`.
+- The PRODUCT UI is stricter: `src/renderer/controller.ts` throws
+  `'no plugin providers available'` when the plugin dir is empty → boot dies
+  at `[ui] boot failed: internal` and nothing interactive ever renders.
+  Stage providers first (reads `providers.lock.json`):
+  `node tooling/sync-plugins.mjs apps/desktop/plugins`
+  then `export AUQW_PLUGIN_DIR=$PWD/plugins` (from `apps/desktop`).
+  itunes/deezer/youtube-music/lyrics-lrclib all stage cleanly with outbound
+  HTTPS.
 - youtube-music `playback.resolve` takes an 11-char video ID as `source_ref`
   (e.g. `kJQP7kiw5Fk`), not a URL.
 - `Ctrl+Shift+I` opens devtools in the window; the preload surface is then
