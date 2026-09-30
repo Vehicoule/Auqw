@@ -383,15 +383,23 @@ export function createWebPlayerPort(deps: {
             if (thrown instanceof MseAborted) {
               throw thrown;
             }
-            // A typed pump verdict isn't an MSE refusal — the
+            // A terminal pump verdict isn't an MSE refusal — the
             // loopback would re-serve the same dead stream and
             // launder the kind to transient through the element.
+            // Retryable codes keep the fallback: a fresh attach on
+            // the live session clears its latched read failure.
             if (
               thrown instanceof PumpFailure &&
               thrown.code !== 'io-error' &&
               thrown.code !== 'closed'
             ) {
-              throw appError(appErrorKind(thrown.code), thrown.message);
+              const mapped = appError(
+                appErrorKind(thrown.code),
+                thrown.message,
+              );
+              if (!mapped.retryable) {
+                throw mapped;
+              }
             }
             const served = await stream.serveUrl({ handle });
             return { url: served.url, source: null };

@@ -1834,9 +1834,10 @@ export async function run(): Promise<void> {
     );
   }
 
-  // A transport death before readiness keeps the loopback leg — the
-  // session may still have bytes the pump never reached.
-  {
+  // A recoverable pump code before readiness keeps the loopback too —
+  // the session latches a transient read failure and a fresh attach
+  // (which the serve leg performs) clears it.
+  for (const code of ['io-error', 'transient', 'rate-limit']) {
     const audio = fakeAudio();
     const port = new FakePort();
     const stream = fakeStream({
@@ -1858,13 +1859,13 @@ export async function run(): Promise<void> {
     port.feed({
       kind: 'error',
       epoch: 0,
-      code: 'io-error',
+      code,
       message: 'read died',
     });
     await playing;
     assert(
       stream.calls.some((c) => c.method === 'serveUrl'),
-      'transport death still takes the loopback',
+      `recoverable ${code} still takes the loopback`,
     );
   }
 
