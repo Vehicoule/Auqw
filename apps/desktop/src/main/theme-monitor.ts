@@ -352,13 +352,22 @@ function watchedPaths(env: ThemeSourceEnv): readonly string[] {
 export function createThemeMonitor(opts: {
   env: ThemeSourceEnv;
   pollMs?: number;
+  maxPollMs?: number;
 }): ThemeMonitor {
   const pollMs = opts.pollMs ?? 4_000;
+  // Consecutive unchanged reads stretch the poll gap geometrically up
+  // to this cap: the poll is the only watcher for sources like the
+  // portal accent, so it can't stop outright — but a settled desktop
+  // doesn't need a collect (and its gdbus spawn) every pollMs. Any
+  // changed read drops the next gap back to pollMs.
+  const maxPollMs = opts.maxPollMs ?? 60_000;
   const env = opts.env;
   const senders = new Map<ThemeSender, number>();
   const destroyedHooked = new WeakSet<ThemeSender>();
   let stops: (() => void)[] | null = null;
   let last: ThemeSource | null = null;
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  let unchangedReads = 0;
 
   async function collect(): Promise<ThemeSource> {
     const source: { -readonly [K in keyof ThemeSource]?: ThemeSource[K] } =
@@ -428,11 +437,21 @@ export function createThemeMonitor(opts: {
           return;
         }
         if (JSON.stringify(next) === JSON.stringify(last)) {
+          unchangedReads += 1;
           return;
         }
+        unchangedReads = 0;
         last = next;
         for (const sender of senders.keys()) {
           sendTo(sender, next);
+        }
+        if (pollTimer !== null) {
+          // A changed read re-bases the poll: drop the idle-stretched
+          // timer so the settle re-arms at base cadence — a watch only
+          // covers its own files, and the sources the poll alone sees
+          // (portal accent, symlink retargets) deserve the fast gap.
+          clearTimeout(pollTimer);
+          pollTimer = null;
         }
       })
       .catch(() => {
@@ -445,7 +464,25 @@ export function createThemeMonitor(opts: {
           refresh();
         }
         rerun = false;
+        armPoll();
       });
+  }
+
+  // Every settled collect arms the next poll — the guard keeps a
+  // single timer outstanding and drops post-teardown settles.
+  function armPoll(): void {
+    if (stops === null || pollTimer !== null) {
+      return;
+    }
+    const delay = Math.min(
+      pollMs * 2 ** Math.min(unchangedReads, 4),
+      maxPollMs,
+    );
+    pollTimer = setTimeout(() => {
+      pollTimer = null;
+      refresh();
+    }, delay);
+    pollTimer.unref();
   }
 
   function setup(): void {
@@ -466,9 +503,6 @@ export function createThemeMonitor(opts: {
     } catch {
       // system change hook unavailable — poll covers it
     }
-    const timer = setInterval(refresh, pollMs);
-    timer.unref();
-    stops.push(() => clearInterval(timer));
   }
 
   function teardown(): void {
@@ -481,6 +515,11 @@ export function createThemeMonitor(opts: {
     stops = null;
     last = null;
     epoch++;
+    if (pollTimer !== null) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+    unchangedReads = 0;
   }
 
   return {

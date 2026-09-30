@@ -619,6 +619,16 @@ function Main({
   const ports = useMemo<AppShellPorts<Overlay>>(
     () => ({
       subscribeOnline: controller.subscribeOnline,
+      // Foreground edges drive the shell's appActive gate — a hidden
+      // window's lyrics clock stops ticking (Chromium throttles the
+      // timer anyway; this skips the reconciler work it would wake).
+      subscribeAppActive: (listener) => {
+        listener(!document.hidden);
+        const onVisibility = () => listener(!document.hidden);
+        document.addEventListener('visibilitychange', onVisibility);
+        return () =>
+          document.removeEventListener('visibilitychange', onVisibility);
+      },
       // OAuth session trust — the IPC-backed auth surface; token
       // material never crosses into this renderer. The adapter is
       // hoisted to a stable memo: each instance wires one `auth:state`
@@ -852,8 +862,23 @@ function Main({
       return;
     }
     syncRefresh();
-    const timer = window.setInterval(syncRefresh, 5_000);
-    return () => window.clearInterval(timer);
+    const timer = window.setInterval(() => {
+      // A hidden window can't read the panel — skip the IPC fan-out
+      // and re-sync once on becoming visible.
+      if (!document.hidden) {
+        syncRefresh();
+      }
+    }, 5_000);
+    const onVisible = () => {
+      if (!document.hidden) {
+        syncRefresh();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [tab, syncRefresh]);
 
   const syncModel = useMemo(

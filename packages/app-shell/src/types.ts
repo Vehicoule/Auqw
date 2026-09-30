@@ -136,6 +136,17 @@ export interface AppShellPorts<E> {
   readonly subscribeOnline: (set: (online: boolean) => void) => () => void;
 
   /**
+   * App foreground/active stream — optional. Mobile wires
+   * `AppState` (`status === 'active'`); desktop wires
+   * `document.visibilitychange` (`!document.hidden`). The listener
+   * must get the CURRENT state pushed on subscribe. While inactive
+   * the shell freezes the interpolated-position clock that drives the
+   * lyrics surface — an off-screen tick only burns battery. Absent =
+   * always active (reduced harnesses, tests).
+   */
+  readonly subscribeAppActive?: (set: (active: boolean) => void) => () => void;
+
+  /**
    * "Owned bytes the player can attach" probe — desktop:
    * `controller.localPlaybackFor(id) !== null`. Mobile's owned set IS
    * the attachable set, so it leaves this unset (the factory's

@@ -75,6 +75,13 @@ those merge, this skill has nothing to run against.
   check: `ps -eo pid,cmd | grep utility-sub-type=node.mojom | grep -v grep`
   must stay a single stable PID across the run, and the launch log must show
   no respawn/crash lines (dbus + ALSA noise is normal on this box).
+- The button row Y-position drifts as the `#events` log grows — each
+  appended `phase`/`dev-prepared` line shifts prepare/play/pause/stop up
+  ~15 px. A click using coordinates from an earlier screenshot lands on
+  empty space and silently no-ops; re-screenshot before each click.
+- Each `play` press serves a FRESH stream (new `attach`/`head-ready`/
+  `first-byte` phase lines, position restarts at 0) — there is no
+  resume-from-pause on this page; pause → play restarts the track.
 
 ## Driving the product UI (app.html)
 
@@ -121,6 +128,13 @@ end-to-end proof:
 `player phase observed` console lines also confirm state transitions.
 Show `tail -f` of the fixture log in a konsole beside the window during the
 recording so reviewers see range pulls live.
+
+In the product UI the lyrics surface corroborates `positionMs`: on a
+synced-lyrics track the active-line highlight + auto-scroll follow the
+position clock. Hiding the window (`wmctrl -r auqw -b add,hidden` then
+`wmctrl -a auqw`) exercises the appActive gate — after restore the
+highlight should sit several lines further along (audio keeps playing
+while hidden).
 
 ## Fixture recipe
 
@@ -188,6 +202,16 @@ recording so reviewers see range pulls live.
   HTTPS.
 - youtube-music `playback.resolve` takes an 11-char video ID as `source_ref`
   (e.g. `kJQP7kiw5Fk`), not a URL.
+- `sync-plugins.mjs` can fail `ENOENT … releases/<id>/<version>` when the
+  sibling `~/repos/Auqw-plugins` checkout is stale (the lock pins releases
+  the clone doesn't have). Fix: `git -C ~/repos/Auqw-plugins pull --ff-only`
+  then re-run the sync.
+- youtube-music CAN resolve on this box — a bot-check on datacenter IPs is
+  a possible failure, not a guaranteed one. A deezer search row pressed
+  with no active queue starts a `radio · growing · youtube-music` session
+  that fully plays (position + synced lrclib lyrics observed). Only a
+  typed `guest failure (transient): transient: bot-check` is the known-bad
+  path.
 - `Ctrl+Shift+I` opens devtools in the window; the preload surface is then
   callable directly (`window.auqw.sync.pairing()`, `.status()`, `.stream.*`)
   — the fastest way to hit IPC paths with no UI control in the harness.
