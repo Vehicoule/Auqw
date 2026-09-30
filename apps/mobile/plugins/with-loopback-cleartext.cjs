@@ -5,9 +5,16 @@
 // policy has no IP-literal/loopback exemption — the debug manifests
 // set the flag but the RELEASE manifest inherited the block, so every
 // pump attach was denied after a successful resolve (the transient
-// toast on release builds). Scoped to loopback literals only: the
-// rest of the app keeps the platform default.
-const { withAndroidManifest, withDangerousMod } = require('expo/config-plugins');
+// toast on release builds).
+//
+// The config lands in src/release/, not src/main/: a
+// networkSecurityConfig on the shared manifest would REPLACE the
+// debug manifest's cleartext flag for dev builds too, and the
+// loopback-only allowlist would then cut debug builds off from Metro
+// (the emulator reaches it at http://10.0.2.2:8081, a physical device
+// at its LAN address). The release-only manifest overlay keeps debug
+// untouched; the xml sits in main res so the reference resolves.
+const { withDangerousMod } = require('expo/config-plugins');
 const fs = require('fs');
 const path = require('path');
 
@@ -20,29 +27,36 @@ const NETWORK_SECURITY_CONFIG = `<?xml version="1.0" encoding="utf-8"?>
 </network-security-config>
 `;
 
-const withLoopbackCleartext = (config) => {
-  config = withDangerousMod(config, [
+const RELEASE_MANIFEST = `<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:networkSecurityConfig="@xml/network_security_config"/>
+</manifest>
+`;
+
+const withLoopbackCleartext = (config) =>
+  withDangerousMod(config, [
     'android',
     async (cfg) => {
-      const dir = path.join(
+      const res = path.join(
         cfg.modRequest.platformProjectRoot,
         'app/src/main/res/xml',
       );
-      await fs.promises.mkdir(dir, { recursive: true });
+      await fs.promises.mkdir(res, { recursive: true });
       await fs.promises.writeFile(
-        path.join(dir, 'network_security_config.xml'),
+        path.join(res, 'network_security_config.xml'),
         NETWORK_SECURITY_CONFIG,
+      );
+      const release = path.join(
+        cfg.modRequest.platformProjectRoot,
+        'app/src/release',
+      );
+      await fs.promises.mkdir(release, { recursive: true });
+      await fs.promises.writeFile(
+        path.join(release, 'AndroidManifest.xml'),
+        RELEASE_MANIFEST,
       );
       return cfg;
     },
   ]);
-  return withAndroidManifest(config, (cfg) => {
-    const app = cfg.modResults.manifest.application?.[0];
-    if (app) {
-      app.$['android:networkSecurityConfig'] = '@xml/network_security_config';
-    }
-    return cfg;
-  });
-};
 
 module.exports = withLoopbackCleartext;
