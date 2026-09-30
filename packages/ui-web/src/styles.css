@@ -386,7 +386,7 @@
 .uw-eq {
   display: inline-flex;
   align-items: flex-end;
-  gap: 2px;
+  gap: var(--spacing-xxs);
 }
 
 .uw-eq__bar {
@@ -860,7 +860,8 @@
 }
 
 .uw-resume:hover:not(:disabled) {
-  border-color: var(--fg25);
+  border-color: var(--fg40);
+  background: var(--uw-hover);
 }
 
 .uw-rail {
@@ -1007,7 +1008,7 @@
 
 .uw-search__cancel:hover:not(:disabled),
 .uw-search__clear:hover:not(:disabled) {
-  background: var(--fg18);
+  background: var(--uw-hover);
 }
 
 .uw-search__count {
@@ -1088,7 +1089,7 @@
 .uw-dup-badge {
   display: inline-block;
   margin: var(--spacing-xs) var(--spacing-sm) 0;
-  padding: 0 7px;
+  padding: 0 var(--spacing-sm);
   border-radius: var(--radius-pill);
   border: var(--stroke-hairline) solid var(--hairline);
   color: var(--text-secondary);
@@ -1409,7 +1410,7 @@
   border: var(--stroke-hairline) solid var(--hairline);
   display: inline-flex;
   align-items: center;
-  padding: 0 2px;
+  padding: 0 var(--spacing-xxs);
   flex-shrink: 0;
 }
 
@@ -1427,6 +1428,8 @@
 }
 
 .uw-toggle--on .uw-toggle__thumb {
+  /* travel = 46 track − 2×(1 border + 2 pad) − 22 thumb: mirrors the
+     OFF inset so both states sit 3px in — same as the native toggle. */
   transform: translateX(18px);
   border-color: transparent;
 }
@@ -1760,7 +1763,7 @@
   animation: uw-sheet-in var(--motion-sheet) ease;
 }
 @keyframes uw-sheet-in {
-  from { transform: translateY(24px); opacity: 0; }
+  from { transform: translateY(var(--spacing-xxl)); opacity: 0; }
   to { transform: none; opacity: 1; }
 }
 .uw-sheet-panel {
@@ -1818,7 +1821,7 @@
   padding: var(--spacing-md);
   border-radius: var(--radius-float);
   background: var(--fg08);
-  letter-spacing: var(--tracking-loose, 0.12em);
+  letter-spacing: 0.12em;
   text-align: center;
 }
 
@@ -1862,7 +1865,7 @@
 }
 
 .uw-namefield__action:hover:not(:disabled) {
-  background: var(--fg18);
+  background: var(--uw-hover);
 }
 
 /* ---- now playing ---------------------------------------------------------- */
@@ -2062,7 +2065,7 @@
   display: inline-flex;
   align-items: center;
   align-self: flex-start;
-  min-height: var(--size-touch-min, 28px);
+  min-height: 28px;
   margin-top: var(--spacing-xxs);
   padding: 0 var(--spacing-sm);
   border-radius: var(--radius-control);
@@ -2123,7 +2126,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: calc(var(--spacing-xs) + 2px);
+  gap: calc(var(--spacing-xs) + var(--spacing-xxs));
   margin-top: var(--spacing-md);
 }
 
@@ -2132,8 +2135,11 @@
    floating in the stage and centered as the world's page switcher. */
 .uw-segment {
   display: flex;
-  gap: 2px;
+  gap: var(--spacing-xxs);
   background: var(--fg08);
+  /* 3px pad is deliberate: 44 + 2×3 + 2×hairline lands the float at
+     the 52px chrome height — the mini player's. Don't pull it onto
+     the spacing scale. */
   padding: 3px;
   border-radius: var(--radius-pill);
 }
@@ -2147,7 +2153,7 @@
   -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
   border: var(--stroke-hairline) solid var(--hairline);
-  box-shadow: 0 8px 24px var(--scrim);
+  box-shadow: 0 var(--spacing-sm) var(--spacing-xxl) var(--scrim);
 }
 
 .uw-segment__item {
@@ -2161,7 +2167,7 @@
 }
 
 .uw-segment__item:hover:not(:disabled):not(.uw-segment__item--on) {
-  background: var(--fg18);
+  background: var(--uw-hover);
 }
 
 .uw-segment__item--on {
@@ -2254,8 +2260,8 @@
   bottom: 96px;
   transform: translateX(-50%);
   max-width: min(480px, calc(100% - 32px));
-  padding: 6px 14px;
-  border-radius: 999px;
+  padding: var(--spacing-sm) var(--spacing-lg);
+  border-radius: var(--radius-pill);
   background: var(--raised);
   border: var(--stroke-hairline) solid var(--hairline);
   z-index: 70;
@@ -2282,7 +2288,7 @@
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--spacing-md);
   text-align: left;
 }
 
@@ -2462,7 +2468,7 @@
 
 .uw-menu-pop {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + var(--spacing-sm));
   right: 0;
   min-width: 160px;
   padding: var(--spacing-xxs);

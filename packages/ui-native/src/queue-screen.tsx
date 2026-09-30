@@ -59,7 +59,7 @@ export function QueueScreen({
         <Text variant="heading" color="bright">
           {view.title}
         </Text>
-        <Text variant="metadata" color="secondary" style={{ marginLeft: 10 }}>
+        <Text variant="metadata" color="secondary" style={{ marginLeft: theme.spacing.sm }}>
           {view.countLabel}
         </Text>
         <View style={{ flex: 1 }} />
@@ -84,7 +84,7 @@ export function QueueScreen({
           style={{
             flexDirection: 'row',
             alignItems: 'center',
-            gap: 11,
+            gap: theme.spacing.md,
             marginHorizontal: theme.spacing.screen,
             marginBottom: theme.spacing.sm,
             padding: theme.spacing.sm,

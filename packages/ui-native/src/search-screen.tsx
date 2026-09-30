@@ -113,10 +113,10 @@ export function SearchScreen({
         style={{
           marginHorizontal: theme.spacing.screen,
           marginTop: theme.spacing.xxs,
-          marginBottom: 10,
+          marginBottom: theme.spacing.sm,
           backgroundColor: theme.colors.fg08,
-          borderRadius: 20,
-          paddingHorizontal: 11,
+          borderRadius: theme.radius.pill,
+          paddingHorizontal: theme.spacing.md,
           minHeight: theme.sizes.touch,
           flexDirection: 'row',
           alignItems: 'center',
@@ -263,7 +263,7 @@ export function SearchScreen({
           data={view.results.rows}
           keyExtractor={(row) => row.row.key}
           scrollEnabled={scrollEnabled}
-          contentContainerStyle={{ paddingHorizontal: 6 }}
+          contentContainerStyle={{ paddingHorizontal: theme.spacing.screen - theme.spacing.sm }}
           renderItem={({ item }) => (
             <TrackRow
               row={item.row}

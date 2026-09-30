@@ -55,7 +55,7 @@ export function AndroidNavbar({
               style={{
                 flex: 1,
                 alignItems: 'center',
-                gap: 3,
+                gap: theme.spacing.xs,
                 minHeight: theme.sizes.touch,
               }}
             >
@@ -63,7 +63,7 @@ export function AndroidNavbar({
                 style={{
                   minWidth: 56,
                   height: 30,
-                  borderRadius: 15,
+                  borderRadius: theme.radius.pill,
                   paddingHorizontal: theme.spacing.screen,
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -128,7 +128,7 @@ export function IosGlassNavbar({
           accessibilityRole="tablist"
           style={{
             flexDirection: 'row',
-            padding: theme.spacing.xs + 2,
+            padding: theme.spacing.xs + theme.spacing.xxs,
             minHeight: theme.sizes.navbarIos,
           }}
         >
@@ -146,7 +146,7 @@ export function IosGlassNavbar({
                   flex: 1,
                   alignItems: 'center',
                   justifyContent: 'center',
-                  gap: 2,
+                  gap: theme.spacing.xxs,
                   minHeight: theme.sizes.touch,
                 }}
               >
@@ -154,7 +154,7 @@ export function IosGlassNavbar({
                   style={{
                     minWidth: 44,
                     height: 26,
-                    borderRadius: 13,
+                    borderRadius: theme.radius.pill,
                     paddingHorizontal: 10,
                     alignItems: 'center',
                     justifyContent: 'center',

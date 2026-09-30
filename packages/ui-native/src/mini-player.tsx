@@ -249,8 +249,8 @@ export function MiniPlayer({
       >
       <View
         style={{
-          marginHorizontal: 10,
-          marginBottom: theme.spacing.sm,
+          marginHorizontal: theme.spacing.md,
+          marginBottom: theme.spacing.md,
           borderRadius: theme.radius.float,
           borderWidth: theme.strokes.hairline,
           borderColor: theme.colors.hairline,
@@ -285,9 +285,9 @@ export function MiniPlayer({
           style={{
             flexDirection: 'row',
             alignItems: 'center',
-            gap: 10,
+            gap: theme.spacing.xs,
             height: theme.sizes.miniPlayer,
-            paddingHorizontal: 7,
+            paddingHorizontal: theme.spacing.sm,
           }}
         >
           <Pressable
@@ -306,7 +306,7 @@ export function MiniPlayer({
               minWidth: 0,
               flexDirection: 'row',
               alignItems: 'center',
-              gap: 10,
+              gap: theme.spacing.md,
             }}
           >
             <ArtworkRing

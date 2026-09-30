@@ -1413,7 +1413,7 @@ function testDesignTokenAuthority(): void {
       `${file.name}: literal font sizes must come from typography tokens`,
     );
     assert(
-      !/(padding|margin)Horizontal: 14/.test(file.source),
+      !/\b(?:padding|margin)\w*: 14\b/.test(file.source),
       `${file.name}: screen gutters must use the spacing token`,
     );
   }

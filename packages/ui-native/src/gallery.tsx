@@ -101,10 +101,10 @@ function Chip({
       accessibilityLabel={label}
       accessibilityState={{ selected: active }}
       style={{
-        paddingHorizontal: 12,
+        paddingHorizontal: theme.spacing.md,
         minHeight: 28,
         justifyContent: 'center',
-        borderRadius: 20,
+        borderRadius: theme.radius.pill,
         backgroundColor: active ? theme.colors.accentSoft : theme.colors.fg08,
       }}
     >
@@ -173,8 +173,9 @@ function Frame({
 }
 
 function Caption({ children }: { readonly children: ReactNode }) {
+  const theme = useTheme();
   return (
-    <Text variant="metadata" color="secondary" style={{ marginBottom: 4 }}>
+    <Text variant="metadata" color="secondary" style={{ marginBottom: theme.spacing.xs }}>
       {children}
     </Text>
   );
@@ -201,8 +202,9 @@ function ShowcaseFrame({
 const PLATFORMS = ['android', 'ios'] as const;
 
 function IconSwatch({ name }: { readonly name: IconName }) {
+  const theme = useTheme();
   return (
-    <View style={{ alignItems: 'center', width: 52, gap: 4 }}>
+    <View style={{ alignItems: 'center', width: 52, gap: theme.spacing.xs }}>
       <Icon name={name} size={16} />
       <Text variant="metadata" color="secondary">
         {name}
@@ -329,7 +331,7 @@ function GalleryBody({
       <Text variant="display" color="bright">
         auqw ui-native
       </Text>
-      <Text variant="metadata" color="secondary" style={{ marginTop: 4 }}>
+      <Text variant="metadata" color="secondary" style={{ marginTop: theme.spacing.xs }}>
         fixture gallery · omarchy shell
       </Text>
       <View
@@ -404,7 +406,7 @@ function GalleryBody({
       </Section>
 
       <Section title="track rows" note="all states">
-        <View style={{ paddingHorizontal: 6 }}>
+        <View style={{ paddingHorizontal: theme.spacing.screen - theme.spacing.sm }}>
           {fixtureRowStates.map((row) => (
             <TrackRow
               key={row.key}

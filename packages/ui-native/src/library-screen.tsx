@@ -411,7 +411,7 @@ export function LibraryScreen({
                   flexWrap: 'wrap',
                   gap: theme.spacing.lg,
                 }
-              : { marginHorizontal: -theme.spacing.sm, gap: 2 }
+              : { marginHorizontal: -theme.spacing.sm, gap: theme.spacing.xxs }
           }
         >
           {view.cards.map((card) => (

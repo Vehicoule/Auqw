@@ -38,7 +38,7 @@ function ResumeCard({
         {
           flexDirection: 'row',
           alignItems: 'center',
-          gap: 11,
+          gap: theme.spacing.md,
           marginHorizontal: theme.spacing.screen,
           marginTop: theme.spacing.lg,
           padding: theme.spacing.sm,
@@ -59,14 +59,14 @@ function ResumeCard({
           variant="body"
           color="primary"
           numberOfLines={1}
-          style={{ marginTop: 2 }}
+          style={{ marginTop: theme.spacing.xxs }}
         >
           {resume.card.title}
         </Text>
         <View
           style={{
             height: 3,
-            borderRadius: 2,
+            borderRadius: theme.radius.pill,
             backgroundColor: theme.colors.fg08,
             marginTop: theme.spacing.xs,
             overflow: 'hidden',
@@ -76,7 +76,7 @@ function ResumeCard({
             style={{
               width: `${Math.round(fraction * 100)}%`,
               height: 3,
-              borderRadius: 2,
+              borderRadius: theme.radius.pill,
               backgroundColor: theme.colors.accent,
             }}
           />
@@ -183,7 +183,7 @@ function Rail({
                 variant="metadata"
                 color="secondary"
                 numberOfLines={1}
-                style={{ marginTop: 2 }}
+                style={{ marginTop: theme.spacing.xxs }}
               >
                 {item.subtitle ?? '—'}
               </Text>

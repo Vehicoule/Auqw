@@ -142,7 +142,7 @@ function ReviewRow({ view }: { readonly view: CorrectionsRowView }) {
           variant="metadata"
           color="secondary"
           numberOfLines={1}
-          style={{ marginTop: 3 }}
+          style={{ marginTop: theme.spacing.xxs }}
         >
           {row.artist}
         </Text>

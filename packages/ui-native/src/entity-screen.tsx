@@ -138,7 +138,7 @@ export function EntityScreen({
             variant="metadata"
             color="secondary"
             numberOfLines={1}
-            style={{ marginTop: 2 }}
+            style={{ marginTop: theme.spacing.xxs }}
           >
             {model.subtitle}
           </Text>

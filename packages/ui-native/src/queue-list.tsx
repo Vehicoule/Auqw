@@ -39,7 +39,7 @@ export function QueueRowChrome({
             alignSelf: 'flex-start',
             marginHorizontal: theme.spacing.sm,
             marginTop: theme.spacing.xs,
-            paddingHorizontal: 7,
+            paddingHorizontal: theme.spacing.sm,
             borderRadius: theme.radius.pill,
             borderWidth: theme.strokes.hairline,
             borderColor: theme.colors.hairline,

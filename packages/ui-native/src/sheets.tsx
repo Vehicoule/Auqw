@@ -147,7 +147,7 @@ export function NameField({
         gap: theme.spacing.sm,
         backgroundColor: theme.colors.fg08,
         borderRadius: theme.radius.float,
-        paddingHorizontal: 11,
+        paddingHorizontal: theme.spacing.md,
         minHeight: theme.sizes.touch,
       }}
     >
