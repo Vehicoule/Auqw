@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { CapsLabel, Icon, Pressable, Spinner, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { TrackRow, indexAdapter, useTrackList } from './track-row.tsx';
@@ -54,17 +54,34 @@ export type SearchScreenProps = SearchScreenHandlers & {
    * from an older search never impersonate matches for the draft.
    */
   readonly suggestions?: readonly string[] | undefined;
-  /** Focus the input on mount — the '/' global shortcut lands here. */
+  /**
+   * Focus the input — passes through to the DOM autofocus attribute
+   * on a visible mount, marks the input `[data-autofocus]` so a
+   * keep-alive host (WorldPanes) can re-focus it on reveal, and
+   * re-focuses whenever `focusSignal` bumps.
+   */
   readonly autoFocus?: boolean | undefined;
+  /**
+   * Bump to re-focus the input without a remount — the '/' global
+   * shortcut refocuses even when the tab never left (the old
+   * `key={searchFocusTick}` remount cost a full screen re-inflation).
+   */
+  readonly focusSignal?: number | undefined;
 };
 
 export function SearchScreen({
   scrollEnabled = true,
   autoFocus = false,
+  focusSignal,
   ...input
 }: SearchScreenProps) {
   const view = useSearchScreenController(input);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (autoFocus) {
+      inputRef.current?.focus();
+    }
+  }, [autoFocus, focusSignal]);
   const list = useTrackList({
     count: input.state.results.length,
     onActivate: indexAdapter(input.state.results, input.onResultPress),
@@ -86,6 +103,7 @@ export function SearchScreen({
           autoComplete="off"
           spellCheck={false}
           autoFocus={autoFocus}
+          data-autofocus={autoFocus ? '' : undefined}
           value={view.field.value}
           onChange={
             view.field.onChange === undefined
