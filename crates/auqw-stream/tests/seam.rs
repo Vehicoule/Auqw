@@ -1118,25 +1118,22 @@ async fn claim_if_live_refuses_dead_and_unknown_sessions() {
         .prepare(source(1024), Arc::new(NeverRemint))
         .unwrap_or_else(|e| panic!("prepare: {e}"))
         .handle;
-    assert_eq!(
+    assert!(
         reg.claim_if_live(&a)
             .unwrap_or_else(|e| panic!("claim_if_live: {e}")),
-        true,
         "live session claims"
     );
     // Owner release ends the session regardless of the claim — a
     // second reservation attempt must now refuse the dead handle.
     reg.release(&a).unwrap_or_else(|e| panic!("release: {e}"));
-    assert_eq!(
-        reg.claim_if_live(&a)
+    assert!(
+        !reg.claim_if_live(&a)
             .unwrap_or_else(|e| panic!("claim_if_live dead: {e}")),
-        false,
         "dead session refused"
     );
-    assert_eq!(
-        reg.claim_if_live("ghost")
+    assert!(
+        !reg.claim_if_live("ghost")
             .unwrap_or_else(|e| panic!("claim_if_live ghost: {e}")),
-        false,
         "unknown handle refused"
     );
 }
@@ -1159,12 +1156,60 @@ async fn claim_if_live_after_terminal_verdict_still_refuses() {
         .handle;
     reg.cancel_if_unattached(&a)
         .unwrap_or_else(|e| panic!("cancel: {e}"));
-    assert_eq!(
-        reg.claim_if_live(&a)
+    assert!(
+        !reg.claim_if_live(&a)
             .unwrap_or_else(|e| panic!("claim_if_live: {e}")),
-        false,
         "cancelled session refused"
     );
+}
+
+/// The reservation under real contention: `claim_if_live` racing an
+/// unattached teardown (`cancel_if_unattached`) on the same session —
+/// the kill class the claim actually guards. Whichever wins the
+/// `shared` lock decides the outcome, and terminal is monotonic, so
+/// the one observable contract is `claimed == is_live`: a claimed
+/// session still lives (it won, the teardown skipped it) and a
+/// refused claim always coincides with a dead session (it saw the
+/// kill). Any other pairing means a stale handle got marked owned —
+/// the bug this closes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claim_if_live_races_unattached_teardown_with_no_stale_claim() {
+    for round in 0..64 {
+        let d = TestDir::new(&format!("claimrace{round}"));
+        let reg = Arc::new(
+            StreamRegistry::with_fetch(
+                config(&d),
+                tokio::runtime::Handle::current(),
+                Arc::new(MapFetch::new(HashMap::new())),
+            )
+            .unwrap_or_else(|e| panic!("registry: {e}")),
+        );
+        let a = reg
+            .prepare(source(1024), Arc::new(NeverRemint))
+            .unwrap_or_else(|e| panic!("prepare: {e}"))
+            .handle;
+        let reg2 = Arc::clone(&reg);
+        let a2 = a.clone();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let b2 = Arc::clone(&barrier);
+        let killer = tokio::spawn(async move {
+            b2.wait().await;
+            reg2.cancel_if_unattached(&a2)
+                .unwrap_or_else(|e| panic!("cancel_if_unattached: {e}"));
+        });
+        barrier.wait().await;
+        let claimed = reg
+            .claim_if_live(&a)
+            .unwrap_or_else(|e| panic!("claim_if_live: {e}"));
+        killer.await.unwrap_or_else(|e| panic!("killer: {e}"));
+        assert_eq!(
+            claimed,
+            reg.is_live(&a),
+            "round {round}: claimed={claimed} but live={} — the claim and \
+             the teardown disagreed about who won",
+            reg.is_live(&a)
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
