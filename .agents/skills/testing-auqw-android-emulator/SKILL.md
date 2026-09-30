@@ -306,12 +306,15 @@ adb install -r app/build/outputs/apk/debug/app-x86_64-debug.apk
 ## sync-plugins: sibling releases can lag origin/main (post-#215)
 
 `pnpm sync-plugins` fails `ENOENT ... releases/<plugin>/<pinned>` when
-`~/repos/Auqw-plugins` is behind the lock's pinned version. Stage the
-pinned dirs without switching that repo's branch:
+the releases checkout that sits NEXT to the worktree is behind the
+lock's pinned version (`~/wt/auqw-plugins` for `~/wt/*` worktrees,
+`~/repos/Auqw-plugins` for the main clone). Stage the pinned dirs into
+that sibling without switching its branch:
 
 ```bash
-git -C ~/repos/Auqw-plugins fetch
-git -C ~/repos/Auqw-plugins checkout origin/main -- releases/<plugin>/<version>
+PLUGINS=../auqw-plugins   # sibling of this worktree
+git -C "$PLUGINS" fetch
+git -C "$PLUGINS" checkout origin/main -- releases/<plugin>/<version>
 pnpm sync-plugins
 ```
 
