@@ -1074,6 +1074,9 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
           return;
         }
         if (!pendingWrote.ok) {
+          // Nothing reached the record — forget the code so a retry
+          // can't resume one that was never persisted.
+          pendingFlow = null;
           endFlow();
           status = { state: 'failed', error: pendingWrote.error };
           publish();

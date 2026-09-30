@@ -1210,6 +1210,16 @@ async function testPendingWriteFailureFailsBegin(): Promise<void> {
   assert(status.state === 'failed', 'pending-write failure still ran');
   assertEqual(status.error.kind, 'unavailable');
   assertEqual(calls.filter((c) => c.kind === 'poll').length, 0);
+  // The failed mint is forgotten — a retry must mint fresh, never
+  // resume the code that was never persisted.
+  begins.push(ok(deviceGrant()));
+  session.beginSignIn();
+  await flush();
+  assertEqual(
+    calls.filter((c) => c.kind === 'begin').length,
+    2,
+    'retry resumed an unpersisted code',
+  );
 }
 
 async function testDeniedClearsPendingRecord(): Promise<void> {
