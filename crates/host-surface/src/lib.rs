@@ -1177,14 +1177,19 @@ fn resolve_resource_from(value: &Value) -> Result<ResolvedResource, &'static str
             let value = match v {
                 Value::String(s)
                     if !s.is_empty()
-                        && s.len() <= 512
+                        && s.chars().count() <= 512
                         && s.bytes().all(|b| matches!(b, 0x20..=0x7e | 0x80..=0xff)) =>
                 {
                     s
                 }
                 _ => return Err("headers"),
             };
-            if !header_name_ok(k) || HOST_OWNED.contains(&name.as_str()) {
+            // Header names are case-insensitive on the wire — two keys
+            // folding to one name would send a split identity.
+            if !header_name_ok(k)
+                || HOST_OWNED.contains(&name.as_str())
+                || out.iter().any(|(seen, _)| *seen == name)
+            {
                 return Err("headers");
             }
             out.push((name, value.clone()));
@@ -2562,6 +2567,11 @@ mod tests {
                 ("x-a".to_string(), "b".to_string())
             ]
         );
+        // The schema's value bound is characters, not bytes — a
+        // 300-char `é` value (600 UTF-8 bytes, all obs-text) parses.
+        let mut m = serde_json::Map::new();
+        m.insert("headers".into(), json!({"x-a": "é".repeat(300)}));
+        assert_eq!(headers(m), [("x-a".to_string(), "é".repeat(300))]);
 
         // Host-owned names, bad shapes, and oversized values all
         // fail the invocation.
@@ -2575,6 +2585,9 @@ mod tests {
             json!({"x-a": "a".repeat(513)}),
             json!({"x-a": "a\nb"}), // value must be printable
             json!({"x-a": 1}),      // non-string value
+            // Wire names are case-insensitive — two spellings of one
+            // header is a split identity, rejected like host-owned.
+            json!({"User-Agent": "a", "user-agent": "b"}),
             json!({"x-a": "v", "x-b": "v", "x-c": "v", "x-d": "v", "x-e": "v", "x-f": "v", "x-g": "v", "x-h": "v", "x-i": "v", "x-j": "v", "x-k": "v", "x-l": "v", "x-m": "v", "x-n": "v", "x-o": "v", "x-p": "v", "x-q": "v"}),
         ] {
             let mut m = serde_json::Map::new();

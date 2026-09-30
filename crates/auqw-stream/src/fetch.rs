@@ -166,6 +166,32 @@ fn follow_target<'a>(status: u16, location: Option<&'a str>, mint_url: &str) -> 
 /// infrastructure.
 const EDGE_PARENT_ZONES: &[&str] = &["googlevideo.com", "dzcdn.net"];
 
+/// Names the host owns outright on the wire — a mint entry under one
+/// of these is dropped here too, not just at the ABI boundary:
+/// `PreparedSource`/`RangeRequest` are public seams a direct caller
+/// can fill, and `reqwest::header()` appends rather than replaces, so
+/// a mint `range` or `host` would otherwise ride beside the real one.
+/// Mirrors `resolve_resource_from`'s blocklist.
+const HOST_OWNED_HEADERS: &[&str] = &[
+    "range",
+    "host",
+    "content-length",
+    "connection",
+    "transfer-encoding",
+    "accept-encoding",
+    "te",
+    "trailer",
+    "upgrade",
+    "expect",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "www-authenticate",
+    "authorization",
+    "cookie",
+    "set-cookie",
+];
+
 /// Is `target_host` inside the mint's trust scope: the mint host
 /// itself, one of its subdomains, or — when the mint sits under a
 /// known edge parent zone — a sibling under that parent.
@@ -214,6 +240,11 @@ impl Fetch for ReqwestFetch {
                 ) else {
                     continue;
                 };
+                // HeaderName canonicalizes to lowercase — an exact
+                // match here is a case-insensitive one on the wire.
+                if HOST_OWNED_HEADERS.contains(&name.as_str()) {
+                    continue;
+                }
                 has_ua |= name == reqwest::header::USER_AGENT;
                 extra.push((name, value));
             }
@@ -346,10 +377,13 @@ mod tests {
     use super::follow_target;
 
     // Real local HTTP verifies the production adapter, independently of pump fakes.
-    // `want` are request-line/header fragments the wire request must carry.
+    // `want` are request-line/header fragments the wire request must carry;
+    // `unwanted` are fragments that must never appear (host-owned mint
+    // entries dropped before the wire).
     fn serve_body(
         body: &'static [u8],
         want: &'static [&'static str],
+        unwanted: &'static [&'static str],
     ) -> (
         String,
         std::sync::mpsc::Sender<()>,
@@ -371,6 +405,12 @@ mod tests {
             for w in want {
                 assert!(request.contains(w), "request missing '{w}': {request}");
             }
+            for w in unwanted {
+                assert!(
+                    !request.contains(w),
+                    "request must not carry '{w}': {request}"
+                );
+            }
             socket.write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Length: 100\r\nContent-Range: bytes 0-3/100\r\n\r\n").unwrap();
             socket.write_all(body).unwrap();
             let _ = wait.recv_timeout(std::time::Duration::from_secs(5));
@@ -384,6 +424,7 @@ mod tests {
         let (url, release, worker) = serve_body(
             b"01234567890123456789",
             &["range: bytes=0-3", "user-agent: auqw/"],
+            &[],
         );
         let fetch = ReqwestFetch::new().unwrap();
         let mut response = fetch
@@ -417,6 +458,7 @@ mod tests {
                 "user-agent: rung-client/1.2",
                 "x-rung-mark: minted",
             ],
+            &[],
         );
         let fetch = ReqwestFetch::new().unwrap();
         let mint_headers = vec![
@@ -440,9 +482,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_owned_mint_headers_never_reach_the_wire() {
+        use super::*;
+        // A directly-constructed source can name what the boundary
+        // would have rejected — the fetch leg drops them regardless:
+        // `reqwest.header()` appends, so a mint `range`/`host` would
+        // otherwise ride beside the real one.
+        let (url, release, worker) = serve_body(
+            b"abcd",
+            &["range: bytes=0-3", "host: 127.0.0.1"],
+            &["bytes=0-0", "host: evil.example", "authorization:"],
+        );
+        let fetch = ReqwestFetch::new().unwrap();
+        let mint_headers = vec![
+            ("range".to_string(), "bytes=0-0".to_string()),
+            ("host".to_string(), "evil.example".to_string()),
+            ("authorization".to_string(), "Bearer x".to_string()),
+        ];
+        let _response = fetch
+            .get_range(RangeRequest {
+                url: &url,
+                offset: 0,
+                max_len: 4,
+                headers: &mint_headers,
+                stall: Duration::from_secs(2),
+                deadline: Duration::from_secs(3),
+                cancel: CancellationToken::new(),
+            })
+            .await
+            .unwrap();
+        let _ = release.send(());
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn cancellation_wakes_a_pending_body_read() {
         use super::*;
-        let (url, release, worker) = serve_body(b"", &["range: bytes=0-3"]);
+        let (url, release, worker) = serve_body(b"", &["range: bytes=0-3"], &[]);
         let token = CancellationToken::new();
         let fetch = ReqwestFetch::new().unwrap();
         let mut response = fetch
