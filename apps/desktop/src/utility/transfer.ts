@@ -1017,7 +1017,7 @@ export function createTransferService(
       }
       return { data: Buffer.concat(parts).toString('base64') };
     } catch (thrown) {
-      asFetchError(live, thrown);
+      return asFetchError(live, thrown);
     } finally {
       // Same guard — a same-id fetch registered after an abort is
       // not ours to remove.
