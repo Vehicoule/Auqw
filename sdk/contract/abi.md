@@ -66,12 +66,22 @@ store is namespaced per plugin id; no cross-plugin reads.
 - `{"type":"done","result":<capability result>}` — `result` is required
   (a missing key is `invalid-message`; an explicit `null` is valid).
   For `playback.resolve`:
-  `{"url":"<string>","mime":"<string>","bitrate_kbps":<u32|null>,"expires_at_ms":<u64|null>,"content_length":<u64|null, optional>,"client":"<ladder rung name>"}`
+  `{"url":"<string>","mime":"<string>","bitrate_kbps":<u32|null>,"expires_at_ms":<u64|null>,"content_length":<u64|null, optional>,"client":"<ladder rung name>","headers":{"<name>":"<value>"} (optional)}`
   (`content_length` is the full byte length of the stream when the
   provider reports it, so hosts can range-download and verify
-  completion.) When a result carries `url`, the host validates it
-  before returning it: https scheme plus a `network:` destination the
-  manifest permits — a violation ends the invocation `invalid-message`.
+  completion.) `headers` names the request headers the minted `url`
+  must be fetched with — typically the minting client's `User-Agent`;
+  the host sends them verbatim on every range request including its
+  one redirect hop, and a mint without them still rides a
+  host-minted `auqw/*` UA. Host-controlled names are rejected
+  (`invalid-response`): `range`, `host`, `content-length`,
+  `connection`, `transfer-encoding`, `accept-encoding`, `te`,
+  `trailer`, `upgrade`, `expect`, `keep-alive`, `proxy-authenticate`,
+  `proxy-authorization`, `www-authenticate`, `authorization`,
+  `cookie`, `set-cookie`. When a result carries `url`, the host
+  validates it before returning it: https scheme plus a `network:`
+  destination the manifest permits — a violation ends the invocation
+  `invalid-message`.
 - `{"type":"fail","error":{"kind":"<ErrorKind>","message":"<string>"}}` —
   `kind` must be one of the guest-visible kinds below; anything else
   ends the invocation `invalid-message`. `message` is guest-controlled

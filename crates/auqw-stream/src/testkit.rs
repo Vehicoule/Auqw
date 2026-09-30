@@ -5,7 +5,6 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
 
 use crate::error::StreamError;
 use crate::fetch::{BodyStream, Fetch, FetchResponse};
@@ -83,6 +82,8 @@ pub(crate) struct ScriptedFetch {
     /// `(offset, max_len)` of each range request seen, in order —
     /// tests assert fetch behaviour off this directly.
     pub(crate) requests: Mutex<Vec<(u64, u64)>>,
+    /// Mint headers seen on each request, in call order.
+    pub(crate) mint_headers: Mutex<Vec<Vec<(String, String)>>>,
 }
 
 /// One scripted answer to a fetch call.
@@ -97,6 +98,7 @@ impl ScriptedFetch {
         Self {
             steps: Mutex::new(steps.into()),
             requests: Mutex::new(Vec::new()),
+            mint_headers: Mutex::new(Vec::new()),
         }
     }
 }
@@ -104,17 +106,15 @@ impl ScriptedFetch {
 impl Fetch for ScriptedFetch {
     fn get_range<'a>(
         &'a self,
-        _url: &'a str,
-        offset: u64,
-        max_len: u64,
-        _stall: Duration,
-        _deadline: Duration,
-        _cancel: tokio_util::sync::CancellationToken,
+        req: crate::RangeRequest<'a>,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>,
     > {
         if let Ok(mut r) = self.requests.lock() {
-            r.push((offset, max_len));
+            r.push((req.offset, req.max_len));
+        }
+        if let Ok(mut h) = self.mint_headers.lock() {
+            h.push(req.headers.to_vec());
         }
         let step = self
             .steps
@@ -157,6 +157,7 @@ pub(crate) fn source() -> PreparedSource {
         bitrate_kbps: Some(129),
         content_length: Some(1024),
         expires_at_ms: None,
+        headers: Vec::new(),
         source_ref: "vid".into(),
         provider: "test".into(),
     }

@@ -14,6 +14,35 @@ use crate::error::StreamError;
 /// Body pieces of one range response, in wire order.
 pub type BodyStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, StreamError>> + Send>>;
 
+/// One ranged fetch issued by a session's pump: `GET url` with
+/// `Range: bytes=offset..offset+max_len-1`, carrying the mint's
+/// `headers` verbatim on this request and on any same-host redirect it
+/// re-issues; `range` is host-controlled and always wins over a
+/// same-named entry.
+///
+/// `max_len` is always positive and bounded by the configured chunk
+/// size — full-file GETs are never issued (they throttle). `headers`
+/// are the mint's required request headers (the
+/// [`PreparedSource::headers`](crate::PreparedSource) contract) — e.g.
+/// the `User-Agent` the minting client impersonates. `url` is signed —
+/// never log it.
+pub struct RangeRequest<'a> {
+    /// Absolute `https` URL of the minted stream.
+    pub url: &'a str,
+    /// First byte to fetch.
+    pub offset: u64,
+    /// Maximum bytes the pump accepts for this window.
+    pub max_len: u64,
+    /// Mint-supplied request headers, sent verbatim.
+    pub headers: &'a [(String, String)],
+    /// No-progress bound (headers wait, or any gap between body chunks).
+    pub stall: Duration,
+    /// Bound on the whole request.
+    pub deadline: Duration,
+    /// Cooperative abort.
+    pub cancel: CancellationToken,
+}
+
 /// One raw range response, unvalidated — the pump applies the wire
 /// rules (206-only, `Content-Range`, empty/oversized) itself.
 pub struct FetchResponse {
@@ -36,18 +65,10 @@ pub struct FetchResponse {
 /// resolves once headers arrive; dropping it or the returned body
 /// stream must abort the request.
 pub trait Fetch: Send + Sync {
-    /// `GET url` with `Range: bytes=offset..offset+max_len-1`.
-    ///
-    /// `max_len` is always positive and bounded by the configured chunk
-    /// size — full-file GETs are never issued (they throttle).
+    /// Issue one [`RangeRequest`].
     fn get_range<'a>(
         &'a self,
-        url: &'a str,
-        offset: u64,
-        max_len: u64,
-        stall: Duration,
-        deadline: Duration,
-        cancel: CancellationToken,
+        req: RangeRequest<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>>;
 }
 
@@ -163,24 +184,56 @@ fn redirect_in_scope(target_host: &str, mint_host: &str) -> bool {
 impl Fetch for ReqwestFetch {
     fn get_range<'a>(
         &'a self,
-        url: &'a str,
-        offset: u64,
-        max_len: u64,
-        stall: Duration,
-        deadline: Duration,
-        cancel: CancellationToken,
+        req: RangeRequest<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<FetchResponse, StreamError>> + Send + 'a>> {
         Box::pin(async move {
+            let RangeRequest {
+                url,
+                offset,
+                max_len,
+                headers: mint_headers,
+                stall,
+                deadline,
+                cancel,
+            } = req;
             let end = offset.saturating_add(max_len.saturating_sub(1));
             let t0 = std::time::Instant::now();
             let range = format!("bytes={offset}-{end}");
+            // The mint's required identity rides every hop. An entry
+            // that fails wire parsing is dropped — the boundary
+            // screens names/values upstream, so this is belt, not the
+            // boundary. When the mint left `user-agent` out entirely
+            // the request still identifies itself: an empty-UA fetch
+            // reads as bot traffic to providers that score headers.
+            let mut extra = Vec::with_capacity(mint_headers.len() + 1);
+            let mut has_ua = false;
+            for (k, v) in mint_headers {
+                let (Ok(name), Ok(value)) = (
+                    reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                    reqwest::header::HeaderValue::from_str(v),
+                ) else {
+                    continue;
+                };
+                has_ua |= name == reqwest::header::USER_AGENT;
+                extra.push((name, value));
+            }
+            if !has_ua {
+                extra.push((
+                    reqwest::header::USER_AGENT,
+                    reqwest::header::HeaderValue::from_static(concat!(
+                        "auqw/",
+                        env!("CARGO_PKG_VERSION")
+                    )),
+                ));
+            }
             let headers = async {
                 let mut current = url.to_string();
                 for hop in 0..2 {
-                    let req = self
-                        .client
-                        .get(&current)
-                        .header(reqwest::header::RANGE, range.clone());
+                    let mut req = self.client.get(&current);
+                    for (name, value) in &extra {
+                        req = req.header(name.clone(), value.clone());
+                    }
+                    let req = req.header(reqwest::header::RANGE, range.clone());
                     let resp = tokio::time::timeout(stall, req.send())
                         .await
                         .map_err(|_| StreamError::Transient {
@@ -293,8 +346,10 @@ mod tests {
     use super::follow_target;
 
     // Real local HTTP verifies the production adapter, independently of pump fakes.
+    // `want` are request-line/header fragments the wire request must carry.
     fn serve_body(
         body: &'static [u8],
+        want: &'static [&'static str],
     ) -> (
         String,
         std::sync::mpsc::Sender<()>,
@@ -312,7 +367,10 @@ mod tests {
                 socket.read_exact(&mut byte).unwrap();
                 request.push(byte[0]);
             }
-            assert!(String::from_utf8_lossy(&request).contains("range: bytes=0-3"));
+            let request = String::from_utf8_lossy(&request).to_lowercase();
+            for w in want {
+                assert!(request.contains(w), "request missing '{w}': {request}");
+            }
             socket.write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Length: 100\r\nContent-Range: bytes 0-3/100\r\n\r\n").unwrap();
             socket.write_all(body).unwrap();
             let _ = wait.recv_timeout(std::time::Duration::from_secs(5));
@@ -323,17 +381,21 @@ mod tests {
     #[tokio::test]
     async fn body_yield_is_capped_at_requested_length_plus_one() {
         use super::*;
-        let (url, release, worker) = serve_body(b"01234567890123456789");
+        let (url, release, worker) = serve_body(
+            b"01234567890123456789",
+            &["range: bytes=0-3", "user-agent: auqw/"],
+        );
         let fetch = ReqwestFetch::new().unwrap();
         let mut response = fetch
-            .get_range(
-                &url,
-                0,
-                4,
-                Duration::from_secs(2),
-                Duration::from_secs(3),
-                CancellationToken::new(),
-            )
+            .get_range(RangeRequest {
+                url: &url,
+                offset: 0,
+                max_len: 4,
+                headers: &[],
+                stall: Duration::from_secs(2),
+                deadline: Duration::from_secs(3),
+                cancel: CancellationToken::new(),
+            })
             .await
             .unwrap();
         let mut bytes = Vec::new();
@@ -346,20 +408,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mint_headers_reach_the_wire_and_own_user_agent() {
+        use super::*;
+        let (url, release, worker) = serve_body(
+            b"abcd",
+            &[
+                "range: bytes=0-3",
+                "user-agent: rung-client/1.2",
+                "x-rung-mark: minted",
+            ],
+        );
+        let fetch = ReqwestFetch::new().unwrap();
+        let mint_headers = vec![
+            ("user-agent".to_string(), "rung-client/1.2".to_string()),
+            ("x-rung-mark".to_string(), "minted".to_string()),
+        ];
+        let _response = fetch
+            .get_range(RangeRequest {
+                url: &url,
+                offset: 0,
+                max_len: 4,
+                headers: &mint_headers,
+                stall: Duration::from_secs(2),
+                deadline: Duration::from_secs(3),
+                cancel: CancellationToken::new(),
+            })
+            .await
+            .unwrap();
+        let _ = release.send(());
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn cancellation_wakes_a_pending_body_read() {
         use super::*;
-        let (url, release, worker) = serve_body(b"");
+        let (url, release, worker) = serve_body(b"", &["range: bytes=0-3"]);
         let token = CancellationToken::new();
         let fetch = ReqwestFetch::new().unwrap();
         let mut response = fetch
-            .get_range(
-                &url,
-                0,
-                4,
-                Duration::from_secs(2),
-                Duration::from_secs(3),
-                token.clone(),
-            )
+            .get_range(RangeRequest {
+                url: &url,
+                offset: 0,
+                max_len: 4,
+                headers: &[],
+                stall: Duration::from_secs(2),
+                deadline: Duration::from_secs(3),
+                cancel: token.clone(),
+            })
             .await
             .unwrap();
         let mut next = Box::pin(response.body.next());

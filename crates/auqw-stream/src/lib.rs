@@ -38,7 +38,7 @@ mod store;
 mod testkit;
 
 pub use error::StreamError;
-pub use fetch::{BodyStream, Fetch, FetchResponse, ReqwestFetch};
+pub use fetch::{BodyStream, Fetch, FetchResponse, RangeRequest, ReqwestFetch};
 pub use marks::PhaseMarks;
 pub use registry::{PrepareInfo, StreamRegistry, SweepReport};
 pub use server::StreamServer;
@@ -165,6 +165,15 @@ pub struct PreparedSource {
     pub content_length: Option<u64>,
     /// URL expiry, epoch ms; `attach` enforces the configured margin.
     pub expires_at_ms: Option<u64>,
+    /// Request headers the provider's mint requires on every fetch
+    /// (e.g. the `User-Agent` the minting client impersonates — a URL
+    /// minted under one client identity is refused when fetched as
+    /// another or with none). Sent verbatim on every range request,
+    /// including the one redirect hop, and replaced on each re-mint.
+    /// Plugin-supplied values reach here already screened of
+    /// host-controlled names (`range`, `host`, `content-length`, …) by
+    /// the resolve boundary. Not logged.
+    pub headers: Vec<(String, String)>,
     /// Provider source reference (not a secret) — carried for sidecar
     /// metadata and diagnostics.
     pub source_ref: String,
@@ -187,6 +196,7 @@ impl std::fmt::Debug for PreparedSource {
             .field("bitrate_kbps", &self.bitrate_kbps)
             .field("content_length", &self.content_length)
             .field("expires_at_ms", &self.expires_at_ms)
+            .field("headers", &self.headers.len())
             .field("source_ref", &self.source_ref)
             .field("provider", &self.provider)
             .finish()

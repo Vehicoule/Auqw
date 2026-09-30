@@ -174,6 +174,11 @@ pub struct ResolvedResource {
     pub bitrate_kbps: Option<u32>,
     /// `expire=` converted to epoch milliseconds.
     pub expires_at_ms: Option<u64>,
+    /// Request headers the mint requires on every stream fetch (the
+    /// minting client's identity — e.g. its `User-Agent`). Forwarded
+    /// verbatim on the pump's range requests; a mint emitted without
+    /// them rides with the transport's own `auqw/*` UA.
+    pub headers: Vec<(String, String)>,
     /// Ladder rung that produced the URL.
     pub client: String,
     /// Reported `contentLength` of the picked format in bytes.
@@ -1106,7 +1111,86 @@ fn resolve_resource_from(value: &Value) -> Result<ResolvedResource, &'static str
         "client",
         "content_length",
         "itag",
+        "headers",
     ];
+    // Names the host owns outright on the fetch — a guest mint may
+    // not rewrite them (a `range` override would corrupt the wire
+    // contract; `host`/`connection`/`content-length` are transport
+    // invariants). RFC 9110 field-name chars; name ≤64, value ≤512,
+    // at most 16 entries.
+    const HOST_OWNED: &[&str] = &[
+        "range",
+        "host",
+        "content-length",
+        "connection",
+        "transfer-encoding",
+        "accept-encoding",
+        "te",
+        "trailer",
+        "upgrade",
+        "expect",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "www-authenticate",
+        "authorization",
+        "cookie",
+        "set-cookie",
+    ];
+    fn header_name_ok(n: &str) -> bool {
+        (1..=64).contains(&n.len())
+            && n.bytes().all(|b| {
+                b.is_ascii_alphanumeric()
+                    || matches!(
+                        b,
+                        b'!' | b'#'
+                            | b'$'
+                            | b'%'
+                            | b'&'
+                            | b'\''
+                            | b'*'
+                            | b'+'
+                            | b'-'
+                            | b'.'
+                            | b'^'
+                            | b'_'
+                            | b'`'
+                            | b'|'
+                            | b'~'
+                    )
+            })
+    }
+    fn opt_headers(
+        o: &serde_json::Map<String, Value>,
+    ) -> Result<Vec<(String, String)>, &'static str> {
+        let raw = match o.get("headers") {
+            None | Some(Value::Null) => return Ok(Vec::new()),
+            Some(Value::Object(m)) => m,
+            Some(_) => return Err("headers"),
+        };
+        if raw.len() > 16 {
+            return Err("headers");
+        }
+        let mut out = Vec::with_capacity(raw.len());
+        for (k, v) in raw {
+            let name = k.to_ascii_lowercase();
+            let value = match v {
+                Value::String(s)
+                    if !s.is_empty()
+                        && s.len() <= 512
+                        && s.bytes().all(|b| matches!(b, 0x20..=0x7e | 0x80..=0xff)) =>
+                {
+                    s
+                }
+                _ => return Err("headers"),
+            };
+            if !header_name_ok(k) || HOST_OWNED.contains(&name.as_str()) {
+                return Err("headers");
+            }
+            out.push((name, value.clone()));
+        }
+        Ok(out)
+    }
     let o = value.as_object().ok_or("result")?;
     if o.keys().any(|k| !KEYS.contains(&k.as_str())) {
         return Err("additionalProperties");
@@ -1145,6 +1229,7 @@ fn resolve_resource_from(value: &Value) -> Result<ResolvedResource, &'static str
         client: req_str("client")?,
         content_length: opt_int("content_length", 1, u64::MAX)?,
         itag: opt_int("itag", 0, u64::from(u32::MAX))?.map(|v| v as u32),
+        headers: opt_headers(o)?,
     })
 }
 
@@ -1532,12 +1617,7 @@ mod tests {
     impl auqw_stream::Fetch for HangFetch {
         fn get_range<'a>(
             &'a self,
-            _url: &'a str,
-            _offset: u64,
-            _max_len: u64,
-            _stall: std::time::Duration,
-            _deadline: std::time::Duration,
-            _cancel: tokio_util::sync::CancellationToken,
+            _req: auqw_stream::RangeRequest<'a>,
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<
@@ -1601,6 +1681,7 @@ mod tests {
             bitrate_kbps: Some(129),
             content_length: Some(1024),
             expires_at_ms: None,
+            headers: Vec::new(),
             source_ref: source_ref.to_string(),
             provider: provider.to_string(),
         }
@@ -2443,5 +2524,65 @@ mod tests {
             None => panic!("the new generation's slot is gone"),
         }
         drop(gate_b_tx);
+    }
+
+    #[test]
+    fn resolve_resource_headers_screened() {
+        use serde_json::json;
+        let base = |extra: serde_json::Map<String, Value>| {
+            let mut m = serde_json::Map::new();
+            m.insert("url".into(), json!("https://v.example/s?sig=x"));
+            m.insert("mime".into(), json!("audio/mp4"));
+            m.insert("bitrate_kbps".into(), json!(129));
+            m.insert("expires_at_ms".into(), Value::Null);
+            m.insert("client".into(), json!("WEB_REMIX"));
+            m.extend(extra);
+            Value::Object(m)
+        };
+        // Absent/null → no headers; a valid set is lowercased and
+        // carries through in object order.
+        let headers = |m: serde_json::Map<String, Value>| {
+            resolve_resource_from(&base(m))
+                .unwrap_or_else(|e| panic!("parse: {e}"))
+                .headers
+        };
+        assert!(headers(serde_json::Map::new()).is_empty());
+        let mut m = serde_json::Map::new();
+        m.insert("headers".into(), Value::Null);
+        assert!(headers(m).is_empty());
+        let mut m = serde_json::Map::new();
+        m.insert(
+            "headers".into(),
+            json!({"User-Agent": "rung/1.2", "x-a": "b"}),
+        );
+        assert_eq!(
+            headers(m),
+            [
+                ("user-agent".to_string(), "rung/1.2".to_string()),
+                ("x-a".to_string(), "b".to_string())
+            ]
+        );
+
+        // Host-owned names, bad shapes, and oversized values all
+        // fail the invocation.
+        for value in [
+            json!("rung/1.0"), // not an object
+            json!({"range": "bytes=0-"}),
+            json!({"Authorization": "Bearer x"}),
+            json!({"SET-COOKIE": "a=1"}),
+            json!({"ok name": "v"}), // space is not a tchar
+            json!({"x-a": ""}),      // empty value
+            json!({"x-a": "a".repeat(513)}),
+            json!({"x-a": "a\nb"}), // value must be printable
+            json!({"x-a": 1}),      // non-string value
+            json!({"x-a": "v", "x-b": "v", "x-c": "v", "x-d": "v", "x-e": "v", "x-f": "v", "x-g": "v", "x-h": "v", "x-i": "v", "x-j": "v", "x-k": "v", "x-l": "v", "x-m": "v", "x-n": "v", "x-o": "v", "x-p": "v", "x-q": "v"}),
+        ] {
+            let mut m = serde_json::Map::new();
+            m.insert("headers".into(), value.clone());
+            assert!(
+                matches!(resolve_resource_from(&base(m)), Err("headers")),
+                "case {value:?}"
+            );
+        }
     }
 }
