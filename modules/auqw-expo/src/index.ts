@@ -289,6 +289,14 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   /** Android 12+ Material You stops — null below API 31 / absent on
       iOS (the JS wrapper resolves null there). */
   systemTonalPalette(): Promise<SystemTonalPalette | null>;
+  /**
+   * Sideloaded-APK update install — Android only. 'installing' = the
+   * system package-installer sheet is up; 'needs-permission' = the
+   * unknown-sources switch still refuses installs and the module
+   * opened this app's page of that settings surface instead (the
+   * caller toasts, never claims an install ran).
+   */
+  installApk(path: string): Promise<InstallApkResult>;
 }
 
 /** The Android 12+ Material You tones an 'adaptive' theme derives from. */
@@ -588,4 +596,24 @@ export function addSyncSocketClosedListener(listener: (event: SyncSocketClosedEv
  */
 export function hasSyncSocket(): boolean {
   return typeof seam.syncConnect === 'function' && typeof seam.syncRandomBytes === 'function';
+}
+
+// ---- Update install (sideloaded APK, docs/decisions.md) ----
+
+export type InstallApkResult = {
+  readonly status: 'installing' | 'needs-permission';
+};
+
+/** Hand the downloaded APK to the system package installer. */
+export function installApk(path: string): Promise<InstallApkResult> {
+  return seam.installApk?.(path) ?? seamUnavailable('installApk');
+}
+
+/**
+ * Whether the platform's module carries the APK-install leg —
+ * Android only; everywhere else the update banner advertises 'open'
+ * (the release page) instead of 'install'.
+ */
+export function hasApkInstaller(): boolean {
+  return typeof seam.installApk === 'function';
 }

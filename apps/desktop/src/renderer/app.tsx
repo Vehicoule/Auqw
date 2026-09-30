@@ -59,6 +59,7 @@ import {
   EntityScreen,
   ErrorState,
   HomeScreen,
+  IconButton,
   LibraryScreen,
   LoadingState,
   NowPlayingScreen,
@@ -108,6 +109,7 @@ import type { ThemeSource } from '@auqw/design-tokens/adaptive';
 import { useAppShell } from '@auqw/app-shell';
 import type { AppShellPorts } from '@auqw/app-shell';
 import { createDesktopAuth } from './auth.ts';
+import { createDesktopUpdate } from './update.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { shellToAppError } from './ipc-errors.ts';
@@ -607,6 +609,13 @@ function Main({
     () => createDesktopAuth(window.auqw),
     [],
   );
+  // Release update check — the IPC-backed snapshot cache; stable for
+  // the same one-listener reason as authPort. Desktop's install
+  // level is 'open': the banner's action opens the release page.
+  const updatePort = useMemo(
+    () => createDesktopUpdate(window.auqw),
+    [],
+  );
   const ports = useMemo<AppShellPorts<Overlay>>(
     () => ({
       subscribeOnline: controller.subscribeOnline,
@@ -617,6 +626,7 @@ function Main({
       // would leak listeners (the preload helper caps at 10 before
       // warning).
       auth: authPort,
+      update: updatePort,
       localPlayable: (id) => controller.localPlaybackFor(id) !== null,
       trackAttemptActions: true,
       gateAdvanceAlways: true,
@@ -748,6 +758,9 @@ function Main({
     lyricsModel,
     transfer,
     pickerItems,
+    updateBanner,
+    onUpdateBannerAct,
+    onUpdateBannerDismiss,
     setActionsFor,
     closeRowActions,
     rowActions,
@@ -1299,6 +1312,46 @@ function Main({
               <Text variant="metadata" color="secondary">
                 {t('offline.bannerStreams')}
               </Text>
+            </div>
+          )}
+          {updateBanner !== null && (
+            <div
+              style={{
+                position: 'fixed',
+                // Stacks under the offline pill when both are up.
+                top: online === false ? 36 : 8,
+                left: '50%',
+                transform: 'translateX(-50%)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '5px 8px 5px 12px',
+                borderRadius: 999,
+                backgroundColor: 'var(--raised)',
+                border: 'var(--stroke-hairline) solid var(--hairline)',
+                zIndex: 40,
+              }}
+            >
+              <Text variant="metadata" color="secondary">
+                {updateBanner.label}
+              </Text>
+              <button
+                type="button"
+                className="uw-pressable"
+                style={{ padding: '2px 8px', borderRadius: 999 }}
+                onClick={onUpdateBannerAct}
+              >
+                <Text variant="metadata" color="accent">
+                  {updateBanner.actionLabel}
+                </Text>
+              </button>
+              <IconButton
+                icon="close"
+                size={20}
+                iconSize={10}
+                ariaLabel={t('update.dismiss')}
+                onPress={onUpdateBannerDismiss}
+              />
             </div>
           )}
           {toast !== null && (

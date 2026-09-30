@@ -50,7 +50,9 @@ import {
   createAppliedPushService,
   createAuthStatePushService,
   createNearbyPushService,
+  createUpdateStatePushService,
 } from './sync-events.ts';
+import { createDesktopUpdate, updateTargetFor } from './update.ts';
 import {
   createSyncKeysHandler,
   migrateSyncCustody,
@@ -384,6 +386,25 @@ async function main(): Promise<void> {
   const appliedPush = createAppliedPushService();
   const nearbyPush = createNearbyPushService();
   const authStatePush = createAuthStatePushService();
+  const updateStatePush = createUpdateStatePushService();
+  // Release update check — lives in main because the renderer CSP
+  // admits only 'self'. The one egress is the GitHub releases list;
+  // the renderer sees validated snapshots + verbs over `update:*`.
+  const updateService = createDesktopUpdate({
+    currentVersion: app.getVersion(),
+    target: updateTargetFor(process.platform, process.env),
+    fetchJson: async (url) => {
+      const res = await net.fetch(url, {
+        headers: { accept: 'application/vnd.github+json' },
+      });
+      return {
+        status: res.status,
+        body: await res.json().catch(() => null),
+      };
+    },
+    openExternal: (url) => shell.openExternal(url),
+  });
+  updateService.subscribe((snapshot) => updateStatePush.notify(snapshot));
   const supervisor = createSupervisor({
     fork: () =>
       utilityProcess.fork(UTILITY, [], {
@@ -478,6 +499,8 @@ async function main(): Promise<void> {
     syncApplied: appliedPush,
     syncNearby: nearbyPush,
     authState: authStatePush,
+    update: updateService,
+    updateState: updateStatePush,
     secure,
     utility: supervisor,
     // The device flow's verification URL opens in the system browser —
@@ -560,6 +583,7 @@ async function main(): Promise<void> {
     appliedPush.stop();
     nearbyPush.stop();
     authStatePush.stop();
+    updateStatePush.stop();
     supervisor.shutdown();
   });
 }

@@ -29,6 +29,8 @@ import type {
   SourceRef,
   StoragePort,
   TrackMetadata,
+  UpdateCheckKind,
+  UpdateSnapshot,
 } from '@auqw/application';
 import {
   nextQueueDestination,
@@ -100,6 +102,28 @@ export interface AuthShellPort {
   setClientOverride(clientId: string | null): Promise<Result<void>>;
   copyText(text: string): void;
   openUrl(url: string): void;
+}
+
+/**
+ * Release update check — the platform owns the transport (the
+ * renderer's CSP forbids the egress, so desktop runs the service in
+ * main and feeds it over `update:*` IPC; mobile fetches directly).
+ * Only the snapshot + verbs cross the port. `action` advertises the
+ * install affordance this platform reached so the banner labels
+ * itself honestly: 'open' opens the release page, 'install' runs the
+ * platform's install path (today: Android APK download + intent).
+ */
+export interface UpdateShellPort {
+  /** The latest snapshot — stable ref between publishes. */
+  snapshot(): UpdateSnapshot;
+  /** Change feed — drives the banner + the settings row value. */
+  subscribe(listener: () => void): () => void;
+  /** 'boot' is once-per-process inside the port; 'manual' refetches. */
+  check(kind: UpdateCheckKind): void;
+  /** What `act()` does — the banner action label reads this. */
+  readonly action: 'open' | 'install';
+  /** Run the install affordance on the currently-available release. */
+  act(): void;
 }
 
 export interface AppShellPorts<E> {
@@ -282,6 +306,13 @@ export interface AppShellPorts<E> {
    * omit themselves.
    */
   readonly auth?: AuthShellPort | undefined;
+
+  /**
+   * Release update check — present on both apps; absent in
+   * reduced/test harnesses, where the banner and the version +
+   * check-for-updates rows omit themselves.
+   */
+  readonly update?: UpdateShellPort | undefined;
 }
 
 export interface AppShellDeps<E = never> {

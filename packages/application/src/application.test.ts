@@ -33,6 +33,7 @@ import { run as runLocalSource } from './local/local-source.test.ts';
 import { run as runTransferPolicy } from './downloads/transfer-policy.test.ts';
 import { run as runOAuth } from './auth/oauth.test.ts';
 import { run as runAuthSession } from './auth/session.test.ts';
+import { run as runUpdate } from './update.test.ts';
 
 runErrors();
 runCancellation();
@@ -69,3 +70,4 @@ await runLocalSource();
 await runTransferPolicy();
 await runOAuth();
 await runAuthSession();
+await runUpdate();

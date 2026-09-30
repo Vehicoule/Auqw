@@ -15,4 +15,5 @@ export type {
   ExportWrite,
   ShellOverlay,
   ShellSheetAction,
+  UpdateShellPort,
 } from './types.ts';

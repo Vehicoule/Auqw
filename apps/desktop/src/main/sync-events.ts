@@ -3,6 +3,7 @@ import type {
   AuthSnapshotPayload,
   SyncAppliedEvent,
   SyncNearbyEvent,
+  UpdateSnapshotPayload,
 } from '../shared/contract.ts';
 import type { NetSender } from './net-monitor.ts';
 
@@ -78,4 +79,8 @@ export function createNearbyPushService(): PushService<SyncNearbyEvent> {
  */
 export function createAuthStatePushService(): PushService<AuthSnapshotPayload> {
   return createPushService<AuthSnapshotPayload>(CHANNELS.authState);
+}
+
+export function createUpdateStatePushService(): PushService<UpdateSnapshotPayload> {
+  return createPushService<UpdateSnapshotPayload>(CHANNELS.updateState);
 }

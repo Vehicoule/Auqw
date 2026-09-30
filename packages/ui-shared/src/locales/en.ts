@@ -425,6 +425,7 @@ export const en = {
   'settings.section.downloads': 'downloads',
   'settings.section.localFiles': 'local files',
   'settings.section.library': 'library',
+  'settings.section.app': 'app',
   'settings.diag.providers': 'providers',
   'settings.diag.none': 'none',
   'settings.diag.attemptTrace': 'attempt trace',
@@ -464,6 +465,8 @@ export const en = {
   'settings.sync': 'lan sync',
   'settings.exportLibrary': 'export library',
   'settings.importLibrary': 'import library',
+  'settings.appVersion': 'version',
+  'settings.checkUpdate': 'check for updates',
   'settings.value.auto': 'auto',
   'settings.value.notSet': 'not set',
   'settings.value.on': 'on',
@@ -580,6 +583,17 @@ export const en = {
   // ---- offline banner ----------------------------------------------------
   'offline.bannerDownloads': 'offline — owned downloads play; streams wait',
   'offline.bannerStreams': 'offline — streams wait for connectivity',
+
+  // ---- update check ------------------------------------------------------
+  'update.value.idle': 'not checked',
+  'update.value.checking': 'checking…',
+  'update.value.current': 'up to date',
+  'update.value.available': 'v{version} available',
+  'update.value.failed': 'check failed — tap to retry',
+  'update.banner': 'update available — v{version}',
+  'update.action.open': 'get it',
+  'update.action.install': 'install',
+  'update.dismiss': 'dismiss',
 
   // ---- storage usage -----------------------------------------------------
   'storage.usage': '{used} used · {free} free',

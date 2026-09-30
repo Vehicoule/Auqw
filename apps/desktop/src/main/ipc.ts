@@ -48,6 +48,7 @@ import {
   isTransferSinkArgs,
   isTransferSweepArgs,
   isTransferWriteArgs,
+  isUpdateCheckArgs,
   isUtilityPingArgs,
 } from '../shared/contract.ts';
 import type { ResultEnvelope } from '../shared/envelope.ts';
@@ -60,6 +61,7 @@ import {
 import type { NetSender, NetService } from './net-monitor.ts';
 import type { SecureStore } from './secure-store.ts';
 import type { ThemeMonitor } from './theme-monitor.ts';
+import type { DesktopUpdate } from './update.ts';
 
 /** Structural slices of the Electron IPC surface — keeps this module electron-free. */
 interface RendererLifecycle {
@@ -109,6 +111,15 @@ export interface ChannelDeps {
   };
   /** `auth:state` push registry — same refcounted sender pattern. */
   readonly authState: {
+    readonly attach: (sender: NetSender) => void;
+    readonly detach: (sender: NetSender) => void;
+  };
+  /** Release update check — snapshot pull, the check verb, and the
+   *  allowlisted release-page open (all main-side; the GitHub egress
+   *  can't run under the renderer CSP). */
+  readonly update: DesktopUpdate;
+  /** `update:state` push registry — same refcounted sender pattern. */
+  readonly updateState: {
     readonly attach: (sender: NetSender) => void;
     readonly detach: (sender: NetSender) => void;
   };
@@ -363,6 +374,25 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     CHANNELS.authOpenUrl,
     channel(isAuthOpenUrlArgs, (args, deps) => deps.openUrl(args.url)),
   ],
+  // Release update check — runs in main (the renderer CSP admits
+  // only 'self'); the open verb takes no URL so nothing untrusted
+  // crosses the bridge.
+  [
+    CHANNELS.updateStatus,
+    channel(noArgs, (_args, deps) =>
+      Promise.resolve(deps.update.snapshot()),
+    ),
+  ],
+  [
+    CHANNELS.updateCheck,
+    channel(isUpdateCheckArgs, (args, deps) =>
+      deps.update.check(args.kind),
+    ),
+  ],
+  [
+    CHANNELS.updateOpen,
+    channel(noArgs, (_args, deps) => deps.update.open()),
+  ],
 ];
 
 /**
@@ -606,6 +636,11 @@ export function registerChannels(
       CHANNELS.authSubscribe,
       CHANNELS.authUnsubscribe,
       deps.authState,
+    ],
+    [
+      CHANNELS.updateSubscribe,
+      CHANNELS.updateUnsubscribe,
+      deps.updateState,
     ],
   ];
   for (const [sub, unsub, registry] of subscriptions) {

@@ -50,6 +50,7 @@ import {
   isTransferStatusResult,
   isTransferSweepResult,
   isUndefinedResult,
+  isUpdateSnapshot,
   isUtilityPingResult,
 } from '../shared/contract.ts';
 import type {
@@ -457,6 +458,19 @@ const api: AuqwApi = {
       CHANNELS.authSubscribe,
       CHANNELS.authUnsubscribe,
       isAuthSnapshot,
+    ),
+  },
+  update: {
+    status: () =>
+      invoke(CHANNELS.updateStatus, undefined, isUpdateSnapshot),
+    check: (kind) =>
+      invoke(CHANNELS.updateCheck, { kind }, isUpdateSnapshot),
+    open: () => invoke(CHANNELS.updateOpen, undefined, isUndefinedResult),
+    onState: subscribeTo(
+      CHANNELS.updateState,
+      CHANNELS.updateSubscribe,
+      CHANNELS.updateUnsubscribe,
+      isUpdateSnapshot,
     ),
   },
 };

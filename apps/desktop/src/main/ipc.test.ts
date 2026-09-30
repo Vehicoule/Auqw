@@ -137,6 +137,23 @@ export async function run(): Promise<void> {
         attach: () => undefined,
         detach: () => undefined,
       },
+      update: {
+        snapshot: () => ({
+          status: { state: 'idle' },
+          currentVersion: '0.1.0',
+        }),
+        check: () =>
+          Promise.resolve({
+            status: { state: 'idle' },
+            currentVersion: '0.1.0',
+          }),
+        subscribe: () => () => undefined,
+        open: () => Promise.resolve(),
+      },
+      updateState: {
+        attach: () => undefined,
+        detach: () => undefined,
+      },
       openUrl: () => Promise.resolve(),
       secure: createSecureStore({ dir: join(dir, 'secure'), safeStorage: WORKING_STORAGE }),
       utility: {

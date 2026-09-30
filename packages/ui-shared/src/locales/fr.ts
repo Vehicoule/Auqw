@@ -442,6 +442,7 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'settings.section.downloads': 'téléchargements',
   'settings.section.localFiles': 'fichiers locaux',
   'settings.section.library': 'bibliothèque',
+  'settings.section.app': 'app',
   'settings.diag.providers': 'fournisseurs',
   'settings.diag.none': 'aucun',
   'settings.diag.attemptTrace': 'trace des tentatives',
@@ -484,6 +485,8 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'settings.sync': 'sync lan',
   'settings.exportLibrary': 'exporter la bibliothèque',
   'settings.importLibrary': 'importer la bibliothèque',
+  'settings.appVersion': 'version',
+  'settings.checkUpdate': 'rechercher des mises à jour',
   'settings.value.auto': 'auto',
   'settings.value.notSet': 'non défini',
   'settings.value.on': 'activé',
@@ -595,6 +598,17 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'optionDetail.themeSystem': 'suivre le système',
   'optionDetail.themeLight': 'jour',
   'optionDetail.themeOled': 'noir pur',
+
+  // ---- update check ------------------------------------------------------
+  'update.value.idle': 'non vérifié',
+  'update.value.checking': 'vérification…',
+  'update.value.current': 'à jour',
+  'update.value.available': 'v{version} disponible',
+  'update.value.failed': 'vérification échouée — toucher pour réessayer',
+  'update.banner': 'mise à jour disponible — v{version}',
+  'update.action.open': "l'obtenir",
+  'update.action.install': 'installer',
+  'update.dismiss': 'ignorer',
 
   // ---- offline banner ----------------------------------------------------
   'offline.bannerDownloads':

@@ -28,6 +28,7 @@ import type {
   SourceRef,
   SyncClientStatus,
   TrackMetadata,
+  UpdateStatus,
 } from '@auqw/application';
 import {
   ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
@@ -1670,6 +1671,16 @@ export function toSettingsModel(
           readonly clientId: string | null;
         }
       | undefined;
+    /**
+     * The update-check seam — `undefined` where the platform wires no
+     * update port: the version + check rows omit themselves entirely.
+     */
+    readonly update?:
+      | {
+          readonly status: UpdateStatus;
+          readonly currentVersion: string;
+        }
+      | undefined;
   } = {},
 ): SettingsModel {
   const nav = (
@@ -1801,8 +1812,74 @@ export function toSettingsModel(
       ),
       nav('exportLibrary', t('settings.exportLibrary'), null),
       nav('importLibrary', t('settings.importLibrary'), null),
+      // The update seam — a value row surfaces the running version;
+      // the nav row is the manual check (or the 'get it' action once
+      // a newer release is found). Absent seam → no rows, like auth.
+      ...(media.update === undefined
+        ? []
+        : [
+            val(
+              'appVersion',
+              t('settings.appVersion'),
+              media.update.currentVersion,
+            ),
+            nav(
+              'checkUpdate',
+              t('settings.checkUpdate'),
+              updateRowValue(media.update.status),
+              media.update.status.state !== 'checking',
+            ),
+          ]),
     ],
     diagnostics,
+  };
+}
+
+/** The check row's value — the update status reduced to one line. */
+function updateRowValue(status: UpdateStatus): string | null {
+  switch (status.state) {
+    case 'idle':
+      return t('update.value.idle');
+    case 'checking':
+      return t('update.value.checking');
+    case 'current':
+      return t('update.value.current');
+    case 'available':
+      return t('update.value.available', { version: status.version });
+    case 'failed':
+      return t('update.value.failed');
+  }
+}
+
+/**
+ * The dismissible update banner — present only while a newer release
+ * is known and the user hasn't dismissed THIS version this session
+ * (dismissal is per-version: a newer release re-surfaces it).
+ * `actionLabel` advertises what the platform's port will actually do.
+ */
+export type UpdateBannerModel = {
+  readonly version: string;
+  readonly label: string;
+  readonly actionLabel: string;
+};
+
+export function toUpdateBanner(
+  snapshot: { readonly status: UpdateStatus } | null,
+  action: 'open' | 'install',
+  dismissedVersion: string | null,
+): UpdateBannerModel | null {
+  if (snapshot === null || snapshot.status.state !== 'available') {
+    return null;
+  }
+  if (snapshot.status.version === dismissedVersion) {
+    return null;
+  }
+  return {
+    version: snapshot.status.version,
+    label: t('update.banner', { version: snapshot.status.version }),
+    actionLabel: t(
+      action === 'install' ? 'update.action.install' : 'update.action.open',
+    ),
   };
 }
 
@@ -1868,6 +1945,7 @@ const SETTINGS_GROUP_STARTS: readonly (readonly [string, MessageId])[] = [
   ['downloadMetered', 'settings.section.downloads'],
   ['localSources', 'settings.section.localFiles'],
   ['sync', 'settings.section.library'],
+  ['appVersion', 'settings.section.app'],
 ];
 
 export function settingsGroups(

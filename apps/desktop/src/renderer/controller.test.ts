@@ -272,6 +272,20 @@ function fakeApi(): Rig {
         openUrl: () => Promise.resolve(),
         onState: () => () => {},
       },
+      update: {
+        status: () =>
+          Promise.resolve({
+            status: { state: 'idle' },
+            currentVersion: '0.1.0',
+          }),
+        check: () =>
+          Promise.resolve({
+            status: { state: 'idle' },
+            currentVersion: '0.1.0',
+          }),
+        open: () => Promise.resolve(),
+        onState: () => () => {},
+      },
     },
   };
   return rig;
