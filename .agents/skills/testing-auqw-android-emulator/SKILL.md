@@ -344,3 +344,71 @@ silent write failures (dead-driver class). `attempt trace` shows
 `lf-req-N` local resolves. Cross-check with collection tiles
 (liked/downloads/top 50/history counts, tap for rows) and
 `[journey] local-add …` / `rescan <id>: +added` logcat lines.
+
+## Downloads ledger + instrumented-mint gate notes (post-#219)
+
+### SQLite ledger on-device (run-as quoting)
+- The app's sqlite is `files/SQLite/auqw.db` (expo-sqlite — NOT `databases/`).
+- `adb shell` strips inner quotes → SQL with spaces fragments into
+  "incomplete input". Nest single quotes inside one double-quoted
+  command: `adb shell "run-as com.vehicoule.auqw sqlite3 files/SQLite/auqw.db 'SELECT ...'"`.
+- `downloads` ledger columns worth polling: `state, committed_offset,
+  bytes, file_path, error_json, checksum, downloaded_ms`.
+  `error_json` carries the failure kind verbatim — distinguish
+  `invalid-response` (decode bug) from `transient: bot-check` (env wall).
+- Owned-bytes dir is `files/downloads/` — `<name>.part` stages bytes,
+  atomic rename on finalize; `.part` size ≥ `committed_offset`
+  (last chunk may be written-not-committed).
+
+### Remote indices for download — st.recordings, not search results
+`auqw://download?i=N` indexes `st.recordings` (the materialized
+library). `auqw://search` only publishes the page + advisory prewarm
+— it writes NO library rows, so on an empty library every index is
+"out of range". Materialize first: `auqw://play-result?i=N` calls
+addAndPlay → upserts exactly that item — but ONLY when the result
+isn't already queued; a repeat of the same index hits the
+queuedOccurrenceForRef → playOccurrence path and adds no row. Fire
+DISTINCT indices for N rows. In the API-36 gate one fresh play grew
+the table to ~50 rows — playback-driven ingest (queue-context/radio)
+materializes more; don't rely on the count, verify:
+`adb shell "run-as com.vehicoule.auqw sqlite3 files/SQLite/auqw.db
+'SELECT count(*) FROM recordings'"`.
+
+### Instrumented-mint pattern when the provider wall is ~100%
+When real resolves are environmentally blocked (bot-check rate too
+high to ever land a mint), exercise the full on-device path with a
+TEMPORARY stub — revert before finishing, label evidence provisional:
+- Stub `request()` in `apps/mobile/src/adapters/plugin-provider.ts`:
+  `if (capability === 'playback.resolve')` return
+  `decodeProviderOutcome({type:'succeeded', resultJson}, kindOf, decode)`
+  — the REAL wire decoder still runs (toMintHeaders →
+  PlayableResource.headers); everything downstream is real.
+- Use a real public https Range endpoint for `url` — verify 206 first
+  (`curl -H 'Range: bytes=0-1048575'`). `speed.cloudflare.com/__down`
+  does NOT honor Range; `www.soundhelix.com/examples/mp3/*.mp3` does
+  (~9MB real mp3 — stored file can even play as owned bytes).
+- ALWAYS include `content_length` in the fixture: omitting it makes
+  the re-mint's `contentLength=null` mismatch the persisted
+  `expectedEncoding` (=`live.bytes` wire total) → honest restart at 0
+  that masquerades as broken resume. With matching length, resume
+  continues AT `committed_offset`.
+- To prove mint headers ride the wire, log header NAMES only —
+  `console.log(Object.keys(init.headers ?? {}))` at the download
+  `fetchImpl` wiring (`apps/mobile/src/session/controller.ts`) —
+  shows `[...mintKeys, 'range']` per chunk in logcat. Never log raw
+  values: mint headers can carry signed request data and logcat
+  persists them (same rule as redacted tokens/URLs). Revert both
+  edits.
+
+### Reactive force-stop for mid-flight catches
+Timed `am force-stop` is racy — chunk commits land in bursts
+(~1-3 s apart on this egress). Poll the ledger (~1 s cadence) and
+force-stop the MOMENT `committed_offset` > 0. At-offset resume
+signature post-relaunch: the next fetch's Range starts at
+`committed_offset`, not `bytes=0`; the row returns `requested` →
+`transferring` → `available` via the init() sweep + pump.
+
+### Misc device gotchas
+- The React Native DevTools window pops open on stray taps near the
+  debug warning bar / 'player' segment area — `wmctrl` close it
+  immediately or it steals the recording frame.

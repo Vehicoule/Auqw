@@ -277,6 +277,98 @@ function toSearchPage(value: unknown): SearchPage | null {
     : { items, storefront: value['storefront'] };
 }
 
+/**
+ * Names the host controls on every wire fetch — a mint may never
+ * dictate them. Mirrors the plugin-host's own list (host-surface
+ * `HOST_OWNED`); a divergence would let a resolve pass here and fail
+ * natively on the streaming leg.
+ */
+const HOST_OWNED_HEADERS: ReadonlySet<string> = new Set([
+  'range',
+  'host',
+  'content-length',
+  'connection',
+  'transfer-encoding',
+  'accept-encoding',
+  'te',
+  'trailer',
+  'upgrade',
+  'expect',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'www-authenticate',
+  'authorization',
+  'cookie',
+  'set-cookie',
+]);
+
+const MAX_MINT_HEADERS = 16;
+const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,64}$/;
+
+/**
+ * Wire `headers` → the resource's fetch headers, mirroring the
+ * plugin-host decoder exactly: ≤16 entries, RFC 9110 token names ≤64
+ * unique after lowercase-folding, values 1–512 UTF-8 bytes of visible
+ * text (each byte 0x20–0x7e | 0x80–0xff). The native rule runs at the
+ * byte level: a codepoint below 0x80 must itself be printable ASCII;
+ * at ≥0x80 its whole UTF-8 encoding is all-≥0x80 bytes and admitted.
+ * Absent/null → `{}`; any violation poisons the whole resolve
+ * result, exactly as the native decoder's `invalid-response`.
+ */
+function toMintHeaders(value: unknown): Record<string, string> | null {
+  if (value === undefined || value === null) {
+    return {};
+  }
+  if (!isRecord(value)) {
+    return null;
+  }
+  const entries = Object.entries(value);
+  if (entries.length > MAX_MINT_HEADERS) {
+    return null;
+  }
+  const seen = new Set<string>();
+  const headers: Record<string, string> = {};
+  for (const [name, headerValue] of entries) {
+    const folded = name.toLowerCase();
+    if (
+      !HEADER_NAME.test(name) ||
+      HOST_OWNED_HEADERS.has(folded) ||
+      seen.has(folded)
+    ) {
+      return null;
+    }
+    if (typeof headerValue !== 'string' || headerValue.length === 0) {
+      return null;
+    }
+    let byteLen = 0;
+    for (const ch of headerValue) {
+      const code = ch.codePointAt(0) ?? 0;
+      if (code < 0x80) {
+        // Single byte — must be visible ASCII (DEL excluded).
+        if (code < 0x20 || code === 0x7f) {
+          return null;
+        }
+        byteLen += 1;
+      } else {
+        // A lone surrogate can't encode — and can't arrive over the
+        // native JSON boundary either; reject rather than diverge.
+        if (code >= 0xd800 && code <= 0xdfff) {
+          return null;
+        }
+        // Every UTF-8 byte of a ≥0x80 codepoint is ≥0x80 — admitted.
+        byteLen += code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+      }
+    }
+    if (byteLen > 512) {
+      return null;
+    }
+    seen.add(folded);
+    headers[folded] = headerValue;
+  }
+  return headers;
+}
+
 /** Wire `playbackResolveResult` → domain `PlayableResource`. */
 function toPlayableResource(value: unknown): PlayableResource | null {
   if (
@@ -284,7 +376,7 @@ function toPlayableResource(value: unknown): PlayableResource | null {
     !hasKeys(
       value,
       ['url', 'mime', 'bitrate_kbps', 'expires_at_ms', 'client'],
-      ['content_length', 'itag'],
+      ['content_length', 'itag', 'headers'],
     )
   ) {
     return null;
@@ -314,7 +406,20 @@ function toPlayableResource(value: unknown): PlayableResource | null {
   ) {
     return null;
   }
-  return { url, mime, bitrateKbps, expiresAtMs, contentLength, client, itag };
+  const headers = toMintHeaders(value['headers']);
+  if (headers === null) {
+    return null;
+  }
+  return {
+    url,
+    mime,
+    bitrateKbps,
+    expiresAtMs,
+    contentLength,
+    client,
+    itag,
+    headers,
+  };
 }
 
 /** Wire `entityMetadata` → domain `EntityMetadata`. */

@@ -16,6 +16,8 @@ import { CHANNELS } from '../shared/channels.ts';
 import type {
   TransferAbortArgs,
   TransferBeginArgs,
+  TransferFetchArgs,
+  TransferFetchIdArgs,
   TransferFinalizeArgs,
   TransferNameArgs,
   TransferSinkArgs,
@@ -26,6 +28,8 @@ import type {
 import {
   isTransferAbortArgs,
   isTransferBeginArgs,
+  isTransferFetchArgs,
+  isTransferFetchIdArgs,
   isTransferFinalizeArgs,
   isTransferNameArgs,
   isTransferSinkArgs,
@@ -69,6 +73,8 @@ type TransferServiceOptions = {
   readonly maxSinks?: number | undefined;
   /** Wait-queue cap; beyond it `begin` fails `unavailable`. */
   readonly maxWaiters?: number | undefined;
+  /** Wire fetch for `transfer:fetch*` — Node fetch in production. */
+  readonly fetchImpl?: typeof fetch | undefined;
 };
 
 type TransferService = {
@@ -93,6 +99,24 @@ type Sink = {
 const DEFAULT_MAX_SINKS = 4;
 const DEFAULT_MAX_WAITERS = 32;
 const PART_SUFFIX = '.part';
+/** Manual-hop cap + backstop for a fetch whose cancel never arrives
+ * (renderer gone). The policy's own chunk timeout stays the real
+ * stall bound; this only bounds the socket's lease. */
+const FETCH_MAX_REDIRECTS = 3;
+const FETCH_HARD_TIMEOUT_MS = 120_000;
+/** Body cap — a 206 chunk is ≤1MiB; the belt sits well above it. */
+const FETCH_MAX_BODY = 8 * 1024 * 1024;
+
+/** A `transfer:fetch` whose response is parked awaiting `fetchBody`/`fetchAbort`. */
+type LiveFetch = {
+  readonly controller: AbortController;
+  readonly timer: NodeJS.Timeout;
+  response: Response | null;
+  /** `fetchBody` has been issued — no second read, but the entry stays
+   * registered so abort/backstop still reach the in-flight read. */
+  consumed: boolean;
+  timedOut: boolean;
+};
 /** Reserved finalize-internal namespace: the parked incumbent of an
  * in-flight destination replace. */
 const REPLACE_SUFFIX = '.replace';
@@ -724,6 +748,298 @@ export function createTransferService(
     return sinkInfo(requireSink(args.sinkId));
   }
 
+  /* ----------------------------------------------------------------
+   * `transfer:fetch*` — the download wire leg over Node fetch. The
+   * renderer can't reach minted https urls (its CSP allows only the
+   * loopback pump) and browser fetch won't send a minted User-Agent,
+   * so the range fetch lives beside the sinks it feeds. `fetch`
+   * performs the request and answers with the status + headers;
+   * `fetchBody` streams a bounded body — the policy only ever reads
+   * 206 bodies; `fetchAbort` cancels a request at any phase.
+   * ---------------------------------------------------------------- */
+  const fetches = new Map<string, LiveFetch>();
+  const fetchImpl = options.fetchImpl ?? fetch;
+
+  /**
+   * Minted urls are public CDN endpoints — a fetch that names a
+   * private or loopback target is either a bug or a renderer trying
+   * to ride the bridge past its own CSP. Refuse literal private
+   * hosts; a hostile name resolved via public DNS is the residual
+   * hole every http client shares.
+   */
+  function isPrivateFetchHost(hostname: string): boolean {
+    const host = hostname.toLowerCase().replace(/\.$/, '');
+    if (host === 'localhost' || host.endsWith('.localhost')) {
+      return true;
+    }
+    const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+    if (v4 !== null) {
+      const octets = v4.slice(1).map(Number);
+      const [a, b] = [octets[0] ?? 0, octets[1] ?? 0];
+      return (
+        octets.every((o) => o <= 255) &&
+        (a === 0 ||
+          a === 10 ||
+          a === 127 ||
+          (a === 100 && b >= 64 && b <= 127) ||
+          (a === 169 && b === 254) ||
+          (a === 172 && b >= 16 && b <= 31) ||
+          (a === 192 && b === 168) ||
+          (a === 198 && (b === 18 || b === 19)) ||
+          a >= 224)
+      );
+    }
+    // `new URL` returns IPv6 literals bracketed.
+    const inner = host.startsWith('[') ? host.slice(1, -1) : host;
+    if (inner === '::1' || inner === '::') {
+      return true;
+    }
+    // fe80::/10 link-local — first hextet fe80–febf.
+    const firstHextet = parseInt(inner.split(':')[0] ?? '', 16);
+    if (
+      !Number.isNaN(firstHextet) &&
+      firstHextet >= 0xfe80 &&
+      firstHextet <= 0xfebf
+    ) {
+      return true;
+    }
+    if (
+      !Number.isNaN(firstHextet) &&
+      firstHextet >= 0xfc00 &&
+      firstHextet <= 0xfdff
+    ) {
+      return true; // ULA fc00::/7
+    }
+    if (inner.startsWith('::ffff:')) {
+      // IPv4-mapped — last 32 bits decide.
+      const tail = inner.slice('::ffff:'.length);
+      const mappedV4 =
+        /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(tail);
+      if (mappedV4 !== null) {
+        return isPrivateFetchHost(tail);
+      }
+      const groups = tail.split(':');
+      const hex = groups
+        .map((g) => parseInt(g, 16))
+        .filter((n) => !Number.isNaN(n));
+      if (hex.length >= 2) {
+        const hi = hex[hex.length - 2] ?? 0;
+        const lo = hex[hex.length - 1] ?? 0;
+        return isPrivateFetchHost(
+          `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`,
+        );
+      }
+    }
+    return false;
+  }
+
+  function parseFetchUrl(raw: string): URL {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw shellError('invalid-request', 'unparseable fetch url');
+    }
+    // Same belt as the policy's fetch site: minted urls are https only.
+    if (url.protocol !== 'https:') {
+      throw shellError('invalid-request', 'fetch url must be https');
+    }
+    if (isPrivateFetchHost(url.hostname)) {
+      throw shellError('invalid-request', 'fetch url is not public');
+    }
+    return url;
+  }
+
+  /** Transport failures → retryable; the caller's abort → cancelled; the
+   * backstop timer → transient (a stall, not a cancel). */
+  function asFetchError(live: LiveFetch, thrown: unknown): never {
+    if (isShellError(thrown)) {
+      throw thrown;
+    }
+    if (live.timedOut) {
+      throw shellError('transient', 'fetch timed out');
+    }
+    if (
+      thrown instanceof Error &&
+      (thrown.name === 'AbortError' || thrown.name === 'TimeoutError')
+    ) {
+      throw shellError('cancelled', 'fetch aborted');
+    }
+    // Node fetch rejects TypeError on every transport failure — DNS,
+    // reset, TLS, body drop — all retryable.
+    throw shellError('transient', 'fetch failed');
+  }
+
+  async function fetchRemote(args: TransferFetchArgs): Promise<unknown> {
+    if (shutdown) {
+      throw shellError('released', 'transfer service is closed');
+    }
+    if (fetches.has(args.requestId)) {
+      throw shellError('invalid-request', 'duplicate fetch requestId');
+    }
+    const live: LiveFetch = {
+      controller: new AbortController(),
+      timer: setTimeout(() => {
+        live.timedOut = true;
+        live.controller.abort();
+      }, FETCH_HARD_TIMEOUT_MS),
+      response: null,
+      consumed: false,
+      timedOut: false,
+    };
+    fetches.set(args.requestId, live);
+    try {
+      let target = parseFetchUrl(args.url);
+      // Node fetch demands ByteString header values (chars ≤0xff);
+      // a native-valid mint can admit ≥0x100 codepoints (UTF-8
+      // obs-text) this transport can't represent — refuse it
+      // non-retryably rather than letting the TypeError surface as
+      // a 'transient' that retries forever.
+      for (const [name, value] of Object.entries(args.headers)) {
+        for (const ch of value) {
+          if ((ch.codePointAt(0) ?? 0) > 0xff) {
+            throw shellError(
+              'invalid-request',
+              `fetch header '${name}' is not byte-encodable`,
+            );
+          }
+        }
+      }
+      // Manual hops like the pump's: the scheme is re-validated each
+      // hop (a downgrade or a loop never passes) and the minted
+      // headers ride verbatim.
+      let response = await fetchImpl(target, {
+        method: 'GET',
+        headers: args.headers,
+        redirect: 'manual',
+        signal: live.controller.signal,
+      });
+      for (let hops = 0; hops < FETCH_MAX_REDIRECTS; hops += 1) {
+        const location = response.headers.get('location');
+        if (
+          response.status < 300 ||
+          response.status >= 400 ||
+          location === null
+        ) {
+          break;
+        }
+        let next: URL;
+        try {
+          next = new URL(location, target);
+        } catch {
+          throw shellError(
+            'invalid-response',
+            'fetch redirect location unparseable',
+          );
+        }
+        if (next.protocol !== 'https:') {
+          throw shellError(
+            'invalid-response',
+            'fetch redirected off https',
+          );
+        }
+        if (isPrivateFetchHost(next.hostname)) {
+          throw shellError(
+            'invalid-response',
+            'fetch redirected to a non-public host',
+          );
+        }
+        target = next;
+        // Drop the hop's body before following so its socket frees.
+        void response.body?.cancel().catch(() => undefined);
+        response = await fetchImpl(target, {
+          method: 'GET',
+          headers: args.headers,
+          redirect: 'manual',
+          signal: live.controller.signal,
+        });
+      }
+      if (
+        response.status >= 300 &&
+        response.status < 400 &&
+        response.headers.get('location') !== null
+      ) {
+        throw shellError(
+          'invalid-response',
+          'fetch redirect chain too long',
+        );
+      }
+      live.response = response;
+      return {
+        status: response.status,
+        headers: [...response.headers.entries()],
+      };
+    } catch (thrown) {
+      // Delete only our own entry — an abort may already have freed
+      // the id and a new fetch may now own it.
+      if (fetches.get(args.requestId) === live) {
+        fetches.delete(args.requestId);
+      }
+      clearTimeout(live.timer);
+      asFetchError(live, thrown);
+    }
+  }
+
+  async function fetchBody(args: TransferFetchIdArgs): Promise<unknown> {
+    const live = fetches.get(args.requestId);
+    if (
+      live === undefined ||
+      live.response === null ||
+      live.consumed
+    ) {
+      throw shellError('invalid-request', 'unknown or consumed fetch');
+    }
+    // Single-use by flag, not by deletion: the entry and its backstop
+    // stay registered for the whole read — a mid-read stall keeps a
+    // socket `fetchAbort` (or the timeout) can still cancel.
+    live.consumed = true;
+    const response = live.response;
+    try {
+      const reader = response.body?.getReader();
+      const parts: Buffer[] = [];
+      let total = 0;
+      if (reader !== undefined) {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+          total += value.byteLength;
+          if (total > FETCH_MAX_BODY) {
+            await reader.cancel().catch(() => undefined);
+            throw shellError(
+              'invalid-response',
+              'fetch body exceeds the cap',
+            );
+          }
+          parts.push(Buffer.from(value));
+        }
+      }
+      return { data: Buffer.concat(parts).toString('base64') };
+    } catch (thrown) {
+      return asFetchError(live, thrown);
+    } finally {
+      // Same guard — a same-id fetch registered after an abort is
+      // not ours to remove.
+      if (fetches.get(args.requestId) === live) {
+        fetches.delete(args.requestId);
+      }
+      clearTimeout(live.timer);
+    }
+  }
+
+  function fetchAbort(args: TransferFetchIdArgs): unknown {
+    const live = fetches.get(args.requestId);
+    if (live === undefined) {
+      // Consumed or never existed — abort is idempotent.
+      return undefined;
+    }
+    fetches.delete(args.requestId);
+    clearTimeout(live.timer);
+    live.controller.abort();
+    return undefined;
+  }
+
   async function stats(): Promise<unknown> {
     let bytes = 0;
     let files = 0;
@@ -832,10 +1148,30 @@ export function createTransferService(
         isUndefinedResult,
         stats,
       ),
+      [CHANNELS.transferFetch]: guarded(
+        CHANNELS.transferFetch,
+        isTransferFetchArgs,
+        fetchRemote,
+      ),
+      [CHANNELS.transferFetchBody]: guarded(
+        CHANNELS.transferFetchBody,
+        isTransferFetchIdArgs,
+        fetchBody,
+      ),
+      [CHANNELS.transferFetchAbort]: guarded(
+        CHANNELS.transferFetchAbort,
+        isTransferFetchIdArgs,
+        fetchAbort,
+      ),
     },
     sweepOrphans,
     close() {
       shutdown = true;
+      for (const live of fetches.values()) {
+        clearTimeout(live.timer);
+        live.controller.abort();
+      }
+      fetches.clear();
       for (const waiter of waiters.splice(0)) {
         waiter.reject(
           shellError('released', 'transfer service is closed'),

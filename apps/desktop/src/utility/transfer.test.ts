@@ -545,4 +545,339 @@ export async function run(): Promise<void> {
   } finally {
     rmSync(root2, { recursive: true, force: true });
   }
+
+  /* --------------------------------------------------------------
+   * transfer:fetch* — the download wire leg over Node fetch. The
+   * renderer's CSP forbids https, so range fetches live here; these
+   * prove minted headers ride verbatim, redirects stay on https, and
+   * failures surface typed kinds the policy can retry.
+   * ------------------------------------------------------------ */
+  const fetchRoot = mkdtempSync(join(tmpdir(), 'auqw-tfetch-'));
+  try {
+    const seen: { url: string; headers: HeadersInit | undefined }[] = [];
+    const scripted = new Map<
+      string,
+      Response | ((init?: RequestInit) => Response)
+    >();
+    const fakeFetch = ((
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = String(input);
+      seen.push({ url, headers: init?.headers });
+      const entry = scripted.get(url);
+      if (entry === undefined) {
+        // Node's own transport failure is a TypeError.
+        return Promise.reject(new TypeError('fetch failed'));
+      }
+      return Promise.resolve(
+        typeof entry === 'function' ? entry(init) : entry,
+      );
+    }) as typeof fetch;
+    const svc = createTransferService({
+      mediaDir: join(fetchRoot, 'media'),
+      fetchImpl: fakeFetch,
+    });
+    const fetchRoute = createUtilityRouter(svc.handlers);
+    let fetchSeq = 1;
+    const fetchCall = (
+      channel: string,
+      args?: unknown,
+    ): Promise<UtilityResponse> => {
+      const id = fetchSeq;
+      fetchSeq += 1;
+      return fetchRoute({ id, channel, args });
+    };
+    const argsFor = (requestId: string, url: string) => ({
+      requestId,
+      url,
+      headers: { 'user-agent': 'auqw-test/1.0', Range: 'bytes=0-3' },
+    });
+
+    // Head + body round-trip; minted headers ride verbatim.
+    scripted.set(
+      'https://cdn.example/ok',
+      new Response('hello', {
+        status: 206,
+        headers: { 'content-range': 'bytes 0-4/9' },
+      }),
+    );
+    const head = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-1', 'https://cdn.example/ok'),
+    );
+    assert(head.ok, 'fetch head ok');
+    const headResult = head.result as {
+      status: number;
+      headers: [string, string][];
+    };
+    assertEqual(headResult.status, 206, 'status surfaced');
+    assert(
+      headResult.headers.some(
+        ([name, value]) =>
+          name === 'content-range' && value === 'bytes 0-4/9',
+      ),
+      'response headers surfaced',
+    );
+    const body = await fetchCall(CHANNELS.transferFetchBody, {
+      requestId: 'f-1',
+    });
+    assert(body.ok, 'fetch body ok');
+    assertEqual(
+      (body.result as { data: string }).data,
+      Buffer.from('hello').toString('base64'),
+      'body base64 round-trips',
+    );
+    const sentHeaders = new Headers(seen[0]?.headers);
+    assertEqual(
+      sentHeaders.get('user-agent'),
+      'auqw-test/1.0',
+      'minted UA sent verbatim',
+    );
+    assertEqual(sentHeaders.get('range'), 'bytes=0-3', 'range sent');
+    const again = await fetchCall(CHANNELS.transferFetchBody, {
+      requestId: 'f-1',
+    });
+    assert(
+      !again.ok && again.error.kind === 'invalid-request',
+      'body is single-use',
+    );
+
+    // https→https redirect followed with the same headers; off-https
+    // refused.
+    scripted.set(
+      'https://cdn.example/hop',
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://cdn2.example/land' },
+      }),
+    );
+    scripted.set(
+      'https://cdn2.example/land',
+      new Response('x', { status: 206 }),
+    );
+    const hopped = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-2', 'https://cdn.example/hop'),
+    );
+    assert(
+      hopped.ok && (hopped.result as { status: number }).status === 206,
+      'https redirect followed',
+    );
+    const hopHeaders = new Headers(seen[seen.length - 1]?.headers);
+    assertEqual(
+      hopHeaders.get('user-agent'),
+      'auqw-test/1.0',
+      'headers ride the redirect hop',
+    );
+    scripted.set(
+      'https://cdn.example/plain',
+      new Response(null, {
+        status: 302,
+        headers: { location: 'http://cdn.example/off' },
+      }),
+    );
+    const plain = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-3', 'https://cdn.example/plain'),
+    );
+    assert(
+      !plain.ok && plain.error.kind === 'invalid-response',
+      'cleartext redirect refused',
+    );
+
+    // Non-https urls refuse before any fetch is issued.
+    const http = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-4', 'http://cdn.example/x'),
+    );
+    assert(
+      !http.ok && http.error.kind === 'invalid-request',
+      'http url refused',
+    );
+    assert(
+      seen.every((entry) => entry.url.startsWith('https://')),
+      'no cleartext fetch issued',
+    );
+
+    // Transport failure → transient (retryable), never 'cancelled'.
+    const failed = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-5', 'https://cdn.example/missing'),
+    );
+    assert(
+      !failed.ok && failed.error.kind === 'transient',
+      'transport failure is retryable',
+    );
+
+    // Private/loopback literals refuse before any fetch is issued —
+    // minted urls are public CDN endpoints, so this bridge must not
+    // reach private https services past the renderer's CSP.
+    for (const target of [
+      'https://127.0.0.1/x',
+      'https://10.0.0.9/x',
+      'https://169.254.169.254/latest',
+      'https://192.168.1.1/x',
+      'https://172.16.0.1/x',
+      'https://localhost/x',
+      'https://[::1]/x',
+      'https://[fd00::1]/x',
+      'https://[::ffff:10.0.0.1]/x',
+      'https://[::ffff:7f00:1]/x',
+      'https://[::ffff:c0a8:101]/x',
+    ]) {
+      const denied = await fetchCall(
+        CHANNELS.transferFetch,
+        argsFor('f-deny', target),
+      );
+      assert(
+        !denied.ok && denied.error.kind === 'invalid-request',
+        `private target refused: ${target}`,
+      );
+    }
+    // A redirect INTO a private host refuses at the hop.
+    scripted.set(
+      'https://cdn.example/private',
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://169.254.169.254/meta' },
+      }),
+    );
+    const privHop = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-priv', 'https://cdn.example/private'),
+    );
+    assert(
+      !privHop.ok && privHop.error.kind === 'invalid-response',
+      'redirect to a private host refused',
+    );
+    assert(
+      seen.every((entry) => !entry.url.includes('169.254')),
+      'no private fetch issued',
+    );
+
+    // A stalled body read stays abort-reachable: the entry and its
+    // backstop live through the read, so fetchAbort cancels the
+    // in-flight reader instead of finding nothing to abort.
+    scripted.set(
+      'https://cdn.example/stall',
+      (init) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start: (controller) => {
+              // Never enqueues — the stall the chunk timeout meets;
+              // undici ties the body to the request signal, so an
+              // abort errors the pending read the same way.
+              init?.signal?.addEventListener('abort', () => {
+                controller.error(new DOMException('aborted', 'AbortError'));
+              });
+            },
+          }),
+          { status: 206, headers: { 'content-range': 'bytes 0-3/8' } },
+        ),
+    );
+    const stalled = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-stall', 'https://cdn.example/stall'),
+    );
+    assert(stalled.ok);
+    const pendingBody = fetchCall(CHANNELS.transferFetchBody, {
+      requestId: 'f-stall',
+    });
+    const abortStall = await fetchCall(CHANNELS.transferFetchAbort, {
+      requestId: 'f-stall',
+    });
+    assert(abortStall.ok, 'abort reaches a mid-read body');
+
+    // A requestId reused while the stale read is still settling
+    // belongs to the new fetch — the stale cleanup must not delete it.
+    scripted.set(
+      'https://cdn.example/reused',
+      new Response('zz', { status: 206 }),
+    );
+    const reHeadPromise = fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-stall', 'https://cdn.example/reused'),
+    );
+    const stalledBody = await pendingBody;
+    assert(
+      !stalledBody.ok && stalledBody.error.kind === 'cancelled',
+      'mid-read abort surfaces cancelled',
+    );
+    const reHead = await reHeadPromise;
+    assert(reHead.ok, 'requestId reusable after abort');
+    const reBody = await fetchCall(CHANNELS.transferFetchBody, {
+      requestId: 'f-stall',
+    });
+    assert(
+      reBody.ok &&
+        (reBody.result as { data: string }).data ===
+          Buffer.from('zz').toString('base64'),
+      'reused id keeps its own response',
+    );
+
+    // A minted header Node fetch can't encode (≥0x100 codepoint —
+    // native admits the UTF-8 obs-text) refuses non-retryably BEFORE
+    // the request, never TypeError→transient.
+    scripted.set('https://cdn.example/uni', new Response('x'));
+    const seenBefore = seen.length;
+    const uniArgs = argsFor('f-uni', 'https://cdn.example/uni');
+    const uni = await fetchCall(CHANNELS.transferFetch, {
+      ...uniArgs,
+      headers: { 'x-client': 'Ā' },
+    });
+    assert(
+      !uni.ok && uni.error.kind === 'invalid-request',
+      'unencodable header refuses non-retryably',
+    );
+    assertEqual(
+      seen.length,
+      seenBefore,
+      'no fetch issued for unencodable header',
+    );
+
+    // Aborting a parked response frees the requestId; unknown ids are
+    // a no-op; a duplicate requestId refuses.
+    scripted.set(
+      'https://cdn.example/ok2',
+      new Response('b', { status: 206 }),
+    );
+    const parked = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-6', 'https://cdn.example/ok2'),
+    );
+    assert(parked.ok);
+    const aborted = await fetchCall(CHANNELS.transferFetchAbort, {
+      requestId: 'f-6',
+    });
+    assert(aborted.ok, 'abort of live fetch ok');
+    const bodyAfterAbort = await fetchCall(CHANNELS.transferFetchBody, {
+      requestId: 'f-6',
+    });
+    assert(
+      !bodyAfterAbort.ok && bodyAfterAbort.error.kind === 'invalid-request',
+      'aborted response denies body',
+    );
+    const noop = await fetchCall(CHANNELS.transferFetchAbort, {
+      requestId: 'never-issued',
+    });
+    assert(noop.ok, 'abort of unknown id is a no-op');
+    const dup = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-6', 'https://cdn.example/ok2'),
+    );
+    assert(dup.ok, 'requestId reusable after abort');
+    const dup2 = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-6', 'https://cdn.example/ok2'),
+    );
+    assert(
+      !dup2.ok && dup2.error.kind === 'invalid-request',
+      'duplicate live requestId refused',
+    );
+    await fetchCall(CHANNELS.transferFetchAbort, { requestId: 'f-6' });
+    svc.close();
+  } finally {
+    rmSync(fetchRoot, { recursive: true, force: true });
+  }
 }

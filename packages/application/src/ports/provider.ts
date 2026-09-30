@@ -69,6 +69,14 @@ export type PlayableResource = {
   readonly contentLength: number | null;
   readonly client: string;
   readonly itag: number | null;
+  /**
+   * Request headers the mint requires on every fetch of `url`
+   * (e.g. the minting client's User-Agent) — decoded per the wire
+   * `playbackResolveResult.headers` contract; `{}` when the mint
+   * declares none. Range is set by the transfer policy itself, so a
+   * mint can never carry it.
+   */
+  readonly headers: Readonly<Record<string, string>>;
 };
 
 /**

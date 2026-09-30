@@ -1163,6 +1163,77 @@ export const isTransferStatsResult = v.object({
 });
 
 /**
+ * `transfer:fetch*` — the download wire leg. The renderer CSP forbids
+ * https egress (`connect-src 'self' http://127.0.0.1:*`) and browser
+ * fetch can't send a minted `User-Agent`, so the request runs in the
+ * utility's Node fetch. `fetch` returns the status + response headers
+ * only; `fetchBody` pulls a bounded body — the transfer policy only
+ * reads bodies on 206, so error pages and whole-file 200s are never
+ * buffered. `fetchAbort` cancels either phase; a requestId is
+ * single-use.
+ */
+const MAX_FETCH_URL = 8192;
+const MAX_FETCH_HEADERS = 32;
+const MAX_FETCH_HEADER_NAME = 64;
+const MAX_FETCH_HEADER_VALUE = 2048;
+// 8MiB decoded → ceil(8388608/3)*4 = 11,184,812 base64 chars.
+const MAX_FETCH_BODY_BASE64 = 11_184_812;
+
+const isFetchId = v.boundedString(96);
+
+// RFC 9110 token — a malformed name would TypeError inside undici and
+// surface as a 'transient' failure that retries forever. Rejected at
+// the boundary instead.
+const FETCH_HEADER_NAME =
+  /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,64}$/;
+
+const isFetchHeaders = (
+  value: unknown,
+): value is Readonly<Record<string, string>> =>
+  isRecord(value) &&
+  Object.keys(value).length <= MAX_FETCH_HEADERS &&
+  Object.entries(value).every(
+    ([name, headerValue]) =>
+      FETCH_HEADER_NAME.test(name) &&
+      isBoundedString(headerValue, MAX_FETCH_HEADER_VALUE),
+  );
+
+export type TransferFetchArgs = v.Guarded<typeof isTransferFetchArgs>;
+
+export const isTransferFetchArgs = v.object({
+  requestId: isFetchId,
+  url: v.boundedString(MAX_FETCH_URL),
+  headers: isFetchHeaders,
+});
+
+// Response header values may legitimately be empty — only bounded.
+const isHeaderPair = (
+  value: unknown,
+): value is readonly [string, string] =>
+  Array.isArray(value) &&
+  value.length === 2 &&
+  isBoundedString(value[0], MAX_FETCH_HEADER_NAME) &&
+  typeof value[1] === 'string' &&
+  value[1].length <= MAX_FETCH_HEADER_VALUE;
+
+type TransferFetchResult = v.Guarded<typeof isTransferFetchResult>;
+
+export const isTransferFetchResult = v.object({
+  status: v.int(599),
+  headers: v.array(isHeaderPair, { max: 64 }),
+});
+
+export type TransferFetchIdArgs = v.Guarded<typeof isTransferFetchIdArgs>;
+
+export const isTransferFetchIdArgs = v.object({ requestId: isFetchId });
+
+type TransferFetchBodyResult = v.Guarded<typeof isTransferFetchBodyResult>;
+
+export const isTransferFetchBodyResult = v.object({
+  data: v.string(MAX_FETCH_BODY_BASE64),
+});
+
+/**
  * `tagread:*` — the `TagReaderPort` read plane for granted trees.
  * `treeUri` is an opaque grant handle minted by `local:add`; every
  * batch is bounded so a hostile or corrupted tree can't smuggle
@@ -1546,6 +1617,11 @@ export type AuqwApi = {
     readonly list: () => Promise<TransferListResult>;
     readonly status: (args: TransferSinkArgs) => Promise<TransferStatusResult>;
     readonly stats: () => Promise<TransferStatsResult>;
+    readonly fetch: (args: TransferFetchArgs) => Promise<TransferFetchResult>;
+    readonly fetchBody: (
+      args: TransferFetchIdArgs,
+    ) => Promise<TransferFetchBodyResult>;
+    readonly fetchAbort: (args: TransferFetchIdArgs) => Promise<void>;
   };
   /**
    * The `TagReaderPort` read plane — enumerate/fingerprint/read against

@@ -38,6 +38,7 @@ import { createDesktopConnectivity } from './connectivity.ts';
 import { createLocalPlayback } from './local-playback.ts';
 import { createDesktopTagReader } from './tag-reader.ts';
 import { createDesktopTransfer } from './transfer-port.ts';
+import { createTransferFetch } from './transfer-fetch.ts';
 import { browserMse } from './mse-source.ts';
 import {
   createPluginProvider,
@@ -432,22 +433,19 @@ export async function createSessionController(
     clock,
     ids,
     log,
-    fetchImpl: (url, init, signal) => {
-      // Bridge the port's CancellationSignal onto fetch's AbortSignal.
-      // Detach on settle — a long transfer must not accumulate one
-      // controller per completed chunk on the shared signal.
-      const abort = new AbortController();
-      const unsub = signal.subscribe(() => abort.abort());
-      return fetch(url, { headers: init.headers, signal: abort.signal }).finally(
-        () => unsub(),
-      );
-    },
+    // The wire leg runs in the utility: the renderer CSP refuses
+    // https egress and browser fetch can't send the minted
+    // User-Agent, so `transfer:fetch*` carries the range requests.
+    fetchImpl: createTransferFetch(api.transfer, ids),
     resolvePlayback: (ref, input, context) => {
       const settings = readyOr((s) => s.settings, defaults);
-      const provider = providerMap.get(settings.playbackProvider);
+      // Mint through the ref's own provider — the ledger row pins the
+      // source, not today's playback pick, so a provider switch can't
+      // mint queued downloads against the wrong plugin.
+      const provider = providerMap.get(ref.provider);
       if (provider === undefined) {
         return Promise.resolve(
-          err(appError('unavailable', 'playback provider not loaded')),
+          err(appError('unavailable', 'source provider not loaded')),
         );
       }
       return provider.resolvePlayback(
