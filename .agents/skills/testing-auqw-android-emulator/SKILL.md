@@ -312,7 +312,9 @@ lock's pinned version (`~/wt/auqw-plugins` for `~/wt/*` worktrees,
 that sibling without switching its branch:
 
 ```bash
-PLUGINS=../auqw-plugins   # sibling of this worktree
+# Sibling checkout — the script's lookup is case-insensitive but the
+# shell is not (~/repos/Auqw-plugins vs ~/wt/auqw-plugins).
+PLUGINS=$(compgen -G '../[Aa]uqw-plugins' | head -1)
 git -C "$PLUGINS" fetch
 git -C "$PLUGINS" checkout origin/main -- releases/<plugin>/<version>
 pnpm sync-plugins
