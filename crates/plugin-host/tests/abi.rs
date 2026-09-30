@@ -1354,16 +1354,19 @@ async fn provider_wall_fail_kind_is_accepted() {
 /// `InvalidMessage` protocol violations instead.
 #[tokio::test]
 async fn schema_error_kind_enum_matches_guest_fail_kinds() {
-    let schema: serde_json::Value = serde_json::from_str(include_str!(
+    let schema: serde_json::Value = ok(serde_json::from_str(include_str!(
         "../../../sdk/contract/messages.schema.json"
-    ))
-    .expect("schema parses");
-    let kinds: Vec<String> = schema["$defs"]["errorKind"]["enum"]
-        .as_array()
-        .expect("errorKind is an enum")
-        .iter()
-        .map(|k| k.as_str().unwrap().to_string())
-        .collect();
+    )));
+    let kinds: Vec<String> = match schema["$defs"]["errorKind"]["enum"].as_array() {
+        Some(items) => items
+            .iter()
+            .map(|k| match k.as_str() {
+                Some(s) => s.to_string(),
+                None => panic!("errorKind entries must be strings"),
+            })
+            .collect(),
+        None => panic!("errorKind is an enum"),
+    };
     for kind in &kinds {
         let wasm = ok(wat::parse_str(raw_wat(&format!(
             "{{\"type\":\"fail\",\"error\":{{\"kind\":\"{kind}\",\
