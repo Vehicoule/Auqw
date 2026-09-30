@@ -29,6 +29,7 @@ function toStreamSource(resource: PlayableResource): StreamSource {
     contentLength: resource.contentLength ?? undefined,
     itag: resource.itag ?? undefined,
     expiresAtMs: resource.expiresAtMs ?? undefined,
+    headers: resource.headers,
   };
 }
 

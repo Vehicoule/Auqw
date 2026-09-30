@@ -13,6 +13,7 @@ type WireRequest = {
   readonly url: string;
   readonly start: number;
   readonly end: number;
+  readonly headers: Record<string, string>;
 };
 
 type WireBehavior =
@@ -50,7 +51,7 @@ class Wire {
     }
     const start = Number(m[1]);
     const end = Number(m[2]);
-    const req: WireRequest = { url, start, end };
+    const req: WireRequest = { url, start, end, headers: { ...init.headers } };
     const behavior = this.#scripts[this.requests.length] ?? { kind: 'serve' };
     this.requests.push(req);
     if (signal.cancelled) {
@@ -134,6 +135,7 @@ function resource(
     contentLength,
     client: 'test',
     itag: 140,
+    headers: {},
     ...overrides,
   };
 }
@@ -189,6 +191,89 @@ async function sha256Vectors(): Promise<void> {
   const h5 = createSha256();
   h5.update(long);
   assertEqual(h4.digest(), h5.digest(), 'split-update digest');
+}
+
+/**
+ * The mint's required headers ride every chunk fetch — a remint
+ * swaps them on both resume paths (same-encoding and the
+ * encoding-restart), exactly like the stream pump.
+ */
+async function mintHeadersReachWire(): Promise<void> {
+  const wire = new Wire();
+  const file = bytes(8);
+  wire.serve('https://cdn/a', file);
+  wire.serve('https://cdn/b', file);
+  const transfer = new FakeTransfer();
+  transfer.enqueueSink({ digest: 'cc'.repeat(32) });
+  // 403 on the second chunk → same-encoding remint to a fresh url
+  // carrying a different minted identity.
+  wire.script(1, { kind: 'status', status: 403 });
+  const result = await runTransfer({
+    destName: 't.mp4',
+    first: resource('https://cdn/a', 8, {
+      headers: { 'user-agent': 'MINTED-UA/1.0' },
+    }),
+    remint: remintServes(
+      resource('https://cdn/b', 8, {
+        headers: { 'user-agent': 'REMINT-UA/2.0' },
+      }),
+    ),
+    transfer,
+    fetchImpl: wire.fetch,
+    clock: new FakeClock(),
+    signal: source().signal,
+    hasher: createSha256,
+    chunkSize: 4,
+  });
+  assert(result.ok, `expected ok, got ${JSON.stringify(result)}`);
+  assertEqual(
+    wire.requests[0]?.headers['user-agent'],
+    'MINTED-UA/1.0',
+    'mint headers ride the first fetch',
+  );
+  assertEqual(
+    wire.requests[0]?.headers['Range'],
+    'bytes=0-3',
+    'Range still policy-owned',
+  );
+  assertEqual(
+    wire.requests[2]?.headers['user-agent'],
+    'REMINT-UA/2.0',
+    'a same-encoding remint swaps the headers',
+  );
+  assertEqual(wire.requests[2]?.url, 'https://cdn/b', 'remint url');
+
+  // Encoding-change restart also carries the fresh mint's headers.
+  const wire2 = new Wire();
+  wire2.serve('https://cdn/a', file);
+  wire2.serve('https://cdn/webm', file);
+  const transfer2 = new FakeTransfer();
+  transfer2.enqueueSink({ digest: 'dd'.repeat(32) });
+  wire2.script(0, { kind: 'status', status: 416 });
+  const result2 = await runTransfer({
+    destName: 't.mp4',
+    first: resource('https://cdn/a', 8, {
+      headers: { 'user-agent': 'MINTED-UA/1.0' },
+    }),
+    remint: remintServes(
+      resource('https://cdn/webm', 8, {
+        mime: 'audio/webm',
+        headers: { 'user-agent': 'WEBM-UA/3.0' },
+      }),
+    ),
+    transfer: transfer2,
+    fetchImpl: wire2.fetch,
+    clock: new FakeClock(),
+    signal: source().signal,
+    hasher: createSha256,
+    chunkSize: 4,
+  });
+  assert(result2.ok, 'encoding-restart ok');
+  assertEqual(
+    wire2.requests[1]?.headers['user-agent'],
+    'WEBM-UA/3.0',
+    'an encoding restart swaps the headers',
+  );
 }
 
 async function happyPath(): Promise<void> {
@@ -938,6 +1023,7 @@ async function totalUnknown(): Promise<void> {
 
 export async function run(): Promise<void> {
   await sha256Vectors();
+  await mintHeadersReachWire();
   await happyPath();
   await resumeOffset();
   await resumeEncodingDescriptor();

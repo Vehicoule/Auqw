@@ -126,7 +126,9 @@ async function drain(rounds = 50): Promise<void> {
 /** A content-serving range fetch; `stallAt` (request index) hangs on signal. */
 function wire(content: Uint8Array) {
   const ranges: string[] = [];
+  const headers: Record<string, string>[] = [];
   const fetch: RangeFetch = (url, init, signal) => {
+    headers.push({ ...init.headers });
     const header = init.headers['Range'] ?? '';
     ranges.push(header);
     const m = /^bytes=(\d+)-(\d+)$/.exec(header);
@@ -146,7 +148,7 @@ function wire(content: Uint8Array) {
       resp(206, slice, `bytes ${start}-${end}/${content.length}`, body),
     );
   };
-  return { fetch, ranges };
+  return { fetch, ranges, headers };
 }
 
 function resp(
@@ -173,7 +175,11 @@ type Rig = {
   ids: SequenceIds;
   log: FakeLog;
   content: Uint8Array;
-  wire: { fetch: RangeFetch; ranges: string[] };
+  wire: {
+    fetch: RangeFetch;
+    ranges: string[];
+    headers: Record<string, string>[];
+  };
   mints: { resumeOffset: number | null; pinItag: number | null }[];
   meteredFlag: { value: boolean };
   signal: CancellationSignal;
@@ -187,11 +193,16 @@ function rig(over: {
   meteredAllowed?: boolean;
   queue?: QueueSnapshot;
   mintError?: ErrorKind;
+  mintHeaders?: Record<string, string>;
   wireFetch?: RangeFetch;
 } = {}): Rig {
   const content = over.content ?? bytes(3 * 1024 * 1024 + 7);
   const wireImpl = over.wireFetch !== undefined
-    ? { fetch: over.wireFetch, ranges: [] as string[] }
+    ? {
+        fetch: over.wireFetch,
+        ranges: [] as string[],
+        headers: [] as Record<string, string>[],
+      }
     : wire(content);
   const storage = new FakeStorage(persisted(over.downloads ?? []));
   const transfer = new FakeTransfer();
@@ -225,6 +236,7 @@ function rig(over: {
         contentLength: content.length,
         client: 'test',
         itag: 140,
+        headers: over.mintHeaders ?? {},
       }),
     );
   };
@@ -304,6 +316,34 @@ async function happyPath(): Promise<void> {
   assertEqual(r.transfer.sinks[0]?.finalizedWith, rec?.checksum, 'digest cross-check');
   const last = r.storage.commits[r.storage.commits.length - 1];
   assertEqual(last?.batch.downloads?.[0]?.state, 'available', 'ledger persisted');
+}
+
+/**
+ * E2E through the manager: the mint's fetch headers reach every
+ * chunk request — the googlevideo empty-UA refusal class (#210) that
+ * the download leg regressed into when the plugin mint started
+ * sending them.
+ */
+async function mintHeadersReachWire(): Promise<void> {
+  const r = rig({ mintHeaders: { 'user-agent': 'MINTED-UA/1.0' } });
+  r.transfer.enqueueSink({ digest: sha256hex(r.content) });
+  await r.manager.init([], r.signal);
+  await r.manager.request(
+    { recordingId: 'rec-1', sourceRef: ref('t1') },
+    r.signal,
+  );
+  await drain(200);
+  const rec = r.manager.recordFor('rec-1');
+  assert(rec?.state === 'available', 'reaches available');
+  assert(r.wire.headers.length > 0, 'fetch happened');
+  for (const headers of r.wire.headers) {
+    assertEqual(
+      headers['user-agent'],
+      'MINTED-UA/1.0',
+      'mint headers ride every chunk',
+    );
+    assert(typeof headers['Range'] === 'string', 'Range present');
+  }
 }
 
 async function dedupeSameMapping(): Promise<void> {
@@ -793,6 +833,7 @@ async function rebandsOnQueueChange(): Promise<void> {
           contentLength: r.content.length,
           client: 'test',
           itag: 140,
+          headers: {},
         }),
       ),
     queue: () => q,
@@ -1122,6 +1163,7 @@ async function removeAllTakesKeptRows(): Promise<void> {
 
 export async function run(): Promise<void> {
   await happyPath();
+  await mintHeadersReachWire();
   await dedupeSameMapping();
   await replacesMapping();
   await failedRetryInPlace();

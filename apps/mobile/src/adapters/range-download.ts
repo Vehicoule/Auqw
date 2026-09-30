@@ -52,6 +52,8 @@ export type StreamSource = {
   /** Format pin for re-mints + prepared-stream reporting. */
   readonly itag?: number | undefined;
   readonly expiresAtMs?: number | undefined;
+  /** Mint-required fetch headers — same contract as `PlayableResource.headers`. */
+  readonly headers?: Readonly<Record<string, string>> | undefined;
 };
 
 export {
@@ -72,6 +74,7 @@ function toResource(source: StreamSource): PlayableResource {
     itag: source.itag ?? null,
     expiresAtMs: source.expiresAtMs ?? null,
     client: '',
+    headers: source.headers ?? {},
   };
 }
 

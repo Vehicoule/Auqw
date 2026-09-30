@@ -285,6 +285,7 @@ async function payloadShapes(): Promise<void> {
     contentLength: null,
     client: 'web',
     itag: null,
+    headers: {},
   });
 
   const artwork = p.artwork(ref('itunes', '123'), { size: 600 }, ctx().context);
@@ -807,8 +808,81 @@ async function suggestOps(): Promise<void> {
   assertEqual(host.requests.length, 3, 'no host request started');
 }
 
+/**
+ * The mint `headers` field decodes per the wire contract — the leg
+ * the desktop download path died on: the strict key check rejected
+ * the unknown `headers` key, so every resolve carrying mint headers
+ * failed invalid-response before a byte was fetched.
+ */
+async function resolveHeaders(): Promise<void> {
+  const succeed = async (headers: unknown) => {
+    const { host, p } = rig();
+    const call = p.resolvePlayback(
+      ref('ytm', 'v1'),
+      {
+        targetBitrateKbps: 128,
+        prefer: ['audio/mp4'],
+        pinItag: null,
+        resumeOffset: null,
+      },
+      ctx().context,
+    );
+    await flush();
+    host.succeed(host.requests[0]!.requestId, {
+      url: 'https://cdn.example/x',
+      mime: 'audio/mp4',
+      bitrate_kbps: 128,
+      expires_at_ms: 999,
+      client: 'web',
+      itag: 140,
+      headers,
+    });
+    return call;
+  };
+
+  // Absent / null → empty headers.
+  {
+    const r = await succeed(null);
+    assert(r.ok, 'null headers decode');
+    assertDeepEqual(r.ok ? r.value.headers : null, {}, 'null → {}');
+  }
+  {
+    const r = await succeed({ 'user-agent': 'UA/1.0', 'X-Ref': 'r' });
+    assert(r.ok, 'mint headers decode');
+    assertDeepEqual(r.ok ? r.value.headers : null, {
+      'user-agent': 'UA/1.0',
+      'x-ref': 'r',
+    });
+  }
+
+  // Every malformed shape → invalid-response, like the native decoder.
+  const rejected: readonly [string, unknown][] = [
+    ['host-owned name', { range: 'bytes=0-1' }],
+    ['host-owned, cased', { Cookie: 'a=b' }],
+    ['non-token name', { 'bad name': 'v' }],
+    ['case-folded dup', { 'X-A': '1', 'x-a': '2' }],
+    ['control char', { 'user-agent': 'UA\nInjected: x' }],
+    ['over-long value', { 'user-agent': 'x'.repeat(513) }],
+    [
+      'over 16 entries',
+      Object.fromEntries(
+        Array.from({ length: 17 }, (_, i) => [`x-${i}`, 'v']),
+      ),
+    ],
+    ['not an object', ['user-agent']],
+  ];
+  for (const [label, headers] of rejected) {
+    const r = await succeed(headers);
+    assert(
+      !r.ok && r.error.kind === 'invalid-response',
+      `headers rejected: ${label}`,
+    );
+  }
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['payloadShapes', payloadShapes],
+  ['resolveHeaders', resolveHeaders],
   ['concurrentCorrelation', concurrentCorrelation],
   ['malformedResults', malformedResults],
   ['failedOutcomeKinds', failedOutcomeKinds],

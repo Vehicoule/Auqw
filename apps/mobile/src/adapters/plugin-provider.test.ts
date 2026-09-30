@@ -1,6 +1,8 @@
 import type {
   OperationContext,
+  PlayableResource,
   ProviderCapability,
+  Result,
   SourceRef,
 } from '@auqw/application';
 import { CancellationSource } from '@auqw/application';
@@ -280,6 +282,7 @@ async function payloadShapes(): Promise<void> {
     contentLength: 1_024,
     client: 'ios',
     itag: 140,
+    headers: {},
   });
 
   const details = p.getDetails(
@@ -910,8 +913,88 @@ async function trackEntityEvidence(): Promise<void> {
   });
 }
 
+/**
+ * The mint `headers` field decodes per the wire contract — it is the
+ * leg the download path died on: `hasKeys` rejected the unknown key
+ * outright, so every resolve carrying mint headers failed
+ * invalid-response before a byte was fetched.
+ */
+async function resolveHeaders(): Promise<void> {
+  const succeed = async (
+    host: FakeHost,
+    headers: unknown,
+  ): Promise<Result<PlayableResource>> => {
+    const p = provider(host);
+    const call = p.resolvePlayback(
+      ref('youtube-music', 'abcDEF123_-'),
+      {
+        targetBitrateKbps: 128,
+        prefer: ['audio/mp4'],
+        pinItag: null,
+        resumeOffset: null,
+      },
+      ctx().context,
+    );
+    await flush();
+    host.succeed('req-1', {
+      url: 'https://g.example/v',
+      mime: 'audio/mp4',
+      bitrate_kbps: 128,
+      expires_at_ms: 9_999,
+      client: 'ios',
+      itag: 140,
+      headers,
+    });
+    return call;
+  };
+
+  // Absent / null → empty headers.
+  {
+    const host = new FakeHost();
+    const r = await succeed(host, null);
+    assert(r.ok, 'null headers decode');
+    assertDeepEqual(r.ok ? r.value.headers : null, {}, 'null → {}');
+  }
+  {
+    const host = new FakeHost();
+    const r = await succeed(host, { 'user-agent': 'UA/1.0', 'X-Ref': 'r' });
+    assert(r.ok, 'mint headers decode');
+    assertDeepEqual(r.ok ? r.value.headers : null, {
+      'user-agent': 'UA/1.0',
+      'x-ref': 'r',
+    });
+  }
+
+  // Every malformed shape → invalid-response, like the native decoder.
+  const rejected: readonly [string, unknown][] = [
+    ['host-owned name', { range: 'bytes=0-1' }],
+    ['host-owned, cased', { Cookie: 'a=b' }],
+    ['non-token name', { 'bad name': 'v' }],
+    ['empty name', { '': 'v' }],
+    ['case-folded dup', { 'X-A': '1', 'x-a': '2' }],
+    ['empty value', { 'user-agent': '' }],
+    ['non-string value', { 'user-agent': 7 }],
+    ['control char', { 'user-agent': 'UA\r\nInjected: x' }],
+    ['over-long value', { 'user-agent': 'x'.repeat(513) }],
+    ['over 16 entries', Object.fromEntries(
+      Array.from({ length: 17 }, (_, i) => [`x-${i}`, 'v']),
+    )],
+    ['not an object', ['user-agent']],
+    ['a string', 'user-agent'],
+  ];
+  for (const [label, headers] of rejected) {
+    const host = new FakeHost();
+    const r = await succeed(host, headers);
+    assert(
+      !r.ok && r.error.kind === 'invalid-response',
+      `headers rejected: ${label}`,
+    );
+  }
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['payloadShapes', payloadShapes],
+  ['resolveHeaders', resolveHeaders],
   ['concurrentCorrelation', concurrentCorrelation],
   ['malformedResults', malformedResults],
   ['failedOutcomeKinds', failedOutcomeKinds],

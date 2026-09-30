@@ -16,6 +16,8 @@ import { CHANNELS } from '../shared/channels.ts';
 import type {
   TransferAbortArgs,
   TransferBeginArgs,
+  TransferFetchArgs,
+  TransferFetchIdArgs,
   TransferFinalizeArgs,
   TransferNameArgs,
   TransferSinkArgs,
@@ -26,6 +28,8 @@ import type {
 import {
   isTransferAbortArgs,
   isTransferBeginArgs,
+  isTransferFetchArgs,
+  isTransferFetchIdArgs,
   isTransferFinalizeArgs,
   isTransferNameArgs,
   isTransferSinkArgs,
@@ -69,6 +73,8 @@ type TransferServiceOptions = {
   readonly maxSinks?: number | undefined;
   /** Wait-queue cap; beyond it `begin` fails `unavailable`. */
   readonly maxWaiters?: number | undefined;
+  /** Wire fetch for `transfer:fetch*` — Node fetch in production. */
+  readonly fetchImpl?: typeof fetch | undefined;
 };
 
 type TransferService = {
@@ -93,6 +99,21 @@ type Sink = {
 const DEFAULT_MAX_SINKS = 4;
 const DEFAULT_MAX_WAITERS = 32;
 const PART_SUFFIX = '.part';
+/** Manual-hop cap + backstop for a fetch whose cancel never arrives
+ * (renderer gone). The policy's own chunk timeout stays the real
+ * stall bound; this only bounds the socket's lease. */
+const FETCH_MAX_REDIRECTS = 3;
+const FETCH_HARD_TIMEOUT_MS = 120_000;
+/** Body cap — a 206 chunk is ≤1MiB; the belt sits well above it. */
+const FETCH_MAX_BODY = 8 * 1024 * 1024;
+
+/** A `transfer:fetch` whose response is parked awaiting `fetchBody`/`fetchAbort`. */
+type LiveFetch = {
+  readonly controller: AbortController;
+  readonly timer: NodeJS.Timeout;
+  response: Response | null;
+  timedOut: boolean;
+};
 /** Reserved finalize-internal namespace: the parked incumbent of an
  * in-flight destination replace. */
 const REPLACE_SUFFIX = '.replace';
@@ -724,6 +745,185 @@ export function createTransferService(
     return sinkInfo(requireSink(args.sinkId));
   }
 
+  /* ----------------------------------------------------------------
+   * `transfer:fetch*` — the download wire leg over Node fetch. The
+   * renderer can't reach minted https urls (its CSP allows only the
+   * loopback pump) and browser fetch won't send a minted User-Agent,
+   * so the range fetch lives beside the sinks it feeds. `fetch`
+   * performs the request and answers with the status + headers;
+   * `fetchBody` streams a bounded body — the policy only ever reads
+   * 206 bodies; `fetchAbort` cancels a request at any phase.
+   * ---------------------------------------------------------------- */
+  const fetches = new Map<string, LiveFetch>();
+  const fetchImpl = options.fetchImpl ?? fetch;
+
+  function parseFetchUrl(raw: string): URL {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw shellError('invalid-request', 'unparseable fetch url');
+    }
+    // Same belt as the policy's fetch site: minted urls are https only.
+    if (url.protocol !== 'https:') {
+      throw shellError('invalid-request', 'fetch url must be https');
+    }
+    return url;
+  }
+
+  /** Transport failures → retryable; the caller's abort → cancelled; the
+   * backstop timer → transient (a stall, not a cancel). */
+  function asFetchError(live: LiveFetch, thrown: unknown): never {
+    if (isShellError(thrown)) {
+      throw thrown;
+    }
+    if (live.timedOut) {
+      throw shellError('transient', 'fetch timed out');
+    }
+    if (
+      thrown instanceof Error &&
+      (thrown.name === 'AbortError' || thrown.name === 'TimeoutError')
+    ) {
+      throw shellError('cancelled', 'fetch aborted');
+    }
+    // Node fetch rejects TypeError on every transport failure — DNS,
+    // reset, TLS, body drop — all retryable.
+    throw shellError('transient', 'fetch failed');
+  }
+
+  async function fetchRemote(args: TransferFetchArgs): Promise<unknown> {
+    if (shutdown) {
+      throw shellError('released', 'transfer service is closed');
+    }
+    if (fetches.has(args.requestId)) {
+      throw shellError('invalid-request', 'duplicate fetch requestId');
+    }
+    const live: LiveFetch = {
+      controller: new AbortController(),
+      timer: setTimeout(() => {
+        live.timedOut = true;
+        live.controller.abort();
+      }, FETCH_HARD_TIMEOUT_MS),
+      response: null,
+      timedOut: false,
+    };
+    fetches.set(args.requestId, live);
+    try {
+      let target = parseFetchUrl(args.url);
+      // Manual hops like the pump's: the scheme is re-validated each
+      // hop (a downgrade or a loop never passes) and the minted
+      // headers ride verbatim.
+      let response = await fetchImpl(target, {
+        method: 'GET',
+        headers: args.headers,
+        redirect: 'manual',
+        signal: live.controller.signal,
+      });
+      for (let hops = 0; hops < FETCH_MAX_REDIRECTS; hops += 1) {
+        const location = response.headers.get('location');
+        if (
+          response.status < 300 ||
+          response.status >= 400 ||
+          location === null
+        ) {
+          break;
+        }
+        let next: URL;
+        try {
+          next = new URL(location, target);
+        } catch {
+          throw shellError(
+            'invalid-response',
+            'fetch redirect location unparseable',
+          );
+        }
+        if (next.protocol !== 'https:') {
+          throw shellError(
+            'invalid-response',
+            'fetch redirected off https',
+          );
+        }
+        target = next;
+        // Drop the hop's body before following so its socket frees.
+        void response.body?.cancel().catch(() => undefined);
+        response = await fetchImpl(target, {
+          method: 'GET',
+          headers: args.headers,
+          redirect: 'manual',
+          signal: live.controller.signal,
+        });
+      }
+      if (
+        response.status >= 300 &&
+        response.status < 400 &&
+        response.headers.get('location') !== null
+      ) {
+        throw shellError(
+          'invalid-response',
+          'fetch redirect chain too long',
+        );
+      }
+      live.response = response;
+      return {
+        status: response.status,
+        headers: [...response.headers.entries()],
+      };
+    } catch (thrown) {
+      fetches.delete(args.requestId);
+      clearTimeout(live.timer);
+      asFetchError(live, thrown);
+    }
+  }
+
+  async function fetchBody(args: TransferFetchIdArgs): Promise<unknown> {
+    const live = fetches.get(args.requestId);
+    if (live === undefined || live.response === null) {
+      throw shellError('invalid-request', 'unknown or consumed fetch');
+    }
+    // Single-use: consumed now, so a second pull or an abort fails
+    // instead of double-reading the stream.
+    fetches.delete(args.requestId);
+    clearTimeout(live.timer);
+    const response = live.response;
+    try {
+      const reader = response.body?.getReader();
+      const parts: Buffer[] = [];
+      let total = 0;
+      if (reader !== undefined) {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+          total += value.byteLength;
+          if (total > FETCH_MAX_BODY) {
+            await reader.cancel().catch(() => undefined);
+            throw shellError(
+              'invalid-response',
+              'fetch body exceeds the cap',
+            );
+          }
+          parts.push(Buffer.from(value));
+        }
+      }
+      return { data: Buffer.concat(parts).toString('base64') };
+    } catch (thrown) {
+      asFetchError(live, thrown);
+    }
+  }
+
+  function fetchAbort(args: TransferFetchIdArgs): unknown {
+    const live = fetches.get(args.requestId);
+    if (live === undefined) {
+      // Consumed or never existed — abort is idempotent.
+      return undefined;
+    }
+    fetches.delete(args.requestId);
+    clearTimeout(live.timer);
+    live.controller.abort();
+    return undefined;
+  }
+
   async function stats(): Promise<unknown> {
     let bytes = 0;
     let files = 0;
@@ -832,10 +1032,30 @@ export function createTransferService(
         isUndefinedResult,
         stats,
       ),
+      [CHANNELS.transferFetch]: guarded(
+        CHANNELS.transferFetch,
+        isTransferFetchArgs,
+        fetchRemote,
+      ),
+      [CHANNELS.transferFetchBody]: guarded(
+        CHANNELS.transferFetchBody,
+        isTransferFetchIdArgs,
+        fetchBody,
+      ),
+      [CHANNELS.transferFetchAbort]: guarded(
+        CHANNELS.transferFetchAbort,
+        isTransferFetchIdArgs,
+        fetchAbort,
+      ),
     },
     sweepOrphans,
     close() {
       shutdown = true;
+      for (const live of fetches.values()) {
+        clearTimeout(live.timer);
+        live.controller.abort();
+      }
+      fetches.clear();
       for (const waiter of waiters.splice(0)) {
         waiter.reject(
           shellError('released', 'transfer service is closed'),

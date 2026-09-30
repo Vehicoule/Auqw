@@ -45,13 +45,13 @@ function sink(): { sink: ByteSink; data: number[]; resets: number } {
 
 function scriptedFetch(
   pages: Map<number, Step[]>,
-  calls: { url: string; start: number }[],
+  calls: { url: string; start: number; headers: Record<string, string> }[],
 ): RangeFetch {
   return async (url, init) => {
     const m = /^bytes=(\d+)-(\d+)$/.exec(init.headers['Range'] ?? '');
     assert(m !== null, 'every request must carry a Range header');
     const start = Number(m[1]);
-    calls.push({ url, start });
+    calls.push({ url, start, headers: init.headers });
     const steps = pages.get(start);
     const step = steps?.shift();
     if (step === undefined) {
@@ -125,7 +125,7 @@ function baseOptions(
   first: StreamSource,
   remint: () => Promise<StreamSource>,
   state: ReturnType<typeof sink>,
-  calls: { url: string; start: number }[],
+  calls: { url: string; start: number; headers: Record<string, string> }[],
   pages: Map<number, Step[]>,
 ): Options {
   return {
@@ -164,7 +164,7 @@ export async function run(): Promise<void> {
       [0, [chunk(0, [1, 2, 3, 4], 8)]],
       [4, [chunk(4, [5, 6, 7, 8], 8)]],
     ]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     let readyAt = -1;
     const opts = baseOptions(
@@ -183,10 +183,50 @@ export async function run(): Promise<void> {
     assertEqual(readyAt, 4);
   }
 
+  // Mint headers reach the provisional fetch on every chunk — the
+  // same leg the download path died on (empty-UA refusal, #210).
+  {
+    const pages = new Map<number, Step[]>([
+      [0, [chunk(0, [1, 2, 3, 4], 8)]],
+      [4, [chunk(4, [5, 6, 7, 8], 8)]],
+    ]);
+    const calls: {
+      url: string;
+      start: number;
+      headers: Record<string, string>;
+    }[] = [];
+    const state = sink();
+    const opts = baseOptions(
+      {
+        ...source(),
+        headers: { 'user-agent': 'MINTED-UA/1.0' },
+      },
+      () => Promise.reject(new Error('no remint')),
+      state,
+      calls,
+      pages,
+    );
+    const written = await downloadTo(opts);
+    assertEqual(written, 8);
+    assertEqual(calls.length, 2);
+    for (const call of calls) {
+      assertEqual(
+        call.headers['user-agent'],
+        'MINTED-UA/1.0',
+        'mint headers ride every chunk',
+      );
+      assertEqual(
+        call.headers['Range'],
+        `bytes=${call.start}-${call.start + 3}`,
+        'Range set per chunk',
+      );
+    }
+  }
+
   // Small file below the ready threshold completes and fires onReady.
   {
     const pages = new Map<number, Step[]>([[0, [chunk(0, [1, 2, 3], 3)]]]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     let fired = 0;
     const opts = baseOptions(
@@ -211,7 +251,7 @@ export async function run(): Promise<void> {
       [0, [chunk(0, [1, 2, 3, 4], 8)]],
       [4, [{ status: 403, body: [] }, chunk(4, [5, 6, 7, 8], 8)]],
     ]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     let mints = 0;
     const opts = baseOptions(
@@ -229,7 +269,9 @@ export async function run(): Promise<void> {
     assertEqual(mints, 1);
     assertDeepEqual(state.data, [1, 2, 3, 4, 5, 6, 7, 8]);
     // The resume request started at the written offset on the new URL.
-    assertDeepEqual(calls[2], { url: 'https://gvs.example/fresh', start: 4 });
+    assertEqual(calls[2]?.url, 'https://gvs.example/fresh');
+    assertEqual(calls[2]?.start, 4);
+    assertEqual(calls[2]?.headers['Range'], 'bytes=4-7');
   }
 
   // 403 → different-encoding remint restarts on a fresh sink.
@@ -238,7 +280,7 @@ export async function run(): Promise<void> {
       [0, [{ status: 403, body: [] }, chunk(0, [9, 9, 9, 9], 8)]],
       [4, [chunk(4, [8, 8, 8, 8], 8)]],
     ]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     const opts = baseOptions(
       source(),
@@ -266,7 +308,7 @@ export async function run(): Promise<void> {
       [0, [chunk(0, [1, 2, 3, 4], 8), chunk(0, [9, 9, 9, 9], 8)]],
       [4, [{ status: 403, body: [] }, chunk(4, [8, 8, 8, 8], 8)]],
     ]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     const ready: number[] = [];
     const opts = baseOptions(
@@ -295,7 +337,7 @@ export async function run(): Promise<void> {
     const pages = new Map<number, Step[]>([
       [0, [{ status: 403, body: [] }, { status: 403, body: [] }]],
     ]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     let mints = 0;
     const opts = baseOptions(
@@ -317,7 +359,7 @@ export async function run(): Promise<void> {
     const pages = new Map<number, Step[]>([
       [0, [{ status: 200, body: [1, 2, 3, 4, 5, 6, 7, 8] }]],
     ]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     const opts = baseOptions(
       source(),
@@ -334,7 +376,7 @@ export async function run(): Promise<void> {
     const pages = new Map<number, Step[]>([
       [0, [{ status: 206, body: [1, 2, 3, 4], range: 'bytes 100-103/8' }]],
     ]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     const opts = baseOptions(
       source(),
@@ -352,7 +394,7 @@ export async function run(): Promise<void> {
       [0, [chunk(0, [1, 2, 3, 4], 8)]],
       [4, [{ status: 206, body: [5, 6, 7, 8], range: 'bytes 4-7/16' }]],
     ]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     const opts = baseOptions(
       source(),
@@ -378,7 +420,7 @@ export async function run(): Promise<void> {
         ],
       ],
     ]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     const opts = baseOptions(
       source(),
@@ -396,7 +438,7 @@ export async function run(): Promise<void> {
       [0, [chunk(0, [1, 2, 3, 4], 8)]],
       [4, [{ hang: true }]],
     ]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     const ctl = new CancellationSource();
     const opts = baseOptions(
@@ -415,7 +457,7 @@ export async function run(): Promise<void> {
   // An AbortError without cancel = the chunk timeout → transient.
   {
     const pages = new Map<number, Step[]>([[0, [{ throwAbort: true }]]]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     const opts = baseOptions(
       source(),
@@ -431,7 +473,7 @@ export async function run(): Promise<void> {
   // transient, not cancelled.
   {
     const pages = new Map<number, Step[]>([[0, [{ throwAbortBody: true }]]]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     const opts = baseOptions(
       source(),
@@ -460,7 +502,7 @@ export async function run(): Promise<void> {
         ],
       ],
     ]);
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     const opts = baseOptions(
       source(),
@@ -479,7 +521,7 @@ export async function run(): Promise<void> {
 
   // Non-https mints are refused at the fetch site.
   {
-    const calls: { url: string; start: number }[] = [];
+    const calls: { url: string; start: number; headers: Record<string, string> }[] = [];
     const state = sink();
     const opts = baseOptions(
       { url: 'http://insecure.example/v', mime: 'audio/mp4', contentLength: 4 },

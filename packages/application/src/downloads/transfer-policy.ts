@@ -115,6 +115,7 @@ async function fetchChunk(
   fetchImpl: RangeFetch,
   clock: ClockPort,
   timeoutMs: number,
+  mintHeaders: Readonly<Record<string, string>>,
 ): Promise<Chunk> {
   // The minted url is validated against the manifest allowlist by the
   // host; the fetch site's own belt refuses anything else.
@@ -130,7 +131,16 @@ async function fetchChunk(
     // The timeout covers headers AND body — a stalled arrayBuffer()
     // must lose this race or the transfer hangs past its stall budget.
     const result = await Promise.race([
-      fetchImpl(url, { headers: { Range: `bytes=${start}-${end}` } }, child.signal)
+      // Mint-required headers (e.g. the minting client's User-Agent)
+      // ride every chunk — an empty-UA GET is refused by providers
+      // that score it as bot traffic. `Range` stays policy-owned: the
+      // mint can't carry it (host-owned names are rejected at
+      // decode), so the spread can't smuggle one in.
+      fetchImpl(
+        url,
+        { headers: { ...mintHeaders, Range: `bytes=${start}-${end}` } },
+        child.signal,
+      )
         .then(async (resp) => ({
           resp,
           // Buffering a non-206 body would read a whole-file 200 or an
@@ -304,6 +314,10 @@ export async function runTransfer(options: {
     // would otherwise resume A into a sink holding B's bytes).
     let current = options.first;
     let url = current.url;
+    // Headers are mint-bound, not file-bound — every re-mint replaces
+    // them alongside the URL (a rung swap can name a different
+    // identity), exactly like the stream pump.
+    let mintHeaders = current.headers;
     let start = options.resumeAtBytes ?? 0;
     let total = current.contentLength;
     const expected = options.expectedEncoding;
@@ -366,6 +380,7 @@ export async function runTransfer(options: {
           fetchImpl,
           clock,
           chunkTimeoutMs,
+          mintHeaders,
         );
         // 403 is the known cap signal; 416 on an in-range request
         // means the mint no longer serves bytes we know exist — same
@@ -395,9 +410,11 @@ export async function runTransfer(options: {
           if (sameEncoding) {
             mintStart = start;
             url = fresh.value.url;
+            mintHeaders = fresh.value.headers;
           } else {
             current = fresh.value;
             url = fresh.value.url;
+            mintHeaders = fresh.value.headers;
             // Encoding changed: keep no bytes — the prefix is a
             // different file now.
             await closeAbort(false);

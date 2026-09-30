@@ -242,6 +242,10 @@ function fakeApi(): Rig {
         list: () => Promise.resolve({ sinks: [], files: [] }),
         status: () => Promise.reject(new Error('seam: inject transfer')),
         stats: () => Promise.resolve(rig.transferStats),
+        fetch: () => Promise.reject(new Error('seam: inject transfer')),
+        fetchBody: () =>
+          Promise.reject(new Error('seam: inject transfer')),
+        fetchAbort: () => Promise.resolve(),
       },
       tagread: {
         enumerate: () => Promise.reject(new Error('seam: inject tagread')),

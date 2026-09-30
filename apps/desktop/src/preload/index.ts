@@ -43,6 +43,8 @@ import {
   isThemeSourceEvent,
   isTransferBeginResult,
   isTransferCommitResult,
+  isTransferFetchBodyResult,
+  isTransferFetchResult,
   isTransferFinalizeResult,
   isTransferListResult,
   isTransferStatResult,
@@ -410,6 +412,12 @@ const api: AuqwApi = {
       invoke(CHANNELS.transferStatus, args, isTransferStatusResult),
     stats: () =>
       invoke(CHANNELS.transferStats, undefined, isTransferStatsResult),
+    fetch: (args) =>
+      invoke(CHANNELS.transferFetch, args, isTransferFetchResult),
+    fetchBody: (args) =>
+      invoke(CHANNELS.transferFetchBody, args, isTransferFetchBodyResult),
+    fetchAbort: (args) =>
+      invoke(CHANNELS.transferFetchAbort, args, isUndefinedResult),
   },
   tagread: {
     enumerate: (args) =>

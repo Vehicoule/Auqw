@@ -10,6 +10,10 @@ import {
   isStorageQueryResult,
   isStorageTxArgs,
   isSyncDeltaDoc,
+  isTransferFetchArgs,
+  isTransferFetchBodyResult,
+  isTransferFetchIdArgs,
+  isTransferFetchResult,
 } from './contract.ts';
 
 export function run(): void {
@@ -314,4 +318,116 @@ export function run(): void {
     return new Proxy([], { getPrototypeOf: endlessProto });
   }
   assert(!isJsonValue(endlessProto()), 'unbounded proto chain rejected');
+
+  // transfer:fetch args — { requestId, url, headers }
+  const fetchArgs = {
+    requestId: 'fetch-1',
+    url: 'https://cdn.example/x',
+    headers: { 'user-agent': 'UA/1.0', Range: 'bytes=0-3' },
+  };
+  assert(isTransferFetchArgs(fetchArgs), 'fetch args pass');
+  assert(
+    !isTransferFetchArgs({ ...fetchArgs, url: '' }),
+    'empty url rejected',
+  );
+  assert(
+    !isTransferFetchArgs({ ...fetchArgs, url: 'x'.repeat(8193) }),
+    'over-long url rejected',
+  );
+  assert(
+    !isTransferFetchArgs({ ...fetchArgs, headers: 'x' }),
+    'non-record headers rejected',
+  );
+  assert(
+    !isTransferFetchArgs({ ...fetchArgs, headers: { 'x a': 'v' } }),
+    'non-token header name rejected',
+  );
+  assert(
+    !isTransferFetchArgs({ ...fetchArgs, headers: { 'x-': 1 } }),
+    'non-string header value rejected',
+  );
+  assert(
+    !isTransferFetchArgs({ ...fetchArgs, headers: { 'x-': '' } }),
+    'empty header value rejected',
+  );
+  assert(
+    !isTransferFetchArgs({ ...fetchArgs, headers: { 'x-': 'v'.repeat(2049) } }),
+    'over-long header value rejected',
+  );
+  assert(
+    !isTransferFetchArgs({
+      ...fetchArgs,
+      headers: Object.fromEntries(
+        Array.from({ length: 33 }, (_, i) => [`h${i}`, 'v']),
+      ),
+    }),
+    'over-32 headers rejected',
+  );
+  assert(
+    !isTransferFetchArgs({ ...fetchArgs, requestId: '' }),
+    'empty requestId rejected',
+  );
+  assert(
+    !isTransferFetchArgs({ ...fetchArgs, extra: 1 }),
+    'fetch args extra key rejected',
+  );
+
+  // transfer:fetch result — { status, headers: [name, value][] }
+  const fetchResult = {
+    status: 206,
+    headers: [
+      ['content-range', 'bytes 0-3/9'],
+      ['accept-ranges', 'bytes'],
+    ],
+  };
+  assert(isTransferFetchResult(fetchResult), 'fetch result passes');
+  assert(
+    !isTransferFetchResult({ ...fetchResult, status: 700 }),
+    'status over 599 rejected',
+  );
+  assert(
+    !isTransferFetchResult({ ...fetchResult, status: '206' }),
+    'string status rejected',
+  );
+  assert(
+    !isTransferFetchResult({ ...fetchResult, headers: { a: 'b' } }),
+    'object headers rejected',
+  );
+  assert(
+    !isTransferFetchResult({ ...fetchResult, headers: [['a']] }),
+    'short pair rejected',
+  );
+  assert(
+    !isTransferFetchResult({ ...fetchResult, headers: [['a', 'b', 'c']] }),
+    'long pair rejected',
+  );
+  assert(
+    !isTransferFetchResult({
+      ...fetchResult,
+      headers: Array.from({ length: 65 }, () => ['a', 'b']),
+    }),
+    'over-64 header pairs rejected',
+  );
+
+  // transfer:fetchBody / transfer:fetchAbort args + body result
+  assert(
+    isTransferFetchIdArgs({ requestId: 'fetch-1' }),
+    'fetch id args pass',
+  );
+  assert(
+    !isTransferFetchIdArgs({ requestId: 'x'.repeat(97) }),
+    'over-long requestId rejected',
+  );
+  assert(
+    isTransferFetchBodyResult({ data: 'AA==' }),
+    'fetch body result passes',
+  );
+  assert(
+    !isTransferFetchBodyResult({ data: 'x'.repeat(11_184_813) }),
+    'over-cap body rejected',
+  );
+  assert(
+    !isTransferFetchBodyResult({ data: 12 }),
+    'non-string body rejected',
+  );
 }
