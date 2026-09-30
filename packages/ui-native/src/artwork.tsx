@@ -122,9 +122,16 @@ export function useResolvedArtworkUri(url: string | null): {
         } else {
           resolvedUriMemo.delete(url);
         }
+        // The verdict is in: a `broken` marker for this url is stale —
+        // leaving it would suppress the refreshed memo on the next
+        // revisit and paint a placeholder over a cache-ready file.
+        setBroken((b) => (b === url ? null : b));
         setOutcome({ url, uri: fileUri });
       })
-      .catch(() => setOutcome({ url, uri: null }));
+      .catch(() => {
+        setBroken((b) => (b === url ? null : b));
+        setOutcome({ url, uri: null });
+      });
     return () => source.cancel();
   }, [url, resolve, cacheable]);
   return {
