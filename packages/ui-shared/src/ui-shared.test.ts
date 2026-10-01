@@ -1661,6 +1661,27 @@ const tap = (s: string) => {
     null,
   );
 
+  // a newer checked release outranks the applied handoff — 'open
+  // installer' on the new version would send its tap at a download,
+  // so the card renders the ordinary offer for it instead
+  const newerAvailable = toUpdateCard(
+    snap(
+      {
+        state: 'available',
+        version: '9.9.9',
+        url: 'https://example/releases',
+        artifact: null,
+        checksums: null,
+      },
+      { state: 'applied', version: '0.0.1-alpha.22' },
+    ),
+    'download',
+    null,
+  );
+  assert(newerAvailable !== null);
+  assertEqual(newerAvailable.version, '9.9.9');
+  assertEqual(newerAvailable.actionLabel, 'download');
+
   // ready-to-restart carries its verb and still honors dismissal
   assertEqual(
     toUpdateCard(

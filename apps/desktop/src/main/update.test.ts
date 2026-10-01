@@ -381,4 +381,68 @@ export async function run(): Promise<void> {
   );
   assertEqual(refusedOpen, true);
   rmSync(dir, { force: true, recursive: true });
+
+  // a dmg image with no .app throws before the copy — the private
+  // mount must still detach (prep failures can't leak attachments)
+  const dir2 = mkdtempSync(join(tmpdir(), 'auqw-dmg-test-'));
+  mkdirSync(join(dir2, 'auqw.app', 'Contents', 'MacOS'), {
+    recursive: true,
+  });
+  const noAppCalls: string[] = [];
+  assertEqual(
+    await applyDmg({
+      dmgPath: join(dir2, 'x.dmg'),
+      isPackaged: true,
+      exePath: join(dir2, 'auqw.app', 'Contents', 'MacOS', 'auqw'),
+      openPath: () => Promise.resolve(''),
+      showItemInFolder: () => undefined,
+      run: (cmd, args) => {
+        noAppCalls.push(`${cmd}:${String(args[0])}`);
+        return Promise.resolve();
+      },
+    }),
+    'installed',
+  );
+  assertDeepEqual(noAppCalls, ['hdiutil:attach', 'hdiutil:detach']);
+  rmSync(dir2, { force: true, recursive: true });
+
+  // a failed ditto sweeps its partial staged copy — the manual
+  // fallback succeeding leaves no `.auqw-new` residue
+  const dir3 = mkdtempSync(join(tmpdir(), 'auqw-dmg-test-'));
+  mkdirSync(join(dir3, 'auqw.app', 'Contents', 'MacOS'), {
+    recursive: true,
+  });
+  const partialCopyRun = (cmd: string, args: readonly string[]) => {
+    if (cmd === 'hdiutil' && args[0] === 'attach') {
+      const mount = args[args.length - 1];
+      if (mount === undefined) {
+        return Promise.reject(new Error('no mountpoint'));
+      }
+      mkdirSync(join(mount, 'auqw.app', 'Contents', 'MacOS'), {
+        recursive: true,
+      });
+      return Promise.resolve();
+    }
+    if (cmd === 'ditto') {
+      const staged = args[1];
+      if (staged !== undefined) {
+        mkdirSync(staged, { recursive: true });
+      }
+      return Promise.reject(new Error('no space left'));
+    }
+    return Promise.resolve();
+  };
+  assertEqual(
+    await applyDmg({
+      dmgPath: join(dir3, 'x.dmg'),
+      isPackaged: true,
+      exePath: join(dir3, 'auqw.app', 'Contents', 'MacOS', 'auqw'),
+      openPath: () => Promise.resolve(''),
+      showItemInFolder: () => undefined,
+      run: partialCopyRun,
+    }),
+    'installed',
+  );
+  assertDeepEqual(readdirSync(dir3), ['auqw.app']);
+  rmSync(dir3, { force: true, recursive: true });
 }

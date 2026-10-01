@@ -2134,6 +2134,12 @@ export function toUpdateCard(
             dismissible: true,
           };
     case 'applied':
+      // A newer checked release owns the card — labeling it 'open
+      // installer' would send its tap at the new version's download,
+      // so it renders the ordinary offer below.
+      if (apply.version !== version) {
+        break;
+      }
       // 'install' builds are done — the OS surface owns the story;
       // when its outcome never lands (cancelled sheet, failed
       // install) the settings row re-offers it (reapply refires the

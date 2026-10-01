@@ -69,6 +69,8 @@ export async function installFromDmg(
   run: DarwinInstallRun = execRun,
 ): Promise<void> {
   const mount = mkdtempSync(join(tmpdir(), 'auqw-update-'));
+  const staged = `${appBundlePath}.auqw-new`;
+  const replaced = `${appBundlePath}.auqw-old`;
   try {
     await run('hdiutil', [
       'attach',
@@ -78,35 +80,42 @@ export async function installFromDmg(
       '-mountpoint',
       mount,
     ]);
-    const bundle = readdirSync(mount).find((name) =>
-      name.endsWith('.app'),
-    );
-    if (bundle === undefined) {
-      throw new Error(`no .app inside ${dmgPath}`);
-    }
-    const staged = `${appBundlePath}.auqw-new`;
-    const replaced = `${appBundlePath}.auqw-old`;
-    rmSync(staged, { force: true, recursive: true });
-    rmSync(replaced, { force: true, recursive: true });
     try {
-      await run('ditto', [join(mount, bundle), staged]);
+      const bundle = readdirSync(mount).find((name) =>
+        name.endsWith('.app'),
+      );
+      if (bundle === undefined) {
+        throw new Error(`no .app inside ${dmgPath}`);
+      }
+      rmSync(staged, { force: true, recursive: true });
+      rmSync(replaced, { force: true, recursive: true });
+      try {
+        await run('ditto', [join(mount, bundle), staged]);
+      } catch (thrown) {
+        // A partial copy must not strand beside the app — when the
+        // manual fallback succeeds, this attempt leaves no residue.
+        rmSync(staged, { force: true, recursive: true });
+        throw thrown;
+      }
+      renameSync(appBundlePath, replaced);
+      try {
+        renameSync(staged, appBundlePath);
+      } catch (thrown) {
+        // Put the old bundle back — a half-swap is worse than no swap.
+        renameSync(replaced, appBundlePath);
+        rmSync(staged, { force: true, recursive: true });
+        throw thrown;
+      }
+      rmSync(replaced, { force: true, recursive: true });
     } finally {
-      // The copy is done either way — never leave the image held.
+      // Detach covers every post-attach failure — a prep throw before
+      // the copy must not leave the private image mounted.
       await run('hdiutil', ['detach', mount, '-quiet']).catch(() =>
         run('hdiutil', ['detach', mount, '-force', '-quiet']).catch(
           () => undefined,
         ),
       );
     }
-    renameSync(appBundlePath, replaced);
-    try {
-      renameSync(staged, appBundlePath);
-    } catch (thrown) {
-      // Put the old bundle back — a half-swap is worse than no swap.
-      renameSync(replaced, appBundlePath);
-      throw thrown;
-    }
-    rmSync(replaced, { force: true, recursive: true });
   } finally {
     rmSync(mount, { force: true, recursive: true });
   }
