@@ -882,8 +882,9 @@ export function createWebPlayerPort(deps: {
         audio.src = '';
         clearOsSurface();
       } else {
-        // A natural end at the tail keeps the element loaded —
-        // 'paused' keeps the OS transport live for a replay.
+        // Natural end keeps the element loaded — 'paused' leaves the
+        // OS transport replay-able until the session releases the
+        // handle (which then clears the surface).
         if (mediaSession !== null) {
           mediaSession.playbackState = 'paused';
         }

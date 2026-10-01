@@ -1838,8 +1838,9 @@ export async function run(): Promise<void> {
     assertEqual(mediaSession.metadata, null, 'stop blanks the card');
   }
 
-  // A natural end at the tail keeps the element loaded — 'paused'
-  // keeps the OS transport live for a replay, never 'none'.
+  // A natural end at the tail reports 'paused' — the element stays
+  // loaded until the session releases it, and that release is what
+  // clears the surface.
   {
     const audio = fakeAudio();
     const mediaSession = fakeMediaSession();
