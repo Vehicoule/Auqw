@@ -528,21 +528,33 @@ export function MiniPlayer({
           if (sheetAnchor !== undefined) {
             sheetAnchor.value = 1;
           }
-          // Fling-up out of a dismiss slide carries the surface home
-          // and open on two coordinated springs — the expand's rise
-          // and the dismiss offset unwind together.
-          sheetGone.value = theme.reducedMotion
-            ? 0
-            : withSpring(0, {
-                ...SHEET_SETTLE_SPRING,
-                velocity: velocityG,
-              });
-          sheetProgress.value = theme.reducedMotion
-            ? 1
-            : withSpring(1, {
-                ...SHEET_SETTLE_SPRING,
-                velocity: velocityP,
-              });
+          if (theme.reducedMotion) {
+            sheetGone.value = 0;
+            sheetProgress.value = 1;
+          } else if (sheetGone.value > 0.001) {
+            // A fling up out of a dismiss slide unwinds the slide to
+            // rest before the sheet expands — the axes share one
+            // visible offset, so two velocity-bearing springs would
+            // double the release speed.
+            sheetGone.value = withSpring(
+              0,
+              { ...SHEET_SETTLE_SPRING, velocity: velocityG },
+              (finished) => {
+                if (finished === true) {
+                  sheetProgress.value = withSpring(1, {
+                    ...SHEET_SETTLE_SPRING,
+                    velocity: velocityP,
+                  });
+                }
+              },
+            );
+          } else {
+            sheetGone.value = 0;
+            sheetProgress.value = withSpring(1, {
+              ...SHEET_SETTLE_SPRING,
+              velocity: velocityP,
+            });
+          }
           scheduleOnRN(emit, 'onPress');
           return;
         }

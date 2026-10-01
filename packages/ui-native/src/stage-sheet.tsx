@@ -895,23 +895,48 @@ export function StageSheet({
         .onFinalize((e, success) => {
           const travel = Math.max(1, travelPx.value);
           const collapsed = Math.max(1, sheetH.value - travel);
-          const springTo = (target: number, velocity: number) =>
-            theme.reducedMotion
-              ? target
-              : withSpring(target, {
-                  ...SHEET_SETTLE_SPRING,
-                  velocity,
-                });
+          const springTo = (
+            target: number,
+            velocity: number,
+            finished?: (ok: boolean | undefined) => void,
+          ) => {
+            if (theme.reducedMotion) {
+              finished?.(true);
+              return target;
+            }
+            return withSpring(
+              target,
+              {
+                ...SHEET_SETTLE_SPRING,
+                velocity,
+              },
+              finished,
+            );
+          };
           if (!success) {
             // RNGH fires onFinalize on END *and* on FAIL/CANCELLED —
             // a failed recognizer (failOffsetX drift, OS gesture
             // steal) must not commit the anchor it never earned:
             // spring back onto the sheet's current anchor only.
-            progress.value = springTo(
-              expanded ? 1 : 0,
-              -e.velocityY / travel,
-            );
-            gone.value = springTo(0, e.velocityY / collapsed);
+            if (gone.value > 0) {
+              gone.value = springTo(
+                0,
+                e.velocityY / collapsed,
+                (ok) => {
+                  if (ok === true && expanded) {
+                    progress.value = springTo(
+                      1,
+                      -e.velocityY / travel,
+                    );
+                  }
+                },
+              );
+            } else {
+              progress.value = springTo(
+                expanded ? 1 : 0,
+                -e.velocityY / travel,
+              );
+            }
             return;
           }
           const raw =
@@ -954,9 +979,21 @@ export function StageSheet({
           // Mark the settle as gesture-owned so the `expanded` flip the
           // commit schedules doesn't cold-restart this spring.
           anchor.value = num;
-          progress.value = springTo(num, -e.velocityY / travel);
           if (gone.value > 0) {
-            gone.value = springTo(0, e.velocityY / collapsed);
+            // A dismiss slide unwinds home on `gone` before the sheet
+            // expands — both axes ride the same visible offset, so two
+            // velocity-bearing springs would double the release speed.
+            gone.value = springTo(
+              0,
+              e.velocityY / collapsed,
+              (ok) => {
+                if (ok === true && num === 1) {
+                  progress.value = springTo(1, -e.velocityY / travel);
+                }
+              },
+            );
+          } else {
+            progress.value = springTo(num, -e.velocityY / travel);
           }
           // A settle that lands on the anchor we're already on is a
           // no-op for the host — committing it would fire a spurious
