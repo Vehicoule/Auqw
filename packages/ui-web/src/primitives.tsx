@@ -1,6 +1,26 @@
 import type { CSSProperties, MouseEvent, ReactNode, Ref } from 'react';
 import { useTheme } from './theme.tsx';
-import { PAUSE_LEFT, PAUSE_RIGHT, PLAY_LEFT, PLAY_RIGHT, quadPath } from '@auqw/ui-shared';
+import {
+  CHECK_DRAW_PATH,
+  CHECK_MINI_PATH,
+  DOWNLOAD_ARROW_PATH,
+  downloadIconState,
+  ICON_ARC_PATH,
+  ICON_RING_PATH,
+  PAUSE_LEFT,
+  PAUSE_RIGHT,
+  PLAY_LEFT,
+  PLAY_RIGHT,
+  quadPath,
+  REFRESH_PATH,
+  WARN_DRAW_DETAIL_PATH,
+  WARN_DRAW_DOT,
+  WARN_DRAW_TRIANGLE_PATH,
+  WARN_MINI_DOT,
+  WARN_MINI_LINE_PATH,
+} from '@auqw/ui-shared';
+import type { DownloadChip } from '@auqw/ui-shared';
+import type { DownloadButtonView } from '@auqw/ui-shared/controllers';
 
 export type TextVariant =
   | 'display'
@@ -436,6 +456,7 @@ const GLYPHS = {
     ],
   },
   check: { filled: false, shapes: [p('m5 12.5 4.5 4.5L19 7')] },
+  refresh: { filled: false, shapes: [p(REFRESH_PATH)] },
   menu: {
     filled: false,
     shapes: [p('M4 7h16M4 12h16M4 17h16')],
@@ -729,5 +750,218 @@ export function EqBars({
         />
       ))}
     </span>
+  );
+}
+
+// ---- animated icons -------------------------------------------------
+// One SVG, five layers; the state class decides which are visible and
+// how they get there. Every motion is a compositor-side transition or
+// keyframe (opacity / transform / stroke-dashoffset) — the JS thread
+// only flips the class when the chip changes.
+//
+//   idle    arrow visible
+//   busy    arrow contracts out · arc spins (indeterminate)
+//   done    ring draws closed · mini check draws in
+//   error   ring draws closed · warn line draws · dot pops
+//
+// `animated={false}` renders the same layers with transitions and the
+// spin removed — the chip snaps straight to its end state for dense
+// lists. Reduced-motion does the same via `data-reduced-motion`.
+export type DownloadIconProps = {
+  readonly state: DownloadChip;
+  readonly size?: number | undefined;
+  readonly color?: string | undefined;
+  readonly strokeWidth?: number | undefined;
+  readonly animated?: boolean | undefined;
+  readonly className?: string | undefined;
+};
+
+export function DownloadIcon({
+  state,
+  size = 14,
+  color,
+  strokeWidth,
+  animated = true,
+  className,
+}: DownloadIconProps) {
+  const phase = downloadIconState(state);
+  const paint = color ?? 'currentColor';
+  const sw = strokeWidth ?? 2;
+  const cls =
+    `uw-dlicon uw-dlicon--${phase}` +
+    (animated ? '' : ' uw-dlicon--still') +
+    (className ? ` ${className}` : '');
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      focusable="false"
+      className={cls}
+      data-phase={phase}
+    >
+      <path
+        className="uw-dlicon__arrow"
+        d={DOWNLOAD_ARROW_PATH}
+        stroke={paint}
+        strokeWidth={sw}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <g className="uw-dlicon__spin">
+        <path
+          d={ICON_ARC_PATH}
+          stroke={paint}
+          strokeWidth={sw}
+          strokeLinecap="round"
+        />
+      </g>
+      <path
+        className="uw-dlicon__ring"
+        d={ICON_RING_PATH}
+        pathLength={1}
+        stroke={paint}
+        strokeWidth={sw}
+        strokeLinecap="round"
+      />
+      <path
+        className="uw-dlicon__check"
+        d={CHECK_MINI_PATH}
+        pathLength={1}
+        stroke={paint}
+        strokeWidth={sw}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        className="uw-dlicon__warnline"
+        d={WARN_MINI_LINE_PATH}
+        pathLength={1}
+        stroke={paint}
+        strokeWidth={sw}
+        strokeLinecap="round"
+      />
+      <circle
+        className="uw-dlicon__warndot"
+        cx={WARN_MINI_DOT.cx}
+        cy={WARN_MINI_DOT.cy}
+        r={WARN_MINI_DOT.r}
+        fill={paint}
+        stroke="none"
+      />
+    </svg>
+  );
+}
+
+/** The download affordance as a real button — same chrome as
+    IconButton, paint + pressed state derived from the view. */
+export function DownloadIconButton({
+  view,
+  size,
+  iconSize = 14,
+  color,
+  disabled = false,
+  className,
+}: {
+  readonly view: DownloadButtonView;
+  readonly size?: number | undefined;
+  readonly iconSize?: number | undefined;
+  readonly color?: string | undefined;
+  readonly disabled?: boolean | undefined;
+  readonly className?: string | undefined;
+}) {
+  const off = disabled || view.onPress === undefined;
+  const paint =
+    color ??
+    (view.failed
+      ? 'var(--warn)'
+      : view.stored
+        ? 'var(--accent)'
+        : 'var(--text-secondary)');
+  return (
+    <button
+      type="button"
+      className={`uw-icon-btn${off ? ' uw-off' : ''}${view.stored ? ' uw-icon-btn--active' : ''}${className ? ` ${className}` : ''}`}
+      onClick={off ? undefined : view.onPress}
+      disabled={off}
+      aria-disabled={off ? 'true' : undefined}
+      aria-pressed={view.stored ? 'true' : undefined}
+      aria-label={view.a11yLabel}
+      style={size === undefined ? undefined : { width: size, height: size }}
+    >
+      <DownloadIcon state={view.state} size={iconSize} color={paint} />
+    </button>
+  );
+}
+
+/** A status mark that draws itself once on mount — for states that
+    arrive by unmount/remount (sheet rows, footers) where there is no
+    persistent element to transition. `kind` matches the terminal
+    DownloadIcon phases. */
+export function StatusMark({
+  kind,
+  size = 15,
+  color,
+  strokeWidth,
+}: {
+  readonly kind: 'check' | 'warn';
+  readonly size?: number | undefined;
+  readonly color?: string | undefined;
+  readonly strokeWidth?: number | undefined;
+}) {
+  const paint = color ?? 'var(--accent)';
+  const sw = strokeWidth ?? 2;
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      focusable="false"
+      className={`uw-mark uw-mark--${kind}`}
+    >
+      {kind === 'check' ? (
+        <path
+          className="uw-mark__draw"
+          d={CHECK_DRAW_PATH}
+          pathLength={1}
+          stroke={paint}
+          strokeWidth={sw}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ) : (
+        <>
+          <path
+            className="uw-mark__draw"
+            d={WARN_DRAW_TRIANGLE_PATH}
+            pathLength={1}
+            stroke={paint}
+            strokeWidth={sw}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            className="uw-mark__draw uw-mark__detail"
+            d={WARN_DRAW_DETAIL_PATH}
+            pathLength={1}
+            stroke={paint}
+            strokeWidth={sw}
+            strokeLinecap="round"
+          />
+          <circle
+            className="uw-mark__dot"
+            cx={WARN_DRAW_DOT.cx}
+            cy={WARN_DRAW_DOT.cy}
+            r={WARN_DRAW_DOT.r}
+            fill={paint}
+            stroke="none"
+          />
+        </>
+      )}
+    </svg>
   );
 }

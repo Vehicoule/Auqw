@@ -9,6 +9,7 @@ import {
   createSerializedWrite,
   downloadChip,
   downloadChipsByRecording,
+  downloadIconState,
   downloadLedgerCount,
   formatAgo,
   languageOptionKey,
@@ -1270,8 +1271,18 @@ const tap = (s: string) => {
 
   const dl = downloadButtonView('failed', () => tap('dl'));
   assertEqual(dl.icon, 'warn');
+  assertEqual(dl.state, 'failed', 'the view carries the raw chip');
   assertEqual(downloadButtonView('queued', undefined).busy, true);
   assertEqual(downloadButtonView('stored', undefined).a11yLabel, t('stage.download.storedA11y'));
+
+  // Chip → icon phase: both platforms' DownloadIcon morphs on this map —
+  // the four coarse phases cover all six chips, nothing falls through.
+  assertEqual(downloadIconState('idle'), 'idle');
+  assertEqual(downloadIconState('queued'), 'busy');
+  assertEqual(downloadIconState('downloading'), 'busy');
+  assertEqual(downloadIconState('removing'), 'busy');
+  assertEqual(downloadIconState('stored'), 'done');
+  assertEqual(downloadIconState('failed'), 'error');
 
   // Downloads ledger: one count/chip rule for every surface.
   const removingView = downloadButtonView('removing', () => tap('dl'));

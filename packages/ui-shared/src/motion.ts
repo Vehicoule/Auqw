@@ -36,3 +36,67 @@ export function progressPathState(
     opacity: amount > 0 ? 1 : 0,
   };
 }
+
+// ---- animated-icon geometry ------------------------------------------
+// One source for the icon state machines on both platforms. Constants
+// are safe inside native worklets (serialized into the closure); the
+// layer math stays platform-side — CSS classes on web, shared values
+// on native — so no per-frame work ever reaches the JS thread.
+
+/** The download chip's coarse visual phases — one ring icon morphs
+    between them: arrow (idle) → indeterminate arc (busy) → circled
+    check (done) / circled warn (error). */
+export type DownloadIconState = 'idle' | 'busy' | 'done' | 'error';
+
+/** Download glyph — identical to the `download` entry in each
+    platform's GLYPHS table; the arrow layer of DownloadIcon. */
+export const DOWNLOAD_ARROW_PATH = 'M12 4v11m0 0-4-4m4 4 4-4M4 19h16';
+
+/** Indeterminate arc — r8.5, gap top-right like the `spinner` glyph. */
+export const ICON_ARC_PATH = 'M20.5 12A8.5 8.5 0 1 1 12 3.5';
+
+/** The terminal ring as a path (draw-on via stroke-dash). Length is the
+    r8.5 circumference — used raw on native, normalized with
+    `pathLength` on web. */
+export const ICON_RING_PATH =
+  'M12 3.5A8.5 8.5 0 1 1 12 20.5A8.5 8.5 0 1 1 12 3.5Z';
+export const ICON_RING_LENGTH = 53.5;
+
+/** Check + warn marks inside the r8.5 ring. */
+export const CHECK_MINI_PATH = 'm8.6 12.5 2.5 2.5 4.7-5.3';
+export const CHECK_MINI_LENGTH = 11;
+export const WARN_MINI_LINE_PATH = 'M12 8.4v4.2';
+export const WARN_MINI_LINE_LENGTH = 4.3;
+export const WARN_MINI_DOT = { cx: 12, cy: 15.7, r: 1 } as const;
+
+/** Full-size status marks — identical geometry to the `check` and
+    `warn` GLYPHS, split so each piece can draw on. */
+export const CHECK_DRAW_PATH = 'm5 12.5 4.5 4.5L19 7';
+export const CHECK_DRAW_LENGTH = 21;
+export const WARN_DRAW_TRIANGLE_PATH = 'M12 4 3 20h18z';
+export const WARN_DRAW_TRIANGLE_LENGTH = 55;
+export const WARN_DRAW_DETAIL_PATH = 'M12 10v4';
+export const WARN_DRAW_DETAIL_LENGTH = 4.2;
+export const WARN_DRAW_DOT = { cx: 12, cy: 17, r: 1 } as const;
+
+/** `refresh` glyph — retry affordances used the `spinner` arc as a
+    static stand-in; a real arrowhead reads as an action, not a busy
+    state. */
+export const REFRESH_PATH = 'M20 12a8 8 0 1 1-2.34-5.66M20 3.5v5.5h-5.5';
+
+/** Chip → coarse icon phase: every busy chip spins the same arc;
+    'stored' completes the ring; 'failed' draws the warn mark. */
+export function downloadIconState(
+  chip: import('./view-models.ts').DownloadChip,
+): DownloadIconState {
+  switch (chip) {
+    case 'idle':
+      return 'idle';
+    case 'stored':
+      return 'done';
+    case 'failed':
+      return 'error';
+    default:
+      return 'busy';
+  }
+}

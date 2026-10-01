@@ -34,6 +34,7 @@ import { DarkThemeScope, ThemeProvider, useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
 import {
   Artwork,
+  DownloadIconButton,
   Icon,
   IconButton,
   Pressable,
@@ -1424,20 +1425,10 @@ export function StageSheet({
                   }}
                 >
                   {downloadButton !== null && (
-                    <IconButton
-                      icon={downloadButton.icon}
+                    <DownloadIconButton
+                      view={downloadButton}
                       size={36}
                       iconSize={15}
-                      color={
-                        downloadButton.failed
-                          ? colors.warn
-                          : downloadButton.stored
-                            ? colors.accent
-                            : colors.textSecondary
-                      }
-                      accessibilityLabel={downloadButton.a11yLabel}
-                      active={downloadButton.stored}
-                      onPress={downloadButton.onPress}
                     />
                   )}
                   {onAddToPlaylist !== undefined && (

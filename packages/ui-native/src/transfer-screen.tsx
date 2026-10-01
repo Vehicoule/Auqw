@@ -1,6 +1,13 @@
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { BackRow, Icon, PillButton, Pressable, Text } from './primitives.tsx';
+import {
+  BackRow,
+  Icon,
+  PillButton,
+  Pressable,
+  StatusMark,
+  Text,
+} from './primitives.tsx';
 import { ErrorState } from './states.tsx';
 import type { TransferModel } from '@auqw/ui-shared';
 import {
@@ -180,7 +187,7 @@ function ImportBody({
             marginTop: theme.spacing.md,
           }}
         >
-          <Icon name="check" size={14} color={theme.colors.accent} />
+          <StatusMark kind="check" size={14} color={theme.colors.accent} />
           <Text variant="metadata" color="accent" style={{ flex: 1 }}>
             {footer.detail}
           </Text>

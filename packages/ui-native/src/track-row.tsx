@@ -1,6 +1,7 @@
 import { View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import {
+  DownloadIcon,
   Icon,
   IconButton,
   PlayingArtwork,
@@ -218,23 +219,30 @@ export function TrackRow({
         </View>
       </Pressable>
       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-        {row.download !== null &&
-          trailIcon(
-            row.download === 'stored'
-              ? 'check'
-              : row.download === 'failed'
-                ? 'warn'
-                : row.download === 'removing'
-                  ? 'spinner'
-                  : 'download',
-            13,
-            row.download === 'failed'
-              ? theme.colors.warn
-              : row.download === 'stored'
-                ? theme.colors.accent
-                : theme.colors.textSecondary,
-            26,
-          )}
+        {row.download !== null && (
+          <View
+            style={{
+              width: 26,
+              height: 30,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+            accessible={false}
+          >
+            <DownloadIcon
+              state={row.download}
+              size={13}
+              animated={false}
+              color={
+                row.download === 'failed'
+                  ? theme.colors.warn
+                  : row.download === 'stored'
+                    ? theme.colors.accent
+                    : theme.colors.textSecondary
+              }
+            />
+          </View>
+        )}
         {row.state !== 'available' && trailIcon('warn', 14, theme.colors.warn)}
         {row.liked &&
           onToggleLike === undefined &&

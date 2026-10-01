@@ -30,9 +30,39 @@ import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
 import { useResolvedArtworkUri } from './artwork.tsx';
-import { morphPlayPause, quadPath } from './motion.ts';
+import {
+  clamp01,
+  DOWNLOAD_TARGETS,
+  markDotProgress,
+  markStrokeProgress,
+  morphPlayPause,
+  quadPath,
+} from './motion.ts';
+import {
+  CHECK_DRAW_LENGTH,
+  CHECK_DRAW_PATH,
+  CHECK_MINI_LENGTH,
+  CHECK_MINI_PATH,
+  DOWNLOAD_ARROW_PATH,
+  downloadIconState,
+  ICON_ARC_PATH,
+  ICON_RING_LENGTH,
+  ICON_RING_PATH,
+  REFRESH_PATH,
+  WARN_DRAW_DETAIL_LENGTH,
+  WARN_DRAW_DETAIL_PATH,
+  WARN_DRAW_DOT,
+  WARN_DRAW_TRIANGLE_LENGTH,
+  WARN_DRAW_TRIANGLE_PATH,
+  WARN_MINI_DOT,
+  WARN_MINI_LINE_LENGTH,
+  WARN_MINI_LINE_PATH,
+} from '@auqw/ui-shared';
+import type { DownloadChip } from '@auqw/ui-shared';
+import type { DownloadButtonView } from '@auqw/ui-shared/controllers';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
+const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 
 export type TextVariant = keyof Theme['typography'];
 
@@ -296,19 +326,30 @@ export type IconButtonProps = {
   readonly style?: StyleProp<ViewStyle>;
 };
 
-export function IconButton({
-  icon,
+/**
+ * Chrome shared by IconButton + DownloadIconButton: hit slop, a11y
+ * role/state, the pressed tint, and the tap scale bounce (a single
+ * worklet transform — no JS work per frame).
+ */
+function IconButtonShell({
   onPress,
   accessibilityLabel,
   size = 32,
-  iconSize = 14,
-  color,
   disabled = false,
   active = false,
-  filled = false,
   hitSlop,
   style,
-}: IconButtonProps) {
+  children,
+}: {
+  readonly onPress?: (() => void) | undefined;
+  readonly accessibilityLabel: string;
+  readonly size?: number | undefined;
+  readonly disabled?: boolean | undefined;
+  readonly active?: boolean | undefined;
+  readonly hitSlop?: number | Insets | undefined;
+  readonly style?: StyleProp<ViewStyle>;
+  readonly children: ReactNode;
+}) {
   const theme = useTheme();
   // Adjacent small buttons (queue chevrons) clamp the slop so their
   // hit regions can't bleed into each other.
@@ -316,9 +357,30 @@ export function IconButton({
   // A button with no handler is inert — it must look and announce as
   // disabled, not ship as a live control that silently does nothing.
   const off = disabled || onPress === undefined;
+  const press = useSharedValue(1);
+  const pressStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: press.value }],
+  }));
+  const bounce = !off && !theme.reducedMotion;
   return (
     <RNPressable
       onPress={onPress}
+      onPressIn={
+        bounce
+          ? () => {
+              press.value = withTiming(0.82, {
+                duration: theme.motion.press,
+              });
+            }
+          : undefined
+      }
+      onPressOut={
+        bounce
+          ? () => {
+              press.value = withTiming(1, { duration: theme.motion.state });
+            }
+          : undefined
+      }
       disabled={off}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
@@ -337,6 +399,42 @@ export function IconButton({
         style,
       ]}
     >
+      <Animated.View
+        style={[
+          { flex: 1, alignItems: 'center', justifyContent: 'center' },
+          pressStyle,
+        ]}
+      >
+        {children}
+      </Animated.View>
+    </RNPressable>
+  );
+}
+
+export function IconButton({
+  icon,
+  onPress,
+  accessibilityLabel,
+  size = 32,
+  iconSize = 14,
+  color,
+  disabled = false,
+  active = false,
+  filled = false,
+  hitSlop,
+  style,
+}: IconButtonProps) {
+  const theme = useTheme();
+  return (
+    <IconButtonShell
+      onPress={onPress}
+      accessibilityLabel={accessibilityLabel}
+      size={size}
+      disabled={disabled}
+      active={active}
+      hitSlop={hitSlop}
+      style={style}
+    >
       {icon === 'heart' || icon === 'heart-filled' ? (
         <HeartIcon
           filled={icon === 'heart-filled' || filled}
@@ -351,7 +449,7 @@ export function IconButton({
           filled={filled}
         />
       )}
-    </RNPressable>
+    </IconButtonShell>
   );
 }
 
@@ -607,6 +705,7 @@ export type IconName =
   | 'chevron-down'
   | 'radio'
   | 'check'
+  | 'refresh'
   | 'menu';
 
 type GlyphShape =
@@ -771,6 +870,7 @@ const GLYPHS: Record<IconName, Glyph> = {
     ],
   },
   check: { filled: false, shapes: [p('m5 12.5 4.5 4.5L19 7')] },
+  refresh: { filled: false, shapes: [p(REFRESH_PATH)] },
   menu: {
     filled: false,
     shapes: [p('M4 7h16M4 12h16M4 17h16')],
@@ -988,6 +1088,293 @@ export function Spinner({
         strokeWidth={theme.strokes.progressAndroid}
       />
     </Animated.View>
+  );
+}
+
+// ---- animated icons -------------------------------------------------
+// Download state machine — three shared values drive every layer on
+// the UI thread; the JS thread only updates targets when the chip
+// changes, so no per-frame render ever happens.
+//
+//   morph   0 arrow ⇄ 1 ring-side (opacity/scale crossfade)
+//   draw    0→1 terminal draw: ring closes, then check/warn draws
+//   spin    arc rotation, looping only while the phase is 'busy'
+//
+//   idle    arrow           busy   arc spins
+//   done    ring + check    error  ring + warn mark
+//
+// `animated={false}` (dense lists) and `theme.reducedMotion` snap the
+// same layers to their end state — same markup, zero motion.
+
+export type DownloadIconProps = {
+  readonly state: DownloadChip;
+  readonly size?: number | undefined;
+  readonly color?: string | undefined;
+  readonly strokeWidth?: number | undefined;
+  readonly animated?: boolean | undefined;
+};
+
+export function DownloadIcon({
+  state,
+  size = 14,
+  color,
+  strokeWidth,
+  animated = true,
+}: DownloadIconProps) {
+  const theme = useTheme();
+  const phase = downloadIconState(state);
+  const initial = DOWNLOAD_TARGETS[phase];
+  const morph = useSharedValue(initial.morph);
+  const draw = useSharedValue(initial.draw);
+  const spin = useSharedValue(0);
+  const run = animated && !theme.reducedMotion;
+  useEffect(() => {
+    const target = DOWNLOAD_TARGETS[phase];
+    morph.value = run
+      ? withTiming(target.morph, { duration: theme.motion.state })
+      : target.morph;
+    draw.value = run
+      ? withTiming(target.draw, { duration: theme.motion.state * 1.6 })
+      : target.draw;
+    if (run && target.spin) {
+      spin.value = withRepeat(
+        withTiming(360, { duration: 900, easing: Easing.linear }),
+        -1,
+        false,
+      );
+      return () => cancelAnimation(spin);
+    }
+    cancelAnimation(spin);
+    spin.value = 0;
+    return undefined;
+  }, [morph, draw, spin, phase, run, theme.motion.state]);
+  const paint = color ?? theme.colors.textPrimary;
+  const sw = strokeWidth ?? theme.strokes.progress;
+  const box = {
+    position: 'absolute' as const,
+    top: 0,
+    left: 0,
+    width: size,
+    height: size,
+  };
+  const arrowStyle = useAnimatedStyle(() => ({
+    opacity: 1 - morph.value,
+    transform: [{ scale: 1 - 0.45 * morph.value }],
+  }));
+  const arcStyle = useAnimatedStyle(() => ({
+    opacity: morph.value * (1 - draw.value),
+    transform: [{ rotate: `${spin.value}deg` }],
+  }));
+  const ringProps = useAnimatedProps(() => ({
+    strokeDashoffset: ICON_RING_LENGTH * (1 - draw.value),
+    opacity: morph.value,
+  }));
+  // The terminal mark waits for the ring to be mostly closed, then
+  // draws inside the same `draw` sweep (sub-progress of the channel).
+  const checkProps = useAnimatedProps(() => ({
+    strokeDashoffset: CHECK_MINI_LENGTH * (1 - markStrokeProgress(draw.value)),
+    opacity: phase === 'done' ? 1 : 0,
+  }));
+  const warnLineProps = useAnimatedProps(() => ({
+    strokeDashoffset:
+      WARN_MINI_LINE_LENGTH * (1 - markStrokeProgress(draw.value)),
+    opacity: phase === 'error' ? 1 : 0,
+  }));
+  const warnDotProps = useAnimatedProps(() => ({
+    opacity: phase === 'error' ? markDotProgress(draw.value) : 0,
+  }));
+  return (
+    <View style={{ width: size, height: size }} accessible={false}>
+      <Animated.View style={[box, arrowStyle]}>
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+          <Path
+            d={DOWNLOAD_ARROW_PATH}
+            stroke={paint}
+            strokeWidth={sw}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </Svg>
+      </Animated.View>
+      <Animated.View style={[box, arcStyle]}>
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+          <Path
+            d={ICON_ARC_PATH}
+            stroke={paint}
+            strokeWidth={sw}
+            strokeLinecap="round"
+          />
+        </Svg>
+      </Animated.View>
+      <Svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="none"
+        style={box}
+      >
+        <AnimatedPath
+          d={ICON_RING_PATH}
+          stroke={paint}
+          strokeWidth={sw}
+          strokeLinecap="round"
+          strokeDasharray={`${ICON_RING_LENGTH}`}
+          animatedProps={ringProps}
+        />
+        <AnimatedPath
+          d={CHECK_MINI_PATH}
+          stroke={paint}
+          strokeWidth={sw}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeDasharray={`${CHECK_MINI_LENGTH}`}
+          animatedProps={checkProps}
+        />
+        <AnimatedPath
+          d={WARN_MINI_LINE_PATH}
+          stroke={paint}
+          strokeWidth={sw}
+          strokeLinecap="round"
+          strokeDasharray={`${WARN_MINI_LINE_LENGTH}`}
+          animatedProps={warnLineProps}
+        />
+        <AnimatedCircle
+          cx={WARN_MINI_DOT.cx}
+          cy={WARN_MINI_DOT.cy}
+          r={WARN_MINI_DOT.r}
+          fill={paint}
+          animatedProps={warnDotProps}
+        />
+      </Svg>
+    </View>
+  );
+}
+
+/** The download affordance as a real button — IconButton chrome with
+    the animated icon; paint + selected state come from the view. */
+export function DownloadIconButton({
+  view,
+  size = 32,
+  iconSize = 14,
+  color,
+  disabled = false,
+  hitSlop,
+  style,
+}: {
+  readonly view: DownloadButtonView;
+  readonly size?: number | undefined;
+  readonly iconSize?: number | undefined;
+  readonly color?: string | undefined;
+  readonly disabled?: boolean | undefined;
+  readonly hitSlop?: number | Insets | undefined;
+  readonly style?: StyleProp<ViewStyle>;
+}) {
+  const theme = useTheme();
+  const paint =
+    color ??
+    (view.failed
+      ? theme.colors.warn
+      : view.stored
+        ? theme.colors.accent
+        : theme.colors.textSecondary);
+  return (
+    <IconButtonShell
+      onPress={view.onPress}
+      accessibilityLabel={view.a11yLabel}
+      size={size}
+      disabled={disabled}
+      active={view.stored}
+      hitSlop={hitSlop}
+      style={style}
+    >
+      <DownloadIcon state={view.state} size={iconSize} color={paint} />
+    </IconButtonShell>
+  );
+}
+
+/** A status mark that draws itself once on mount — for states that
+    arrive by unmount/remount (sheet rows, footers) where there is no
+    persistent element to transition. */
+export function StatusMark({
+  kind,
+  size = 15,
+  color,
+  strokeWidth,
+}: {
+  readonly kind: 'check' | 'warn';
+  readonly size?: number | undefined;
+  readonly color?: string | undefined;
+  readonly strokeWidth?: number | undefined;
+}) {
+  const theme = useTheme();
+  const draw = useSharedValue(theme.reducedMotion ? 1 : 0);
+  useEffect(() => {
+    draw.value = theme.reducedMotion
+      ? 1
+      : withTiming(1, { duration: theme.motion.state * 1.6 });
+    return undefined;
+  }, [draw, theme.motion.state, theme.reducedMotion]);
+  const paint = color ?? theme.colors.accent;
+  const sw = strokeWidth ?? theme.strokes.progress;
+  const drawProps = useAnimatedProps(() => ({
+    strokeDashoffset:
+      (kind === 'check' ? CHECK_DRAW_LENGTH : WARN_DRAW_TRIANGLE_LENGTH) *
+      (1 - draw.value),
+  }));
+  const detailProps = useAnimatedProps(() => ({
+    strokeDashoffset:
+      WARN_DRAW_DETAIL_LENGTH * (1 - clamp01((draw.value - 0.5) / 0.5)),
+  }));
+  const dotProps = useAnimatedProps(() => ({
+    opacity: markDotProgress(draw.value),
+  }));
+  return (
+    <Svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      accessible={false}
+    >
+      {kind === 'check' ? (
+        <AnimatedPath
+          d={CHECK_DRAW_PATH}
+          stroke={paint}
+          strokeWidth={sw}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeDasharray={`${CHECK_DRAW_LENGTH}`}
+          animatedProps={drawProps}
+        />
+      ) : (
+        <>
+          <AnimatedPath
+            d={WARN_DRAW_TRIANGLE_PATH}
+            stroke={paint}
+            strokeWidth={sw}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeDasharray={`${WARN_DRAW_TRIANGLE_LENGTH}`}
+            animatedProps={drawProps}
+          />
+          <AnimatedPath
+            d={WARN_DRAW_DETAIL_PATH}
+            stroke={paint}
+            strokeWidth={sw}
+            strokeLinecap="round"
+            strokeDasharray={`${WARN_DRAW_DETAIL_LENGTH}`}
+            animatedProps={detailProps}
+          />
+          <AnimatedCircle
+            cx={WARN_DRAW_DOT.cx}
+            cy={WARN_DRAW_DOT.cy}
+            r={WARN_DRAW_DOT.r}
+            fill={paint}
+            animatedProps={dotProps}
+          />
+        </>
+      )}
+    </Svg>
   );
 }
 

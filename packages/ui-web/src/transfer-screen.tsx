@@ -1,4 +1,11 @@
-import { CapsLabel, Icon, Pressable, ScreenHead, Text } from './primitives.tsx';
+import {
+  CapsLabel,
+  Icon,
+  Pressable,
+  ScreenHead,
+  StatusMark,
+  Text,
+} from './primitives.tsx';
 import { ErrorState } from './states.tsx';
 import type { TransferModel } from '@auqw/ui-shared';
 import {
@@ -136,7 +143,7 @@ function ImportBody({
       </div>
       {footer.kind === 'done' ? (
         <div className="uw-import-preview__done">
-          <Icon name="check" size={14} color="var(--accent)" />
+          <StatusMark kind="check" size={14} color="var(--accent)" />
           <Text variant="metadata" color="accent" className="uw-diag-row__k">
             {footer.detail}
           </Text>

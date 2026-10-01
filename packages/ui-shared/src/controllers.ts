@@ -1406,6 +1406,9 @@ export function useStageMode(
 
 export type DownloadButtonView = {
   readonly icon: 'check' | 'warn' | 'download' | 'spinner';
+  /** The raw chip — the animated DownloadIcon consumes it directly
+      (the static `icon` mapping stays for callers that want a glyph). */
+  readonly state: DownloadChip;
   readonly stored: boolean;
   readonly failed: boolean;
   readonly busy: boolean;
@@ -1437,6 +1440,7 @@ export function downloadButtonView(
   const meta = DOWNLOAD_BUTTON_META[download];
   return {
     icon: meta.icon,
+    state: download,
     stored: download === 'stored',
     failed: download === 'failed',
     busy: meta.busy,

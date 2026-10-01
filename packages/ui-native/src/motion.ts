@@ -12,7 +12,7 @@ export {
   PAUSE_RIGHT,
   type Quad,
 } from '@auqw/ui-shared';
-import type { ProgressPathState } from '@auqw/ui-shared';
+import type { DownloadIconState, ProgressPathState } from '@auqw/ui-shared';
 
 // The functions below are worklets: they run on reanimated's UI
 // runtime inside useDerivedValue/useAnimatedProps, which cannot call
@@ -22,7 +22,7 @@ import type { ProgressPathState } from '@auqw/ui-shared';
 // document). The shared ProgressPathState type above is safe to
 // import: types are erased before the worklet transform runs.
 
-function clamp01(value: number): number {
+export function clamp01(value: number): number {
   'worklet';
 
   return Math.min(1, Math.max(0, value));
@@ -84,4 +84,35 @@ export function progressPathState(
     dashOffset: (1 - amount) * pathLength,
     opacity: amount > 0 ? 1 : 0,
   };
+}
+
+// ---- download icon state machine -------------------------------------
+// Phase -> channel targets: `morph` crossfades arrow to ring, `draw`
+// sweeps the ring + terminal mark, `spin` loops the indeterminate arc
+// only while the chip is busy. Plain data (no closures) so it serializes
+// into worklet closures safely.
+
+export const DOWNLOAD_TARGETS = {
+  idle: { morph: 0, draw: 0, spin: false },
+  busy: { morph: 1, draw: 0, spin: true },
+  done: { morph: 1, draw: 1, spin: false },
+  error: { morph: 1, draw: 1, spin: false },
+} as const satisfies Record<
+  DownloadIconState,
+  { morph: number; draw: number; spin: boolean }
+>;
+
+/** The terminal mark waits for the ring to be mostly closed, then draws
+    inside the same `draw` sweep. */
+export function markStrokeProgress(draw: number): number {
+  'worklet';
+
+  return clamp01((draw - 0.35) / 0.65);
+}
+
+/** The warn dot pops once the stroke has finished. */
+export function markDotProgress(draw: number): number {
+  'worklet';
+
+  return clamp01((draw - 0.75) / 0.25);
 }

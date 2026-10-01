@@ -1,4 +1,5 @@
 import {
+  downloadIconState,
   entityIdForRef,
   formatClock,
   formatRemaining,
@@ -80,6 +81,9 @@ import {
   galleryCoverage,
 } from '@auqw/ui-shared/fixtures';
 import {
+  DOWNLOAD_TARGETS,
+  markDotProgress,
+  markStrokeProgress,
   quadPath,
   morphPlayPause,
   PAUSE_LEFT,
@@ -1615,9 +1619,108 @@ function testSkipPeek(): void {
   assert(dup !== null && dup.occurrenceId === 'occ-6', 'occurrence identity');
 }
 
+function testAnimatedIcons(): void {
+  // The state machine contract: every chip reaches a phase with defined
+  // channel targets — busy is the only phase that spins, terminal
+  // phases finish the draw sweep.
+  for (const chip of [
+    'idle',
+    'queued',
+    'downloading',
+    'stored',
+    'failed',
+    'removing',
+  ] as const) {
+    const phase = downloadIconState(chip);
+    const target = DOWNLOAD_TARGETS[phase];
+    assert(target !== undefined, `${chip} maps to a phase without targets`);
+    assertEqual(
+      target.spin,
+      phase === 'busy',
+      `${phase} spin flag matches its busy-ness`,
+    );
+    assertEqual(
+      target.draw,
+      phase === 'done' || phase === 'error' ? 1 : 0,
+      `${phase} draw channel reaches its terminal state`,
+    );
+    assertEqual(
+      target.morph,
+      phase === 'idle' ? 0 : 1,
+      `${phase} morph channel reaches its ring state`,
+    );
+  }
+  // Mark sub-progress: hidden until the ring is mostly closed, fully
+  // drawn at the end of the sweep; the dot only trails the stroke.
+  assertEqual(markStrokeProgress(0), 0, 'mark hidden before the sweep');
+  assertEqual(markStrokeProgress(0.35), 0, 'mark waits for the ring');
+  assertEqual(markStrokeProgress(1), 1, 'mark fully drawn at done');
+  assertEqual(markDotProgress(0.75), 0, 'dot waits for the stroke');
+  assertEqual(markDotProgress(1), 1, 'dot fully popped at done');
+  assert(
+    markDotProgress(0.5) < markStrokeProgress(0.5),
+    'dot trails the stroke through the sweep',
+  );
+
+  // Worklet discipline: the icon layer must run entirely on the UI
+  // thread — shared values + animated props, zero JS-frame drivers.
+  const primitives = readFileSync(new URL('./primitives.tsx', import.meta.url), 'utf8');
+  assert(
+    primitives.includes('useAnimatedProps'),
+    'DownloadIcon mutates SVG through animated props',
+  );
+  assert(
+    primitives.includes('withTiming'),
+    'phase transitions run as timing worklets',
+  );
+  const iconBlock = primitives.slice(
+    primitives.indexOf('export function DownloadIcon'),
+    primitives.indexOf('export function DownloadIconButton'),
+  );
+  assert(
+    !/setInterval|requestAnimationFrame|setTimeout/.test(iconBlock),
+    'no per-frame JS scheduling inside the icon layer',
+  );
+  assert(
+    primitives.includes('theme.reducedMotion'),
+    'icon paths honor the reduced-motion flag',
+  );
+  assert(
+    primitives.includes('downloadIconState'),
+    'icon phases come from the shared chip map',
+  );
+
+  // Consumers mount the state machine, not a glyph swap. Rows take the
+  // static path — the densest surface doesn't pay for transitions.
+  const row = readFileSync(new URL('./track-row.tsx', import.meta.url), 'utf8');
+  assert(row.includes('DownloadIcon'), 'track-row mounts the icon state machine');
+  assert(
+    row.includes('animated={false}'),
+    'track rows render icon end states without animation',
+  );
+  const stage = readFileSync(new URL('./stage-sheet.tsx', import.meta.url), 'utf8');
+  assert(stage.includes('DownloadIconButton'), 'stage mounts the morph button');
+  const nav = readFileSync(new URL('./navbar.tsx', import.meta.url), 'utf8');
+  assert(
+    nav.includes('useSharedValue') && nav.includes('theme.reducedMotion'),
+    'nav activation is a gated shared-value transition',
+  );
+  const sheets = readFileSync(new URL('./sheets.tsx', import.meta.url), 'utf8');
+  assert(
+    sheets.includes('StatusMark') && !sheets.includes('name="spinner"'),
+    'sheets draw terminal marks and use the real spinner',
+  );
+  const gallery = readFileSync(new URL('./gallery.tsx', import.meta.url), 'utf8');
+  assert(
+    gallery.includes('animated icons') && gallery.includes('DL_STATES'),
+    'gallery exercises the icon state machine',
+  );
+}
+
 testGallerySafeArea();
 testStageMotion();
 testSkipPeek();
+testAnimatedIcons();
 
 console.log('ui-native tests passed');
 import { readdirSync, readFileSync } from 'node:fs';

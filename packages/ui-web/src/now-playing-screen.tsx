@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Artwork,
+  DownloadIconButton,
   Icon,
   IconButton,
   Pressable,
@@ -475,20 +476,10 @@ export function NowPlayingScreen({
                 {(downloadBtn !== null || onAddToPlaylist !== undefined) && (
                   <div className="uw-stage__actions">
                     {downloadBtn !== null && (
-                      <IconButton
-                        icon={downloadBtn.icon}
+                      <DownloadIconButton
+                        view={downloadBtn}
                         size={36}
                         iconSize={15}
-                        color={
-                          downloadBtn.failed
-                            ? 'var(--warn)'
-                            : downloadBtn.stored
-                              ? 'var(--accent)'
-                              : 'var(--text-secondary)'
-                        }
-                        ariaLabel={downloadBtn.a11yLabel}
-                        active={downloadBtn.stored}
-                        onPress={downloadBtn.onPress}
                       />
                     )}
                     {onAddToPlaylist !== undefined && (
