@@ -178,6 +178,8 @@ export type HomeModel = {
   readonly resume: ResumeModel | null;
   /** Materialized track recordings ordered by like time. */
   readonly recents: readonly RailCardModel[];
+  /** Materialized recordings at their latest counted play. */
+  readonly played: readonly RailCardModel[];
   /** Provider metadata from the current committed search page. */
   readonly suggestions: readonly RailCardModel[];
 };
@@ -1601,6 +1603,7 @@ export function toRailCard(recording: Recording): RailCardModel {
 export function toHomeModel(input: {
   readonly recordings: readonly Recording[];
   readonly likes: readonly Like[];
+  readonly playHistory: readonly PlayEvent[];
   readonly suggestions: readonly TrackMetadata[];
   readonly playback: SessionPlayback;
   readonly greeting: string;
@@ -1613,6 +1616,18 @@ export function toHomeModel(input: {
       const recording =
         like.entityKind === 'track' ? byId.get(like.targetId) : undefined;
       return recording === undefined ? [] : [recording];
+    })
+    .slice(0, 12)
+    .map(toRailCard);
+  const playedIds = new Set<string>();
+  const played = [...input.playHistory]
+    .sort((a, b) => b.playedMs - a.playedMs)
+    .flatMap((event) => {
+      if (playedIds.has(event.recordingId)) return [];
+      const recording = byId.get(event.recordingId);
+      if (recording === undefined) return [];
+      playedIds.add(event.recordingId);
+      return [recording];
     })
     .slice(0, 12)
     .map(toRailCard);
@@ -1639,6 +1654,7 @@ export function toHomeModel(input: {
     subline: input.subline,
     resume,
     recents,
+    played,
     suggestions,
   };
 }

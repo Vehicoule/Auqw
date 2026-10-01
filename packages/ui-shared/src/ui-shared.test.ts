@@ -114,6 +114,7 @@ import type { LibraryControls } from './controllers.ts';
 const home = toHomeModel({
   recordings: fixtureRecordings,
   likes: fixtureLikes,
+  playHistory: fixturePlayHistory,
   playback: { type: 'idle' },
   suggestions: fixtureSearchResults,
   greeting: 'good evening',
@@ -121,6 +122,11 @@ const home = toHomeModel({
 });
 assertEqual(home.greeting, 'good evening');
 assertEqual(home.resume, null, 'idle playback yields no resume card');
+assertEqual(
+  home.played.map((card) => card.key).join(','),
+  'rec-dracula,rec-self-aware,rec-petit',
+  'played rail dedups to each recording at its latest play, newest first',
+);
 assert(
   home.recents.every((card) => card.title === card.title.trim()),
   'recents map through the shared package',

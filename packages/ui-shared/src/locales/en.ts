@@ -48,6 +48,8 @@ export const en = {
   'home.empty': 'nothing here yet',
   'home.recents.title': 'recently liked',
   'home.recents.subtitle': 'your latest liked tracks',
+  'home.played.title': 'recently played',
+  'home.played.subtitle': 'your latest plays',
   'home.suggestions.title': 'search results',
   'home.suggestions.subtitle': 'from your last search',
   'home.greeting.night': 'night',

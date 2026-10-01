@@ -49,6 +49,8 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'home.empty': '还没有内容',
   'home.recents.title': '最近喜欢',
   'home.recents.subtitle': '最近点赞的歌曲',
+  'home.played.title': '最近播放',
+  'home.played.subtitle': '最近播放的歌曲',
   'home.suggestions.title': '搜索结果',
   'home.suggestions.subtitle': '来自上次搜索',
   'home.greeting.night': '深夜',

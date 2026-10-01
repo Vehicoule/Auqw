@@ -1667,6 +1667,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       toHomeModel({
         recordings: state.recordings,
         likes: state.likes,
+        playHistory: state.playHistory,
         playback: state.playback,
         suggestions:
           searchState.type === 'content' ? searchState.page.items : [],
@@ -1679,6 +1680,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [
       state.recordings,
       state.likes,
+      state.playHistory,
       state.playback,
       searchState,
       localeTick,
@@ -2101,7 +2103,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
       // recording first — a key collision still plays the recording.
       if (
         ports.strictHomeCardKeys === true &&
-        homeModel.recents.some((liked) => liked.key === card.key)
+        (homeModel.recents.some((liked) => liked.key === card.key) ||
+          homeModel.played.some((played) => played.key === card.key))
       ) {
         void playRecording(card.key);
         return;

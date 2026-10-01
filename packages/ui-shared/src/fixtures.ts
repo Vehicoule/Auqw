@@ -901,6 +901,11 @@ export const fixtureHomeModel: HomeModel = {
     durationMs: 214_000,
   },
   recents: fixtureRecordings.slice(0, 5).map(toRailCard),
+  played: [
+    fixtureRecordings[2]!,
+    fixtureRecordings[0]!,
+    fixtureRecordings[1]!,
+  ].map(toRailCard),
   suggestions: fixtureRecordings.slice(5, 9).map(toRailCard),
 };
 
