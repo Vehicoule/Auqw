@@ -582,3 +582,26 @@ completion mark after; no `peaks_cache` row for its recording_id; the
 next track's sweep proceeds under its own requestId; zero
 FATAL/ANR lines for the app pid (grep `AndroidRuntime` false-positives
 from uiautomator's shell process, uid 2000 — filter by app pid).
+
+### Wall-window realities (verified 2026-10-01, PR #256 leg)
+- The innertube resolve wall is per-request-burst, NOT per-provider:
+  during a ~47 min burst `catalog.search` (deezer fanout) returned 25
+  real matches and every `request req-N` metadata call `succeeded`,
+  while ~48 stream prepares all failed `kind=transient … bot-check`
+  (media session never left NONE(0)). Distinguish metadata-OK /
+  resolve-denied — do not call it 'provider down'.
+- Denial-robustness evidence is free while walled: each `play-result`
+  drive emits `[journey] play-result` + `prepare req-N failed
+  bot-check`, the queue walk-forward tries subsequent rows (~30 tracks
+  attempted), the mini player lands the last target with the
+  `couldn't play` badge — and after ~10 denials the single row marks
+  unplayable so later journeys emit no prepares at all (re-search to
+  reseed rows). Zero FATAL/ANR across ~50 min of denial retries.
+- Read `peaks_cache` without root: `adb shell run-as com.vehicoule.auqw
+  "cat files/SQLite/auqw.db" > /tmp/auqw.db`, then query with
+  `~/Android/Sdk/platform-tools/sqlite3` (the file lives under
+  `files/SQLite/`, not `databases/`).
+- TLOG process: any in-tree gate stub in the shared worktree gets
+  swept by a lead-side `git add -A` — apply → leg →
+  `git checkout -- <file>` IMMEDIATELY (a stub reached a pushed PR once
+  and broke CI).
