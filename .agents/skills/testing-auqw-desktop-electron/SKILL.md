@@ -1,6 +1,6 @@
 ---
 name: testing-auqw-desktop-electron
-description: How to launch and exercise the auqw Electron desktop shell (apps/desktop) live on the X desktop — env knobs, plugin staging required for product-UI boot, dev-gate audio path, product-UI driving (dialogs, tabs, transport, waveform capture), ranged fixture, and how to prove sound on a VM with no audio device.
+description: How to launch and exercise the auqw Electron desktop shell (apps/desktop) live on the X desktop — env knobs, plugin staging required for product-UI boot, dev-gate audio path, product-UI driving (dialogs, tabs, transport, waveform capture), ranged fixture, counted-play seeding via local files, sqlite ground truth, and how to prove sound on a VM with no audio device.
 ---
 
 # Testing the auqw desktop Electron shell end-to-end
@@ -518,3 +518,73 @@ None — the napi artifact is a local cargo build output.
   shortly after (different PIDs, parented to a foreign shell).
   Verify process parentage/env before trusting a "recovered" window —
   a foreign-shell instance may lack AUQW_NODE_BINDINGS/PLUGIN_DIR.
+
+# Learned while E2E-testing history dedup
+
+## Verify the build actually contains the code under test
+
+- `git branch --show-current` is not enough: the shared checkout drifts
+  between branches mid-session. Grep the BUNDLE for a code marker unique to
+  the change: `grep -o "unique-fragment" apps/desktop/dist/renderer/app.js`.
+  (For the history-dedup change: `hist-${recording` = new, `hist-${event` =
+  old.) Building `main` overwrites dist — after any branch switch, rebuild.
+- `/tmp/electron-dist` survives the shared-checkout node_modules churn —
+  copy `node_modules/electron/dist` there once and launch from it.
+
+## Clean-slate database prep
+
+- `rm -rf ~/.config/auqw-desktop` — deleting only `auqw.db*` leaves
+  `sync-log.jsonl`/`streams/` which REPLAY persisted events on next boot
+  (old play_history rows reappear; local recordings get double-committed).
+  The local-folder grant lives in renderer Local Storage + `local_sources`
+  rows — deleting `auqw.db*` keeps neither intact (sync-log replays it),
+  but a full `rm -rf` wipe removes both, so re-add the folder afterward.
+- Ground truth: `sqlite3 "file:$HOME/.config/auqw-desktop/auqw.db?mode=ro&immutable=1"`
+  (expand `$HOME` — `~` fails inside the URI). Key tables:
+  `recordings` (title, provenance), `source_refs`, `queue_occurrences`,
+  `queue_state`, `play_history` (played_ms, occurrence_id), `play_counts`.
+
+## Deleting queue rows without breaking restore
+
+- Deleting `queue_occurrences` + `queue_state` → next boot shows
+  "couldn't restore your library". Fix WITHOUT losing other data:
+  keep (or reinsert) the singleton row
+  `INSERT INTO queue_state VALUES (1,0,NULL,0,'stopped',NULL)` and do a
+  FULL relaunch — the UI's "retry" button does NOT re-run restore.
+- play_history.occurrence_id may reference deleted occurrences — harmless.
+
+## Counted plays via local files (provider playback is often dead — bot-check)
+
+- Counted-play rule: a play counts once listenedMs ≥ 120s OR ≥ 50% of
+  duration. ~4s ffmpeg sine fixtures count in ~2s of real playback.
+  Fixtures: `ffmpeg -f lavfi -i "sine=frequency=440:duration=4" -metadata
+  title="Alpha Song" -metadata artist="Test Artist" /tmp/auqw-music/a.mp3`.
+- Desktop surfaces no `local:` search rows unless the renderer ports memo
+  sets `localCatalog: true` (apps/desktop/src/renderer/app.tsx ~line 674) —
+  test-only flip; rebuild + revert after.
+- Add the folder via menu → settings → "add local folder"; GTK dialog:
+  Ctrl+L, type the absolute path, click the "Open" BUTTON — pressing Enter
+  returns "nothing came back" (empty selection).
+- Dedupe key is `${occurrenceId}#${listenCycle}` — a plain replay of the
+  same occurrence does NOT re-count, but `bumpListenCycle` gives repeat-one
+  loops and repeat-all wraps a fresh cycle, so each loop counts once
+  (playback-engine.ts `#maybeRecordPlay`). Easiest second play of the same
+  song: put the ~4s fixture on repeat-one and let it loop — it counts per
+  pass. When repeat is hard to drive, the deterministic path is:
+  empty the queue (`delete from queue_occurrences`, keep `queue_state`),
+  relaunch, then press the row — `queuedOccurrenceFor` misses →
+  `session.enqueueRecording` mints a new occurrence → a real counted play.
+  Alternatives (repeat-all wrap / 'add to queue' sheet) are hard to drive:
+  the transport only renders on the 'player' segment DURING playback (~4s
+  window on fixtures; icons ~y721: pause≈199, next≈220, repeat≈231 tool
+  coords on 1024x768) and the `local:` row's action sheet did not open via
+  right-click or its trailing hover icons (observed).
+- xdotool XF86 media keys / playerctl do NOT reach the app (no MPRIS wiring
+  observed on this box).
+
+## Verification pattern that discriminates dedup
+
+- Seed events [A,B,C,A] → deduped History shows exactly 3 rows
+  [A,C,B-newest-first]; old behavior shows 4 rows with A at positions 1 & 4.
+  Cross-check: `top 50` collection shows per-recording play counts
+  (A = "2 plays") proving raw play_history events stay intact.
