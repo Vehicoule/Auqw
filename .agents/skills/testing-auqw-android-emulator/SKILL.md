@@ -218,9 +218,10 @@ writer that runs MIGRATIONS + every INSERT/UPDATE/DELETE.
 - Verify by tapping cards with SAME-ISH titles (e.g. a liked 'Ulveham'
   card vs a 'Ulveham (Full Version)' suggestion card) and checking the
   mini player's current title — each lands on its own target.
-- `searchRecents` is `useState` — it resets on any app relaunch (deep
-  links re-launch MainActivity), so an earlier committed query vanishing
-  from recents is a state reset, not a regression.
+- `searchRecents` hydrates from the `search_history` sqlite table
+  (schema v12, `SearchHistoryStore` port) — recents SURVIVE a relaunch
+  (deep links re-launch MainActivity). A missing committed query after
+  relaunch is a real regression, not a state reset.
 
 ## OAuth auth surface (post-#202)
 

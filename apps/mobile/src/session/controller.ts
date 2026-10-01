@@ -24,10 +24,15 @@ import type {
   ProviderPort,
   QueueSnapshot,
   Result,
+  SearchHistoryStore,
   SyncApplyReport,
   SyncScheduler,
 } from '@auqw/application';
-import { SqliteStorage, SqliteSyncLogStore } from '@auqw/storage-sqlite';
+import {
+  SqliteStorage,
+  SqliteSyncLogStore,
+  createSearchHistoryStore,
+} from '@auqw/storage-sqlite';
 import { defaultSettings, repairedSettings } from '@auqw/app-shell';
 import type {
   AuqwConnectivityNative,
@@ -114,6 +119,13 @@ export type SessionController = {
    */
   readonly local: () => LocalFileSource | null;
   readonly connectivity: ConnectivityPort;
+  /**
+   * Device-local search recents (schema v12 `search_history`) — the
+   * rail's durable backing list; hydrated on shell mount, committed
+   * on each submitted/tapped query. Lives outside PersistedState,
+   * so import and sync never touch it.
+   */
+  readonly searchHistory: SearchHistoryStore;
   /**
    * Slice-4 LAN sync client — null when the platform lacks the seam
    * (iOS) or custody/engine bring-up failed; the UI must render an
@@ -261,6 +273,9 @@ export async function createSessionController(
   // Sync-log tables ride the same file + driver — the shared
   // transaction tail serializes sync writes with library writes.
   const syncLogStore = new SqliteSyncLogStore(sqliteDriver);
+  // Device-local recents ride it too — the table exists once
+  // restore's migrations ran, and the shell only mounts in 'ready'.
+  const searchHistory = createSearchHistoryStore(sqliteDriver);
   // Assembled in start() after restore: custody → engine → client.
   let syncSurface: ExpoSyncSurface | null = null;
   // The spec's trigger layer (on-launch, on-change debounced,
@@ -491,6 +506,7 @@ export async function createSessionController(
     downloads,
     local: () => localSource,
     connectivity,
+    searchHistory,
     sync: () => syncSurface,
     // A stale native module predating the pot seam has no such
     // function — the provider keeps its boot value rather than

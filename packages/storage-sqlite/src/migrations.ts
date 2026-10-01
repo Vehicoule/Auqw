@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 11;
+export const CURRENT_SCHEMA_VERSION = 12;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -36,6 +36,7 @@ const KNOWN_TABLES: readonly string[] = Object.freeze([
   'sync_divergence_dropped',
   'sync_peer_marks',
   'peaks_cache',
+  'search_history',
 ]);
 
 const MIGRATION_1: readonly string[] = [
@@ -398,6 +399,21 @@ const MIGRATION_11: readonly string[] = [
 )`,
 ];
 
+/**
+ * v11 -> v12: `search_history` — the search screen's recents rail:
+ * one row per distinct submitted query (`query` PK), `searched_ms`
+ * its last-commit stamp. Device-local like `peaks_cache`: not a
+ * `PersistedState` section, so export/import and sync never carry
+ * it; rows are written and pruned directly by `search-history.ts`,
+ * outside the section-commit machinery.
+ */
+const MIGRATION_12: readonly string[] = [
+  `CREATE TABLE search_history (
+  query TEXT PRIMARY KEY,
+  searched_ms INTEGER NOT NULL CHECK (searched_ms >= 0)
+)`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
@@ -411,6 +427,7 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_9]),
   Object.freeze([...MIGRATION_10]),
   Object.freeze([...MIGRATION_11]),
+  Object.freeze([...MIGRATION_12]),
 ]);
 
 const CREATED_OBJECT_NAME =

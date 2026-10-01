@@ -24,6 +24,7 @@ import type {
   PeaksPort,
   PeaksStore,
   ProviderPort,
+  SearchHistoryStore,
   ReadySession,
   Result,
   Session,
@@ -292,6 +293,14 @@ export interface AppShellPorts<E> {
    * keeps peaks memory-only (fresh pull per session).
    */
   readonly peaksStore?: PeaksStore | null | undefined;
+
+  /**
+   * Persisted search recents — the rail's durable backing list,
+   * hydrated on mount and committed on the same events the in-memory
+   * list records (submit, suggestion tap, result tap). `undefined`
+   * keeps recents session-scoped (memory-only).
+   */
+  readonly searchHistory?: SearchHistoryStore | null | undefined;
 
   /**
    * Settings-model platform inputs the factory cannot derive:
