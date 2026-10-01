@@ -444,8 +444,12 @@ internal class AuqwWaveformPeaks(
           // and unlike a parked streamRead, nothing stays behind
           // competing with playback when the window lapses.
           if (SystemClock.uptimeMillis() >= deadline) {
+            // A hole with refusal evidence is a provider 'no', not
+            // unbuffered content — type it transient so direct
+            // callers read it as retryable-after-cooldown, not absent.
             throw CodedException(
-              "unavailable", "stream bytes not yet buffered", null
+              if (refused) "transient" else "unavailable",
+              "stream bytes not yet buffered", null
             )
           }
           delay(PEEK_POLL_MS)
