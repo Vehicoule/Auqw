@@ -212,20 +212,25 @@ export function LibraryScreen({
             onPress={view.layoutChip.onPress}
           />
         </div>
-        <div
-          className="uw-library__filters"
-          role="toolbar"
-          aria-label={view.filterA11yLabel}
-        >
-          {view.filterOptions.map((option) => (
-            <ToggleChip
-              key={option.key}
-              label={option.label}
-              active={option.active}
-              onPress={option.onPress}
-            />
-          ))}
-        </div>
+        {(view.filterOptions.length > 2 ||
+          // A retained kind filter whose kind left the library must keep
+          // the row — `all` is the way back to the remaining cards.
+          !view.filterOptions.some((o) => o.key === 'all' && o.active)) && (
+          <div
+            className="uw-library__filters"
+            role="toolbar"
+            aria-label={view.filterA11yLabel}
+          >
+            {view.filterOptions.map((option) => (
+              <ToggleChip
+                key={option.key}
+                label={option.label}
+                active={option.active}
+                onPress={option.onPress}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
       {view.nameField !== null && (

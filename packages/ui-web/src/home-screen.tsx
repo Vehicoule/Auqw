@@ -1,5 +1,4 @@
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
-import { EmptyState } from './states.tsx';
 import { bindTo } from './track-row.tsx';
 import { progressOf } from './progress.tsx';
 import { formatClock, t } from '@auqw/ui-shared';
@@ -50,6 +49,11 @@ function ResumeCard({
   );
 }
 
+const RAIL_EMPTY_ICON = {
+  recents: 'clock',
+  suggestions: 'compass',
+} as const;
+
 function Rail({
   title,
   subtitle,
@@ -89,7 +93,16 @@ function Rail({
         )}
       </div>
       {cards.length === 0 ? (
-        <EmptyState title={t('home.empty')} icon="note" />
+        <div className="uw-rail__empty">
+          <Icon
+            name={RAIL_EMPTY_ICON[section]}
+            size={14}
+            color="var(--fg25)"
+          />
+          <Text variant="metadata" color="secondary">
+            {t('home.empty')}
+          </Text>
+        </div>
       ) : (
         <div className="uw-rail__cards" role="list">
           {cards.map((card) => (

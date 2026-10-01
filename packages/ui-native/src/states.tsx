@@ -32,6 +32,34 @@ function StateShell({
   );
 }
 
+function StateIcon({
+  name,
+  color,
+}: {
+  readonly name?: IconName | undefined;
+  readonly color: string;
+}) {
+  const theme = useTheme();
+  return (
+    <View
+      style={{
+        width: theme.sizes.artworkRing,
+        height: theme.sizes.artworkRing,
+        borderRadius: theme.radius.pill,
+        backgroundColor: theme.colors.fg08,
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      {name === undefined ? (
+        <Spinner size={22} />
+      ) : (
+        <Icon name={name} size={22} color={color} />
+      )}
+    </View>
+  );
+}
+
 function StateCopy({
   title,
   hint,
@@ -43,7 +71,7 @@ function StateCopy({
 }) {
   return (
     <>
-      <Text variant="body" color="secondary">
+      <Text variant="title" color="primary">
         {title}
       </Text>
       {hint !== null && hint !== undefined && (
@@ -68,9 +96,10 @@ export function LoadingState({
   readonly hint?: string | null | undefined;
   readonly onCancel?: (() => void) | undefined;
 }) {
+  const theme = useTheme();
   return (
     <StateShell>
-      <Spinner size={18} />
+      <StateIcon color={theme.colors.textSecondary} />
       <StateCopy title={title} hint={hint} centered={false} />
       {onCancel !== undefined && (
         <PillButton label={t('common.cancel')} onPress={onCancel} />
@@ -83,7 +112,7 @@ export function EmptyState({ title, hint = null, icon = 'note' }: StateViewProps
   const theme = useTheme();
   return (
     <StateShell>
-      <Icon name={icon} size={20} color={theme.colors.textSecondary} />
+      <StateIcon name={icon} color={theme.colors.textSecondary} />
       <StateCopy title={title} hint={hint} />
     </StateShell>
   );
@@ -103,7 +132,7 @@ export function ErrorState({
   const theme = useTheme();
   return (
     <StateShell>
-      <Icon name="warn" size={20} color={theme.colors.warn} />
+      <StateIcon name="warn" color={theme.colors.warn} />
       <StateCopy title={title} hint={hint} />
       {onRetry !== undefined && (
         <PillButton label={retryLabel} onPress={onRetry} />
@@ -122,7 +151,7 @@ export function UnavailableState({
   const theme = useTheme();
   return (
     <StateShell>
-      <Icon name="warn" size={20} color={theme.colors.warn} />
+      <StateIcon name="warn" color={theme.colors.warn} />
       <StateCopy title={title} hint={hint} />
     </StateShell>
   );

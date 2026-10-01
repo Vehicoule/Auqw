@@ -360,22 +360,27 @@ export function LibraryScreen({
             onPress={view.layoutChip.onPress}
           />
         </View>
-        <View
-          style={{
-            flexDirection: 'row',
-            flexWrap: 'wrap',
-            gap: theme.spacing.sm,
-          }}
-        >
-          {view.filterOptions.map((option) => (
-            <ToggleChip
-              key={option.key}
-              label={option.label}
-              active={option.active}
-              onPress={option.onPress}
-            />
-          ))}
-        </View>
+        {(view.filterOptions.length > 2 ||
+          // A retained kind filter whose kind left the library must keep
+          // the row — `all` is the way back to the remaining cards.
+          !view.filterOptions.some((o) => o.key === 'all' && o.active)) && (
+          <View
+            style={{
+              flexDirection: 'row',
+              flexWrap: 'wrap',
+              gap: theme.spacing.sm,
+            }}
+          >
+            {view.filterOptions.map((option) => (
+              <ToggleChip
+                key={option.key}
+                label={option.label}
+                active={option.active}
+                onPress={option.onPress}
+              />
+            ))}
+          </View>
+        )}
       </View>
 
       {view.nameField !== null && (
