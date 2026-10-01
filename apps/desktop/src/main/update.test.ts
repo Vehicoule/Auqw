@@ -59,6 +59,27 @@ const MAC_RELEASE = {
 const macFetchJson = () =>
   Promise.resolve({ status: 200, body: [MAC_RELEASE] });
 
+const WIN_RELEASE = {
+  tag_name: 'v9.9.9',
+  html_url: 'https://github.com/Vehicoule/Auqw/releases/tag/v9.9.9',
+  draft: false,
+  assets: [
+    {
+      name: 'auqw-9.9.9-win-x64-setup.exe',
+      browser_download_url:
+        'https://github.com/Vehicoule/Auqw/releases/download/v9.9.9/auqw-9.9.9-win-x64-setup.exe',
+    },
+    {
+      name: 'SHA256SUMS-Windows.txt',
+      browser_download_url:
+        'https://github.com/Vehicoule/Auqw/releases/download/v9.9.9/SHA256SUMS-Windows.txt',
+    },
+  ],
+};
+
+const winFetchJson = () =>
+  Promise.resolve({ status: 200, body: [WIN_RELEASE] });
+
 /** Ports whose apply resolves 'relaunch' — enough to drive a full run. */
 function fakeApplyPorts(
   applied: { count: number },
@@ -289,13 +310,13 @@ export async function run(): Promise<void> {
   const spawned = { count: 0 };
   const guarded = createDesktopUpdate({
     currentVersion: '0.0.1',
-    target: { os: 'mac' },
-    fetchJson: macFetchJson,
+    target: { os: 'win' },
+    fetchJson: winFetchJson,
     openExternal: () => Promise.resolve(),
     capability: 'download',
     installerSpawnedInProcess: () => true,
     applyPorts: {
-      ...fakeApplyPorts(spawned, 'auqw-9.9.9-mac-arm64.dmg'),
+      ...fakeApplyPorts(spawned, 'auqw-9.9.9-win-x64-setup.exe'),
       apply: () => {
         spawned.count += 1;
         return Promise.resolve('installed');
