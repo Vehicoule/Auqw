@@ -476,7 +476,8 @@ if (capability === 'catalog.search') {
     (slug) => appErrorKind(slug ?? ''), decode));
 }
 ```
-Then `auqw://search?q=x` (2 items render) → `auqw://play-result?i=0` →
+Then `auqw://search?q=x` (one row per `items` entry renders — add a
+second object for two) → `auqw://play-result?i=0` →
 real innertube resolve → `prepare req-N prepared handle=st-* mime=audio/webm`
 → PLAYING. The radio seed auto-grows a 50+ item UP NEXT queue with real
 provider metadata — plenty of tracks to skip through for size variety.
