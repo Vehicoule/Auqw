@@ -3151,6 +3151,69 @@ async function playNextUnderShuffleSplicesDeal(): Promise<void> {
   await r.session.dispose();
 }
 
+async function enqueueUnderShuffleStaysAheadOfRadio(): Promise<void> {
+  // Under shuffle the radio boundary holds in dealt order too: a
+  // manual add splices ahead of the first pending suggestion —
+  // a fetched item never plays before what the user queued.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C', 'D'].map((id) =>
+        recording(`r${id}`, [ref('youtube-music', `y${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B', 'C'].map((id) =>
+          occurrence(`o${id}`, `r${id}`),
+        ),
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    undefined,
+    undefined,
+    undefined,
+    new SequenceRandom([0.8, 0.1, 0.5, 0.3, 0.9]),
+  );
+  await restoreOk(r);
+  await pump();
+  const radio = r.session.startRadio(ref('youtube-music', 'yA'));
+  await pump();
+  assert(
+    r.ytm.settleRadio(
+      ok({
+        candidates: [
+          meta('youtube-music', 'yR1', 'R1', 'Artist', 200_000),
+          meta('youtube-music', 'yR2', 'R2', 'Artist', 200_000),
+        ],
+        continuation: null,
+      }),
+    ),
+    'radio seed pending',
+  );
+  assert((await radio).ok, 'startRadio failed');
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  const tailIds = readyOf(r).queue.occurrences
+    .slice(3)
+    .map((o) => o.occurrenceId);
+  assertEqual(tailIds.length, 2, 'the suggestion tail grew');
+  const enqueued = await r.session.enqueueRecording('rD');
+  assert(enqueued.ok);
+  await pump();
+  const order = readyOf(r).shuffleOrder;
+  assert(order !== null, 'shuffle dealt a walk');
+  const pos = order.indexOf(enqueued.value);
+  const boundary = Math.min(...tailIds.map((id) => order.indexOf(id)));
+  assert(
+    pos >= 0 && pos < boundary,
+    `manual add must deal ahead of the suggestion boundary (pos ${pos}, boundary ${boundary})`,
+  );
+  await r.session.dispose();
+}
+
 async function addOnDeadCursorParksPaused(): Promise<void> {
   // An 'add' landing on a cursorless queue parks as the paused
   // current — it surfaces in the chrome instead of sitting unseen.
@@ -6871,6 +6934,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['enqueueAheadOfRadioTail', enqueueAheadOfRadioTail],
   ['playNextBehindCursor', playNextBehindCursor],
   ['playNextUnderShuffleSplicesDeal', playNextUnderShuffleSplicesDeal],
+  ['enqueueUnderShuffleStaysAheadOfRadio', enqueueUnderShuffleStaysAheadOfRadio],
   ['addOnDeadCursorParksPaused', addOnDeadCursorParksPaused],
   ['clearQueueKeepsCurrent', clearQueueKeepsCurrent],
   ['clearQueueEmptiesDead', clearQueueEmptiesDead],

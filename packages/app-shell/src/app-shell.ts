@@ -2074,7 +2074,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       const items =
         searchState.type === 'content' ? searchState.page.items : [];
       const metas =
-        ports.entityPlayRequiresCanPlay === true
+        ports.entityPlayRequiresCanPlay === true || online === false
           ? items.filter(canPlayMeta)
           : items;
       const startAt = metas.indexOf(tapped);
@@ -2090,6 +2090,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [
       playRecording,
       query,
+      online,
       ports.localCatalog,
       ports.entityPlayRequiresCanPlay,
       searchState,
@@ -2993,22 +2994,29 @@ export function useAppShell<E extends { readonly type: string } = never>(
       entry: { readonly entryId: string },
     ) => {
       const entries = model?.entries ?? [];
-      const startAt = entries.findIndex(
-        (e) => e.entryId === entry.entryId,
-      );
+      const tapped = entries.find((e) => e.entryId === entry.entryId);
+      if (tapped === undefined) {
+        return;
+      }
+      // Missing recordings render as unavailable rows — they can't
+      // mint an occurrence and sending one fails the whole batch, so
+      // the context filters to known recordings before it plays.
+      const known = new Set(state.recordings.map((rec) => rec.id));
+      const playable = entries.filter((e) => known.has(e.recordingId));
+      const startAt = playable.indexOf(tapped);
       if (startAt < 0) {
         return;
       }
       playRows(
         'action.playPlaylistEntry',
-        entries.map((e) => ({
+        playable.map((e) => ({
           recordingId: e.recordingId,
           selectedRef: playRefFor(e.recordingId, e.selectedRef),
         })),
         startAt,
       );
     },
-    [playRows, playRefFor],
+    [state.recordings, playRows, playRefFor],
   );
 
   const playlistDownloadFor = useCallback(
@@ -3297,7 +3305,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // Entity-page metas in display order — the context a row tap
   // queues (and the list shuffle draws from).
   // ports.entityPlayRequiresCanPlay gates the desktop canPlayMeta
-  // filter; mobile keeps every fetched row.
+  // filter; offline always filters too — a stream-only row can't
+  // mint a playable occurrence while the device is down.
   const entityContextMetas = useCallback(
     (fetch: EntityFetch | null, entryKey: string): TrackMetadata[] =>
       entityModelFor(fetch)
@@ -3307,10 +3316,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
         .filter(
           (m): m is TrackMetadata =>
             m !== undefined &&
-            (ports.entityPlayRequiresCanPlay !== true ||
+            ((ports.entityPlayRequiresCanPlay !== true &&
+              online !== false) ||
               canPlayMeta(m)),
         ),
-    [entityModelFor, canPlayMeta, ports.entityPlayRequiresCanPlay],
+    [entityModelFor, canPlayMeta, online, ports.entityPlayRequiresCanPlay],
   );
 
   // Shuffle-play the entity's whole context — the one header action
@@ -3318,10 +3328,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const entityShuffleAll = useCallback(
     (fetch: EntityFetch | null, entryKey: string) => {
       const metas = entityContextMetas(fetch, entryKey);
-      if (
-        ports.entityPlayRequiresCanPlay === true &&
-        metas.length === 0
-      ) {
+      if (metas.length === 0) {
         return;
       }
       void dispatchPlay(

@@ -1485,7 +1485,11 @@ export class Session {
    * too — `#dealtOrder`'s reconcile would otherwise scatter the new
    * id into a random dealt slot. The reconcile runs first (dead ids
    * drop, the new id lands somewhere), then the id relocates to
-   * cursor + 1 — a splice correction, never a re-deal.
+   * cursor + 1 — a splice correction, never a re-deal. A parked
+   * cursor (the new id IS current after `#parkIfIdle`, so it filters
+   * out of `order` and `pos` reads -1) deals at the head instead —
+   * every older row dealt behind it as the upcoming walk, matching
+   * its canonical index-0 landing.
    */
   #dealNext(r: Ready, occurrenceId: string): void {
     const dealt = this.#dealtOrder(r);
@@ -1495,7 +1499,32 @@ export class Session {
     const currentId = r.queue.snapshot().currentOccurrenceId;
     const order = dealt.filter((id) => id !== occurrenceId);
     const pos = currentId === null ? -1 : order.indexOf(currentId);
-    order.splice(pos < 0 ? order.length : pos + 1, 0, occurrenceId);
+    order.splice(pos < 0 ? 0 : pos + 1, 0, occurrenceId);
+    r.shuffleOrder = order;
+  }
+
+  /**
+   * A 'last' insertion under shuffle honors the same boundary as the
+   * canonical index: the new id splices ahead of the first pending
+   * radio-marked id in dealt order — a manual add never plays behind
+   * fetched suggestions — and otherwise at the dealt tail. A parked
+   * cursor (`pos` -1, the new id IS current) deals at the head like
+   * `#dealNext` — the drained walk resumes from it.
+   */
+  #dealAheadOfRadio(r: Ready, occurrenceId: string): void {
+    const dealt = this.#dealtOrder(r);
+    if (dealt === null) {
+      return;
+    }
+    const currentId = r.queue.snapshot().currentOccurrenceId;
+    const order = dealt.filter((id) => id !== occurrenceId);
+    const pos = currentId === null ? -1 : order.indexOf(currentId);
+    const boundary =
+      pos < 0
+        ? -1
+        : order.findIndex((id, i) => i > pos && r.radioIds.has(id));
+    const slot = pos < 0 ? 0 : boundary === -1 ? order.length : boundary;
+    order.splice(slot, 0, occurrenceId);
     r.shuffleOrder = order;
   }
 
@@ -1532,6 +1561,7 @@ export class Session {
         apply: (rr) => {
           rr.recordings = [...up.recordings];
           rr.queue = draft;
+          this.#dealAheadOfRadio(rr, occurrenceId);
           return occurrenceId;
         },
       });
@@ -1751,6 +1781,7 @@ export class Session {
         batch: { queue: draft.snapshot() },
         apply: (rr) => {
           rr.queue = draft;
+          this.#dealAheadOfRadio(rr, occurrenceId);
           return occurrenceId;
         },
       });
@@ -1931,6 +1962,7 @@ export class Session {
           });
           const start =
             options?.startAt !== undefined &&
+            Number.isInteger(options.startAt) &&
             options.startAt >= 0 &&
             options.startAt < occurrenceIds.length
               ? options.startAt
@@ -2020,6 +2052,7 @@ export class Session {
           });
           const start =
             options?.startAt !== undefined &&
+            Number.isInteger(options.startAt) &&
             options.startAt >= 0 &&
             options.startAt < occurrenceIds.length
               ? options.startAt
