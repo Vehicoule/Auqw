@@ -1,6 +1,7 @@
 import { assertDeepEqual, assertEqual } from '@auqw/application/testing';
 import type { UpdateApplyPorts } from '@auqw/application';
 import {
+  appImageRelaunchOptions,
   createDesktopUpdate,
   updateCapabilityFor,
   updateTargetFor,
@@ -144,6 +145,20 @@ export async function run(): Promise<void> {
   }
   await restarting.restart();
   assertEqual(relaunches, 1);
+
+  // the restart handoff execs the replaced image, not process.execPath
+  // — and carries the launch argv so the new image keeps the flags
+  assertDeepEqual(
+    appImageRelaunchOptions(
+      ['/usr/bin/Auqw.AppImage', '--no-sandbox', '--proxy=1'],
+      '/usr/bin/Auqw.AppImage',
+    ),
+    { args: ['--no-sandbox', '--proxy=1'], execPath: '/usr/bin/Auqw.AppImage' },
+  );
+  assertDeepEqual(
+    appImageRelaunchOptions(['electron', 'app', '--flag'], undefined),
+    { args: ['app', '--flag'] },
+  );
 
   // a renderer can't summon apply on an 'open' build — the verb
   // rejects rather than pretending capability

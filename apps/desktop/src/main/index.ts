@@ -64,6 +64,7 @@ import {
 } from './sync-events.ts';
 import type { UpdateApplyPorts } from '@auqw/application';
 import {
+  appImageRelaunchOptions,
   createDesktopUpdate,
   updateCapabilityFor,
   updateTargetFor,
@@ -589,8 +590,13 @@ async function main(): Promise<void> {
         };
   // Dev/test seam (mobile's EXPO_PUBLIC_UPDATE_RELEASES_URL twin):
   // point the check at a local/staging releases payload — e.g. a
-  // fixture feed for deterministic update legs.
-  const updateReleasesUrl = process.env['AUQW_UPDATE_RELEASES_URL'];
+  // fixture feed for deterministic update legs. Unpackaged runs only:
+  // a packaged build's egress must stay on the pinned GitHub endpoint
+  // (decisions.md) — an inherited env var would steer the artifact
+  // AND its checksum to whatever endpoint it names.
+  const updateReleasesUrl = app.isPackaged
+    ? undefined
+    : process.env['AUQW_UPDATE_RELEASES_URL'];
   const updateService = createDesktopUpdate({
     currentVersion: app.getVersion(),
     target: updateTarget,
@@ -613,18 +619,9 @@ async function main(): Promise<void> {
       ? {
           relaunch: () => {
             // The AppImage apply already renamed the new bytes over
-            // $APPIMAGE — the restart must exec THAT file. A bare
-            // app.relaunch() re-execs process.execPath, the binary
-            // inside the dying FUSE mount, so the "updated" app comes
-            // back as the old version (or dies with the mount). args
-            // defaults to [] under relaunch(), so pass argv back or
-            // the new image drops the user's launch flags.
-            app.relaunch({
-              args: process.argv.slice(1),
-              ...(appimagePath !== undefined
-                ? { execPath: appimagePath }
-                : {}),
-            });
+            // $APPIMAGE — the restart must exec THAT file, not
+            // process.execPath inside the dying FUSE mount.
+            app.relaunch(appImageRelaunchOptions(process.argv, appimagePath));
             app.exit(0);
           },
         }

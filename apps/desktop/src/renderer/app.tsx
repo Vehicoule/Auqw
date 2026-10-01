@@ -1470,8 +1470,11 @@ function Main({
             <div
               style={{
                 position: 'fixed',
-                // Stacks under the offline pill when both are up.
-                top: online === false ? 36 : 8,
+                // Below the 40px chrome strip — the strip's nav/tab
+                // controls stay clickable even mid-download (the card
+                // isn't dismissible while a run is live). Clears the
+                // offline pill (top:8, ~26px) the same way.
+                top: 44,
                 left: '50%',
                 transform: 'translateX(-50%)',
                 width: 'min(420px, calc(100vw - 32px))',
