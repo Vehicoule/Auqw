@@ -8,10 +8,7 @@ import {
   downloadIconState,
   ICON_ARC_PATH,
   ICON_RING_PATH,
-  PAUSE_LEFT,
-  PAUSE_RIGHT,
-  PLAY_LEFT,
-  PLAY_RIGHT,
+  morphPlayPause,
   quadPath,
   REFRESH_PATH,
   scaledArtworkUrl,
@@ -23,6 +20,7 @@ import {
 } from '@auqw/ui-shared';
 import type { DownloadChip } from '@auqw/ui-shared';
 import type { DownloadButtonView } from '@auqw/ui-shared/controllers';
+import { motion } from '@auqw/design-tokens';
 
 export type TextVariant =
   | 'display'
@@ -564,9 +562,10 @@ export function Icon({
   );
 }
 
-// Chromium interpolates `d` between path() values with matching
-// command lists — the play/pause quads keep identical shapes, so the
-// morph runs as a pure CSS transition gated by reduced-motion.
+// The play/pause morph tweens its two quads per frame over rAF — `d`
+// has no compositor path (Chromium interpolates it on the main thread;
+// Firefox can't transition it at all), so the CSS transition either
+// janked or silently snapped. Reduced-motion jumps to the end state.
 export function PlayPauseIcon({
   playing,
   size = 18,
@@ -576,9 +575,39 @@ export function PlayPauseIcon({
   readonly size?: number | undefined;
   readonly color?: string | undefined;
 }) {
+  const theme = useTheme();
   const paint = color ?? 'currentColor';
-  const left = playing ? PAUSE_LEFT : PLAY_LEFT;
-  const right = playing ? PAUSE_RIGHT : PLAY_RIGHT;
+  const leftRef = useRef<SVGPathElement>(null);
+  const rightRef = useRef<SVGPathElement>(null);
+  const amount = useRef(playing ? 1 : 0);
+
+  useEffect(() => {
+    const target = playing ? 1 : 0;
+    const from = amount.current;
+    const paint_ = (a: number) => {
+      amount.current = a;
+      const m = morphPlayPause(a);
+      leftRef.current?.setAttribute('d', quadPath(m.left));
+      rightRef.current?.setAttribute('d', quadPath(m.right));
+    };
+    if (theme.reducedMotion || from === target) {
+      paint_(target);
+      return;
+    }
+    const start = performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / motion.state);
+      // easeInOutQuad — matches native's withTiming default.
+      const eased = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+      paint_(from + (target - from) * eased);
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, theme.reducedMotion]);
+
+  const initial = morphPlayPause(amount.current);
   return (
     <svg
       width={size}
@@ -589,8 +618,8 @@ export function PlayPauseIcon({
       focusable="false"
       className="uw-playpause"
     >
-      <path className="uw-playpause__half" d={quadPath(left)} fill={paint} />
-      <path className="uw-playpause__half" d={quadPath(right)} fill={paint} />
+      <path ref={leftRef} className="uw-playpause__half" d={quadPath(initial.left)} fill={paint} />
+      <path ref={rightRef} className="uw-playpause__half" d={quadPath(initial.right)} fill={paint} />
     </svg>
   );
 }

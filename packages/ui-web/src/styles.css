@@ -445,14 +445,9 @@
     transform var(--motion-state) ease;
 }
 
-.uw-playpause__half {
-  transition: d var(--motion-state) ease;
-}
-
-.ui-web[data-reduced-motion='true'] .uw-playpause__half {
-  transition: none;
-}
-
+/* The play/pause morph runs per-frame over rAF in the component —
+   `d` has no compositor path, so a CSS transition is dead weight
+   (and on Firefox it never ran at all). */
 /* ---- download icon state machine ----------------------------------
    Layers cross-fade + dash-draw in one SVG; the busy arc rotates.
    `--still` (dense lists) and reduced-motion get the same end states
