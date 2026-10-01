@@ -113,6 +113,28 @@ those merge, this skill has nothing to run against.
   backdrop. Local files honestly have `artwork: []` — monogram tiles are
   correct, NOT missing-art bugs.
 
+## Search screen: recents rail, drafts, and commits
+
+- The **recents rail only renders on the search `idle` phase** — after
+  submitting, results own the pane. To see the rail again without a
+  restart, click the field's ✕ "clear search" control (right edge of
+  the field, ~x993 at 1024px wide): clearing to empty republishes
+  `idle`. Re-screenshot for the ✕ position first.
+- **Typing is draft mode, not a commit.** Keystrokes debounce (150 ms)
+  into `suggest` and render a SUGGESTIONS section (`search for "…"`
+  commit row + provider completions). Only Enter (or a row tap)
+  commits a query — typed-but-unsubmitted text must never appear in
+  recents; verify by closing the app with the draft still in the
+  field.
+- **Direct sqlite cross-checks:** the app's whole persisted state is
+  one file, `~/.config/auqw-desktop/auqw.db` (`search_history`,
+  `peaks_cache`, `settings`, `queue_state`, …). `sqlite3` is already
+  on the box at `$HOME/Android/Sdk/platform-tools/sqlite3`. MRU order
+  is `ORDER BY rowid DESC` — re-records take a FRESH rowid via
+  `INSERT OR REPLACE`, so a deduped re-search visibly jumps to a new
+  max rowid. Read while the app is CLOSED (`wmctrl -c auqw`, then poll
+  `pgrep -f "[d]ist/electron"` to empty) to avoid lock noise.
+
 ## Proving sound on a VM with no audio hardware
 
 This box has no `/dev/snd`, no pulseaudio/pipewire, and `pactl` is absent —
