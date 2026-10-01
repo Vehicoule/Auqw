@@ -567,6 +567,11 @@ export async function run(): Promise<void> {
       0,
       'a run cancelled mid-verify must never reach apply',
     );
+    assertDeepEqual(
+      calls.removed,
+      [`/stage/${APK_NAME}`],
+      'a run cancelled mid-verify still drops its staged file',
+    );
   }
 
   // service.apply() gates: no-op while not 'available', and merges

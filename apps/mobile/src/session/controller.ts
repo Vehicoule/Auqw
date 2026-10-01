@@ -575,6 +575,9 @@ export async function createSessionController(
             // can't zero another writer's protection.
             try {
               void mediaDownloadsActive(
+                // Log the native failure, then rethrow — the
+                // aggregate only marks an edge delivered on resolve,
+                // so a swallowed rejection would suppress its retry.
                 (count) =>
                   host.downloadsActiveChanged(count).catch((thrown) => {
                     void log.write({
@@ -582,6 +585,7 @@ export async function createSessionController(
                       message: `fgs update failed: ${nativeMessage(thrown)}`,
                       atMs: clock.nowMs(),
                     });
+                    throw thrown;
                   }),
                 active,
               );

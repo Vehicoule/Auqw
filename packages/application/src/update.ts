@@ -648,6 +648,9 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
   // publish would otherwise admit a second begin — two downloads
   // racing one staging path.
   let running = false;
+  // Which generation last claimed the staging path — a stale run
+  // may delete its own leftover but never a successor's download.
+  let claimedGen = 0;
 
   function publish(next: UpdateApplyStatus): void {
     state = next;
@@ -682,8 +685,19 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
     const { version, artifact, checksums } = target;
     // The staged file — removed whenever this run dies before the
     // apply leg consumed it (failed download, rejected checksum,
-    // apply throw): an unconsumed artifact never stays behind.
+    // apply throw, or a cancel between stages): an unconsumed
+    // artifact never stays behind.
     let path: string | null = null;
+    // A stale run still drops its OWN staged file — a cancel mid-
+    // verify must not strand a download — but never the path a
+    // newer run just claimed (claimedGen marks the latest claimant).
+    const dropOwned = (): void => {
+      if (path !== null && claimedGen === gen) {
+        const staged = path;
+        path = null;
+        void ports.remove(staged).catch(() => undefined);
+      }
+    };
     try {
       // Integrity metadata rides first: no sums asset → the artifact
       // is unverifiable and the honest answer is refusal (the open-page
@@ -703,6 +717,7 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
         );
       }
       path = ports.stagePath(artifact);
+      claimedGen = gen;
       publishIfCurrent({
         state: 'downloading',
         version,
@@ -717,11 +732,13 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
         signal,
       );
       if (stale()) {
+        dropOwned();
         return;
       }
       publishIfCurrent({ state: 'verifying', version });
       const actual = await ports.sha256Hex(path);
       if (stale()) {
+        dropOwned();
         return;
       }
       if (actual.toLowerCase() !== expected) {
@@ -736,6 +753,7 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       publishIfCurrent({ state: 'applying', version });
       const outcome = await ports.apply(path, artifact);
       if (stale()) {
+        dropOwned();
         return;
       }
       // The apply leg consumed the file (renamed into place, spawned
@@ -748,11 +766,12 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
           : { state: 'applied', version },
       );
     } catch (thrown) {
+      // Cleanup before the generation gate: a stale run's own
+      // leftover still goes (cancel-then-retry leaves no partial),
+      // but a successor's claimed path is untouched.
+      dropOwned();
       if (gen !== generation) {
         return;
-      }
-      if (path !== null) {
-        void ports.remove(path).catch(() => undefined);
       }
       if (isAbort(thrown)) {
         publish({ state: 'idle' });

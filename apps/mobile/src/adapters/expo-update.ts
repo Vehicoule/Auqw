@@ -63,18 +63,40 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
           return new File(directory, artifact.name).uri;
         },
         fetchText: async (url, signal) => {
-          const res = await fetch(url, { signal: signal as AbortSignal });
-          if (!res.ok) {
-            throw appError('transient', `checksums fetch ${res.status}`);
+          // The sums file rides the same disk-bound transport as the
+          // APK: the global fetch materializes response bodies in
+          // memory with no cap, but a downloaded file is byte-counted
+          // on disk BEFORE anything reads it — over-cap is
+          // invalid-response, never a memory hit.
+          const directory = new Directory(Paths.cache, 'auqw-update');
+          if (!directory.exists) {
+            directory.create({ intermediates: true, idempotent: true });
           }
-          // RN fetch can't bound a streamed body — the declared
-          // length is the only gate: a sums file is kilobytes, so a
-          // body over the cap is invalid-response, not a read.
-          const declared = Number(res.headers.get('content-length'));
-          if (Number.isFinite(declared) && declared > 1024 * 1024) {
+          const sums = new File(directory, 'SHA256SUMS-fetch');
+          try {
+            await File.downloadFileAsync(url, sums, {
+              idempotent: true,
+              signal: signal as AbortSignal,
+            });
+          } catch (thrown) {
+            if (signal.aborted) {
+              throw appError('cancelled', 'checksums fetch aborted');
+            }
+            throw appError(
+              'transient',
+              `checksums fetch: ${thrown instanceof Error ? thrown.message : 'failed'}`,
+            );
+          }
+          if (!sums.exists || sums.size > 1024 * 1024) {
             throw appError('invalid-response', 'checksums body over 1 MiB');
           }
-          return res.text();
+          const body = await sums.text();
+          try {
+            sums.delete();
+          } catch {
+            // the staging sweep owns cleanup; a stubborn file is harmless
+          }
+          return body;
         },
         download: async (url, path, onProgress, signal) => {
           if (!url.startsWith(RELEASE_DOWNLOAD_PREFIX)) {
@@ -97,9 +119,11 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
           // so releasing must never zero a live media transfer.
           const releaseForeground = holdDownloadForeground((count) => {
             try {
+              // Rejection propagates so the aggregate marks the edge
+              // undelivered and retries it on the next report.
               return Promise.resolve(
                 AuqwExpo.downloadsActiveChanged(count),
-              ).catch(() => undefined);
+              );
             } catch {
               // the seam is Android-only; anywhere else this is a no-op
               return Promise.resolve();
