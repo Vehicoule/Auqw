@@ -258,7 +258,18 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
           status.state === 'available' &&
           status.version !== snapshot.apply.version
         ) {
-          service.apply();
+          // The newer release may itself be un-installable on this
+          // build (no APK asset or no checksums) — the open-page
+          // fallback owns that affordance, same as the normal path.
+          if (
+            canInstall &&
+            status.artifact !== null &&
+            status.checksums !== null
+          ) {
+            service.apply();
+          } else {
+            void Linking.openURL(status.url).catch(() => undefined);
+          }
           return;
         }
         service.reapply();
