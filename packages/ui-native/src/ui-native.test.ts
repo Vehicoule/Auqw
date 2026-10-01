@@ -16,6 +16,7 @@ import {
   toSearchRowModel,
   toSettingsModel,
   toTrackRowModel,
+  skipPeekFor,
 } from '@auqw/ui-shared';
 import type { LyricsSheet, SourceRef } from '@auqw/application';
 import {
@@ -1560,15 +1561,71 @@ function testStageMotion(): void {
   // Scrim rises with progress.
   assertEqual(stageScrimAlpha(0), 0);
   assertEqual(stageScrimAlpha(1), 0.5);
+
+  // ---- sideswipe conveyor ----------------------------------------
+  // Travel: an allowed drag tracks the finger 1:1 up to the row's
+  // width; a dead edge rubber-bands with a hard cap.
+  assertEqual(skipTravelPx(-120, 400, true), -120, 'live drag tracks');
+  assertEqual(skipTravelPx(-500, 400, true), -400, 'live drag clamps');
+  assertEqual(skipTravelPx(500, 400, true), 400, 'live drag clamps +');
+  assert(
+    skipTravelPx(-500, 400, false) > -50 &&
+      skipTravelPx(-500, 400, false) < -40,
+    'dead edge asymptotes toward the resist cap',
+  );
+  assertEqual(skipTravelPx(0, 400, false), 0, 'rest edge stays home');
+  assert(
+    Math.abs(skipTravelPx(10_000, 400, false)) <= 48,
+    'resist never exceeds the cap',
+  );
+  // Commit: past 36% commits, under it springs home, a release-ward
+  // fling commits regardless of distance, a backward fling does not.
+  assert(resolveSkipCommit(-160, 0, 400, true), '36% commits');
+  assert(!resolveSkipCommit(-140, 0, 400, true), 'under 36% releases');
+  assert(resolveSkipCommit(-40, -900, 400, true), 'outward fling commits');
+  assert(!resolveSkipCommit(-40, 900, 400, true), 'inward fling releases');
+  assert(!resolveSkipCommit(-300, -900, 400, false), 'dead edge never commits');
+  assert(!resolveSkipCommit(NaN, 0, 400, true), 'NaN translation releases');
+  // The commit edge mirrors the drag direction.
+  assertEqual(skipCommitEdge(-10, 400), -400);
+  assertEqual(skipCommitEdge(10, 400), 400);
+}
+
+function testSkipPeek(): void {
+  const occ2 = fixtureQueueModel.items.find((i) => i.occurrenceId === 'occ-2');
+  assert(occ2 !== undefined, 'fixture occ-2 row missing');
+  const peek = skipPeekFor(fixtureQueueModel, 'occ-2');
+  assert(peek !== null, 'a live occurrence peeks');
+  assertEqual(peek!.occurrenceId, 'occ-2');
+  assertEqual(peek!.title, occ2!.row.title, 'peek mirrors the queue row');
+  assertEqual(peek!.artist, occ2!.row.artist, 'peek mirrors the artist');
+  assertEqual(
+    skipPeekFor(fixtureQueueModel, null),
+    null,
+    'a dead edge has no peek',
+  );
+  assertEqual(
+    skipPeekFor(fixtureQueueModel, 'occ-missing'),
+    null,
+    'a stale target has no peek',
+  );
+  // Identity is per-occurrence: the duplicated recording peeks its own
+  // queue row, not a recording-level match.
+  const dup = skipPeekFor(fixtureQueueModel, 'occ-6');
+  assert(dup !== null && dup.occurrenceId === 'occ-6', 'occurrence identity');
 }
 
 testGallerySafeArea();
 testStageMotion();
+testSkipPeek();
 
 console.log('ui-native tests passed');
 import { readdirSync, readFileSync } from 'node:fs';
 import {
+  resolveSkipCommit,
   resolveStageAnchor,
+  skipCommitEdge,
+  skipTravelPx,
   stageCollapsedAlpha,
   stageContentAlpha,
   stageScrimAlpha,

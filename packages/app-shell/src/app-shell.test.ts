@@ -24,6 +24,7 @@ import {
   playlistDownloadPlan,
   reportStoredDownloadError,
   rowActionsModel,
+  skipTargetIds,
   stageDownloadChip,
   suggestionMetaMap,
 } from './types.ts';
@@ -182,6 +183,82 @@ assertEqual(
   }),
   null,
   'no cursor → previous stays put',
+);
+
+// ---- skipTargetIds ---------------------------------------------------
+// The conveyor's pure target resolution: the blocked row's retained
+// position reads as 0 (the engine's own restart-window rule), and a
+// landing-less forward walk with a live cursor is the drain edge —
+// advance() stops the queue there — not a dead edge.
+
+assertEqual(
+  skipTargetIds({
+    occurrences,
+    currentOccurrenceId: 'occ-4',
+    dealtOrder: null,
+    failedIds: new Set(),
+    repeat: 'off',
+    positionMs: 12_000,
+    blocked: true,
+  }).previous,
+  'occ-3',
+  'a blocked current row steps previous back, never restarts itself',
+);
+
+assertEqual(
+  skipTargetIds({
+    occurrences,
+    currentOccurrenceId: 'occ-4',
+    dealtOrder: null,
+    failedIds: new Set(),
+    repeat: 'off',
+    positionMs: 12_000,
+    blocked: false,
+  }).previous,
+  'occ-4',
+  'the same position unblocked previews the restart the commit runs',
+);
+
+assertEqual(
+  skipTargetIds({
+    occurrences,
+    currentOccurrenceId: 'occ-8',
+    dealtOrder: null,
+    failedIds: new Set(),
+    repeat: 'off',
+    positionMs: 0,
+    blocked: false,
+  }).nextEndsQueue,
+  true,
+  'tail + live cursor drains the queue on commit — an actionable edge',
+);
+
+assertEqual(
+  skipTargetIds({
+    occurrences,
+    currentOccurrenceId: null,
+    dealtOrder: null,
+    failedIds: new Set(),
+    repeat: 'off',
+    positionMs: 0,
+    blocked: false,
+  }).nextEndsQueue,
+  false,
+  'no cursor → advance fails outright; the edge is genuinely dead',
+);
+
+assertEqual(
+  skipTargetIds({
+    occurrences,
+    currentOccurrenceId: 'occ-7',
+    dealtOrder: null,
+    failedIds: new Set(['occ-8']),
+    repeat: 'off',
+    positionMs: 0,
+    blocked: false,
+  }).nextEndsQueue,
+  true,
+  'a forward walk that finds only failed rows still drains on commit',
 );
 
 // ---- failedSkipIds ---------------------------------------------------

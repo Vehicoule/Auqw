@@ -407,6 +407,56 @@ export function failedSkipIds(
   return out;
 }
 
+/**
+ * The mini-player's conveyor targets in both directions, plus whether
+ * a landing-less forward swipe still drains the queue — `advance()`
+ * stops at the tail (or when a wrap finds only failed rows), which is
+ * an actionable edge, not a dead one. Only a null cursor makes the
+ * direction genuinely unavailable (advance fails 'no-result').
+ *
+ * `blocked` marks the current row unresumable: the engine reads a
+ * blocked row's retained position as 0 for the restart-window rules,
+ * so this walk substitutes the same or the previous target diverges
+ * from where the commit actually lands.
+ */
+export function skipTargetIds(input: {
+  readonly occurrences: readonly {
+    readonly occurrenceId: string;
+    readonly recordingId: string;
+  }[];
+  readonly currentOccurrenceId: string | null;
+  readonly dealtOrder: readonly string[] | null;
+  readonly failedIds: ReadonlySet<string>;
+  readonly repeat: 'off' | 'all' | 'one';
+  readonly positionMs: number;
+  /** `queue.blockedError !== undefined` — a blocked row's retained
+      position reads as 0 for the restart window, matching the
+      engine's own previous() walk. */
+  readonly blocked: boolean;
+}): {
+  readonly next: string | null;
+  readonly previous: string | null;
+  readonly nextEndsQueue: boolean;
+} {
+  const walkPosMs = input.blocked ? 0 : input.positionMs;
+  const target = (method: 'next' | 'previous'): string | null =>
+    advanceTargetId({
+      method,
+      occurrences: input.occurrences,
+      currentOccurrenceId: input.currentOccurrenceId,
+      dealtOrder: input.dealtOrder,
+      failedIds: input.failedIds,
+      repeat: input.repeat,
+      positionMs: walkPosMs,
+    });
+  const next = target('next');
+  return {
+    next,
+    previous: target('previous'),
+    nextEndsQueue: input.currentOccurrenceId !== null && next === null,
+  };
+}
+
 /** A row-actions sheet entry — `icon` is the subset of both
     platforms' IconName unions the action list uses. */
 export type ShellSheetAction = {

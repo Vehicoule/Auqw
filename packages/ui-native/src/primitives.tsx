@@ -218,6 +218,10 @@ export type PressableProps = {
   readonly pointerEvents?: 'auto' | 'none' | 'box-none' | 'box-only' | undefined;
   readonly compact?: boolean | undefined;
   readonly hitSlop?: Insets | undefined;
+  /** Press feedback — 'fill' washes the surface fg08 while held;
+      'opacity' dims instead (drag surfaces where the fill reads as a
+      persistent highlight, e.g. the mini-player row). */
+  readonly feedback?: 'fill' | 'opacity' | undefined;
   readonly style?:
   | StyleProp<ViewStyle>
   | ((state: { pressed: boolean }) => StyleProp<ViewStyle>);
@@ -237,6 +241,7 @@ export function Pressable({
   pointerEvents,
   compact = false,
   hitSlop,
+  feedback = 'fill',
   style,
   children,
 }: PressableProps) {
@@ -264,7 +269,10 @@ export function Pressable({
           minWidth: theme.sizes.touch,
           minHeight: theme.sizes.touch,
         },
-        pressed && !off && { backgroundColor: theme.colors.fg08 },
+        pressed && !off && feedback === 'fill' && {
+          backgroundColor: theme.colors.fg08,
+        },
+        pressed && !off && feedback === 'opacity' && { opacity: 0.82 },
         off && { opacity: 0.4 },
         typeof style === 'function' ? style({ pressed }) : style,
       ]}

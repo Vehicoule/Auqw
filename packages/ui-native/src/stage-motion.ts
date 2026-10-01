@@ -109,3 +109,79 @@ export function resolveStageAnchor(
   }
   return dragStart >= 0.5 ? 'expanded' : 'collapsed';
 }
+
+// ---- Horizontal track-skip conveyor (the OpenTune-style sideswipe) ----
+//
+// The mini-player's row tracks the finger 1:1 while the incoming track's
+// preview slides in from the edge it will occupy — a pager, not a button
+// strip. Release past the commit fraction (or fling hard enough) runs the
+// conveyor to the edge and commits the skip; anything less springs home.
+// Directions: translationX < 0 = next, > 0 = previous — matching the
+// physical page-forward/page-back of a horizontal pager.
+
+/** Release commit: drag crossing this fraction of the row's width commits. */
+export const SKIP_COMMIT_FRACTION = 0.36;
+
+/** Fling override: px/s beyond which the release direction wins outright. */
+export const SKIP_FLING_VELOCITY = 800;
+
+/**
+ * Edge rubber-band: with no track to land on the row still nudges so the
+ * direction reads as a boundary — tanh() approaches the cap smoothly
+ * instead of clamping dead (a linear dampener has a visible slope kink
+ * where the resistance starts).
+ */
+const SKIP_RESIST_CAP = 48;
+
+/**
+ * Finger→conveyor translation for one drag event. `allowed` is whether
+ * the dragged direction has a landing track at all; the row clamps to
+ * one width either way so a full-width pull never overshoots the
+ * incoming preview's seat.
+ */
+export function skipTravelPx(
+  translationX: number,
+  width: number,
+  allowed: boolean,
+): number {
+  'worklet';
+  const bound = Math.max(1, width);
+  if (!Number.isFinite(translationX)) return 0;
+  if (allowed) {
+    return Math.min(bound, Math.max(-bound, translationX));
+  }
+  return SKIP_RESIST_CAP * Math.tanh(translationX / SKIP_RESIST_CAP);
+}
+
+/**
+ * Release decision for the conveyor: a drag committed only when the
+ * direction was allowed AND it crossed the width fraction or flung past
+ * the velocity override. The velocity check keys on the drag's own
+ * direction (sign of translationX) so a back-swipe into the release
+ * can't commit the wrong side.
+ */
+export function resolveSkipCommit(
+  translationX: number,
+  velocityX: number,
+  width: number,
+  allowed: boolean,
+): boolean {
+  'worklet';
+  if (!allowed || !Number.isFinite(translationX)) return false;
+  const bound = Math.max(1, width);
+  if (Math.abs(translationX) >= bound * SKIP_COMMIT_FRACTION) {
+    return true;
+  }
+  return (
+    Number.isFinite(velocityX) &&
+    Math.abs(velocityX) >= SKIP_FLING_VELOCITY &&
+    Math.sign(velocityX) === Math.sign(translationX)
+  );
+}
+
+/** The conveyor's completion position for a committed direction. */
+export function skipCommitEdge(translationX: number, width: number): number {
+  'worklet';
+  const bound = Math.max(1, width);
+  return translationX < 0 ? -bound : bound;
+}

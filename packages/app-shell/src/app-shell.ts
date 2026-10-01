@@ -62,6 +62,7 @@ import {
   resolveLocale,
   setLocale,
   setToastSink,
+  skipPeekFor,
   systemLocaleTag,
   t,
   toCorrectionsModel,
@@ -98,12 +99,14 @@ import type {
   PlayerModel,
   ProviderSlot,
   ReviewFetch,
+  SkipPeek,
   StageMode,
   TrackRowModel,
   TransferModel,
 } from '@auqw/ui-shared';
 import {
   advanceTargetId,
+  skipTargetIds,
   failedSkipIds,
   playlistDownloadPlan,
   reportStoredDownloadError,
@@ -1181,6 +1184,61 @@ export function useAppShell<E extends { readonly type: string } = never>(
     downloads,
     localTick,
     localeTick,
+  ]);
+
+  // The mini-player's sideswipe conveyor previews each edge's landing
+  // row. Targets come from the same advanceTargetId the commit runs
+  // (dealt order, permanent-failure marks, repeat wrap, the 3 s
+  // previous-restart) plus the same attachability gate, so the card
+  // under your finger is the row the skip actually lands on — and a
+  // target that would be gated away is a dead edge, not a false
+  // promise.
+  const skipPreview = useMemo(() => {
+    const { occurrences, currentOccurrenceId, blockedError } = state.queue;
+    const failed = failedSkipIds(failedQueueErrors.current);
+    const targets = skipTargetIds({
+      occurrences,
+      currentOccurrenceId,
+      dealtOrder: state.shuffleOrder,
+      failedIds: failed,
+      repeat: state.repeat,
+      positionMs,
+      blocked: blockedError !== undefined,
+    });
+    const peek = (targetId: string | null): SkipPeek | null => {
+      if (targetId === null) {
+        return null;
+      }
+      const target = occurrences.find(
+        (o) => o.occurrenceId === targetId,
+      );
+      if (target === undefined) {
+        return null;
+      }
+      const blocked =
+        ports.gateAdvanceAlways === true
+          ? !canPlay(target.recordingId)
+          : online === false && !localPlayable(target.recordingId);
+      if (blocked) {
+        return null;
+      }
+      return skipPeekFor(queueModel, targetId);
+    };
+    return {
+      next: peek(targets.next),
+      previous: peek(targets.previous),
+      nextEndsQueue: targets.nextEndsQueue,
+    };
+  }, [
+    state.queue,
+    state.shuffleOrder,
+    state.repeat,
+    positionMs,
+    queueModel,
+    online,
+    canPlay,
+    localPlayable,
+    ports.gateAdvanceAlways,
   ]);
 
   // An ended queue surfaces itself: when playback goes idle with the
@@ -3367,6 +3425,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     stagePlayer,
     heldOccurrenceId,
     queueModel,
+    skipPreview,
     libraryModel,
     playlistModelFor,
     entityModelFor,
