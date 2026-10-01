@@ -22,6 +22,11 @@ const LADDER = [64, 128, 192, 256, 384, 512, 768, 1024, 2048] as const;
  * anything else 404s back to the unrewritten URL. */
 const DEEZER_LADDER = [28, 56, 120, 250, 500, 1000] as const;
 
+/** Deezer ladder only applies to real dzcdn.net hosts — a look-alike
+ * suffix (`dzcdn.net.evil.tld`) or a needle in the query must not
+ * pick the discrete-size ladder. */
+const DEEZER_HOST = /^https:\/\/(?:[a-z0-9-]{1,63}\.){0,4}dzcdn\.net(?::\d{1,5})?\//i;
+
 function pickSize(targetPx: number, ladder: readonly number[]): number {
   for (const step of ladder) {
     if (step >= targetPx) {
@@ -50,13 +55,13 @@ export function scaledArtworkUrl(url: string, targetPx: number): string {
   // googleusercontent (lh3/yt3/yt4/ggpht/gp5 — YouTube Music covers and
   // artist images): size rides a `=w544-h544-...` or `=s544` suffix;
   // any pixel value is servable.
-  const googleSize = url.match(/=w(\d+)-h(\d+)((?:-\S+)*)$/);
+  const googleSize = url.match(/=w(\d{1,8})-h(\d{1,8})(-\S{1,127})?$/);
   if (googleSize !== null) {
     const offered = parseInt(googleSize[1] ?? '0', 10);
     const px = Math.min(offered, pickSize(targetPx, LADDER));
-    return `${url.slice(0, googleSize.index ?? 0)}=w${px}-h${px}${googleSize[3]}`;
+    return `${url.slice(0, googleSize.index ?? 0)}=w${px}-h${px}${googleSize[3] ?? ''}`;
   }
-  const googleSquare = url.match(/=s(\d+)(-\S*)?$/);
+  const googleSquare = url.match(/=s(\d{1,8})(-\S{1,127})?$/);
   if (googleSquare !== null) {
     const offered = parseInt(googleSquare[1] ?? '0', 10);
     const px = Math.min(offered, pickSize(targetPx, LADDER));
@@ -64,9 +69,11 @@ export function scaledArtworkUrl(url: string, targetPx: number): string {
   }
   // Same infra, bare path (no `=` suffix): the CDN falls back to a
   // ~900px default — appending the size param picks the small one.
+  // The last segment must be parameter-free or the append would
+  // double a suffix too long for the matchers above.
   if (
-    /\.googleusercontent\.com\//.test(url) ||
-    /ggpht\.com\//.test(url)
+    (/\.googleusercontent\.com\//.test(url) || /ggpht\.com\//.test(url)) &&
+    /\/[^/?=]{0,255}$/.test(url)
   ) {
     const px = pickSize(targetPx, LADDER);
     return `${url}=w${px}-h${px}`;
@@ -83,7 +90,7 @@ export function scaledArtworkUrl(url: string, targetPx: number): string {
   // variant would silently reshape the artwork instead of shrinking it.
   if (sizedTail !== null && sizedTail[1] === sizedTail[2]) {
     const offered = parseInt(sizedTail[1] ?? '0', 10);
-    const ladder = url.includes('dzcdn.net') ? DEEZER_LADDER : LADDER;
+    const ladder = DEEZER_HOST.test(url) ? DEEZER_LADDER : LADDER;
     const px = Math.min(offered, pickSize(targetPx, ladder));
     if (px === offered) {
       return url;
