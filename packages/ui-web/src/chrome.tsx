@@ -165,6 +165,10 @@ export function DesktopChrome({
   return (
     <div className="uw-chrome" data-stage={open ? 'open' : 'closed'}>
       <aside className="uw-stage-col">
+        {/* Invisible drag grip — only rendered at the <860px overlay
+            breakpoint, where the floating column covers the toolbar
+            and the scrim covers the rest (see styles.css). */}
+        <div className="uw-stage-drag" aria-hidden="true" />
         <div className="uw-stage-col__body">{stage}</div>
       </aside>
       {/* Only visible under the 860px overlay breakpoint — tap-outside
