@@ -476,3 +476,40 @@ preload invoke has a main-side registration.
 ## Devin Secrets Needed
 
 None — the napi artifact is a local cargo build output.
+
+## Verified 2026-10-01 on devin/1790860626-desktop-sidebar (PR #240)
+
+- **HiDPI click geometry**: this box's display is 3200×2400 while the
+  computer-tool space is 1024×768 (scale 3.125). An `800×700` window
+  covers only ~255×224 tool px, and KDE adds ~16px x / ~0px y frame
+  offset (innerW 768 vs outer 800) so real_x = window_x + 16 + css_x.
+  A 32-css-px control is ~10 tool px — a 1-2 px mapping slip lands in
+  the `-webkit-app-region:drag` strip and silently no-ops. When a small
+  control "won't click", verify the real rect before calling it a bug.
+- **CDP ground truth**: relaunch with `--remote-debugging-port=9222`,
+  then `curl localhost:9222/json` → `webSocketDebuggerUrl`. Python
+  `websocket-client` needs `suppress_origin=True` (else 403). Use
+  `Runtime.evaluate` for DOM state (`data-stage` on `.uw-chrome`,
+  `elementFromPoint`, `getBoundingClientRect`) and
+  `Input.dispatchMouseEvent` press+release for trusted input.
+- **JS `.click()` does NOT fire Pressable onPress** — the world-bar
+  IconButtons bind pointer events, not click. A programmatic
+  `el.click()` no-ops even when the button is perfect; don't read a
+  `.click()` failure as a dead handler — dispatch press+release.
+- **Stage toggle = `.uw-world-bar__start button[0]`** with aria
+  'show player'/'hide player' (NOT 'stage'); `data-stage` on
+  `.uw-chrome` flips open/closed — the cheapest state probe.
+- **'update available' notification pill** is a pushed overlayStack
+  entry rendered `position:fixed; z-index:40` — while shown it COVERS
+  the world-bar `__start` cluster (toggle + search); elementFromPoint
+  returns its `uw-text` span and real clicks on the controls hit the
+  pill. If bar controls seem dead, check for an overlaying stack
+  notification first; its 'dismiss' × clears it.
+- **Escape is NOT bound on the stage overlay** — Escape lives in
+  stack.tsx sheets (menu popover, pushed pages). Escape doing nothing
+  on the floating stage is correct-by-design, not a regression.
+- **GPU FATAL flake**: `GPU process isn't usable. Goodbye` killed one
+  instance mid-run on this GPU-less box; a respawned window appeared
+  shortly after (different PIDs, parented to a foreign shell).
+  Verify process parentage/env before trusting a "recovered" window —
+  a foreign-shell instance may lack AUQW_NODE_BINDINGS/PLUGIN_DIR.
