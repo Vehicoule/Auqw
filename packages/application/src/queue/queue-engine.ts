@@ -53,7 +53,16 @@ function cloneError(error: AppError | undefined): AppError | undefined {
 function cloneOrigin(
   origin: QueueOrigin | undefined,
 ): QueueOrigin | undefined {
-  return origin === undefined ? undefined : Object.freeze({ ...origin });
+  if (origin === undefined) {
+    return undefined;
+  }
+  // Entity refs are objects — a caller mutating origin.ref after the
+  // play would rewrite the stored origin without a revision tick.
+  return Object.freeze(
+    origin.kind === 'entity'
+      ? { ...origin, ref: Object.freeze({ ...origin.ref }) }
+      : { ...origin },
+  );
 }
 
 function sameOrigin(

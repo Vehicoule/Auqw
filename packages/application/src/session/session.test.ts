@@ -3393,7 +3393,7 @@ async function queueOriginSemantics(): Promise<void> {
     liked,
     'clearQueue keeps the origin — the surviving row still belongs to it',
   );
-  void r.session.playRecordings([
+  const contextless = r.session.playRecordings([
     { recordingId: 'rA', selectedRef: ref('youtube-music', 'yA') },
   ]);
   await pump();
@@ -3402,12 +3402,58 @@ async function queueOriginSemantics(): Promise<void> {
     undefined,
     'a contextless play clears the origin',
   );
+  await emitPrepared(r, 'ctx');
+  await contextless;
   const invalid = await r.session.playRecordings(
     [{ recordingId: 'rA', selectedRef: ref('youtube-music', 'yA') }],
     { origin: { kind: 'nonsense' } as unknown as QueueOrigin },
   );
   assert(!invalid.ok, 'invalid origin rejected');
   assertEqual(invalid.error.kind, 'invalid-response');
+
+  // Source names ride the same bound the source records carry — a
+  // playlist named at the 512-char domain bound must still play.
+  const longName = 'x'.repeat(512);
+  const namedOrigin: QueueOrigin = {
+    kind: 'playlist',
+    playlistId: 'pl-1',
+    name: longName,
+  };
+  const named = r.session.playRecordings(
+    [{ recordingId: 'rA', selectedRef: ref('youtube-music', 'yA') }],
+    { origin: namedOrigin },
+  );
+  await pump();
+  assertDeepEqual(
+    readyOf(r).queue.origin,
+    namedOrigin,
+    'a source name at the domain bound stages',
+  );
+  await emitPrepared(r, 'b');
+  assert((await named).ok, 'the bound-name play prepares');
+
+  // The engine deep-freezes an entity ref on the way in — a caller
+  // mutating its own copy afterwards must not rewrite stored
+  // provenance behind the revision's back.
+  const refA = { provider: 'ytm', kind: 'album' as const, id: 'alb-1' };
+  const entityOrigin: QueueOrigin = {
+    kind: 'entity',
+    ref: refA,
+    name: 'Album',
+  };
+  const entityPlay = r.session.playRecordings(
+    [{ recordingId: 'rA', selectedRef: ref('youtube-music', 'yA') }],
+    { origin: entityOrigin },
+  );
+  await pump();
+  await emitPrepared(r, 'c');
+  assert((await entityPlay).ok, 'entity origin plays');
+  (refA as { provider: string }).provider = 'mutated';
+  const stored = readyOf(r).queue.origin;
+  assert(
+    stored?.kind === 'entity' && stored.ref.provider === 'ytm',
+    'stored origin ignores post-mint mutation of the caller ref',
+  );
   await r.session.dispose();
 }
 

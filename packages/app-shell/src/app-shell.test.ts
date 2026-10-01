@@ -3,7 +3,11 @@
 // the playlist download plan, and the stored-error retry toast. The
 // hook itself is thin wiring — the app-level journeys keep behavior
 // identical evidence.
-import { assert, assertEqual } from '@auqw/application/testing';
+import {
+  assert,
+  assertDeepEqual,
+  assertEqual,
+} from '@auqw/application/testing';
 import {
   setLocale,
   setToastSink,
@@ -16,20 +20,25 @@ import {
 import type {
   AppError,
   DownloadRecord,
+  EntityRef,
   TrackMetadata,
 } from '@auqw/application';
 import {
   advanceTargetId,
   failedSkipIds,
+  overlayRouteIndex,
   playlistDownloadPlan,
+  queueOriginRoute,
   reportStoredDownloadError,
   rowActionsModel,
+  sameOverlayRoute,
   skipTargetIds,
   stageDownloadChip,
   stageReopenMode,
   suggestionMetaMap,
 } from './types.ts';
 import type { SourceRef } from '@auqw/application';
+import type { ShellOverlay } from './types.ts';
 
 setLocale('en');
 
@@ -524,5 +533,89 @@ reportStoredDownloadError(null);
 assertEqual(toasts.length, 0, 'no stored error → no toast');
 reportStoredDownloadError({ kind: 'offline', message: 'no link' });
 assertEqual(toasts.length, 1, 'stored error toasts');
+
+// ---- queue provenance navigation ------------------------------------
+// "playing from …" routes to overlays when the source is a paged
+// surface, null for world tabs; a source already in the stack is
+// unwound to (topmost match), never duplicated.
+
+const albumRef: EntityRef = {
+  provider: 'ytm',
+  kind: 'album',
+  id: 'a1',
+};
+const artistRef: EntityRef = {
+  provider: 'ytm',
+  kind: 'artist',
+  id: 'ar1',
+};
+
+assertDeepEqual(
+  queueOriginRoute({ kind: 'collection', collection: 'liked' }),
+  { type: 'collection', key: 'liked' },
+  'collection origin routes to its collection overlay',
+);
+assertEqual(
+  queueOriginRoute({ kind: 'search', query: 'q' }),
+  null,
+  'search origin has no overlay route',
+);
+assert(
+  sameOverlayRoute(
+    { type: 'entity', ref: albumRef },
+    { type: 'entity', ref: { ...albumRef } },
+  ),
+  'entity routes match by ref identity, not object identity',
+);
+assert(
+  !sameOverlayRoute(
+    { type: 'entity', ref: albumRef },
+    { type: 'entity', ref: artistRef },
+  ),
+  'different entity refs are different routes',
+);
+assert(
+  sameOverlayRoute(
+    { type: 'collection', key: 'liked' },
+    { type: 'collection', key: 'liked' },
+  ) &&
+    !sameOverlayRoute(
+      { type: 'collection', key: 'liked' },
+      { type: 'playlist', playlistId: 'liked' },
+    ),
+  'collection matches on key; overlay type is part of the route',
+);
+
+const mixedRoutes: readonly (ShellOverlay | null)[] = [
+  { type: 'playlist', playlistId: 'mix' },
+  { type: 'entity', ref: albumRef },
+  { type: 'playlist', playlistId: 'mix' },
+];
+assertEqual(
+  overlayRouteIndex(mixedRoutes, { type: 'playlist', playlistId: 'mix' }),
+  2,
+  'unwind lands on the topmost matching copy',
+);
+assertEqual(
+  overlayRouteIndex(mixedRoutes, { type: 'entity', ref: albumRef }),
+  1,
+  'entity match unwinds to its stack position',
+);
+assertEqual(
+  overlayRouteIndex(mixedRoutes, {
+    type: 'collection',
+    key: 'history',
+  }),
+  -1,
+  'absent source pushes fresh',
+);
+assertEqual(
+  overlayRouteIndex(
+    [null, { type: 'collection', key: 'top50' }],
+    { type: 'collection', key: 'top50' },
+  ),
+  1,
+  'app-specific overlay entries (null after narrowing) are skipped',
+);
 
 console.log('app-shell tests passed');

@@ -381,13 +381,13 @@ export function isQueueOrigin(value: unknown): value is QueueOrigin {
       return (
         hasExactKeys(value, ['kind', 'playlistId', 'name']) &&
         isString(value['playlistId'], 64) &&
-        isString(value['name'], 256)
+        isString(value['name'], 512)
       );
     case 'entity':
       return (
         hasExactKeys(value, ['kind', 'ref', 'name']) &&
         isEntityRef(value['ref']) &&
-        isString(value['name'], 256)
+        isString(value['name'], 512)
       );
     case 'search':
       return (

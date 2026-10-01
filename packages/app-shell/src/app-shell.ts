@@ -109,7 +109,9 @@ import {
   advanceTargetId,
   skipTargetIds,
   failedSkipIds,
+  overlayRouteIndex,
   playlistDownloadPlan,
+  queueOriginRoute,
   reportStoredDownloadError,
   rowActionsModel,
   stageDownloadChip,
@@ -3423,34 +3425,55 @@ export function useAppShell<E extends { readonly type: string } = never>(
   }, [clearOverlays]);
 
   // Queue chrome "playing from …" — navigates back to the surface
-  // that minted the queue. ports.closeStageOnContextNav: mobile's
-  // sheet covers the world — it folds so the destination is visible;
-  // desktop's stage column sits beside the world and stays.
+  // that minted the queue. A source already in the overlay stack is
+  // unwound to (dismiss drops everything above it) instead of
+  // stacking a duplicate — Back should leave the source, not walk
+  // copies. ports.closeStageOnContextNav: mobile's sheet covers the
+  // world — it folds so the destination is visible; desktop's stage
+  // column sits beside the world and stays.
   const openQueueContext = useCallback(
     (origin: QueueOrigin) => {
-      switch (origin.kind) {
-        case 'collection':
-          pushOverlay({ type: 'collection', key: origin.collection });
-          break;
-        case 'playlist':
-          pushOverlay({ type: 'playlist', playlistId: origin.playlistId });
-          break;
-        case 'entity':
-          openEntity(origin.ref);
-          break;
-        case 'search':
-          selectTab('explore');
-          applySearchText(origin.query);
-          break;
-        case 'library':
-          selectTab('library');
-          break;
+      const target = queueOriginRoute(origin);
+      const match =
+        target === null
+          ? -1
+          : overlayRouteIndex(
+              overlayStack.map((entry) => shellOverlayOf(entry.overlay)),
+              target,
+            );
+      if (match !== -1) {
+        const above = overlayStack[match + 1];
+        if (above !== undefined) {
+          dismissOverlay(above.key);
+        }
+      }
+      if (match === -1) {
+        switch (origin.kind) {
+          case 'collection':
+            pushOverlay({ type: 'collection', key: origin.collection });
+            break;
+          case 'playlist':
+            pushOverlay({ type: 'playlist', playlistId: origin.playlistId });
+            break;
+          case 'entity':
+            openEntity(origin.ref);
+            break;
+          case 'search':
+            selectTab('explore');
+            applySearchText(origin.query);
+            break;
+          case 'library':
+            selectTab('library');
+            break;
+        }
       }
       if (ports.closeStageOnContextNav === true) {
         setStageOpen(false);
       }
     },
     [
+      overlayStack,
+      dismissOverlay,
       pushOverlay,
       openEntity,
       selectTab,
