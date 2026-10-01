@@ -28,8 +28,6 @@ import {
   stageCollapsedAlpha,
   stageSheetWrite,
 } from './stage-motion';
-// TEST-ONLY instrumentation — remove before merge
-const TLOG = (m: string) => console.log('[T]', Date.now(), m);
 import {
   IconButton,
   PlayPauseIcon,
@@ -546,10 +544,6 @@ export function MiniPlayer({
           collapsed,
           e.velocityY,
         );
-        scheduleOnRN(
-          TLOG,
-          `finalize target=${target} raw=${raw.toFixed(1)} velY=${e.velocityY.toFixed(0)} gone=${sheetGone.value.toFixed(3)}`,
-        );
         if (target === 'expanded') {
           if (sheetAnchor !== undefined) {
             sheetAnchor.value = 1;
@@ -559,7 +553,6 @@ export function MiniPlayer({
             sheetProgress.value = 1;
             scheduleOnRN(emit, 'onExpandCommit');
           } else if (sheetGone.value > 0.001) {
-            scheduleOnRN(TLOG, 'unwind_start');
             // A fling up out of a dismiss slide unwinds the slide to
             // rest before the sheet expands — the axes share one
             // visible offset, so two velocity-bearing springs would
@@ -573,22 +566,15 @@ export function MiniPlayer({
               0,
               { ...SHEET_SETTLE_SPRING, velocity: velocityG },
               (finished) => {
-                scheduleOnRN(
-                  TLOG,
-                  `unwind_fin ok=${finished} anchor=${sheetAnchor === undefined ? 'u' : sheetAnchor.value}`,
-                );
                 if (
                   finished === true &&
                   (sheetAnchor === undefined || sheetAnchor.value !== 0)
                 ) {
-                  scheduleOnRN(TLOG, 'expand_commit_fired');
                   sheetProgress.value = withSpring(1, {
                     ...SHEET_SETTLE_SPRING,
                     velocity: velocityP,
                   });
                   scheduleOnRN(emit, 'onExpandCommit');
-                } else {
-                  scheduleOnRN(TLOG, 'expand_commit_CANCELLED');
                 }
               },
             );

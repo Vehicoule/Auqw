@@ -1037,7 +1037,6 @@ function Main({
     }
     hadPlayerRef.current = hasPlayer;
   }, [player, stageGone]);
-
   const syncModel = useMemo(
     () =>
       toSyncModel({
@@ -1535,9 +1534,12 @@ function Main({
       // over it. Cancel the pending commit and swallow the press.
       // The unwind callback re-checks `stageAnchor` before expanding,
       // and queued commits gate on it in `commitAnchor` — writing 0
-      // cancels both rather than just moving the shared value.
+      // cancels both rather than just moving the shared value. A
+      // release from rest has its expand spring already in flight, so
+      // the surface retreats to the pill in the same breath.
       if (stageAnchor.value === 1) {
         stageAnchor.value = 0;
+        stageProgress.value = 0;
         return true;
       }
       if (tab !== 'home') {
@@ -1554,6 +1556,7 @@ function Main({
     overlayStack,
     expanded,
     stageAnchor,
+    stageProgress,
     tab,
     closeOverlay,
     closeRowActions,
