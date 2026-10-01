@@ -113,9 +113,9 @@
   .tbt.play .ic{width:18px;height:18px}
   /* the mode segment floats over the bottom edge — stage column and phone sheet alike */
   .seg{position:absolute;left:20px;right:20px;bottom:16px;display:flex;gap:2px;
-       background:var(--fg08);padding:3px;border-radius:999px;z-index:5}
+       background:var(--fg08);padding:3px;border-radius:10px;z-index:5}
   .seg span{display:flex;align-items:center;justify-content:center;gap:7px;flex:1;
-            padding:7px 0;font-size:10.5px;color:var(--fg-muted);border-radius:999px}
+            padding:7px 0;font-size:10.5px;color:var(--fg-muted);border-radius:7px}
   .seg span.on{background:var(--accent-soft);color:var(--accent);font-weight:700}
   .seg .ic{width:12px;height:12px}
 
@@ -135,11 +135,11 @@
   .world{flex:1;display:flex;flex-direction:column;min-width:0}
   .toolbar{height:56px;flex:none;display:flex;align-items:center;gap:8px;
            padding:0 16px 0 20px;position:relative}
-  /* world navigation = the same segmented pill, sized up */
+  /* world navigation = the same segmented construction, sized up */
   .navtabs{position:absolute;left:50%;transform:translateX(-50%);
-           display:flex;gap:2px;background:var(--fg08);padding:3px;border-radius:999px}
+           display:flex;gap:2px;background:var(--fg08);padding:3px;border-radius:10px}
   .navtabs span{display:flex;align-items:center;gap:7px;padding:6px 16px;font-size:12px;
-                color:var(--fg-muted);border-radius:999px}
+                color:var(--fg-muted);border-radius:7px}
   .navtabs span:hover{color:var(--fg)}
   .navtabs span.on{background:var(--accent-soft);color:var(--accent);font-weight:700}
   .navtabs .ic{width:13px;height:13px}
@@ -152,20 +152,19 @@
   .chrome-linux .caps span{width:38px;border-left:1px solid var(--hair)}
 
   .wbody{flex:1;padding:12px 24px 24px;overflow:hidden}
-  /* search = icon in the toolbar that expands into a field (GTK pattern) */
-  .srch{display:flex;align-items:center;gap:8px;height:32px;width:32px;overflow:hidden;
-        color:var(--fg-muted);padding:0 8px;border-radius:var(--r-ctl);
-        transition:width .18s ease,background .15s}
-  .srch:hover{background:var(--fg08);color:var(--fg)}
+  /* search = one compact field in the toolbar beside the toggle, always rendered;
+     on explore it carries the live query — there is no in-body field */
+  .srch{display:flex;align-items:center;gap:8px;height:32px;width:146px;overflow:hidden;flex:none;
+        color:var(--fg-muted);padding:0 8px;border-radius:var(--r-ctl);background:var(--fg08);
+        transition:border-color .15s,color .15s}
+  .srch:hover{color:var(--fg)}
   .srch>.ic{flex:none}
   .srch input{border:none;background:none;color:var(--fg);font:10.5px inherit;outline:none;
-              width:0;opacity:0;transition:opacity .12s}
+              width:100%;opacity:1}
   .srch kbd{font:9.5px inherit;color:var(--fg-muted);border:1px solid var(--hair);
-            padding:2px 6px;border-radius:4px;background:var(--bg);opacity:0;transition:opacity .12s}
-  .srch:focus-within{width:216px;background:var(--fg08);color:var(--fg)}
-  .srch.open{flex:1;margin:0 6px;background:var(--fg08);color:var(--fg)}
-  .srch:focus-within input,.srch.open input{width:100%;opacity:1}
-  .srch:focus-within kbd,.srch.open kbd{opacity:1}
+            padding:2px 6px;border-radius:4px;background:var(--bg)}
+  .srch:focus-within{color:var(--fg);box-shadow:0 0 0 3px var(--accent-soft)}
+  .srch.open{color:var(--fg)}
 
   .greet{color:var(--fg-bright);font-size:20px;font-weight:700;letter-spacing:-.02em;margin-top:8px}
   .greet-sub{color:var(--fg-muted);font-size:10.5px;margin:5px 0 4px}
@@ -187,7 +186,7 @@
   .transport .lk.on{color:var(--pink)}
   .transport .lk.on .ic{fill:currentColor}
   .chips{display:flex;gap:6px;margin:6px 0 14px}
-  .chips span{font-size:10px;color:var(--fg-muted);padding:5px 12px;border-radius:20px;
+  .chips span{font-size:10px;color:var(--fg-muted);padding:5px 12px;border-radius:9px;
               background:var(--fg08)}
   .chips span.on{background:var(--accent-soft);color:var(--accent);font-weight:700}
   .artists{display:flex;gap:16px;margin-top:4px}
@@ -203,7 +202,7 @@
   .ctile>.ic{color:var(--accent);width:15px;height:15px;flex:none}
   .ctile .n{font-size:11px;font-weight:600}
   .ctile small{display:block;color:var(--fg-muted);font-size:9px;font-weight:400;margin-top:2px}
-  .ctile .pb{margin-left:auto;width:28px;height:28px;border-radius:50%;flex:none;
+  .ctile .pb{margin-left:auto;width:28px;height:28px;border-radius:30%;flex:none;
              display:flex;align-items:center;justify-content:center;
              background:var(--fg08);color:var(--fg-muted)}
   .ctile .pb .ic{width:11px;height:11px}
@@ -305,7 +304,7 @@
   .status .sigs .batt rect:first-child{fill:none}
   .status .sigs .batt rect:nth-child(2){fill:currentColor;stroke:none}
   .msearch{margin:2px 14px 10px;background:var(--fg08);padding:8px 11px;color:var(--fg-muted);
-           font-size:10.5px;display:flex;gap:8px;align-items:center;border-radius:20px}
+           font-size:10.5px;display:flex;gap:8px;align-items:center;border-radius:10px}
   .mrows{flex:1;overflow:hidden;padding:0 6px}
   .mrows .r{display:flex;align-items:center;gap:11px;height:50px;padding:0 8px;border-radius:var(--r-ctl)}
   .mrows .r .thumb{width:40px;height:40px;flex:none;border-radius:var(--r-thumb);overflow:hidden;position:relative}
@@ -341,18 +340,18 @@
   .mini .mbt{width:32px;height:32px;display:flex;align-items:center;justify-content:center;
              border:none;color:var(--fg);background:transparent;border-radius:var(--r-ctl)}
   .mini .mbt .ic{width:16px;height:16px}
-  /* M3E mini: resume is a tonal pill — iOS: a glass circle */
+  /* M3E mini: resume is a tonal squircle — iOS: a glass circle */
   .phone-android .mini .mbt.play{background:var(--accent-soft);color:var(--accent);border-radius:12px}
   .phone-ios .mini .mbt.play{border:1px solid var(--hair);border-radius:50%;
                              background:rgba(255,255,255,.12);backdrop-filter:blur(8px)}
   .mini.glass{background:var(--glass);backdrop-filter:blur(14px)}
 
-  /* M3E navbar (Android) — tall bar, wide pill indicator */
+  /* M3E navbar (Android) — tall bar, wide indicator */
   .natnav{flex:none;background:var(--bg-deep);display:flex;padding:8px 0 10px}
   .natnav div{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;
               color:var(--fg-muted);font-size:9.5px}
   .natnav .icw{min-width:56px;height:30px;display:flex;align-items:center;justify-content:center;
-              border-radius:15px;padding:0 14px}
+              border-radius:10px;padding:0 14px}
   .natnav div.on{color:var(--accent);font-weight:700}
   .natnav div.on .icw{background:var(--accent-soft)}
   .gesture{height:14px;flex:none;display:flex;align-items:center;justify-content:center;background:var(--bg-deep)}
@@ -388,7 +387,7 @@
     background:linear-gradient(180deg,rgba(11,10,9,.30),rgba(11,10,9,.82))}
   .immersive > :not(.sheet-art):not(.sheet-frost):not(.sheet-scrim){position:relative;z-index:3}
   .immersive .radio-top{display:flex;align-items:center;align-self:center;gap:6px;
-    margin-top:8px;padding:6px 12px;border-radius:999px;background:var(--accent-soft);
+    margin-top:8px;padding:6px 12px;border-radius:10px;background:var(--accent-soft);
     color:var(--accent);font-size:10px;font-weight:700}
   .immersive .radio-top .ic{width:13px;height:13px}
   .immersive .t-meta{margin-top:auto;align-items:flex-end;padding-bottom:4px}
@@ -461,8 +460,9 @@
     No titlebar band, no stage-top strip — the Stage column is chromeless and runs to the top
     edge (macOS lights pin over it); the World's first row is its toolbar. The full player is one
     <b>artwork-led surface on both platforms</b> — backdrop art, progressive bottom frost, and a
-    floating <b>player | lyrics | queue</b> segment. Search is a full-width field inside World (it
-    can't collide with chrome). Track rows share <b>one anatomy across platforms</b>: artwork left
+    floating <b>player | lyrics | queue</b> segment. Search lives once — a compact field in the
+    World toolbar's right group on every tab; on Explore it carries the live query. Track rows
+    share <b>one anatomy across platforms</b>: artwork left
     (live eq overlay when playing), title · version, length, state + add-to-playlist right.
     Mobile is platform-native: M3E navbar + controls on Android, liquid glass on iOS.
   </p>
@@ -651,6 +651,22 @@
         </div>
         <div class="lbar"></div>
       </div>
+      <div class="t-meta" style="margin-top:8px">
+        <div class="tt"><h3>Self Aware (Live at the Observatory)</h3><div class="a">Temper City</div></div>
+        <div class="iconbt">
+          <span class="ib"><svg class="ic"><use href="#i-dl"/></svg></span>
+          <span class="ib"><svg class="ic"><use href="#i-listplus"/></svg></span>
+        </div>
+      </div>
+      <div class="wf" data-p="0.5" style="height:30px;margin-top:8px"></div>
+      <div class="transport">
+        <button class="tbt lk on"><svg class="ic"><use href="#i-heart"/></svg></button>
+        <button class="tbt"><svg class="ic"><use href="#i-shuffle"/></svg></button>
+        <button class="tbt main"><svg class="ic fill"><use href="#i-prev"/></svg></button>
+        <button class="tbt play"><svg class="ic fill"><use href="#i-pause"/></svg></button>
+        <button class="tbt main"><svg class="ic fill"><use href="#i-next"/></svg></button>
+        <button class="tbt"><svg class="ic"><use href="#i-repeat"/></svg></button>
+      </div>
       <div class="seg">
         <span><svg class="ic"><use href="#i-note"/></svg>player</span>
         <span class="on"><svg class="ic"><use href="#i-lyr"/></svg>lyrics</span>
@@ -661,6 +677,11 @@
       <div class="toolbar">
         <button class="tb"><svg class="ic"><use href="#i-side"/></svg></button>
         <div class="srch open"><svg class="ic"><use href="#i-search"/></svg><input value="roads portishead"><kbd>esc</kbd></div>
+        <div class="navtabs">
+          <span><svg class="ic"><use href="#i-home"/></svg>home</span>
+          <span class="on"><svg class="ic"><use href="#i-compass"/></svg>explore</span>
+          <span><svg class="ic"><use href="#i-lib"/></svg>library</span>
+        </div>
         <div class="tright">
           <button class="tb"><svg class="ic"><use href="#i-menu"/></svg></button>
           <div class="caps">
@@ -835,7 +856,7 @@
       state · add</b>. Mini-player is OpenTune-style: artwork left hugged by a <b>squared progress
       ring</b> (wavy M3E outline on Android, thin arc on iOS — artwork stays square), <b>like +
       resume</b> right, swipe sideways to skip, tap/swipe-up to open. The sheet uses <b>full-bleed
-      artwork with a progressive bottom frost</b>, a top radio pill, and a bottom-pinned two-line
+      artwork with a progressive bottom frost</b>, a top radio chip, and a bottom-pinned two-line
       title and control cluster. Media controls go platform-native: <b>M3E on Android</b>
       (filled accent squircle play, tonal prev/next) vs <b>liquid glass on iOS</b> (translucent
       circles, real blur — OS chrome plus the deliberate artwork frost). Navbars: M3 Expressive bar vs floating
@@ -915,25 +936,31 @@
 <div class="foot">
   WCO — <code>titleBarStyle: 'hidden'</code> + <code>titleBarOverlay</code> themed per scheme.
   The Stage column is chromeless: it runs to the top edge and macOS lights pin over its
-  top-left — no strip of its own. World toolbar = stage toggle · search icon · centered
-  segmented nav pills (same pill language as the mode switch, sized up) · menu · (win/linux
-  caption buttons overlay its right edge). Search is the GTK pattern: the icon expands into a field — when open it takes the
-  toolbar's width and the nav pills step aside (see the OLED frame), so nothing ever overlaps.
+  top-left — no strip of its own. World toolbar = stage toggle · centered
+  segmented nav (squared-with-rounded indicator, sized up) · compact search field + menu at
+  the right edge · (win/linux caption buttons overlay it). Search lives once — the field stays
+  on every tab and simply carries the query on Explore (see the OLED frame), so there is no
+  second field inside the body.
   <br><br>
   library — collections grid (liked · downloads · top 50 · history, play affordance on each) →
   your library (filter chips + sort + grid/list toggle + new-playlist card) → followed artists →
   recently added (shared row anatomy).
   Own design in the same language — not the GTK page.
   <br><br>
-  Stage modes — the floating segmented pill swaps the body: <b>player</b> (artwork backdrop →
-  radio pill → meta + download/add → waveform → transport like · shuffle · prev · play · next ·
-  repeat → floating segment) / <b>lyrics</b> (title + sync state + scrollable lines, active in
-  accent, estimated timing labeled honestly) / <b>queue</b>. The identical surface is mobile's
+  Stage modes — the floating segmented control swaps the pane above the cluster: <b>player</b>
+  (artwork backdrop → radio chip → meta + download/add → waveform → transport like · shuffle ·
+  prev · play · next · repeat → floating segment) / <b>lyrics</b> (title + sync state +
+  scrollable lines, active in accent, estimated timing labeled honestly) / <b>queue</b>.
+  The cluster — meta + actions, waveform, transport, mode segment — never leaves the surface:
+  lyrics and queue fill the space above it instead of replacing it (see the OLED frame).
+  The identical surface is mobile's
   expanded sheet — grab handle aside — and the phone's navbar hides beneath it.
   <br><br>
   icons — custom-rendered, motion by contract: eq bars on the playing thumb (live here), heart
-  fill-in, play⇄pause morph, rotate (sync), bounce (like). Radius ladder: frames 0–8 (per OS) ·
-  controls 6 · floating 12 · thumbs 5 · OS pills full. Accent #ff8a3d = active/progress only;
+  fill-in, play⇄pause morph, rotate (sync), bounce (like). Radius ladder: frame 0 ·
+  controls 8–11 (squared with rounded corners) · floating 16 · thumbs 5 · full round only where
+  round is the meaning (switch, knob, dots) — play is a ~30% squircle, not a circle.
+  Accent #ff8a3d = active/progress only;
   play = filled accent squircle (m3e) everywhere but iOS glass; liked = pink.
 </div>
 
