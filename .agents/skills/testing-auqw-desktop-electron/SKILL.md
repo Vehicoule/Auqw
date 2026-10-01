@@ -493,10 +493,13 @@ None — the napi artifact is a local cargo build output.
   `elementFromPoint`, `getBoundingClientRect`) and
   `Input.dispatchMouseEvent` press+release for trusted input.
 - **JS `.click()` DOES fire IconButton onPress** — `IconButton` binds
-  `onClick={onPress}` (primitives.tsx), so a programmatic
-  `el.click()` works when the button is actually under the cursor.
-  If a `.click()` no-ops, suspect element coverage (the update pill),
-  coordinate misses, or a corrupted instance — not the binding.
+  `onClick={onPress}` (primitives.tsx), and `el.click()` dispatches
+  directly on the element with NO hit-testing — it fires even when the
+  button is covered. If `.click()` appeared to no-op, the element was
+  wrong (e.g. `data-stage`-first-button vs a different control),
+  disabled (`uw-off` clears onClick), or the instance was corrupted —
+  coverage/coordinate misses only affect REAL pointer input, never
+  programmatic clicks.
 - **Stage toggle = `.uw-world-bar__start button[0]`** with aria
   'show player'/'hide player' (NOT 'stage'); `data-stage` on
   `.uw-chrome` flips open/closed — the cheapest state probe.
