@@ -1536,10 +1536,13 @@ function Main({
       // and queued commits gate on it in `commitAnchor` — writing 0
       // cancels both rather than just moving the shared value. A
       // release from rest has its expand spring already in flight, so
-      // the surface retreats to the pill in the same breath.
+      // the surface retreats to the pill in the same breath. A queued
+      // commit that ran just before this press is overridden by the
+      // close — the last write wins on the same JS run queue.
       if (stageAnchor.value === 1) {
         stageAnchor.value = 0;
         stageProgress.value = 0;
+        setExpanded(false);
         return true;
       }
       if (tab !== 'home') {

@@ -2010,12 +2010,19 @@ export function StageSheet({
               gone={gone}
               hostHeight={sheetH}
               onPress={() => {
-                // A tap expands unconditionally — mint the commit
-                // token so commitAnchor's gate passes; gesture swipes
-                // commit through onExpandCommit instead, which checks
-                // the token written at release (a back press clears
-                // it and the queued commit drops itself).
+                // A tap expands like a velocity-0 gesture release:
+                // mint the commit token AND launch the settle, so the
+                // expanded effect's gestureOwned check sees a spring
+                // actually in flight (a bare token would flip
+                // `expanded` while `progress` stays parked — a
+                // phantom sheet). Gesture swipes commit through
+                // onExpandCommit instead, which checks the token
+                // written at release (a back press clears it and the
+                // queued commit drops itself).
                 anchor.value = 1;
+                progress.value = theme.reducedMotion
+                  ? 1
+                  : withSpring(1, SHEET_SETTLE_SPRING);
                 commitAnchor(1);
               }}
               onExpandCommit={() => commitAnchor(1)}
