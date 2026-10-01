@@ -410,8 +410,9 @@ impl StreamRegistry {
     ) -> Result<ProbeRead, StreamError> {
         let session = self.session(handle)?;
         // Probe requests cap at the pump's chunk size — a decoration
-        // asks for bounded samples, not segments.
-        let want = max_len.clamp(1, session.config.chunk_bytes);
+        // asks for bounded samples, not segments. `chunk_bytes` floors
+        // at 1: a zeroed config must degrade, not panic the clamp.
+        let want = max_len.clamp(1, session.config.chunk_bytes.max(1));
         // Committed hit or a confirmed hole/EOF — the peek semantics,
         // with the total riding along either way.
         if let Some(bytes) = session.peek(position, want)? {
@@ -485,10 +486,19 @@ impl StreamRegistry {
             }
             FetchOutcome::Status(429, _, retry_after_ms) => {
                 // Stake the provider's ask session-wide — whichever
-                // leg fetches next owes the remainder.
+                // leg fetches next owes the remainder — bounded by the
+                // same `rate_limit_cooldown_cap` the pump's retry path
+                // honors, so an oversized ask can't freeze every fetch
+                // leg for the provider's full window.
                 let e = classify_status(429, position, retry_after_ms);
                 if let Some(ms) = retry_after_ms {
-                    session.set_cooldown(std::time::Instant::now() + Duration::from_millis(ms));
+                    let wait = Duration::from_millis(
+                        ms.min(
+                            u64::try_from(session.config.rate_limit_cooldown_cap.as_millis())
+                                .unwrap_or(u64::MAX),
+                        ),
+                    );
+                    session.set_cooldown(std::time::Instant::now() + wait);
                 }
                 Err(e)
             }
@@ -909,5 +919,104 @@ fn settle(report: &mut SweepReport, dir: &std::path::Path, stem: &str, corrupt: 
         } else {
             report.evicted += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fetch::FetchResponse;
+    use crate::testkit::*;
+
+    /// A prepared session whose head fill is disabled — `head_bytes`
+    /// 0 parks the pump before it requests — so the probe leg is the
+    /// only fetcher and scripted steps land on it in order.
+    async fn probed(cfg: StreamConfig, steps: Vec<Step>) -> (StreamRegistry, String) {
+        let fetch = Arc::new(ScriptedFetch::new(steps));
+        let reg = StreamRegistry::with_fetch(cfg, Handle::current(), fetch)
+            .unwrap_or_else(|e| panic!("registry: {e}"));
+        let info = reg
+            .prepare(source(), Arc::new(StaticRemint))
+            .unwrap_or_else(|e| panic!("prepare: {e}"));
+        (reg, info.handle)
+    }
+
+    /// The [`SessionInner`] behind `handle` — tests observe staked
+    /// cooldowns off it directly.
+    fn session_of(reg: &StreamRegistry, handle: &str) -> Arc<SessionInner> {
+        lock(&reg.sessions)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .get(handle)
+            .cloned()
+            .unwrap_or_else(|| panic!("no session {handle}"))
+    }
+
+    /// A probe `429` stakes the provider's `Retry-After` ask bounded
+    /// by `rate_limit_cooldown_cap` — the same bound the pump's retry
+    /// path honors — while the error still reports the real ask.
+    /// Uncapped, a >cap ask froze every fetch leg on the session for
+    /// the provider's full window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_429_stakes_capped_cooldown() {
+        let d = TestDir::new("probe429");
+        let mut cfg = test_config(&d);
+        cfg.head_bytes = 0;
+        let ask = 86_400_000u64; // a day — the uncapped wedge this guards
+        let (reg, h) = probed(
+            cfg,
+            vec![
+                Step::Reply(FetchResponse {
+                    status: 429,
+                    content_range: None,
+                    retry_after_ms: Some(ask),
+                    body: stream_body(vec![]),
+                }),
+                Step::Reply(resp(206, 0, 8, 1024)),
+            ],
+        )
+        .await;
+        let Err(e) = reg.probe(&h, 0, 8, true).await else {
+            panic!("a 429 probe must fail");
+        };
+        assert!(
+            matches!(
+                e,
+                StreamError::RateLimited {
+                    retry_after_ms: Some(ms),
+                    ..
+                } if ms == ask
+            ),
+            "error keeps the provider's real ask"
+        );
+        let cap = reg.config.rate_limit_cooldown_cap;
+        let remaining = session_of(&reg, &h)
+            .cooldown_remaining()
+            .unwrap_or_else(|| panic!("a 429 must stake a cooldown"));
+        assert!(remaining <= cap, "stake {remaining:?} exceeds cap {cap:?}");
+        // The window ends at the cap: once it elapses a fetch leg
+        // runs again instead of owing the provider's full ask.
+        tokio::time::sleep(cap + Duration::from_millis(50)).await;
+        let read = reg
+            .probe(&h, 0, 8, true)
+            .await
+            .unwrap_or_else(|e| panic!("post-cap probe: {e}"));
+        assert_eq!(read.bytes.len(), 8);
+    }
+
+    /// `chunk_bytes` 0 is a degenerate config the probe must survive:
+    /// `u64::clamp(1, 0)` panics. The request bounds at one byte and
+    /// the hole answer is the usual `fetch: false` shape.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_survives_zero_chunk_bytes() {
+        let d = TestDir::new("probe0chunk");
+        let mut cfg = test_config(&d);
+        cfg.head_bytes = 0;
+        cfg.chunk_bytes = 0;
+        let (reg, h) = probed(cfg, Vec::new()).await;
+        let read = reg
+            .probe(&h, 0, 8, false)
+            .await
+            .unwrap_or_else(|e| panic!("probe: {e}"));
+        assert!(read.bytes.is_empty() && !read.eof);
     }
 }

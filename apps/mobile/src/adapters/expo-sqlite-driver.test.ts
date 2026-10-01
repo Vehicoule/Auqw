@@ -23,6 +23,7 @@ function npe(): Error {
 class FakeDb implements ExpoSqliteDb {
   readonly execs: string[] = [];
   readonly runs: string[] = [];
+  readonly queries: string[] = [];
   closed = false;
   /** Throw this on the next call of each kind, once. */
   failExec: Error | null = null;
@@ -64,6 +65,7 @@ class FakeDb implements ExpoSqliteDb {
     sql: string,
     _params: SQLiteBindParams,
   ): Promise<T[]> {
+    this.queries.push(sql);
     if (this.dead) {
       return Promise.reject(npe());
     }
@@ -238,6 +240,35 @@ export async function run(): Promise<void> {
     assert(caught instanceof Error, 'non-dead error propagates');
     assertEqual((caught as Error).message, 'disk I/O error');
     assertEqual(r.opened.length, 1, 'real errors never self-heal');
+  }
+
+  // Ops can arrive on different storage tails (a backup rides the
+  // initialize tail, a transaction the transaction tail): with a dead
+  // registry underneath, both must share a single re-open and replay
+  // on the same fresh handle — no racing reopens, no leaked or
+  // sibling-closed registration.
+  {
+    const first = new FakeDb();
+    const second = new FakeDb();
+    const r = rig(first, second);
+    const driver = await createExpoSqliteDriver(undefined, r.io);
+    first.dead = true;
+    const [backupResult, txnResult] = await Promise.all([
+      driver.backup('v1'),
+      driver.transaction(work),
+    ]);
+    assertEqual(backupResult, undefined, 'backup completed');
+    assertEqual(txnResult, 'done', 'transaction completed');
+    assertEqual(r.opened.length, 2, 'a single re-open served both ops');
+    assert(!second.closed, 'fresh handle never closed mid-flight');
+    assert(
+      second.execs.includes('COMMIT'),
+      'transaction replayed on the fresh handle',
+    );
+    assert(
+      second.queries.includes('PRAGMA database_list'),
+      'backup replayed on the fresh handle',
+    );
   }
 
   // A handle dead on retry too surfaces the second failure — bounded.

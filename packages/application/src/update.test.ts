@@ -15,6 +15,7 @@ import type {
   UpdateApplyPorts,
   UpdateApplyTarget,
   UpdateFetchJson,
+  UpdateTarget,
 } from './update.ts';
 import { assert, assertDeepEqual, assertEqual } from './testing/assert.ts';
 
@@ -62,6 +63,11 @@ const RELEASE_JSON = {
   ],
 };
 
+const ANDROID_ARM64: UpdateTarget = {
+  os: 'android',
+  supportedAbis: ['arm64-v8a'],
+};
+
 function scriptedFetch(
   replies: readonly { status: number; body: unknown }[],
 ): { calls: number; fetchJson: UpdateFetchJson } {
@@ -87,6 +93,13 @@ export async function run(): Promise<void> {
   assertEqual(parseVersionTag('release-alpha-2'), null);
   assertEqual(parseVersionTag('v0.0.1-'), null);
   assertEqual(parseVersionTag('nightly'), null);
+  // the snapshot contract bounds version at 64 chars — a longer
+  // normalization is unshippable, skipped like an unparseable tag
+  assertEqual(
+    parseVersionTag(`v1.2.3-${'a'.repeat(58)}`),
+    `1.2.3-${'a'.repeat(58)}`,
+  );
+  assertEqual(parseVersionTag(`v1.2.3-${'a'.repeat(59)}`), null);
 
   // ---- semver ordering ----
 
@@ -102,6 +115,11 @@ export async function run(): Promise<void> {
   assert(compareVersions('1.0.0-alpha', '1.0.0-alpha.1') < 0);
   assert(compareVersions('1.0.0-alpha.1', '1.0.0-alpha.beta') < 0);
   assert(compareVersions('garbage', '0.0.1') === 0);
+  // a hyphen is legal INSIDE a prerelease identifier — 'alpha-1'
+  // is one alphanumeric identifier, not a truncated 'alpha'
+  assert(compareVersions('1.0.0-alpha-1', '1.0.0-alpha.5') > 0);
+  assert(compareVersions('1.0.0-alpha-1', '1.0.0-alpha') > 0);
+  assert(compareVersions('1.0.0-alpha-1', '1.0.0-beta') < 0);
 
   // ---- release parsing ----
 
@@ -163,8 +181,74 @@ export async function run(): Promise<void> {
 
   const assets = parsed.assets;
   assertEqual(
-    pickArtifact(assets, { os: 'android' })?.name,
+    pickArtifact(assets, ANDROID_ARM64)?.name,
     'auqw-0.0.1-alpha.18-android-arm64-v8a.apk',
+  );
+  // an x86_64 device must refuse the arm64-only asset — array-first
+  // would download ~50 MB into INSTALL_FAILED_NO_MATCHING_ABIS
+  assertEqual(
+    pickArtifact(assets, { os: 'android', supportedAbis: ['x86_64'] }),
+    null,
+  );
+  // several splits → the device's ABI preference order wins, not
+  // asset order; 'universal' is the fallback for an unmatched list
+  const multiAbi = [
+    ...assets,
+    {
+      name: 'auqw-0.0.1-alpha.18-android-x86_64.apk',
+      url: 'https://github.com/Vehicoule/Auqw/releases/download/v0.0.1-alpha.18/auqw-0.0.1-alpha.18-android-x86_64.apk',
+    },
+    {
+      name: 'auqw-0.0.1-alpha.18-android-universal.apk',
+      url: 'https://github.com/Vehicoule/Auqw/releases/download/v0.0.1-alpha.18/auqw-0.0.1-alpha.18-android-universal.apk',
+    },
+  ];
+  assertEqual(
+    pickArtifact(multiAbi, { os: 'android', supportedAbis: ['x86_64'] })
+      ?.name,
+    'auqw-0.0.1-alpha.18-android-x86_64.apk',
+  );
+  assertEqual(
+    pickArtifact(multiAbi, {
+      os: 'android',
+      supportedAbis: ['armeabi-v7a'],
+    })?.name,
+    'auqw-0.0.1-alpha.18-android-universal.apk',
+  );
+  // a version prerelease may itself contain '-android-' — the LAST
+  // tag carries the abi; and a wall of repeated tags parses
+  // linearly, never backtracking (CodeQL js/redos on the regex)
+  assertEqual(
+    pickArtifact(
+      [
+        {
+          name: 'auqw-1.2.3-android-beta-android-arm64-v8a.apk',
+          url: 'https://example.com/a',
+        },
+      ],
+      { os: 'android', supportedAbis: ['arm64-v8a'] },
+    )?.name,
+    'auqw-1.2.3-android-beta-android-arm64-v8a.apk',
+  );
+  assertEqual(
+    pickArtifact(
+      [{ name: `${'-android-'.repeat(4000)}x.apk`, url: 'https://example.com/b' }],
+      ANDROID_ARM64,
+    ),
+    null,
+  );
+  // pickArtifact's own basename gate — an artifact built outside
+  // parseRelease (the seam's sanitizing boundary) stages into the
+  // same dirs, so separators must not pick either
+  assertEqual(
+    pickArtifact(
+      [
+        { name: '../escape.AppImage', url: 'https://example.com/a' },
+        { name: 'sub/dir.AppImage', url: 'https://example.com/b' },
+      ],
+      { os: 'linux', prefer: 'appimage' },
+    ),
+    null,
   );
   assertEqual(
     pickArtifact(assets, { os: 'linux', prefer: 'appimage' })?.name,
@@ -183,11 +267,11 @@ export async function run(): Promise<void> {
     'auqw-0.0.1-alpha.18-win-x64-setup.exe',
   );
   assertEqual(pickArtifact(assets, { os: 'other' }), null);
-  assertEqual(pickArtifact([], { os: 'android' }), null);
+  assertEqual(pickArtifact([], ANDROID_ARM64), null);
 
   // ---- checksums pick + parse ----
 
-  assertEqual(checksumsNameFor({ os: 'android' }), 'SHA256SUMS-Android.txt');
+  assertEqual(checksumsNameFor(ANDROID_ARM64), 'SHA256SUMS-Android.txt');
   assertEqual(
     checksumsNameFor({ os: 'linux', prefer: 'appimage' }),
     'SHA256SUMS-Linux.txt',
@@ -197,7 +281,7 @@ export async function run(): Promise<void> {
   assertEqual(checksumsNameFor({ os: 'other' }), null);
 
   assertEqual(
-    pickChecksums(assets, { os: 'android' })?.name,
+    pickChecksums(assets, ANDROID_ARM64)?.name,
     'SHA256SUMS-Android.txt',
   );
   assertEqual(
@@ -227,7 +311,7 @@ export async function run(): Promise<void> {
 
   const service = createUpdateService({
     currentVersion: '0.0.1-alpha.1',
-    target: { os: 'android' },
+    target: ANDROID_ARM64,
     fetchJson: scriptedFetch([{ status: 200, body: [RELEASE_JSON] }]).fetchJson,
   });
 
@@ -617,7 +701,7 @@ export async function run(): Promise<void> {
     const { calls, ports } = fakePorts();
     const svc = createUpdateService({
       currentVersion: '0.0.1-alpha.1',
-      target: { os: 'android' },
+      target: ANDROID_ARM64,
       fetchJson: scriptedFetch([{ status: 200, body: [RELEASE_JSON] }])
         .fetchJson,
       applier: createUpdateApplier(ports),

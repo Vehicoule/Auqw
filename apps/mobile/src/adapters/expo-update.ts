@@ -29,12 +29,15 @@ const RELEASE_DOWNLOAD_PREFIX =
  * unknown-sources gate refuses, installApk opens this app's page of
  * that settings surface and returns 'needs-permission', which lands
  * as a retryable 'failed' apply — never a claimed install. On every
- * other platform, and on Android when the release ships no APK asset,
- * `action` degrades to 'open' and `act()` opens the release page.
+ * other platform, and on Android when the release ships no APK asset
+ * or none built for the device's ABIs, `action` degrades to 'open'
+ * and `act()` opens the release page.
  */
 export function createExpoUpdate(currentVersion: string): UpdateShellPort {
   const target: UpdateTarget =
-    Platform.OS === 'android' ? { os: 'android' } : { os: 'other' };
+    Platform.OS === 'android'
+      ? { os: 'android', supportedAbis: AuqwExpo.supportedAbis() }
+      : { os: 'other' };
   // The seam probe answers capability, not grant — the unknown-
   // sources switch is per-user and only checked at install time.
   const canInstall =

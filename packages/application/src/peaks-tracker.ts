@@ -128,14 +128,16 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
   const gatedNullMs = new Map<string, number>();
   const inflight = new Map<string, Inflight>();
   /**
-   * The newest pull that deduped onto a shared sweep, per content
-   * key. The dedupe only drops the DUPLICATE work — the request
-   * itself is still owed: if the active sweep dies without a
+   * The pulls that deduped onto a shared sweep, per content key,
+   * keyed by request id. The dedupe only drops the DUPLICATE work —
+   * every request is still owed: if the active sweep dies without a
    * finished profile (cancel, transient death past retry), the
-   * waiting target is promoted into its own extraction instead of
-   * silently losing its bars.
+   * newest surviving waiter is promoted into its own extraction
+   * instead of silently losing its bars. One slot per key would let
+   * a later dedupe overwrite an earlier waiter whose consumer is
+   * still mounted — its pull would vanish with the slot.
    */
-  const pending = new Map<string, PeaksTarget>();
+  const pending = new Map<string, Map<string, PeaksTarget>>();
 
   function evict(): void {
     while (cache.size > cacheLimit) {
@@ -215,7 +217,12 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
     // finishing owes the waiter its own extraction.
     for (const running of inflight.values()) {
       if (running.key === key) {
-        pending.set(key, target);
+        let waiters = pending.get(key);
+        if (waiters === undefined) {
+          waiters = new Map<string, PeaksTarget>();
+          pending.set(key, waiters);
+        }
+        waiters.set(id, target);
         return;
       }
     }
@@ -381,11 +388,18 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
    * so promotion costs nothing when the sweep actually delivered.
    */
   function promotePending(key: string): void {
-    const target = pending.get(key);
-    if (target === undefined) {
+    const waiters = pending.get(key);
+    if (waiters === undefined || waiters.size === 0) {
       return;
     }
-    pending.delete(key);
+    // Map iteration is insertion order — the last entry is the
+    // newest waiting target.
+    const newestId = Array.from(waiters.keys()).pop()!;
+    const target = waiters.get(newestId)!;
+    waiters.delete(newestId);
+    if (waiters.size === 0) {
+      pending.delete(key);
+    }
     if (finalized.has(key)) {
       return;
     }
@@ -398,10 +412,16 @@ export function createPeaksTracker(deps: PeaksTrackerDeps): {
       const entry = inflight.get(id);
       if (entry === undefined) {
         // The id may sit in `pending` — a deduped waiter the caller
-        // abandoned before its sweep ever started.
+        // abandoned before its sweep ever started. Only its own
+        // entry goes: sibling waiters on the same content key are
+        // still owed their promotion.
         const key = contentKey(id);
-        if (pending.get(key)?.id === id) {
-          pending.delete(key);
+        const waiters = pending.get(key);
+        if (waiters !== undefined) {
+          waiters.delete(id);
+          if (waiters.size === 0) {
+            pending.delete(key);
+          }
         }
         return;
       }

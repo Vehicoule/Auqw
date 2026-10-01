@@ -603,4 +603,43 @@ export async function run(): Promise<void> {
     await settle();
     assertEqual(calls.length, 1, 'a cancelled waiter never promotes');
   }
+
+  // Two pulls dedupe onto one sweep: cancelling the newest waiter and
+  // then losing the covering sweep still owes the surviving waiter
+  // its own extraction — a single pending slot would have lost it to
+  // the overwrite.
+  {
+    const { calls, port } = fakePort();
+    const tracker = createPeaksTracker({
+      port,
+      clock: new FakeClock(),
+      retryLimit: 0,
+    });
+    tracker.pull(target('r-15|a1', 'h1'));
+    await settle();
+    tracker.pull(target('r-15|a2', 'h2'));
+    tracker.pull(target('r-15|a3', 'h3'));
+    await settle();
+    assertEqual(calls.length, 1, 'both pulls dedupe onto the sweep');
+    tracker.cancel('r-15|a3');
+    calls[0]!.resolve(err(appError('unavailable', 'stalled fill')));
+    await settle();
+    assertEqual(
+      calls.length,
+      2,
+      'the surviving waiter promotes after the sweep dies',
+    );
+    assertEqual(
+      calls[1]!.request.handle,
+      'h2',
+      'the promoted sweep runs the surviving waiter, not the cancelled one',
+    );
+    calls[1]!.resolve(ok(PEAKS));
+    await settle();
+    assertEqual(
+      tracker.get('r-15|a2'),
+      PEAKS,
+      'the owed waiter lands its bars',
+    );
+  }
 }

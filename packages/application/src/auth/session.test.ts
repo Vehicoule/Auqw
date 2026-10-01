@@ -4,8 +4,11 @@
  * denial, expiry, cancellation, missing refresh_token), custody
  * round-trips and corruption, sign-out ordering (host slot cleared
  * before custody), the client-id override's persistence across
- * sign-out, and the expiry renew lane (success, transient backoff,
- * revoked-grant drop). No token material is asserted into messages.
+ * sign-out, the override's single-writer window (eager assign,
+ * deduped restore retry), dismissal of a landed grant, the
+ * unread-custody verb refusal, dispose teardown, and the expiry
+ * renew lane (success, transient backoff, revoked-grant drop). No
+ * token material is asserted into messages.
  */
 import { appError, err, ok } from '../errors.ts';
 import type { AppError, Result } from '../errors.ts';
@@ -1290,6 +1293,290 @@ async function testDeniedClearsPendingRecord(): Promise<void> {
   assertEqual(record.current?.pendingFlow, undefined);
 }
 
+// ------------------------------------------------------------------
+// Single-writer + teardown races
+// ------------------------------------------------------------------
+
+async function testOverrideWriteWindowIsLive(): Promise<void> {
+  // The override takes effect before its custody write resolves — a
+  // write queued during the roundtrip carries the new id, and the
+  // snapshot reads it immediately.
+  const { custody, record } = fakeCustody({
+    v: 1,
+    refreshToken: 'r1',
+    clientId: 'stored',
+    grantClientId: 'g1',
+  });
+  const gate = deferred<Result<void>>();
+  const origWrite = custody.write;
+  let gated = true;
+  custody.write = (next) => {
+    if (gated) {
+      gated = false;
+      return gate.promise;
+    }
+    return origWrite(next);
+  };
+  const session = createAuthSession({
+    custody,
+    oauth: fakeOAuth().oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  await session.restore();
+  const pending = session.setClientOverride('new-id');
+  await flush();
+  // Live before the write lands — a queued write can't revert it.
+  assertEqual(session.snapshot().clientId, 'new-id');
+  const out = session.signOut();
+  gate.resolve(ok(undefined));
+  await pending;
+  await out;
+  await flush();
+  // signOut's whole-record write queued behind the override's — it
+  // must carry 'new-id', not the stale 'stored' it would have read
+  // under assign-on-resolve.
+  assertEqual(record.current?.clientId, 'new-id');
+  assertEqual(session.snapshot().clientId, 'new-id');
+}
+
+async function testOverrideWriteFailureReverts(): Promise<void> {
+  // A rejected override write rolls the in-memory preference back —
+  // the failed preference must not linger as if it persisted.
+  const { custody } = fakeCustody({
+    v: 1,
+    refreshToken: null,
+    clientId: 'stored',
+    grantClientId: null,
+  });
+  custody.write = () =>
+    Promise.resolve(err(appError('unavailable', 'seal failed')));
+  const session = createAuthSession({
+    custody,
+    oauth: fakeOAuth().oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  await session.restore();
+  const out = await session.setClientOverride('new-id');
+  assert(!out.ok, 'override reported success on a failed write');
+  assertEqual(session.snapshot().clientId, 'stored');
+}
+
+async function testRestoreRetryDedupes(): Promise<void> {
+  // A second restore() while a retry is in flight awaits the same
+  // read — a parallel stale read resolving after a verb's write
+  // would clobber the newer in-memory state.
+  const { custody } = fakeCustody(null);
+  custody.read = () =>
+    Promise.resolve(err(appError('unavailable', 'store: io')));
+  const session = createAuthSession({
+    custody,
+    oauth: fakeOAuth().oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  await session.restore();
+  const reads: ReturnType<
+    typeof deferred<Result<AuthCustodyRecord | null>>
+  >[] = [];
+  custody.read = () => {
+    const d = deferred<Result<AuthCustodyRecord | null>>();
+    reads.push(d);
+    return d.promise;
+  };
+  const r1 = session.restore();
+  const r2 = session.restore();
+  await flush();
+  assertEqual(reads.length, 1, 'parallel restore reads issued');
+  reads[0]!.resolve(
+    ok({ v: 1, refreshToken: null, clientId: 'stored', grantClientId: null }),
+  );
+  await r1;
+  await r2;
+  const set = await session.setClientOverride('new-id');
+  assert(set.ok);
+  assertEqual(session.snapshot().clientId, 'new-id');
+}
+
+async function testCancelSignInRetractsLandedGrant(): Promise<void> {
+  // Sheet dismissal while the granted mint is mid-apply: the grant
+  // tears down like a sign-out — host slot nulled, custody retracted,
+  // no live bearer under 'signed-out'.
+  const { custody, record } = fakeCustody(null);
+  const { oauth, begins, polls } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  polls.push(ok({ type: 'granted', grant: tokenGrant() }));
+  const pending = deferred<void>();
+  const applied: (string | null)[] = [];
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+      if (t === 'access-1') {
+        return pending.promise;
+      }
+      return Promise.resolve();
+    },
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  await flush();
+  // The grant is persisted and the access apply is parked in flight.
+  assertEqual(record.current?.refreshToken, 'refresh-1');
+  session.cancelSignIn();
+  pending.resolve();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-out');
+  assertEqual(session.snapshot().bearerLive, false);
+  assertDeepEqual(applied, ['access-1', null]);
+  assertEqual(record.current?.refreshToken, null);
+}
+
+async function testCancelSignInKeepsSignedInGrant(): Promise<void> {
+  // Sheet dismissal on a live sign-in must not retract the stored
+  // grant — the teardown covers only grants a dismissed flow minted.
+  const { custody, record } = fakeCustody({
+    v: 1,
+    refreshToken: 'r-stored',
+    clientId: 'kept',
+    grantClientId: 'g1',
+  });
+  const { oauth, refreshes } = fakeOAuth();
+  refreshes.push(ok(tokenGrant({ refreshToken: null })));
+  const applied: (string | null)[] = [];
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: fakeClock().clock,
+  });
+  await session.restore();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-in');
+  session.cancelSignIn();
+  await flush();
+  assertEqual(session.snapshot().status.state, 'signed-in');
+  assertEqual(record.current?.refreshToken, 'r-stored');
+  assertDeepEqual(applied, ['access-1']);
+}
+
+async function testSignOutRefusesUnreadCustody(): Promise<void> {
+  // signOut shares the restoreFailed refusal every record-changing
+  // verb honors — an unread record must not be rewritten from the
+  // unloaded in-memory view.
+  const { custody, record } = fakeCustody({
+    v: 1,
+    refreshToken: 'r-stored',
+    clientId: 'kept',
+    grantClientId: 'g1',
+  });
+  custody.read = () =>
+    Promise.resolve(err(appError('unavailable', 'store: io')));
+  const session = createAuthSession({
+    custody,
+    oauth: fakeOAuth().oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  await session.restore();
+  const out = await session.signOut();
+  assert(!out.ok, 'signOut wrote over an unread record');
+  assertEqual(out.error.kind, 'unavailable');
+  assertEqual(record.current?.refreshToken, 'r-stored');
+  assertEqual(record.current?.clientId, 'kept');
+}
+
+async function testDisposeStopsLanes(): Promise<void> {
+  // dispose() disarms the renew lane and dead-flags queued work — a
+  // torn-down session mints nothing and writes nothing.
+  const { custody } = fakeCustody({
+    v: 1,
+    refreshToken: 'r1',
+    clientId: null,
+    grantClientId: null,
+  });
+  const { oauth, refreshes, calls } = fakeOAuth();
+  refreshes.push(ok(tokenGrant({ accessToken: 'a1', refreshToken: null })));
+  const applied: (string | null)[] = [];
+  const clock = fakeClock();
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: (t) => {
+      applied.push(t);
+    },
+    clock: clock.clock,
+  });
+  await session.restore();
+  await flush();
+  assertDeepEqual(applied, ['a1']);
+  assertEqual(clock.armed.length, 1);
+  session.dispose();
+  assertEqual(clock.armed.length, 0, 'renew timer survived dispose');
+  refreshes.push(ok(tokenGrant({ accessToken: 'a2', refreshToken: null })));
+  session.retryNow();
+  await flush();
+  assertEqual(
+    calls.filter((c) => c.kind === 'refresh').length,
+    1,
+    'disposed session minted a token',
+  );
+  assertDeepEqual(applied, ['a1']);
+}
+
+async function testDisposedVerbsInert(): Promise<void> {
+  // A disposed session's verbs no-op — nothing mints, writes, or
+  // publishes on a dead lane (signed-out, so only `disposed` can
+  // be holding them back).
+  const { custody, record } = fakeCustody(null);
+  const { oauth, calls } = fakeOAuth();
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {},
+    clock: fakeClock().clock,
+  });
+  await session.restore();
+  session.dispose();
+  session.beginSignIn();
+  session.cancelSignIn();
+  session.retryNow();
+  const out = await session.signOut();
+  const over = await session.setClientOverride('late');
+  await flush();
+  assertEqual(calls.length, 0, 'disposed session ran an oauth call');
+  assert(out.ok, 'disposed signOut reported a failure');
+  assert(!over.ok, 'disposed setClientOverride reported success');
+  assertEqual(session.snapshot().status.state, 'signed-out');
+  assertEqual(record.current, null);
+}
+
+async function testApplyThrowFailsHonestly(): Promise<void> {
+  // A failed apply surfaces typed failure — the session must never
+  // claim a live bearer on an empty host slot.
+  const { custody } = fakeCustody(null);
+  const { oauth, begins, polls } = fakeOAuth();
+  begins.push(ok(deviceGrant()));
+  polls.push(ok({ type: 'granted', grant: tokenGrant() }));
+  const session = createAuthSession({
+    custody,
+    oauth,
+    applyToken: () => {
+      throw appError('unavailable', 'auth: host token slot absent');
+    },
+    clock: fakeClock().clock,
+  });
+  session.beginSignIn();
+  await flush();
+  const status = session.snapshot().status;
+  assert(status.state === 'failed', 'absent slot still claimed sign-in');
+  assertEqual(session.snapshot().bearerLive, false);
+}
+
 export async function run(): Promise<void> {
   testCustodyValidator();
   await testRestoreEmpty();
@@ -1323,4 +1610,13 @@ export async function run(): Promise<void> {
   await testDeniedClearsPendingRecord();
   await testPendingWriteFailureFailsBegin();
   await testOverrideDoesNotReviveFailedPending();
+  await testOverrideWriteWindowIsLive();
+  await testOverrideWriteFailureReverts();
+  await testRestoreRetryDedupes();
+  await testCancelSignInRetractsLandedGrant();
+  await testCancelSignInKeepsSignedInGrant();
+  await testSignOutRefusesUnreadCustody();
+  await testDisposeStopsLanes();
+  await testDisposedVerbsInert();
+  await testApplyThrowFailsHonestly();
 }

@@ -118,8 +118,14 @@ const guardNative = async <T>(call: Promise<T>): Promise<T> => {
  * the thing that is dead), re-`openDb`s a fresh registration, and
  * replays the unit of work once. A second failure propagates; it is
  * genuinely dead (file gone, registry wedged for the process), not a
- * stale handle. Storage serializes transactions per driver instance,
- * so the binding swap can never interleave another in-flight turn.
+ * stale handle.
+ *
+ * Every op — transaction, backup — queues on one tail inside the
+ * driver: storage serializes transactions on their own tail while
+ * backups ride the initialize tail, so without this a `run`/reopen
+ * could overlap a sibling op's — a concurrent re-open closing the
+ * fresh handle mid-replay, or two racing opens leaking a live
+ * registration the binding never references.
  */
 export async function createExpoSqliteDriver(
   path: string | undefined,
@@ -179,20 +185,28 @@ export async function createExpoSqliteDriver(
     db = await openLive();
   };
 
+  let opTail: Promise<void> = Promise.resolve();
   const withDb = async <T>(
     run: (db: ExpoSqliteDb) => Promise<T>,
   ): Promise<T> => {
-    try {
-      return await run(db);
-    } catch (thrown) {
-      // Only a marked native failure replays — a callback error with a
-      // look-alike message propagates without re-running `work`.
-      if (!(thrown instanceof DeadHandle)) {
-        throw thrown;
+    const result = opTail.then(async () => {
+      try {
+        return await run(db);
+      } catch (thrown) {
+        // Only a marked native failure replays — a callback error with
+        // a look-alike message propagates without re-running `work`.
+        if (!(thrown instanceof DeadHandle)) {
+          throw thrown;
+        }
       }
-    }
-    await reopen();
-    return await run(db);
+      await reopen();
+      return await run(db);
+    });
+    opTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   };
 
   const checkTag = (tag: string): void => {

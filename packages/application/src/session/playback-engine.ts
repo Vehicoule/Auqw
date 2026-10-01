@@ -310,6 +310,13 @@ export type PrewarmFocus =
 export type PrewarmInput = {
   readonly recordingIds?: readonly string[];
   readonly occurrenceIds?: readonly string[];
+  /**
+   * Just-enqueued queue rows — the internal hand `enqueueRecording`
+   * fires. Same resolve+pin+mint treatment as `occurrenceIds`, keyed
+   * under 'e:' so it neither wipes the viewport's 'o:' namespace nor
+   * is evicted by the next real viewport report.
+   */
+  readonly enqueuedIds?: readonly string[];
   readonly sourceRefs?: readonly SourceRef[];
   readonly tracks?: readonly TrackMetadata[];
   readonly focus?: PrewarmFocus;
@@ -545,6 +552,21 @@ export class PlaybackEngine {
     provider: string;
     sourceRef: string;
     atMs: number;
+    /**
+     * The `#warmSeen` mark this row's resolve earned — the
+     * recordingId for row resolves (an occurrence-keyed entry's
+     * `key` is never the mark), the query key for `q:`/`f:` track
+     * resolves, null for direct ref hands that paid no resolve.
+     * An unoffered eviction unsees it so a re-hand resolves fresh.
+     */
+    seenKey: string | null;
+    /**
+     * Set only on occurrence-keyed rows ('o:', 'e:', 'f:o') — the
+     * queue row the entry lives and dies with. Carried, never
+     * parsed from the key: a provider id starting with 'o' makes
+     * `f:`-keys ambiguous by shape.
+     */
+    occurrenceId: string | null;
   }[] = [];
 
   /**
@@ -3035,6 +3057,8 @@ export class PlaybackEngine {
       provider: string;
       sourceRef: string;
       atMs: number;
+      seenKey: string | null;
+      occurrenceId: string | null;
     }): void => {
       if (
         now !== null &&
@@ -3052,43 +3076,79 @@ export class PlaybackEngine {
         this.#warmPending.set(recordingId, pending);
       }
     };
+    const snap = r.queue.snapshot();
+    // Shared queue-row hand for `occurrenceIds`/`enqueuedIds`: a
+    // resolved row's ref straight into the backlog — the stream-warm
+    // slot mints it; an unresolved row joins the window pass tagged
+    // so the resolve pins it AND mints through the same backlog.
+    const handOccurrence = (occurrenceId: string, key: string): void => {
+      if (!isString(occurrenceId, 256)) {
+        return;
+      }
+      const occurrence = snap.occurrences.find(
+        (o) => o.occurrenceId === occurrenceId,
+      );
+      if (occurrence === undefined) {
+        return;
+      }
+      const ref = this.#queueRowRef(r, occurrenceId);
+      if (ref !== null) {
+        backlogPush({
+          key,
+          provider: ref.provider,
+          sourceRef: ref.sourceRef,
+          atMs: now ?? 0,
+          seenKey: occurrence.recordingId,
+          occurrenceId,
+        });
+        return;
+      }
+      pendRow(occurrence.recordingId, {
+        occurrenceId,
+        backlogKey: key,
+      });
+    };
 
     // `sourceRefs`: the FIRST eligible ref is the direct mint hand;
     // the rest queue in the backlog (reversed so the hand's rank
     // order is the offer order — the backlog scans newest-first).
-    const refs = (input.sourceRefs ?? []).slice(0, PREWARM_INPUT_LIMIT);
-    const eligible = refs.filter(
-      (s) =>
-        isTrackRef(s) &&
-        s.provider === playbackProvider &&
-        s.provider !== LOCAL_PROVIDER,
-    );
-    const extraRefs = eligible.slice(1);
-    this.#surfaceKeysReplace(
-      's:',
-      extraRefs.map((s) => `s:${s.provider}:${s.id}`),
-    );
-    for (const s of [...extraRefs].reverse()) {
-      backlogPush({
-        key: `s:${s.provider}:${s.id}`,
-        provider: s.provider,
-        sourceRef: s.id,
-        atMs: (now ?? 0) - 1,
-      });
-    }
-    const first = eligible[0];
-    if (first !== undefined && now !== null) {
-      this.#surfaceWarm = {
-        provider: first.provider,
-        sourceRef: first.id,
-        atMs: now,
-      };
+    // The 's:' replace only runs when the caller actually handed
+    // refs — single-field calls must not evict the earlier extras.
+    if (input.sourceRefs !== undefined) {
+      const refs = input.sourceRefs.slice(0, PREWARM_INPUT_LIMIT);
+      const eligible = refs.filter(
+        (s) =>
+          isTrackRef(s) &&
+          s.provider === playbackProvider &&
+          s.provider !== LOCAL_PROVIDER,
+      );
+      const extraRefs = eligible.slice(1);
+      this.#surfaceKeysReplace(
+        's:',
+        extraRefs.map((s) => `s:${s.provider}:${s.id}`),
+      );
+      for (const s of [...extraRefs].reverse()) {
+        backlogPush({
+          key: `s:${s.provider}:${s.id}`,
+          provider: s.provider,
+          sourceRef: s.id,
+          atMs: (now ?? 0) - 1,
+          seenKey: null,
+          occurrenceId: null,
+        });
+      }
+      const first = eligible[0];
+      if (first !== undefined && now !== null) {
+        this.#surfaceWarm = {
+          provider: first.provider,
+          sourceRef: first.id,
+          atMs: now,
+        };
+      }
     }
 
-    // `occurrenceIds`: queue rows the surface is showing. A resolved
-    // row's ref straight into the backlog — the stream-warm slot
-    // mints it; an unresolved row joins the window pass tagged so
-    // the resolve pins it AND mints through the same backlog.
+    // `occurrenceIds`: queue rows the surface is showing (the
+    // viewport hand) — 'o:' is replaced wholesale on each report.
     if (input.occurrenceIds !== undefined) {
       const occIds = input.occurrenceIds.slice(0, PREWARM_INPUT_LIMIT);
       this.#surfaceKeysReplace(
@@ -3096,28 +3156,32 @@ export class PlaybackEngine {
         occIds.map((id) => `o:${id}`),
       );
       for (const occurrenceId of [...occIds].reverse()) {
+        handOccurrence(occurrenceId, `o:${occurrenceId}`);
+      }
+    }
+
+    // `enqueuedIds`: the internal enqueueRecording hand — identical
+    // treatment, keyed under 'e:' so a real viewport report can
+    // never wipe it (and vice versa). 'e:' keys are add-only; rows
+    // that left the queue are swept on each hand so the set cannot
+    // grow stale over a session.
+    if (input.enqueuedIds !== undefined) {
+      for (const occurrenceId of input.enqueuedIds.slice(
+        0,
+        PREWARM_INPUT_LIMIT,
+      )) {
         if (!isString(occurrenceId, 256)) {
           continue;
         }
-        const ref = this.#queueRowRef(r, occurrenceId);
-        if (ref !== null) {
-          backlogPush({
-            key: `o:${occurrenceId}`,
-            provider: ref.provider,
-            sourceRef: ref.sourceRef,
-            atMs: now ?? 0,
-          });
-          continue;
-        }
-        const snap = r.queue.snapshot();
-        const occurrence = snap.occurrences.find(
-          (o) => o.occurrenceId === occurrenceId,
-        );
-        if (occurrence !== undefined) {
-          pendRow(occurrence.recordingId, {
-            occurrenceId,
-            backlogKey: `o:${occurrenceId}`,
-          });
+        this.#surfaceKeys.add(`e:${occurrenceId}`);
+        handOccurrence(occurrenceId, `e:${occurrenceId}`);
+      }
+      for (const key of this.#surfaceKeys) {
+        if (
+          key.startsWith('e:') &&
+          !snap.occurrences.some((o) => `e:${o.occurrenceId}` === key)
+        ) {
+          this.#surfaceKeys.delete(key);
         }
       }
     }
@@ -3160,7 +3224,9 @@ export class PlaybackEngine {
         }
         // Never offered, so the row's seen mark is undone — a page
         // that shows it again resolves it fresh.
-        this.#warmSeen.delete(e.key);
+        if (e.seenKey !== null) {
+          this.#warmSeen.delete(e.seenKey);
+        }
         return false;
       });
     }
@@ -3217,7 +3283,6 @@ export class PlaybackEngine {
             atMs: now,
           };
         } else {
-          const snap = r.queue.snapshot();
           const occurrence = snap.occurrences.find(
             (o) => o.occurrenceId === focus.id,
           );
@@ -3539,7 +3604,17 @@ export class PlaybackEngine {
         ? this.#active.recordingId
         : null;
     const snapNow = r.queue.snapshot();
-    for (const [id, pending] of [...this.#warmPending]) {
+    // Focus pendings ('f:' backlog keys) jump the queue — the row
+    // under the user's finger must not wait behind every earlier
+    // surface hand. The sort is stable, so the two tiers each keep
+    // FIFO order.
+    const pendings = [...this.#warmPending];
+    pendings.sort(
+      (a, b) =>
+        Number(b[1].backlogKey?.startsWith('f:') ?? false) -
+        Number(a[1].backlogKey?.startsWith('f:') ?? false),
+    );
+    for (const [id, pending] of pendings) {
       this.#warmPending.delete(id);
       const rec = r.recordings.find((x) => x.id === id);
       const occurrence =
@@ -3554,6 +3629,15 @@ export class PlaybackEngine {
       if (pending.occurrenceId !== null && occurrence === undefined) {
         // The handed row left the queue before its resolve ran —
         // nothing to pin, nothing to mint over.
+        continue;
+      }
+      // A flagged row is skipped by every forward move — resolving
+      // and pinning it would buy a ref nothing attaches, same skip
+      // the dealt-window branch below applies.
+      if (
+        occurrence !== undefined &&
+        r.queue.isUnplayable(occurrence.occurrenceId)
+      ) {
         continue;
       }
       const picked = this.#host.pickRef(
@@ -3587,6 +3671,8 @@ export class PlaybackEngine {
             provider: picked.provider,
             sourceRef: picked.id,
             atMs: now,
+            seenKey: id,
+            occurrenceId: pending.occurrenceId,
           });
         }
       }
@@ -3843,6 +3929,8 @@ export class PlaybackEngine {
           provider: ref.provider,
           sourceRef: ref.id,
           atMs: now,
+          seenKey: target.recordingId,
+          occurrenceId: target.occurrenceId,
         });
       }
       this.#maybeWarmStream();
@@ -3949,6 +4037,8 @@ export class PlaybackEngine {
         provider: ref.provider,
         sourceRef: ref.id,
         atMs: now,
+        seenKey: target.key,
+        occurrenceId: null,
       });
     }
     this.#maybeWarmStream();
@@ -3992,16 +4082,12 @@ export class PlaybackEngine {
         continue;
       }
       // An occurrence-keyed entry lives and dies with its queue row
-      // — a removed occurrence's resolved ref mints nothing. `o:` is
-      // a viewport hand; `f:o` is a focus hand's pending resolve.
-      const occId = e.key.startsWith('o:')
-        ? e.key.slice(2)
-        : e.key.startsWith('f:o')
-          ? e.key.slice(3)
-          : null;
+      // — a removed occurrence's resolved ref mints nothing. The id
+      // rides on the entry: parsing it out of the key misreads
+      // `f:<provider>:<id>` keys whose provider starts with 'o'.
       const gone =
-        occId !== null &&
-        !snap.occurrences.some((o) => o.occurrenceId === occId);
+        e.occurrenceId !== null &&
+        !snap.occurrences.some((o) => o.occurrenceId === e.occurrenceId);
       if (
         gone ||
         !this.#surfaceKeys.has(e.key) ||
@@ -4009,7 +4095,13 @@ export class PlaybackEngine {
         e.provider !== r.settings.playbackProvider
       ) {
         this.#surfaceBacklog.splice(i, 1);
-        this.#warmSeen.delete(e.key);
+        // Never offered — undo the resolve's seen mark so a re-hand
+        // resolves fresh. `seenKey`, not `key`: occurrence-keyed
+        // entries are marked under the recordingId, so deleting
+        // `key` was a no-op that left 120s of dead suppression.
+        if (e.seenKey !== null) {
+          this.#warmSeen.delete(e.seenKey);
+        }
         continue;
       }
       if (this.#streamWarmDeniedFresh(`${e.provider} ${e.sourceRef}`)) {

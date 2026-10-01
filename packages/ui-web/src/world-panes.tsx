@@ -1,5 +1,17 @@
-import { useEffect, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+
+/**
+ * Whether the pane containing the consumer is the visible one. Context
+ * — not a prop — because a hidden pane's element stays frozen on its
+ * last build: only a context change reaches inside it. True outside a
+ * keep-alive host (gallery, tests).
+ */
+const PaneVisibleContext = createContext(true);
+
+export function usePaneVisible(): boolean {
+  return useContext(PaneVisibleContext);
+}
 
 export type WorldPanesProps = {
   readonly keys: readonly string[];
@@ -47,21 +59,22 @@ export function WorldPanes({ keys, activeKey, renderPane }: WorldPanesProps) {
           built.current.set(key, element);
         }
         return (
-          <div
-            key={key}
-            ref={(node) => {
-              if (node === null) {
-                paneEls.current.delete(key);
-              } else {
-                paneEls.current.set(key, node);
-              }
-            }}
-            style={active ? { display: 'contents' } : { display: 'none' }}
-            inert={!active}
-            aria-hidden={active ? undefined : 'true'}
-          >
-            {element}
-          </div>
+          <PaneVisibleContext.Provider key={key} value={active}>
+            <div
+              ref={(node) => {
+                if (node === null) {
+                  paneEls.current.delete(key);
+                } else {
+                  paneEls.current.set(key, node);
+                }
+              }}
+              style={active ? { display: 'contents' } : { display: 'none' }}
+              inert={!active}
+              aria-hidden={active ? undefined : 'true'}
+            >
+              {element}
+            </div>
+          </PaneVisibleContext.Provider>
         );
       })}
       {/* A tab outside the pane keys still renders (never cached) so an

@@ -508,6 +508,25 @@ export class SqliteStorage implements StoragePort {
         // wiped — the device-local files stay on disk for the
         // integrity pass to reconcile; local_sources (the user's
         // folder grants) are kept since the export never carried them.
+        // The session survives the import as an empty stopped queue —
+        // its old occurrences named the recordings being replaced. The
+        // bump only applies when the queue is not already at that
+        // post-import state, so a wholesale transaction replay (a
+        // dead-handle retry whose COMMIT had already landed) is a
+        // no-op instead of incrementing the revision a second time.
+        await conn.execute(
+          `UPDATE queue_state
+           SET revision = revision + 1, current_occurrence_id = NULL,
+               position_ms = 0, mode = 'stopped', blocked_error_json = NULL
+           WHERE id = 1
+             AND (current_occurrence_id IS NOT NULL
+                  OR position_ms <> 0
+                  OR mode <> 'stopped'
+                  OR blocked_error_json IS NOT NULL
+                  OR EXISTS (SELECT 1 FROM queue_occurrences))`,
+          undefined,
+          signal,
+        );
         for (const statement of [
           'DELETE FROM queue_occurrences',
           'DELETE FROM lyrics_cache',
@@ -528,16 +547,6 @@ export class SqliteStorage implements StoragePort {
         ]) {
           await conn.execute(statement, undefined, signal);
         }
-        // The session survives the import as an empty stopped queue —
-        // its old rows named the recordings just replaced.
-        await conn.execute(
-          `UPDATE queue_state
-           SET revision = revision + 1, current_occurrence_id = NULL,
-               position_ms = 0, mode = 'stopped', blocked_error_json = NULL
-           WHERE id = 1`,
-          undefined,
-          signal,
-        );
         await conn.execute(
           `INSERT OR IGNORE INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
            VALUES (1, 0, NULL, 0, 'stopped', NULL)`,

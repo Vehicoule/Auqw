@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
+import { usePaneVisible } from './platform-tabs.tsx';
 import {
   bind,
   Hairline,
@@ -53,6 +54,11 @@ function Toggle({ enabled }: { readonly enabled: boolean }) {
   );
 }
 
+// How long an armed confirm may wait for the second tap — long enough
+// for a deliberate press, short enough that coming back later can't
+// land a stale commit.
+const ARM_TIMEOUT_MS = 10_000;
+
 function SettingsRow({
   row,
   onSelectRow,
@@ -73,12 +79,24 @@ function SettingsRow({
   // commit + cancel (same rule the web port renders).
   const confirms = settingsRowConfirms(row);
   // Arm state must not outlive the row it was armed on — a
-  // re-rendered (disabled, rekeyed) row drops any pending confirm.
+  // re-rendered (disabled, rekeyed) or hidden row drops any pending
+  // confirm. Keep-alive panes stay mounted while hidden, so visibility
+  // arrives via context, not props.
+  const paneVisible = usePaneVisible();
   useEffect(() => {
-    if (!confirms || !interactive || !row.enabled) {
+    if (!confirms || !interactive || !row.enabled || !paneVisible) {
       setArmed(false);
     }
-  }, [confirms, interactive, row.enabled, row.key]);
+  }, [confirms, interactive, row.enabled, row.key, paneVisible]);
+  // A pushed overlay hides the pane without deactivating it — the arm
+  // expires instead of surviving indefinitely under the cover.
+  useEffect(() => {
+    if (!armed) {
+      return undefined;
+    }
+    const timer = setTimeout(() => setArmed(false), ARM_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [armed]);
   if (armed && interactive) {
     const confirmLabel = t('settings.confirmAction', {
       action: row.label,

@@ -144,8 +144,11 @@ export type SessionController = {
    * Live OAuth access-token update — the host merges it into every
    * session-trust payload; `null` clears the slot and restores the
    * anonymous ladder. Sync (UniFFI binding) — never awaited.
+   * Returns false when the native slot is absent (a stale module
+   * predating the auth seam) so the caller can fail the apply
+   * honestly rather than claiming a live bearer on an empty slot.
    */
-  setAuthToken(token: string | null): void;
+  setAuthToken(token: string | null): boolean;
   /**
    * Post-restore bring-up: loads persisted state once more, builds
    * the local source over it, and inits the download ledger. Call
@@ -514,9 +517,15 @@ export async function createSessionController(
     // crashing the sync-status effect that calls this.
     setPotProvider: (url) => host.setPotProvider?.(url),
     // A stale native module predating the auth seam has no such
-    // function — applyToken treats the absence like setPotProvider
-    // does: the host keeps its boot (anonymous) slot.
-    setAuthToken: (token) => host.setAuthToken?.(token),
+    // function — report the miss so applyToken can fail the apply
+    // rather than claiming a live bearer on the empty slot.
+    setAuthToken: (token) => {
+      if (typeof host.setAuthToken !== 'function') {
+        return false;
+      }
+      host.setAuthToken(token);
+      return true;
+    },
     async start(signal) {
       // Post-restore reconcile: persisted slots name ids picked under
       // an earlier bundle or synced from a peer — repick any slot whose

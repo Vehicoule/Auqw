@@ -297,6 +297,9 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
    * caller toasts, never claims an install ran).
    */
   installApk(path: string): Promise<InstallApkResult>;
+  /** `Build.SUPPORTED_ABIS`, preference order — Android only (the
+      JS wrapper reads an absent seam as no ABI data). */
+  supportedAbis(): string[];
 }
 
 /** The Android 12+ Material You tones an 'adaptive' theme derives from. */
@@ -616,4 +619,14 @@ export function installApk(path: string): Promise<InstallApkResult> {
  */
 export function hasApkInstaller(): boolean {
   return typeof seam.installApk === 'function';
+}
+
+/**
+ * The device's ABI preference list (`Build.SUPPORTED_ABIS`) — the
+ * update check picks its APK against it. An absent seam (iOS, web
+ * harness) reports no ABIs, so the pick refuses a foreign-ABI APK
+ * rather than guessing.
+ */
+export function supportedAbis(): readonly string[] {
+  return seam.supportedAbis?.() ?? [];
 }

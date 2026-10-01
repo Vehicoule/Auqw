@@ -1,8 +1,11 @@
 import { assert, assertEqual } from '@auqw/application/testing';
 import { CancellationSource } from '@auqw/application';
 import type { OperationContext, Settings } from '@auqw/application';
+import { CANCELLED } from './driver.ts';
+import type { SqliteDriver } from './driver.ts';
 import { SqliteStorage } from './storage.ts';
 import { createPeaksCacheStore } from './peaks-cache.ts';
+import { enqueueDriverTransaction } from './transaction-queue.ts';
 import { NodeSqliteDriver } from './testing/node-sqlite-driver.ts';
 
 const SETTINGS: Settings = {
@@ -106,6 +109,69 @@ const TESTS: [string, () => Promise<void>][] = [
         await peaks.load('cold-b'),
         null,
         'an untouched older row still evicts',
+      );
+    },
+  ],
+  [
+    'queuesOnTheSharedDriverTail',
+    async () => {
+      const inner = new NodeSqliteDriver();
+      const storage = new SqliteStorage(inner, SETTINGS);
+      const loaded = await storage.load(ctx());
+      assert(loaded.ok, 'storage initializes');
+      // One driver is one connection: count overlapping transactions
+      // the way a driver without JS-level serialization (the expo
+      // driver) would experience them.
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const counting: SqliteDriver = {
+        transaction: (work, signal) => {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          return inner
+            .transaction(work, signal)
+            .finally(() => {
+              inFlight -= 1;
+            });
+        },
+        backup: (tag) => inner.backup(tag),
+        dropBackup: (tag) => inner.dropBackup(tag),
+      };
+      const peaks = createPeaksCacheStore(counting);
+      // Hold a queued transaction open — the spot a SqliteStorage
+      // commit or a sync-log append occupies when a peaks op races it.
+      let release!: () => void;
+      const held = enqueueDriverTransaction(
+        counting,
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+        ctx().signal,
+        (signal) => {
+          if (signal.cancelled) {
+            throw CANCELLED;
+          }
+        },
+      );
+      // A couple of microtask turns lets the held transaction open —
+      // BEGIN ran, work is parked on the gate — before the racer fires.
+      await Promise.resolve();
+      await Promise.resolve();
+      const saving = peaks.save('rec-held', profile(4));
+      await Promise.resolve();
+      await Promise.resolve();
+      assertEqual(
+        maxInFlight,
+        1,
+        'a peaks op queues behind an open transaction on the same driver',
+      );
+      release();
+      await held;
+      await saving;
+      assert(
+        (await peaks.load('rec-held')) !== null,
+        'the queued save still lands',
       );
     },
   ],

@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CancellationSource } from '@auqw/application';
+import type { CancellationSignal } from '@auqw/application';
 import type {
   ArtworkCacheEntry,
   AttemptTrace,
@@ -29,6 +30,7 @@ import type {
   SourceRef,
 } from '@auqw/application';
 import { assert, assertDeepEqual, assertEqual } from '@auqw/application/testing';
+import type { SqliteConnection } from './driver.ts';
 import { CURRENT_SCHEMA_VERSION, MIGRATIONS } from './migrations.ts';
 import { SqliteStorage } from './storage.ts';
 import { FailingDriver, NodeSqliteDriver } from './testing/node-sqlite-driver.ts';
@@ -146,6 +148,31 @@ async function loadOk(storage: SqliteStorage): Promise<PersistedState> {
     throw new Error(`load failed: ${loaded.error.kind}`);
   }
   return loaded.value;
+}
+
+/**
+ * Re-runs the next transaction's work a second time against the
+ * post-commit state — the dead-handle retry path: COMMIT landed but
+ * its ack was lost, so the driver replays the unit of work wholesale.
+ */
+class ReplayingDriver extends FailingDriver {
+  #replayNext = false;
+
+  replayNext(): void {
+    this.#replayNext = true;
+  }
+
+  override async transaction<T>(
+    work: (connection: SqliteConnection) => Promise<T>,
+    signal?: CancellationSignal,
+  ): Promise<T> {
+    const value = await super.transaction(work, signal);
+    if (this.#replayNext) {
+      this.#replayNext = false;
+      await super.transaction(work, signal);
+    }
+    return value;
+  }
 }
 
 const EMPTY_QUEUE: QueueSnapshot = {
@@ -634,6 +661,32 @@ async function attemptTraces(): Promise<void> {
   );
   const broken = await storage.loadAttempts(500, ctx().context);
   assert(!broken.ok && broken.error.kind === 'invalid-response');
+  driver.close();
+}
+
+// 8b. A landed-but-unacked COMMIT replays the whole batch: the
+// attempt inserts stay idempotent — each trace lands exactly once.
+async function attemptReplayIdempotent(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  const replaying = new ReplayingDriver(driver);
+  const storage = new SqliteStorage(replaying, SETTINGS);
+  assert((await storage.initialize(ctx().context)).ok);
+  replaying.replayNext();
+  assert(
+    (
+      await storage.commit(
+        { attempts: [trace('t1'), trace('t2'), trace('t3')] },
+        ctx().context,
+      )
+    ).ok,
+  );
+  const listed = await storage.loadAttempts(10, ctx().context);
+  assert(listed.ok);
+  assertDeepEqual(
+    listed.value.map((t) => t.requestId),
+    ['t3', 't2', 't1'],
+    'replayed commit lands each trace once',
+  );
   driver.close();
 }
 
@@ -1686,6 +1739,66 @@ async function importResetsExcluded(): Promise<void> {
   driver.close();
 }
 
+// 18c. The same wholesale replay applies to importOwned: the queue
+// revision ticks exactly once — a replayed import is a fixed point,
+// not a second increment.
+async function importReplayIdempotent(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  const replaying = new ReplayingDriver(driver);
+  const storage = new SqliteStorage(replaying, SETTINGS);
+  const queue: QueueSnapshot = {
+    revision: 3,
+    occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+    currentOccurrenceId: 'o1',
+    positionMs: 800,
+    mode: 'playing',
+  };
+  assert(
+    (
+      await storage.commit(
+        {
+          recordings: [recording('r1', [ref('itunes', 'i1')])],
+          queue,
+          settings: SETTINGS,
+        },
+        ctx().context,
+      )
+    ).ok,
+  );
+  const doc: ExportDocument = {
+    formatVersion: 1,
+    exportedAtMs: 2,
+    recordings: [],
+    sourceRefs: [],
+    mappings: [],
+    likes: [],
+    entities: [],
+    entitySourceRefs: [],
+    playlists: [],
+    playlistEntries: [],
+    playHistory: [],
+    playCounts: [],
+    matchReviews: [],
+    settings: SETTINGS,
+  };
+  replaying.replayNext();
+  const imported = await storage.importOwned(doc, ctx().context);
+  assert(imported.ok, 'import resolves');
+  const after = await loadOk(storage);
+  assertDeepEqual(
+    after.queue,
+    {
+      revision: 4,
+      occurrences: [],
+      currentOccurrenceId: null,
+      positionMs: 0,
+      mode: 'stopped',
+    },
+    'replayed import bumps the revision once',
+  );
+  driver.close();
+}
+
 function download(
   recordingId: string,
   overrides: Partial<DownloadRecord> = {},
@@ -2345,6 +2458,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['corruptedRelations', corruptedRelations],
   ['schemaVersionEdges', schemaVersionEdges],
   ['attemptTraces', attemptTraces],
+  ['attemptReplayIdempotent', attemptReplayIdempotent],
   ['sectionScopedCommits', sectionScopedCommits],
   ['sharedDriverVisibility', sharedDriverVisibility],
   ['cancelledBoundaries', cancelledBoundaries],
@@ -2362,6 +2476,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['exportImportRoundtrip', exportImportRoundtrip],
   ['importAtomicity', importAtomicity],
   ['importResetsExcluded', importResetsExcluded],
+  ['importReplayIdempotent', importReplayIdempotent],
   ['sharedDriverTransactions', sharedDriverTransactions],
   ['exportOwnedUnsafeTimestamp', exportOwnedUnsafeTimestamp],
   ['entityKindCrossCheck', entityKindCrossCheck],

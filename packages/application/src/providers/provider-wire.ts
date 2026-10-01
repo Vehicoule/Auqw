@@ -328,7 +328,10 @@ function toMintHeaders(value: unknown): Record<string, string> | null {
     return null;
   }
   const seen = new Set<string>();
-  const headers: Record<string, string> = {};
+  // Null prototype: '__proto__' is a valid RFC 9110 token the native
+  // Vec-pair decoder carries verbatim — on a plain object literal the
+  // assignment below silently no-ops and drops the header.
+  const headers: Record<string, string> = Object.create(null);
   for (const [name, headerValue] of entries) {
     const folded = name.toLowerCase();
     if (

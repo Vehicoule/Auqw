@@ -72,6 +72,8 @@ export function createTransferFetch(
       const released = head.status !== 206;
       if (released) {
         void api.fetchAbort({ requestId }).catch(() => undefined);
+        // No body read is coming — the abort bridge is dead weight.
+        unsubscribe();
       }
       const headers = new Map(
         head.headers.map(([name, value]) => [name.toLowerCase(), value]),
@@ -104,13 +106,17 @@ export function createTransferFetch(
             return bytes.buffer as ArrayBuffer;
           } catch (thrown) {
             return mapWireError(signal, thrown);
+          } finally {
+            // The subscription must outlive the headers — a body
+            // stall still has to reach `fetchAbort` — so it releases
+            // when the read settles, not when the head answers.
+            unsubscribe();
           }
         },
       };
     } catch (thrown) {
-      return mapWireError(signal, thrown);
-    } finally {
       unsubscribe();
+      return mapWireError(signal, thrown);
     }
   };
 }

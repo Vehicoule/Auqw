@@ -13,7 +13,7 @@
  * The globals install inside run() and restore on exit so the rest of
  * the suite still runs node-native.
  */
-import { assert, assertEqual } from '@auqw/application/testing';
+import { assert, assertDeepEqual, assertEqual } from '@auqw/application/testing';
 import { JSDOM } from 'jsdom';
 import { register } from 'node:module';
 
@@ -31,6 +31,7 @@ const GLOBALS = [
   'Element',
   'Node',
   'MutationObserver',
+  'MouseEvent',
   'IS_REACT_ACT_ENVIRONMENT',
 ] as const;
 
@@ -42,6 +43,7 @@ export async function run(): Promise<void> {
     Element: typeof Element;
     Node: typeof Node;
     MutationObserver: typeof MutationObserver;
+    MouseEvent: typeof MouseEvent;
   };
   const env = globalThis as Record<string, unknown>;
   const saved = new Map<string, unknown>();
@@ -54,6 +56,7 @@ export async function run(): Promise<void> {
   env['Element'] = win.Element;
   env['Node'] = win.Node;
   env['MutationObserver'] = win.MutationObserver;
+  env['MouseEvent'] = win.MouseEvent;
   env['IS_REACT_ACT_ENVIRONMENT'] = true;
   try {
     const { act, createElement, useEffect } = await import('react');
@@ -188,6 +191,102 @@ export async function run(): Promise<void> {
     observer.disconnect();
     await act(async () => {
       root.unmount();
+    });
+
+    // An armed destructive-row confirm must not survive its pane being
+    // hidden — a keep-alive pane stays mounted under display:none, so
+    // without the visibility context the pending commit would sit
+    // armed indefinitely and fire on the user's next single tap.
+    const { SettingsScreen } = await import('@auqw/ui-web');
+    const { t, toSettingsModel } = await import('@auqw/ui-shared');
+    const { fixtureSettings, fixtureDiagnostics } = await import(
+      '@auqw/ui-shared/fixtures'
+    );
+    const settingsModel = toSettingsModel(
+      fixtureSettings,
+      fixtureDiagnostics,
+      { downloadCount: 3 },
+    );
+    const selected: string[] = [];
+    const container2 = document.createElement('div');
+    document.body.appendChild(container2);
+    const root2 = createRoot(container2);
+    const renderSettingsPane = (key: string) =>
+      key === 'settings'
+        ? h(SettingsScreen, {
+            model: settingsModel,
+            onSelectRow: (rowKey: string) => {
+              selected.push(rowKey);
+            },
+          })
+        : h('div', { 'data-pane': key });
+    const el2 = (tab: string) =>
+      h(WorldPanes, {
+        keys: ['settings', 'home'],
+        activeKey: tab,
+        renderPane: renderSettingsPane,
+      });
+    await act(async () => {
+      root2.render(el2('settings'));
+    });
+    const rowLabel = t('settings.removeAllDownloads');
+    const rowButton = () =>
+      Array.from(container2.querySelectorAll('button')).find((button) =>
+        button.getAttribute('aria-label')?.startsWith(rowLabel),
+      );
+    const armedGroup = () =>
+      container2.querySelector('.uw-settings-confirm');
+    await act(async () => {
+      rowButton()?.dispatchEvent(
+        new win.MouseEvent('click', { bubbles: true }),
+      );
+    });
+    assert(armedGroup() !== null, 'first tap arms the destructive row');
+    // Hiding the pane disarms it — the confirm pair is gone and the
+    // plain row is back in its place.
+    await act(async () => {
+      root2.render(el2('home'));
+    });
+    assertEqual(armedGroup(), null, 'hidden pane drops the armed row');
+    assert(
+      rowButton() !== undefined,
+      'the disarmed row button returns in place',
+    );
+    // Back on the pane the row stays disarmed: no stale one-tap commit.
+    await act(async () => {
+      root2.render(el2('settings'));
+    });
+    assertEqual(
+      armedGroup(),
+      null,
+      'a revealed pane does not resurrect the arm',
+    );
+    assertEqual(
+      selected.length,
+      0,
+      'the destructive action never fired',
+    );
+    // Re-arm and commit still work — the row keeps its two-tap contract.
+    await act(async () => {
+      rowButton()?.dispatchEvent(
+        new win.MouseEvent('click', { bubbles: true }),
+      );
+    });
+    const confirmLabel = t('settings.confirmAction', { action: rowLabel });
+    const confirm = () =>
+      Array.from(
+        container2.querySelectorAll('.uw-settings-confirm button'),
+      ).find((button) => button.getAttribute('aria-label') === confirmLabel);
+    await act(async () => {
+      confirm()?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    });
+    assertDeepEqual(
+      selected,
+      ['removeAllDownloads'],
+      'armed confirm commits the row action',
+    );
+    await act(async () => {
+      root2.unmount();
     });
   } finally {
     for (const key of GLOBALS) {

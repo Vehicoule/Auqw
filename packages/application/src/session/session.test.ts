@@ -6623,7 +6623,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
     'reconnectRearmsConnectivityBlockedQueue',
     reconnectRearmsConnectivityBlockedQueue,
   ],
-  ['nonEdgeCallDoesNotAutoplay', nonEdgeCallDoesNotAutoplay],
+  ['onlineCallReArmsWeatherPark', onlineCallReArmsWeatherPark],
   ['reconnectKeepsLegacyBotWall', reconnectKeepsLegacyBotWall],
   ['reconnectKeepsVerdictBlocks', reconnectKeepsVerdictBlocks],
   ['reconnectKeepsCleanPause', reconnectKeepsCleanPause],
@@ -6773,6 +6773,30 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
     focusOccurrenceStaleResolveDrops,
   ],
   ['focusRecordingPinWinsDefault', focusRecordingPinWinsDefault],
+  [
+    'enqueueHandSurvivesViewportReports',
+    enqueueHandSurvivesViewportReports,
+  ],
+  [
+    'singleFieldHandKeepsSourceExtras',
+    singleFieldHandKeepsSourceExtras,
+  ],
+  [
+    'evictedRowEntryUnseesRecording',
+    evictedRowEntryUnseesRecording,
+  ],
+  [
+    'focusOccurrenceJumpsPendingQueue',
+    focusOccurrenceJumpsPendingQueue,
+  ],
+  [
+    'focusTrackProviderPrefixedOMints',
+    focusTrackProviderPrefixedOMints,
+  ],
+  [
+    'flaggedViewportRowNeverResolves',
+    flaggedViewportRowNeverResolves,
+  ],
 ] as const;
 
 // The materialized rebuild: the durable log's surviving records
@@ -7243,12 +7267,13 @@ async function reconnectRearmsConnectivityBlockedQueue(): Promise<void> {
   assertEqual(calls(r, 'prepare').length, 1, 'no second attempt on repeat');
 }
 
-// `connectivityChanged` also fires for non-edge reasons (boot
-// re-derive, media ownership) — a weather block must re-arm only on
-// a proven offline→online transition, never on a housekeeping call
-// that happens to run while online.
-async function nonEdgeCallDoesNotAutoplay(): Promise<void> {
-  let online = true;
+// A weather park re-arms on ANY online sample — the parked block
+// itself is the re-arm condition, not a sampled false→true edge:
+// a provider/CDN blip parks the queue while the platform stays
+// green (no NIC edge can ever follow), and a suspended app's
+// monitor coalesces the offline→online window into a single
+// online report.
+async function onlineCallReArmsWeatherPark(): Promise<void> {
   const r = rig(
     persisted({
       recordings: [recording('r1', [ref('youtube-music', 'y1')])],
@@ -7262,7 +7287,7 @@ async function nonEdgeCallDoesNotAutoplay(): Promise<void> {
     }),
     [],
     new Map(),
-    () => online,
+    () => true,
   );
   await restoreOk(r);
   const started = r.session.playOccurrence('o1');
@@ -7272,20 +7297,22 @@ async function nonEdgeCallDoesNotAutoplay(): Promise<void> {
   assert(!(await started).ok);
   assertEqual(readyOf(r).queue.blockedError?.kind, 'unavailable');
   assertEqual(calls(r, 'prepare').length, 1);
-  // Housekeeping calls while online never re-arm — no transition was
-  // observed even though the block is weather.
+  // Parked while the platform stayed green — no edge was ever
+  // delivered, yet the housekeeping call still re-arms the
+  // connectivity-retryable block.
   r.session.connectivityChanged();
   await pump();
+  assertEqual(
+    calls(r, 'prepare').length,
+    2,
+    'online sample re-arms weather park',
+  );
+  assertEqual(readyOf(r).queue.mode, 'playing');
+  // Once the block cleared the trigger is inert — a repeat online
+  // call fires nothing.
   r.session.connectivityChanged();
   await pump();
-  assertEqual(calls(r, 'prepare').length, 1, 'non-edge call does not autoplay');
-  // The real flap still re-arms.
-  online = false;
-  r.session.connectivityChanged();
-  online = true;
-  r.session.connectivityChanged();
-  await pump();
-  assertEqual(calls(r, 'prepare').length, 2, 'real edge re-arms');
+  assertEqual(calls(r, 'prepare').length, 2, 'no second attempt');
 }
 
 // A legacy bot wall (transient kind + bot-check detail) is a provider
@@ -9232,6 +9259,250 @@ async function focusRecordingPinWinsDefault(): Promise<void> {
     warmInput(r).sourceRef,
     'yPin',
     'row pin warmed, not the recording default',
+  );
+}
+
+/** The internal enqueue hand keys under 'e:' — it must neither wipe
+ *  the viewport's 'o:' backlog entries nor be evicted by the next
+ *  real viewport report. */
+async function enqueueHandSurvivesViewportReports(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+        recording('rN', [ref('itunes', 'iN')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oA', 'rA'),
+        occurrence('oB', 'rB'),
+      ]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({ occurrenceIds: ['oA', 'oB'] });
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'viewport hand mints');
+  const first = warmInput(r);
+  assertEqual(first.sourceRef, 'yA', 'first viewport row warmed');
+  // The enqueue hand joins under its own namespace — an unresolved
+  // row pays its resolve+pin like a viewport hand would.
+  const enq = await r.session.enqueueRecording('rN');
+  assert(enq.ok, 'enqueue failed');
+  await pump();
+  assertEqual(r.ytm.pendingCount('candidates'), 1, 'enqueued row resolves');
+  // Finish oA's mint — oB's parked entry must still be alive to
+  // mint next (pre-fix the enqueue's 'o:' replace evicted it).
+  assert(r.player.settlePrewarm(ok('req-warm-1')), 'pending prewarm');
+  r.player.emit(warmPrepared(first.identity, 'h-warmA'));
+  await pump();
+  r.session.connectivityChanged();
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 2, 'oB survives the enqueue hand');
+  assertEqual(warmInput(r).sourceRef, 'yB', 'viewport row minted');
+  // A real viewport report replaces 'o:' wholesale — the 'e:'-keyed
+  // enqueued row survives it and mints once its resolve lands.
+  r.session.prewarm({ occurrenceIds: ['oB'] });
+  await pump();
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'yN', 'Song rN', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(
+    calls(r, 'prewarm').length,
+    3,
+    'enqueued row mints past the viewport replace',
+  );
+  assertEqual(warmInput(r).sourceRef, 'yN', 'enqueued ref warmed');
+}
+
+/** A single-field hand (viewport/focus/enqueue) must not wipe the
+ *  parked 's:' extras the last sourceRefs hand queued — only a real
+ *  sourceRefs hand replaces that namespace. */
+async function singleFieldHandKeepsSourceExtras(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('rA', [ref('youtube-music', 'yA')])],
+      queue: stoppedQueue([occurrence('oA', 'rA')]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({
+    sourceRefs: [ref('youtube-music', 'yA'), ref('youtube-music', 'yB')],
+  });
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'first ref warms');
+  const first = warmInput(r);
+  assertEqual(first.sourceRef, 'yA');
+  assert(r.player.settlePrewarm(ok('req-warm-1')), 'pending prewarm');
+  r.player.emit(warmPrepared(first.identity, 'h-warmA'));
+  await pump();
+  // An empty viewport report carries no sourceRefs field — 's:' is
+  // not its namespace to clear.
+  r.session.prewarm({ occurrenceIds: [] });
+  await pump();
+  assertEqual(
+    calls(r, 'prewarm').length,
+    2,
+    'parked extra survives the single-field hand',
+  );
+  assertEqual(warmInput(r).sourceRef, 'yB', 'extra ref minted');
+}
+
+/** A backlog entry evicted before its mint lands unsees the row's
+ *  resolve mark — the recordingId mark rides on the entry, so a
+ *  re-hand resolves fresh instead of sitting out the 120s TTL. */
+async function evictedRowEntryUnseesRecording(): Promise<void> {
+  const spotify = new FakeProvider('spotify');
+  const r = rig(
+    persisted({
+      recordings: [recording('rB', [ref('itunes', 'iB')])],
+      queue: stoppedQueue([occurrence('oB', 'rB')]),
+    }),
+    [spotify],
+  );
+  await restoreOk(r);
+  r.session.prewarm({ occurrenceIds: ['oB'] });
+  await pump();
+  assertEqual(r.ytm.pendingCount('candidates'), 1, 'viewport row resolves');
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'yB', 'Song rB', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'resolved row mints');
+  assertEqual(warmInput(r).sourceRef, 'yB');
+  // A provider switch kills the mint and evicts the entry on the
+  // provider mismatch — the resolve mark must die with it.
+  const switched = await r.session.updateSettings({
+    ...SETTINGS,
+    playbackProvider: 'spotify',
+  });
+  assert(switched.ok, 'provider switch failed');
+  await pump();
+  r.session.prewarm({ occurrenceIds: ['oB'] });
+  await pump();
+  assert(
+    spotify.calls.some((c) => c.method === 'candidates'),
+    'evicted row re-resolves under the new provider',
+  );
+  spotify.settleCandidates(
+    ok([meta('spotify', 'sB', 'Song rB', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(warmInput(r).sourceRef, 'sB', 're-resolved row mints');
+}
+
+/** An unresolved occurrence focus jumps the pending queue — the row
+ *  under the user's finger resolves before every earlier surface
+ *  hand, same priority the focus-track hand already had. */
+async function focusOccurrenceJumpsPendingQueue(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('itunes', 'iA')]),
+        recording('rB', [ref('itunes', 'iB')]),
+        recording('rF', [ref('itunes', 'iF')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oA', 'rA'),
+        occurrence('oB', 'rB'),
+        occurrence('oF', 'rF'),
+      ]),
+    }),
+  );
+  await restoreOk(r);
+  r.session.prewarm({ occurrenceIds: ['oA', 'oB'] });
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    'first viewport row resolving',
+  );
+  r.session.prewarm({ focus: { kind: 'occurrence', id: 'oF' } });
+  await pump();
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'yA', 'Song rA', 'Artist', 300_000)]),
+  );
+  await pump();
+  const candidateCalls = r.ytm.calls.filter(
+    (c) => c.method === 'candidates',
+  );
+  assertEqual(candidateCalls.length, 2, 'next resolve issued');
+  const second = candidateCalls[1]?.input as
+    | { query: { title: string } }
+    | undefined;
+  assertEqual(
+    second?.query.title,
+    'Song rF',
+    'focused row jumps ahead of the earlier viewport hand',
+  );
+}
+
+/** An 'f:' track key whose provider id starts with 'o' is a catalog
+ *  focus row, not an occurrence — it must mint instead of dying on
+ *  the old 'f:o' prefix parse as a 'gone occurrence'. */
+async function focusTrackProviderPrefixedOMints(): Promise<void> {
+  const openmusic = new FakeProvider('openmusic');
+  const r = rig(
+    persisted({
+      recordings: [recording('rA', [ref('youtube-music', 'yA')])],
+      queue: stoppedQueue([occurrence('oA', 'rA')]),
+    }),
+    [openmusic],
+  );
+  await restoreOk(r);
+  r.session.prewarm({
+    focus: {
+      kind: 'track',
+      track: meta('openmusic', 'om-1', 'Song OM', 'Artist', 300_000),
+    },
+  });
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    'prefixed track resolving',
+  );
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'y-om', 'Song OM', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(calls(r, 'prewarm').length, 1, 'prefixed track mints');
+  assertEqual(warmInput(r).sourceRef, 'y-om');
+}
+
+/** A flagged row still renders in the viewport — the surface hands
+ *  it in, but the pending drain must skip its resolve+pin exactly
+ *  like the dealt-window branch does. */
+async function flaggedViewportRowNeverResolves(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('itunes', 'iB')]),
+      ],
+      queue: stoppedQueue([
+        occurrence('oA', 'rA'),
+        occurrence('oB', 'rB'),
+      ]),
+    }),
+  );
+  await restoreOk(r);
+  // A permanent verdict on the current row flags it unplayable
+  // before any resolve landed.
+  const started = r.session.playOccurrence('oB');
+  await pump();
+  assertEqual(r.ytm.pendingCount('candidates'), 1, 'attempt resolving');
+  r.ytm.settleCandidates(err(appError('not-found', 'gone')));
+  await pump();
+  assert(!(await started).ok);
+  assertEqual(readyOf(r).queue.mode, 'paused');
+  r.session.prewarm({ occurrenceIds: ['oB'] });
+  await pump();
+  assertEqual(
+    r.ytm.calls.filter((c) => c.method === 'candidates').length,
+    1,
+    'flagged row never pays a warm resolve',
   );
 }
 
