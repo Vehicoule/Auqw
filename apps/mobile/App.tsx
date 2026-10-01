@@ -1527,8 +1527,10 @@ function Main({
       if (expanded) {
         // Clear a pending commit token too — an expand commit queued
         // just before this press would otherwise land after the close
-        // and reopen the sheet.
-        stageAnchor.value = 0;
+        // and reopen the sheet. -1 is the idle marker: writing the
+        // collapse target (0) would make the expanded effect read the
+        // close as gesture-owned and skip its collapse spring.
+        stageAnchor.value = -1;
         setExpanded(false);
         return true;
       }
