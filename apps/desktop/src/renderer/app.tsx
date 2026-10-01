@@ -1468,6 +1468,7 @@ function Main({
           )}
           {updateCard !== null && (
             <div
+              className="uw-update-card"
               style={{
                 position: 'fixed',
                 // Below the 40px chrome strip — the strip's nav/tab
@@ -1482,10 +1483,6 @@ function Main({
                 backgroundColor: 'var(--raised)',
                 border: 'var(--stroke-hairline) solid var(--hairline)',
                 overflow: 'hidden',
-                // Floats over the frameless titlebar's drag region —
-                // without opting out, every control is a window-drag
-                // grip on macOS (the dead-click defect on the old pill).
-                WebkitAppRegion: 'no-drag',
                 zIndex: 40,
               }}
               role="status"

@@ -2548,6 +2548,12 @@
 .uw-world-bar > * {
   -webkit-app-region: no-drag;
 }
+/* The update card floats over the chrome strip's drag region — without
+   opting out, every control on it is a window-drag grip on macOS (the
+   dead-click defect on the old pill). */
+.uw-update-card {
+  -webkit-app-region: no-drag;
+}
 /* WCO caption buttons overlay the bar's far right — controls keep
    clear of them. `--uw-caption-w` is measured in the renderer
    (windowControlsOverlay) since its width is platform-drawn. The
