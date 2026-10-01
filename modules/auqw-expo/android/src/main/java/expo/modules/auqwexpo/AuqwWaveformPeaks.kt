@@ -110,10 +110,12 @@ private const val COARSE_LEAD_PTS_US = 20_000_000L
 /** Parser pulls to land the audio track's format — container headers
  *  plus sniff retries. */
 private const val FORMAT_PARSE_PULLS = 400
-/** Parser pulls to yield one queued sample before the decode loop
- *  treats the demuxer as wedged — a stalled parser ends the feed, not
- *  the sweep. */
-private const val SAMPLE_PARSE_PULLS = 200
+/** Consecutive demuxer reads that yield no placeable audio sample
+ *  before the decode lane calls the parser stalled — an honest typed
+ *  failure, never a silently-truncated profile. Sized well past the
+ *  longest plausible non-audio interleave an audio-bearing container
+ *  can carry; audio-only streams land samples every read. */
+private const val PARSE_STALL_PULLS = 2000
 /** Decorative decode bound — the JS port's `PEAKS_MAX_DECODE_MS`:
  *  tracks longer than this refuse extraction. The caller gates known
  *  durations; the decode lane re-gates on the PARSED duration so an
@@ -390,7 +392,11 @@ internal class AuqwWaveformPeaks(
     // or after it (final/abort emit) — no lock needed.
     val buildFlat = {
       val dur = durationUs.get().takeIf { it > 0 } ?: lastPtsUs.get()
-      if (dur <= 0) {
+      // Zero slices = zero measured audio — a container that publishes
+      // only its duration must not emit a fabricated flat baseline as a
+      // finished waveform. Decoded-silent PCM still lands slices, so
+      // measured silence keeps its honest zeros.
+      if (dur <= 0 || slices.isEmpty()) {
         null
       } else {
         fillFlat(foldSlices(slices, count, dur), count)
@@ -651,15 +657,24 @@ internal class AuqwWaveformPeaks(
           val inIdx = decoder.dequeueInputBuffer(DEQUEUE_US)
           if (inIdx >= 0) {
             var s = pump.samples.removeFirstOrNull()
-            var innerPulls = 0
-            while ((s === null || s.timeUs < 0) && !parseEnded &&
-              innerPulls++ < SAMPLE_PARSE_PULLS
-            ) {
+            var stalePulls = 0
+            while ((s === null || s.timeUs < 0) && !parseEnded) {
               if (s !== null) {
                 // Untimestamped access unit — unplaceable, drop it and
                 // keep pulling rather than feed the codec a lie.
                 s = null
                 continue
+              }
+              // Reads keep flowing while the demuxer still owes audio —
+              // a bounded stall guard, never a silent EOS on a
+              // non-ended parser: a truncated-at-limit profile would
+              // persist the measured prefix as if it were the whole.
+              if (++stalePulls > PARSE_STALL_PULLS) {
+                throw CodedException(
+                  "invalid-response",
+                  "demuxer produced no audio samples",
+                  null
+                )
               }
               when (adapter.read(ph)) {
                 Extractor.RESULT_SEEK ->
@@ -1323,7 +1338,7 @@ private class SampleQueue : ExtractorOutput {
  *  ends: an extractor's internal seek may walk back into them, and at
  *  ≤ MAX_PEAK_BYTES they cost the same footprint the old whole-pull
  *  byte array took. */
-private class PullBuffer(
+internal class PullBuffer(
   private val end: Long,
 ) {
   private val lock = ReentrantLock()
