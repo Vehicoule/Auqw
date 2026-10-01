@@ -48,6 +48,8 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'home.empty': 'hier ist noch nichts',
   'home.recents.title': 'zuletzt gelikt',
   'home.recents.subtitle': 'deine zuletzt gelikten titel',
+  'home.played.title': 'zuletzt gespielt',
+  'home.played.subtitle': 'deine letzten wiedergaben',
   'home.suggestions.title': 'suchergebnisse',
   'home.suggestions.subtitle': 'aus deiner letzten suche',
   'home.greeting.night': 'nacht',

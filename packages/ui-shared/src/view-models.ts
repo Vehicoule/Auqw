@@ -178,6 +178,8 @@ export type HomeModel = {
   readonly resume: ResumeModel | null;
   /** Materialized track recordings ordered by like time. */
   readonly recents: readonly RailCardModel[];
+  /** Materialized recordings at their latest counted play. */
+  readonly played: readonly RailCardModel[];
   /** Provider metadata from the current committed search page. */
   readonly suggestions: readonly RailCardModel[];
 };
@@ -1603,6 +1605,7 @@ export function toRailCard(recording: Recording): RailCardModel {
 export function toHomeModel(input: {
   readonly recordings: readonly Recording[];
   readonly likes: readonly Like[];
+  readonly playHistory: readonly PlayEvent[];
   readonly suggestions: readonly TrackMetadata[];
   readonly playback: SessionPlayback;
   readonly greeting: string;
@@ -1618,6 +1621,25 @@ export function toHomeModel(input: {
     })
     .slice(0, 12)
     .map(toRailCard);
+  // Latest play wins per recording — ties (clamped timestamps after a
+  // clock rollback) resolve to the later array element, which is the
+  // more recent event on both orderings this list can carry (live
+  // appends; restored `played_ms, event_id` order).
+  const latestById = new Map<
+    string,
+    { recording: Recording; playedMs: number; at: number }
+  >();
+  input.playHistory.forEach((event, at) => {
+    const recording = byId.get(event.recordingId);
+    const cur = latestById.get(event.recordingId);
+    if (recording !== undefined && (cur === undefined || event.playedMs >= cur.playedMs)) {
+      latestById.set(event.recordingId, { recording, playedMs: event.playedMs, at });
+    }
+  });
+  const played = [...latestById.values()]
+    .sort((a, b) => b.playedMs - a.playedMs || b.at - a.at)
+    .slice(0, 12)
+    .map((entry) => toRailCard(entry.recording));
   const suggestions = input.suggestions.slice(0, 12).map((metadata) => ({
     key: `${metadata.sourceRef.provider}:${metadata.sourceRef.id}`,
     title: metadata.title,
@@ -1641,6 +1663,7 @@ export function toHomeModel(input: {
     subline: input.subline,
     resume,
     recents,
+    played,
     suggestions,
   };
 }

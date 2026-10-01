@@ -8,7 +8,7 @@ export type HomeScreenProps = {
   readonly model: HomeModel;
   readonly scrollEnabled?: boolean | undefined;
   readonly onPressCard?: ((card: RailCardModel) => void) | undefined;
-  readonly onPressSeeAll?: ((section: 'recents' | 'suggestions') => void) | undefined;
+  readonly onPressSeeAll?: ((section: 'recents' | 'played' | 'suggestions') => void) | undefined;
   readonly onResume?: (() => void) | undefined;
 };
 
@@ -51,6 +51,7 @@ function ResumeCard({
 
 const RAIL_EMPTY_ICON = {
   recents: 'clock',
+  played: 'clock',
   suggestions: 'compass',
 } as const;
 
@@ -64,10 +65,10 @@ function Rail({
 }: {
   readonly title: string;
   readonly subtitle: string | null;
-  readonly section: 'recents' | 'suggestions';
+  readonly section: 'recents' | 'played' | 'suggestions';
   readonly cards: readonly RailCardModel[];
   readonly onPressCard?: ((card: RailCardModel) => void) | undefined;
-  readonly onPressSeeAll?: ((section: 'recents' | 'suggestions') => void) | undefined;
+  readonly onPressSeeAll?: ((section: 'recents' | 'played' | 'suggestions') => void) | undefined;
 }) {
   return (
     <section className="uw-rail" aria-label={title}>
@@ -156,6 +157,16 @@ export function HomeScreen({
       )}
       {model.resume !== null && (
         <ResumeCard resume={model.resume} onResume={onResume} />
+      )}
+      {model.played.length > 0 && (
+        <Rail
+          title={t('home.played.title')}
+          subtitle={t('home.played.subtitle')}
+          section="played"
+          cards={model.played}
+          onPressCard={onPressCard}
+          onPressSeeAll={onPressSeeAll}
+        />
       )}
       <Rail
         title={t('home.recents.title')}

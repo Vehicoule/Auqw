@@ -48,6 +48,8 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'home.empty': 'nada aquí aún',
   'home.recents.title': 'me gusta recientes',
   'home.recents.subtitle': 'tus últimas canciones favoritas',
+  'home.played.title': 'reproducido recientemente',
+  'home.played.subtitle': 'tus últimas reproducciones',
   'home.suggestions.title': 'resultados de búsqueda',
   'home.suggestions.subtitle': 'de tu última búsqueda',
   'home.greeting.night': 'noche',
