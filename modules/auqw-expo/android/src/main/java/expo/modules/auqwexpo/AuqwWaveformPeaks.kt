@@ -541,6 +541,15 @@ internal class AuqwWaveformPeaks(
       )
     }
     if (seed === null || seed.durationUs <= 0 || !seed.seekable) {
+      // A seed killed by refused probes can't be rebuilt by the
+      // whole-file pull — it parks on the same refused session.
+      // Surface the transient for a cooled-down retry; a structural
+      // parse failure with no refusal still gets the pull.
+      if (probeRefused.get()) {
+        throw CodedException(
+          "transient", "seed probes refused mid-parse", null
+        )
+      }
       return null
     }
     val durationUs = seed.durationUs
