@@ -1508,37 +1508,68 @@ testGalleryNestingSafety();
 testTrackRowTextScale();
 testNavbarTextScale();
 function testStageMotion(): void {
-  // Release decision — the shared CMP deck contract.
+  // Release decision — OpenTune's performFling contract on one
+  // continuous pixel axis (raw px above the rest anchor; negative
+  // below it). travel = 600, collapsed = 136 throughout.
   assertEqual(
-    resolveStageAnchor(0, 0.1, -700),
+    resolveSheetTarget(60, 600, 136, -700),
     'expanded',
     'an up-fling commits regardless of distance',
   );
   assertEqual(
-    resolveStageAnchor(1, 0.9, 700),
+    resolveSheetTarget(540, 600, 136, 700),
     'collapsed',
     'a down-fling commits regardless of distance',
   );
   assertEqual(
-    resolveStageAnchor(0, 0.29, 0),
+    resolveSheetTarget(-20, 600, 136, 700),
+    'dismissed',
+    'a down-fling below the rest anchor dismisses',
+  );
+  assertEqual(
+    resolveSheetTarget(30, 600, 136, 500),
     'collapsed',
-    'below the commit fraction the release settles home',
+    'a down-fling above rest collapses',
   );
+  // Zone midpoints: below collapsed/2 dismisses, below the
+  // collapsed-expanded midpoint collapses, otherwise expands.
   assertEqual(
-    resolveStageAnchor(0, 0.31, 0),
-    'expanded',
-    'the deck edge commits at 30% of the travel',
-  );
-  assertEqual(
-    resolveStageAnchor(1, 0.69, 0),
+    resolveSheetTarget(170, 600, 136, 0),
     'collapsed',
-    'a 30% pull from expanded commits the collapse',
+    'below half the travel the release settles home',
   );
   assertEqual(
-    resolveStageAnchor(1, 0.9, 0),
+    resolveSheetTarget(310, 600, 136, 0),
     'expanded',
-    'a short pull from expanded settles back up',
+    'past half the travel the release commits up',
   );
+  assertEqual(
+    resolveSheetTarget(-69, 600, 136, 0),
+    'dismissed',
+    'more than half the strip below rest dismisses',
+  );
+  assertEqual(
+    resolveSheetTarget(-67, 600, 136, 0),
+    'collapsed',
+    'a short dip below rest settles back',
+  );
+
+  // The raw axis splits at the rest anchor into the two unit
+  // intervals the shared values each expect.
+  assertEqual(stageSheetWrite(300, 600, 136).progress, 0.5);
+  assertEqual(stageSheetWrite(300, 600, 136).gone, 0);
+  assertEqual(stageSheetWrite(700, 600, 136).progress, 1);
+  assertEqual(stageSheetWrite(-68, 600, 136).progress, 0);
+  assertEqual(stageSheetWrite(-68, 600, 136).gone, 0.5);
+  assertEqual(stageSheetWrite(0, 600, 136).progress, 0);
+  assertEqual(stageSheetWrite(0, 600, 136).gone, 0);
+
+  // The coupled phase is the first 18% of the morph — geometry,
+  // corners and background all key off it.
+  assertEqual(stageCoupled(0), 0);
+  assertEqual(stageCoupled(0.09), 0.5);
+  assertEqual(stageCoupled(0.18), 1);
+  assertEqual(stageCoupled(1), 1);
 
   // Pill fade: full at rest, gone exactly at the reveal start.
   assertEqual(stageCollapsedAlpha(0), 1);
@@ -1725,12 +1756,14 @@ testAnimatedIcons();
 console.log('ui-native tests passed');
 import { readdirSync, readFileSync } from 'node:fs';
 import {
+  resolveSheetTarget,
   resolveSkipCommit,
-  resolveStageAnchor,
   skipCommitEdge,
   skipTravelPx,
   stageCollapsedAlpha,
   stageContentAlpha,
+  stageCoupled,
   stageScrimAlpha,
+  stageSheetWrite,
   stageTopRadius,
 } from './stage-motion.ts';

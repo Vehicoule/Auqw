@@ -9,7 +9,10 @@ import {
 } from 'react-native';
 import type { StyleProp, ViewStyle } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { BlurView } from 'expo-blur';
+import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
 import Animated, {
+  interpolateColor,
   useAnimatedProps,
   useAnimatedReaction,
   useAnimatedStyle,
@@ -45,11 +48,15 @@ import {
 import type { IconName } from './primitives.tsx';
 import { useResolvedArtworkUri } from './artwork.tsx';
 import {
-  resolveStageAnchor,
+  resolveSheetTarget,
+  stageCollapsedAlpha,
   stageContentAlpha,
+  stageCoupled,
   stageScrimAlpha,
+  stageSheetWrite,
   stageTopRadius,
 } from './stage-motion';
+import { MiniPlayer } from './mini-player.tsx';
 import { WaveformSeek } from './progress.tsx';
 import { QueueList } from './queue-list';
 import { EmptyState, StateFor } from './states.tsx';
@@ -59,6 +66,7 @@ import type {
   PlayerModel,
   QueueModel,
   RadioModel,
+  SkipPeek,
   StageMode,
   WaveformPeak,
 } from '@auqw/ui-shared';
@@ -86,6 +94,16 @@ import {
 const STAGE_SETTLE_SPRING = {
   stiffness: 200,
   damping: 30,
+  overshootClamping: true,
+} as const;
+
+// Gesture-release settle — OpenTune's BottomSheetAnimationSpec
+// (StiffnessMediumLow ≈ 400 at the Compose default dampingRatio 1.0):
+// critically damped, so the flick carries into the anchor with zero
+// overshoot. damping 40 is the critical point for stiffness 400.
+const SHEET_SETTLE_SPRING = {
+  stiffness: 400,
+  damping: 40,
   overshootClamping: true,
 } as const;
 
@@ -546,16 +564,36 @@ export type StageSheetProps = {
       `expanded` change after the fact. Standalone hosts (the gallery)
       omit it and the sheet animates from `expanded` alone. */
   readonly progress?: SharedValue<number> | undefined;
-  /** Shared pixel travel for the morph — the sheet publishes its
-      measured height here so the mini-player's drag converts finger
-      pixels to progress against the same distance the sheet translates
-      over. Standalone hosts omit it and the sheet measures itself. */
+  /** Shared pixel travel for the morph — the sheet publishes the
+      distance from its top edge to the collapsed pill's top edge here
+      so the pill's drag converts finger pixels to progress over the
+      same distance the surface translates. Standalone hosts omit it
+      and the sheet measures itself. */
   readonly travel?: SharedValue<number> | undefined;
   /** Shared settle-target flag (-1 = idle, else 0/1): whichever
       gesture's release committed this anchor already launched its own
       velocity-carrying spring, so the `expanded`-flip effect must not
       restart the settle cold. Standalone hosts omit it. */
   readonly anchor?: SharedValue<number> | undefined;
+  /** Shared 0..1 dismiss slide — drags below the rest anchor write it,
+      the whole surface slides offscreen and fades on it (OpenTune's
+      dismissed bound below the collapsed one). Standalone hosts omit
+      it and the sheet parks at the collapsed anchor. */
+  readonly gone?: SharedValue<number> | undefined;
+  /** Shared pixel height of the rest strip the collapsed surface parks
+      on — pill height + its gap above the tab bar + the tab bar itself
+      (OpenTune's `collapsedBound`). The host measures it; standalone
+      hosts omit it and the pill floats its own height + gap off the
+      bottom edge. */
+  readonly collapsedHeight?: SharedValue<number> | undefined;
+  /** Sideswipe conveyor peeks for the embedded pill row (the same
+      contract MiniPlayer documents — null = dead edge). */
+  readonly skipNext?: SkipPeek | null | undefined;
+  readonly skipPrevious?: SkipPeek | null | undefined;
+  readonly nextEndsQueue?: boolean | undefined;
+  /** Swipe-down dismiss on the collapsed surface — the pill's
+      slide-off settles, then this fires (the host stops playback). */
+  readonly onDismiss?: (() => void) | undefined;
   readonly onPlayPause?: (() => void) | undefined;
   readonly onNext?: (() => void) | undefined;
   readonly onPrevious?: (() => void) | undefined;
@@ -624,6 +662,12 @@ export function StageSheet({
   progress: progressProp,
   travel: travelProp,
   anchor: anchorProp,
+  gone: goneProp,
+  collapsedHeight: collapsedHeightProp,
+  skipNext,
+  skipPrevious,
+  nextEndsQueue,
+  onDismiss,
   onPlayPause,
   onNext,
   onPrevious,
@@ -666,11 +710,29 @@ export function StageSheet({
   // the UI thread, `expanded` flips only on commit.
   const progress = progressProp ?? internalProgress;
   const internalTravel = useSharedValue(0);
-  // The measured sheet height is the morph's travel distance; the pill
-  // divides finger pixels by this same value so the rise is 1:1.
+  // The morph's pixel travel is the distance from the sheet's top edge
+  // to the collapsed pill's top edge (sheet height minus the rest
+  // strip); the pill divides finger pixels by this same value so the
+  // rise is 1:1.
   const travelPx = travelProp ?? internalTravel;
   const internalAnchor = useSharedValue(-1);
   const anchor = anchorProp ?? internalAnchor;
+  // The dismissed slide — 0 = at the collapsed anchor, 1 = fully below
+  // the host's bottom edge. The same gesture axis as `progress`:
+  // OpenTune's single `value` split at the collapsed bound so each half
+  // keeps its own unit interval.
+  const internalGone = useSharedValue(0);
+  const gone = goneProp ?? internalGone;
+  // Pixels from the sheet's bottom edge up to the pill's top edge at
+  // rest (OpenTune's collapsedBound). Standalone hosts get the pill's
+  // own footprint — it floats one gap off the bottom edge.
+  const internalCollapsed = useSharedValue(
+    theme.sizes.miniPlayer + theme.spacing.md,
+  );
+  const collapsedPx = collapsedHeightProp ?? internalCollapsed;
+  // Measured sheet height as a shared value — gesture worklets read it
+  // for the dismiss strip without capturing a stale JS number.
+  const sheetH = useSharedValue(0);
   // Each detector snapshots its own drag start — the recognizers
   // mount concurrently (grab strip plus each kept-alive pane's
   // chrome), and a shared baseline would let a second finger's
@@ -730,6 +792,26 @@ export function StageSheet({
   useEffect(() => {
     onExpandChangeRef.current = onExpandChange;
   }, [onExpandChange]);
+  const onDismissRef = useRef(onDismiss);
+  useEffect(() => {
+    onDismissRef.current = onDismiss;
+  }, [onDismiss]);
+  const emitDismiss = useCallback(() => {
+    onDismissRef.current?.();
+  }, []);
+
+  // The travel is derived, not measured directly: sheet height minus
+  // the rest strip. A tab-bar hide/show rewrites the strip mid-flight
+  // and the pill's rest anchor follows in the same frame.
+  useAnimatedReaction(
+    () => collapsedPx.value,
+    (strip) => {
+      if (sheetH.value > 0) {
+        travelPx.value = Math.max(0, sheetH.value - strip);
+      }
+    },
+    [collapsedPx],
+  );
 
   useEffect(() => {
     const target = expanded ? 1 : 0;
@@ -758,7 +840,8 @@ export function StageSheet({
         : dragPreview === 'mid-drag'
           ? 0.75
           : 0;
-  }, [dragPreview, expanded, progress]);
+    gone.value = dragPreview === 'dismissed' ? 1 : 0;
+  }, [dragPreview, expanded, progress, gone]);
 
   const commitAnchor = useCallback((target: number) => {
     onExpandChangeRef.current?.(target === 1);
@@ -771,8 +854,9 @@ export function StageSheet({
     progress.value = theme.reducedMotion
       ? 0
       : withSpring(0, STAGE_SETTLE_SPRING);
+    gone.value = theme.reducedMotion ? 0 : withSpring(0, STAGE_SETTLE_SPRING);
     onExpandChangeRef.current?.(false);
-  }, [progress, theme.reducedMotion]);
+  }, [progress, gone, theme.reducedMotion]);
 
   // The gesture factory is stable across renders — a fresh Pan() per
   // render would cancel an in-flight sheet drag on the next tick. Each
@@ -782,6 +866,11 @@ export function StageSheet({
   // non-scrollable chrome get dedicated recognizers: the dismiss drag
   // works from any mode while the scrollable lists keep their own
   // scroll gesture.
+  //
+  // All of them drive one continuous pixel axis (OpenTune's single
+  // `value`): px above the rest anchor maps to `progress`, px below it
+  // maps to `gone`, and a drag can cross the collapsed→dismissed
+  // boundary mid-flight without re-anchoring.
   const makeSheetPan = useCallback(
     (start: SharedValue<number>) =>
       Gesture.Pan()
@@ -790,58 +879,102 @@ export function StageSheet({
         // cancelled finalize must not commit an anchor (see below).
         .failOffsetX([-16, 16])
         .onBegin(() => {
-          start.value = progress.value;
+          const collapsed = Math.max(1, sheetH.value - travelPx.value);
+          start.value =
+            progress.value * travelPx.value - gone.value * collapsed;
         })
         .onUpdate((e) => {
-          const travel = Math.max(1, travelPx.value);
-          progress.value = Math.min(
-            1,
-            Math.max(0, start.value - e.translationY / travel),
+          const write = stageSheetWrite(
+            start.value - e.translationY,
+            Math.max(1, travelPx.value),
+            Math.max(1, sheetH.value - travelPx.value),
           );
+          progress.value = write.progress;
+          gone.value = write.gone;
         })
         .onFinalize((e, success) => {
           const travel = Math.max(1, travelPx.value);
-          const settle = (target: number) =>
+          const collapsed = Math.max(1, sheetH.value - travel);
+          const springTo = (target: number, velocity: number) =>
             theme.reducedMotion
               ? target
               : withSpring(target, {
-                  ...STAGE_SETTLE_SPRING,
-                  velocity: -e.velocityY / travel,
+                  ...SHEET_SETTLE_SPRING,
+                  velocity,
                 });
           if (!success) {
             // RNGH fires onFinalize on END *and* on FAIL/CANCELLED —
             // a failed recognizer (failOffsetX drift, OS gesture
             // steal) must not commit the anchor it never earned:
             // spring back onto the sheet's current anchor only.
-            progress.value = settle(expanded ? 1 : 0);
+            progress.value = springTo(
+              expanded ? 1 : 0,
+              -e.velocityY / travel,
+            );
+            gone.value = springTo(0, e.velocityY / collapsed);
             return;
           }
-          const target =
-            resolveStageAnchor(
-              start.value,
-              progress.value,
-              e.velocityY,
-            ) === 'expanded'
-              ? 1
-              : 0;
+          const raw =
+            progress.value * travel - gone.value * collapsed;
+          const target = resolveSheetTarget(
+            raw,
+            travel,
+            collapsed,
+            e.velocityY,
+          );
+          if (target === 'dismissed') {
+            anchor.value = 0;
+            progress.value = 0;
+            if (expanded) {
+              scheduleOnRN(commitAnchor, 0);
+            }
+            // The slide-off lands before the host tears down — the
+            // emit fires on the spring's completion so the surface
+            // visibly leaves instead of vanishing mid-travel.
+            if (theme.reducedMotion) {
+              gone.value = 1;
+              scheduleOnRN(emitDismiss);
+            } else {
+              gone.value = withSpring(
+                1,
+                {
+                  ...SHEET_SETTLE_SPRING,
+                  velocity: e.velocityY / collapsed,
+                },
+                (finished) => {
+                  if (finished === true) {
+                    scheduleOnRN(emitDismiss);
+                  }
+                },
+              );
+            }
+            return;
+          }
+          const num = target === 'expanded' ? 1 : 0;
           // Mark the settle as gesture-owned so the `expanded` flip the
           // commit schedules doesn't cold-restart this spring.
-          anchor.value = target;
-          progress.value = settle(target);
+          anchor.value = num;
+          progress.value = springTo(num, -e.velocityY / travel);
+          if (gone.value > 0) {
+            gone.value = springTo(0, e.velocityY / collapsed);
+          }
           // A settle that lands on the anchor we're already on is a
           // no-op for the host — committing it would fire a spurious
           // expanded flip (the App wrapper maps every commit to
           // player mode, stomping queue/lyrics).
-          if (target !== (expanded ? 1 : 0)) {
-            scheduleOnRN(commitAnchor, target);
+          if (num !== (expanded ? 1 : 0)) {
+            scheduleOnRN(commitAnchor, num);
           }
         }),
     [
       travelPx,
+      sheetH,
+      gone,
       theme.reducedMotion,
       progress,
       anchor,
       commitAnchor,
+      emitDismiss,
       expanded,
     ],
   );
@@ -866,38 +999,50 @@ export function StageSheet({
     [makeSheetPan, playerPaneDragStart, playerCanScroll],
   );
 
-  const restCorner = theme.radius.float;
+  // One offset for the whole vertical axis — OpenTune BottomSheet's
+  // `expandedBound - value`: rest parks the surface's top edge on the
+  // pill (`travel` px), expansion carries it to 0, and `gone` slides it
+  // below rest into dismissal. Transform only — never a layout pass.
   const animatedStyle = useAnimatedStyle(() => {
+    const travel = travelPx.value;
+    if (travel <= 0) {
+      // Before the first layout measure lands, keep the sheet parked
+      // off-screen rather than flashing a zero-travel frame.
+      return { transform: [{ translateY: 4000 }] };
+    }
+    const collapsed = Math.max(0, sheetH.value - travel);
+    // progress may overshoot 1 while the spring settles — clamp so the
+    // sheet never paints past the top edge.
+    const p = Math.min(1, progress.value);
+    const g = Math.min(1, Math.max(0, gone.value));
+    return {
+      transform: [
+        { translateY: travel * (1 - p) + g * collapsed },
+      ],
+    };
+  });
+
+  const restCorner = theme.radius.float;
+  const pillHeight = theme.sizes.miniPlayer;
+  const pillGap = theme.spacing.md;
+  const iosSurface = platform === 'ios';
+
+  // The reveal rides progress twice — fade and a 4% grow — so the
+  // expanded surface settles into place instead of just brightening.
+  // Top corners match the leaf's live radius so revealed content clips
+  // to the card's rounded edge instead of painting past it.
+  const contentStyle = useAnimatedStyle(() => {
+    const p = Math.min(1, Math.max(0, progress.value));
     const radius = stageTopRadius(
       progress.value,
       restCorner,
       SHEET_CORNER_RADIUS,
     );
     return {
-      // Before the first layout measure lands, keep the sheet parked
-      // off-screen rather than flashing a zero-travel frame.
-      transform: [
-        {
-          translateY:
-            travelPx.value <= 0
-              ? 4000
-              : // progress may overshoot 1 while the spring settles — clamp
-                // so the sheet never paints past the top edge.
-                travelPx.value * (1 - Math.min(1, progress.value)),
-        },
-      ],
-      borderTopLeftRadius: radius,
-      borderTopRightRadius: radius,
-    };
-  });
-
-  // The reveal rides progress twice — fade and a 4% grow — so the
-  // expanded surface settles into place instead of just brightening.
-  const contentStyle = useAnimatedStyle(() => {
-    const p = Math.min(1, Math.max(0, progress.value));
-    return {
       opacity: stageContentAlpha(progress.value),
       transform: [{ scale: 0.96 + 0.04 * p }],
+      borderTopLeftRadius: radius,
+      borderTopRightRadius: radius,
     };
   });
 
@@ -981,6 +1126,79 @@ export function StageSheet({
     }
   }, [risenOn]);
   const backdropOn = risenOn || backdropWarm;
+
+  // The morphing surface: a single card whose collapsed geometry IS the
+  // pill — its side insets, bottom inset, corner radii, background and
+  // hairline all interpolate over the coupled phase on the same
+  // progress value the translation rides. The only layout-animating
+  // element is this leaf, so a drag frame is a leaf relayout, not a
+  // content reflow.
+  const leafStartColor = iosSurface
+    ? theme.colors.glass
+    : theme.colors.raised;
+  const leafStyle = useAnimatedStyle(() => {
+    const c = stageCoupled(progress.value);
+    const g = Math.min(1, Math.max(0, gone.value));
+    const h = Math.max(pillHeight, sheetH.value);
+    const radius = stageTopRadius(
+      progress.value,
+      restCorner,
+      SHEET_CORNER_RADIUS,
+    );
+    const end = immersive ? schemes.dark.stage : theme.colors.stage;
+    return {
+      left: pillGap * (1 - c),
+      right: pillGap * (1 - c),
+      bottom: (h - pillHeight) * (1 - c),
+      borderTopLeftRadius: radius,
+      borderTopRightRadius: radius,
+      borderBottomLeftRadius: restCorner * (1 - c),
+      borderBottomRightRadius: restCorner * (1 - c),
+      backgroundColor: interpolateColor(c, [0, 1], [leafStartColor, end]),
+      borderColor: interpolateColor(
+        c,
+        [0, 1],
+        [theme.colors.hairline, end],
+      ),
+      // The dismiss slide takes the whole surface down and eases it
+      // out — it leaves fully via the translation; the fade just keeps
+      // it from lingering at the edge.
+      opacity: 1 - g * 0.75,
+    };
+  });
+
+  // The iOS glass fills the leaf while it reads as the pill and fades
+  // out over the coupled phase as the surface becomes the opaque stage.
+  const glassStyle = useAnimatedStyle(() => ({
+    opacity: 1 - stageCoupled(progress.value),
+  }));
+
+  // The collapsed row rides the leaf's top edge: it fades out inside
+  // the same window the old standalone pill used, and its touch/a11y
+  // gate follows visibility — once it reads gone it never intercepts.
+  const rowStyle = useAnimatedStyle(() => ({
+    opacity: stageCollapsedAlpha(progress.value),
+  }));
+  const rowGateProps = useAnimatedProps(() => {
+    const on =
+      !expandedShared.value &&
+      stageCollapsedAlpha(progress.value) > 0.001 &&
+      gone.value < 0.5;
+    return {
+      pointerEvents: on ? 'auto' : 'none',
+      accessibilityElementsHidden: !on,
+      importantForAccessibility: on ? 'auto' : 'no-hide-descendants',
+    } as const;
+  });
+
+  // The expanded content's input gate rides the morph on the UI
+  // thread — it opens exactly where the reveal completes (progress >
+  // 0.5 is STAGE_CONTENT_GATE) and closes the moment the sheet drops
+  // back under it, so a mid-drag pane never eats a stray tap.
+  const contentGateProps = useAnimatedProps(() => {
+    const on = expandedShared.value || progress.value > 0.5;
+    return { pointerEvents: on ? 'auto' : 'none' } as const;
+  });
 
   // Tap-to-seek on the waveform: the scrub pan only ever activates on
   // movement, so a plain tap resolves x→ms through the same commit
@@ -1631,10 +1849,12 @@ export function StageSheet({
       </Animated.View>
       <Animated.View
         onLayout={(e) => {
-          setHeight(e.nativeEvent.layout.height);
-          travelPx.value = e.nativeEvent.layout.height;
+          const h = e.nativeEvent.layout.height;
+          setHeight(h);
+          sheetH.value = h;
+          travelPx.value = Math.max(0, h - collapsedPx.value);
         }}
-        pointerEvents={expanded ? 'auto' : 'none'}
+        pointerEvents="box-none"
         accessibilityViewIsModal={expanded}
         style={[
           {
@@ -1643,19 +1863,107 @@ export function StageSheet({
             left: 0,
             right: 0,
             bottom: 0,
-            overflow: 'hidden',
-            backgroundColor: immersive
-              ? schemes.dark.stage
-              : theme.colors.stage,
           },
           animatedStyle,
           style,
         ]}
       >
-        {/* Staged reveal: the surface sweeps up as a tone first, the
-            artwork and controls fade in through the pill's fade window
-            and are fully present at the input gate. */}
-        <Animated.View style={[StyleSheet.absoluteFill, contentStyle]}>
+        {/* The morphing surface — one card whose collapsed geometry is
+            the pill itself: side insets, bottom inset, corner radii,
+            background and hairline interpolate toward the full sheet
+            on the same progress the translation rides, so a tracked
+            drag reads as the pill growing into the player, never a
+            fade-out/slide-up exchange. */}
+        <Animated.View
+          pointerEvents="box-none"
+          style={[
+            {
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              overflow: 'hidden',
+              borderWidth: theme.strokes.hairline,
+            },
+            leafStyle,
+          ]}
+        >
+          {/* iOS 26+: real Liquid Glass backdrop; below that the
+              BlurView stays. It fades out over the coupled phase as
+              the surface becomes the opaque stage. Off-iOS GlassView
+              is a plain View passthrough anyway. */}
+          {iosSurface && (
+            <Animated.View
+              pointerEvents="none"
+              style={[StyleSheet.absoluteFill, glassStyle]}
+            >
+              {isLiquidGlassAvailable() ? (
+                <GlassView
+                  glassEffectStyle="regular"
+                  colorScheme={
+                    theme.scheme === 'light' ? 'light' : 'dark'
+                  }
+                  style={StyleSheet.absoluteFill}
+                />
+              ) : (
+                <BlurView
+                  intensity={60}
+                  tint={theme.scheme === 'light' ? 'light' : 'dark'}
+                  style={StyleSheet.absoluteFill}
+                />
+              )}
+            </Animated.View>
+          )}
+          {/* The collapsed row sits at the surface's top edge — the
+              same slot OpenTune's collapsedContent occupies — fading
+              out as the morph takes over. */}
+          <Animated.View
+            animatedProps={rowGateProps}
+            style={[
+              {
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                height: pillHeight,
+              },
+              rowStyle,
+            ]}
+          >
+            <MiniPlayer
+              embedded
+              player={player}
+              platform={platform}
+              progress={progress}
+              travel={travelPx}
+              anchor={anchor}
+              gone={gone}
+              hostHeight={sheetH}
+              onPress={() => commitAnchor(1)}
+              onCollapse={() => commitAnchor(0)}
+              onPlayPause={onPlayPause}
+              onNext={onNext}
+              onPrevious={onPrevious}
+              onToggleLike={onToggleLike}
+              onDismiss={emitDismiss}
+              skipNext={skipNext}
+              skipPrevious={skipPrevious}
+              nextEndsQueue={nextEndsQueue}
+            />
+          </Animated.View>
+        </Animated.View>
+        {/* Staged reveal: constant-fill layer, clipped to the leaf's
+            live top radius, fading in through the pill's fade window
+            and fully present at the input gate. */}
+        <Animated.View
+          animatedProps={contentGateProps}
+          style={[
+            StyleSheet.absoluteFill,
+            { overflow: 'hidden' },
+            contentStyle,
+          ]}
+        >
           {/* Mount on the first rise commit and keep mounted across
               collapses, track changes and mode switches — remounting
               mid-morph would pay the artwork resolver and decode

@@ -39,10 +39,6 @@ const PNG_ICONS_OUTLINE: Record<string, ImageSourcePropType> = {
   settings: iconSettingsOutline,
 };
 
-// Space reserved at a scene's bottom edge while the Android docked
-// accessory overlays it (mini player height + its margins).
-const ACCESSORY_RESERVE = 78;
-
 type Route = {
   key: string;
   title: string;
@@ -87,6 +83,7 @@ export function PlatformTabs({
   renderTab,
   accessory,
   tabBarHidden = false,
+  onTabBarHeight,
 }: PlatformTabsProps) {
   const theme = useTheme();
   const index = Math.max(
@@ -175,7 +172,6 @@ export function PlatformTabs({
             style={{
               flex: 1,
               backgroundColor: theme.colors.canvas,
-              paddingBottom: androidDock ? ACCESSORY_RESERVE : 0,
             }}
           >
             {/* Scenes keep-alive off-screen like the fallback's panes —
@@ -199,7 +195,12 @@ export function PlatformTabs({
                 backgroundColor: theme.colors.canvas,
               }}
             />
-            <TabBarHeightProbe onHeight={setTabBarHeight} />
+            <TabBarHeightProbe
+              onHeight={(h) => {
+                setTabBarHeight(h);
+                onTabBarHeight?.(h);
+              }}
+            />
           </View>
         )}
         onIndexChange={(next) => {

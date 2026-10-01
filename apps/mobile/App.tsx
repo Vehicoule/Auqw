@@ -91,7 +91,6 @@ import {
   LanguagePickerSheet,
   LibraryScreen,
   LoadingState,
-  MiniPlayer,
   PlatformTabs,
   PlaylistScreen,
   Pressable,
@@ -576,6 +575,21 @@ function Main({
   // writes its committed anchor here so the sheet's `expanded`-flip
   // effect doesn't restart the spring and drop the flick velocity.
   const stageAnchor = useSharedValue(-1);
+  // Shared 0..1 dismiss slide — drags below the collapsed anchor
+  // slide the whole surface offscreen on it (OpenTune's dismissed
+  // bound below collapsed).
+  const stageGone = useSharedValue(0);
+  // The collapsed strip the sheet's pill parks on (OpenTune's
+  // collapsedBound): measured tab-bar height + the pill's gap +
+  // its height. PlatformTabs reports the bar height upward.
+  const stageCollapsedHeight = useSharedValue(0);
+  const reportStageCollapsed = useCallback(
+    (barHeight: number) => {
+      stageCollapsedHeight.value =
+        barHeight + theme.spacing.md + theme.sizes.miniPlayer;
+    },
+    [theme, stageCollapsedHeight],
+  );
 
   // Slice-4 sync surface — null on iOS or when bring-up failed. The
   // client's own subscription feeds status; a failed bring-up leaves
@@ -738,6 +752,7 @@ function Main({
       resetStageMorph: () => {
         stageProgress.value = 0;
         stageTravel.value = 0;
+        stageGone.value = 0;
       },
       // Lyrics prefetch while the Stage is open in any mode — one
       // provider call per track — so switching to the lyrics tab is
@@ -2358,36 +2373,16 @@ function Main({
       />
       <AppStack>
         <StackItem stackKey="root">
+          {/* No accessory slot and no dead reserve: the stage sheet
+              IS the miniplayer — its collapsed geometry floats the
+              pill over the tab bar while content scrolls beneath,
+              exactly like OpenTune's single bottom sheet. */}
           <PlatformTabs
             items={navItems()}
             activeKey={tab}
-            tabBarHidden={expanded}
             onSelect={selectTab}
             renderTab={renderTabScreen}
-            accessory={
-              // The pill stays mounted through the morph — its own
-              // alpha rides stageProgress; `interactive` keeps the
-              // invisible rest state out of touch and a11y reach.
-              player !== null ? (
-                <MiniPlayer
-                  player={player}
-                  progress={stageProgress}
-                  travel={stageTravel}
-                  anchor={stageAnchor}
-                  interactive={!expanded}
-                  onPress={() => setStageOpenFor(true)}
-                  onCollapse={() => setExpanded(false)}
-                  onPlayPause={onPlayPause}
-                  onNext={() => advance('next')}
-                  onPrevious={() => advance('previous')}
-                  onToggleLike={onToggleLike}
-                  onDismiss={() => void session.stop()}
-                  skipNext={skipPreview.next}
-                  skipPrevious={skipPreview.previous}
-                  nextEndsQueue={skipPreview.nextEndsQueue}
-                />
-              ) : undefined
-            }
+            onTabBarHeight={reportStageCollapsed}
           />
           {sheetPlayer !== null ? (
             <StageSheet
@@ -2396,7 +2391,13 @@ function Main({
               progress={stageProgress}
               travel={stageTravel}
               anchor={stageAnchor}
+              gone={stageGone}
+              collapsedHeight={stageCollapsedHeight}
               onExpandChange={setStageOpenFor}
+              onDismiss={() => void session.stop()}
+              skipNext={skipPreview.next}
+              skipPrevious={skipPreview.previous}
+              nextEndsQueue={skipPreview.nextEndsQueue}
               mode={stageMode}
               onModeChange={setStageMode}
               queue={queueModel}

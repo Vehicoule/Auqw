@@ -215,7 +215,12 @@ export function SettingsScreen({
     <ScrollView
       scrollEnabled={scrollEnabled}
       style={{ flex: 1, backgroundColor: theme.colors.canvas }}
-      contentContainerStyle={{ paddingTop: topInset, paddingBottom: theme.spacing.xxl }}
+      contentContainerStyle={{
+        paddingTop: topInset,
+        // Clears the floating miniplayer's strip.
+        paddingBottom:
+          theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
+      }}
     >
       <Text
         variant="display"

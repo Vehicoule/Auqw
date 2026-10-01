@@ -176,7 +176,11 @@ export function SearchScreen({
           style={{ flex: 1 }}
           scrollEnabled={scrollEnabled}
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ paddingBottom: theme.spacing.xxl }}
+          contentContainerStyle={{
+            // Clears the floating miniplayer's strip.
+            paddingBottom:
+              theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
+          }}
         >
           <Text
             variant="label"
