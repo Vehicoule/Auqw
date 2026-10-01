@@ -607,7 +607,11 @@ export function PlayPauseIcon({
     return () => cancelAnimationFrame(raf);
   }, [playing, theme.reducedMotion]);
 
-  const initial = morphPlayPause(amount.current);
+  // Reduced-motion renders the target straight away — the effect's
+  // passive snap would otherwise let the stale glyph paint one frame.
+  const initial = morphPlayPause(
+    theme.reducedMotion ? (playing ? 1 : 0) : amount.current,
+  );
   return (
     <svg
       width={size}
