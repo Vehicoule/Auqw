@@ -894,21 +894,30 @@ function playlistRecordingIds(
 }
 
 /** SourceRef identity shared by catalog rows and stored selected_refs. */
-function refKey(ref: SourceRef | null | undefined): string | null {
+export function refKey(ref: SourceRef | null | undefined): string | null {
   return ref === null || ref === undefined
     ? null
     : `${ref.provider}:${ref.kind}:${ref.id}`;
 }
 
-/** Remote tracks parked in playlists via selected_ref — catalog rows
-    test membership on this set, not the recording id. */
-function playlistSourceRefs(
+/** Remote tracks parked in playlists — catalog rows test membership
+    on this set. Entries carry the identity two ways: a parked
+    `selectedRef` for tracks added straight from a provider, and a
+    `recordingId` whose recording's own `sourceRefs` mark the catalog
+    tracks it materialized — a saved catalog track tests positive on
+    either identity. */
+export function playlistSourceRefs(
   entries: readonly PlaylistEntry[],
+  recordings: readonly Recording[],
 ): ReadonlySet<string> {
+  const byId = indexById(recordings);
   const refs = new Set<string>();
   for (const entry of entries) {
     const key = refKey(entry.selectedRef);
     if (key !== null) refs.add(key);
+    for (const ref of byId.get(entry.recordingId)?.sourceRefs ?? []) {
+      refs.add(`${ref.provider}:${ref.kind}:${ref.id}`);
+    }
   }
   return refs;
 }
@@ -1625,6 +1634,8 @@ export function toEntityModel(input: {
   readonly error: AppError | null;
   readonly likes: readonly Like[];
   readonly playlistEntries?: readonly PlaylistEntry[];
+  /** Library recordings — joins playlist entries to catalog refs. */
+  readonly recordings?: readonly Recording[];
   readonly entitySourceRefs: readonly EntitySourceRef[];
   readonly loadingMore?: boolean | undefined;
   readonly playingRef?: SourceRef | null | undefined;
@@ -1650,7 +1661,10 @@ export function toEntityModel(input: {
     input.entitySourceRefs,
     page.entity.sourceRef,
   );
-  const inPlaylist = playlistSourceRefs(input.playlistEntries ?? []);
+  const inPlaylist = playlistSourceRefs(
+    input.playlistEntries ?? [],
+    input.recordings ?? [],
+  );
   const liked =
     entityId !== null &&
     input.likes.some(

@@ -1558,11 +1558,19 @@ export function useAppShell<E extends { readonly type: string } = never>(
         error: fetch?.error ?? null,
         likes: state.likes,
         playlistEntries: state.playlistEntries,
+        recordings: state.recordings,
         entitySourceRefs: state.entitySourceRefs,
         loadingMore: fetch?.loadingMore ?? false,
         playingRef,
       }),
-    [state.likes, state.playlistEntries, state.entitySourceRefs, playingRef, localeTick],
+    [
+      state.likes,
+      state.playlistEntries,
+      state.recordings,
+      state.entitySourceRefs,
+      playingRef,
+      localeTick,
+    ],
   );
   // Row-key → TrackMetadata for entity items (resultMeta's contract)
   // — namespaced per stack entry so two entity screens never collide.
@@ -1671,6 +1679,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       searchState,
       playingRef,
       state.playlistEntries,
+      state.recordings,
     );
     if (localResults.length === 0 || base.phase === 'idle') {
       return base;
@@ -1683,7 +1692,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
     // rows still play (owned bytes), so surface them instead of the
     // bare failure.
     return { ...base, phase: 'ready' as const, results };
-  }, [searchState, localResults, playingRef, state.playlistEntries, localeTick]);
+  }, [
+    searchState,
+    localResults,
+    playingRef,
+    state.playlistEntries,
+    state.recordings,
+    localeTick,
+  ]);
 
   const homeModel = useMemo(
     () =>

@@ -14,12 +14,18 @@ import {
   toQueueModel,
   toRadioModel,
   toRailCard,
+  toSearchModel,
   toSearchRowModel,
   toSettingsModel,
   toTrackRowModel,
   skipPeekFor,
 } from '@auqw/ui-shared';
-import type { LyricsSheet, SourceRef } from '@auqw/application';
+import type {
+  LyricsSheet,
+  PlaylistEntry,
+  Recording,
+  SourceRef,
+} from '@auqw/application';
 import {
   assert,
   assertDeepEqual,
@@ -1004,6 +1010,105 @@ function testEntityModel(): void {
   assert(fixtureEntities.length >= 2, 'need entity fixtures');
 }
 
+function testPlaylistMembership(): void {
+  // Catalog membership joins entry selected_refs AND the sourceRefs of
+  // recordings entries hold — a catalog track saved as a recording
+  // (selectedRef null) still marks its search/entity rows.
+  const baseRec = fixtureRecordings[0];
+  assert(baseRec !== undefined, 'need a fixture recording to spread');
+  const savedRec: Recording = {
+    ...baseRec,
+    id: 'rec-saved',
+    sourceRefs: [
+      { provider: 'deezer', kind: 'track', id: 'dz-t-dracula' },
+      { provider: 'deezer', kind: 'track', id: 'dz-t-nope' },
+    ],
+  };
+  const entries: PlaylistEntry[] = [
+    {
+      entryId: 'pe-saved',
+      playlistId: 'pl-x',
+      recordingId: 'rec-saved',
+      position: 1,
+      selectedRef: null,
+      addedMs: 0,
+    },
+    {
+      entryId: 'pe-parked',
+      playlistId: 'pl-x',
+      recordingId: 'rec-parked',
+      position: 2,
+      selectedRef: {
+        provider: 'deezer',
+        kind: 'track',
+        id: 'dz-t-loser',
+      },
+      addedMs: 0,
+    },
+  ];
+  const model = toEntityModel({
+    page: fixtureEntityPage,
+    error: null,
+    likes: fixtureLikes,
+    playlistEntries: entries,
+    recordings: [savedRec],
+    entitySourceRefs: fixtureEntitySourceRefs,
+  });
+  const byRef = (refId: string) =>
+    model.items.find((i) => i.key.startsWith(`deezer:${refId}:`));
+  assert(byRef('dz-t-dracula')?.inPlaylist === true,
+    'member via recording sourceRef marks the check');
+  assert(byRef('dz-t-nope')?.inPlaylist === true,
+    'every ref of a multi-ref member counts');
+  assert(byRef('dz-t-loser')?.inPlaylist === true,
+    'member via parked selectedRef marks the check');
+  const empty = toEntityModel({
+    page: fixtureEntityPage,
+    error: null,
+    likes: fixtureLikes,
+    playlistEntries: [],
+    recordings: [savedRec],
+    entitySourceRefs: fixtureEntitySourceRefs,
+  });
+  assert(
+    empty.items.every((i) => i.inPlaylist === false),
+    'no entries — no membership',
+  );
+  const roadsRec: Recording = {
+    ...baseRec,
+    id: 'rec-roads',
+    sourceRefs: [
+      { provider: 'youtube-music', kind: 'track', id: 'ytm-roads' },
+    ],
+  };
+  const search = toSearchModel(
+    {
+      type: 'content',
+      revision: 1,
+      query: 'roads',
+      page: { items: fixtureSearchResults, storefront: null },
+    },
+    null,
+    [
+      {
+        entryId: 'pe-roads',
+        playlistId: 'pl-x',
+        recordingId: 'rec-roads',
+        position: 1,
+        selectedRef: null,
+        addedMs: 0,
+      },
+    ],
+    [roadsRec],
+  );
+  const rowFor = (refId: string) =>
+    search.results.find((r) => r.key.startsWith(`youtube-music:${refId}:`));
+  assert(rowFor('ytm-roads')?.inPlaylist === true,
+    'search rows join membership through recording sourceRefs');
+  assert(rowFor('ytm-glory')?.inPlaylist === false,
+    'non-members keep the plus');
+}
+
 function testHomeAndNav(): void {
   assert(fixtureHomeModel.recents.length >= 4, 'recents too thin');
   assert(fixtureHomeModel.suggestions.length >= 3, 'suggestions too thin');
@@ -1522,6 +1627,7 @@ testLibraryCards();
 testCollections();
 testPlaylistModel();
 testEntityModel();
+testPlaylistMembership();
 testHomeAndNav();
 testSearchStates();
 testLyricsModel();
