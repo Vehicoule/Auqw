@@ -995,20 +995,31 @@ export function StageSheet({
               0,
               e.velocityY / collapsed,
               (ok) => {
-                if (ok === true && num === 1) {
+                // A hardware back during the unwind cancels a pending
+                // expand by clearing the anchor; reopening without
+                // that check would morph the leaf over navigated-away
+                // content.
+                if (
+                  ok === true &&
+                  num === 1 &&
+                  (expanded || anchor.value === 1)
+                ) {
                   progress.value = springTo(1, -e.velocityY / travel);
+                  if (!expanded) {
+                    scheduleOnRN(commitAnchor, 1);
+                  }
                 }
               },
             );
           } else {
             progress.value = springTo(num, -e.velocityY / travel);
-          }
-          // A settle that lands on the anchor we're already on is a
-          // no-op for the host — committing it would fire a spurious
-          // expanded flip (the App wrapper maps every commit to
-          // player mode, stomping queue/lyrics).
-          if (num !== (expanded ? 1 : 0)) {
-            scheduleOnRN(commitAnchor, num);
+            // A settle that lands on the anchor we're already on is a
+            // no-op for the host — committing it would fire a spurious
+            // expanded flip (the App wrapper maps every commit to
+            // player mode, stomping queue/lyrics).
+            if (num !== (expanded ? 1 : 0)) {
+              scheduleOnRN(commitAnchor, num);
+            }
           }
         }),
     [

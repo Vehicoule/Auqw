@@ -531,20 +531,28 @@ export function MiniPlayer({
           if (theme.reducedMotion) {
             sheetGone.value = 0;
             sheetProgress.value = 1;
+            scheduleOnRN(emit, 'onPress');
           } else if (sheetGone.value > 0.001) {
             // A fling up out of a dismiss slide unwinds the slide to
             // rest before the sheet expands — the axes share one
             // visible offset, so two velocity-bearing springs would
-            // double the release speed.
+            // double the release speed. The expand commit rides the
+            // same callback: a hardware back during the unwind clears
+            // the anchor, and reopening without that check would
+            // morph the leaf over navigated-away content.
             sheetGone.value = withSpring(
               0,
               { ...SHEET_SETTLE_SPRING, velocity: velocityG },
               (finished) => {
-                if (finished === true) {
+                if (
+                  finished === true &&
+                  (sheetAnchor === undefined || sheetAnchor.value === 1)
+                ) {
                   sheetProgress.value = withSpring(1, {
                     ...SHEET_SETTLE_SPRING,
                     velocity: velocityP,
                   });
+                  scheduleOnRN(emit, 'onPress');
                 }
               },
             );
@@ -554,8 +562,8 @@ export function MiniPlayer({
               ...SHEET_SETTLE_SPRING,
               velocity: velocityP,
             });
+            scheduleOnRN(emit, 'onPress');
           }
-          scheduleOnRN(emit, 'onPress');
           return;
         }
         if (target === 'collapsed') {

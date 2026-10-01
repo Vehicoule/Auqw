@@ -1529,6 +1529,14 @@ function Main({
         setExpanded(false);
         return true;
       }
+      // A gesture-committed sheet expand sets `stageAnchor` before the
+      // `expanded` state lands — a back press inside that window would
+      // navigate away and the in-flight commit would reopen the sheet
+      // over it. Cancel the pending commit and swallow the press.
+      if (stageAnchor.value === 1) {
+        stageAnchor.value = 0;
+        return true;
+      }
       if (tab !== 'home') {
         setTab('home');
         return true;
@@ -1542,6 +1550,7 @@ function Main({
     providerSlot,
     overlayStack,
     expanded,
+    stageAnchor,
     tab,
     closeOverlay,
     closeRowActions,
