@@ -2092,18 +2092,20 @@ export function useAppShell<E extends { readonly type: string } = never>(
       if (startAt < 0) {
         return;
       }
-      recordRecentSearch(query);
+      // Results render the committed query — a cleared or edited
+      // input must not stamp (or validate-reject) the origin.
+      recordRecentSearch(committedQuery);
       void dispatchPlay(
         'action.playResult',
         session.playMetadata(metas, {
           startAt,
-          origin: { kind: 'search', query },
+          origin: { kind: 'search', query: committedQuery },
         }),
       );
     },
     [
       playRecording,
-      query,
+      committedQuery,
       online,
       ports.localCatalog,
       ports.entityPlayRequiresCanPlay,
