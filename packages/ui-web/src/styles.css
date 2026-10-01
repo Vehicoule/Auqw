@@ -2504,8 +2504,8 @@
    reserve the strip so headings never sit under the lights; the
    immersive player keeps artwork full-bleed (its interactive
    controls are center/right, so nothing collides). */
-[data-platform='darwin'] .uw-stage[data-mode='lyrics'],
-[data-platform='darwin'] .uw-stage[data-mode='queue'] {
+[data-platform='darwin'] .uw-stage-col .uw-stage[data-mode='lyrics'],
+[data-platform='darwin'] .uw-stage-col .uw-stage[data-mode='queue'] {
   padding-top: var(--uw-titlebar-h);
 }
 .uw-stage-col__body {
