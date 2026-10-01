@@ -210,7 +210,10 @@ export function HomeScreen({
       style={{ flex: 1, backgroundColor: theme.colors.canvas }}
       contentContainerStyle={{
         paddingTop: topInset + theme.spacing.sm,
-        paddingBottom: theme.spacing.xxl,
+        // The floating miniplayer overlays the last rows — the extra
+        // strip lets them scroll clear of the pill.
+        paddingBottom:
+          theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
       }}
     >
       <Text

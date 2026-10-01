@@ -30,6 +30,10 @@ export type PlatformTabsProps = {
   /** Hide the nav bar (and the accessory with it — it lives in the
       bar's slot on iOS): the expanded stage sheet owns the screen. */
   readonly tabBarHidden?: boolean | undefined;
+  /** The measured tab-bar height, reported upward — the stage sheet's
+      collapsed strip (OpenTune's `collapsedBound`) anchors the
+      floating pill to the bar's top edge. */
+  readonly onTabBarHeight?: ((height: number) => void) | undefined;
 };
 
 // Non-native fallback (web/desktop): the app's own navbar + docked
@@ -46,6 +50,7 @@ export function PlatformTabs({
   renderTab,
   accessory,
   tabBarHidden = false,
+  onTabBarHeight,
 }: PlatformTabsProps) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -103,7 +108,13 @@ export function PlatformTabs({
       {!tabBarHidden && (
         <>
           {accessory}
-          <AppNavbar items={items} activeKey={activeKey} onSelect={onSelect} />
+          <View
+            onLayout={(e) =>
+              onTabBarHeight?.(e.nativeEvent.layout.height)
+            }
+          >
+            <AppNavbar items={items} activeKey={activeKey} onSelect={onSelect} />
+          </View>
         </>
       )}
     </View>

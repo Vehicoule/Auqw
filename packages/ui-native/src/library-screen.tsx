@@ -310,7 +310,9 @@ export function LibraryScreen({
       contentContainerStyle={{
         paddingTop: topInset + theme.spacing.sm,
         paddingHorizontal: theme.spacing.lg,
-        paddingBottom: theme.spacing.xxl,
+        // Clears the floating miniplayer's strip.
+        paddingBottom:
+          theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
         gap: theme.spacing.lg,
       }}
     >

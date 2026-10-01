@@ -91,7 +91,6 @@ import {
   LanguagePickerSheet,
   LibraryScreen,
   LoadingState,
-  MiniPlayer,
   PlatformTabs,
   PlaylistScreen,
   Pressable,
@@ -576,6 +575,21 @@ function Main({
   // writes its committed anchor here so the sheet's `expanded`-flip
   // effect doesn't restart the spring and drop the flick velocity.
   const stageAnchor = useSharedValue(-1);
+  // Shared 0..1 dismiss slide — drags below the collapsed anchor
+  // slide the whole surface offscreen on it (OpenTune's dismissed
+  // bound below collapsed).
+  const stageGone = useSharedValue(0);
+  // The collapsed strip the sheet's pill parks on (OpenTune's
+  // collapsedBound): measured tab-bar height + the pill's gap +
+  // its height. PlatformTabs reports the bar height upward.
+  const stageCollapsedHeight = useSharedValue(0);
+  const reportStageCollapsed = useCallback(
+    (barHeight: number) => {
+      stageCollapsedHeight.value =
+        barHeight + theme.spacing.md + theme.sizes.miniPlayer;
+    },
+    [theme, stageCollapsedHeight],
+  );
 
   // Slice-4 sync surface — null on iOS or when bring-up failed. The
   // client's own subscription feeds status; a failed bring-up leaves
@@ -738,6 +752,7 @@ function Main({
       resetStageMorph: () => {
         stageProgress.value = 0;
         stageTravel.value = 0;
+        stageGone.value = 0;
       },
       // Lyrics prefetch while the Stage is open in any mode — one
       // provider call per track — so switching to the lyrics tab is
@@ -1010,6 +1025,18 @@ function Main({
     onCreatePlaylist,
   } = shell;
 
+  // A swipe-dismissed sheet parks `stageGone` at 1 until the held
+  // mount releases; a player taking over inside that window must not
+  // inherit a pill translated offscreen. Only the dismiss axis resets
+  // — an expanded gesture keeps its progress.
+  const hadPlayerRef = useRef(false);
+  useEffect(() => {
+    const hasPlayer = player !== null;
+    if (hasPlayer && !hadPlayerRef.current) {
+      stageGone.value = 0;
+    }
+    hadPlayerRef.current = hasPlayer;
+  }, [player, stageGone]);
   const syncModel = useMemo(
     () =>
       toSyncModel({
@@ -1498,7 +1525,38 @@ function Main({
         return true;
       }
       if (expanded) {
+        // Clear a pending commit token too — an expand commit queued
+        // just before this press would otherwise land after the close
+        // and reopen the sheet. -1 is the idle marker: writing the
+        // collapse target (0) would make the expanded effect read the
+        // close as gesture-owned and skip its collapse spring.
+        stageAnchor.value = -1;
         setExpanded(false);
+        return true;
+      }
+      // A gesture-committed sheet expand sets `stageAnchor` before the
+      // `expanded` state lands — a back press inside that window would
+      // navigate away and the in-flight commit would reopen the sheet
+      // over it. Cancel the pending commit and swallow the press.
+      // The unwind callback re-checks `stageAnchor` before expanding,
+      // and queued commits gate on it in `commitAnchor` — writing 0
+      // cancels both rather than just moving the shared value. A
+      // release from rest has its expand spring already in flight, so
+      // the surface retreats to the pill in the same breath. A queued
+      // commit that ran just before this press is overridden by the
+      // close — the last write wins on the same JS run queue.
+      if (stageAnchor.value === 1) {
+        stageAnchor.value = 0;
+        stageProgress.value = 0;
+        setExpanded(false);
+        return true;
+      }
+      // A sheet drag still in flight mints a fresh commit token at
+      // release — writing -2 marks it cancelled so the finalize
+      // worklet retreats without committing over the navigation this
+      // press just ran.
+      if (stageAnchor.value === 2) {
+        stageAnchor.value = -2;
         return true;
       }
       if (tab !== 'home') {
@@ -1514,6 +1572,8 @@ function Main({
     providerSlot,
     overlayStack,
     expanded,
+    stageAnchor,
+    stageProgress,
     tab,
     closeOverlay,
     closeRowActions,
@@ -2358,36 +2418,16 @@ function Main({
       />
       <AppStack>
         <StackItem stackKey="root">
+          {/* No accessory slot and no dead reserve: the stage sheet
+              IS the miniplayer — its collapsed geometry floats the
+              pill over the tab bar while content scrolls beneath,
+              exactly like OpenTune's single bottom sheet. */}
           <PlatformTabs
             items={navItems()}
             activeKey={tab}
-            tabBarHidden={expanded}
             onSelect={selectTab}
             renderTab={renderTabScreen}
-            accessory={
-              // The pill stays mounted through the morph — its own
-              // alpha rides stageProgress; `interactive` keeps the
-              // invisible rest state out of touch and a11y reach.
-              player !== null ? (
-                <MiniPlayer
-                  player={player}
-                  progress={stageProgress}
-                  travel={stageTravel}
-                  anchor={stageAnchor}
-                  interactive={!expanded}
-                  onPress={() => setStageOpenFor(true)}
-                  onCollapse={() => setExpanded(false)}
-                  onPlayPause={onPlayPause}
-                  onNext={() => advance('next')}
-                  onPrevious={() => advance('previous')}
-                  onToggleLike={onToggleLike}
-                  onDismiss={() => void session.stop()}
-                  skipNext={skipPreview.next}
-                  skipPrevious={skipPreview.previous}
-                  nextEndsQueue={skipPreview.nextEndsQueue}
-                />
-              ) : undefined
-            }
+            onTabBarHeight={reportStageCollapsed}
           />
           {sheetPlayer !== null ? (
             <StageSheet
@@ -2396,7 +2436,13 @@ function Main({
               progress={stageProgress}
               travel={stageTravel}
               anchor={stageAnchor}
+              gone={stageGone}
+              collapsedHeight={stageCollapsedHeight}
               onExpandChange={setStageOpenFor}
+              onDismiss={() => void session.stop()}
+              skipNext={skipPreview.next}
+              skipPrevious={skipPreview.previous}
+              nextEndsQueue={skipPreview.nextEndsQueue}
               mode={stageMode}
               onModeChange={setStageMode}
               queue={queueModel}

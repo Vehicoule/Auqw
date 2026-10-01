@@ -13,19 +13,25 @@ const STAGE_PILL_GONE = 0.25;
 /** Expanded content finishes its reveal (and input opens) here. */
 const STAGE_CONTENT_GATE = 0.5;
 
-/** Release commit: dragging this fraction of the travel past the start
- *  anchor flips the decision (deck edge — tighter than the generic 0.4). */
-const STAGE_COMMIT_FRACTION = 0.3;
-
-/** Fling override: px/s beyond which the release direction wins outright. */
-const STAGE_FLING_VELOCITY = 600;
-
-type StageAnchor = 'expanded' | 'collapsed';
+/** Fling override: px/s beyond which the release direction wins outright
+ *  — OpenTune BottomSheet.kt's performFling threshold. */
+const SHEET_FLING_VELOCITY = 250;
 
 const clamp01 = (v: number): number => {
   'worklet';
   return Math.min(1, Math.max(0, v));
 };
+
+/**
+ * The coupled-phase fraction: bounds, radius and background morphs all
+ * interpolate over the same 0..1 slice of progress so the pill grows
+ * into the sheet as one surface.
+ */
+export function stageCoupled(progress: number): number {
+  'worklet';
+  if (!Number.isFinite(progress)) return 0;
+  return clamp01(progress / STAGE_COUPLED_END);
+}
 
 /**
  * The collapsed pill's opacity: 1 at rest, 0 at STAGE_PILL_GONE — its fade
@@ -72,42 +78,69 @@ export function stageTopRadius(
   'worklet';
   if (!Number.isFinite(progress)) return restRadius;
   if (progress >= 0.999) return 0;
-  const coupled = clamp01(progress / STAGE_COUPLED_END);
+  const coupled = stageCoupled(progress);
   return restRadius + (sheetRadius - restRadius) * coupled;
 }
 
+// ---- Unified vertical axis (OpenTune BottomSheet.kt's single `value`) ----
+//
+// One continuous pixel position over the collapsed anchor drives the
+// whole gesture: raw > 0 is above the rest anchor (climbing toward the
+// expanded sheet), raw < 0 is below it (sinking into the dismiss slide).
+// OpenTune keeps a single `value` between dismissedBound and
+// expandedBound; raw = value - collapsedBound is the same measure shifted
+// so zero sits on the pill. A drag can cross the collapsed→dismissed
+// boundary without re-anchoring — the pill just keeps traveling with
+// the finger into the slide-off.
+
+export type SheetTarget = 'expanded' | 'collapsed' | 'dismissed';
+
 /**
- * Release decision — the shared sheet contract: fling wins on direction,
- * otherwise the drag must cross the commit fraction from its start anchor;
- * an ambiguous release settles back to the start side.
+ * The shared-value pair the raw position maps onto: `progress` covers
+ * raw > 0 (the morph), `gone` covers raw < 0 (the dismiss slide).
  */
-export function resolveStageAnchor(
-  dragStart: number,
-  current: number,
-  velocityY: number,
-  commitFraction?: number,
-  flingVelocity?: number,
-): StageAnchor {
+export function stageSheetWrite(
+  rawPx: number,
+  travelPx: number,
+  collapsedPx: number,
+): { readonly progress: number; readonly gone: number } {
   'worklet';
-  // Default values via `??` in the body, not the signature — a worklet's
-  // default-parameter initializers can't reference module scope (the
-  // transform captures body refs into __closure only), so the signature
-  // form throws ReferenceError on the UI runtime.
-  const commit = commitFraction ?? STAGE_COMMIT_FRACTION;
-  const fling = flingVelocity ?? STAGE_FLING_VELOCITY;
-  if (Number.isFinite(velocityY) && velocityY <= -fling) {
-    return 'expanded';
+  if (!Number.isFinite(rawPx)) return { progress: 0, gone: 0 };
+  const travel = Math.max(1, travelPx);
+  const collapsed = Math.max(1, collapsedPx);
+  if (rawPx >= 0) {
+    return { progress: clamp01(rawPx / travel), gone: 0 };
   }
-  if (Number.isFinite(velocityY) && velocityY >= fling) {
-    return 'collapsed';
+  return { progress: 0, gone: clamp01(-rawPx / collapsed) };
+}
+
+/**
+ * Release decision — OpenTune's performFling, verbatim semantics on the
+ * raw axis: a fast enough fling commits by direction (down only dismisses
+ * when the sheet is already below the collapsed anchor — the same
+ * `value < collapsedBound` check), otherwise the zone midpoints decide:
+ * above half the expand travel → expanded, below half the dismissed
+ * strip → dismissed, between → collapsed.
+ */
+export function resolveSheetTarget(
+  rawPx: number,
+  travelPx: number,
+  collapsedPx: number,
+  velocityY: number,
+): SheetTarget {
+  'worklet';
+  if (!Number.isFinite(rawPx)) return 'collapsed';
+  const travel = Math.max(1, travelPx);
+  const collapsed = Math.max(1, collapsedPx);
+  if (Number.isFinite(velocityY)) {
+    if (velocityY <= -SHEET_FLING_VELOCITY) return 'expanded';
+    if (velocityY >= SHEET_FLING_VELOCITY) {
+      return rawPx < 0 ? 'dismissed' : 'collapsed';
+    }
   }
-  if (dragStart <= 0.5 && current - dragStart >= commit) {
-    return 'expanded';
-  }
-  if (dragStart >= 0.5 && dragStart - current >= commit) {
-    return 'collapsed';
-  }
-  return dragStart >= 0.5 ? 'expanded' : 'collapsed';
+  if (rawPx >= travel / 2) return 'expanded';
+  if (rawPx < -collapsed / 2) return 'dismissed';
+  return 'collapsed';
 }
 
 // ---- Horizontal track-skip conveyor (the OpenTune-style sideswipe) ----

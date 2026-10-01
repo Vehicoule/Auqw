@@ -21,11 +21,12 @@ import { scheduleOnRN } from 'react-native-worklets';
 import { useTheme } from './theme.tsx';
 import {
   SKIP_COMMIT_FRACTION,
+  resolveSheetTarget,
   resolveSkipCommit,
-  resolveStageAnchor,
   skipCommitEdge,
   skipTravelPx,
   stageCollapsedAlpha,
+  stageSheetWrite,
 } from './stage-motion';
 import {
   IconButton,
@@ -52,6 +53,11 @@ export type MiniPlayerProps = {
   readonly onToggleLike?: (() => void) | undefined;
   /** Swipe-down: dismiss stops playback; the queue keeps its items. */
   readonly onDismiss?: (() => void) | undefined;
+  /** Gesture-release expand commit — distinct from `onPress` taps so
+      the sheet can token-gate queued swipe commits (a back press
+      cancels the anchor) without blocking direct taps. Falls back to
+      `onPress` when omitted. */
+  readonly onExpandCommit?: (() => void) | undefined;
   /** Drag release committed to collapse while grabbing a mid-flight
       sheet (never fires from the rest anchor — there the pill just
       settles back). */
@@ -70,8 +76,21 @@ export type MiniPlayerProps = {
       doesn't restart the spring and drop the flick's velocity. */
   readonly anchor?: SharedValue<number> | undefined;
   /** False while the sheet owns the screen — keeps the invisible pill
-      out of the touch path and the accessibility tree. */
+      out of the touch path and the accessibility tree. Ignored when
+      `embedded` — the sheet owns the gate there. */
   readonly interactive?: boolean | undefined;
+  /** Render inside the stage sheet's morphing surface: only the row
+      strip mounts here — the sheet supplies the card chrome, the rest
+      position, the fade and the touch gate. */
+  readonly embedded?: boolean | undefined;
+  /** Shared 0..1 dismiss slide — the unified vertical axis (OpenTune's
+      single `value`) writes it on drags below the rest anchor, and the
+      release resolves against OpenTune's three-target performFling.
+      Omitted in static fixtures. */
+  readonly gone?: SharedValue<number> | undefined;
+  /** Shared measured height of the morph host — the dismiss strip's
+      pixel distance resolves against it (window height fallback). */
+  readonly hostHeight?: SharedValue<number> | undefined;
   /** Sideswipe landing rows: the row the drag previews sliding in from
       each edge, resolved with the engine's own walk (dealt order,
       failed skips, repeat wrap, previous-restart) so the commit lands
@@ -126,6 +145,17 @@ function SkipPeekRow({ peek }: { readonly peek: SkipPeek }) {
     home. Long enough for a real advance, short enough to feel honest. */
 const SKIP_RESET_MS = 520;
 
+// Gesture-release settle — OpenTune BottomSheetAnimationSpec
+// (StiffnessMediumLow ≈ 400 at dampingRatio 1.0): critically damped.
+// damping 40 is the critical point for stiffness 400 at mass 1, and
+// overshootClamping pins the value at the anchor so a velocity-carrying
+// flick can never dip past it and read as a bounce.
+const SHEET_SETTLE_SPRING = {
+  stiffness: 400,
+  damping: 40,
+  overshootClamping: true,
+} as const;
+
 export function MiniPlayer({
   player,
   platform = Platform.OS === 'ios' ? 'ios' : 'android',
@@ -135,11 +165,15 @@ export function MiniPlayer({
   onPrevious,
   onToggleLike,
   onDismiss,
+  onExpandCommit,
   onCollapse,
   progress: sheetProgress,
   travel: sheetTravel,
   anchor: sheetAnchor,
   interactive = true,
+  embedded = false,
+  gone: sheetGone,
+  hostHeight,
   skipNext,
   skipPrevious,
   nextEndsQueue,
@@ -186,6 +220,7 @@ export function MiniPlayer({
     onPrevious,
     onPress,
     onDismiss,
+    onExpandCommit,
     onCollapse,
   });
   const skipData = useRef({ next: skipNext, previous: skipPrevious });
@@ -196,14 +231,27 @@ export function MiniPlayer({
       onPrevious,
       onPress,
       onDismiss,
+      onExpandCommit,
       onCollapse,
     };
     skipData.current = { next: skipNext, previous: skipPrevious };
     occurrenceId.current = player.occurrenceId;
   });
   const emit = useCallback(
-    (key: 'onNext' | 'onPrevious' | 'onPress' | 'onDismiss' | 'onCollapse') => {
-      callbacks.current[key]?.();
+    (
+      key:
+        | 'onNext'
+        | 'onPrevious'
+        | 'onPress'
+        | 'onDismiss'
+        | 'onExpandCommit'
+        | 'onCollapse',
+    ) => {
+      const pick =
+        key === 'onExpandCommit'
+          ? (callbacks.current.onExpandCommit ?? callbacks.current.onPress)
+          : callbacks.current[key];
+      pick?.();
     },
     [],
   );
@@ -279,20 +327,39 @@ export function MiniPlayer({
           : windowHeight;
       return Math.max(1, measured);
     };
+    const hostPx = () => {
+      'worklet';
+      const measured =
+        hostHeight !== undefined && hostHeight.value > 0
+          ? hostHeight.value
+          : windowHeight;
+      return Math.max(1, measured);
+    };
+    // The dismissed strip's pixel depth — the band below the pill's
+    // rest anchor, from OpenTune's `collapsedBound - dismissedBound`.
+    const collapsedPx = () => {
+      'worklet';
+      return Math.max(1, hostPx() - travelPx());
+    };
+    const settleTo = (target: number) => {
+      'worklet';
+      return theme.reducedMotion
+        ? target
+        : withSpring(target, SHEET_SETTLE_SPRING);
+    };
     // Only settle when this gesture actually displaced the sheet —
     // restoring toward `dragStart` after grabbing a closing sheet
     // would resurrect it mid-collapse (the pill is interactive
     // only while `expanded` is false, so the anchor here is 0).
     const settleBack = () => {
       'worklet';
-      if (
-        sheetProgress !== undefined &&
-        wroteProgress.value &&
-        sheetProgress.value > 0
-      ) {
-        sheetProgress.value = theme.reducedMotion
-          ? 0
-          : withSpring(0, { stiffness: 200, damping: 28 });
+      if (sheetProgress !== undefined && wroteProgress.value) {
+        if (sheetProgress.value > 0) {
+          sheetProgress.value = settleTo(0);
+        }
+        if (sheetGone !== undefined && sheetGone.value > 0) {
+          sheetGone.value = settleTo(0);
+        }
       }
     };
     const springHome = () => {
@@ -309,8 +376,21 @@ export function MiniPlayer({
         axis.value = 0;
         ticked.value = 0;
         if (sheetProgress !== undefined) {
-          dragStart.value = sheetProgress.value;
+          // The drag start on the unified axis: px above the rest
+          // anchor (a drag grabbed mid-dismiss reopens negative).
+          dragStart.value =
+            sheetProgress.value * travelPx() -
+            (sheetGone === undefined ? 0 : sheetGone.value) *
+              collapsedPx();
           wroteProgress.value = false;
+        }
+      })
+      .onStart(() => {
+        // The drag is live: mint the in-flight marker so a hardware
+        // back pressed mid-gesture can mark the pending release
+        // cancelled (-2) before it mints a fresh commit token.
+        if (sheetAnchor !== undefined) {
+          sheetAnchor.value = 2;
         }
       })
       .onUpdate((e) => {
@@ -322,9 +402,10 @@ export function MiniPlayer({
         }
         if (axis.value === 1) {
           // The conveyor only runs at the pill's rest anchor — a sheet
-          // already rising owns the drag.
+          // already rising or a dismiss slide owns the drag.
           if (sheetProgress === undefined) return;
           if (sheetProgress.value > 0.001) return;
+          if (sheetGone !== undefined && sheetGone.value > 0.001) return;
           const w = Math.max(1, rowW.value);
           // Forward is actionable without a landing row when it drains
           // the queue — the empty pill behind the outgoing row is the
@@ -348,10 +429,19 @@ export function MiniPlayer({
         }
         if (sheetProgress === undefined) return;
         wroteProgress.value = true;
-        sheetProgress.value = Math.min(
-          1,
-          Math.max(0, dragStart.value - e.translationY / travelPx()),
+        // One axis, two shared values: above the rest anchor writes the
+        // morph progress, below it writes the dismiss slide — the pill
+        // tracks the finger continuously across the collapsed→dismissed
+        // boundary (OpenTune's single `value`).
+        const write = stageSheetWrite(
+          dragStart.value - e.translationY,
+          travelPx(),
+          collapsedPx(),
         );
+        sheetProgress.value = write.progress;
+        if (sheetGone !== undefined) {
+          sheetGone.value = write.gone;
+        }
       })
       .onFinalize((e, success) => {
         // RNGH fires onFinalize on END *and* on FAIL/CANCELLED — an OS
@@ -360,6 +450,22 @@ export function MiniPlayer({
         // dismisses/skips/commits. Restore whatever it wrote and stop.
         const released = axis.value;
         axis.value = 0;
+        if (sheetAnchor !== undefined) {
+          if (sheetAnchor.value === -2) {
+            // A hardware back mid-drag cancelled the pending release —
+            // retreat to rest without minting a commit over the
+            // navigation that press already ran.
+            sheetAnchor.value = -1;
+            settleBack();
+            springHome();
+            return;
+          }
+          // The in-flight drag marker is consumed — the release
+          // branches below mint their own commit token.
+          if (sheetAnchor.value === 2) {
+            sheetAnchor.value = -1;
+          }
+        }
         if (!success) {
           settleBack();
           springHome();
@@ -384,7 +490,9 @@ export function MiniPlayer({
                 ? 1
                 : 0
               : prevLive.value;
-          const atRest = sheetProgress.value <= 0.001;
+          const atRest =
+            sheetProgress.value <= 0.001 &&
+            (sheetGone === undefined || sheetGone.value <= 0.001);
           if (
             atRest &&
             allowed !== 0 &&
@@ -410,41 +518,146 @@ export function MiniPlayer({
           if (e.translationY > 40) {
             scheduleOnRN(emit, 'onDismiss');
           } else if (e.translationY < -40) {
-            scheduleOnRN(emit, 'onPress');
+            scheduleOnRN(emit, 'onExpandCommit');
           }
           return;
         }
-        // A pull-down that never left the rest anchor dismisses the
-        // player outright rather than bouncing an unmoved sheet.
-        if (dragStart.value < 0.01 && e.translationY > 48) {
-          scheduleOnRN(emit, 'onDismiss');
+        const travel = travelPx();
+        const collapsed = collapsedPx();
+        const raw = dragStart.value - e.translationY;
+        const velocityP = -e.velocityY / travel;
+        const velocityG = e.velocityY / collapsed;
+        if (sheetGone === undefined) {
+          // Shared progress but no dismiss axis — the release keeps
+          // the two-anchor contract plus the rest-anchor dismiss tap.
+          if (dragStart.value <= 0 && e.translationY > 48) {
+            scheduleOnRN(emit, 'onDismiss');
+            return;
+          }
+          const target =
+            resolveSheetTarget(
+              Math.max(0, raw),
+              travel,
+              collapsed,
+              e.velocityY,
+            ) === 'expanded'
+              ? 1
+              : 0;
+          if (sheetAnchor !== undefined) {
+            sheetAnchor.value = target;
+          }
+          sheetProgress.value = theme.reducedMotion
+            ? target
+            : withSpring(target, {
+                ...SHEET_SETTLE_SPRING,
+                velocity: velocityP,
+              });
+          if (target === 1) {
+            scheduleOnRN(emit, 'onExpandCommit');
+          } else if (dragStart.value > travel * 0.5) {
+            scheduleOnRN(emit, 'onCollapse');
+          }
           return;
         }
-        const travel = travelPx();
-        const target =
-          resolveStageAnchor(
-            dragStart.value,
-            sheetProgress.value,
-            e.velocityY,
-          ) === 'expanded'
-            ? 1
-            : 0;
-        // Mark the settle as gesture-owned — the sheet's effect on
-        // `expanded` must not cold-restart this velocity spring.
-        if (sheetAnchor !== undefined) {
-          sheetAnchor.value = target;
-        }
-        sheetProgress.value = theme.reducedMotion
-          ? target
-          : withSpring(target, {
-              stiffness: 200,
-              damping: 28,
-              velocity: -e.velocityY / travel,
+        // OpenTune performFling: fling direction wins outright (down
+        // only dismisses below the collapsed anchor), otherwise the
+        // zone midpoints decide.
+        const target = resolveSheetTarget(
+          raw,
+          travel,
+          collapsed,
+          e.velocityY,
+        );
+        if (target === 'expanded') {
+          if (sheetAnchor !== undefined) {
+            sheetAnchor.value = 1;
+          }
+          if (theme.reducedMotion) {
+            sheetGone.value = 0;
+            sheetProgress.value = 1;
+            scheduleOnRN(emit, 'onExpandCommit');
+          } else if (sheetGone.value > 0.001) {
+            // A fling up out of a dismiss slide unwinds the slide to
+            // rest before the sheet expands — the axes share one
+            // visible offset, so two velocity-bearing springs would
+            // double the release speed. The expand commit rides the
+            // same callback: a hardware back or a newer collapse
+            // commit clears the anchor to 0 during the unwind, and
+            // reopening without that check would morph the leaf over
+            // navigated-away content. (-1 = consumed already — only
+            // 0 means cancelled.)
+            sheetGone.value = withSpring(
+              0,
+              { ...SHEET_SETTLE_SPRING, velocity: velocityG },
+              (finished) => {
+                if (
+                  finished === true &&
+                  (sheetAnchor === undefined || sheetAnchor.value !== 0)
+                ) {
+                  sheetProgress.value = withSpring(1, {
+                    ...SHEET_SETTLE_SPRING,
+                    velocity: velocityP,
+                  });
+                  scheduleOnRN(emit, 'onExpandCommit');
+                }
+              },
+            );
+          } else {
+            sheetGone.value = 0;
+            sheetProgress.value = withSpring(1, {
+              ...SHEET_SETTLE_SPRING,
+              velocity: velocityP,
             });
-        if (target === 1) {
-          scheduleOnRN(emit, 'onPress');
-        } else if (dragStart.value > 0.5) {
-          scheduleOnRN(emit, 'onCollapse');
+            scheduleOnRN(emit, 'onExpandCommit');
+          }
+          return;
+        }
+        if (target === 'collapsed') {
+          if (sheetAnchor !== undefined) {
+            sheetAnchor.value = 0;
+          }
+          if (raw > 0) {
+            sheetProgress.value = theme.reducedMotion
+              ? 0
+              : withSpring(0, {
+                  ...SHEET_SETTLE_SPRING,
+                  velocity: velocityP,
+                });
+          } else {
+            sheetGone.value = theme.reducedMotion
+              ? 0
+              : withSpring(0, {
+                  ...SHEET_SETTLE_SPRING,
+                  velocity: velocityG,
+                });
+          }
+          // A mid-flight grab settling home commits the collapse —
+          // from the rest anchor itself it would be a spurious flip.
+          if (dragStart.value > travel * 0.5) {
+            scheduleOnRN(emit, 'onCollapse');
+          }
+          return;
+        }
+        // Dismissed: the slide-off lands before the host tears the
+        // player down — emit on the spring's completion so the pill
+        // visibly leaves instead of vanishing mid-travel.
+        if (sheetAnchor !== undefined) {
+          sheetAnchor.value = 0;
+        }
+        sheetProgress.value = 0;
+        if (theme.reducedMotion) {
+          sheetGone.value = 1;
+          scheduleOnRN(emit, 'onDismiss');
+        } else {
+          sheetGone.value = withSpring(
+            1,
+            { ...SHEET_SETTLE_SPRING, velocity: velocityG },
+            (finished) => {
+              if (finished === true) {
+                scheduleOnRN(emit, 'onDismiss');
+              }
+            },
+          );
         }
       });
   }, [
@@ -454,6 +667,8 @@ export function MiniPlayer({
     sheetProgress,
     sheetTravel,
     sheetAnchor,
+    sheetGone,
+    hostHeight,
     windowHeight,
     theme.reducedMotion,
     dragStart,
@@ -500,6 +715,139 @@ export function MiniPlayer({
       opacity: f,
     };
   });
+  /*
+   * The row strip is shared between the standalone card and the
+   * embedded mount — inside the sheet's morphing surface the card
+   * chrome, glass backdrop, rest position and fade all live on the
+   * sheet's leaf instead.
+   */
+  const row = (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: theme.spacing.xs,
+        height: theme.sizes.miniPlayer,
+        paddingHorizontal: theme.spacing.sm,
+      }}
+    >
+      {/*
+       * The conveyor box owns the content slot: clipped, measured
+       * for the shared rowW, and hosting the sliding current row
+       * plus the two off-screen landing previews.
+       */}
+      <View
+        style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}
+        onLayout={(e) => {
+          rowW.value = e.nativeEvent.layout.width;
+        }}
+      >
+        <Animated.View style={[{ flex: 1, minWidth: 0 }, conveyorStyle]}>
+          <Pressable
+            compact
+            feedback="opacity"
+            onPress={onPress}
+            accessibilityLabel={t('player.a11y.nowPlaying', {
+              title: player.title,
+              artist:
+                player.artist === null
+                  ? ''
+                  : t('track.a11y.artistSuffix', {
+                      artist: player.artist,
+                    }),
+              status: t(`player.status.${player.status}`),
+            })}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: theme.spacing.md,
+            }}
+          >
+            <ArtworkRing artworkUrl={player.artworkUrl} progress={progress} />
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text
+                variant="body"
+                color="bright"
+                numberOfLines={1}
+                style={{ fontFamily: theme.fontFamilies.medium }}
+              >
+                {player.title}
+              </Text>
+              <Text variant="metadata" color="secondary" numberOfLines={1}>
+                {player.artist ?? '—'}
+              </Text>
+            </View>
+          </Pressable>
+        </Animated.View>
+        {skipPrevious != null && (
+          <Animated.View
+            pointerEvents="none"
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+            style={[StyleSheet.absoluteFill, prevPeekStyle]}
+          >
+            <SkipPeekRow peek={skipPrevious} />
+          </Animated.View>
+        )}
+        {skipNext != null && (
+          <Animated.View
+            pointerEvents="none"
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+            style={[StyleSheet.absoluteFill, nextPeekStyle]}
+          >
+            <SkipPeekRow peek={skipNext} />
+          </Animated.View>
+        )}
+      </View>
+      {onToggleLike !== undefined && (
+        <IconButton
+          icon={player.liked ? 'heart-filled' : 'heart'}
+          size={30}
+          iconSize={14}
+          color={player.liked ? theme.colors.liked : theme.colors.textSecondary}
+          accessibilityLabel={
+            player.liked ? t('common.unlike') : t('common.like')
+          }
+          onPress={onToggleLike}
+        />
+      )}
+      <Pressable
+        compact
+        onPress={onPlayPause}
+        accessibilityLabel={
+          player.intentPlaying ? t('common.pause') : t('common.play')
+        }
+        style={{
+          width: 32,
+          height: 32,
+          alignItems: 'center',
+          justifyContent: 'center',
+          borderRadius: ios ? 16 : 12,
+          backgroundColor: ios
+            ? theme.colors.glassControl
+            : theme.colors.accentSoft,
+          borderWidth: ios ? theme.strokes.hairline : 0,
+          borderColor: theme.colors.hairline,
+        }}
+      >
+        {busy ? (
+          <Spinner size={14} color={playColor} />
+        ) : (
+          <PlayPauseIcon
+            playing={player.intentPlaying}
+            size={16}
+            color={playColor}
+          />
+        )}
+      </Pressable>
+    </View>
+  );
+  if (embedded) {
+    return <GestureDetector gesture={swipe}>{row}</GestureDetector>;
+  }
   return (
     <GestureDetector gesture={swipe}>
       <Animated.View
@@ -508,173 +856,42 @@ export function MiniPlayer({
         accessibilityElementsHidden={!interactive}
         importantForAccessibility={interactive ? 'auto' : 'no-hide-descendants'}
       >
-      <View
-        style={{
-          marginHorizontal: theme.spacing.md,
-          marginBottom: theme.spacing.md,
-          borderRadius: theme.radius.float,
-          borderWidth: theme.strokes.hairline,
-          borderColor: theme.colors.hairline,
-          backgroundColor: ios ? theme.colors.glass : theme.colors.raised,
-          overflow: 'hidden',
-        }}
-      >
-        {/*
-         * iOS 26+: real Liquid Glass backdrop; below that the BlurView
-         * stays. Off-iOS GlassView is a plain View passthrough anyway.
-         */}
-        {ios &&
-          (isLiquidGlassAvailable() ? (
-            <GlassView
-              glassEffectStyle="regular"
-              colorScheme={theme.scheme === 'light' ? 'light' : 'dark'
-              }
-              style={StyleSheet.absoluteFill}
-            />
-          ) : (
-            <BlurView
-              intensity={60}
-              tint={theme.scheme === 'light' ? 'light' : 'dark'}
-              style={StyleSheet.absoluteFill}
-            />
-          ))}
-        {/*
-         * Action buttons are siblings of the open-player pressable,
-         * not children: a labelled pressable groups its descendants
-         * into one VoiceOver element on iOS, hiding the controls.
-         */}
         <View
           style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: theme.spacing.xs,
-            height: theme.sizes.miniPlayer,
-            paddingHorizontal: theme.spacing.sm,
+            marginHorizontal: theme.spacing.md,
+            marginBottom: theme.spacing.md,
+            borderRadius: theme.radius.float,
+            borderWidth: theme.strokes.hairline,
+            borderColor: theme.colors.hairline,
+            backgroundColor: ios ? theme.colors.glass : theme.colors.raised,
+            overflow: 'hidden',
           }}
         >
           {/*
-           * The conveyor box owns the content slot: clipped, measured
-           * for the shared rowW, and hosting the sliding current row
-           * plus the two off-screen landing previews.
+           * iOS 26+: real Liquid Glass backdrop; below that the BlurView
+           * stays. Off-iOS GlassView is a plain View passthrough anyway.
            */}
-          <View
-            style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}
-            onLayout={(e) => {
-              rowW.value = e.nativeEvent.layout.width;
-            }}
-          >
-            <Animated.View style={[{ flex: 1, minWidth: 0 }, conveyorStyle]}>
-              <Pressable
-                compact
-                feedback="opacity"
-                onPress={onPress}
-                accessibilityLabel={t('player.a11y.nowPlaying', {
-                  title: player.title,
-                  artist:
-                    player.artist === null
-                      ? ''
-                      : t('track.a11y.artistSuffix', {
-                          artist: player.artist,
-                        }),
-                  status: t(`player.status.${player.status}`),
-                })}
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: theme.spacing.md,
-                }}
-              >
-                <ArtworkRing
-                  artworkUrl={player.artworkUrl}
-                  progress={progress}
-                />
-                <View style={{ flex: 1, minWidth: 0 }}>
-                  <Text
-                    variant="body"
-                    color="bright"
-                    numberOfLines={1}
-                    style={{ fontFamily: theme.fontFamilies.medium }}
-                  >
-                    {player.title}
-                  </Text>
-                  <Text
-                    variant="metadata"
-                    color="secondary"
-                    numberOfLines={1}
-                  >
-                    {player.artist ?? '—'}
-                  </Text>
-                </View>
-              </Pressable>
-            </Animated.View>
-            {skipPrevious != null && (
-              <Animated.View
-                pointerEvents="none"
-                accessibilityElementsHidden
-                importantForAccessibility="no-hide-descendants"
-                style={[StyleSheet.absoluteFill, prevPeekStyle]}
-              >
-                <SkipPeekRow peek={skipPrevious} />
-              </Animated.View>
-            )}
-            {skipNext != null && (
-              <Animated.View
-                pointerEvents="none"
-                accessibilityElementsHidden
-                importantForAccessibility="no-hide-descendants"
-                style={[StyleSheet.absoluteFill, nextPeekStyle]}
-              >
-                <SkipPeekRow peek={skipNext} />
-              </Animated.View>
-            )}
-          </View>
-          {onToggleLike !== undefined && (
-            <IconButton
-              icon={player.liked ? 'heart-filled' : 'heart'}
-              size={30}
-              iconSize={14}
-              color={
-                player.liked ? theme.colors.liked : theme.colors.textSecondary
-              }
-              accessibilityLabel={
-                player.liked ? t('common.unlike') : t('common.like')
-              }
-              onPress={onToggleLike}
-            />
-          )}
-          <Pressable
-            compact
-            onPress={onPlayPause}
-            accessibilityLabel={
-              player.intentPlaying ? t('common.pause') : t('common.play')
-            }
-            style={{
-              width: 32,
-              height: 32,
-              alignItems: 'center',
-              justifyContent: 'center',
-              borderRadius: ios ? 16 : 12,
-              backgroundColor: ios
-                ? theme.colors.glassControl
-                : theme.colors.accentSoft,
-              borderWidth: ios ? theme.strokes.hairline : 0,
-              borderColor: theme.colors.hairline,
-            }}
-          >
-            {busy ? (
-              <Spinner size={14} color={playColor} />
-            ) : (
-              <PlayPauseIcon
-                playing={player.intentPlaying}
-                size={16}
-                color={playColor}
+          {ios &&
+            (isLiquidGlassAvailable() ? (
+              <GlassView
+                glassEffectStyle="regular"
+                colorScheme={theme.scheme === 'light' ? 'light' : 'dark'}
+                style={StyleSheet.absoluteFill}
               />
-            )}
-          </Pressable>
+            ) : (
+              <BlurView
+                intensity={60}
+                tint={theme.scheme === 'light' ? 'light' : 'dark'}
+                style={StyleSheet.absoluteFill}
+              />
+            ))}
+          {/*
+           * Action buttons are siblings of the open-player pressable,
+           * not children: a labelled pressable groups its descendants
+           * into one VoiceOver element on iOS, hiding the controls.
+           */}
+          {row}
         </View>
-      </View>
       </Animated.View>
     </GestureDetector>
   );
