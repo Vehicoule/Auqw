@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Image,
+  PixelRatio,
   Platform,
   ScrollView,
   StyleSheet,
@@ -393,7 +394,13 @@ function PlayerBackdrop({
   // inside Artwork would repeat the persisted lookup and access-time
   // write; the blurred layer must read the same cache-local file the
   // sharp copy does anyway (offline a remote refetch is just absent).
-  const { uri, pending, markSourceError } = useResolvedArtworkUri(artworkUrl);
+  // Screen-width pixels are plenty for the sharp layer — the provider's
+  // multi-MP file only costs radio + decode.
+  const { width: windowWidth } = useWindowDimensions();
+  const { uri, pending, markSourceError } = useResolvedArtworkUri(
+    artworkUrl,
+    Math.ceil(windowWidth * PixelRatio.get()),
+  );
   const theme = useTheme();
   const haveArt = !pending && uri !== null;
   return (

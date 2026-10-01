@@ -2,9 +2,11 @@ import { useEffect } from 'react';
 import type { ReactNode } from 'react';
 import {
   Image,
+  PixelRatio,
   Pressable as RNPressable,
   StyleSheet,
   Text as RNText,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import type {
@@ -557,7 +559,18 @@ export function Artwork({
   style,
 }: ArtworkProps) {
   const theme = useTheme();
-  const { uri, pending, markSourceError } = useResolvedArtworkUri(url);
+  // The resolver caches what it downloads — ask it for the smallest
+  // variant covering the rendered pixels instead of the provider's
+  // full-res file, so the radio fetch, disk entry, and decode all
+  // shrink by the same ratio (a 40px row needs ~120px, not 3000).
+  const { width: windowWidth } = useWindowDimensions();
+  const targetPx = Math.ceil(
+    (fill ? windowWidth : size) * PixelRatio.get(),
+  );
+  const { uri, pending, markSourceError } = useResolvedArtworkUri(
+    url,
+    targetPx,
+  );
   const r = cornerRadius ?? theme.radius.thumb;
   return (
     <View

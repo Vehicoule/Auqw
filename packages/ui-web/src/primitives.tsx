@@ -14,6 +14,7 @@ import {
   PLAY_RIGHT,
   quadPath,
   REFRESH_PATH,
+  scaledArtworkUrl,
   WARN_DRAW_DETAIL_PATH,
   WARN_DRAW_DOT,
   WARN_DRAW_TRIANGLE_PATH,
@@ -22,7 +23,6 @@ import {
 } from '@auqw/ui-shared';
 import type { DownloadChip } from '@auqw/ui-shared';
 import type { DownloadButtonView } from '@auqw/ui-shared/controllers';
-import { scaledArtworkUrl } from './artwork-url.ts';
 
 export type TextVariant =
   | 'display'

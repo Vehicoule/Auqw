@@ -16,6 +16,7 @@ import {
   nextQueueDestination,
   overlayReducer,
   resolveLocale,
+  scaledArtworkUrl,
   setLocale,
   settingsGroups,
   settingsRowConfirms,
@@ -1731,6 +1732,68 @@ const tap = (s: string) => {
       '0.0.1-alpha.22',
     ),
     null,
+  );
+}
+
+// ---- artwork URL scaling ----------------------------------------------------------
+
+{
+  const deezer =
+    'https://cdn-images.dzcdn.net/images/cover/abc/1000x1000-000000-80-0-0.jpg';
+  assertEqual(
+    scaledArtworkUrl(deezer, 40),
+    'https://cdn-images.dzcdn.net/images/cover/abc/56x56-000000-80-0-0.jpg',
+    'deezer tail shrinks to the smallest served step',
+  );
+  assertEqual(
+    scaledArtworkUrl(deezer, 1024),
+    deezer,
+    'deezer caps at its largest served step',
+  );
+  assertEqual(
+    scaledArtworkUrl(
+      'https://cdn-images.dzcdn.net/images/cover/abc/250x250-000000-80-0-0.jpg',
+      500,
+    ),
+    'https://cdn-images.dzcdn.net/images/cover/abc/250x250-000000-80-0-0.jpg',
+    'a source smaller than the target is never upscaled',
+  );
+  const google =
+    'https://lh3.googleusercontent.com/xyz=w544-h544-l90-rj';
+  assertEqual(
+    scaledArtworkUrl(google, 40),
+    'https://lh3.googleusercontent.com/xyz=w64-h64-l90-rj',
+    'googleusercontent w-h suffix shrinks in place, flags kept',
+  );
+  assertEqual(
+    scaledArtworkUrl('https://yt3.googleusercontent.com/xyz', 40),
+    'https://yt3.googleusercontent.com/xyz=w64-h64',
+    'bare googleusercontent path gains a size suffix',
+  );
+  assertEqual(
+    scaledArtworkUrl('https://yt3.googleusercontent.com/a=s900-c', 200),
+    'https://yt3.googleusercontent.com/a=s256-c',
+    'google s-suffix shrinks in place',
+  );
+  assertEqual(
+    scaledArtworkUrl(
+      'https://is1-ssl.mzstatic.com/image/thumb/x/3000x3000bb.jpg',
+      384,
+    ),
+    'https://is1-ssl.mzstatic.com/image/thumb/x/384x384bb.jpg',
+    'mzstatic tail shrinks with flags kept',
+  );
+  assertEqual(
+    scaledArtworkUrl('https://images.example/art/600x400.jpg', 40),
+    'https://images.example/art/600x400.jpg',
+    'non-square tails pass through — differing numbers can encode a crop',
+  );
+  assert(
+    scaledArtworkUrl('data:image/png;base64,xx', 40) ===
+      'data:image/png;base64,xx' &&
+      scaledArtworkUrl('https://img.example/a.png', 40) ===
+        'https://img.example/a.png',
+    'non-https and unknown shapes pass through untouched',
   );
 }
 

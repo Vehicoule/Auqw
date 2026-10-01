@@ -553,7 +553,14 @@ export function createExpoAudioPlayer(deps: ExpoAudioPlayerDeps): PlayerPort {
           return err(appError('released', 'stream released'));
         }
         detach(record);
-        const player = createAudioPlayer({ uri: record.file.uri });
+        // 1 Hz status ticks, same cadence the Android Media3 seam
+        // uses — the default 500 ms doubles the JS-bridge wake-ups
+        // during playback for no visible gain (elapsed text and the
+        // progress ring both interpolate between ticks).
+        const player = createAudioPlayer(
+          { uri: record.file.uri },
+          { updateInterval: 1000 },
+        );
         const attached: AttachedRecord = {
           player,
           identity: input.identity,
