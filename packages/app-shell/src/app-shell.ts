@@ -113,6 +113,7 @@ import {
   reportStoredDownloadError,
   rowActionsModel,
   stageDownloadChip,
+  stageReopenMode,
   suggestionMetaMap,
 } from './types.ts';
 import type {
@@ -3259,22 +3260,35 @@ export function useAppShell<E extends { readonly type: string } = never>(
     clearOverlays();
     setSearchFocusTick((n) => n + 1);
   }, [clearOverlays]);
-  // Every open lands on the player pane — a hidden stage that reopens
-  // must not revive the last mode. Except an idle stage with an ended
-  // queue: it reopens on the queue so its rows stay replayable — the
-  // same surface the idle-transition effect picks while it's open.
+  // The pane an open lands on — computed once so the open commit and
+  // the collapsed-anchor normalization below never disagree.
+  const reopenMode = stageReopenMode({
+    playbackIdle,
+    queueEnded: queueModel.ended,
+  });
+  // A collapsed stage must already name its landing pane: the mobile
+  // sheet morphs into whichever mode is current from the drag's first
+  // frame, while the expand commit's pick only lands after the rise —
+  // a stale queue/lyrics mode would render through the whole morph
+  // and snap at the end. Normalizing on the collapse anchor keeps the
+  // first morph frame honest. Explicit opens (journey links mint the
+  // mode in the same batch as the open flip) pass the guard.
+  useEffect(() => {
+    if (!stageOpen) {
+      setStageMode(reopenMode);
+    }
+  }, [stageOpen, reopenMode]);
+  // Every open lands on the reopen pane — a hidden stage that reopens
+  // must not revive the last mode: player ordinarily, queue only for
+  // the idle-stage ended-queue reopen the idle effect also picks.
   const setStageOpenFor = useCallback(
     (open: boolean) => {
       if (open) {
-        setStageMode(
-          state.playback.type === 'idle' && queueModel.ended
-            ? 'queue'
-            : 'player',
-        );
+        setStageMode(reopenMode);
       }
       setStageOpen(open);
     },
-    [state.playback.type, queueModel.ended],
+    [reopenMode],
   );
 
   const toggleReordering = useCallback(() => {
