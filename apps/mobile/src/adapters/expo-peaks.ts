@@ -18,14 +18,45 @@ const MAX_UNKNOWN_DURATION_BYTES =
   (PEAKS_MAX_DECODE_MS / 1000) * (BITRATE_FLOOR_BPS / 8);
 
 /**
+ * Flat `[up, down]` pair list → `PeakWindow[]`, or `null` when the
+ * shape is dishonest: wrong length is a partial decode (not a
+ * waveform — caching one would stretch a truncated profile over the
+ * whole track), and non-finite/negative magnitudes are malformed.
+ * A genuinely silent decode still yields `count` zero pairs, which
+ * passes and normalizes to honest zeros.
+ */
+function windowsFromFlat(flat: readonly number[]): PeakWindow[] | null {
+  if (flat.length !== PEAKS_RESOLUTION * 2) {
+    return null;
+  }
+  const windows: PeakWindow[] = [];
+  for (let i = 0; i < PEAKS_RESOLUTION; i += 1) {
+    const up = flat[i * 2];
+    const down = flat[i * 2 + 1];
+    if (
+      up === undefined ||
+      down === undefined ||
+      !Number.isFinite(up) ||
+      !Number.isFinite(down) ||
+      up < 0 ||
+      down < 0
+    ) {
+      return null;
+    }
+    windows.push({ up, down });
+  }
+  return windows;
+}
+
+/**
  * Android `PeaksPort` over the `auqw-expo` native extractor: the
  * Kotlin side borrows the playing stream's handle for positional
- * `streamRead` pulls, decodes with MediaExtractor+MediaCodec, and
- * returns raw per-window RMS pairs — this adapter re-pairs them and
- * runs the shared `normalizePeakWindows` so both platforms produce
- * the same normalized contract. iOS has no decoder path: the seam
- * methods are absent there and every call surfaces 'unavailable',
- * keeping the placeholder baseline.
+ * reads, decodes with MediaExtractor+MediaCodec, and returns raw
+ * per-window RMS pairs — this adapter re-pairs them and runs the
+ * shared `normalizePeakWindows` so both platforms produce the same
+ * normalized contract. iOS has no decoder path: the seam methods
+ * are absent there and every call surfaces 'unavailable', keeping
+ * the placeholder baseline.
  */
 export function createExpoPeaksPort(native: AuqwPeaksNative): PeaksPort {
   return {
@@ -77,6 +108,29 @@ export function createExpoPeaksPort(native: AuqwPeaksNative): PeaksPort {
           : deadlineFired
             ? err(appError('timeout', 'peak extraction deadline'))
             : null;
+      // Coarse relay — installed before the call so an early emit
+      // isn't missed: the sampled sweep sends its measured profile
+      // while refinement still runs, and the tracker draws it as the
+      // first real bars. A settled/cancelled call stays silent, and
+      // a coarse event that fails the same validation the final
+      // result gets is ignored rather than drawn.
+      const coarseSub =
+        request.onCoarse === undefined ||
+        native.addWaveformPeaksCoarseListener === undefined
+          ? null
+          : native.addWaveformPeaksCoarseListener((event) => {
+              if (
+                event.requestId !== requestId ||
+                settled() !== null ||
+                request.onCoarse === undefined
+              ) {
+                return;
+              }
+              const windows = windowsFromFlat(event.peaks);
+              if (windows !== null) {
+                request.onCoarse(normalizePeakWindows(windows));
+              }
+            });
       try {
         const flat = await extract(
           requestId,
@@ -89,39 +143,14 @@ export function createExpoPeaksPort(native: AuqwPeaksNative): PeaksPort {
         if (hit !== null) {
           return hit;
         }
-        // The contract is exactly `count` [up,down] pairs — a shorter
-        // list is a partial decode, not a waveform, and caching it
-        // would stretch a truncated profile over the whole track. A
-        // genuinely silent decode still yields `count` zero pairs,
-        // which passes and normalizes to honest zeros.
-        if (flat.length !== PEAKS_RESOLUTION * 2) {
+        const windows = windowsFromFlat(flat);
+        if (windows === null) {
           return err(
             appError(
               'invalid-response',
-              'peak extractor returned a partial profile',
+              'peak extractor returned a malformed profile',
             ),
           );
-        }
-        const windows: PeakWindow[] = [];
-        for (let i = 0; i < PEAKS_RESOLUTION; i += 1) {
-          const up = flat[i * 2];
-          const down = flat[i * 2 + 1];
-          if (
-            up === undefined ||
-            down === undefined ||
-            !Number.isFinite(up) ||
-            !Number.isFinite(down) ||
-            up < 0 ||
-            down < 0
-          ) {
-            return err(
-              appError(
-                'invalid-response',
-                'peak extractor returned malformed magnitudes',
-              ),
-            );
-          }
-          windows.push({ up, down });
         }
         return ok(normalizePeakWindows(windows));
       } catch (thrown) {
@@ -131,6 +160,7 @@ export function createExpoPeaksPort(native: AuqwPeaksNative): PeaksPort {
         }
         return err(nativeError(thrown));
       } finally {
+        coarseSub?.remove();
         unsubscribe();
         clearTimeout(deadlineTimer);
       }

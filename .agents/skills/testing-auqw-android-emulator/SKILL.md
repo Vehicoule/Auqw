@@ -489,3 +489,93 @@ states deterministically.
 - `sendevent` on /dev/input/event* is permission-denied (no root) —
   true multi-tap touch injection isn't available; `input swipe/tap` are
   the tools.
+- The RN "Open debugger to view warnings" bar can cover the stage's
+  floating segment pill — dismiss it via its X (~device 1000,2211)
+  before tapping the segment.
+
+## Waveform peaks gates (post-#waveform-fast)
+
+The UI waveform (`WaveformSeek` in the stage `player` segment) is fed by
+`useWaveformPeaks` only when `state.playback` exists — i.e. a SESSION
+queue play. Dev `auqw://seam-url`/`seam-queue` plays produce no
+peaksTarget and no mini player; they cannot show the UI path.
+
+### The segment pill floats at the sheet's BOTTOM
+`auqw://open?tab=queue` expands the stage into QUEUE mode; the mode
+segment is a floating pill near the bottom nav inset
+(`queue | player | lyrics`, 'player' center ≈ device 665,2245 on the
+1080x2400 pixel_6 profile). Tap it for transport + waveform.
+
+### logcat marks (native tag `AuqwWaveformPeaks`)
+- Info-level sweep marks: `peaks[<requestId>] head-probe +Xms total=N`
+  → `seed +Xms durationMs=N fetched=N` → `coarse +Xms applied=N` →
+  `sampled-done +Xms samples=N fetched=N probes=N`.
+- Per-point lanes are DEBUG (`lane=L point=P +Xms seek->Nms pcmMs=N
+  fetched+N probes+N`) — enable with
+  `adb shell setprop log.tag.AuqwWaveformPeaks DEBUG` BEFORE the run
+  (re-set after every emulator reboot).
+- Honest-path signatures: `legacy pull`/`decode`/`bucket` = whole-file
+  pull+decode; `sampled bailed: <code>` = graceful exit mid-sweep.
+- `fetched=` on `sampled-done` counts bytes delivered through probe
+  reads INCLUDING re-reads of already-committed regions (player pump +
+  overlapping probes) — it can exceed `total=`; not a fabrication tell.
+- JS-side `seam-peaks` dev leg logs `[s1.5] seam-peaks coarse +Xms n=`
+  / `resolved +Xms n= nonzero=` (tag ReactNativeJS).
+
+### The 4MiB gate decides which path a stream takes
+`SAMPLED_MIN_TOTAL_BYTES = 4MiB`: streams ≤4MiB skip the sampled sweep
+silently (no `head-probe` line — `sampledStream` returns null before it
+logs) and take the legacy pull — honest, not a bug. At ~128kbps opus a
+4MiB file is ≈4.2 min: for sampled-path evidence pick tracks ~4.5+ min
+(e.g. queue items ≥4:30). `lf-*` local files always decode whole-file
+off disk — INVALID evidence for the fast path.
+
+### Getting a REAL session play when provider search is walled
+`catalog.search` can die JS-side on this egress with ZERO `request`
+host logs (deezer API itself is curl-reachable — the failure is in-app,
+before transport). `playback.resolve` stubs do NOT help session plays:
+`module.prepare` → `h.startPrepare` resolves INSIDE the Rust host, the
+JS `request()` seam never sees it. Working stub — same file/pattern as
+the download mint stub but intercept `catalog.search` and return real
+youtube-music source_ref ids so the host-internal resolve still mints a
+genuine ranged stream:
+
+```ts
+// in request() of apps/mobile/src/adapters/plugin-provider.ts — REVERT after
+if (capability === 'catalog.search') {
+  return Promise.resolve(decodeProviderOutcome(
+    { type: 'succeeded', resultJson: JSON.stringify({ items: [
+      { source_ref: { provider: 'youtube-music', kind: 'track', id: '<real-yt-id>' },
+        title: 'X', artist: 'Y', album: null, duration_ms: 260000,
+        release_year: null, artwork: [], explicit: false, genre: null,
+        storefront: null } ], storefront: null }) },
+    (slug) => appErrorKind(slug ?? ''), decode));
+}
+```
+Then `auqw://search?q=x` (one row per `items` entry renders — add a
+second object for two) → `auqw://play-result?i=0` →
+real innertube resolve → `prepare req-N prepared handle=st-* mime=audio/webm`
+→ PLAYING. The radio seed auto-grows a 50+ item UP NEXT queue with real
+provider metadata — plenty of tracks to skip through for size variety.
+To hit the sampled path keep skipping (`input keyevent 87`) until a
+`head-probe` mark appears instead of `legacy pull`.
+
+### Persisted peaks_cache (v11)
+`peaks_cache` keyed by `recording_id`; rows are
+`[{"up":f,"down":f},...]` (256 entries for the sampled path). Recordings
+dedupe by provider source_ref — replaying the same youtube id (fresh
+search → play-result) reuses the SAME recording_id → `store.load` hit:
+bars render with ZERO new `peaks[` marks and no row-count change.
+`queue_state`/`queue_occurrences` persist across `am force-stop` — the
+relaunch home looks empty but the queue restores on the next play.
+
+### Cancellation honesty check
+Skip (`input keyevent 87`) mid-sweep. The sampled sweep completes in
+~1.5 s on WAN streams — the cancel window is tight; the legacy path
+gives ~8-9 s (decode dominates). Poll logcat at ~0.4 s for the new
+`peaks[peaks-rec-…]` mark, then fire the skip. Honest cancel signature:
+the old requestId shows its last mark BEFORE the switch and never a
+completion mark after; no `peaks_cache` row for its recording_id; the
+next track's sweep proceeds under its own requestId; zero
+FATAL/ANR lines for the app pid (grep `AndroidRuntime` false-positives
+from uiautomator's shell process, uid 2000 — filter by app pid).

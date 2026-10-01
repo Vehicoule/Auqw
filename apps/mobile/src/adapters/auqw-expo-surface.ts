@@ -75,6 +75,17 @@ export type AuqwPeaksNative = {
     provisionalCap: boolean,
   ): Promise<readonly number[]>;
   waveformPeaksCancel?(requestId: string): void;
+  /**
+   * Coarse-but-measured profile while the sampled sweep refines —
+   * `{requestId, peaks}` flat pairs of the requested count, at most
+   * once per request. Absent on modules older than the event.
+   */
+  addWaveformPeaksCoarseListener?(
+    listener: (event: {
+      requestId: string;
+      peaks: readonly number[];
+    }) => void,
+  ): AuqwExpoSubscription;
 };
 
 /**

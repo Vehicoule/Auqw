@@ -19,6 +19,7 @@ import type {
   ConnectivityPort,
   ImportPreview,
   LocalWrite,
+  PeaksStore,
   PersistedState,
   PlayerPort,
   ProviderPort,
@@ -31,6 +32,7 @@ import type {
 import {
   SqliteStorage,
   SqliteSyncLogStore,
+  createPeaksCacheStore,
   createSearchHistoryStore,
 } from '@auqw/storage-sqlite';
 import { defaultSettings, repairedSettings } from '@auqw/app-shell';
@@ -127,6 +129,12 @@ export type SessionController = {
    * so import and sync never touch it.
    */
   readonly searchHistory: SearchHistoryStore;
+  /**
+   * Device-local waveform peaks (schema v11 `peaks_cache`) — repeat
+   * plays render the stored profile instantly; content-keyed like
+   * searchHistory, outside PersistedState.
+   */
+  readonly peaksStore: PeaksStore;
   /**
    * Slice-4 LAN sync client — null when the platform lacks the seam
    * (iOS) or custody/engine bring-up failed; the UI must render an
@@ -280,6 +288,10 @@ export async function createSessionController(
   // Device-local recents ride it too — the table exists once
   // restore's migrations ran, and the shell only mounts in 'ready'.
   const searchHistory = createSearchHistoryStore(sqliteDriver);
+  // Same device-local file backs finished waveform profiles — a
+  // repeat play of a known recording renders stored bars instead of
+  // re-extracting.
+  const peaksStore = createPeaksCacheStore(sqliteDriver);
   // Assembled in start() after restore: custody → engine → client.
   let syncSurface: ExpoSyncSurface | null = null;
   // The spec's trigger layer (on-launch, on-change debounced,
@@ -511,6 +523,7 @@ export async function createSessionController(
     local: () => localSource,
     connectivity,
     searchHistory,
+    peaksStore,
     sync: () => syncSurface,
     // A stale native module predating the pot seam has no such
     // function — the provider keeps its boot value rather than

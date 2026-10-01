@@ -74,6 +74,8 @@ export type {
 export { MiniPlayer } from './mini-player.tsx';
 export type { MiniPlayerProps } from './mini-player.tsx';
 
+export { UpdateCard } from './update-card.tsx';
+
 export { ModeSegment, StageSheet, TransportControls } from './stage-sheet.tsx';
 export type { StageSheetProps, TransportProps } from './stage-sheet.tsx';
 
