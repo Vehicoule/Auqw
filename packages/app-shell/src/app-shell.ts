@@ -3261,23 +3261,16 @@ export function useAppShell<E extends { readonly type: string } = never>(
     setSearchFocusTick((n) => n + 1);
   }, [clearOverlays]);
   // The pane an open lands on — computed once so the open commit and
-  // the collapsed-anchor normalization below never disagree.
+  // the sheet's parked normalization never disagree. A collapsed
+  // stage must already name this pane by the next rise: the mobile
+  // morph renders `stageMode` from the drag's first frame, while the
+  // commit's pick only lands after it. The sheet owns the normalize
+  // moment (its parked signal) — firing at close-commit would swap
+  // the still-descending pane mid-fade.
   const reopenMode = stageReopenMode({
     playbackIdle,
     queueEnded: queueModel.ended,
   });
-  // A collapsed stage must already name its landing pane: the mobile
-  // sheet morphs into whichever mode is current from the drag's first
-  // frame, while the expand commit's pick only lands after the rise —
-  // a stale queue/lyrics mode would render through the whole morph
-  // and snap at the end. Normalizing on the collapse anchor keeps the
-  // first morph frame honest. Explicit opens (journey links mint the
-  // mode in the same batch as the open flip) pass the guard.
-  useEffect(() => {
-    if (!stageOpen) {
-      setStageMode(reopenMode);
-    }
-  }, [stageOpen, reopenMode]);
   // Every open lands on the reopen pane — a hidden stage that reopens
   // must not revive the last mode: player ordinarily, queue only for
   // the idle-stage ended-queue reopen the idle effect also picks.
@@ -3479,6 +3472,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     setStageOpenFor,
     stageMode,
     setStageMode,
+    stageReopenMode: reopenMode,
     reordering,
     toggleReordering,
     // models

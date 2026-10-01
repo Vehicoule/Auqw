@@ -626,6 +626,12 @@ export type StageSheetProps = {
   readonly onStartRadio?: (() => void) | undefined;
   readonly onStopRadio?: (() => void) | undefined;
   readonly onModeChange?: ((mode: StageMode) => void) | undefined;
+  /** The pane the sheet must rest on once parked — a stale `mode` is
+      normalized to it through `onModeChange` only after the surface
+      reads fully collapsed, so the next rise paints the pane it lands
+      on and the descending pane is never swapped mid-fade. Omitted
+      leaves the parked mode untouched (standalone hosts). */
+  readonly restMode?: StageMode | undefined;
   readonly onPressQueueItem?: ((occurrenceId: string) => void) | undefined;
   /** Advisory row intent — touch-down on a row; the host warms it. */
   readonly onQueueRowIntent?: ((occurrenceId: string) => void) | undefined;
@@ -686,6 +692,7 @@ export function StageSheet({
   onStartRadio,
   onStopRadio,
   onModeChange,
+  restMode,
   onPressQueueItem,
   onQueueRowIntent,
   onQueueViewport,
@@ -1179,6 +1186,24 @@ export function StageSheet({
     } as const;
   });
   const dismissOn = risenOn || expanded;
+
+  // Parked normalization: a stale mode retires only once the surface
+  // reads collapsed — flipping at the close commit would swap the
+  // still-descending pane mid-fade; waiting for the open commit would
+  // flash it through the whole next rise. `restMode` tracks live while
+  // parked (a playback flip under a parked sheet still renames the
+  // landing pane before the next drag).
+  useEffect(() => {
+    if (
+      !risenOn &&
+      !expanded &&
+      restMode !== undefined &&
+      mode !== undefined &&
+      mode !== restMode
+    ) {
+      onModeChange?.(restMode);
+    }
+  }, [risenOn, expanded, mode, restMode, onModeChange]);
 
   // The backdrop's warm-up bound: mount it once the sheet has ever
   // risen so the artwork resolver and full-size decode only run for
