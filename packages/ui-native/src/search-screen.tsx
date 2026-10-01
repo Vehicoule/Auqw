@@ -267,7 +267,12 @@ export function SearchScreen({
           data={view.results.rows}
           keyExtractor={(row) => row.row.key}
           scrollEnabled={scrollEnabled}
-          contentContainerStyle={{ paddingHorizontal: theme.spacing.screen - theme.spacing.sm }}
+          contentContainerStyle={{
+            paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
+            // Clears the floating miniplayer's strip.
+            paddingBottom:
+              theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
+          }}
           renderItem={({ item }) => (
             <TrackRow
               row={item.row}

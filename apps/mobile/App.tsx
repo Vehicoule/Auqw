@@ -1025,6 +1025,19 @@ function Main({
     onCreatePlaylist,
   } = shell;
 
+  // A swipe-dismissed sheet parks `stageGone` at 1 until the held
+  // mount releases; a player taking over inside that window must not
+  // inherit a pill translated offscreen. Only the dismiss axis resets
+  // — an expanded gesture keeps its progress.
+  const hadPlayerRef = useRef(false);
+  useEffect(() => {
+    const hasPlayer = player !== null;
+    if (hasPlayer && !hadPlayerRef.current) {
+      stageGone.value = 0;
+    }
+    hadPlayerRef.current = hasPlayer;
+  }, [player, stageGone]);
+
   const syncModel = useMemo(
     () =>
       toSyncModel({

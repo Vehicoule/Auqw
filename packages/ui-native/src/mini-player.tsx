@@ -528,7 +528,15 @@ export function MiniPlayer({
           if (sheetAnchor !== undefined) {
             sheetAnchor.value = 1;
           }
-          sheetGone.value = 0;
+          // Fling-up out of a dismiss slide carries the surface home
+          // and open on two coordinated springs — the expand's rise
+          // and the dismiss offset unwind together.
+          sheetGone.value = theme.reducedMotion
+            ? 0
+            : withSpring(0, {
+                ...SHEET_SETTLE_SPRING,
+                velocity: velocityG,
+              });
           sheetProgress.value = theme.reducedMotion
             ? 1
             : withSpring(1, {
