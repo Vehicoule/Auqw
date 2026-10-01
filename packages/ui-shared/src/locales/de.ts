@@ -310,7 +310,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'transfer.apply': 'bibliothek ersetzen',
   'transfer.applying': 'wird ersetzt…',
   'transfer.replaceWarn':
-    'löscht bibliothek, downloads, warteschlange, verlauf und einstellungen auf diesem gerät — vorher eine kopie exportieren',
+    'löscht bibliothek, downloads, warteschlange, verlauf und einstellungen auf diesem gerät — ein export sichert die bibliothek, nicht downloads oder warteschlange',
   'transfer.cancelA11y': 'import abbrechen',
   'transfer.readFailed': 'die gewählte datei konnte nicht gelesen werden',
   'transfer.exportWriteFailed': 'export fehlgeschlagen',

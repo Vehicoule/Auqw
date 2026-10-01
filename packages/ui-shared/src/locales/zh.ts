@@ -293,7 +293,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'transfer.apply': '替换资料库',
   'transfer.applying': '替换中…',
   'transfer.replaceWarn':
-    '将抹除此设备上的资料库、下载内容、队列、播放历史和设置 — 请先导出备份',
+    '将抹除此设备上的资料库、下载内容、队列、播放历史和设置 — 导出仅保留资料库，不含下载和队列',
   'transfer.cancelA11y': '取消导入',
   'transfer.readFailed': '无法读取所选文件',
   'transfer.exportWriteFailed': '导出写入失败',

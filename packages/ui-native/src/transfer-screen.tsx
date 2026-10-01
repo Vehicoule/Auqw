@@ -224,7 +224,9 @@ function ImportBody({
           <View
             style={{
               flexDirection: 'row',
-              gap: theme.spacing.md,
+              flexWrap: 'wrap',
+              rowGap: theme.spacing.sm,
+              columnGap: theme.spacing.md,
               marginTop: theme.spacing.sm,
             }}
           >

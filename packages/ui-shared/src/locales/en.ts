@@ -298,7 +298,7 @@ export const en = {
   'transfer.apply': 'replace library',
   'transfer.applying': 'replacing…',
   'transfer.replaceWarn':
-    'erases this device\'s library, downloads, queue, history and settings — export a copy first',
+    'erases this device\'s library, downloads, queue, history and settings — an export preserves the library, not downloads or the queue',
   'transfer.cancelA11y': 'cancel import',
   'transfer.readFailed': 'could not read the picked file',
   'transfer.exportWriteFailed': 'export write failed',

@@ -1879,6 +1879,7 @@
 
 .uw-import-preview__buttons {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--spacing-md);
 }
 
@@ -1902,6 +1903,11 @@
   background: transparent;
   box-shadow: none;
   border-color: var(--fg25);
+}
+
+.uw-cta--warn:disabled {
+  background: transparent;
+  border-color: var(--hairline);
 }
 
 /* ---- sheets ----------------------------------------------------------------- */
