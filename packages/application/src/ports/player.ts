@@ -5,6 +5,7 @@ import {
   isSafeNonNegative,
   isString,
 } from '../domain.ts';
+import type { ArtworkRef } from '../domain.ts';
 import type { AppError, Result } from '../errors.ts';
 
 export type PlaybackIdentity = {
@@ -144,6 +145,13 @@ export type QueueProjectionItem = {
   readonly title: string;
   readonly artist: string | null;
   readonly artworkUrl: string | null;
+  /**
+   * The recording's album and full artwork list, when the session
+   * carries them — richer OS now-playing metadata. `artworkUrl`
+   * stays the single best pick for consumers showing one image.
+   */
+  readonly album?: string | null;
+  readonly artwork?: readonly ArtworkRef[];
   /**
    * The session marked this row failed — forward moves (ended,
    * remote-next, repeat=all wrap) step over it the way the engine's

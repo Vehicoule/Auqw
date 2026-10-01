@@ -2026,6 +2026,12 @@ async function projectionBasics(): Promise<void> {
   assertEqual(itemA?.sourceRef, 'yA');
   assertEqual(itemA?.title, 'Song rA');
   assertEqual(itemA?.artworkUrl, 'https://art.example/a.png', 'first https art');
+  assertEqual(itemA?.album, 'Album', 'projection carries the album');
+  assertDeepEqual(
+    itemA?.artwork,
+    [{ url: 'https://art.example/a.png', width: 2, height: 2 }],
+    'projection carries the full art list',
+  );
   assertEqual(itemB?.provider, null, 'wrong-provider ref is null');
   assertEqual(itemB?.sourceRef, null);
   assertEqual(itemB?.artworkUrl, null);

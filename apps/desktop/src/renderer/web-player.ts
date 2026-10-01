@@ -46,8 +46,13 @@ export type AudioLike = {
   removeEventListener(type: string, listener: () => void): void;
 };
 
-/** Details on a transport action — only `seekto` carries one. */
-export type MediaActionDetails = { seekTime?: number };
+/** Details on a transport action — `seekto` carries `seekTime`,
+ * `seekbackward`/`seekforward` carry `seekOffset` (seconds, may be
+ * absent; the OS default is 10). */
+export type MediaActionDetails = {
+  seekTime?: number;
+  seekOffset?: number;
+};
 
 /** The `MediaMetadata` init bag — the DOM ctor is injected as a
  * factory so the port stays testable under plain node. */
@@ -66,7 +71,15 @@ export type MediaSessionLike = {
   /** The `MediaMetadata` instance the factory minted, or null. */
   metadata: unknown;
   setActionHandler(
-    action: 'play' | 'pause' | 'nexttrack' | 'previoustrack' | 'seekto',
+    action:
+      | 'play'
+      | 'pause'
+      | 'nexttrack'
+      | 'previoustrack'
+      | 'seekto'
+      | 'seekbackward'
+      | 'seekforward'
+      | 'stop',
     handler: ((details?: MediaActionDetails) => void) | null,
   ): void;
   /** Optional — older embeds may lack it; publishing is best-effort. */
@@ -110,6 +123,22 @@ async function guard<T>(fn: () => Promise<T>): Promise<Result<T>> {
 
 function identityEq(a: PlaybackIdentity, b: PlaybackIdentity): boolean {
   return a.attemptId === b.attemptId && a.queueRev === b.queueRev;
+}
+
+/** First `skipsForward`-unmarked item after `walkPos` in the dealt
+ * order — the step-over rule every forward move shares. */
+function unflaggedAfter(
+  p: QueueProjection,
+  order: readonly number[],
+  walkPos: number,
+): QueueProjectionItem | undefined {
+  for (let i = walkPos + 1; i < order.length; i += 1) {
+    const item = p.items[order[i] ?? -1];
+    if (item !== undefined && item.skipsForward !== true) {
+      return item;
+    }
+  }
+  return undefined;
 }
 
 function toPreparedStream(p: PreparedStreamPayload): PreparedStream {
@@ -504,16 +533,36 @@ export function createWebPlayerPort(deps: {
       return;
     }
     const item = projectedItem(current?.occurrenceId ?? null);
-    mediaSession.metadata =
-      item === null
-        ? null
-        : mediaMetadata({
-            title: item.title,
-            ...(item.artist === null ? {} : { artist: item.artist }),
-            ...(item.artworkUrl === null
-              ? {}
-              : { artwork: [{ src: item.artworkUrl }] }),
-          });
+    if (item === null) {
+      mediaSession.metadata = null;
+      return;
+    }
+    const artwork = osArtwork(item);
+    mediaSession.metadata = mediaMetadata({
+      title: item.title,
+      ...(item.artist === null ? {} : { artist: item.artist }),
+      ...(item.album ? { album: item.album } : {}),
+      ...(artwork.length === 0 ? {} : { artwork }),
+    });
+  }
+
+  /** The artwork candidates the OS may pick from — the projection's
+   * full list when it carries one, else the single `artworkUrl`
+   * pick. `sizes` is emitted only when both dims are known. */
+  function osArtwork(
+    item: QueueProjectionItem,
+  ): Array<{ src: string; sizes?: string }> {
+    const list =
+      item.artwork ??
+      (item.artworkUrl === null
+        ? []
+        : [{ url: item.artworkUrl, width: null, height: null }]);
+    return list.map((a) => ({
+      src: a.url,
+      ...(a.width !== null && a.height !== null
+        ? { sizes: `${a.width}x${a.height}` }
+        : {}),
+    }));
   }
 
   /** Position mirror — the OS interpolates between pushes via
@@ -573,6 +622,7 @@ export function createWebPlayerPort(deps: {
       ...(error === undefined ? {} : { error }),
     });
     publishPosition();
+    refreshTransportButtons();
   }
 
   function emitTransition(
@@ -584,6 +634,7 @@ export function createWebPlayerPort(deps: {
     handle: string | null,
   ): void {
     projection = { ...p, currentOccurrenceId: toOccurrenceId };
+    refreshTransportButtons();
     emit({
       type: 'queue-transition',
       projectionId: p.projectionId,
@@ -851,23 +902,12 @@ export function createWebPlayerPort(deps: {
     // first unflagged entry. `skipsForward` rows are stepped over
     // exactly like the engine's next(); backward moves still reach
     // them.
-    const unflagged = (
-      walkPos: number,
-    ): (typeof p.items)[number] | undefined => {
-      for (let i = walkPos + 1; i < order.length; i += 1) {
-        const item = p.items[order[i] ?? -1];
-        if (item !== undefined && item.skipsForward !== true) {
-          return item;
-        }
-      }
-      return undefined;
-    };
     const successor =
       reason === 'ended' && p.repeat === 'one'
         ? p.items[idx]
-        : (unflagged(pos) ??
+        : (unflaggedAfter(p, order, pos) ??
           (p.repeat === 'all' && order.length > 0
-            ? unflagged(-1)
+            ? unflaggedAfter(p, order, -1)
             : undefined));
     if (successor === undefined) {
       const tailPositionMs = posMs();
@@ -1057,30 +1097,112 @@ export function createWebPlayerPort(deps: {
         });
       }
     });
-    mediaSession.setActionHandler('nexttrack', () =>
-      advanceQueue('remote-next'),
-    );
-    mediaSession.setActionHandler('previoustrack', () =>
-      advanceQueue('remote-previous'),
-    );
-    // The OS scrubber — same landing as a seekTo on the live attempt:
-    // a mid-attach play owns the seek in its pending slot instead.
+    // The OS scrubber and step seeks share the seekTo landing: a
+    // mid-attach play owns the position through its pending slot.
     mediaSession.setActionHandler('seekto', (details) => {
       if (details?.seekTime === undefined) {
         return;
       }
-      const positionMs = Math.max(0, Math.round(details.seekTime * 1000));
-      for (const pending of pendingPlayGens.values()) {
-        if (
-          current === null ||
-          identityEq(pending.identity, current.identity)
-        ) {
-          pending.positionMs = positionMs;
+      applyOsSeek(Math.max(0, Math.round(details.seekTime * 1000)));
+    });
+    mediaSession.setActionHandler('seekbackward', (details) => {
+      applyOsSeek(
+        Math.max(0, posMs() - Math.round((details?.seekOffset ?? 10) * 1000)),
+      );
+    });
+    mediaSession.setActionHandler('seekforward', (details) => {
+      applyOsSeek(
+        Math.min(
+          durMs() ?? Number.MAX_SAFE_INTEGER,
+          posMs() + Math.round((details?.seekOffset ?? 10) * 1000),
+        ),
+      );
+    });
+    mediaSession.setActionHandler('stop', () => {
+      // Nothing attached — the stop still kills a mid-resolve play so
+      // it can't start after the surface clears.
+      if (current === null) {
+        invalidatePendingPlays(null);
+        audio.pause();
+        return;
+      }
+      hardStop();
+    });
+    // next/previous grey at the walk's edges rather than no-op.
+    refreshTransportButtons();
+  }
+
+  /** The shared landing for every OS seek shape — a mid-attach play
+   * owns the position through its pending slot instead. */
+  function applyOsSeek(positionMs: number): void {
+    for (const pending of pendingPlayGens.values()) {
+      if (
+        current === null ||
+        identityEq(pending.identity, current.identity)
+      ) {
+        pending.positionMs = positionMs;
+      }
+    }
+    audio.currentTime = positionMs / 1000;
+    activeMse?.source.seekTo(positionMs);
+  }
+
+  /** The element teardown the port `stop` and the OS stop action
+   * share. */
+  function hardStop(): void {
+    opGen++;
+    abortPendingAttaches();
+    dropMse();
+    audio.pause();
+    audio.src = '';
+    clearOsSurface();
+    status('idle');
+    current = null;
+  }
+
+  /** Chromium greys an OS transport button whose handler is null —
+   * mirror the walk's real edges instead of letting a press no-op or
+   * detach through advanceQueue. Refreshed on every cursor move
+   * (emitTransition), projection swap, and status tick — the >3 s
+   * restart threshold turns 'previoustrack' back on mid-track. */
+  function refreshTransportButtons(): void {
+    if (mediaSession === null) {
+      return;
+    }
+    let next = false;
+    let prev = false;
+    const p = projection;
+    if (p !== null) {
+      const idx = p.items.findIndex(
+        (item) => item.occurrenceId === p.currentOccurrenceId,
+      );
+      if (idx >= 0) {
+        const order =
+          p.order.length === 0 ? p.items.map((_, i) => i) : p.order;
+        const pos = order.indexOf(idx);
+        if (pos >= 0) {
+          next =
+            unflaggedAfter(p, order, pos) !== undefined ||
+            (p.repeat === 'all' &&
+              unflaggedAfter(p, order, -1) !== undefined);
+          // Mirror advanceQueue's remote-previous leg: mid-walk a
+          // backward step always lands; at the head a repeat=all wrap
+          // or a live element (restart in place) makes it real.
+          prev =
+            pos > 0 ||
+            (pos === 0 && p.repeat === 'all' && order.length > 1) ||
+            (pos === 0 && current !== null);
         }
       }
-      audio.currentTime = positionMs / 1000;
-      activeMse?.source.seekTo(positionMs);
-    });
+    }
+    mediaSession.setActionHandler(
+      'nexttrack',
+      next ? () => advanceQueue('remote-next') : null,
+    );
+    mediaSession.setActionHandler(
+      'previoustrack',
+      prev ? () => advanceQueue('remote-previous') : null,
+    );
   }
 
   function stale(identity: PlaybackIdentity): Result<never> | null {
@@ -1377,14 +1499,7 @@ export function createWebPlayerPort(deps: {
       if (bad !== null) {
         return bad;
       }
-      opGen++;
-      abortPendingAttaches();
-      dropMse();
-      audio.pause();
-      audio.src = '';
-      clearOsSurface();
-      status('idle');
-      current = null;
+      hardStop();
       return ok(undefined);
     },
 
@@ -1465,6 +1580,7 @@ export function createWebPlayerPort(deps: {
         }
       }
       installMediaActions();
+      refreshTransportButtons();
       publishMetadata();
       return ok(undefined);
     },

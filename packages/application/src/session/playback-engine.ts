@@ -2412,7 +2412,9 @@ export class PlaybackEngine {
           sourceRef: selected?.id ?? null,
           title: recording?.title ?? 'Unknown',
           artist: recording?.artist ?? null,
+          album: recording?.album ?? null,
           artworkUrl: artwork?.url ?? null,
+          artwork: recording?.artwork ?? [],
           skipsForward: r.queue.isUnplayable(occurrence.occurrenceId)
             ? true
             : undefined,
