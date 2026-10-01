@@ -120,12 +120,32 @@ export function updateCapabilityFor(
 const OPEN_HOST = 'github.com';
 const OPEN_PATH = '/Vehicoule/Auqw/releases';
 
+/** The restart options for the AppImage self-apply leg — kept pure
+    (no electron import) so the handoff is testable. `execPath` is the
+    image the apply renamed over: a bare `app.relaunch()` re-execs
+    `process.execPath`, the binary inside the dying FUSE mount, and
+    the "updated" app comes back as the old version. `args` carries
+    the launch argv because relaunch() defaults it to [] — the new
+    image would drop the user's launch flags without it. */
+export function appImageRelaunchOptions(
+  argv: readonly string[],
+  appimagePath: string | undefined,
+): { readonly args: string[]; readonly execPath?: string } {
+  return {
+    args: argv.slice(1),
+    ...(appimagePath !== undefined ? { execPath: appimagePath } : {}),
+  };
+}
+
 export function createDesktopUpdate(deps: {
   readonly currentVersion: string;
   readonly target: UpdateTarget;
   readonly fetchJson: UpdateFetchJson;
   readonly openExternal: (url: string) => Promise<void>;
   readonly capability: UpdateCapability;
+  /** Override for the releases list endpoint — dev/test seam, same
+      role as mobile's EXPO_PUBLIC_UPDATE_RELEASES_URL. */
+  readonly releasesUrl?: string;
   /** Apply transport + format installer — required past 'open'. */
   readonly applyPorts?: UpdateApplyPorts;
   /** Relaunch hook — required on formats that self-apply on restart
@@ -141,6 +161,9 @@ export function createDesktopUpdate(deps: {
     currentVersion: deps.currentVersion,
     target: deps.target,
     fetchJson: deps.fetchJson,
+    ...(deps.releasesUrl !== undefined && deps.releasesUrl !== ''
+      ? { releasesUrl: deps.releasesUrl }
+      : {}),
     ...(applier !== undefined ? { applier } : {}),
   });
   const snapshot = (): DesktopUpdateSnapshot => ({
