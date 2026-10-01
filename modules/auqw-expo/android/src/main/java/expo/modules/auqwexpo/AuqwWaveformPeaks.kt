@@ -38,6 +38,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.coroutineContext
 import kotlin.math.ceil
 import kotlin.math.sqrt
@@ -61,6 +62,11 @@ private const val MAX_PCM_BYTES = 256 * 1024 * 1024
 /** Cold-start patience while position 0 stays uncommitted — the player's
  * own head fill takes a while too; peaks may wait for the same warm-up. */
 private const val FIRST_READ_TIMEOUT_MS = 15_000L
+/** First-hole patience after a probe met a session refusal — the fill
+ * that would commit the hole rides the same refused session, so the
+ * pull still serves whatever is already committed but gives up fast
+ * instead of parking through the provider's cooldown. */
+private const val REFUSED_PULL_PATIENCE_MS = 1_000L
 /** Patience for each later position: a hole still unfetched past this
  * sits ahead of committed bytes — a demanding read there would queue
  * fetch-through demand that outranks the player's own (demand serves
@@ -89,6 +95,15 @@ private const val HEAD_PROBE_BYTES = 256 * 1024
 /** Per-call read bound inside a probe-backed data source — one readAt
  * is at most one ranged GET (the seam itself clamps at chunk_bytes). */
 private const val PROBE_READ_MAX = 256 * 1024
+/** Probe-window floor — under it the demuxer's own read pattern
+ * re-probes inside a single sample window. */
+private const val PROBE_WINDOW_MIN = 48 * 1024
+/** Container slack over a sample's encoded span — cues and cluster
+ * headers sit between the seek point and the audio blocks. */
+private const val PROBE_WINDOW_SLACK = 32 * 1024
+/** Consecutive refused probes before a lane's reader gives up — one
+ * stalled or rate-limited response must not kill the lane outright. */
+private const val PROBE_MAX_STRIKES = 3
 /** Whole-sweep probe spend across all lanes: a runaway extractor scan
  * fails closed at this — reads past it report EOF so the sampled path
  * gives up instead of pulling the whole file for a decoration. */
@@ -314,20 +329,41 @@ internal class AuqwWaveformPeaks(
         // instead of trailing a whole-file pull. Structural misses
         // (unknown total, small file, unseekable container, no
         // decodable sample) fall through to the whole-file sweep.
+        // null = no probe refused yet; non-null = the FIRST refusal's
+        // seam kind — a terminal kind (dead handle, invalid-response)
+        // must stay terminal through the pull, not decay to transient.
+        val probeRefused = AtomicReference<String?>(null)
         val sampled = try {
-          sampledStream(requestId, host, handle, count, cap, provisionalCap, job, onCoarse)
+          sampledStream(
+            requestId, host, handle, count, cap, provisionalCap, job,
+            onCoarse, probeRefused
+          )
         } catch (e: CancellationException) {
           throw e
         } catch (e: CodedException) {
-          if (e.code in PROPAGATE_KINDS) throw e
+          // A refusal met before anything committed (the head probe's
+          // own failure leaves position 0 a hole) can't be beaten by
+          // the whole-file pull — propagate the transient so the
+          // tracker retries once the session's cooldown lapses.
+          if (e.code in PROPAGATE_KINDS ||
+            (e.code == "transient" && probeRefused.get() != null)
+          ) {
+            throw e
+          }
           Log.w(TAG, "peaks[$requestId] sampled bailed: ${e.code}")
           null
         }
         if (sampled !== null) {
           return sampled
         }
+        // The pull only ever serves committed bytes — a refused
+        // session won't fill the holes, so its first-hole patience
+        // shortens to a beat: committed audio still drains, a cold
+        // refusal fails typed instead of parking through the cooldown.
         val pullStart = SystemClock.uptimeMillis()
-        val encoded = pullBytes(host, handle, cap, provisionalCap)
+        val encoded = pullBytes(
+          host, handle, cap, provisionalCap, probeRefused.get()
+        )
         Log.i(
           TAG,
           "peaks[$requestId] legacy pull +${SystemClock.uptimeMillis() - pullStart}ms bytes=${encoded.size}"
@@ -386,10 +422,12 @@ internal class AuqwWaveformPeaks(
     handle: String,
     cap: Long,
     provisionalCap: Boolean,
+    refusalKind: String? = null,
   ): ByteArray {
     val out = ByteArrayOutputStream()
     var ended = false
-    var deadline = SystemClock.uptimeMillis() + FIRST_READ_TIMEOUT_MS
+    var deadline = SystemClock.uptimeMillis() +
+      if (refusalKind != null) REFUSED_PULL_PATIENCE_MS else FIRST_READ_TIMEOUT_MS
     // `<=` so an exactly-`cap` stream still reaches its EOF read.
     while (out.size() <= cap) {
       coroutineContext.ensureActive()
@@ -410,8 +448,13 @@ internal class AuqwWaveformPeaks(
           // and unlike a parked streamRead, nothing stays behind
           // competing with playback when the window lapses.
           if (SystemClock.uptimeMillis() >= deadline) {
+            // A hole with refusal evidence fails as the refusal's
+            // own kind — a terminal one (dead handle, invalid-response)
+            // stays terminal instead of decaying to retry weather; an
+            // unrefused hole is genuinely unbuffered content.
             throw CodedException(
-              "unavailable", "stream bytes not yet buffered", null
+              refusalKind ?: "unavailable",
+              "stream bytes not yet buffered", null
             )
           }
           delay(PEEK_POLL_MS)
@@ -465,6 +508,7 @@ internal class AuqwWaveformPeaks(
     provisionalCap: Boolean,
     job: Job?,
     onCoarse: ((List<Double>) -> Unit)?,
+    probeRefused: AtomicReference<String?>,
   ): List<Double>? {
     val t0 = SystemClock.uptimeMillis()
     // Head probe: warms position 0 (the extractor's own sniff reads
@@ -474,6 +518,7 @@ internal class AuqwWaveformPeaks(
         host.streamProbe(handle, 0uL, HEAD_PROBE_BYTES.toULong(), true)
       }
     } catch (e: StreamException) {
+      recordRefusal(probeRefused, seamKind(e))
       throw seamError(e)
     }
     val total = head.total?.toLong() ?: return null
@@ -507,7 +552,7 @@ internal class AuqwWaveformPeaks(
     var seed: SeedInfo? = null
     try {
       seed = withContext(Dispatchers.IO) {
-        seedParse(host, handle, total, budget, probeCalls, job)
+        seedParse(host, handle, total, budget, probeCalls, job, probeRefused)
       }
     } catch (e: CancellationException) {
       throw e
@@ -541,6 +586,17 @@ internal class AuqwWaveformPeaks(
       return null
     }
 
+    // One window = the sample's own encoded span plus container slack,
+    // sized off the stream's average bitrate — a fixed 256KiB fetch
+    // makes every point a ~6MiB-share ranged GET on throttled links
+    // for audio the window never decodes, while a fixed small window
+    // would re-probe mid-sample on fat streams.
+    val probeWindow = (
+      total * (SAMPLE_PCM_MS + 1_000L) / durationMs +
+        PROBE_WINDOW_SLACK
+      ).toLong().coerceIn(
+        PROBE_WINDOW_MIN.toLong(), PROBE_READ_MAX.toLong()
+      )
     val sparse = arrayOfNulls<DoubleArray>(count)
     val sparseLock = Any()
     val applied = AtomicInteger(0)
@@ -551,7 +607,8 @@ internal class AuqwWaveformPeaks(
         async(Dispatchers.IO) {
           sampleLane(
             requestId, host, handle, total, budget, probeCalls,
-            lane, lanes, durationUs, durationMs, count, job
+            lane, lanes, durationUs, durationMs, count, job,
+            probeWindow, probeRefused
           ) { mediaMs, _, windows ->
             // Merge the sample's per-window RMS under the lock — an
             // overlap keeps the louder measured value, never averages
@@ -635,9 +692,13 @@ internal class AuqwWaveformPeaks(
     durationMs: Double,
     count: Int,
     job: Job?,
+    probeWindow: Long,
+    probeRefused: AtomicReference<String?>,
     onSample: (mediaMs: Double, pcmMs: Double, windows: List<Double>) -> Unit,
   ) {
-    val reader = ProbeDataReader(host, handle, total, budget, probeCalls)
+    val reader = ProbeDataReader(
+      host, handle, total, budget, probeCalls, probeWindow, probeRefused
+    )
     val pump = SampleQueue()
     val adapter = BundledExtractorsAdapter(DefaultExtractorsFactory())
     var codec: MediaCodec? = null
@@ -939,8 +1000,12 @@ internal class AuqwWaveformPeaks(
     budget: AtomicLong,
     probeCalls: AtomicLong,
     job: Job?,
+    probeRefused: AtomicReference<String?>,
   ): SeedInfo? {
-    val reader = ProbeDataReader(host, handle, total, budget, probeCalls)
+    val reader = ProbeDataReader(
+      host, handle, total, budget, probeCalls,
+      PROBE_READ_MAX.toLong(), probeRefused
+    )
     val pump = SampleQueue()
     val adapter = BundledExtractorsAdapter(DefaultExtractorsFactory())
     try {
@@ -1338,13 +1403,38 @@ internal class AuqwWaveformPeaks(
   /** Seam failures → the ABI kind the JS adapter maps — the same table
    *  the desktop port's `toError` applies. */
   private fun seamError(e: StreamException): CodedException {
-    val kind = when {
-      e !is StreamException.Failed -> "unavailable"
-      e.kind in DEAD_HANDLE_KINDS -> "released"
-      e.kind in INVALID_RESPONSE_KINDS -> "invalid-response"
-      else -> "transient"
+    return CodedException(seamKind(e), e.message, e)
+  }
+}
+
+/** The seam's kind mapping at file scope — probe readers below the
+ *  peaks class need the same table to keep a refusal's own kind. */
+private fun seamKind(e: StreamException): String {
+  return when {
+    e !is StreamException.Failed -> "unavailable"
+    e.kind in DEAD_HANDLE_KINDS -> "released"
+    e.kind in INVALID_RESPONSE_KINDS -> "invalid-response"
+    else -> "transient"
+  }
+}
+
+/** Refusal kinds a retry can't beat — a dead handle or a malformed
+ *  response stays terminal even when an earlier lane only met retry
+ *  weather. */
+private val TERMINAL_REFUSAL_KINDS = setOf("released", "invalid-response")
+
+/** Fold a probe refusal into the shared kind: first-wins among equally
+ *  ranked kinds, but a terminal refusal always supersedes retryable
+ *  evidence — a later invalid-response must not hide behind an earlier
+ *  lane's 429 and retry a session that cannot serve. */
+private fun recordRefusal(ref: AtomicReference<String?>, kind: String) {
+  ref.updateAndGet { cur ->
+    when {
+      cur == null -> kind
+      cur in TERMINAL_REFUSAL_KINDS -> cur
+      kind in TERMINAL_REFUSAL_KINDS -> kind
+      else -> cur
     }
-    return CodedException(kind, e.message, e)
   }
 }
 
@@ -1455,11 +1545,14 @@ private class SampleQueue : ExtractorOutput {
 /**
  * Sequential DataReader over `streamProbe` — the bundled extractor's
  * `DefaultExtractorInput` drives it with small sequential reads, so a
- * fetched window is held and misses become the next 256KiB ranged GET.
- * `position` is the cursor `seek` moves via RESULT_SEEK handling in
- * the caller. Past `budget` or on a refused probe it fails closed
- * (EOF) — a runaway scan dies instead of pulling the whole file for
- * a decoration.
+ * fetched window is held and misses become the next ranged GET of
+ * `windowBytes`. `position` is the cursor `seek` moves via RESULT_SEEK
+ * handling in the caller. A failed probe counts one strike and dies
+ * after `PROBE_MAX_STRIKES` in a row — a lone 429 or stalled reply
+ * abandons the point, not the lane — while `refused` records for the
+ * caller that the session itself said no. Past `budget` it fails
+ * closed (EOF) — a runaway scan dies instead of pulling the whole
+ * file for a decoration.
  */
 private class ProbeDataReader(
   private val host: PluginHost,
@@ -1467,6 +1560,8 @@ private class ProbeDataReader(
   private val size: Long,
   private val budget: AtomicLong,
   private val calls: AtomicLong,
+  private val windowBytes: Long,
+  private val refused: AtomicReference<String?>,
 ) : DataReader {
   var position = 0L
 
@@ -1475,6 +1570,7 @@ private class ProbeDataReader(
   private var winStart = -1L
   private var win = ByteArray(0)
   private var dead = false
+  private var strikes = 0
 
   /** This source's own probe traffic — the shared `budget` counts
    *  payload across all lanes, these two attribute it per window. */
@@ -1494,19 +1590,35 @@ private class ProbeDataReader(
       position += n
       return n
     }
-    val want = minOf(size - position, PROBE_READ_MAX.toLong()).toULong()
+    val want = minOf(size - position, windowBytes).toULong()
     val result = try {
       host.streamProbe(handle, position.toULong(), want, true)
+    } catch (e: StreamException) {
+      // A refusal keeps its seam kind — a terminal one (dead
+      // handle, invalid-response) must not decay to `transient` and
+      // retry a session that cannot serve.
+      recordRefusal(refused, seamKind(e))
+      if (++strikes >= PROBE_MAX_STRIKES) {
+        dead = true
+      }
+      return -1
     } catch (_: Exception) {
-      dead = true
+      recordRefusal(refused, "transient")
+      if (++strikes >= PROBE_MAX_STRIKES) {
+        dead = true
+      }
       return -1
     }
     if (result.data.isEmpty()) {
       // A refused or empty probe reports EOF to the parser — the
       // sweep counts fewer measured windows, never fabricated ones.
-      dead = true
+      recordRefusal(refused, "transient")
+      if (++strikes >= PROBE_MAX_STRIKES) {
+        dead = true
+      }
       return -1
     }
+    strikes = 0
     calls.incrementAndGet()
     srcCalls.incrementAndGet()
     budget.addAndGet(result.data.size.toLong())
