@@ -163,6 +163,14 @@ const TESTS: [string, () => Promise<void>][] = [
     async () => {
       const driver = new NodeSqliteDriver();
       const recents = await migrated(driver);
+      // Two gates make the window deterministic: `txOpen` fires only
+      // once the gated work runs INSIDE the open transaction (BEGIN
+      // IMMEDIATE has executed), and `gate` holds it there while
+      // record attempts its own write.
+      let txOpen!: () => void;
+      const openBarrier = new Promise<void>((resolve) => {
+        txOpen = resolve;
+      });
       let release!: () => void;
       const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -170,16 +178,19 @@ const TESTS: [string, () => Promise<void>][] = [
       const signal = new CancellationSource().signal;
       const open = enqueueDriverTransaction(
         driver,
-        () => gate,
+        async () => {
+          txOpen();
+          await gate;
+        },
         signal,
         (s) => {
           if (s.cancelled) throw CANCELLED;
         },
       );
-      // The transaction is demonstrably open (gate unresolved) when
-      // record runs: unqueued, its BEGIN IMMEDIATE would throw inside
-      // record's catch and drop the write; queued, `recorded` only
-      // settles after `release()` lets the open commit out.
+      // The gated transaction demonstrably holds the connection now:
+      // an unqueued record's BEGIN IMMEDIATE would throw here (and be
+      // swallowed by record's catch); a queued one waits the tail out.
+      await openBarrier;
       const recorded = recents.record('overlap');
       release();
       await Promise.all([open, recorded]);
