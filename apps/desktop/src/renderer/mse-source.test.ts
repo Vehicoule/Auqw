@@ -599,15 +599,16 @@ export async function run(): Promise<void> {
     await settle();
     const sb = media.sourceBuffer;
     assert(sb !== null);
-    sb.buffered.list = [[0, 500]];
+    sb.buffered.list = [[0, 800]];
     // Playhead at 300s is covered → [0,180) is stale and trims with
-    // no quota error ever raised.
+    // no quota error ever raised. [600,800] stays: evicting unplayed
+    // media ahead opens a hole the contiguous pump never refills.
     source.notePosition(300_000);
     await settle();
     assertDeepEqual(
       sb.removes,
       [[0, 180]],
-      'notePosition trims stale media without quota pressure',
+      'notePosition trims behind only, ahead coverage survives',
     );
   }
   {

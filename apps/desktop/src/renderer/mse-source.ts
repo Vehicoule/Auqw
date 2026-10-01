@@ -509,7 +509,7 @@ function runSession(
     maybeGrant();
   }
 
-  function startEviction(): void {
+  function startEviction(includeAhead = true): void {
     const ranges = buffer?.buffered;
     if (ranges === undefined) {
       drain();
@@ -533,7 +533,7 @@ function runSession(
         evictQueue.push([start, behindEnd]);
       }
       const aheadStart = Math.max(start, anchorS + KEEP_AHEAD_S);
-      if (end > aheadStart) {
+      if (includeAhead && end > aheadStart) {
         evictQueue.push([aheadStart, end]);
       }
     }
@@ -568,11 +568,13 @@ function runSession(
    * Quota-triggered eviction runs once Chromium's SourceBuffer
    * cap (~100+ MB of audio) is hit — every track before that stays
    * buffered whole, so an hour of listening parks hundreds of MB of
-   * decoded-adjacent media per track in renderer shared memory. The
-   * playhead moves on the same cadence as `notePosition`, so a
-   * throttled pass there trims buffered media down to the
-   * keep-window (behind/ahead) the quota path already computes —
-   * same evict ranges, just run before pressure, not after.
+   * played media in renderer shared memory. The playhead moves on the
+   * same cadence as `notePosition`, so a throttled pass there trims
+   * consumed media trailing the keep-behind window — behind-only,
+   * because the pump's byte cursor can't rewind: evicting buffered
+   * media ahead of the playhead opens a hole the contiguous stream
+   * never refills and playback stalls dead at the trim frontier.
+   * Ahead is already bounded by the ingest grant window.
    */
   let lastProactiveEvictAtMs = -1;
   const PROACTIVE_EVICT_INTERVAL_MS = 10_000;
@@ -607,7 +609,7 @@ function runSession(
       return;
     }
     lastProactiveEvictAtMs = now;
-    startEviction();
+    startEviction(false);
   }
 
   function drain(): void {
