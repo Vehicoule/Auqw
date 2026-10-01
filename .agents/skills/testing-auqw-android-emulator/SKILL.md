@@ -413,3 +413,70 @@ signature post-relaunch: the next fetch's Range starts at
 - The React Native DevTools window pops open on stray taps near the
   debug warning bar / 'player' segment area — `wmctrl` close it
   immediately or it steals the recording frame.
+
+## Stage-sheet drag mechanics + transient ended pill (post-#236)
+
+Techniques worked out for the stage-pane-morph gate; generalize to any
+gate that needs to collapse/expand the stage sheet or reach ended-queue
+states deterministically.
+
+- The sheet's GH pan wraps its WHOLE surface (GestureDetector at the
+  sheet root — `stage-sheet.tsx`), so a drag on the parked mini-player
+  pill or the open sheet pans it. `input swipe` DOES drive `onUpdate` —
+  but Pressables inside (transport buttons, queue rows) may swallow the
+  touch if the drag starts dead on a button. Start drags on the pill
+  body (~x400) or the sheet's empty space.
+- `input tap` DOES trigger MiniPlayer Pressables — the pill's play/pause
+  button and the pill body `onPress` (a SYNCHRONOUS expand commit:
+  anchor→1 + spring→1). Useful when a drag is impractical.
+- `resolveSheetTarget` thresholds (`stage-motion.ts`,
+  SHEET_FLING_VELOCITY=250): release velocity ≤ −250 px/s → 'expanded'
+  regardless of distance; ≥ +250 px/s below the collapsed anchor →
+  'dismissed' (DELETES the pill); raw ≥ travel/2 → 'expanded';
+  raw < −collapsed/2 → 'dismissed'; else 'collapsed'.
+  Consequences for `input swipe` collapse pulls:
+  - MODERATE pulls that end mid-travel resolve 'collapsed' (pill parks).
+  - A pull ending below the anchor at ≥ 250 px/s fling speed DISMISSES
+    the sheet entirely — the pill vanishes. Stay under fling
+    (< ~240 px/s → duration ≥ distance/0.24) or end the pull above the
+    −collapsed/2 cutoff.
+  - HOLD-AT-PARK simulation without root: a slow sub-fling pull ending
+    at/below the collapsed bound (e.g.
+    `input swipe 541 200 541 2095 8000` — ~240 px/s) lands 'collapsed'
+    and dwells at progress 0 for the tail of the gesture — this
+    exercises the "parked at progress 0 before release" shape.
+- ENDED + IDLE pill is a ~450 ms TRANSIENT: when playback is idle the
+  collapse commit schedules an end-hold release (STAGE_RELEASE_MS=450)
+  — the parked pill unmounts ~0.5 s after collapse. Reopen evidence must
+  land inside the window: `input tap` on the pill body works
+  (tap-expand). A real DRAG on the transient pill is NOT reliably
+  injectable via `input swipe` — the settle outpaces `input`'s spawn
+  latency and the down event lands on the settled/background UI. For
+  morph-pane evidence use the in-window tap-expand (the spring morph
+  renders the same stageMode a drag would).
+- `auqw://open?tab=queue` mints stageMode='queue'+expanded but CANNOT
+  remount a released stage (sheetPlayer=null → nothing renders) — it
+  only works while a live hold keeps the mount alive.
+- Deterministic IDLE+ENDED recipe: play a LOCAL fixture row →
+  `auqw://open?tab=queue` → `auqw://seek?ms=<durMs−4000>` → wait ~5 s →
+  verify `queue_state.currentOccurrenceId` empty + `state='stopped'` +
+  dumpsys `state=NONE`. The sheet STAYS OPEN on the ended queue
+  (stageOpen holds the mount) even though the pane shows no NOW PLAYING.
+- SQLite queue ground truth:
+  `adb shell "run-as com.vehicoule.auqw sqlite3 files/SQLite/auqw.db 'SELECT * FROM queue_state'"`
+  → `id|rev|currentOccurrenceId|position|state|errorJSON`; an EMPTY
+  `currentOccurrenceId` = ended cursor.
+- Tapping an ended queue's UP NEXT row restarts playback and the sheet
+  auto-lands on the PLAYER pane.
+- Reliable leg recording: run screenrecord + gestures in ONE adb shell
+  so the mp4 finalizes before pull —
+  `adb shell "screenrecord --time-limit N /sdcard/f.mp4 & RP=\$!; sleep 0.8; <gestures>; wait \$RP"; adb pull /sdcard/f.mp4 …`.
+  Pulling early yields `moov atom not found` truncated files.
+- Mid-morph pane identity is read from extracted frames:
+  `ffmpeg -i f.mp4 -vf fps=8 f-%02d.png` — the rising/descending card
+  shows which pane (artwork+waveform = player, UP NEXT/NOW PLAYING rows
+  = queue, lyric lines = lyrics) is painting mid-morph vs which it
+  lands on.
+- `sendevent` on /dev/input/event* is permission-denied (no root) —
+  true multi-tap touch injection isn't available; `input swipe/tap` are
+  the tools.
