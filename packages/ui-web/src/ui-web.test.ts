@@ -734,11 +734,11 @@ function render(node: ReactNode): string {
   check('chrome marks the active tab', markup.includes('aria-selected="true"'));
   check('chrome renders the stage column', markup.includes('uw-stage-col'));
   check(
-    'stage column carries its own head strip',
-    markup.includes('uw-stage-head'),
+    'stage column carries no head strip — chromeless to the top edge',
+    !markup.includes('uw-stage-head'),
   );
   check(
-    'stage head offers the collapse control',
+    'world toolbar offers the collapse control',
     markup.includes('hide player'),
   );
   check('chrome renders the world toolbar', markup.includes('uw-world-bar'));
