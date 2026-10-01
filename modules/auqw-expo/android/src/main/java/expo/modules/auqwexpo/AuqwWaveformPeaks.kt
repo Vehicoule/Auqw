@@ -518,7 +518,7 @@ internal class AuqwWaveformPeaks(
         host.streamProbe(handle, 0uL, HEAD_PROBE_BYTES.toULong(), true)
       }
     } catch (e: StreamException) {
-      probeRefused.compareAndSet(null, seamKind(e))
+      recordRefusal(probeRefused, seamKind(e))
       throw seamError(e)
     }
     val total = head.total?.toLong() ?: return null
@@ -1418,6 +1418,26 @@ private fun seamKind(e: StreamException): String {
   }
 }
 
+/** Refusal kinds a retry can't beat — a dead handle or a malformed
+ *  response stays terminal even when an earlier lane only met retry
+ *  weather. */
+private val TERMINAL_REFUSAL_KINDS = setOf("released", "invalid-response")
+
+/** Fold a probe refusal into the shared kind: first-wins among equally
+ *  ranked kinds, but a terminal refusal always supersedes retryable
+ *  evidence — a later invalid-response must not hide behind an earlier
+ *  lane's 429 and retry a session that cannot serve. */
+private fun recordRefusal(ref: AtomicReference<String?>, kind: String) {
+  ref.updateAndGet { cur ->
+    when {
+      cur == null -> kind
+      cur in TERMINAL_REFUSAL_KINDS -> cur
+      kind in TERMINAL_REFUSAL_KINDS -> kind
+      else -> cur
+    }
+  }
+}
+
 /** In-memory positional source for `MediaExtractor` over the pulled
  *  encoded bytes — the stream seam's own contract shape. */
 private class ByteArrayMediaDataSource(
@@ -1574,16 +1594,16 @@ private class ProbeDataReader(
     val result = try {
       host.streamProbe(handle, position.toULong(), want, true)
     } catch (e: StreamException) {
-      // First refusal keeps its seam kind — a terminal kind (dead
+      // A refusal keeps its seam kind — a terminal one (dead
       // handle, invalid-response) must not decay to `transient` and
       // retry a session that cannot serve.
-      refused.compareAndSet(null, seamKind(e))
+      recordRefusal(refused, seamKind(e))
       if (++strikes >= PROBE_MAX_STRIKES) {
         dead = true
       }
       return -1
     } catch (_: Exception) {
-      refused.compareAndSet(null, "transient")
+      recordRefusal(refused, "transient")
       if (++strikes >= PROBE_MAX_STRIKES) {
         dead = true
       }
@@ -1592,7 +1612,7 @@ private class ProbeDataReader(
     if (result.data.isEmpty()) {
       // A refused or empty probe reports EOF to the parser — the
       // sweep counts fewer measured windows, never fabricated ones.
-      refused.compareAndSet(null, "transient")
+      recordRefusal(refused, "transient")
       if (++strikes >= PROBE_MAX_STRIKES) {
         dead = true
       }
