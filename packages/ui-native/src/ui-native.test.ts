@@ -1615,9 +1615,61 @@ function testSkipPeek(): void {
   assert(dup !== null && dup.occurrenceId === 'occ-6', 'occurrence identity');
 }
 
+function testAnimatedIcons(): void {
+  // Worklet discipline: the icon state machine must run entirely on the
+  // UI thread — shared values + animated props, zero JS-frame drivers.
+  const primitives = readFileSync(new URL('./primitives.tsx', import.meta.url), 'utf8');
+  assert(
+    primitives.includes('useAnimatedProps'),
+    'DownloadIcon mutates SVG through animated props',
+  );
+  assert(
+    primitives.includes('withTiming'),
+    'phase transitions run as timing worklets',
+  );
+  const iconBlock = primitives.slice(
+    primitives.indexOf('export function DownloadIcon'),
+    primitives.indexOf('export function DownloadIconButton'),
+  );
+  assert(
+    !/setInterval|requestAnimationFrame|setTimeout/.test(iconBlock),
+    'no per-frame JS scheduling inside the icon layer',
+  );
+  assert(
+    primitives.includes('theme.reducedMotion'),
+    'icon paths honor the reduced-motion flag',
+  );
+  assert(
+    primitives.includes('downloadIconState'),
+    'icon phases come from the shared chip map',
+  );
+
+  // Consumers mount the state machine, not a glyph swap.
+  const row = readFileSync(new URL('./track-row.tsx', import.meta.url), 'utf8');
+  assert(row.includes('DownloadIcon'), 'track-row mounts the icon state machine');
+  const stage = readFileSync(new URL('./stage-sheet.tsx', import.meta.url), 'utf8');
+  assert(stage.includes('DownloadIconButton'), 'stage mounts the morph button');
+  const nav = readFileSync(new URL('./navbar.tsx', import.meta.url), 'utf8');
+  assert(
+    nav.includes('useSharedValue') && nav.includes('theme.reducedMotion'),
+    'nav activation is a gated shared-value transition',
+  );
+  const sheets = readFileSync(new URL('./sheets.tsx', import.meta.url), 'utf8');
+  assert(
+    sheets.includes('StatusMark') && !sheets.includes('name="spinner"'),
+    'sheets draw terminal marks and use the real spinner',
+  );
+  const gallery = readFileSync(new URL('./gallery.tsx', import.meta.url), 'utf8');
+  assert(
+    gallery.includes('animated icons') && gallery.includes('DL_STATES'),
+    'gallery exercises the icon state machine',
+  );
+}
+
 testGallerySafeArea();
 testStageMotion();
 testSkipPeek();
+testAnimatedIcons();
 
 console.log('ui-native tests passed');
 import { readdirSync, readFileSync } from 'node:fs';

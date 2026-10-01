@@ -5,10 +5,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme, ThemeProvider } from './theme.tsx';
 import {
   Artwork,
+  DownloadIcon,
   EqBars,
   Icon,
   Pressable,
   Spinner,
+  StatusMark,
   Text,
 } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
@@ -244,9 +246,19 @@ const ICON_SET: readonly IconName[] = [
   'chevron-down',
   'radio',
   'check',
+  'refresh',
   'menu',
   'podium',
 ];
+
+const DL_STATES = [
+  'idle',
+  'queued',
+  'downloading',
+  'stored',
+  'failed',
+  'removing',
+] as const;
 
 export function GalleryScreen() {
   const controls = useGalleryControls();
@@ -290,6 +302,9 @@ function GalleryBody({
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const search = fixtureSearchStates[searchPhase] ?? fixtureSearchStates[0];
+  const [dlChip, setDlChip] = useState<
+    (typeof DL_STATES)[number]
+  >('idle');
   const stagePlayer = {
     ...fixturePlayerPlaying,
     title: 'Self Aware (Live at the Observatory)',
@@ -375,6 +390,65 @@ function GalleryBody({
           {ICON_SET.map((name) => (
             <IconSwatch key={name} name={name} />
           ))}
+        </View>
+      </Section>
+
+      <Section
+        title="animated icons"
+        note="download morph · status marks · tap a chip to drive"
+      >
+        <View
+          style={{
+            flexDirection: 'row',
+            flexWrap: 'wrap',
+            gap: theme.spacing.sm,
+            marginBottom: theme.spacing.sm,
+          }}
+        >
+          {DL_STATES.map((chip) => (
+            <Chip
+              key={chip}
+              label={chip}
+              active={dlChip === chip}
+              onPress={() => setDlChip(chip)}
+            />
+          ))}
+        </View>
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: theme.spacing.lg,
+          }}
+        >
+          <View style={{ alignItems: 'center', gap: theme.spacing.xs }}>
+            <DownloadIcon
+              state={dlChip}
+              size={20}
+              color={
+                dlChip === 'failed'
+                  ? theme.colors.warn
+                  : dlChip === 'stored'
+                    ? theme.colors.accent
+                    : theme.colors.textPrimary
+              }
+            />
+            <Text variant="metadata" color="secondary">
+              download
+            </Text>
+          </View>
+          <View style={{ alignItems: 'center', gap: theme.spacing.xs }}>
+            <StatusMark kind="check" size={20} color={theme.colors.accent} />
+            <Text variant="metadata" color="secondary">
+              check mark
+            </Text>
+          </View>
+          <View style={{ alignItems: 'center', gap: theme.spacing.xs }}>
+            <StatusMark kind="warn" size={20} color={theme.colors.warn} />
+            <Text variant="metadata" color="secondary">
+              warn mark
+            </Text>
+          </View>
         </View>
       </Section>
 
@@ -646,7 +720,7 @@ function GalleryBody({
                 topInset={theme.spacing.xxl}
                 onExpandChange={noop}
                 radio={fixtureRadioModels[1]}
-                download="idle"
+                download={dlChip}
                 onDownload={noop}
                 onAddToPlaylist={noop}
                 onPlayPause={noop}

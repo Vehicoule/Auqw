@@ -22,7 +22,7 @@ import type { ProgressPathState } from '@auqw/ui-shared';
 // document). The shared ProgressPathState type above is safe to
 // import: types are erased before the worklet transform runs.
 
-function clamp01(value: number): number {
+export function clamp01(value: number): number {
   'worklet';
 
   return Math.min(1, Math.max(0, value));

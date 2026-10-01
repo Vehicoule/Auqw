@@ -33,11 +33,17 @@ import {
 // loader registered here — the dynamic import below resolves after it.
 register('./tsx-loader.mjs', import.meta.url);
 
+import { downloadButtonView } from '@auqw/ui-shared/controllers';
+import { downloadIconState } from '@auqw/ui-shared';
+
 const {
   Artwork,
+  AuthSheet,
   CollectionScreen,
   CorrectionsScreen,
   DesktopChrome,
+  DownloadIcon,
+  DownloadIconButton,
   EntityScreen,
   HomeScreen,
   Icon,
@@ -55,6 +61,7 @@ const {
   Sheet,
   StageSheet,
   StageIdlePane,
+  StatusMark,
   ThemeProvider,
   TrackRow,
   TransferScreen,
@@ -837,6 +844,112 @@ function render(node: ReactNode): string {
   );
 }
 
+// ---- animated icons ---------------------------------------------------
+
+// The download icon is one SVG whose layer classes map every chip onto
+// the four-phase state machine — SSR emits the full layer stack and the
+// phase modifier; the compositor takes it from there.
+{
+  // Every chip lands on the phase the shared map assigns — the icon
+  // can't drift from the state machine both platforms consume.
+  for (const chip of [
+    'idle',
+    'queued',
+    'downloading',
+    'stored',
+    'failed',
+    'removing',
+  ] as const) {
+    const markup = render(h(DownloadIcon, { state: chip }));
+    const phase = downloadIconState(chip);
+    assertIncludes(`chip ${chip} mounts phase ${phase}`, markup, `uw-dlicon--${phase}`);
+    assertIncludes(`chip ${chip} exposes data-phase`, markup, `data-phase="${phase}"`);
+    for (const layer of [
+      'uw-dlicon__arrow',
+      'uw-dlicon__spin',
+      'uw-dlicon__ring',
+      'uw-dlicon__check',
+      'uw-dlicon__warnline',
+      'uw-dlicon__warndot',
+    ]) {
+      assertIncludes(`all morph layers render (${layer})`, markup, layer);
+    }
+  }
+  const still = render(h(DownloadIcon, { state: 'stored', animated: false }));
+  assertIncludes(
+    'dense-list path carries the no-motion modifier',
+    still,
+    'uw-dlicon--still',
+  );
+}
+{
+  const check = render(h(StatusMark, { kind: 'check' }));
+  assertIncludes('check mark mounts its kind', check, 'uw-mark--check');
+  assertIncludes('check mark draws on mount', check, 'uw-mark__draw');
+  const warn = render(h(StatusMark, { kind: 'warn' }));
+  assertIncludes('warn mark mounts its kind', warn, 'uw-mark--warn');
+  assertIncludes('warn mark draws triangle + dot', warn, 'uw-mark__dot');
+}
+{
+  // Row chips mount the state machine directly — the chip attr stays
+  // for tests/a11y while the icon morphs through the shared phases.
+  const busy = { ...fixtureRowStates[2]!, download: 'downloading' as const };
+  const markup = render(h(TrackRow, { row: busy }));
+  assertIncludes('row chip mounts the animated icon', markup, 'uw-dlicon');
+  assertIncludes('row chip keeps its data state', markup, 'data-chip="downloading"');
+}
+{
+  const storedView = downloadButtonView('stored', () => {});
+  const markup = render(h(DownloadIconButton, { view: storedView }));
+  assertIncludes('download button carries the chip', markup, 'uw-dlicon--done');
+  assertIncludes('stored reads as pressed', markup, 'aria-pressed="true"');
+  assertIncludes(
+    'button a11y label comes from the view',
+    markup,
+    'aria-label=',
+  );
+  const removingView = downloadButtonView('removing', () => {});
+  const inert = render(h(DownloadIconButton, { view: removingView }));
+  assertIncludes('removing button is inert', inert, 'disabled=""');
+}
+{
+  // Auth sheet: busy rows got the real spinner, terminal states the
+  // draw-on marks, retry the honest refresh glyph.
+  const starting = render(
+    h(AuthSheet, {
+      model: {
+        state: 'starting',
+        userCode: null,
+        verificationUrl: null,
+        errorMessage: null,
+      },
+    }),
+  );
+  assertIncludes('auth starting spins for real', starting, 'uw-spinner');
+  const linked = render(
+    h(AuthSheet, {
+      model: {
+        state: 'signed-in',
+        userCode: null,
+        verificationUrl: null,
+        errorMessage: null,
+      },
+    }),
+  );
+  assertIncludes('auth linked draws the check', linked, 'uw-mark--check');
+  const failed = render(
+    h(AuthSheet, {
+      model: {
+        state: 'failed',
+        userCode: null,
+        verificationUrl: null,
+        errorMessage: 'denied',
+      },
+    }),
+  );
+  assertIncludes('auth failure draws the warn mark', failed, 'uw-mark--warn');
+}
+
 // ---- source-scan guards -----------------------------------------------------------
 
 {
@@ -851,6 +964,37 @@ function render(node: ReactNode): string {
   check('styles.css: no hex colors', !/#[0-9a-fA-F]{3,8}\b/.test(styles));
   check('styles.css: no rgb() literals', !/\brgba?\(/.test(styles));
   check('styles.css: consumes token vars', styles.includes('var(--accent)'));
+
+  // Reduced-motion contract for the animated icons: every transition /
+  // keyframe sits behind the same `:not([data-reduced-motion='true'])`
+  // gate the rest of the motion system uses — `--still` is the
+  // opt-out twin for dense lists.
+  const reduced = readFileSync(
+    new URL('./styles.css', import.meta.url),
+    'utf8',
+  );
+  check(
+    'download icon transitions are reduced-motion gated',
+    reduced.includes(
+      ".ui-web:not([data-reduced-motion='true'])\n  .uw-dlicon:not(.uw-dlicon--still)",
+    ),
+  );
+  check(
+    'download icon spin is reduced-motion gated',
+    reduced.includes(
+      ".ui-web:not([data-reduced-motion='true'])\n  .uw-dlicon--busy:not(.uw-dlicon--still)",
+    ),
+  );
+  check(
+    'status marks draw only with motion allowed',
+    reduced.includes(
+      ".ui-web:not([data-reduced-motion='true']) .uw-mark__draw",
+    ),
+  );
+  check(
+    'icon layers scale around the view box, not their bbox',
+    styles.includes('transform-box: view-box'),
+  );
 }
 
 console.log(`ui-web tests passed (${passed} assertions)`);

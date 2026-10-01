@@ -10,6 +10,8 @@ export * from '@auqw/ui-shared';
 
 export {
     Artwork,
+    DownloadIcon,
+    DownloadIconButton,
     EqBars,
     Hairline,
     HeartIcon,
@@ -18,10 +20,12 @@ export {
     PlayPauseIcon,
     Pressable,
     Spinner,
+    StatusMark,
     Text,
 } from './primitives.tsx';
 export type {
     ArtworkProps,
+    DownloadIconProps,
     IconButtonProps,
     IconName,
     IconProps,

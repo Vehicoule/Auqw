@@ -449,6 +449,147 @@
   transition: none;
 }
 
+/* ---- download icon state machine ----------------------------------
+   Layers cross-fade + dash-draw in one SVG; the busy arc rotates.
+   `--still` (dense lists) and reduced-motion get the same end states
+   with zero animation. */
+
+.uw-dlicon {
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.uw-dlicon__arrow,
+.uw-dlicon__spin,
+.uw-dlicon__ring,
+.uw-dlicon__check,
+.uw-dlicon__warnline,
+.uw-dlicon__warndot {
+  transform-box: view-box;
+  transform-origin: center;
+}
+
+.uw-dlicon__spin,
+.uw-dlicon__ring,
+.uw-dlicon__check,
+.uw-dlicon__warnline,
+.uw-dlicon__warndot {
+  opacity: 0;
+}
+
+.uw-dlicon__ring,
+.uw-dlicon__check,
+.uw-dlicon__warnline {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+}
+
+.uw-dlicon--busy .uw-dlicon__arrow,
+.uw-dlicon--done .uw-dlicon__arrow,
+.uw-dlicon--error .uw-dlicon__arrow {
+  opacity: 0;
+  transform: scale(0.55);
+}
+
+.uw-dlicon--busy .uw-dlicon__spin {
+  opacity: 1;
+}
+
+.ui-web:not([data-reduced-motion='true'])
+  .uw-dlicon--busy:not(.uw-dlicon--still)
+  .uw-dlicon__spin {
+  animation: uw-rotate 0.9s linear infinite;
+}
+
+.uw-dlicon--done .uw-dlicon__ring,
+.uw-dlicon--error .uw-dlicon__ring {
+  opacity: 1;
+  stroke-dashoffset: 0;
+}
+
+.uw-dlicon--done .uw-dlicon__check {
+  opacity: 1;
+  stroke-dashoffset: 0;
+  transition-delay: 90ms;
+}
+
+.uw-dlicon--error .uw-dlicon__warnline {
+  opacity: 1;
+  stroke-dashoffset: 0;
+  transition-delay: 80ms;
+}
+
+.uw-dlicon--error .uw-dlicon__warndot {
+  opacity: 1;
+  transition-delay: 170ms;
+}
+
+.ui-web:not([data-reduced-motion='true'])
+  .uw-dlicon:not(.uw-dlicon--still)
+  .uw-dlicon__arrow,
+.ui-web:not([data-reduced-motion='true'])
+  .uw-dlicon:not(.uw-dlicon--still)
+  .uw-dlicon__spin,
+.ui-web:not([data-reduced-motion='true'])
+  .uw-dlicon:not(.uw-dlicon--still)
+  .uw-dlicon__ring,
+.ui-web:not([data-reduced-motion='true'])
+  .uw-dlicon:not(.uw-dlicon--still)
+  .uw-dlicon__check,
+.ui-web:not([data-reduced-motion='true'])
+  .uw-dlicon:not(.uw-dlicon--still)
+  .uw-dlicon__warnline,
+.ui-web:not([data-reduced-motion='true'])
+  .uw-dlicon:not(.uw-dlicon--still)
+  .uw-dlicon__warndot {
+  transition:
+    opacity var(--motion-state) ease,
+    transform var(--motion-state) ease,
+    stroke-dashoffset var(--motion-state) ease;
+}
+
+/* ---- status marks (draw-on-mount check / warn) -------------------- */
+
+.uw-mark {
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.uw-mark__draw {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+}
+
+.uw-mark__dot {
+  transform-box: view-box;
+  transform-origin: center;
+}
+
+@keyframes uw-mark-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+}
+
+@keyframes uw-mark-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+}
+
+.ui-web:not([data-reduced-motion='true']) .uw-mark__draw {
+  animation: uw-mark-draw 0.28s ease-out backwards;
+}
+
+.ui-web:not([data-reduced-motion='true']) .uw-mark__detail {
+  animation-delay: 0.15s;
+}
+
+.ui-web:not([data-reduced-motion='true']) .uw-mark__dot {
+  animation: uw-mark-pop 0.18s ease-out 0.22s backwards;
+}
+
 /* ---- screens / lists -------------------------------------------- */
 
 .uw-screen {
@@ -2172,6 +2313,15 @@
 
 .uw-segment__item--on {
   background: var(--accent-soft);
+}
+
+/* Activation nudge: the glyph lifts a touch when its tab takes over. */
+.ui-web:not([data-reduced-motion='true']) .uw-segment__item .uw-icon {
+  transition: transform var(--motion-state) ease;
+}
+
+.uw-segment__item--on .uw-icon {
+  transform: scale(1.08);
 }
 
 /* The world's page switcher: content-width pills, larger-than-

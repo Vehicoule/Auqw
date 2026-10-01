@@ -3,7 +3,15 @@ import type { ReactNode } from 'react';
 import type { AuthSheetModel, PairingModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
 import type { ProviderPickerOption } from '@auqw/ui-shared';
-import { Artwork, DiagPressRow, Icon, Pressable, Text } from './primitives.tsx';
+import {
+  Artwork,
+  DiagPressRow,
+  Icon,
+  Pressable,
+  Spinner,
+  StatusMark,
+  Text,
+} from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { bindTo } from './track-row.tsx';
 import { useOverlayDismiss, useOverlayFocus } from './stack.tsx';
@@ -423,7 +431,7 @@ export function ProviderPickerSheet({
                 )}
               </span>
               {selected && (
-                <Icon name="check" size={14} color="var(--accent)" />
+                <StatusMark kind="check" size={14} color="var(--accent)" />
               )}
             </SheetRow>
           );
@@ -803,7 +811,7 @@ export function AuthSheet({
       )}
       {model.state === 'starting' && (
         <div className="uw-sheet-row" data-state="busy">
-          <Icon name="spinner" size={15} color="var(--accent)" />
+          <Spinner size={15} />
           <Text variant="body" color="secondary">
             {t('auth.sheet.starting')}
           </Text>
@@ -829,13 +837,11 @@ export function AuthSheet({
               }}
               ariaLabel={t('auth.sheet.copyCode')}
             >
-              <Icon
-                name={copied ? 'check' : 'note'}
-                size={15}
-                color={
-                  copied ? 'var(--accent)' : 'var(--text-secondary)'
-                }
-              />
+              {copied ? (
+                <StatusMark kind="check" size={15} color="var(--accent)" />
+              ) : (
+                <Icon name="note" size={15} color="var(--text-secondary)" />
+              )}
               <Text
                 variant="body"
                 color={copied ? 'accent' : 'primary'}
@@ -860,7 +866,7 @@ export function AuthSheet({
             </SheetRow>
           )}
           <div className="uw-sheet-row" data-state="busy">
-            <Icon name="spinner" size={15} color="var(--accent)" />
+            <Spinner size={15} />
             <Text variant="metadata" color="secondary">
               {t('auth.sheet.waiting')}
             </Text>
@@ -870,7 +876,7 @@ export function AuthSheet({
       {model.state === 'signed-in' && (
         <>
           <div className="uw-sheet-row">
-            <Icon name="check" size={15} color="var(--accent)" />
+            <StatusMark kind="check" size={15} color="var(--accent)" />
             <Text variant="body" color="secondary">
               {t('auth.sheet.linked')}
             </Text>
@@ -891,7 +897,7 @@ export function AuthSheet({
       {model.state === 'failed' && (
         <>
           <div className="uw-sheet-row" data-state="unavailable">
-            <Icon name="warn" size={15} color="var(--warn)" />
+            <StatusMark kind="warn" size={15} color="var(--warn)" />
             <Text variant="body" color="warn">
               {model.errorMessage ?? t('error.generic')}
             </Text>
@@ -899,7 +905,7 @@ export function AuthSheet({
           {onRetry !== undefined && (
             <SheetRow onPress={onRetry} ariaLabel={t('auth.sheet.retry')}>
               <Icon
-                name="spinner"
+                name="refresh"
                 size={15}
                 color="var(--text-secondary)"
               />

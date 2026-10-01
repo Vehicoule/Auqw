@@ -2,30 +2,22 @@ import { useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import {
   Artwork,
+  DownloadIcon,
   EqBars,
   Icon,
   IconButton,
   Pressable,
   Text,
 } from './primitives.tsx';
-import type { IconButtonProps, IconName } from './primitives.tsx';
+import type { IconButtonProps } from './primitives.tsx';
 import { formatClock, t } from '@auqw/ui-shared';
-import type { DownloadChip, TrackRowModel } from '@auqw/ui-shared';
+import type { TrackRowModel } from '@auqw/ui-shared';
 import { reconcileFocusIndex, rowKeyAction } from './keyboard.ts';
 
 // The tail cluster's buttons are one build — 30px hit area, 14px glyph.
 function TailBtn(props: IconButtonProps) {
   return <IconButton size={30} iconSize={14} {...props} />;
 }
-
-const DL_ICON: Record<DownloadChip, IconName> = {
-  idle: 'download',
-  queued: 'download',
-  downloading: 'download',
-  stored: 'check',
-  failed: 'warn',
-  removing: 'spinner',
-};
 
 export type TrackRowProps = {
   readonly row: TrackRowModel;
@@ -168,8 +160,8 @@ export function TrackRow({
             data-chip={row.download}
             title={row.download === 'stored' ? t('playlist.downloaded') : t('track.download.tooltip', { state: t(`track.download.${row.download}`) })}
           >
-            <Icon
-              name={DL_ICON[row.download]}
+            <DownloadIcon
+              state={row.download}
               size={13}
               color={
                 row.download === 'failed'

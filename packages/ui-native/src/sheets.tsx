@@ -2,7 +2,15 @@ import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ScrollView, TextInput, useWindowDimensions, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Artwork, bind, Icon, Pressable, Text } from './primitives.tsx';
+import {
+  Artwork,
+  bind,
+  Icon,
+  Pressable,
+  Spinner,
+  StatusMark,
+  Text,
+} from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { t } from '@auqw/ui-shared';
 import type {
@@ -361,7 +369,11 @@ export function ProviderPickerSheet({
                 )}
               </View>
               {selected && (
-                <Icon name="check" size={14} color={theme.colors.accent} />
+                <StatusMark
+                  kind="check"
+                  size={14}
+                  color={theme.colors.accent}
+                />
               )}
             </SheetRow>
           );
@@ -416,7 +428,11 @@ export function LanguagePickerSheet({
                 {option.label}
               </Text>
               {selected && (
-                <Icon name="check" size={14} color={theme.colors.accent} />
+                <StatusMark
+                  kind="check"
+                  size={14}
+                  color={theme.colors.accent}
+                />
               )}
             </SheetRow>
           );
@@ -556,7 +572,7 @@ export function AuthSheet({
             minHeight: theme.sizes.touch,
           }}
         >
-          <Icon name="spinner" size={15} color={theme.colors.accent} />
+          <Spinner size={15} />
           <Text variant="body" color="secondary">
             {t('auth.sheet.starting')}
           </Text>
@@ -594,13 +610,11 @@ export function AuthSheet({
               }}
               accessibilityLabel={t('auth.sheet.copyCode')}
             >
-              <Icon
-                name={copied ? 'check' : 'note'}
-                size={15}
-                color={
-                  copied ? theme.colors.accent : theme.colors.textSecondary
-                }
-              />
+              {copied ? (
+                <StatusMark kind="check" size={15} color={theme.colors.accent} />
+              ) : (
+                <Icon name="note" size={15} color={theme.colors.textSecondary} />
+              )}
               <Text
                 variant="body"
                 color={copied ? 'accent' : 'primary'}
@@ -632,7 +646,7 @@ export function AuthSheet({
               minHeight: theme.sizes.touch,
             }}
           >
-            <Icon name="spinner" size={15} color={theme.colors.accent} />
+            <Spinner size={15} />
             <Text variant="metadata" color="secondary">
               {t('auth.sheet.waiting')}
             </Text>
@@ -649,7 +663,7 @@ export function AuthSheet({
               minHeight: theme.sizes.touch,
             }}
           >
-            <Icon name="check" size={15} color={theme.colors.accent} />
+            <StatusMark kind="check" size={15} color={theme.colors.accent} />
             <Text variant="body" color="secondary">
               {t('auth.sheet.linked')}
             </Text>
@@ -677,7 +691,7 @@ export function AuthSheet({
               minHeight: theme.sizes.touch,
             }}
           >
-            <Icon name="warn" size={15} color={theme.colors.warn} />
+            <StatusMark kind="warn" size={15} color={theme.colors.warn} />
             <Text variant="body" color="warn">
               {model.errorMessage ?? t('error.generic')}
             </Text>
@@ -688,7 +702,7 @@ export function AuthSheet({
               accessibilityLabel={t('auth.sheet.retry')}
             >
               <Icon
-                name="spinner"
+                name="refresh"
                 size={15}
                 color={theme.colors.textSecondary}
               />

@@ -2,7 +2,15 @@ export { ThemeProvider, useTheme } from './theme.tsx';
 
 export * from '@auqw/ui-shared';
 
-export { Artwork, Icon, IconButton, Text } from './primitives.tsx';
+export {
+  Artwork,
+  DownloadIcon,
+  DownloadIconButton,
+  Icon,
+  IconButton,
+  StatusMark,
+  Text,
+} from './primitives.tsx';
 export { WaveformSeek } from './progress.tsx';
 export { TrackRow } from './track-row.tsx';
 export { EmptyState, ErrorState, LoadingState } from './states.tsx';

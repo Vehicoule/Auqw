@@ -1,5 +1,11 @@
+import { useEffect } from 'react';
 import { Platform, View } from 'react-native';
 import { BlurView } from 'expo-blur';
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 import { useTheme } from './theme.tsx';
 import { Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
@@ -16,6 +22,35 @@ const NAV_ICONS: Record<string, IconName> = {
 
 function iconFor(key: string): IconName {
   return NAV_ICONS[key] ?? 'note';
+}
+
+/** Tab glyph with a subtle activation lift — one worklet transform;
+    reduced motion snaps straight to the end scale. */
+function NavIcon({
+  name,
+  active,
+  color,
+}: {
+  readonly name: IconName;
+  readonly active: boolean;
+  readonly color: string;
+}) {
+  const theme = useTheme();
+  const lift = useSharedValue(active ? 1.08 : 1);
+  useEffect(() => {
+    const target = active ? 1.08 : 1;
+    lift.value = theme.reducedMotion
+      ? target
+      : withTiming(target, { duration: theme.motion.state });
+  }, [lift, active, theme.motion.state, theme.reducedMotion]);
+  const liftStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: lift.value }],
+  }));
+  return (
+    <Animated.View style={liftStyle}>
+      <Icon name={name} size={14} color={color} />
+    </Animated.View>
+  );
 }
 
 export type NavbarProps = {
@@ -72,9 +107,9 @@ export function AndroidNavbar({
                     : 'transparent',
                 }}
               >
-                <Icon
+                <NavIcon
                   name={iconFor(item.key)}
-                  size={14}
+                  active={active}
                   color={
                     active ? theme.colors.accent : theme.colors.textSecondary
                   }
@@ -163,9 +198,9 @@ export function IosGlassNavbar({
                       : 'transparent',
                   }}
                 >
-                  <Icon
+                  <NavIcon
                     name={iconFor(item.key)}
-                    size={14}
+                    active={active}
                     color={
                       active ? theme.colors.accent : theme.colors.textSecondary
                     }
