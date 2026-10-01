@@ -105,10 +105,12 @@ export async function run(): Promise<void> {
     'shell kind maps to app kind',
   );
 
-  // docUri stays sync + pure — same math the utility applies.
+  // docUri stays sync + pure — same math the utility applies. Grant
+  // URIs are platform-shaped (file:///… POSIX, file:///C:/… Windows).
+  const URI_ROOT = process.platform === 'win32' ? '/C:' : '';
   assertEqual(
-    reader.docUri('file:///music', 'sub/a.wav'),
-    'file:///music/sub/a.wav',
+    reader.docUri(`file://${URI_ROOT}/music`, 'sub/a.wav'),
+    `file://${URI_ROOT}/music/sub/a.wav`,
     'docUri is file:// over the tree',
   );
   assertEqual(

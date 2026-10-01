@@ -33,7 +33,11 @@ const domBundleFixes = {
       };
     });
     b.onLoad(
-      { filter: /css-tree\/lib\/(data|data-patch|version)\.js$/ },
+      // onLoad paths are OS-native — Windows reports backslashes, so
+      // the separator must be tolerant or the strip never runs and the
+      // bundle keeps a `createRequire(undefined)` that crashes the
+      // utility at module init.
+      { filter: /css-tree[/\\]lib[/\\](data|data-patch|version)\.js$/ },
       async (args) => ({
         contents: (await readFile(args.path, 'utf8'))
           .replace(/import \{ createRequire \} from 'module';\s*/, '')

@@ -423,6 +423,9 @@ async function main(): Promise<void> {
   // so the apply rename stays atomic (same filesystem).
   const updatesStageDir = join(userDataPath, 'updates');
   const appimagePath = process.env['APPIMAGE'];
+  // One installer handoff per process — 'applied' inside the ~1s
+  // pre-quit window is the spawn having fired, not a retriable offer.
+  let updateInstallerSpawned = false;
   if (updateCapability !== 'open') {
     mkdirSync(updatesStageDir, { recursive: true });
     for (const name of readdirSync(updatesStageDir)) {
@@ -556,8 +559,12 @@ async function main(): Promise<void> {
                   );
                 });
                 child.once('spawn', () => {
+                  updateInstallerSpawned = true;
                   child.unref();
-                  setTimeout(() => app.quit(), 250).unref();
+                  // Give the 'applying' beat ~1s to render before the
+                  // window hands off — an instant quit reads as a crash
+                  // mid-flow (the installer still owns the install).
+                  setTimeout(() => app.quit(), 1000).unref();
                   resolve('installed');
                 });
               });
@@ -611,6 +618,7 @@ async function main(): Promise<void> {
       };
     },
     openExternal: (url) => shell.openExternal(url),
+    installerSpawnedInProcess: () => updateInstallerSpawned,
     capability: updateCapability,
     ...(updateReleasesUrl !== undefined && updateReleasesUrl !== ''
       ? { releasesUrl: updateReleasesUrl }

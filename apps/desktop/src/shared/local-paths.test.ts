@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import {
   assert,
   assertEqual,
@@ -13,38 +14,47 @@ import {
 } from './local-paths.ts';
 
 export function run(): void {
+  // Grants mint from OS paths — the URI is platform-shaped (file:///…
+  // on POSIX, file:///C:/… on Windows, which fileURLToPath requires a
+  // drive-qualified path to accept at all).
+  const UROOT = process.platform === 'win32' ? 'C:/' : '/';
+  const URI_ROOT = process.platform === 'win32' ? '/C:' : '';
   // toFileUri: pathToFileURL handles separators and escapes — the URI
   // stays navigable for Chromium's file-scheme parser.
   assertEqual(
-    toFileUri('/music/a b/c#d.wav'),
-    'file:///music/a%20b/c%23d.wav',
+    toFileUri(`${UROOT}music/a b/c#d.wav`),
+    `file://${URI_ROOT}/music/a%20b/c%23d.wav`,
     'segments encode, separators preserved',
   );
 
   // Grants mint as file: URLs — platform-independent by construction
   // (drive letters + UNC parse via fileURLToPath on Windows).
-  assertEqual(dirTreeUri('/music/rips'), 'file:///music/rips', 'dir grant');
   assertEqual(
-    pickedFileTreeUri('/m/a.wav'),
-    'picked-file:file:///m/a.wav',
+    dirTreeUri(`${UROOT}music/rips`),
+    `file://${URI_ROOT}/music/rips`,
+    'dir grant',
+  );
+  assertEqual(
+    pickedFileTreeUri(`${UROOT}m/a.wav`),
+    `picked-file:file://${URI_ROOT}/m/a.wav`,
     'picked-file grant',
   );
 
   // docUriFor: dir trees join the POSIX docId under the tree; picked
   // files return the embedded file URL verbatim.
   assertEqual(
-    docUriFor('file:///music', 'sub/a.wav'),
-    'file:///music/sub/a.wav',
+    docUriFor(`file://${URI_ROOT}/music`, 'sub/a.wav'),
+    `file://${URI_ROOT}/music/sub/a.wav`,
     'dir tree docUri',
   );
   assertEqual(
-    docUriFor('file:///music/', 'a.wav'),
-    'file:///music/a.wav',
+    docUriFor(`file://${URI_ROOT}/music/`, 'a.wav'),
+    `file://${URI_ROOT}/music/a.wav`,
     'trailing slash normalized',
   );
   assertEqual(
-    docUriFor('picked-file:file:///m/solo.wav', 'solo.wav'),
-    'file:///m/solo.wav',
+    docUriFor(`picked-file:file://${URI_ROOT}/m/solo.wav`, 'solo.wav'),
+    `file://${URI_ROOT}/m/solo.wav`,
     'picked-file docUri ignores docId',
   );
   assertEqual(
@@ -61,14 +71,14 @@ export function run(): void {
   );
 
   // parseTree round-trips both grant shapes and refuses non-URL forms.
-  const dir = parseTree('file:///music/rips');
+  const dir = parseTree(`file://${URI_ROOT}/music/rips`);
   assert(
-    dir?.kind === 'dir' && dir.absPath === '/music/rips',
+    dir?.kind === 'dir' && dir.absPath === join(`${UROOT}`, 'music', 'rips'),
     'dir parse',
   );
-  const file = parseTree('picked-file:file:///m/a.wav');
+  const file = parseTree(`picked-file:file://${URI_ROOT}/m/a.wav`);
   assert(
-    file?.kind === 'file' && file.absPath === '/m/a.wav',
+    file?.kind === 'file' && file.absPath === join(`${UROOT}`, 'm', 'a.wav'),
     'picked-file parse',
   );
   assertEqual(parseTree('relative/path'), null, 'relatives rejected');

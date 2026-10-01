@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { assert, assertEqual } from '@auqw/application/testing';
 import { isRecord } from '../shared/check.ts';
 import type { NodeBindingsModule, PluginHostLike } from './host.ts';
@@ -5,6 +6,8 @@ import { bindingsCandidates, createHostRuntime } from './host.ts';
 
 export async function run(): Promise<void> {
   // Candidate order: env override, resources, then repo dev outputs.
+  // Expectations go through join() — the candidates carry OS-native
+  // separators, so literal POSIX strings never match on Windows.
   const candidates = bindingsCandidates(
     { AUQW_NODE_BINDINGS: '/opt/auqw_node_bindings.node' },
     '/resources',
@@ -12,11 +15,13 @@ export async function run(): Promise<void> {
   );
   assertEqual(candidates[0], '/opt/auqw_node_bindings.node');
   assert(
-    candidates.includes('/resources/auqw_node_bindings.node'),
+    candidates.includes(join('/resources', 'auqw_node_bindings.node')),
     'resources candidate scanned',
   );
   assert(
-    candidates.includes('/repo/target/debug/libauqw_node_bindings.so'),
+    candidates.includes(
+      join('/repo', 'target', 'debug', 'libauqw_node_bindings.so'),
+    ),
     'dev target/debug candidate scanned',
   );
 
@@ -108,16 +113,21 @@ export async function run(): Promise<void> {
       }
     } as unknown as NodeBindingsModule['PluginHost'],
   };
+  // fs keys are join()ed — loadPluginDir stages OS-native paths, so
+  // literal POSIX names never match on Windows.
   const files = new Map<string, Buffer>([
     ['/b/auqw_node_bindings.node', Buffer.from('')],
-    ['/plugins/deezer.wasm', Buffer.from('wasm-deezer')],
+    [join('/plugins', 'deezer.wasm'), Buffer.from('wasm-deezer')],
     [
-      '/plugins/deezer.manifest.json',
+      join('/plugins', 'deezer.manifest.json'),
       Buffer.from(
         '{"id":"deezer","capabilities":["catalog.search","playback.resolve"]}',
       ),
     ],
-    ['/plugins/lyrics.manifest.json', Buffer.from('{"id":"lyrics"}')],
+    [
+      join('/plugins', 'lyrics.manifest.json'),
+      Buffer.from('{"id":"lyrics"}'),
+    ],
   ]);
   const runtime = createHostRuntime({
     env: {
@@ -147,8 +157,8 @@ export async function run(): Promise<void> {
   const config = hostConfigs[0];
   assert(
     isRecord(config) &&
-      config['statePath'] === '/ud/host-state' &&
-      config['streamPath'] === '/ud/streams',
+      config['statePath'] === join('/ud', 'host-state') &&
+      config['streamPath'] === join('/ud', 'streams'),
     'host paths derive from AUQW_USER_DATA',
   );
   assert(
@@ -174,8 +184,11 @@ export async function run(): Promise<void> {
   {
     const stemFiles = new Map<string, Buffer>([
       ['/b/auqw_node_bindings.node', Buffer.from('')],
-      ['/plugins/quiet.wasm', Buffer.from('wasm-quiet')],
-      ['/plugins/quiet.manifest.json', Buffer.from('{"id":""}')],
+      [join('/plugins', 'quiet.wasm'), Buffer.from('wasm-quiet')],
+      [
+        join('/plugins', 'quiet.manifest.json'),
+        Buffer.from('{"id":""}'),
+      ],
     ]);
     const stemRuntime = createHostRuntime({
       env: {
@@ -211,7 +224,10 @@ export async function run(): Promise<void> {
         AUQW_USER_DATA: '/ud',
       },
       require: (path) => {
-        assertEqual(path, '/ud/node-bindings/auqw_node_bindings.node');
+        assertEqual(
+          path,
+          join('/ud', 'node-bindings', 'auqw_node_bindings.node'),
+        );
         return fakeModule;
       },
       fs: {
@@ -231,8 +247,9 @@ export async function run(): Promise<void> {
     assert(
       staged.length === 1 &&
         staged[0]?.src === '/repo/target/debug/libauqw_node_bindings.so' &&
-        staged[0]?.dst === '/ud/node-bindings/auqw_node_bindings.node' &&
-        dirs.includes('/ud/node-bindings'),
+        staged[0]?.dst ===
+          join('/ud', 'node-bindings', 'auqw_node_bindings.node') &&
+        dirs.includes(join('/ud', 'node-bindings')),
       'cdylib staged to userData .node',
     );
   }

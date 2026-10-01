@@ -526,7 +526,10 @@ function createStore(path: string, deviceId: string): SyncLogStore {
         let handle;
         try {
           await appendFile(path, line, 'utf8');
-          handle = await open(path, 'r');
+          // 'r+' not 'r' — Windows refuses FlushFileBuffers on a
+          // read-only handle (EPERM), so the fsync needs a
+          // write-capable open. sync-journal already takes 'r+'.
+          handle = await open(path, 'r+');
           await handle.sync();
         } catch (thrown) {
           return err(fromUnknown(thrown));
