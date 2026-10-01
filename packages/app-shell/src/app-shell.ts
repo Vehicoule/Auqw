@@ -17,6 +17,7 @@ import {
 import {
   CancellationSource,
   ProviderRouter,
+  SEARCH_HISTORY_LIMIT,
   SearchSession,
   createClock,
   createIds,
@@ -268,9 +269,32 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // Bumped when '/' routes to explore — remounts SearchScreen so its
   // autoFocus refocuses even when the tab was already active.
   const [searchFocusTick, setSearchFocusTick] = useState(0);
-  // Session-scoped, newest first — persisting them would be a
-  // storage-schema decision, so they die with the app.
+  // Newest first; seeded empty until the persisted store hydrates —
+  // an absent `ports.searchHistory` keeps recents session-scoped.
   const [searchRecents, setSearchRecents] = useState<readonly string[]>([]);
+  const searchHistory = ports.searchHistory;
+  // Boot hydration merges rather than replaces: a record landing
+  // before load resolves is newer than anything persisted, so the
+  // session's own entries keep the head of the list.
+  useEffect(() => {
+    if (searchHistory === null || searchHistory === undefined) {
+      return undefined;
+    }
+    let live = true;
+    void searchHistory.load().then((persisted) => {
+      if (live) {
+        setSearchRecents((prev) =>
+          [...prev, ...persisted.filter((q) => !prev.includes(q))].slice(
+            0,
+            SEARCH_HISTORY_LIMIT,
+          ),
+        );
+      }
+    });
+    return () => {
+      live = false;
+    };
+  }, [searchHistory]);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
   const [languagePickerOpen, setLanguagePickerOpen] = useState(false);
   const [artworkCachePickerOpen, setArtworkCachePickerOpen] = useState(false);
@@ -853,14 +877,23 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [search, state.settings.storefront, ports.onSearchCommit, cancelSuggest],
   );
 
-  const recordRecentSearch = useCallback((q: string) => {
-    const trimmed = q.trim();
-    if (trimmed !== '') {
-      setSearchRecents((prev) =>
-        [trimmed, ...prev.filter((r) => r !== trimmed)].slice(0, 8),
-      );
-    }
-  }, []);
+  const recordRecentSearch = useCallback(
+    (q: string) => {
+      const trimmed = q.trim();
+      if (trimmed !== '') {
+        setSearchRecents((prev) =>
+          [trimmed, ...prev.filter((r) => r !== trimmed)].slice(
+            0,
+            SEARCH_HISTORY_LIMIT,
+          ),
+        );
+        // The store dedupes + bounds identically — a dropped write
+        // only costs the row on next boot, never the live list.
+        void searchHistory?.record(trimmed);
+      }
+    },
+    [searchHistory],
+  );
 
   const cancelSearch = useCallback(() => {
     setQuery('');

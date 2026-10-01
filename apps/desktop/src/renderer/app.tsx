@@ -114,7 +114,10 @@ import { createDesktopUpdate } from './update.ts';
 import { createSessionController } from './controller.ts';
 import type { SessionController } from './controller.ts';
 import { shellToAppError } from './ipc-errors.ts';
-import { createPeaksCacheStore } from '@auqw/storage-sqlite';
+import {
+  createPeaksCacheStore,
+  createSearchHistoryStore,
+} from '@auqw/storage-sqlite';
 import { createSqliteDriver } from './sqlite-driver.ts';
 import { createWebPeaksPort } from './web-peaks.ts';
 
@@ -610,9 +613,18 @@ function Main({
 
   // Persisted peaks — one device-local `peaks_cache` table; repeat
   // plays render the stored profile instantly without re-extraction.
-  const peaksStore = useMemo(
-    () => createPeaksCacheStore(createSqliteDriver(window.auqw.storage)),
+  // Search recents ride the same driver to their own side-table.
+  const sqliteDriver = useMemo(
+    () => createSqliteDriver(window.auqw.storage),
     [],
+  );
+  const peaksStore = useMemo(
+    () => createPeaksCacheStore(sqliteDriver),
+    [sqliteDriver],
+  );
+  const searchHistory = useMemo(
+    () => createSearchHistoryStore(sqliteDriver),
+    [sqliteDriver],
   );
 
   // The shared shell composition — every state/callback surface the
@@ -673,6 +685,7 @@ function Main({
       },
       peaksPort,
       peaksStore,
+      searchHistory,
       settingsExtras: () => ({
         // The probe surface only exists once rehydrateMedia ran —
         // gate the rows on it instead of dead-pressing behind a null

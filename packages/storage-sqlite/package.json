@@ -9,7 +9,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types src/storage.test.ts && node --experimental-strip-types src/sync-log-store.test.ts && node --experimental-strip-types src/peaks-cache.test.ts"
+    "test": "node --experimental-strip-types src/storage.test.ts && node --experimental-strip-types src/sync-log-store.test.ts && node --experimental-strip-types src/peaks-cache.test.ts && node --experimental-strip-types src/search-history.test.ts"
   },
   "dependencies": {
     "@auqw/application": "workspace:*"

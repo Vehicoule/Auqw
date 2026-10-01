@@ -800,6 +800,10 @@ function Main({
         }).statusLabel,
       }),
       peaksPort,
+      // Durable recents rail — the device-local `search_history`
+      // table hydrates on mount; a committed query persists through
+      // the same store on both apps.
+      searchHistory: controller.searchHistory,
       // SAF folder pick on Android — the export lands where the user
       // can reach it (Downloads and friends), not app-private storage;
       // iOS writes into the documents root.
