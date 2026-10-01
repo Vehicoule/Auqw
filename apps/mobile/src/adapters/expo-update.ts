@@ -189,6 +189,7 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
       } satisfies UpdateApplyPorts)
     : undefined;
 
+  const releasesUrl = process.env.EXPO_PUBLIC_UPDATE_RELEASES_URL;
   const service = createUpdateService({
     currentVersion,
     target,
@@ -198,6 +199,12 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
       });
       return { status: res.status, body: await res.json().catch(() => null) };
     },
+    // Dev seam (same convention as EXPO_PUBLIC_POT_PROVIDER_URL):
+    // point the check at a local/staging releases payload — e.g. a
+    // fixture feed over `adb reverse` for deterministic update legs.
+    ...(releasesUrl !== undefined && releasesUrl !== ''
+      ? { releasesUrl }
+      : {}),
     ...(applier !== undefined ? { applier } : {}),
   });
 
@@ -239,8 +246,37 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
     act() {
       const snapshot = service.snapshot();
       const applyState = snapshot.apply.state;
-      // A live or settled apply ignores the affordance — cancel is
-      // the banner's own verb; 'applied' is terminal for the run.
+      // 'applied' means the OS sheet owned the outcome — which may
+      // never have landed (cancelled sheet, failed install). The
+      // verified APK is still staged, so the affordance refires the
+      // handoff instead of dead-ending the offer — but only while the
+      // checked release IS the applied one: a newer release starts
+      // its own pipeline rather than re-prompting the old APK.
+      if (applyState === 'applied' && snapshot.apply.state === 'applied') {
+        const status = snapshot.status;
+        if (
+          status.state === 'available' &&
+          status.version !== snapshot.apply.version
+        ) {
+          // The newer release may itself be un-installable on this
+          // build (no APK asset or no checksums) — the open-page
+          // fallback owns that affordance, same as the normal path.
+          if (
+            canInstall &&
+            status.artifact !== null &&
+            status.checksums !== null
+          ) {
+            service.apply();
+          } else {
+            void Linking.openURL(status.url).catch(() => undefined);
+          }
+          return;
+        }
+        service.reapply();
+        return;
+      }
+      // A live apply ignores the affordance — cancel is the card's
+      // own verb; 'ready-to-restart' has no relaunch leg here.
       if (applyState !== 'idle' && applyState !== 'failed') {
         return;
       }

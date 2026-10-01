@@ -2039,6 +2039,143 @@ export function toUpdateBanner(
 }
 
 /**
+ * The mobile update card — the floating progress surface that
+ * replaces the top snack. One model carries the prompt, every
+ * pipeline phase, and the failure state so the card never fabricates
+ * a phase: `progress` is the real byte fraction (null = unknown
+ * total or a phase with no honest fill), `chip` feeds the
+ * DownloadIcon morph, and `dismissible` stays false while a run is
+ * live — hiding the card mid-apply would bury the only cancel
+ * affordance and let a ~55 MB download continue invisibly.
+ */
+export type UpdateCardModel = {
+  readonly version: string;
+  readonly title: string;
+  /** Secondary line — the version while prompting, byte progress
+      while downloading, the humanized failure kind after 'failed'. */
+  readonly detail: string;
+  /** 0..1 for the determinate bar; null when the honest answer is
+      "no fill" (unknown total, non-download phases). */
+  readonly progress: number | null;
+  /** DownloadIcon phase: idle arrow to prompt, busy arc while the
+      pipeline runs, warn mark on failure. */
+  readonly chip: DownloadChip;
+  readonly actionLabel: string | null;
+  /** The action aborts the pipeline (cancel) rather than starting it. */
+  readonly cancelable: boolean;
+  /** Only a settled surface may hide: prompt, failure, restart. */
+  readonly dismissible: boolean;
+};
+
+export function toUpdateCard(
+  snapshot: UpdateSnapshot | null,
+  action: 'open' | 'download' | 'install',
+  dismissedVersion: string | null,
+): UpdateCardModel | null {
+  if (snapshot === null || snapshot.status.state !== 'available') {
+    return null;
+  }
+  const version = snapshot.status.version;
+  const apply = snapshot.apply;
+  const dismissed = version === dismissedVersion;
+  switch (apply.state) {
+    case 'downloading':
+      return {
+        version,
+        title: t('update.card.downloading'),
+        detail: downloadProgressText(
+          apply,
+          'update.card.downloadingDetail',
+          'update.card.downloadingDetailUnknown',
+        ),
+        progress:
+          apply.totalBytes !== null && apply.totalBytes > 0
+            ? Math.min(1, apply.receivedBytes / apply.totalBytes)
+            : null,
+        chip: 'downloading',
+        actionLabel: t('update.action.cancel'),
+        cancelable: true,
+        dismissible: false,
+      };
+    case 'verifying':
+      return {
+        version,
+        title: t('update.banner.verifying'),
+        detail: '',
+        progress: null,
+        chip: 'downloading',
+        actionLabel: t('update.action.cancel'),
+        cancelable: true,
+        dismissible: false,
+      };
+    case 'applying':
+      // The OS surface is already firing — nothing honest to abort.
+      return {
+        version,
+        title: t('update.banner.applying'),
+        detail: '',
+        progress: null,
+        chip: 'downloading',
+        actionLabel: null,
+        cancelable: false,
+        dismissible: false,
+      };
+    case 'ready-to-restart':
+      return dismissed
+        ? null
+        : {
+            version,
+            title: t('update.banner.restart', { version }),
+            detail: '',
+            progress: null,
+            chip: 'stored',
+            actionLabel: t('update.action.restart'),
+            cancelable: false,
+            dismissible: true,
+          };
+    case 'applied':
+      // The OS surface owns the story; when its outcome never lands
+      // (cancelled sheet, failed install) the settings row re-offers
+      // the install — reapply refires the handoff, no re-download.
+      return null;
+    case 'failed':
+      return dismissed
+        ? null
+        : {
+            version,
+            title: t('update.card.failed'),
+            detail: errorText(apply.error) ?? '',
+            progress: null,
+            chip: 'failed',
+            actionLabel: t('update.action.retry'),
+            cancelable: false,
+            dismissible: true,
+          };
+    case 'idle':
+      break;
+  }
+  if (dismissed) {
+    return null;
+  }
+  return {
+    version,
+    title: t('update.card.title'),
+    detail: t('update.card.detail', { version }),
+    progress: null,
+    chip: 'idle',
+    actionLabel: t(
+      action === 'install'
+        ? 'update.action.install'
+        : action === 'download'
+          ? 'update.action.download'
+          : 'update.action.open',
+    ),
+    cancelable: false,
+    dismissible: true,
+  };
+}
+
+/**
  * The flat settings row list chunked into labeled cards for
  * presentation. Boundaries are keyed, not positional: a row whose key
  * starts a group opens a new card, every other row continues the
