@@ -1421,6 +1421,7 @@ export class Session {
         data.playHistory,
       ),
       radio: null,
+      radioIds: new Set<string>(),
       persistenceError: undefined,
       syncApplyCache: null,
       syncPending: [],
@@ -1444,6 +1445,60 @@ export class Session {
 
   // ---- library ----------------------------------------------------
 
+  /**
+   * The canonical insertion index for a user-minted occurrence.
+   * 'next' lands right behind the playhead (a dead cursor means the
+   * head — the resume slot). 'last' lands ahead of the first pending
+   * radio-grown item so manual adds always outrank the suggestion
+   * tail — and otherwise at the queue end.
+   */
+  #enqueueIndex(r: Ready, mode: 'next' | 'last'): number {
+    const snap = r.queue.snapshot();
+    const cursor =
+      snap.currentOccurrenceId === null
+        ? -1
+        : snap.occurrences.findIndex(
+            (o) => o.occurrenceId === snap.currentOccurrenceId,
+          );
+    if (mode === 'next') {
+      return cursor < 0 ? 0 : cursor + 1;
+    }
+    const boundary = snap.occurrences.findIndex(
+      (o, i) => i > cursor && r.radioIds.has(o.occurrenceId),
+    );
+    return boundary === -1 ? snap.occurrences.length : boundary;
+  }
+
+  /**
+   * An 'add' landing on a queue with no playhead parks the row as
+   * the paused current — it surfaces in the player chrome instead
+   * of sitting unseen in an unplayed list.
+   */
+  #parkIfIdle(draft: QueueEngine, occurrenceId: string): void {
+    if (draft.snapshot().currentOccurrenceId === null) {
+      draft.select(occurrenceId, false);
+    }
+  }
+
+  /**
+   * A 'next' insertion under shuffle lands behind the dealt cursor
+   * too — `#dealtOrder`'s reconcile would otherwise scatter the new
+   * id into a random dealt slot. The reconcile runs first (dead ids
+   * drop, the new id lands somewhere), then the id relocates to
+   * cursor + 1 — a splice correction, never a re-deal.
+   */
+  #dealNext(r: Ready, occurrenceId: string): void {
+    const dealt = this.#dealtOrder(r);
+    if (dealt === null) {
+      return;
+    }
+    const currentId = r.queue.snapshot().currentOccurrenceId;
+    const order = dealt.filter((id) => id !== occurrenceId);
+    const pos = currentId === null ? -1 : order.indexOf(currentId);
+    order.splice(pos < 0 ? order.length : pos + 1, 0, occurrenceId);
+    r.shuffleOrder = order;
+  }
+
   async enqueueMetadata(metadata: TrackMetadata): Promise<Result<string>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -1460,19 +1515,67 @@ export class Session {
       );
       const occurrenceId = this.#ids.next('occ');
       const draft = r.queue.fork();
-      draft.enqueue({
-        occurrenceId,
-        recordingId: up.recording.id,
-        selectedRef:
-          metadata.sourceRef.provider === r.settings.playbackProvider
-            ? metadata.sourceRef
-            : null,
-      });
+      draft.enqueue(
+        {
+          occurrenceId,
+          recordingId: up.recording.id,
+          selectedRef:
+            metadata.sourceRef.provider === r.settings.playbackProvider
+              ? metadata.sourceRef
+              : null,
+        },
+        this.#enqueueIndex(r, 'last'),
+      );
+      this.#parkIfIdle(draft, occurrenceId);
       return ok({
         batch: { recordings: up.recordings, queue: draft.snapshot() },
         apply: (rr) => {
           rr.recordings = [...up.recordings];
           rr.queue = draft;
+          return occurrenceId;
+        },
+      });
+    });
+  }
+
+  /**
+   * Play Next: the row lands right behind the playhead — canonical
+   * cursor + 1, and behind the dealt position under shuffle.
+   */
+  async playNextMetadata(metadata: TrackMetadata): Promise<Result<string>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    if (!isTrackMetadata(metadata)) {
+      return err(appError('invalid-response', 'metadata failed validation'));
+    }
+    return this.#commitAndDerive((r) => {
+      const up = upsertRecordingIn(
+        r.recordings,
+        metadata,
+        this.#ids.next('rec'),
+      );
+      const occurrenceId = this.#ids.next('occ');
+      const draft = r.queue.fork();
+      draft.enqueue(
+        {
+          occurrenceId,
+          recordingId: up.recording.id,
+          selectedRef:
+            metadata.sourceRef.provider === r.settings.playbackProvider
+              ? metadata.sourceRef
+              : null,
+        },
+        this.#enqueueIndex(r, 'next'),
+      );
+      this.#parkIfIdle(draft, occurrenceId);
+      return ok({
+        batch: { recordings: up.recordings, queue: draft.snapshot() },
+        apply: (rr) => {
+          rr.recordings = [...up.recordings];
+          rr.queue = draft;
+          this.#dealNext(rr, occurrenceId);
           return occurrenceId;
         },
       });
@@ -1635,11 +1738,15 @@ export class Session {
       }
       const occurrenceId = this.#ids.next('occ');
       const draft = cur.queue.fork();
-      draft.enqueue({
-        occurrenceId,
-        recordingId,
-        selectedRef: this.#pickRef(live, null),
-      });
+      draft.enqueue(
+        {
+          occurrenceId,
+          recordingId,
+          selectedRef: this.#pickRef(live, null),
+        },
+        this.#enqueueIndex(cur, 'last'),
+      );
+      this.#parkIfIdle(draft, occurrenceId);
       return ok({
         batch: { queue: draft.snapshot() },
         apply: (rr) => {
@@ -1657,12 +1764,63 @@ export class Session {
     return staged;
   }
 
-  async addAndPlay(metadata: TrackMetadata): Promise<Result<void>> {
-    const enqueued = await this.enqueueMetadata(metadata);
-    if (!enqueued.ok) {
-      return enqueued;
+  /** Play Next for a library recording — same landing as the metadata twin. */
+  async playNextRecording(recordingId: string): Promise<Result<string>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
     }
-    return this.playOccurrence(enqueued.value);
+    const r = ready.value;
+    if (!r.recordings.some((rec) => rec.id === recordingId)) {
+      return err(appError('not-found', 'unknown recording'));
+    }
+    const staged = await this.#commitAndDerive((cur) => {
+      const live = cur.recordings.find((rec) => rec.id === recordingId);
+      if (live === undefined) {
+        return err(appError('not-found', 'unknown recording'));
+      }
+      const occurrenceId = this.#ids.next('occ');
+      const draft = cur.queue.fork();
+      draft.enqueue(
+        {
+          occurrenceId,
+          recordingId,
+          selectedRef: this.#pickRef(live, null),
+        },
+        this.#enqueueIndex(cur, 'next'),
+      );
+      this.#parkIfIdle(draft, occurrenceId);
+      return ok({
+        batch: { queue: draft.snapshot() },
+        apply: (rr) => {
+          rr.queue = draft;
+          this.#dealNext(rr, occurrenceId);
+          return occurrenceId;
+        },
+      });
+    });
+    if (staged.ok) {
+      this.#playback.prewarm({ enqueuedIds: [staged.value] });
+    }
+    return staged;
+  }
+
+  /**
+   * A play tap recontextualizes the queue — the tapped content
+   * becomes the whole queue, not an append-and-jump that orphans
+   * every pending item into history. The parked engine state
+   * clears with the slate: a dead deal and a suggestion boundary
+   * both belong to the context being replaced, and the armed tail
+   * disarms so its suggestions never land on the new context.
+   */
+  #resetQueueContext(rr: Ready): void {
+    rr.shuffleOrder = null;
+    rr.radioIds.clear();
+    this.#radio.clearRadio(rr);
+  }
+
+  async addAndPlay(metadata: TrackMetadata): Promise<Result<void>> {
+    return this.playMetadata([metadata]);
   }
 
   /**
@@ -1734,6 +1892,7 @@ export class Session {
     }
     const staged = await this.#commitStaged((r) => {
       const draft = r.queue.fork();
+      draft.clear();
       const occurrenceIds: string[] = [];
       for (const item of resolved) {
         const occurrenceId = this.#ids.next('occ');
@@ -1748,6 +1907,7 @@ export class Session {
         batch: { queue: draft.snapshot() },
         apply: (rr) => {
           rr.queue = draft;
+          this.#resetQueueContext(rr);
           return occurrenceIds[0] ?? '';
         },
       });
@@ -1794,6 +1954,7 @@ export class Session {
     const staged = await this.#commitStaged((r) => {
       let recordings = r.recordings;
       const draft = r.queue.fork();
+      draft.clear();
       const occurrenceIds: string[] = [];
       for (const metadata of ordered) {
         const up = upsertRecordingIn(
@@ -1818,6 +1979,7 @@ export class Session {
         apply: (rr) => {
           rr.recordings = [...recordings];
           rr.queue = draft;
+          this.#resetQueueContext(rr);
           return occurrenceIds[0] ?? '';
         },
       });
@@ -2677,6 +2839,30 @@ export class Session {
     ) {
       return this.#playback.startAttempt(snap.currentOccurrenceId);
     }
+    this.#publish();
+    return ok(undefined);
+  }
+
+  /**
+   * Clear queue: flush every pending item and history while the
+   * cursor row keeps playing — a dead queue empties outright. The
+   * armed tail is deliberately untouched: it keeps growing onto the
+   * kept row (the mix the user armed), and `stopRadio` disarms it
+   * separately.
+   */
+  async clearQueue(): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    const persisted = await this.#mutateQueue(r, (q) =>
+      q.clearExceptCurrent(),
+    );
+    if (!persisted.ok) {
+      return persisted;
+    }
+    this.#derived();
     this.#publish();
     return ok(undefined);
   }

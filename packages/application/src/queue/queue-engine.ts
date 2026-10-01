@@ -1,6 +1,6 @@
 import type { AppError } from '../errors.ts';
 import { isSafeNonNegative, isSourceRef } from '../domain.ts';
-import type { QueueOccurrence, Recording, SourceRef } from '../domain.ts';
+import type { QueueOccurrence, SourceRef } from '../domain.ts';
 import { sameRef } from '../session/util.ts';
 
 export type QueueMode = 'stopped' | 'paused' | 'playing';
@@ -70,72 +70,6 @@ export function sameError(
     a.message === b.message &&
     a.retryable === b.retryable &&
     a.retryAfterMs === b.retryAfterMs
-  );
-}
-
-/**
- * Which queued occurrence answers a "play now" tap: the first match
- * at or after the cursor (a pending play wins — replaying it lands
- * the tap where the queue is headed); when the track only sits
- * behind the cursor the nearest history entry wins so the replay
- * rewinds as little as possible. A queue with no cursor is all
- * pending — the earliest match returns.
- */
-function pickOccurrence(
-  queue: QueueSnapshot,
-  match: (occurrence: QueueOccurrence) => boolean,
-): string | null {
-  const currentIndex =
-    queue.currentOccurrenceId === null
-      ? 0
-      : queue.occurrences.findIndex(
-          (o) => o.occurrenceId === queue.currentOccurrenceId,
-        );
-  let lastHistory: string | null = null;
-  for (const [index, occurrence] of queue.occurrences.entries()) {
-    if (!match(occurrence)) {
-      continue;
-    }
-    if (index >= currentIndex) {
-      return occurrence.occurrenceId;
-    }
-    lastHistory = occurrence.occurrenceId;
-  }
-  return lastHistory;
-}
-
-/**
- * Tap-to-play dedupe: a play tap on a recording the queue already
- * holds reuses its occurrence instead of minting a duplicate —
- * `pickOccurrence` picks which one. Returns null when the recording
- * isn't queued at all (the caller enqueues). Deliberate
- * "add to queue" calls stay additive: repeat entries are a legal
- * queue shape the row model marks `duplicate`.
- */
-export function queuedOccurrenceFor(
-  queue: QueueSnapshot,
-  recordingId: string,
-): string | null {
-  return pickOccurrence(queue, (o) => o.recordingId === recordingId);
-}
-
-/**
- * The same dedupe for a metadata row (search/entity/home card taps):
- * the tap's source ref matches a queued occurrence's selected ref or
- * any source ref on its recording.
- */
-export function queuedOccurrenceForRef(
-  queue: QueueSnapshot,
-  recordings: readonly Recording[],
-  ref: SourceRef,
-): string | null {
-  const byId = new Map(recordings.map((r) => [r.id, r]));
-  return pickOccurrence(
-    queue,
-    (o) =>
-      sameRef(o.selectedRef, ref) ||
-      (byId.get(o.recordingId)?.sourceRefs.some((s) => sameRef(s, ref)) ??
-        false),
   );
 }
 
@@ -411,6 +345,50 @@ export class QueueEngine {
     }
     this.#requireTick();
     this.#apply(null, 0, 'stopped');
+  }
+
+  /**
+   * Drops every occurrence — a play-context replacement clears the
+   * slate before the new content enqueues. Marks prune with the
+   * members; the queue lands on the legal empty state.
+   */
+  clear(): void {
+    if (this.#occurrences.length === 0 && this.#currentId === null) {
+      return;
+    }
+    this.#requireTick();
+    this.#occurrences = [];
+    this.#unplayable.clear();
+    this.#apply(null, 0, 'stopped');
+  }
+
+  /**
+   * Drops everything except the cursor row — a user "clear queue"
+   * flushes pending items and history while playback continues.
+   * A queue with no cursor is all pending, so this is `clear()` with
+   * nothing kept.
+   */
+  clearExceptCurrent(): void {
+    const currentId = this.#currentId;
+    if (currentId === null) {
+      this.clear();
+      return;
+    }
+    if (this.#occurrences.length === 1) {
+      return;
+    }
+    this.#requireTick();
+    const current = this.#occurrences[this.#indexOf(currentId)];
+    if (current === undefined) {
+      return;
+    }
+    this.#occurrences = [current];
+    for (const id of [...this.#unplayable]) {
+      if (id !== current.occurrenceId) {
+        this.#unplayable.delete(id);
+      }
+    }
+    this.#tick();
   }
 
   previous(): void {

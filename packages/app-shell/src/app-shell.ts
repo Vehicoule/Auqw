@@ -25,8 +25,6 @@ import {
   isMatchGate,
   isRefRejected,
   previewImport,
-  queuedOccurrenceFor,
-  queuedOccurrenceForRef,
   redactSensitive,
   selectionFromSettings,
 } from '@auqw/application';
@@ -1929,21 +1927,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
       if (!canPlay(recordingId)) {
         return;
       }
-      // Tap-to-play dedupe: a queued track jumps to its occurrence
-      // instead of minting a repeat — 'add to queue' stays additive.
-      const queued =
-        queuedOccurrenceFor(state.queue, recordingId) ??
-        (await session.enqueueRecording(recordingId).then((r) => {
-          if (!r.ok) {
-            reportResult('action.enqueueTrack', r);
-          }
-          return r.ok ? r.value : null;
-        }));
-      if (queued !== null) {
-        await dispatchPlay('common.play', session.playOccurrence(queued));
-      }
+      // A play tap recontextualizes: the tapped recording becomes the
+      // queue — never an append-and-jump that orphans pending items.
+      await dispatchPlay(
+        'common.play',
+        session.playRecordings([{ recordingId, selectedRef: null }]),
+      );
     },
-    [session, state.queue, canPlay, dispatchPlay],
+    [session, canPlay, dispatchPlay],
   );
 
   // Queue presses and transport follow the same offline rule as
@@ -2028,21 +2019,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [online, state.recordings, localPlayable],
   );
 
-  // The playRecording dedupe for metadata taps: a tap's source ref
-  // can match a queued occurrence (or its recording's refs) before
-  // the metadata materializes into one.
+  // Metadata taps recontextualize the same way — the tapped item
+  // becomes the whole queue.
   const playMeta = useCallback(
-    (meta: TrackMetadata) => {
-      const queued = queuedOccurrenceForRef(
-        state.queue,
-        state.recordings,
-        meta.sourceRef,
-      );
-      return queued === null
-        ? session.addAndPlay(meta)
-        : session.playOccurrence(queued);
-    },
-    [session, state.queue, state.recordings],
+    (meta: TrackMetadata) => session.addAndPlay(meta),
+    [session],
   );
 
   // The shared result-tap funnel: the gate fires inside so callers'
@@ -2382,6 +2363,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   const removeQueueOccurrence = useCallback(
     (occurrenceId: string) => void session.removeOccurrence(occurrenceId),
+    [session],
+  );
+
+  // Clear queue — keeps the cursor row playing, flushes the rest.
+  const clearQueue = useCallback(
+    () => void session.clearQueue(),
     [session],
   );
 
@@ -3072,6 +3059,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
             : session.enqueueMetadata(target.meta)
           ).then(reporter('action.addToQueue'));
           break;
+        case 'playNext':
+          void (target.kind === 'recording'
+            ? session.playNextRecording(target.recordingId)
+            : session.playNextMetadata(target.meta)
+          ).then(reporter('action.playNext'));
+          break;
         case 'add':
           setPickerFor(target);
           break;
@@ -3545,6 +3538,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     onMoveQueueItem,
     onMoveQueueItemTo,
     removeQueueOccurrence,
+    clearQueue,
     seekToPosition,
     canPlay,
     playRecording,

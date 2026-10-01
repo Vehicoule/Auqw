@@ -63,7 +63,6 @@ import {
   formatEndpoint,
   fromUnknown,
   parseSyncDeltaDocs,
-  queuedOccurrenceForRef,
   serializeSyncDeltaDocs,
 } from '@auqw/application';
 import type {
@@ -922,6 +921,7 @@ function Main({
     onMoveQueueItem,
     onMoveQueueItemTo,
     removeQueueOccurrence,
+    clearQueue,
     seekToPosition,
     canPlay,
     playRecording,
@@ -1711,18 +1711,9 @@ function Main({
               ? searchStateRef.current.page.items[i]
               : undefined;
           if (meta !== undefined) {
-            const queued =
-              st.type === 'ready'
-                ? queuedOccurrenceForRef(
-                    st.queue,
-                    st.recordings,
-                    meta.sourceRef,
-                  )
-                : null;
-            void (queued === null
-              ? s.addAndPlay(meta)
-              : s.playOccurrence(queued)
-            ).then((r) => reportPlay('action.playResult', r));
+            void s
+              .addAndPlay(meta)
+              .then((r) => reportPlay('action.playResult', r));
           }
           break;
         }
@@ -2532,6 +2523,7 @@ function Main({
               }
               onQueueViewport={onQueueViewport}
               onRemoveQueueItem={removeQueueOccurrence}
+              onClearQueue={clearQueue}
               onToggleQueueReorder={toggleReordering}
               onMoveQueueItem={onMoveQueueItem}
               onMoveQueueItemTo={onMoveQueueItemTo}

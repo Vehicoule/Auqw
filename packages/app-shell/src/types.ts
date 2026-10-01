@@ -487,6 +487,7 @@ export type ShellSheetAction = {
   readonly label: string;
   readonly icon:
     | 'heart'
+    | 'next'
     | 'queue'
     | 'list-plus'
     | 'download'
@@ -525,6 +526,7 @@ export function rowActionsModel(input: {
     });
   }
   actions.push(
+    { key: 'playNext', label: t('action.playNext'), icon: 'next' },
     { key: 'enqueue', label: t('action.addToQueue'), icon: 'queue' },
     { key: 'add', label: t('sheets.addToPlaylist'), icon: 'list-plus' },
   );

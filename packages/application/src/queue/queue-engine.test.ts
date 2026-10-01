@@ -1,9 +1,5 @@
-import {
-  QueueEngine,
-  queuedOccurrenceFor,
-  queuedOccurrenceForRef,
-} from './queue-engine.ts';
-import type { QueueOccurrence, Recording } from '../domain.ts';
+import { QueueEngine } from './queue-engine.ts';
+import type { QueueOccurrence } from '../domain.ts';
 import { appError } from '../errors.ts';
 import { assert, assertEqual, assertDeepEqual } from '../testing/assert.ts';
 
@@ -190,6 +186,84 @@ function directTests(): void {
     other.remove('a');
     assertEqual(other.snapshot().currentOccurrenceId, 'b');
     assertEqual(other.snapshot().occurrences.length, 1);
+  }
+
+  // clear drops every occurrence to the legal empty state — marks
+  // and the blocked verdict go with the members.
+  {
+    const e = engineWith(['a', 'b', 'c']);
+    e.select('b', true);
+    e.markUnplayable(appError('expired-resource', 'gone'));
+    e.clear();
+    const snap = e.snapshot();
+    assertEqual(snap.occurrences.length, 0);
+    assertEqual(snap.currentOccurrenceId, null);
+    assertEqual(snap.mode, 'stopped');
+    assertEqual(snap.positionMs, 0);
+    assertEqual(snap.blockedError, undefined);
+    assertEqual(e.unplayableIds.size, 0, 'marks prune with members');
+    const rev = snap.revision;
+    e.clear();
+    assertEqual(
+      e.snapshot().revision,
+      rev,
+      'clear on empty is a no-op',
+    );
+  }
+
+  // clearExceptCurrent keeps the cursor row playing — pending items
+  // and history flush, marks prune to the survivor.
+  {
+    const e = engineWith(['a', 'b', 'c', 'd']);
+    e.select('c', true);
+    e.markUnplayable(appError('transient', 'skip me'));
+    e.next(); // c stays marked behind the cursor; d lands paused
+    e.play(); // resume — d is the playing current
+    e.observePosition(900);
+    e.clearExceptCurrent();
+    const snap = e.snapshot();
+    assertEqual(
+      snap.occurrences.map((o) => o.occurrenceId).join(','),
+      'd',
+    );
+    assertEqual(snap.currentOccurrenceId, 'd');
+    assertEqual(snap.mode, 'playing');
+    assertEqual(snap.positionMs, 900, 'position survives the flush');
+    assertEqual(
+      e.isUnplayable('c'),
+      false,
+      'a dropped row loses its mark',
+    );
+    const single = e.snapshot().revision;
+    e.clearExceptCurrent();
+    assertEqual(
+      e.snapshot().revision,
+      single,
+      'one-item queue is a no-op',
+    );
+  }
+
+  // clearExceptCurrent on a blocked current keeps the paused verdict
+  // so the retry path still names its error; on a drained queue it
+  // clears outright.
+  {
+    const blocked = engineWith(['a', 'b']);
+    blocked.select('a', true);
+    blocked.markUnplayable(appError('expired-resource', 'gone'));
+    blocked.clearExceptCurrent();
+    const snap = blocked.snapshot();
+    assertEqual(snap.occurrences.length, 1);
+    assertEqual(snap.mode, 'paused');
+    assertEqual(snap.blockedError?.kind, 'expired-resource');
+    assertEqual(blocked.isUnplayable('a'), true);
+
+    const drained = engineWith(['a', 'b']);
+    drained.select('a', true);
+    drained.next();
+    drained.next(); // cursor null — all pending
+    drained.clearExceptCurrent();
+    assertEqual(drained.snapshot().occurrences.length, 0);
+    assertEqual(drained.snapshot().mode, 'stopped');
   }
 
   // move preserves current occurrence and position.
@@ -496,97 +570,6 @@ function directTests(): void {
     assertEqual(e.snapshot().currentOccurrenceId, 'x2');
     e.remove('x1');
     assertEqual(e.snapshot().currentOccurrenceId, 'x2');
-  }
-
-  // Tap-to-play dedupe: first occurrence at/after the cursor wins,
-  // else the nearest history entry; not-queued answers null.
-  {
-    const e = new QueueEngine();
-    e.enqueue(occ('h1', 'rA'));
-    e.enqueue(occ('h2', 'rB'));
-    e.enqueue(occ('p1', 'rA'));
-    e.enqueue(occ('p2', 'rC'));
-    // No cursor: the queue is all pending — the earliest match wins.
-    assertEqual(queuedOccurrenceFor(e.snapshot(), 'rA'), 'h1');
-    assertEqual(
-      queuedOccurrenceFor(e.snapshot(), 'rZ'),
-      null,
-      'unqueued recording gets no occurrence',
-    );
-    e.select('h2', true);
-    assertEqual(
-      queuedOccurrenceFor(e.snapshot(), 'rA'),
-      'p1',
-      'a pending occurrence beats the played one',
-    );
-    assertEqual(
-      queuedOccurrenceFor(e.snapshot(), 'rB'),
-      'h2',
-      're-tapping the current track replays its occurrence',
-    );
-    e.select('p2', false);
-    // rA only sits behind the cursor — the nearest entry wins.
-    assertEqual(queuedOccurrenceFor(e.snapshot(), 'rA'), 'p1');
-    assertEqual(queuedOccurrenceFor(e.snapshot(), 'rB'), 'h2');
-    // A drained queue still answers: its entries are pending again.
-    e.next();
-    assertEqual(e.snapshot().currentOccurrenceId, null);
-    assertEqual(queuedOccurrenceFor(e.snapshot(), 'rA'), 'h1');
-    assertEqual(queuedOccurrenceFor(e.snapshot(), 'rB'), 'h2');
-  }
-
-  // Ref dedupe covers metadata taps: a queued selectedRef and a
-  // recording's own sourceRefs both match.
-  {
-    const e = new QueueEngine();
-    const refA = { provider: 'ytm', kind: 'track' as const, id: 'v-a' };
-    e.enqueue({
-      occurrenceId: 'o1',
-      recordingId: 'rA',
-      selectedRef: refA,
-    });
-    const recordings: Recording[] = [
-      {
-        id: 'rB',
-        title: 'B',
-        artist: null,
-        album: null,
-        durationMs: null,
-        releaseYear: null,
-        artwork: [],
-        explicit: null,
-        genre: null,
-        isrc: null,
-        versionLabels: [],
-        sourceRefs: [{ provider: 'ytm', kind: 'track', id: 'v-b' }],
-        mappings: [],
-        provenance: 'provider',
-      },
-    ];
-    e.enqueue(occ('o2', 'rB'));
-    assertEqual(
-      queuedOccurrenceForRef(e.snapshot(), recordings, refA),
-      'o1',
-      'queued selectedRef matches',
-    );
-    assertEqual(
-      queuedOccurrenceForRef(e.snapshot(), recordings, {
-        provider: 'ytm',
-        kind: 'track',
-        id: 'v-b',
-      }),
-      'o2',
-      'a recording source ref matches too',
-    );
-    assertEqual(
-      queuedOccurrenceForRef(e.snapshot(), recordings, {
-        provider: 'ytm',
-        kind: 'track',
-        id: 'v-x',
-      }),
-      null,
-      'an unknown ref stays enqueuing',
-    );
   }
 
   // Failed occurrences keep a session mark: next() steps over them,

@@ -401,6 +401,10 @@ const GLYPHS = {
     filled: false,
     shapes: [p('M4 6h12M4 11h12M4 16h7m4 0h6m-3-3v6')],
   },
+  'list-remove': {
+    filled: false,
+    shapes: [p('M4 6h12M4 11h12M4 16h7'), p('m11 13 5 5m0-5-5 5')],
+  },
   home: {
     filled: false,
     shapes: [p('M4 11 12 4l8 7v8h-5v-5H9v5H4z')],

@@ -53,6 +53,7 @@ export type SharedIconName =
   | 'heart-filled'
   | 'library'
   | 'list-plus'
+  | 'list-remove'
   | 'lyrics'
   | 'next'
   | 'note'
@@ -106,6 +107,8 @@ export type QueueScreenHandlers = {
   readonly onRemoveItem?: MaybeFn<[occurrenceId: string]>;
   readonly onMoveItem?: MaybeFn<[occurrenceId: string, direction: -1 | 1]>;
   readonly onMoveItemTo?: MaybeFn<[occurrenceId: string, toIndex: number]>;
+  /** Clear-queue intent — drops every row except the current one. */
+  readonly onClearQueue?: MaybeFn;
 };
 
 export type QueueReorderButton = ControlView & {
@@ -130,10 +133,34 @@ export function queueReorderButton(
   };
 }
 
+export type QueueClearButton = ControlView & {
+  readonly icon: 'list-remove';
+  readonly onPress: () => void;
+};
+
+/**
+ * The clear-queue toggle — absent when the host never binds a
+ * handler, or when a lone cursor row leaves nothing to flush.
+ */
+export function queueClearButton(
+  itemCount: number,
+  onClearQueue: MaybeFn,
+): QueueClearButton | null {
+  if (onClearQueue === undefined || itemCount <= 1) {
+    return null;
+  }
+  return {
+    icon: 'list-remove',
+    a11yLabel: t('queue.clear'),
+    onPress: onClearQueue,
+  };
+}
+
 export type QueueScreenView = {
   readonly title: string;
   readonly countLabel: string;
   readonly reorder: QueueReorderButton | null;
+  readonly clearQueue: QueueClearButton | null;
   readonly current: {
     readonly title: string;
     readonly status: PlayerModel['status'];
@@ -148,16 +175,19 @@ export function useQueueScreenController({
   player = null,
   reordering = false,
   onToggleReorder,
+  onClearQueue,
 }: {
   readonly queue: QueueModel;
   readonly player?: PlayerModel | null | undefined;
   readonly reordering?: boolean | undefined;
   readonly onToggleReorder?: MaybeFn;
+  readonly onClearQueue?: MaybeFn;
 }): QueueScreenView {
   return {
     title: t('queue.title'),
     countLabel: t('queue.count', { count: queue.items.length }),
     reorder: queueReorderButton(reordering, onToggleReorder),
+    clearQueue: queueClearButton(queue.items.length, onClearQueue),
     current:
       player === null
         ? null
@@ -1296,6 +1326,8 @@ export type StageQueueHandlers = {
   /** Advisory row intent — hover/focus/long-press; the host warms the row. */
   readonly onQueueRowIntent?: MaybeFn<[occurrenceId: string]>;
   readonly onRemoveQueueItem?: MaybeFn<[occurrenceId: string]>;
+  /** Clear-queue intent — drops every row except the current one. */
+  readonly onClearQueue?: MaybeFn;
   readonly onToggleQueueReorder?: MaybeFn;
   readonly onMoveQueueItem?: MaybeFn<[occurrenceId: string, direction: -1 | 1]>;
   readonly onMoveQueueItemTo?: MaybeFn<[occurrenceId: string, toIndex: number]>;

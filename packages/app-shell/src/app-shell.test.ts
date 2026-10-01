@@ -306,8 +306,8 @@ const baseKeys = rowActionsModel({
 }).actions.map((a) => a.key);
 assertEqual(
   baseKeys.join(','),
-  'like,enqueue,add,download',
-  'recording rows carry like/enqueue/add/download',
+  'like,playNext,enqueue,add,download',
+  'recording rows carry like/playNext/enqueue/add/download',
 );
 
 assert(
@@ -333,7 +333,7 @@ assert(
   }).actions.map((a) => a.key);
   assertEqual(
     actions.join(','),
-    'like,enqueue,add,download,removeDownload',
+    'like,playNext,enqueue,add,download,removeDownload',
     'a failed ledger row offers retry AND an explicit remove out',
   );
 }
@@ -349,8 +349,8 @@ assert(
   }).actions.map((a) => a.key);
   assertEqual(
     actions.join(','),
-    'enqueue,add,radio,album,artist',
-    'metadata rows carry enqueue/add + seedable radio + entity hops',
+    'playNext,enqueue,add,radio,album,artist',
+    'metadata rows carry playNext/enqueue/add + seedable radio + entity hops',
   );
 }
 

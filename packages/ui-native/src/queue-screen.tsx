@@ -27,6 +27,7 @@ export function QueueScreen({
   topInset = 0,
   scrollEnabled = true,
   onToggleReorder,
+  onClearQueue,
   onPressItem,
   onRemoveItem,
   onMoveItem,
@@ -38,6 +39,7 @@ export function QueueScreen({
     player,
     reordering,
     onToggleReorder,
+    onClearQueue,
   });
   return (
     <View
@@ -63,6 +65,16 @@ export function QueueScreen({
           {view.countLabel}
         </Text>
         <View style={{ flex: 1 }} />
+        {view.clearQueue !== null && (
+          <IconButton
+            icon={view.clearQueue.icon}
+            size={32}
+            iconSize={14}
+            color={theme.colors.textSecondary}
+            accessibilityLabel={view.clearQueue.a11yLabel}
+            onPress={view.clearQueue.onPress}
+          />
+        )}
         {view.reorder !== null && (
           <IconButton
             icon={view.reorder.icon}

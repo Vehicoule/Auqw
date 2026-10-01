@@ -96,6 +96,15 @@ export type Ready = {
    */
   listenCycles: Record<string, number>;
   radio: RadioTailRecord | null;
+  /**
+   * Occurrence ids the radio tail minted — the "add to queue"
+   * boundary: user-minted items insert ahead of the first pending
+   * suggestion, so manual adds always outrank the auto-grown tail.
+   * Entries outlive their tail record (a disarmed mix's items stay
+   * suggestions); reads intersect with the live queue, so stale ids
+   * are harmless. Session-scoped, never persisted.
+   */
+  radioIds: Set<string>;
   persistenceError: AppError | undefined;
   /**
    * Reusable sync-apply projection input: seeded by one storage load

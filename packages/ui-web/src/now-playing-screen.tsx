@@ -32,6 +32,7 @@ import {
   downloadButtonView,
   lyricsHeaderView,
   lyricsPaneView,
+  queueClearButton,
   queueReorderButton,
   radioRowView,
   stageMetaView,
@@ -277,6 +278,7 @@ export function NowPlayingScreen({
   onPressQueueItem,
   onQueueRowIntent,
   onRemoveQueueItem,
+  onClearQueue,
   onToggleQueueReorder,
   onMoveQueueItem,
   onMoveQueueItemTo,
@@ -296,6 +298,7 @@ export function NowPlayingScreen({
   );
   const radioRow = radioRowView(radio, onStartRadio, onStopRadio);
   const reorder = queueReorderButton(queueReordering, onToggleQueueReorder);
+  const clearQueue = queueClearButton(queue?.items.length ?? 0, onClearQueue);
   const downloadBtn =
     download === null ? null : downloadButtonView(download, onDownload);
   // Player mode is artwork-led — full-bleed art under the bottom
@@ -563,19 +566,31 @@ export function NowPlayingScreen({
               />
             ) : (
               <>
-                {reorder !== null && (
+                {(reorder !== null || clearQueue !== null) && (
                   <div className="uw-stage__queue-tools">
-                    <IconButton
-                      icon={reorder.icon}
-                      size={32}
-                      iconSize={14}
-                      color={
-                        reorder.active ? 'var(--accent)' : 'var(--text-secondary)'
-                      }
-                      ariaLabel={reorder.a11yLabel}
-                      active={reorder.active}
-                      onPress={reorder.onPress}
-                    />
+                    {clearQueue !== null && (
+                      <IconButton
+                        icon={clearQueue.icon}
+                        size={32}
+                        iconSize={14}
+                        color="var(--text-secondary)"
+                        ariaLabel={clearQueue.a11yLabel}
+                        onPress={clearQueue.onPress}
+                      />
+                    )}
+                    {reorder !== null && (
+                      <IconButton
+                        icon={reorder.icon}
+                        size={32}
+                        iconSize={14}
+                        color={
+                          reorder.active ? 'var(--accent)' : 'var(--text-secondary)'
+                        }
+                        ariaLabel={reorder.a11yLabel}
+                        active={reorder.active}
+                        onPress={reorder.onPress}
+                      />
+                    )}
                   </div>
                 )}
                 {queueListEl}
@@ -667,6 +682,7 @@ export type StageIdlePaneProps = {
   readonly queue?: QueueModel | undefined;
   readonly queueReordering?: QueueScreenProps['reordering'];
   readonly onToggleQueueReorder?: QueueScreenProps['onToggleReorder'];
+  readonly onClearQueue?: QueueScreenProps['onClearQueue'];
   readonly onPressQueueItem?: QueueScreenProps['onPressItem'];
   readonly onQueueRowIntent?: QueueScreenProps['onRowIntent'];
   readonly onRemoveQueueItem?: QueueScreenProps['onRemoveItem'];
@@ -685,6 +701,7 @@ export function StageIdlePane({
   queue,
   queueReordering,
   onToggleQueueReorder,
+  onClearQueue,
   onPressQueueItem,
   onQueueRowIntent,
   onRemoveQueueItem,
@@ -698,6 +715,7 @@ export function StageIdlePane({
           queue={queue}
           reordering={queueReordering}
           onToggleReorder={onToggleQueueReorder}
+          onClearQueue={onClearQueue}
           onPressItem={onPressQueueItem}
           onRowIntent={onQueueRowIntent}
           onRemoveItem={onRemoveQueueItem}

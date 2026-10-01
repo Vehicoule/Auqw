@@ -794,6 +794,7 @@ function Main({
     onMoveQueueItem,
     onMoveQueueItemTo,
     removeQueueOccurrence,
+    clearQueue,
     seekToPosition,
     playRecording,
     onResultPress,
@@ -1494,6 +1495,7 @@ function Main({
                     rowIntent({ kind: 'occurrence', id })
                   }
                   onRemoveQueueItem={removeQueueOccurrence}
+                  onClearQueue={clearQueue}
                   onToggleQueueReorder={toggleReordering}
                   onMoveQueueItem={onMoveQueueItem}
                   onMoveQueueItemTo={onMoveQueueItemTo}
@@ -1514,6 +1516,7 @@ function Main({
                     rowIntent({ kind: 'occurrence', id })
                   }
                   onRemoveQueueItem={removeQueueOccurrence}
+                  onClearQueue={clearQueue}
                   onMoveQueueItem={onMoveQueueItem}
                   onMoveQueueItemTo={onMoveQueueItemTo}
                 />

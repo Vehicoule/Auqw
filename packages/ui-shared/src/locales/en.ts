@@ -107,6 +107,7 @@ export const en = {
   'queue.failed': "couldn't play",
   'queue.reorder': 'reorder queue',
   'queue.reorderDone': 'done reordering',
+  'queue.clear': 'clear queue',
   'queue.badge.repeat': 'repeat',
 
   // ---- search -------------------------------------------------------------
@@ -549,6 +550,7 @@ export const en = {
   'action.seek': 'seek',
   'action.enqueueTrack': 'enqueue track',
   'action.addToQueue': 'add to queue',
+  'action.playNext': 'play next',
   'action.createPlaylist': 'create playlist',
   'action.renamePlaylist': 'rename playlist',
   'action.deletePlaylist': 'delete playlist',
