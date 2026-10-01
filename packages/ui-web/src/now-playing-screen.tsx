@@ -18,6 +18,7 @@ import { QueueList } from './queue-list.tsx';
 import { QueueScreen } from './queue-screen.tsx';
 import type { QueueScreenProps } from './queue-screen.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
+import { scaledArtworkUrl } from './artwork-url.ts';
 import { t } from '@auqw/ui-shared';
 import type {
   DownloadChip,
@@ -218,15 +219,23 @@ function StageBackdrop({
   readonly url: string;
   readonly onError: () => void;
 }) {
+  // The backdrop blurs and dims behind the cluster — 1024px covers a
+  // retina-width stage; provider full-res would decode 10–35 MB here
+  // for zero visible gain. A rewrite that fails loads falls back to
+  // the original URL before reporting the error outward.
+  const [src, setSrc] = useState(() => scaledArtworkUrl(url, 1024));
+  useEffect(() => {
+    setSrc(scaledArtworkUrl(url, 1024));
+  }, [url]);
   return (
     <div className="uw-stage__backdrop" aria-hidden="true">
       {['art', 'frost'].map((layer) => (
         <img
           key={layer}
           className={`uw-stage__backdrop-${layer}`}
-          src={url}
+          src={src}
           alt=""
-          onError={onError}
+          onError={src !== url ? () => setSrc(url) : onError}
         />
       ))}
       <div className="uw-stage__backdrop-scrim" />

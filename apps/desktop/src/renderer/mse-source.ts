@@ -564,6 +564,52 @@ function runSession(
     }
   }
 
+  /**
+   * Quota-triggered eviction runs once Chromium's SourceBuffer
+   * cap (~100+ MB of audio) is hit — every track before that stays
+   * buffered whole, so an hour of listening parks hundreds of MB of
+   * decoded-adjacent media per track in renderer shared memory. The
+   * playhead moves on the same cadence as `notePosition`, so a
+   * throttled pass there trims buffered media down to the
+   * keep-window (behind/ahead) the quota path already computes —
+   * same evict ranges, just run before pressure, not after.
+   */
+  let lastProactiveEvictAtMs = -1;
+  const PROACTIVE_EVICT_INTERVAL_MS = 10_000;
+  function maybeProactiveEvict(): void {
+    const now = performance.now();
+    if (
+      destroyed ||
+      evicting ||
+      buffer === null ||
+      buffer.updating ||
+      (lastProactiveEvictAtMs >= 0 &&
+        now - lastProactiveEvictAtMs < PROACTIVE_EVICT_INTERVAL_MS)
+    ) {
+      return;
+    }
+    // Only trim when the anchor sits inside buffered coverage — a
+    // playhead outside every range (stalled at the frontier, or a
+    // pre-play attach still filling) has nothing provably stale, and
+    // a blind pass could evict the very media about to play.
+    const last = journal[journal.length - 1];
+    const anchorS =
+      playheadS >= 0 ? playheadS : last === undefined ? 0 : last.mediaEnd / 1000;
+    const ranges = buffer.buffered;
+    let anchorCovered = false;
+    for (let i = 0; i < ranges.length; i++) {
+      if (ranges.start(i) <= anchorS && anchorS <= ranges.end(i)) {
+        anchorCovered = true;
+        break;
+      }
+    }
+    if (!anchorCovered) {
+      return;
+    }
+    lastProactiveEvictAtMs = now;
+    startEviction();
+  }
+
   function drain(): void {
     if (
       destroyed ||
@@ -676,6 +722,7 @@ function runSession(
         seekTo: (ms) => seek(ms),
         notePosition: (ms) => {
           playheadS = ms / 1000;
+          maybeProactiveEvict();
         },
         onFail: (listener) => {
           // A failure that already landed fires immediately — the

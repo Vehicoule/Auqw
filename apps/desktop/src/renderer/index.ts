@@ -23,6 +23,10 @@ function logEvent(text: string): void {
   const li = document.createElement('li');
   li.textContent = `${new Date().toISOString().slice(11, 19)} ${text}`;
   list.prepend(li);
+  // Long harness runs otherwise grow the DOM one row per event forever.
+  while (list.childElementCount > 400) {
+    list.lastElementChild?.remove();
+  }
 }
 
 function describe(thrown: unknown): string {
