@@ -804,6 +804,7 @@ function Main({
     onUpdateBannerAct,
     onUpdateBannerDismiss,
     onUpdateEntry,
+    onUpdateCheck,
     setActionsFor,
     closeRowActions,
     rowActions,
@@ -1387,16 +1388,27 @@ function Main({
                   active={updateEngaged}
                   onPress={() => {
                     if (updateCard === null) {
-                      // Nothing to show — the press re-checks silently.
-                      onUpdateEntry();
+                      // Nothing to show — the press re-checks silently
+                      // and NEVER acts: an undisplayed offer (dismissed
+                      // version, settled apply) must not start unseen.
+                      onUpdateCheck();
                       return;
                     }
                     if (updateEngaged) {
-                      setUpdateEngaged(false);
+                      // Collapse only when the model says the surface
+                      // may hide — mid-run the card carries the cancel.
+                      if (updateCard.dismissible) {
+                        setUpdateEngaged(false);
+                      }
                       return;
                     }
                     setUpdateEngaged(true);
-                    onUpdateEntry();
+                    // Only a standing offer kicks its verb on entry —
+                    // 'stored'/'failed' reveal their own buttons instead
+                    // of restarting/retrying uninvited.
+                    if (updateCard.chip === 'idle') {
+                      onUpdateEntry();
+                    }
                   }}
                 />
                 {updateCard !== null && (

@@ -492,6 +492,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
       updatePort.check('manual');
     }
   }, [updatePort, updateSnapshot]);
+  const onUpdateCheck = useCallback(() => {
+    // The bar entry's "nothing to show" press — always just a silent
+    // re-check. Never act: 'available' can hide behind a dismissal
+    // (model null) or a settled apply, and the icon must not start
+    // or restart anything the user can't see.
+    updatePort?.check('manual');
+  }, [updatePort]);
 
   // ---- locale -----------------------------------------------------
   // setLocale mutates module state and never notifies React — every
@@ -3625,6 +3632,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     onUpdateBannerAct,
     onUpdateBannerDismiss,
     onUpdateEntry,
+    onUpdateCheck,
     // settings + misc ops
     onSettingsSelect,
     onSettingsToggle,
