@@ -1135,8 +1135,11 @@ export function createWebPlayerPort(deps: {
         hardStop();
         return;
       }
-      // Silence now; the reported stop is what the session reconciles
-      // — its release of this handle runs the real teardown.
+      // Kill the play machinery — a settling attach must not restart
+      // the element — then report the stop for the session to
+      // reconcile; its release of this handle runs the real teardown.
+      opGen++;
+      invalidatePendingPlays(null);
       audio.pause();
       mediaSession.playbackState = 'paused';
       emitTransition(projection, null, 'remote-stop', posMs(), null, null);
@@ -1147,9 +1150,13 @@ export function createWebPlayerPort(deps: {
 
   /** The position a step seek starts from — a mid-attach play's
    * pending resume target when one owns the element's future, else
-   * the element's live position. */
+   * the element's live position. A superseded play's slot can linger
+   * until its promise settles — only the live generation counts. */
   function osSeekBaseMs(): number {
     for (const pending of pendingPlayGens.values()) {
+      if (pending.gen !== opGen) {
+        continue;
+      }
       if (
         current === null ||
         identityEq(pending.identity, current.identity)
@@ -1165,8 +1172,9 @@ export function createWebPlayerPort(deps: {
   function applyOsSeek(positionMs: number): void {
     for (const pending of pendingPlayGens.values()) {
       if (
-        current === null ||
-        identityEq(pending.identity, current.identity)
+        pending.gen === opGen &&
+        (current === null ||
+          identityEq(pending.identity, current.identity))
       ) {
         pending.positionMs = positionMs;
       }

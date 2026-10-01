@@ -1953,6 +1953,48 @@ export async function run(): Promise<void> {
     );
   }
 
+  // A superseded play's pending slot is dead — step seeks ride the
+  // live generation's resume target only.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const resolvers = new Map<string, (v: { url: string }) => void>();
+    const stream = fakeStream({
+      serveUrl: (args) => {
+        const { handle } = args as { handle: string };
+        return new Promise((resolve) => {
+          resolvers.set(handle, resolve);
+        });
+      },
+    });
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    const pendingA = player.play({
+      handle: 'h-a',
+      identity,
+      positionMs: 30_000,
+    });
+    const pendingB = player.play({
+      handle: 'h-b',
+      identity,
+      positionMs: 5_000,
+    });
+    mediaSession.actions.get('seekforward')?.({});
+    resolvers.get('h-b')?.({ url: 'http://127.0.0.1:9/s/h-b' });
+    await pendingB;
+    await settle();
+    assertEqual(
+      audio.currentTime,
+      15,
+      'step seek rides the live play, not the superseded one',
+    );
+    // The dead play's late resolve can't retake the element.
+    resolvers.get('h-a')?.({ url: 'http://127.0.0.1:9/s/h-a' });
+    await pendingA;
+    await settle();
+    assertEqual(audio.currentTime, 15, 'superseded play stays dead');
+  }
+
   // The OS stop action reports a 'remote-stop' transition — the
   // session reconciles it (queue stops) and its release is what
   // tears the element down, so no local queue state can phantom.
@@ -1988,6 +2030,39 @@ export async function run(): Promise<void> {
     assertEqual(audio.src, '', 'release detaches the element');
     assertEqual(mediaSession.playbackState, 'none');
     assertEqual(mediaSession.metadata, null, 'release clears the card');
+  }
+
+  // An OS stop inside the attached-but-unsettled window kills the
+  // play's generation — the late settle must not restart audio.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mediaSession,
+      mse: fakeMseFactories(media),
+    });
+    await player.setQueueProjection(twoItemProjection());
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    const playResult = player.play({ handle: 'h-1', identity });
+    // attachUrl resolved — `current` is set, the settle is pending.
+    await settle();
+    mediaSession.actions.get('stop')?.();
+    assert(audio.paused, 'stop pauses the element');
+    media.fireSourceopen();
+    await settle();
+    await playResult;
+    assert(audio.paused, 'the late settle does not restart audio');
   }
 
   // A natural end at the tail reports 'paused' — the element stays

@@ -440,6 +440,7 @@ export type PlaybackHost = SessionHostCore & {
   /** Radio-tail hooks the transition reconcile and derived ticks kick. */
   readonly maybeGrowRadio: () => void;
   readonly maybeArmRadio: () => void;
+  readonly disarmRadio: (r: Ready) => void;
   readonly resumeDrainedQueue: (
     r: Ready,
     record: RadioTailRecord,
@@ -2661,8 +2662,10 @@ export class PlaybackEngine {
       }
     } else if (event.reason === 'remote-stop') {
       // A service stop is not a cursor move — only the null target
-      // (queue ran off / stopped) is legal.
-      legal = edgeUnverifiable || event.toOccurrenceId === null;
+      // (queue ran off / stopped) is legal. Unlike the walk edges
+      // this never depends on the projection's contents, so an
+      // evicted projection earns no free pass on a non-null stop.
+      legal = event.toOccurrenceId === null;
     }
     if (
       projection === null ||
@@ -2730,6 +2733,12 @@ export class PlaybackEngine {
     // time — a reseed during the write below swaps in a fresh record
     // whose own flag already reflects its queue state.
     const radioAtTransition = r.radio;
+    if (event.reason === 'remote-stop') {
+      // Session-stop semantics: drop the armed tail before the write
+      // below, so a page landing during it finds `r.radio` empty — a
+      // deliberate stop must not grow the queue it just stopped.
+      this.#host.disarmRadio(r);
+    }
     // Adopt the service-reported attempt, superseding the current one.
     const prev = this.#active;
     this.#active = null;

@@ -1163,6 +1163,7 @@ function serviceTransition(
   fields: {
     from: string;
     to: string | null;
+    reason?: 'ended' | 'remote-next' | 'remote-previous' | 'remote-stop';
     identity?: PlaybackIdentity | null;
     handle?: string | null;
   },
@@ -1175,7 +1176,7 @@ function serviceTransition(
     projectedQueueRev: projection.queueRev,
     fromOccurrenceId: fields.from,
     toOccurrenceId: fields.to,
-    reason: 'ended',
+    reason: fields.reason ?? 'ended',
     positionMs: 0,
     identity: fields.identity ?? null,
     handle: fields.handle ?? null,
@@ -1270,6 +1271,35 @@ async function autoArmSuppressedAfterDisarm(): Promise<void> {
   assertEqual(radioCalls(r).length, 1, 'disarm suppresses the auto-seed');
   r.player.cancelPendingPrepares();
   await replayed;
+  await r.session.dispose();
+}
+
+async function remoteStopDisarmsTail(): Promise<void> {
+  // An OS-side stop carries session-stop radio semantics: the armed
+  // tail drops with it, so a continuation landing afterwards is
+  // rejected instead of growing the queue the user just stopped.
+  const r = rig(pausedTailQueue());
+  await restoreOk(r);
+  const resumed = r.session.resume();
+  await pump();
+  assertEqual(radioCalls(r).length, 1, 'playing the tail arms it');
+  serviceTransition(r, { from: 'u1', to: null, reason: 'remote-stop' });
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.mode, 'stopped', 'remote-stop stops the queue');
+  assertEqual(snap.radio, null, 'remote-stop disarms the tail');
+  // The in-flight seed page is stale against the dropped record.
+  r.ytm.settleRadio(
+    ok(page([meta('youtube-music', 'v1', 'R1', 'A', 200_000)], 'cont-1')),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.occurrences.length,
+    1,
+    'late seed page discarded',
+  );
+  r.player.cancelPendingPrepares();
+  await resumed;
   await r.session.dispose();
 }
 
@@ -2083,6 +2113,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['autoArmSeedsOnPlayingTail', autoArmSeedsOnPlayingTail],
   ['autoArmSkipsMidQueue', autoArmSkipsMidQueue],
   ['autoArmSuppressedAfterDisarm', autoArmSuppressedAfterDisarm],
+  ['remoteStopDisarmsTail', remoteStopDisarmsTail],
   ['autoArmDrainResumesIntoTail', autoArmDrainResumesIntoTail],
   ['autoArmServiceDrainResumes', autoArmServiceDrainResumes],
   ['shuffleArmResumeWalksDeal', shuffleArmResumeWalksDeal],
