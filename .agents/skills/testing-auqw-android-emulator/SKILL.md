@@ -367,9 +367,9 @@ library). `auqw://search` only publishes the page + advisory prewarm
 — it writes NO library rows, so on an empty library every index is
 "out of range". Materialize first: `auqw://play-result?i=N` calls
 addAndPlay → upserts exactly that item — but ONLY when the result
-isn't already queued; a repeat of the same index hits the
-queuedOccurrenceForRef → playOccurrence path and adds no row. Fire
-DISTINCT indices for N rows. In the API-36 gate one fresh play grew
+isn't already queued; a repeat of the same index now replaces the
+queue (dedupe is gone — `playRecordings`/`playMetadata` clear then
+enqueue) and still adds no row. Fire DISTINCT indices for N rows. In the API-36 gate one fresh play grew
 the table to ~50 rows — playback-driven ingest (queue-context/radio)
 materializes more; don't rely on the count, verify:
 `adb shell "run-as com.vehicoule.auqw sqlite3 files/SQLite/auqw.db

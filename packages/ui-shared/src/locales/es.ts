@@ -109,7 +109,10 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'queue.failed': 'no se pudo reproducir',
   'queue.reorder': 'reordenar la cola',
   'queue.reorderDone': 'reordenación terminada',
+  'queue.clear': 'vaciar la cola',
   'queue.badge.repeat': 'repetir',
+  'queue.origin': 'reproduciendo desde {name}',
+  'queue.origin.search': 'búsqueda “{query}”',
 
   // ---- search -------------------------------------------------------------
   'search.fieldLabel': 'buscar',
@@ -575,6 +578,7 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'action.seek': 'posición',
   'action.enqueueTrack': 'encolar pista',
   'action.addToQueue': 'añadir a la cola',
+  'action.playNext': 'reproducir a continuación',
   'action.createPlaylist': 'crear playlist',
   'action.renamePlaylist': 'renombrar playlist',
   'action.deletePlaylist': 'eliminar playlist',

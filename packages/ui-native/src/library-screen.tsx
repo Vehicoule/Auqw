@@ -69,31 +69,6 @@ function CollectionTile({ view }: { readonly view: LibraryCollectionView }) {
           {view.countLabel}
         </Text>
       </View>
-      {/*
-       * Per-tile play affordance: nested pressable wins responder
-       * negotiation, so a play tap never opens the collection.
-       * Empty collections disable honestly.
-       */}
-      {view.enabled && (
-        <Pressable
-          compact
-          onPress={view.onPlay}
-          accessibilityLabel={view.playA11yLabel}
-          style={({ pressed }) => [
-            {
-              width: 30,
-              height: 30,
-              borderRadius: theme.radius.pill,
-              alignItems: 'center',
-              justifyContent: 'center',
-              backgroundColor: theme.colors.accentSoft,
-            },
-            pressed && { backgroundColor: theme.colors.fg18 },
-          ]}
-        >
-          <Icon name="play" size={13} color={theme.colors.accent} />
-        </Pressable>
-      )}
     </Pressable>
   );
 }
@@ -284,7 +259,6 @@ export function LibraryScreen({
   onToggleLike,
   onContext,
   onOpenCollection,
-  onPlayCollection,
   onOpenCard,
   onOpenArtist,
   onCreatePlaylist,
@@ -296,7 +270,6 @@ export function LibraryScreen({
     onToggleLike,
     onContext,
     onOpenCollection,
-    onPlayCollection,
     onOpenCard,
     onOpenArtist,
     onCreatePlaylist,

@@ -316,7 +316,6 @@ function GalleryBody({
   };
   const playlistHandlers = {
     onBack: noop,
-    onPlayAll: noop,
     onRename: noop,
     onDelete: noop,
     scrollEnabled: false,
@@ -839,7 +838,6 @@ function GalleryBody({
                 onToggleLike={noop}
                 onContext={noop}
                 onOpenCollection={noop}
-                onPlayCollection={noop}
                 onOpenCard={noop}
                 onOpenArtist={noop}
                 onCreatePlaylist={noop}
@@ -860,7 +858,6 @@ function GalleryBody({
             <CollectionScreen
               model={collection}
               onBack={noop}
-              onPlayAll={noop}
               onPressItem={noop}
               onToggleLike={noop}
               onContext={noop}

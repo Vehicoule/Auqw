@@ -25,8 +25,6 @@ import {
   isMatchGate,
   isRefRejected,
   previewImport,
-  queuedOccurrenceFor,
-  queuedOccurrenceForRef,
   redactSensitive,
   selectionFromSettings,
 } from '@auqw/application';
@@ -39,6 +37,7 @@ import type {
   LocalFileSource,
   OperationContext,
   PrewarmFocus,
+  QueueOrigin,
   Result,
   SearchState,
   Settings,
@@ -110,7 +109,9 @@ import {
   advanceTargetId,
   skipTargetIds,
   failedSkipIds,
+  overlayRouteIndex,
   playlistDownloadPlan,
+  queueOriginRoute,
   reportStoredDownloadError,
   rowActionsModel,
   stageDownloadChip,
@@ -142,6 +143,14 @@ function shellOverlayOf<E extends { readonly type: string }>(
 }
 
 const freshSignal = () => new CancellationSource().signal;
+
+// Queue provenance for entity plays — the page fetch names both the
+// navigable ref and the display title; a fetch without its page can't
+// name itself honestly, so it mints no origin.
+const entityOriginFor = (fetch: EntityFetch | null): QueueOrigin | undefined =>
+  fetch?.page == null
+    ? undefined
+    : { kind: 'entity', ref: fetch.ref, name: fetch.page.entity.title };
 
 const refKey = (r: {
   readonly provider: string;
@@ -1929,21 +1938,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
       if (!canPlay(recordingId)) {
         return;
       }
-      // Tap-to-play dedupe: a queued track jumps to its occurrence
-      // instead of minting a repeat — 'add to queue' stays additive.
-      const queued =
-        queuedOccurrenceFor(state.queue, recordingId) ??
-        (await session.enqueueRecording(recordingId).then((r) => {
-          if (!r.ok) {
-            reportResult('action.enqueueTrack', r);
-          }
-          return r.ok ? r.value : null;
-        }));
-      if (queued !== null) {
-        await dispatchPlay('common.play', session.playOccurrence(queued));
-      }
+      // A play tap recontextualizes: the tapped recording becomes the
+      // queue — never an append-and-jump that orphans pending items.
+      await dispatchPlay(
+        'common.play',
+        session.playRecordings([{ recordingId, selectedRef: null }]),
+      );
     },
-    [session, state.queue, canPlay, dispatchPlay],
+    [session, canPlay, dispatchPlay],
   );
 
   // Queue presses and transport follow the same offline rule as
@@ -2028,21 +2030,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [online, state.recordings, localPlayable],
   );
 
-  // The playRecording dedupe for metadata taps: a tap's source ref
-  // can match a queued occurrence (or its recording's refs) before
-  // the metadata materializes into one.
+  // Metadata taps recontextualize the same way — the tapped item
+  // becomes the whole queue.
   const playMeta = useCallback(
-    (meta: TrackMetadata) => {
-      const queued = queuedOccurrenceForRef(
-        state.queue,
-        state.recordings,
-        meta.sourceRef,
-      );
-      return queued === null
-        ? session.addAndPlay(meta)
-        : session.playOccurrence(queued);
-    },
-    [session, state.queue, state.recordings],
+    (meta: TrackMetadata) => session.addAndPlay(meta),
+    [session],
   );
 
   // The shared result-tap funnel: the gate fires inside so callers'
@@ -2084,9 +2076,45 @@ export function useAppShell<E extends { readonly type: string } = never>(
         void playRecording(row.key.slice('local:'.length));
         return;
       }
-      playMetaRow(resultMeta.current.get(row.key), query);
+      const tapped = resultMeta.current.get(row.key);
+      if (tapped === undefined || !canPlayMeta(tapped)) {
+        return;
+      }
+      // The provider result list is the play context — the tapped
+      // result starts mid-list with its siblings queued behind it.
+      const items =
+        searchState.type === 'content' ? searchState.page.items : [];
+      const metas =
+        ports.entityPlayRequiresCanPlay === true || online === false
+          ? items.filter(canPlayMeta)
+          : items;
+      const startAt = metas.indexOf(tapped);
+      if (startAt < 0) {
+        return;
+      }
+      // Results render the committed query — a cleared or edited
+      // input must not stamp (or validate-reject) the origin.
+      recordRecentSearch(committedQuery);
+      void dispatchPlay(
+        'action.playResult',
+        session.playMetadata(metas, {
+          startAt,
+          origin: { kind: 'search', query: committedQuery },
+        }),
+      );
     },
-    [playMetaRow, playRecording, query, ports.localCatalog],
+    [
+      playRecording,
+      committedQuery,
+      online,
+      ports.localCatalog,
+      ports.entityPlayRequiresCanPlay,
+      searchState,
+      canPlayMeta,
+      recordRecentSearch,
+      dispatchPlay,
+      session,
+    ],
   );
 
   // A home card carries either a materialized recording id (recents /
@@ -2382,6 +2410,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   const removeQueueOccurrence = useCallback(
     (occurrenceId: string) => void session.removeOccurrence(occurrenceId),
+    [session],
+  );
+
+  // Clear queue — keeps the cursor row playing, flushes the rest.
+  const clearQueue = useCallback(
+    () => void session.clearQueue(),
     [session],
   );
 
@@ -2888,7 +2922,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // ---- collection / playlist play + download -----------------------
 
   // The shared play-list funnel: filter to attachable rows, then play
-  // under the caller's action label.
+  // under the caller's action label. `startAt` indexes `rows` — the
+  // tapped row's context play starts mid-list; when it survives the
+  // playable filter its position lands the cursor.
   const playRows = useCallback(
     (
       action: MessageId,
@@ -2896,25 +2932,69 @@ export function useAppShell<E extends { readonly type: string } = never>(
         readonly recordingId: string;
         readonly selectedRef: SourceRef | null;
       }[],
+      startAt = 0,
+      origin?: QueueOrigin,
     ) => {
       const playable = rows.filter((row) => canPlay(row.recordingId));
-      if (playable.length === 0) {
+      const tapped = rows[startAt];
+      const start = tapped === undefined ? 0 : playable.indexOf(tapped);
+      if (playable.length === 0 || start < 0) {
         return;
       }
-      void dispatchPlay(action, session.playRecordings(playable));
+      void dispatchPlay(
+        action,
+        session.playRecordings(playable, { startAt: start, origin }),
+      );
     },
     [session, canPlay, dispatchPlay],
   );
 
+  // A collection row tap queues the whole collection — the tapped row
+  // starts playing with its siblings behind it.
   const playCollectionRows = useCallback(
-    (rows: readonly { recordingId: string }[]) =>
+    (
+      key: 'liked' | 'top50' | 'history' | 'downloads',
+      rows: readonly CollectionRowModel[],
+      tapped?: CollectionRowModel,
+    ) => {
+      const startAt =
+        tapped === undefined
+          ? 0
+          : rows.findIndex((row) => row.key === tapped.key);
+      if (startAt < 0) {
+        return;
+      }
       playRows(
         'action.playCollection',
         rows.map((row) => ({
           recordingId: row.recordingId,
           selectedRef: null,
         })),
-      ),
+        startAt,
+        { kind: 'collection', collection: key },
+      );
+    },
+    [playRows],
+  );
+
+  // A library row tap queues the whole library track list at the
+  // tapped recording — the recentlyAdded rail lands the same context.
+  const playLibraryItem = useCallback(
+    (items: readonly TrackRowModel[], recordingId: string) => {
+      const startAt = items.findIndex((row) => row.key === recordingId);
+      if (startAt < 0) {
+        return;
+      }
+      playRows(
+        'common.play',
+        items.map((row) => ({
+          recordingId: row.key,
+          selectedRef: null,
+        })),
+        startAt,
+        { kind: 'library' },
+      );
+    },
     [playRows],
   );
 
@@ -2929,30 +3009,44 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [isOwned, ports.preferOwnedRef],
   );
 
-  const playPlaylist = useCallback(
-    (model: ReturnType<typeof playlistModelFor>) =>
-      playRows(
-        'action.playPlaylist',
-        (model?.entries ?? []).map((entry) => ({
-          recordingId: entry.recordingId,
-          selectedRef: playRefFor(entry.recordingId, entry.selectedRef),
-        })),
-      ),
-    [playRows, playRefFor],
-  );
-
+  // A playlist row tap queues the playlist's entries with their pins,
+  // starting on the tapped entry — the playlist is the play context.
   const playPlaylistEntry = useCallback(
-    (entry: {
-      readonly recordingId: string;
-      readonly selectedRef: SourceRef | null;
-    }) =>
-      playRows('action.playPlaylistEntry', [
-        {
-          recordingId: entry.recordingId,
-          selectedRef: playRefFor(entry.recordingId, entry.selectedRef),
-        },
-      ]),
-    [playRows, playRefFor],
+    (
+      model: ReturnType<typeof playlistModelFor>,
+      entry: { readonly entryId: string },
+    ) => {
+      const entries = model?.entries ?? [];
+      const tapped = entries.find((e) => e.entryId === entry.entryId);
+      if (tapped === undefined) {
+        return;
+      }
+      // Missing recordings render as unavailable rows — they can't
+      // mint an occurrence and sending one fails the whole batch, so
+      // the context filters to known recordings before it plays.
+      const known = new Set(state.recordings.map((rec) => rec.id));
+      const playable = entries.filter((e) => known.has(e.recordingId));
+      const startAt = playable.indexOf(tapped);
+      if (startAt < 0) {
+        return;
+      }
+      playRows(
+        'action.playPlaylistEntry',
+        playable.map((e) => ({
+          recordingId: e.recordingId,
+          selectedRef: playRefFor(e.recordingId, e.selectedRef),
+        })),
+        startAt,
+        model === null
+          ? undefined
+          : {
+              kind: 'playlist',
+              playlistId: model.playlistId,
+              name: model.name,
+            },
+      );
+    },
+    [state.recordings, playRows, playRefFor],
   );
 
   const playlistDownloadFor = useCallback(
@@ -3071,6 +3165,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
             ? session.enqueueRecording(target.recordingId)
             : session.enqueueMetadata(target.meta)
           ).then(reporter('action.addToQueue'));
+          break;
+        case 'playNext':
+          void (target.kind === 'recording'
+            ? session.playNextRecording(target.recordingId)
+            : session.playNextMetadata(target.meta)
+          ).then(reporter('action.playNext'));
           break;
         case 'add':
           setPickerFor(target);
@@ -3232,39 +3332,46 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [session],
   );
 
-  // Entity-screen play — ports.entityPlayRequiresCanPlay gates the
-  // desktop canPlayMeta filter + empty early-return; mobile plays
-  // every fetched row.
-  const entityPlayAll = useCallback(
-    (fetch: EntityFetch | null, entryKey: string, shuffle: boolean) => {
-      const metas = entityModelFor(fetch)
+  // Entity-page metas in display order — the context a row tap
+  // queues (and the list shuffle draws from).
+  // ports.entityPlayRequiresCanPlay gates the desktop canPlayMeta
+  // filter; offline always filters too — a stream-only row can't
+  // mint a playable occurrence while the device is down.
+  const entityContextMetas = useCallback(
+    (fetch: EntityFetch | null, entryKey: string): TrackMetadata[] =>
+      entityModelFor(fetch)
         .items.map((row) =>
           entityMeta.current.get(`${entryKey}:${row.key}`),
         )
         .filter(
           (m): m is TrackMetadata =>
             m !== undefined &&
-            (ports.entityPlayRequiresCanPlay !== true ||
+            ((ports.entityPlayRequiresCanPlay !== true &&
+              online !== false) ||
               canPlayMeta(m)),
-        );
-      if (
-        ports.entityPlayRequiresCanPlay === true &&
-        metas.length === 0
-      ) {
+        ),
+    [entityModelFor, canPlayMeta, online, ports.entityPlayRequiresCanPlay],
+  );
+
+  // Shuffle-play the entity's whole context — the one header action
+  // row taps can't express.
+  const entityShuffleAll = useCallback(
+    (fetch: EntityFetch | null, entryKey: string) => {
+      const metas = entityContextMetas(fetch, entryKey);
+      if (metas.length === 0) {
         return;
       }
       void dispatchPlay(
-        shuffle ? 'action.shuffleAll' : 'collection.playAll',
-        session.playMetadata(
-          metas,
-          shuffle ? { shuffle: true } : undefined,
-        ),
+        'action.shuffleAll',
+        session.playMetadata(metas, {
+          shuffle: true,
+          origin: entityOriginFor(fetch),
+        }),
       );
     },
     [
       session,
-      entityModelFor,
-      canPlayMeta,
+      entityContextMetas,
       dispatchPlay,
       ports.entityPlayRequiresCanPlay,
     ],
@@ -3276,10 +3383,28 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [],
   );
 
+  // An entity row tap queues the page's track list at the tapped row
+  // — the album's tracklist or the artist's top tracks is the context.
   const onEntityRowPress = useCallback(
-    (entryKey: string, row: TrackRowModel) =>
-      playMetaRow(entityRowMeta(entryKey, row), null),
-    [entityRowMeta, playMetaRow],
+    (entryKey: string, fetch: EntityFetch | null, row: TrackRowModel) => {
+      const tapped = entityRowMeta(entryKey, row);
+      if (tapped === undefined || !canPlayMeta(tapped)) {
+        return;
+      }
+      const metas = entityContextMetas(fetch, entryKey);
+      const startAt = metas.indexOf(tapped);
+      if (startAt < 0) {
+        return;
+      }
+      void dispatchPlay(
+        'action.playResult',
+        session.playMetadata(metas, {
+          startAt,
+          origin: entityOriginFor(fetch),
+        }),
+      );
+    },
+    [entityRowMeta, entityContextMetas, canPlayMeta, dispatchPlay, session],
   );
 
   // ---- shell chrome helpers ----------------------------------------
@@ -3300,6 +3425,64 @@ export function useAppShell<E extends { readonly type: string } = never>(
     clearOverlays();
     setSearchFocusTick((n) => n + 1);
   }, [clearOverlays]);
+
+  // Queue chrome "playing from …" — navigates back to the surface
+  // that minted the queue. A source already in the overlay stack is
+  // unwound to (dismiss drops everything above it) instead of
+  // stacking a duplicate — Back should leave the source, not walk
+  // copies. ports.closeStageOnContextNav: mobile's sheet covers the
+  // world — it folds so the destination is visible; desktop's stage
+  // column sits beside the world and stays.
+  const openQueueContext = useCallback(
+    (origin: QueueOrigin) => {
+      const target = queueOriginRoute(origin);
+      const match =
+        target === null
+          ? -1
+          : overlayRouteIndex(
+              overlayStack.map((entry) => shellOverlayOf(entry.overlay)),
+              target,
+            );
+      if (match !== -1) {
+        const above = overlayStack[match + 1];
+        if (above !== undefined) {
+          dismissOverlay(above.key);
+        }
+      }
+      if (match === -1) {
+        switch (origin.kind) {
+          case 'collection':
+            pushOverlay({ type: 'collection', key: origin.collection });
+            break;
+          case 'playlist':
+            pushOverlay({ type: 'playlist', playlistId: origin.playlistId });
+            break;
+          case 'entity':
+            openEntity(origin.ref);
+            break;
+          case 'search':
+            selectTab('explore');
+            applySearchText(origin.query);
+            break;
+          case 'library':
+            selectTab('library');
+            break;
+        }
+      }
+      if (ports.closeStageOnContextNav === true) {
+        setStageOpen(false);
+      }
+    },
+    [
+      overlayStack,
+      dismissOverlay,
+      pushOverlay,
+      openEntity,
+      selectTab,
+      applySearchText,
+      ports.closeStageOnContextNav,
+    ],
+  );
   // The pane an open lands on — computed once so the open commit and
   // the sheet's parked normalization never disagree. A collapsed
   // stage must already name this pane by the next rise: the mobile
@@ -3545,16 +3728,18 @@ export function useAppShell<E extends { readonly type: string } = never>(
     onMoveQueueItem,
     onMoveQueueItemTo,
     removeQueueOccurrence,
+    clearQueue,
+    openQueueContext,
     seekToPosition,
     canPlay,
     playRecording,
     onResultPress,
     onHomeCardPress,
     playCollectionRows,
-    playPlaylist,
+    playLibraryItem,
     playPlaylistEntry,
     playRefFor,
-    entityPlayAll,
+    entityShuffleAll,
     onEntityRowPress,
     reportPlay,
     // search

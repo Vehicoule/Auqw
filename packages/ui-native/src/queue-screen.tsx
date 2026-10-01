@@ -3,6 +3,7 @@ import { useTheme } from './theme.tsx';
 import {
   IconButton,
   PlayingArtwork,
+  Pressable,
   Text,
 } from './primitives.tsx';
 import { QueueList } from './queue-list';
@@ -27,6 +28,8 @@ export function QueueScreen({
   topInset = 0,
   scrollEnabled = true,
   onToggleReorder,
+  onClearQueue,
+  onOpenContext,
   onPressItem,
   onRemoveItem,
   onMoveItem,
@@ -38,6 +41,8 @@ export function QueueScreen({
     player,
     reordering,
     onToggleReorder,
+    onClearQueue,
+    onOpenContext,
   });
   return (
     <View
@@ -63,6 +68,16 @@ export function QueueScreen({
           {view.countLabel}
         </Text>
         <View style={{ flex: 1 }} />
+        {view.clearQueue !== null && (
+          <IconButton
+            icon={view.clearQueue.icon}
+            size={32}
+            iconSize={14}
+            color={theme.colors.textSecondary}
+            accessibilityLabel={view.clearQueue.a11yLabel}
+            onPress={view.clearQueue.onPress}
+          />
+        )}
         {view.reorder !== null && (
           <IconButton
             icon={view.reorder.icon}
@@ -79,6 +94,24 @@ export function QueueScreen({
           />
         )}
       </View>
+      {view.origin !== null && (
+        <Pressable
+          onPress={view.origin.onPress}
+          accessibilityLabel={view.origin.label}
+          compact
+          feedback="opacity"
+          style={{
+            alignSelf: 'flex-start',
+            marginHorizontal: theme.spacing.screen,
+            marginTop: -theme.spacing.sm,
+            marginBottom: theme.spacing.sm,
+          }}
+        >
+          <Text variant="metadata" color="secondary" numberOfLines={1}>
+            {view.origin.label}
+          </Text>
+        </Pressable>
+      )}
       {view.current !== null && (
         <View
           style={{

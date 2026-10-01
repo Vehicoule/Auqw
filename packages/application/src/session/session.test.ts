@@ -1,6 +1,7 @@
 import type {
   EntityRef,
   QueueOccurrence,
+  QueueOrigin,
   Recording,
   Settings,
   SourceRef,
@@ -2984,6 +2985,476 @@ async function shuffleMutationReconciles(): Promise<void> {
     [0, 1, 2],
     'the new walk rides the next projection',
   );
+}
+
+async function playTapReplacesQueue(): Promise<void> {
+  // A play tap recontextualizes: pending items don't orphan into
+  // history — the tapped item becomes the whole queue, and an armed
+  // suggestion tail disarms with the context it grew from.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C'].map((id) =>
+        recording(`r${id}`, [ref('youtube-music', `y${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B', 'C'].map((id) =>
+          occurrence(`o${id}`, `r${id}`),
+        ),
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  const radio = r.session.startRadio(ref('youtube-music', 'yA'));
+  await pump();
+  assert(
+    r.ytm.settleRadio(
+      ok({
+        candidates: [
+          meta('youtube-music', 'yR1', 'R1', 'Artist', 200_000),
+        ],
+        continuation: null,
+      }),
+    ),
+    'radio seed pending',
+  );
+  assert((await radio).ok, 'startRadio failed');
+  await pump();
+  assertEqual(
+    readyOf(r).queue.occurrences.length,
+    4,
+    'the tail grew onto the queue',
+  );
+  const played = r.session.playMetadata([
+    meta('youtube-music', 'yX', 'New', 'Artist', 200_000),
+  ]);
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(
+    snap.queue.occurrences.length,
+    1,
+    'the queue is the tapped item alone — pending never orphans',
+  );
+  assertEqual(snap.queue.occurrences[0]?.selectedRef?.id, 'yX');
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[0]?.occurrenceId,
+    'the tapped item owns the cursor',
+  );
+  assert(
+    snap.radio === null || snap.radio.seedRef.id !== 'yA',
+    'the old suggestion tail disarmed — a fresh arm must ride the new context',
+  );
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'h-new'));
+  r.player.settlePrepare(ok('req-new'));
+  assert((await played).ok, 'the play attempt prepares');
+  await r.session.dispose();
+}
+
+async function enqueueAheadOfRadioTail(): Promise<void> {
+  // "Add to queue" lands ahead of the suggestion tail: the first
+  // pending tail-minted item is the boundary — a manual add never
+  // queues behind fetched suggestions.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'D'].map((id) =>
+        recording(`r${id}`, [ref('youtube-music', `y${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B'].map((id) => occurrence(`o${id}`, `r${id}`)),
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  const radio = r.session.startRadio(ref('youtube-music', 'yA'));
+  await pump();
+  assert(
+    r.ytm.settleRadio(
+      ok({
+        candidates: [
+          meta('youtube-music', 'yR1', 'R1', 'Artist', 200_000),
+          meta('youtube-music', 'yR2', 'R2', 'Artist', 200_000),
+        ],
+        continuation: null,
+      }),
+    ),
+    'radio seed pending',
+  );
+  assert((await radio).ok, 'startRadio failed');
+  await pump();
+  const enqueued = await r.session.enqueueRecording('rD');
+  assert(enqueued.ok);
+  const ids = readyOf(r).queue.occurrences.map((o) => o.occurrenceId);
+  assertEqual(ids.length, 5);
+  assertEqual(
+    ids[2],
+    enqueued.value,
+    'the manual add lands at the suggestion boundary',
+  );
+  await r.session.dispose();
+}
+
+async function playNextBehindCursor(): Promise<void> {
+  // Play Next lands right behind the playhead — not at the end.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C', 'D'].map((id) =>
+        recording(`r${id}`, [ref('itunes', `i${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B', 'C'].map((id) =>
+          occurrence(`o${id}`, `r${id}`),
+        ),
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  const played = await r.session.playNextRecording('rD');
+  assert(played.ok);
+  const ids = readyOf(r).queue.occurrences.map((o) => o.occurrenceId);
+  assertDeepEqual(ids, ['oA', played.value, 'oB', 'oC']);
+  await r.session.dispose();
+}
+
+async function playNextUnderShuffleSplicesDeal(): Promise<void> {
+  // Under shuffle the "next" landing is a deal splice behind the
+  // dealt cursor — the random-reconcile slot would scatter it.
+  const r = shuffleRig([0.8, 0.1]);
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  assertDeepEqual(readyOf(r).shuffleOrder, ['oA', 'oC', 'oB']);
+  const played = await r.session.playNextRecording('rD');
+  assert(played.ok);
+  await pump();
+  assertDeepEqual(
+    readyOf(r).shuffleOrder,
+    ['oA', played.value, 'oC', 'oB'],
+    'the new id sits behind the dealt cursor',
+  );
+  await r.session.dispose();
+}
+
+async function enqueueUnderShuffleStaysAheadOfRadio(): Promise<void> {
+  // Under shuffle the radio boundary holds in dealt order too: a
+  // manual add splices ahead of the first pending suggestion —
+  // a fetched item never plays before what the user queued.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C', 'D'].map((id) =>
+        recording(`r${id}`, [ref('youtube-music', `y${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B', 'C'].map((id) =>
+          occurrence(`o${id}`, `r${id}`),
+        ),
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    undefined,
+    undefined,
+    undefined,
+    new SequenceRandom([0.8, 0.1, 0.5, 0.3, 0.9]),
+  );
+  await restoreOk(r);
+  await pump();
+  const radio = r.session.startRadio(ref('youtube-music', 'yA'));
+  await pump();
+  assert(
+    r.ytm.settleRadio(
+      ok({
+        candidates: [
+          meta('youtube-music', 'yR1', 'R1', 'Artist', 200_000),
+          meta('youtube-music', 'yR2', 'R2', 'Artist', 200_000),
+        ],
+        continuation: null,
+      }),
+    ),
+    'radio seed pending',
+  );
+  assert((await radio).ok, 'startRadio failed');
+  await pump();
+  assert((await r.session.toggleShuffle()).ok);
+  await pump();
+  const tailIds = readyOf(r).queue.occurrences
+    .slice(3)
+    .map((o) => o.occurrenceId);
+  assertEqual(tailIds.length, 2, 'the suggestion tail grew');
+  const enqueued = await r.session.enqueueRecording('rD');
+  assert(enqueued.ok);
+  await pump();
+  const order = readyOf(r).shuffleOrder;
+  assert(order !== null, 'shuffle dealt a walk');
+  const pos = order.indexOf(enqueued.value);
+  const boundary = Math.min(...tailIds.map((id) => order.indexOf(id)));
+  assert(
+    pos >= 0 && pos < boundary,
+    `manual add must deal ahead of the suggestion boundary (pos ${pos}, boundary ${boundary})`,
+  );
+  await r.session.dispose();
+}
+
+async function addOnDeadCursorParksPaused(): Promise<void> {
+  // An 'add' landing on a cursorless queue parks as the paused
+  // current — it surfaces in the chrome instead of sitting unseen.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C'].map((id) =>
+        recording(`r${id}`, [ref('itunes', `i${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B'].map((id) => occurrence(`o${id}`, `r${id}`)),
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  const enqueued = await r.session.enqueueRecording('rC');
+  assert(enqueued.ok);
+  const snap = readyOf(r);
+  assertEqual(snap.queue.currentOccurrenceId, enqueued.value);
+  assertEqual(snap.queue.mode, 'paused');
+  const played = await r.session.playNextMetadata(
+    meta('itunes', 'iX', 'New', 'Artist', 200_000),
+  );
+  assert(played.ok);
+  const next = readyOf(r).queue;
+  assertEqual(
+    next.occurrences[next.occurrences.length - 1]?.occurrenceId,
+    played.value,
+    'play-next lands behind the parked cursor',
+  );
+  assertEqual(next.currentOccurrenceId, enqueued.value);
+  await r.session.dispose();
+}
+
+async function clearQueueKeepsCurrent(): Promise<void> {
+  // Clear queue flushes pending + history; the cursor row keeps its
+  // mode and position.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C'].map((id) =>
+        recording(`r${id}`, [ref('itunes', `i${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B', 'C'].map((id) =>
+          occurrence(`o${id}`, `r${id}`),
+        ),
+        currentOccurrenceId: 'oB',
+        positionMs: 4_200,
+        mode: 'paused',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.clearQueue()).ok);
+  const snap = readyOf(r).queue;
+  assertDeepEqual(
+    snap.occurrences.map((o) => o.occurrenceId),
+    ['oB'],
+  );
+  assertEqual(snap.currentOccurrenceId, 'oB');
+  assertEqual(snap.positionMs, 4_200);
+  assertEqual(snap.mode, 'paused');
+  await r.session.dispose();
+}
+
+async function clearQueueEmptiesDead(): Promise<void> {
+  // A cursorless queue clears outright — no parking, no leftovers.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B'].map((id) =>
+        recording(`r${id}`, [ref('itunes', `i${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B'].map((id) => occurrence(`o${id}`, `r${id}`)),
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.clearQueue()).ok);
+  const snap = readyOf(r).queue;
+  assertEqual(snap.occurrences.length, 0);
+  assertEqual(snap.mode, 'stopped');
+  await r.session.dispose();
+}
+
+async function playBatchStartAtCursor(): Promise<void> {
+  // Context play: tapping row N queues the whole list — rows above
+  // the tap stay as history and the tapped row owns the cursor.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C', 'D'].map((id) =>
+        recording(`r${id}`, [ref('youtube-music', `y${id}`)]),
+      ),
+      queue: {
+        revision: 0,
+        occurrences: [],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  const played = r.session.playRecordings(
+    ['rA', 'rB', 'rC', 'rD'].map((id) => ({
+      recordingId: id,
+      selectedRef: ref('youtube-music', `y${id.slice(1)}`),
+    })),
+    { startAt: 2 },
+  );
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 4, 'the whole context queued');
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[2]?.occurrenceId,
+    'the tapped row owns the cursor — rows above it sit as history',
+  );
+  assertEqual(snap.queue.occurrences[2]?.recordingId, 'rC');
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'h-c'));
+  r.player.settlePrepare(ok('req-c'));
+  assert((await played).ok, 'the play attempt prepares');
+  await r.session.dispose();
+}
+
+async function queueOriginSemantics(): Promise<void> {
+  // Provenance rides the queue snapshot: a play that names an origin
+  // stamps it; replace-play without one clears it; clearQueue keeps it.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B'].map((id) =>
+        recording(`r${id}`, [ref('youtube-music', `y${id}`)]),
+      ),
+      queue: {
+        revision: 0,
+        occurrences: [],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  const liked: QueueOrigin = { kind: 'collection', collection: 'liked' };
+  const played = r.session.playRecordings(
+    ['rA', 'rB'].map((id) => ({
+      recordingId: id,
+      selectedRef: ref('youtube-music', `y${id.slice(1)}`),
+    })),
+    { origin: liked },
+  );
+  await pump();
+  assertDeepEqual(readyOf(r).queue.origin, liked, 'the origin stamps');
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'h-a'));
+  r.player.settlePrepare(ok('req-a'));
+  assert((await played).ok, 'the play attempt prepares');
+  assert((await r.session.clearQueue()).ok);
+  assertDeepEqual(
+    readyOf(r).queue.origin,
+    liked,
+    'clearQueue keeps the origin — the surviving row still belongs to it',
+  );
+  const contextless = r.session.playRecordings([
+    { recordingId: 'rA', selectedRef: ref('youtube-music', 'yA') },
+  ]);
+  await pump();
+  assertEqual(
+    readyOf(r).queue.origin,
+    undefined,
+    'a contextless play clears the origin',
+  );
+  await emitPrepared(r, 'ctx');
+  await contextless;
+  const invalid = await r.session.playRecordings(
+    [{ recordingId: 'rA', selectedRef: ref('youtube-music', 'yA') }],
+    { origin: { kind: 'nonsense' } as unknown as QueueOrigin },
+  );
+  assert(!invalid.ok, 'invalid origin rejected');
+  assertEqual(invalid.error.kind, 'invalid-response');
+
+  // Source names ride the same bound the source records carry — a
+  // playlist named at the 512-char domain bound must still play.
+  const longName = 'x'.repeat(512);
+  const namedOrigin: QueueOrigin = {
+    kind: 'playlist',
+    playlistId: 'pl-1',
+    name: longName,
+  };
+  const named = r.session.playRecordings(
+    [{ recordingId: 'rA', selectedRef: ref('youtube-music', 'yA') }],
+    { origin: namedOrigin },
+  );
+  await pump();
+  assertDeepEqual(
+    readyOf(r).queue.origin,
+    namedOrigin,
+    'a source name at the domain bound stages',
+  );
+  await emitPrepared(r, 'b');
+  assert((await named).ok, 'the bound-name play prepares');
+
+  // The engine deep-freezes an entity ref on the way in — a caller
+  // mutating its own copy afterwards must not rewrite stored
+  // provenance behind the revision's back.
+  const refA = { provider: 'ytm', kind: 'album' as const, id: 'alb-1' };
+  const entityOrigin: QueueOrigin = {
+    kind: 'entity',
+    ref: refA,
+    name: 'Album',
+  };
+  const entityPlay = r.session.playRecordings(
+    [{ recordingId: 'rA', selectedRef: ref('youtube-music', 'yA') }],
+    { origin: entityOrigin },
+  );
+  await pump();
+  await emitPrepared(r, 'c');
+  assert((await entityPlay).ok, 'entity origin plays');
+  (refA as { provider: string }).provider = 'mutated';
+  const stored = readyOf(r).queue.origin;
+  assert(
+    stored?.kind === 'entity' && stored.ref.provider === 'ytm',
+    'stored origin ignores post-mint mutation of the caller ref',
+  );
+  await r.session.dispose();
 }
 
 async function shuffleToggleOffRestoresCanonical(): Promise<void> {
@@ -6562,6 +7033,16 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['shuffleRepeatAllWrapsDealtEnds', shuffleRepeatAllWrapsDealtEnds],
   ['shuffleWrapCountsLoop', shuffleWrapCountsLoop],
   ['shuffleMutationReconciles', shuffleMutationReconciles],
+  ['playTapReplacesQueue', playTapReplacesQueue],
+  ['playBatchStartAtCursor', playBatchStartAtCursor],
+  ['queueOriginSemantics', queueOriginSemantics],
+  ['enqueueAheadOfRadioTail', enqueueAheadOfRadioTail],
+  ['playNextBehindCursor', playNextBehindCursor],
+  ['playNextUnderShuffleSplicesDeal', playNextUnderShuffleSplicesDeal],
+  ['enqueueUnderShuffleStaysAheadOfRadio', enqueueUnderShuffleStaysAheadOfRadio],
+  ['addOnDeadCursorParksPaused', addOnDeadCursorParksPaused],
+  ['clearQueueKeepsCurrent', clearQueueKeepsCurrent],
+  ['clearQueueEmptiesDead', clearQueueEmptiesDead],
   ['shuffleToggleOffRestoresCanonical', shuffleToggleOffRestoresCanonical],
   ['shuffleEndedFallbackFollowsDeal', shuffleEndedFallbackFollowsDeal],
   ['shuffleStaleProjectionEdge', shuffleStaleProjectionEdge],

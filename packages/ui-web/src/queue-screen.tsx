@@ -19,6 +19,8 @@ export function QueueScreen({
   reordering = false,
   scrollEnabled = true,
   onToggleReorder,
+  onClearQueue,
+  onOpenContext,
   ...listHandlers
 }: QueueScreenProps) {
   const view = useQueueScreenController({
@@ -26,6 +28,8 @@ export function QueueScreen({
     player,
     reordering,
     onToggleReorder,
+    onClearQueue,
+    onOpenContext,
   });
   return (
     <div
@@ -39,6 +43,16 @@ export function QueueScreen({
         <Text variant="metadata" color="secondary" className="uw-queue__count">
           {view.countLabel}
         </Text>
+        {view.clearQueue !== null && (
+          <IconButton
+            icon={view.clearQueue.icon}
+            size={32}
+            iconSize={14}
+            color="var(--text-secondary)"
+            ariaLabel={view.clearQueue.a11yLabel}
+            onPress={view.clearQueue.onPress}
+          />
+        )}
         {view.reorder !== null && (
           <IconButton
             icon={view.reorder.icon}
@@ -53,6 +67,17 @@ export function QueueScreen({
           />
         )}
       </div>
+      {view.origin !== null && (
+        <button
+          className="uw-queue__origin"
+          onClick={view.origin.onPress}
+          disabled={view.origin.onPress === undefined}
+        >
+          <Text variant="metadata" color="secondary" numberOfLines={1}>
+            {view.origin.label}
+          </Text>
+        </button>
+      )}
       {view.current !== null && (
         <div className="uw-queue__current" data-status={view.current.status}>
           <span className="uw-track-row__art">

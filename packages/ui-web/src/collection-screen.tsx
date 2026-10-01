@@ -8,7 +8,6 @@ export type CollectionScreenProps = {
   readonly model: CollectionModel;
   readonly scrollEnabled?: boolean | undefined;
   readonly onBack?: (() => void) | undefined;
-  readonly onPlayAll?: (() => void) | undefined;
   readonly onPressItem?: ((row: CollectionRowModel) => void) | undefined;
   /** Advisory row intent — hover/focus on a row; the host warms it. */
   readonly onRowIntent?: ((row: CollectionRowModel) => void) | undefined;
@@ -30,7 +29,6 @@ export function CollectionScreen({
   model,
   scrollEnabled = true,
   onBack,
-  onPlayAll,
   onPressItem,
   onRowIntent,
   onToggleLike,
@@ -57,18 +55,6 @@ export function CollectionScreen({
         <Text variant="metadata" color="secondary">
           {t('common.trackCount', { count: model.rows.length })}
         </Text>
-        <Pressable
-          onPress={model.rows.length === 0 ? undefined : onPlayAll}
-          ariaLabel={t('collection.playAllA11y', { title: model.title })}
-          className={`uw-playall${model.rows.length === 0 ? ' uw-off' : ''}`}
-        >
-          <Text
-            variant="metadata"
-            color={model.rows.length === 0 ? 'secondary' : 'accent'}
-          >
-            {t('collection.playAll')}
-          </Text>
-        </Pressable>
       </div>
       {model.rows.length === 0 ? (
         <EmptyState

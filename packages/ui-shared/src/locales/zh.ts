@@ -108,7 +108,10 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'queue.failed': '播放失败',
   'queue.reorder': '重排队列',
   'queue.reorderDone': '排序完成',
+  'queue.clear': '清空队列',
   'queue.badge.repeat': '重复',
+  'queue.origin': '正在播放：{name}',
+  'queue.origin.search': '搜索“{query}”',
 
   // ---- search -------------------------------------------------------------
   'search.fieldLabel': '搜索',
@@ -541,6 +544,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'action.seek': '跳转',
   'action.enqueueTrack': '加入队列',
   'action.addToQueue': '加入队列',
+  'action.playNext': '下一首播放',
   'action.createPlaylist': '新建歌单',
   'action.renamePlaylist': '重命名歌单',
   'action.deletePlaylist': '删除歌单',

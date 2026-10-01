@@ -44,7 +44,6 @@ export function EntityScreen({
   topInset = 0,
   scrollEnabled = true,
   onBack,
-  onPlayAll,
   onShuffleAll,
   onToggleLike,
   onPressItem,
@@ -56,7 +55,6 @@ export function EntityScreen({
   const theme = useTheme();
   const view = useEntityScreenController({
     model,
-    onPlayAll,
     onShuffleAll,
     onToggleLike,
     onPressItem,
@@ -153,7 +151,6 @@ export function EntityScreen({
           marginTop: theme.spacing.md,
         }}
       >
-        <HeaderPill view={view.play} />
         <HeaderPill view={view.shuffle} />
         {/*
          * Like only binds to a materialized entity (canLike); an

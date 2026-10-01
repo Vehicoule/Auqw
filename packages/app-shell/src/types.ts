@@ -24,6 +24,7 @@ import type {
   PeaksPort,
   PeaksStore,
   ProviderPort,
+  QueueOrigin,
   SearchHistoryStore,
   ReadySession,
   Result,
@@ -35,6 +36,7 @@ import type {
   UpdateSnapshot,
 } from '@auqw/application';
 import {
+  entityRefKey,
   nextQueueDestination,
   reportResult,
   t,
@@ -237,6 +239,13 @@ export interface AppShellPorts<E> {
    * settle; desktop unmounts immediately. Default false.
    */
   readonly holdEndedPlayer?: boolean | undefined;
+
+  /**
+   * Mobile's "playing from …" queue chrome folds the covering sheet
+   * after navigating to the source surface; desktop's stage column
+   * sits beside the world and stays open. Default false.
+   */
+  readonly closeStageOnContextNav?: boolean | undefined;
   /**
    * Runs inside the held-player release timer — mobile re-seeds its
    * morph shared values to rest so a fresh player starts collapsed.
@@ -487,6 +496,7 @@ export type ShellSheetAction = {
   readonly label: string;
   readonly icon:
     | 'heart'
+    | 'next'
     | 'queue'
     | 'list-plus'
     | 'download'
@@ -525,6 +535,7 @@ export function rowActionsModel(input: {
     });
   }
   actions.push(
+    { key: 'playNext', label: t('action.playNext'), icon: 'next' },
     { key: 'enqueue', label: t('action.addToQueue'), icon: 'queue' },
     { key: 'add', label: t('sheets.addToPlaylist'), icon: 'list-plus' },
   );
@@ -695,3 +706,54 @@ export function playlistDownloadPlan(input: {
     requests,
   };
 }
+
+// ---- queue provenance navigation -----------------------------------
+// "playing from …" navigates back to the surface that minted the
+// queue. A source already in the overlay stack is unwound to instead
+// of pushed again — Back should leave the source, not walk copies.
+
+/** The overlay route a queue origin navigates to — null for kinds
+    that are world tabs (search/library), not overlays. */
+export const queueOriginRoute = (origin: QueueOrigin): ShellOverlay | null =>
+  origin.kind === 'collection'
+    ? { type: 'collection', key: origin.collection }
+    : origin.kind === 'playlist'
+      ? { type: 'playlist', playlistId: origin.playlistId }
+      : origin.kind === 'entity'
+        ? { type: 'entity', ref: origin.ref }
+        : null;
+
+/** Whether two shell routes name the same surface. */
+export const sameOverlayRoute = (
+  a: ShellOverlay,
+  b: ShellOverlay,
+): boolean => {
+  if (a.type !== b.type) {
+    return false;
+  }
+  if (a.type === 'collection' && b.type === 'collection') {
+    return a.key === b.key;
+  }
+  if (a.type === 'playlist' && b.type === 'playlist') {
+    return a.playlistId === b.playlistId;
+  }
+  if (a.type === 'entity' && b.type === 'entity') {
+    return entityRefKey(a.ref) === entityRefKey(b.ref);
+  }
+  return true;
+};
+
+/** Topmost stack index whose route matches the target, or -1 —
+    scanned newest-first so a deeper duplicate stays buried. */
+export const overlayRouteIndex = (
+  routes: readonly (ShellOverlay | null)[],
+  target: ShellOverlay,
+): number => {
+  for (let i = routes.length - 1; i >= 0; i -= 1) {
+    const route = routes[i];
+    if (route != null && sameOverlayRoute(route, target)) {
+      return i;
+    }
+  }
+  return -1;
+};

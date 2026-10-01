@@ -2,7 +2,6 @@ import { useState } from 'react';
 import {
   Artwork,
   Icon,
-  IconButton,
   Pressable,
   Text,
 } from './primitives.tsx';
@@ -21,7 +20,6 @@ export type PlaylistScreenProps = {
   readonly model: PlaylistModel | null;
   readonly scrollEnabled?: boolean | undefined;
   readonly onBack?: (() => void) | undefined;
-  readonly onPlayAll?: (() => void) | undefined;
   /**
    * Download-all over the playlist's recordings. `downloadState`
    * is the live roll-up — the button says what is true, never
@@ -69,7 +67,6 @@ export function PlaylistScreen({
   model,
   scrollEnabled = true,
   onBack,
-  onPlayAll,
   onDownloadAll,
   downloadAllState = 'none',
   onRename,
@@ -124,14 +121,6 @@ export function PlaylistScreen({
             {t('playlist.meta', { count: model.count })}
           </Text>
         </div>
-        <IconButton
-          icon="play"
-          size={34}
-          iconSize={14}
-          color="var(--text-bright)"
-          ariaLabel={t('playlist.playA11y', { name: model.name })}
-          onPress={model.count === 0 ? undefined : onPlayAll}
-        />
       </div>
 
       <div className="uw-playlist__actions">

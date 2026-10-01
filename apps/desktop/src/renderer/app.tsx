@@ -794,15 +794,17 @@ function Main({
     onMoveQueueItem,
     onMoveQueueItemTo,
     removeQueueOccurrence,
+    clearQueue,
+    openQueueContext,
     seekToPosition,
     playRecording,
     onResultPress,
     onHomeCardPress,
     playCollectionRows,
-    playPlaylist,
+    playLibraryItem,
     playPlaylistEntry,
     playRefFor,
-    entityPlayAll,
+    entityShuffleAll,
     onEntityRowPress,
     entityRowMeta,
     query,
@@ -1151,7 +1153,7 @@ function Main({
     () => (
       <LibraryScreen
         model={libraryModel}
-        onPressItem={(id) => void playRecording(id)}
+        onPressItem={(id) => playLibraryItem(libraryModel.items, id)}
         onRowIntent={(id) => rowIntent({ kind: 'recording', id })}
         onToggleLike={(id) => void session.toggleLike(id)}
         onAddToPlaylist={(id) =>
@@ -1235,8 +1237,9 @@ function Main({
           <CollectionScreen
             model={model}
             onBack={closeOverlay}
-            onPlayAll={() => playCollectionRows(model.rows)}
-            onPressItem={(row) => void playRecording(row.recordingId)}
+            onPressItem={(row) =>
+              playCollectionRows(current.key, model.rows, row)
+            }
             onRowIntent={(row) =>
               rowIntent({ kind: 'recording', id: row.recordingId })
             }
@@ -1257,7 +1260,7 @@ function Main({
           <PlaylistScreen
             model={playlistModel}
             onBack={closeOverlay}
-            onPlayAll={() => playPlaylist(playlistModel)}
+
             onDownloadAll={() => onPlaylistDownloadAll(downloadAll.requests)}
             downloadAllState={downloadAll.state}
             onRename={(name) => renamePlaylist(current.playlistId, name)}
@@ -1265,7 +1268,9 @@ function Main({
               deletePlaylist(current.playlistId);
               dismissOverlay(entry.key);
             }}
-            onPressEntry={playPlaylistEntry}
+            onPressEntry={(entry) =>
+              playPlaylistEntry(playlistModel, entry)
+            }
             onRowIntent={(entry) =>
               rowIntent({
                 kind: 'recording',
@@ -1305,15 +1310,14 @@ function Main({
           <EntityScreen
             model={entityModelFor(fetch)}
             onBack={closeOverlay}
-            onPlayAll={() => entityPlayAll(fetch, entry.key, false)}
-            onShuffleAll={() => entityPlayAll(fetch, entry.key, true)}
+            onShuffleAll={() => entityShuffleAll(fetch, entry.key)}
             onToggleLike={
               entityId === null
                 ? undefined
                 : () =>
                     void session.toggleEntityLike(current.ref.kind, entityId)
             }
-            onPressItem={(row) => onEntityRowPress(entry.key, row)}
+            onPressItem={(row) => onEntityRowPress(entry.key, fetch, row)}
             onRowIntent={(row) => {
               const meta = metaFor(row);
               if (meta !== undefined) {
@@ -1494,6 +1498,8 @@ function Main({
                     rowIntent({ kind: 'occurrence', id })
                   }
                   onRemoveQueueItem={removeQueueOccurrence}
+                  onClearQueue={clearQueue}
+                  onOpenQueueContext={openQueueContext}
                   onToggleQueueReorder={toggleReordering}
                   onMoveQueueItem={onMoveQueueItem}
                   onMoveQueueItemTo={onMoveQueueItemTo}
@@ -1514,6 +1520,8 @@ function Main({
                     rowIntent({ kind: 'occurrence', id })
                   }
                   onRemoveQueueItem={removeQueueOccurrence}
+                  onClearQueue={clearQueue}
+                  onOpenQueueContext={openQueueContext}
                   onMoveQueueItem={onMoveQueueItem}
                   onMoveQueueItemTo={onMoveQueueItemTo}
                 />

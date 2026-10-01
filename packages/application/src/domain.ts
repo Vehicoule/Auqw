@@ -117,6 +117,23 @@ export type QueueOccurrence = {
 };
 
 /**
+ * Provenance for a queue: which surface minted it. Persisted and
+ * synced inside the queue snapshot so every device can answer
+ * "playing from …". `name`/`query` freeze display text at play time
+ * for the kinds that carry it; `collection`/`library`/`search`
+ * resolve to localized chrome instead.
+ */
+export type QueueOrigin =
+  | {
+      readonly kind: 'collection';
+      readonly collection: 'liked' | 'top50' | 'history' | 'downloads';
+    }
+  | { readonly kind: 'playlist'; readonly playlistId: string; readonly name: string }
+  | { readonly kind: 'entity'; readonly ref: EntityRef; readonly name: string }
+  | { readonly kind: 'search'; readonly query: string }
+  | { readonly kind: 'library' };
+
+/**
  * Bounds for the optional artwork-cache budget setting, per
  * docs/specs/data.md (artwork ~200 MB, bounded, managed in settings).
  */
@@ -168,6 +185,13 @@ const MAPPING_STATUSES: ReadonlySet<string> = new Set([
 ]);
 const SOURCE_REF_KINDS: ReadonlySet<string> = new Set(['track', 'album', 'artist']);
 const ENTITY_KINDS: ReadonlySet<string> = new Set(['album', 'artist']);
+
+const QUEUE_ORIGIN_COLLECTIONS: ReadonlySet<string> = new Set([
+  'liked',
+  'top50',
+  'history',
+  'downloads',
+]);
 const RECORDING_PROVENANCES: ReadonlySet<string> = new Set(['provider', 'local']);
 const LIKE_ENTITY_KINDS: ReadonlySet<string> = SOURCE_REF_KINDS;
 const THEMES: ReadonlySet<string> = new Set([
@@ -341,6 +365,40 @@ export function isTrackRef(value: unknown): value is SourceRef {
 
 export function isEntityRef(value: unknown): value is EntityRef {
   return isSourceRef(value) && isIn(ENTITY_KINDS, value.kind);
+}
+
+export function isQueueOrigin(value: unknown): value is QueueOrigin {
+  if (!isRecord(value)) {
+    return false;
+  }
+  switch (value['kind']) {
+    case 'collection':
+      return (
+        hasExactKeys(value, ['kind', 'collection']) &&
+        isIn(QUEUE_ORIGIN_COLLECTIONS, value['collection'])
+      );
+    case 'playlist':
+      return (
+        hasExactKeys(value, ['kind', 'playlistId', 'name']) &&
+        isString(value['playlistId'], 64) &&
+        isString(value['name'], 512)
+      );
+    case 'entity':
+      return (
+        hasExactKeys(value, ['kind', 'ref', 'name']) &&
+        isEntityRef(value['ref']) &&
+        isString(value['name'], 512)
+      );
+    case 'search':
+      return (
+        hasExactKeys(value, ['kind', 'query']) &&
+        isString(value['query'], 256)
+      );
+    case 'library':
+      return hasExactKeys(value, ['kind']);
+    default:
+      return false;
+  }
 }
 
 function isMatchEvidence(value: unknown): value is MatchEvidence {
@@ -551,7 +609,7 @@ export function isQueueSnapshot(value: unknown): value is QueueSnapshot {
     !hasKeys(
       value,
       ['revision', 'occurrences', 'currentOccurrenceId', 'positionMs', 'mode'],
-      ['blockedError'],
+      ['blockedError', 'origin'],
     )
   ) {
     return false;
@@ -563,6 +621,7 @@ export function isQueueSnapshot(value: unknown): value is QueueSnapshot {
     positionMs,
     mode,
     blockedError,
+    origin,
   } = value;
   if (
     !isSafeNonNegative(revision) ||
@@ -571,7 +630,8 @@ export function isQueueSnapshot(value: unknown): value is QueueSnapshot {
     !occurrences.every(isQueueOccurrence) ||
     (mode !== 'stopped' && mode !== 'paused' && mode !== 'playing') ||
     (currentOccurrenceId !== null && typeof currentOccurrenceId !== 'string') ||
-    (blockedError !== undefined && !isAppErrorLike(blockedError))
+    (blockedError !== undefined && !isAppErrorLike(blockedError)) ||
+    (origin !== undefined && !isQueueOrigin(origin))
   ) {
     return false;
   }

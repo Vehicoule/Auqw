@@ -434,6 +434,11 @@ export class RadioCoordinator {
       apply: (rr) => {
         rr.recordings = [...recordings];
         rr.queue = draft;
+        // Tail-minted ids mark the suggestion boundary — "add to
+        // queue" inserts user items ahead of them.
+        for (const occurrence of plan.occurrences) {
+          rr.radioIds.add(occurrence.occurrenceId);
+        }
         return { changed: true, firstAppended };
       },
     });

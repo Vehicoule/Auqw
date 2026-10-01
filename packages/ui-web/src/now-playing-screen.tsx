@@ -32,6 +32,9 @@ import {
   downloadButtonView,
   lyricsHeaderView,
   lyricsPaneView,
+  queueClearButton,
+  queueMetaLabel,
+  queueOriginView,
   queueReorderButton,
   radioRowView,
   stageMetaView,
@@ -277,6 +280,8 @@ export function NowPlayingScreen({
   onPressQueueItem,
   onQueueRowIntent,
   onRemoveQueueItem,
+  onClearQueue,
+  onOpenQueueContext,
   onToggleQueueReorder,
   onMoveQueueItem,
   onMoveQueueItemTo,
@@ -296,6 +301,16 @@ export function NowPlayingScreen({
   );
   const radioRow = radioRowView(radio, onStartRadio, onStopRadio);
   const reorder = queueReorderButton(queueReordering, onToggleQueueReorder);
+  const clearQueue = queueClearButton(
+    queue?.items.length ?? 0,
+    queue?.currentOccurrenceId != null,
+    onClearQueue,
+  );
+  const queueOrigin = queueOriginView(
+    queue?.origin ?? null,
+    onOpenQueueContext,
+  );
+  const queueMeta = queue === undefined ? null : queueMetaLabel(queue);
   const downloadBtn =
     download === null ? null : downloadButtonView(download, onDownload);
   // Player mode is artwork-led — full-bleed art under the bottom
@@ -563,19 +578,60 @@ export function NowPlayingScreen({
               />
             ) : (
               <>
-                {reorder !== null && (
+                {(queueOrigin !== null ||
+                  queueMeta !== null ||
+                  reorder !== null ||
+                  clearQueue !== null) && (
                   <div className="uw-stage__queue-tools">
-                    <IconButton
-                      icon={reorder.icon}
-                      size={32}
-                      iconSize={14}
-                      color={
-                        reorder.active ? 'var(--accent)' : 'var(--text-secondary)'
-                      }
-                      ariaLabel={reorder.a11yLabel}
-                      active={reorder.active}
-                      onPress={reorder.onPress}
-                    />
+                    <span className="uw-stage__queue-meta">
+                      {queueOrigin !== null && (
+                        <button
+                          className="uw-stage__queue-origin"
+                          onClick={queueOrigin.onPress}
+                          disabled={queueOrigin.onPress === undefined}
+                        >
+                          <Text
+                            variant="metadata"
+                            color="secondary"
+                            numberOfLines={1}
+                          >
+                            {queueOrigin.label}
+                          </Text>
+                        </button>
+                      )}
+                      {queueMeta !== null && (
+                        <Text
+                          variant="metadata"
+                          color="secondary"
+                          numberOfLines={1}
+                        >
+                          {queueMeta}
+                        </Text>
+                      )}
+                    </span>
+                    {clearQueue !== null && (
+                      <IconButton
+                        icon={clearQueue.icon}
+                        size={32}
+                        iconSize={14}
+                        color="var(--text-secondary)"
+                        ariaLabel={clearQueue.a11yLabel}
+                        onPress={clearQueue.onPress}
+                      />
+                    )}
+                    {reorder !== null && (
+                      <IconButton
+                        icon={reorder.icon}
+                        size={32}
+                        iconSize={14}
+                        color={
+                          reorder.active ? 'var(--accent)' : 'var(--text-secondary)'
+                        }
+                        ariaLabel={reorder.a11yLabel}
+                        active={reorder.active}
+                        onPress={reorder.onPress}
+                      />
+                    )}
                   </div>
                 )}
                 {queueListEl}
@@ -667,6 +723,8 @@ export type StageIdlePaneProps = {
   readonly queue?: QueueModel | undefined;
   readonly queueReordering?: QueueScreenProps['reordering'];
   readonly onToggleQueueReorder?: QueueScreenProps['onToggleReorder'];
+  readonly onClearQueue?: QueueScreenProps['onClearQueue'];
+  readonly onOpenQueueContext?: QueueScreenProps['onOpenContext'];
   readonly onPressQueueItem?: QueueScreenProps['onPressItem'];
   readonly onQueueRowIntent?: QueueScreenProps['onRowIntent'];
   readonly onRemoveQueueItem?: QueueScreenProps['onRemoveItem'];
@@ -685,6 +743,8 @@ export function StageIdlePane({
   queue,
   queueReordering,
   onToggleQueueReorder,
+  onClearQueue,
+  onOpenQueueContext,
   onPressQueueItem,
   onQueueRowIntent,
   onRemoveQueueItem,
@@ -698,6 +758,8 @@ export function StageIdlePane({
           queue={queue}
           reordering={queueReordering}
           onToggleReorder={onToggleQueueReorder}
+          onClearQueue={onClearQueue}
+          onOpenContext={onOpenQueueContext}
           onPressItem={onPressQueueItem}
           onRowIntent={onQueueRowIntent}
           onRemoveItem={onRemoveQueueItem}

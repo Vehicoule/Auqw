@@ -75,6 +75,9 @@ import {
   downloadButtonView,
   lyricsHeaderView,
   lyricsPaneView,
+  queueClearButton,
+  queueMetaLabel,
+  queueOriginView,
   queueReorderButton,
   radioRowView,
   stageMetaView,
@@ -82,6 +85,7 @@ import {
   stageModeTabs,
   useStageMode,
   useTransportView,
+  type StageQueueHandlers,
 } from '@auqw/ui-shared/controllers';
 
 
@@ -641,6 +645,8 @@ export type StageSheetProps = {
   | ((occurrenceIds: readonly string[]) => void)
   | undefined;
   readonly onRemoveQueueItem?: ((occurrenceId: string) => void) | undefined;
+  readonly onClearQueue?: (() => void) | undefined;
+  readonly onOpenQueueContext?: StageQueueHandlers['onOpenQueueContext'];
   readonly onToggleQueueReorder?: (() => void) | undefined;
   readonly onMoveQueueItem?:
   | ((occurrenceId: string, direction: -1 | 1) => void)
@@ -697,6 +703,8 @@ export function StageSheet({
   onQueueRowIntent,
   onQueueViewport,
   onRemoveQueueItem,
+  onClearQueue,
+  onOpenQueueContext,
   onToggleQueueReorder,
   onMoveQueueItem,
   onMoveQueueItemTo,
@@ -788,6 +796,16 @@ export function StageSheet({
     queueReordering,
     onToggleQueueReorder,
   );
+  const queueClear = queueClearButton(
+    queue?.items.length ?? 0,
+    queue?.currentOccurrenceId != null,
+    onClearQueue,
+  );
+  const queueOrigin = queueOriginView(
+    queue?.origin ?? null,
+    onOpenQueueContext,
+  );
+  const queueMeta = queue === undefined ? null : queueMetaLabel(queue);
   const downloadButton =
     download === null ? null : downloadButtonView(download, onDownload);
 
@@ -1847,7 +1865,10 @@ export function StageSheet({
             </GestureDetector>
           ) : (
             <>
-              {queueReorder !== null && (
+              {(queueReorder !== null ||
+                queueClear !== null ||
+                queueOrigin !== null ||
+                queueMeta !== null) && (
                 <GestureDetector gesture={queueChromePan}>
                   <View
                     style={{
@@ -1857,19 +1878,69 @@ export function StageSheet({
                       marginBottom: theme.spacing.xs,
                     }}
                   >
-                    <IconButton
-                      icon={queueReorder.icon}
-                      size={32}
-                      iconSize={14}
-                      color={
-                        queueReorder.active
-                          ? colors.accent
-                          : colors.textSecondary
-                      }
-                      accessibilityLabel={queueReorder.a11yLabel}
-                      active={queueReorder.active}
-                      onPress={queueReorder.onPress}
-                    />
+                    <View
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: theme.spacing.xs,
+                      }}
+                    >
+                      {queueOrigin !== null && (
+                        <Pressable
+                          onPress={queueOrigin.onPress}
+                          accessibilityLabel={queueOrigin.label}
+                          accessibilityRole="button"
+                          compact
+                          feedback="opacity"
+                          style={{ flexShrink: 1, minWidth: 0 }}
+                        >
+                          <Text
+                            variant="metadata"
+                            color="secondary"
+                            numberOfLines={1}
+                          >
+                            {queueOrigin.label}
+                          </Text>
+                        </Pressable>
+                      )}
+                      {queueMeta !== null && (
+                        <Text
+                          variant="metadata"
+                          color="secondary"
+                          numberOfLines={1}
+                          style={{ flexShrink: 1 }}
+                        >
+                          {queueMeta}
+                        </Text>
+                      )}
+                    </View>
+                    {queueClear !== null && (
+                      <IconButton
+                        icon={queueClear.icon}
+                        size={32}
+                        iconSize={14}
+                        color={colors.textSecondary}
+                        accessibilityLabel={queueClear.a11yLabel}
+                        onPress={queueClear.onPress}
+                      />
+                    )}
+                    {queueReorder !== null && (
+                      <IconButton
+                        icon={queueReorder.icon}
+                        size={32}
+                        iconSize={14}
+                        color={
+                          queueReorder.active
+                            ? colors.accent
+                            : colors.textSecondary
+                        }
+                        accessibilityLabel={queueReorder.a11yLabel}
+                        active={queueReorder.active}
+                        onPress={queueReorder.onPress}
+                      />
+                    )}
                   </View>
                 </GestureDetector>
               )}

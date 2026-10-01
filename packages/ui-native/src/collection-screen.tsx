@@ -1,6 +1,6 @@
 import { FlatList, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { BackRow, bind, PillButton, Text } from './primitives.tsx';
+import { BackRow, bind, Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import type {
@@ -15,7 +15,6 @@ export type CollectionScreenProps = {
   readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
   readonly onBack?: (() => void) | undefined;
-  readonly onPlayAll?: (() => void) | undefined;
   readonly onPressItem?: ((row: CollectionRowModel) => void) | undefined;
   /** Advisory row intent — touch-down on a row; the caller warms it. */
   readonly onRowIntent?: ((row: CollectionRowModel) => void) | undefined;
@@ -37,7 +36,6 @@ export function CollectionScreen({
   topInset = 0,
   scrollEnabled = true,
   onBack,
-  onPlayAll,
   onPressItem,
   onRowIntent,
   onToggleLike,
@@ -59,13 +57,6 @@ export function CollectionScreen({
         <Text variant="metadata" color="secondary">
           {t('common.trackCount', { count: model.rows.length })}
         </Text>
-        <PillButton
-          label={t('collection.playAll')}
-          tone="soft"
-          disabled={model.rows.length === 0}
-          onPress={onPlayAll}
-          accessibilityLabel={t('collection.playAllA11y', { title: model.title })}
-        />
       </BackRow>
       {model.rows.length === 0 ? (
         <EmptyState

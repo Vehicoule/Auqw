@@ -572,8 +572,9 @@ None — the napi artifact is a local cargo build output.
   song: put the ~4s fixture on repeat-one and let it loop — it counts per
   pass. When repeat is hard to drive, the deterministic path is:
   empty the queue (`delete from queue_occurrences`, keep `queue_state`),
-  relaunch, then press the row — `queuedOccurrenceFor` misses →
-  `session.enqueueRecording` mints a new occurrence → a real counted play.
+  relaunch, then press the row — `session.playRecordings` replaces the
+  queue (dedupe is gone) and mints a fresh occurrence → a real counted
+  play.
   Alternatives (repeat-all wrap / 'add to queue' sheet) are hard to drive:
   the transport only renders on the 'player' segment DURING playback (~4s
   window on fixtures; icons ~y721: pause≈199, next≈220, repeat≈231 tool

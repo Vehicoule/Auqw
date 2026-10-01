@@ -1,6 +1,14 @@
 import type { AppError } from '../errors.ts';
-import { isSafeNonNegative, isSourceRef } from '../domain.ts';
-import type { QueueOccurrence, Recording, SourceRef } from '../domain.ts';
+import {
+  isQueueOrigin,
+  isSafeNonNegative,
+  isSourceRef,
+} from '../domain.ts';
+import type {
+  QueueOccurrence,
+  QueueOrigin,
+  SourceRef,
+} from '../domain.ts';
 import { sameRef } from '../session/util.ts';
 
 export type QueueMode = 'stopped' | 'paused' | 'playing';
@@ -12,6 +20,13 @@ export type QueueSnapshot = {
   readonly positionMs: number;
   readonly mode: QueueMode;
   readonly blockedError?: AppError;
+  /**
+   * Which surface minted this queue — set on the context-switching
+   * play verbs, cleared by `clear()`, kept through `clearExceptCurrent`
+   * (the surviving row still belongs to that source). Absent on
+   * pre-v3 snapshots and contextless plays.
+   */
+  readonly origin?: QueueOrigin;
 };
 
 function cloneRef(ref: SourceRef | null): SourceRef | null {
@@ -33,6 +48,45 @@ function cloneOccurrence(occurrence: QueueOccurrence): QueueOccurrence {
  */
 function cloneError(error: AppError | undefined): AppError | undefined {
   return error === undefined ? undefined : Object.freeze({ ...error });
+}
+
+function cloneOrigin(
+  origin: QueueOrigin | undefined,
+): QueueOrigin | undefined {
+  if (origin === undefined) {
+    return undefined;
+  }
+  // Entity refs are objects — a caller mutating origin.ref after the
+  // play would rewrite the stored origin without a revision tick.
+  return Object.freeze(
+    origin.kind === 'entity'
+      ? { ...origin, ref: Object.freeze({ ...origin.ref }) }
+      : { ...origin },
+  );
+}
+
+function sameOrigin(
+  a: QueueOrigin | undefined,
+  b: QueueOrigin | undefined,
+): boolean {
+  if (a === undefined || b === undefined || a.kind !== b.kind) {
+    return a === b;
+  }
+  switch (a.kind) {
+    case 'collection':
+      return a.collection === (b as typeof a).collection;
+    case 'playlist':
+      return (
+        a.playlistId === (b as typeof a).playlistId &&
+        a.name === (b as typeof a).name
+      );
+    case 'entity':
+      return a.name === (b as typeof a).name && sameRef(a.ref, (b as typeof a).ref);
+    case 'search':
+      return a.query === (b as typeof a).query;
+    case 'library':
+      return true;
+  }
 }
 
 function requireStr(value: unknown, name: string): void {
@@ -74,72 +128,6 @@ export function sameError(
 }
 
 /**
- * Which queued occurrence answers a "play now" tap: the first match
- * at or after the cursor (a pending play wins — replaying it lands
- * the tap where the queue is headed); when the track only sits
- * behind the cursor the nearest history entry wins so the replay
- * rewinds as little as possible. A queue with no cursor is all
- * pending — the earliest match returns.
- */
-function pickOccurrence(
-  queue: QueueSnapshot,
-  match: (occurrence: QueueOccurrence) => boolean,
-): string | null {
-  const currentIndex =
-    queue.currentOccurrenceId === null
-      ? 0
-      : queue.occurrences.findIndex(
-          (o) => o.occurrenceId === queue.currentOccurrenceId,
-        );
-  let lastHistory: string | null = null;
-  for (const [index, occurrence] of queue.occurrences.entries()) {
-    if (!match(occurrence)) {
-      continue;
-    }
-    if (index >= currentIndex) {
-      return occurrence.occurrenceId;
-    }
-    lastHistory = occurrence.occurrenceId;
-  }
-  return lastHistory;
-}
-
-/**
- * Tap-to-play dedupe: a play tap on a recording the queue already
- * holds reuses its occurrence instead of minting a duplicate —
- * `pickOccurrence` picks which one. Returns null when the recording
- * isn't queued at all (the caller enqueues). Deliberate
- * "add to queue" calls stay additive: repeat entries are a legal
- * queue shape the row model marks `duplicate`.
- */
-export function queuedOccurrenceFor(
-  queue: QueueSnapshot,
-  recordingId: string,
-): string | null {
-  return pickOccurrence(queue, (o) => o.recordingId === recordingId);
-}
-
-/**
- * The same dedupe for a metadata row (search/entity/home card taps):
- * the tap's source ref matches a queued occurrence's selected ref or
- * any source ref on its recording.
- */
-export function queuedOccurrenceForRef(
-  queue: QueueSnapshot,
-  recordings: readonly Recording[],
-  ref: SourceRef,
-): string | null {
-  const byId = new Map(recordings.map((r) => [r.id, r]));
-  return pickOccurrence(
-    queue,
-    (o) =>
-      sameRef(o.selectedRef, ref) ||
-      (byId.get(o.recordingId)?.sourceRefs.some((s) => sameRef(s, ref)) ??
-        false),
-  );
-}
-
-/**
  * Owns the playback queue. Snapshots are immutable; `revision`
  * identifies intent — every intent-changing command ticks exactly
  * once, true no-ops and observed positions do not tick. Ticks are
@@ -153,6 +141,7 @@ export class QueueEngine {
   #positionMs: number;
   #mode: QueueMode;
   #blockedError: AppError | undefined;
+  #origin: QueueOrigin | undefined;
   /**
    * Occurrences that failed playback this engine lifetime —
    * `markUnplayable` flags the failed current; a fresh play intent
@@ -180,6 +169,7 @@ export class QueueEngine {
     const positionMs = initial?.positionMs ?? 0;
     const mode = initial?.mode ?? 'stopped';
     const blockedError = initial?.blockedError;
+    const origin = initial?.origin;
 
     if (!isSafeNonNegative(revision)) {
       throw new TypeError('revision must be a safe nonnegative integer');
@@ -218,6 +208,9 @@ export class QueueEngine {
         throw new TypeError('blockedError requires the paused mode');
       }
     }
+    if (origin !== undefined && !isQueueOrigin(origin)) {
+      throw new TypeError('origin must be a valid QueueOrigin');
+    }
 
     this.#revision = revision;
     this.#occurrences = occurrences.map(cloneOccurrence);
@@ -225,6 +218,7 @@ export class QueueEngine {
     this.#positionMs = positionMs;
     this.#mode = mode;
     this.#blockedError = cloneError(blockedError);
+    this.#origin = cloneOrigin(origin);
     // Carried marks are pruned to live members — a mark for an id the
     // snapshot doesn't hold would never get removed() to clean it up.
     for (const id of unplayable ?? []) {
@@ -296,6 +290,7 @@ export class QueueEngine {
       ...(this.#blockedError === undefined
         ? {}
         : { blockedError: this.#blockedError }),
+      ...(this.#origin === undefined ? {} : { origin: this.#origin }),
     };
     this.#snapshotCache = Object.freeze(snap);
     return this.#snapshotCache;
@@ -411,6 +406,66 @@ export class QueueEngine {
     }
     this.#requireTick();
     this.#apply(null, 0, 'stopped');
+  }
+
+  /**
+   * Drops every occurrence — a play-context replacement clears the
+   * slate before the new content enqueues. Marks prune with the
+   * members; the queue lands on the legal empty state.
+   */
+  clear(): void {
+    if (this.#occurrences.length === 0 && this.#currentId === null) {
+      return;
+    }
+    this.#requireTick();
+    this.#occurrences = [];
+    this.#unplayable.clear();
+    this.#origin = undefined;
+    this.#apply(null, 0, 'stopped');
+  }
+
+  /**
+   * Provenance for the queue — the context-switching play verbs set
+   * it after `clear()` (which resets it); every other verb leaves it
+   * alone so an enqueue or a cursor jump can't rewrite where the
+   * queue "came from".
+   */
+  setOrigin(origin: QueueOrigin | undefined): void {
+    if (sameOrigin(this.#origin, origin)) {
+      return;
+    }
+    this.#requireTick();
+    this.#origin = cloneOrigin(origin);
+    this.#tick();
+  }
+
+  /**
+   * Drops everything except the cursor row — a user "clear queue"
+   * flushes pending items and history while playback continues.
+   * A queue with no cursor is all pending, so this is `clear()` with
+   * nothing kept.
+   */
+  clearExceptCurrent(): void {
+    const currentId = this.#currentId;
+    if (currentId === null) {
+      this.clear();
+      return;
+    }
+    if (this.#occurrences.length === 1) {
+      return;
+    }
+    this.#requireTick();
+    const current = this.#occurrences[this.#indexOf(currentId)];
+    if (current === undefined) {
+      return;
+    }
+    this.#occurrences = [current];
+    for (const id of [...this.#unplayable]) {
+      if (id !== current.occurrenceId) {
+        this.#unplayable.delete(id);
+      }
+    }
+    this.#tick();
   }
 
   previous(): void {

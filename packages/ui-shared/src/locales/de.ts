@@ -109,7 +109,10 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'queue.failed': 'wiedergabe fehlgeschlagen',
   'queue.reorder': 'warteschlange umsortieren',
   'queue.reorderDone': 'umsortieren beendet',
+  'queue.clear': 'warteschlange leeren',
   'queue.badge.repeat': 'wiederholung',
+  'queue.origin': 'wird abgespielt von {name}',
+  'queue.origin.search': 'suche “{query}”',
 
   // ---- search -------------------------------------------------------------
   'search.fieldLabel': 'suchen',
@@ -568,6 +571,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'action.seek': 'springen',
   'action.enqueueTrack': 'titel einreihen',
   'action.addToQueue': 'zur warteschlange hinzufügen',
+  'action.playNext': 'als nächstes abspielen',
   'action.createPlaylist': 'playlist erstellen',
   'action.renamePlaylist': 'playlist umbenennen',
   'action.deletePlaylist': 'playlist löschen',
