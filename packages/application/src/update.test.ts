@@ -18,6 +18,7 @@ import type {
   UpdateTarget,
 } from './update.ts';
 import { assert, assertDeepEqual, assertEqual } from './testing/assert.ts';
+import { appError } from './errors.ts';
 
 const RELEASE_JSON = {
   tag_name: 'v0.0.1-alpha.18',
@@ -717,5 +718,65 @@ export async function run(): Promise<void> {
     const snap = svc.snapshot();
     assertEqual(snap.apply.state, 'applied');
     assertEqual(calls.downloads, 1);
+  }
+
+  // 'applied' is not a dead end: the OS sheet owned the outcome and
+  // may never have landed (cancelled sheet, failed install) —
+  // reapply() refires the handoff on the still-staged verified file
+  {
+    const { calls, ports } = fakePorts();
+    const applier = createUpdateApplier(ports);
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'applied');
+    applier.reapply();
+    assertEqual(applier.snapshot().state, 'applying');
+    await settle();
+    assertEqual(applier.snapshot().state, 'applied');
+    assertEqual(calls.applies, 2, 'reapply refires the install port');
+    assertEqual(calls.downloads, 1, 'reapply must not re-download');
+  }
+
+  // reapply is inert in any other phase — 'idle', mid-run, 'failed'
+  {
+    const { calls, ports } = fakePorts();
+    const applier = createUpdateApplier(ports);
+    applier.reapply();
+    applier.begin(APK_TARGET);
+    applier.reapply();
+    await settle();
+    assertEqual(applier.snapshot().state, 'applied');
+    assertEqual(calls.applies, 1, 'reapply outside applied is a no-op');
+  }
+
+  // a reapply whose handoff throws reports 'failed' and drops the
+  // retained file — a dead handoff can't keep masquerading as staged
+  {
+    let fail = false;
+    const { calls, ports } = fakePorts();
+    const applier = createUpdateApplier({
+      ...ports,
+      apply: () => {
+        calls.applies += 1;
+        return fail
+          ? Promise.reject(appError('internal', 'intent died'))
+          : Promise.resolve('installed' as const);
+      },
+    });
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'applied');
+    fail = true;
+    applier.reapply();
+    await settle();
+    const snap = applier.snapshot();
+    assertEqual(snap.state, 'failed');
+    applier.reapply();
+    await settle();
+    assertEqual(
+      calls.applies,
+      2,
+      'a failed reapply clears the staged handoff — retry begins fresh',
+    );
   }
 }

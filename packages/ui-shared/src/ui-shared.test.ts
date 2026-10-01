@@ -26,9 +26,16 @@ import {
   toQueueModel,
   toSettingsModel,
   toSyncPanel,
+  toUpdateCard,
 } from './index.ts';
 import type { Locale, MessageId, OverlayEntry } from './index.ts';
-import type { DownloadProgress, Result } from '@auqw/application';
+import type {
+  DownloadProgress,
+  Result,
+  UpdateApplyStatus,
+  UpdateSnapshot,
+  UpdateStatus,
+} from '@auqw/application';
 import {
   waveformBarExtent,
   waveformBarLayout,
@@ -1519,5 +1526,134 @@ const tap = (s: string) => {
   );
 }
 
+
+// ---- update card model ---------------------------------------------------
+{
+  setLocale('en');
+  const snap = (
+    status: UpdateStatus,
+    apply: UpdateApplyStatus = { state: 'idle' },
+  ): UpdateSnapshot => ({
+    status,
+    currentVersion: '0.0.1-alpha.1',
+    apply,
+  });
+  const available = snap({
+    state: 'available',
+    version: '0.0.1-alpha.22',
+    url: 'https://example/releases',
+    artifact: null,
+    checksums: null,
+  });
+  const live = (apply: UpdateApplyStatus): UpdateSnapshot =>
+    snap(available.status, apply);
+
+  // no snapshot / wrong status → no card
+  assertEqual(toUpdateCard(null, 'install', null), null);
+  assertEqual(toUpdateCard(snap({ state: 'current' }), 'install', null), null);
+
+  // idle offer carries the action verb per platform action
+  const offer = toUpdateCard(available, 'install', null);
+  assert(offer !== null);
+  assertEqual(offer.actionLabel, 'install');
+  assertEqual(offer.chip, 'idle');
+  assertEqual(offer.progress, null);
+  assert(offer.dismissible);
+  assertEqual(toUpdateCard(available, 'open', null)?.actionLabel, 'get it');
+  // a dismissed version hides the offer
+  assertEqual(toUpdateCard(available, 'install', '0.0.1-alpha.22'), null);
+
+  // live download: real byte fraction, cancel verb, and NO dismiss —
+  // hiding the card mid-run would strand the only stop affordance
+  const dl = toUpdateCard(
+    live({
+      state: 'downloading',
+      version: '0.0.1-alpha.22',
+      receivedBytes: 256,
+      totalBytes: 1024,
+    }),
+    'install',
+    '0.0.1-alpha.22',
+  );
+  assert(dl !== null);
+  assertEqual(dl.progress, 0.25);
+  assertEqual(dl.chip, 'downloading');
+  assertEqual(dl.actionLabel, 'cancel');
+  assert(dl.cancelable);
+  assert(!dl.dismissible);
+
+  // no Content-Length → indeterminate bar, honest byte detail
+  const dlUnknown = toUpdateCard(
+    live({
+      state: 'downloading',
+      version: '0.0.1-alpha.22',
+      receivedBytes: 1048576,
+      totalBytes: null,
+    }),
+    'install',
+    null,
+  );
+  assert(dlUnknown !== null);
+  assertEqual(dlUnknown.progress, null);
+  assert(dlUnknown.detail.includes('mb'));
+
+  // verify still aborts honestly; the OS handoff does not
+  const verifying = toUpdateCard(
+    live({ state: 'verifying', version: '0.0.1-alpha.22' }),
+    'install',
+    null,
+  );
+  assertEqual(verifying?.actionLabel, 'cancel');
+  const applying = toUpdateCard(
+    live({ state: 'applying', version: '0.0.1-alpha.22' }),
+    'install',
+    null,
+  );
+  assertEqual(applying?.actionLabel, null);
+
+  // a failed apply: error chip + retry verb + humanized detail
+  const failedCard = toUpdateCard(
+    live({
+      state: 'failed',
+      version: '0.0.1-alpha.22',
+      error: appError('transient', 'net died'),
+    }),
+    'install',
+    null,
+  );
+  assert(failedCard !== null);
+  assertEqual(failedCard.chip, 'failed');
+  assertEqual(failedCard.actionLabel, 'retry');
+  assert(failedCard.dismissible);
+
+  // 'applied' renders nothing — the settings row re-offers the
+  // handoff (reapply) when the OS sheet's outcome never landed
+  assertEqual(
+    toUpdateCard(
+      live({ state: 'applied', version: '0.0.1-alpha.22' }),
+      'install',
+      null,
+    ),
+    null,
+  );
+
+  // ready-to-restart carries its verb and still honors dismissal
+  assertEqual(
+    toUpdateCard(
+      live({ state: 'ready-to-restart', version: '0.0.1-alpha.22' }),
+      'install',
+      null,
+    )?.actionLabel,
+    'restart',
+  );
+  assertEqual(
+    toUpdateCard(
+      live({ state: 'ready-to-restart', version: '0.0.1-alpha.22' }),
+      'install',
+      '0.0.1-alpha.22',
+    ),
+    null,
+  );
+}
 
 console.log('ui-shared tests passed');

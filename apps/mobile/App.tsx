@@ -106,6 +106,7 @@ import {
   Text,
   ThemeProvider,
   TransferScreen,
+  UpdateCard,
   ValueFieldSheet,
   entityIdForRef,
   languageOptionKey,
@@ -581,10 +582,13 @@ function Main({
   const stageGone = useSharedValue(0);
   // The collapsed strip the sheet's pill parks on (OpenTune's
   // collapsedBound): measured tab-bar height + the pill's gap +
-  // its height. PlatformTabs reports the bar height upward.
+  // its height. PlatformTabs reports the bar height upward — kept
+  // in JS state too so the update card can anchor above the pill.
   const stageCollapsedHeight = useSharedValue(0);
+  const [tabBarHeight, setTabBarHeight] = useState(0);
   const reportStageCollapsed = useCallback(
     (barHeight: number) => {
+      setTabBarHeight(barHeight);
       stageCollapsedHeight.value =
         barHeight + theme.spacing.md + theme.sizes.miniPlayer;
     },
@@ -879,7 +883,7 @@ function Main({
     localeTick,
     online,
     toast,
-    updateBanner,
+    updateCard,
     onUpdateBannerAct,
     onUpdateBannerDismiss,
     tab,
@@ -2542,41 +2546,32 @@ function Main({
               </Text>
             </View>
           )}
-          {updateBanner !== null && (
+          {/* Update card — the snack's replacement: a determinate
+              surface parked above the dock (or above the collapsed
+              miniplayer pill when one is up). Hidden while the stage
+              sheet owns the screen; the toast owns this slot only
+              transiently. */}
+          {updateCard !== null && !expanded && (
             <View
+              pointerEvents="box-none"
               style={{
-                ...pillStyle,
-                // Below the offline pill when both float.
-                top: topInset + (online === false ? 38 : 4),
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: 6,
-                paddingLeft: 12,
-                paddingRight: 4,
-                paddingVertical: 3,
+                position: 'absolute',
+                left: 0,
+                right: 0,
+                bottom:
+                  tabBarHeight > 0
+                    ? tabBarHeight +
+                      theme.spacing.md +
+                      (sheetPlayer !== null
+                        ? theme.sizes.miniPlayer + theme.spacing.xs
+                        : 0)
+                    : insets.bottom + 88,
               }}
             >
-              <Text variant="metadata" color="secondary">
-                {updateBanner.label}
-              </Text>
-              {updateBanner.actionLabel !== null && (
-                <Pressable
-                  onPress={onUpdateBannerAct}
-                  accessibilityRole="button"
-                  accessibilityLabel={updateBanner.actionLabel}
-                  style={{ paddingHorizontal: 6, paddingVertical: 3 }}
-                >
-                  <Text variant="metadata" color="accent">
-                    {updateBanner.actionLabel}
-                  </Text>
-                </Pressable>
-              )}
-              <IconButton
-                icon="close"
-                size={24}
-                iconSize={10}
-                accessibilityLabel={t('update.dismiss')}
-                onPress={onUpdateBannerDismiss}
+              <UpdateCard
+                model={updateCard}
+                onAct={onUpdateBannerAct}
+                onDismiss={onUpdateBannerDismiss}
               />
             </View>
           )}

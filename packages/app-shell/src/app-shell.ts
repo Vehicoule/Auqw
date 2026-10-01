@@ -81,6 +81,7 @@ import {
   toSettingsModel,
   toTrackRowModel,
   toUpdateBanner,
+  toUpdateCard,
   useOverlayStack,
   useSerializedWrite,
   useSmoothedPosition,
@@ -445,15 +446,22 @@ export function useAppShell<E extends { readonly type: string } = never>(
     updatePort?.action ?? 'open',
     updateDismissed,
   );
+  // Mobile's card surface — same inputs, richer phase model.
+  const updateCard = toUpdateCard(
+    updateSnapshot,
+    updatePort?.action ?? 'open',
+    updateDismissed,
+  );
   const onUpdateBannerAct = useCallback(() => {
-    // A 'cancelable' banner's action aborts the live apply; every
-    // other state runs the port's own affordance.
-    if (updateBanner?.cancelable === true) {
+    // A 'cancelable' surface's action aborts the live apply; every
+    // other state runs the port's own affordance. Either surface can
+    // drive the handler — the desktop banner or the mobile card.
+    if (updateBanner?.cancelable === true || updateCard?.cancelable === true) {
       updatePort?.cancel();
     } else {
       updatePort?.act();
     }
-  }, [updatePort, updateBanner]);
+  }, [updatePort, updateBanner, updateCard]);
   const onUpdateBannerDismiss = useCallback(() => {
     setUpdateDismissed(
       updateSnapshot?.status.state === 'available'
@@ -3579,9 +3587,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
     closeAuthClient,
     // release update check — `updateBanner` is null until a newer
     // release is known (and for a dismissed version). `updateSnapshot`
-    // is null where the platform has no update seam.
+    // is null where the platform has no update seam. `updateCard`
+    // is the mobile card surface over the same dismissal state.
     updateSnapshot,
     updateBanner,
+    updateCard,
     onUpdateBannerAct,
     onUpdateBannerDismiss,
     // settings + misc ops

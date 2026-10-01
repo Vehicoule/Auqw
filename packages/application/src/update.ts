@@ -460,6 +460,10 @@ export interface UpdateService {
    * reach here).
    */
   apply(): void;
+  /** Re-fire the install handoff on the staged artifact — only
+      meaningful after 'applied' (the OS sheet owned the outcome).
+      No-op otherwise. */
+  reapply(): void;
   /** Abort an in-flight apply — back to 'idle'; no-op otherwise. */
   cancelApply(): void;
 }
@@ -596,6 +600,9 @@ export function createUpdateService(deps: {
         checksums: status.checksums,
       });
     },
+    reapply() {
+      deps.applier?.reapply();
+    },
     cancelApply() {
       deps.applier?.cancel();
     },
@@ -664,6 +671,12 @@ export interface UpdateApplier {
   /** Abort the live run — publishes 'idle' so the affordance returns
       to its install label. */
   cancel(): void;
+  /** Re-fire the platform's install surface on the already-verified
+      staged file — 'applied' means an OS sheet owned the outcome and
+      it may never have landed (cancelled sheet, failed install), so
+      the affordance re-offers the handoff without re-downloading.
+      No-op unless the current state is 'applied'. */
+  reapply(): void;
 }
 
 function applyError(thrown: unknown): AppError {
@@ -720,6 +733,13 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
   // deletes its own leftover but never a successor's download, even
   // when successive releases stage under different names.
   const claims = new Map<string, number>();
+  // The 'applied' run's verified stage — retained so `reapply` can
+  // re-fire the platform's install surface without another download
+  // when the OS surface's outcome never landed.
+  let appliedRun: {
+    readonly path: string;
+    readonly artifact: UpdateArtifact;
+  } | null = null;
 
   function publish(next: UpdateApplyStatus): void {
     state = next;
@@ -830,6 +850,9 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       // as the installer, revealed in Finder) — cleanup is its
       // responsibility now, not the sweep's.
       claims.delete(path);
+      if (outcome === 'installed') {
+        appliedRun = { path, artifact };
+      }
       path = null;
       publishIfCurrent(
         outcome === 'relaunch'
@@ -876,12 +899,67 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       }
       running = true;
       generation += 1;
+      appliedRun = null;
       const gen = generation;
       controller = new AbortController();
       const signal = controller.signal;
       // The publish happens inside run's try so the state lands
       // before any synchronous port throw could misorder events.
       void run(target, gen, signal);
+    },
+    reapply() {
+      if (
+        running ||
+        state.state !== 'applied' ||
+        appliedRun === null
+      ) {
+        return;
+      }
+      running = true;
+      generation += 1;
+      const gen = generation;
+      const version = state.version;
+      const { path: staged, artifact } = appliedRun;
+      const publishIfCurrent = (next: UpdateApplyStatus): void => {
+        if (gen === generation) {
+          publish(next);
+        }
+      };
+      publishIfCurrent({ state: 'applying', version });
+      controller = new AbortController();
+      const signal = controller.signal;
+      void ports
+        .apply(staged, artifact)
+        .then((outcome) => {
+          if (gen !== generation || signal.aborted) {
+            return;
+          }
+          publishIfCurrent(
+            outcome === 'relaunch'
+              ? { state: 'ready-to-restart', version }
+              : { state: 'applied', version },
+          );
+        })
+        .catch((thrown) => {
+          if (gen !== generation) {
+            return;
+          }
+          // The staged file may be gone (a later release's sweep) or
+          // the surface refused again — a failure hands retry back
+          // to the full pipeline, so the retained stage drops.
+          appliedRun = null;
+          if (isAbort(thrown)) {
+            publish({ state: 'idle' });
+          } else {
+            publish({ state: 'failed', version, error: applyError(thrown) });
+          }
+        })
+        .finally(() => {
+          if (gen === generation) {
+            controller = null;
+            running = false;
+          }
+        });
     },
     cancel() {
       generation += 1;
