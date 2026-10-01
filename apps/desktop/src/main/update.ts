@@ -150,6 +150,10 @@ export function createDesktopUpdate(deps: {
   /** Override for the releases list endpoint — dev/test seam, same
       role as mobile's EXPO_PUBLIC_UPDATE_RELEASES_URL. */
   readonly releasesUrl?: string;
+  /** True once THIS process has handed an installer to the OS — a
+      same-version 'applied' after that is the pending-quit window,
+      not a retriable offer; reapply would spawn a second wizard. */
+  readonly installerSpawnedInProcess?: () => boolean;
   /** Apply transport + format installer — required past 'open'. */
   readonly applyPorts?: UpdateApplyPorts;
   /** Relaunch hook — required on formats that self-apply on restart
@@ -214,6 +218,12 @@ export function createDesktopUpdate(deps: {
       return Promise.resolve();
     },
     reapply: () => {
+      // 'applied' inside the pre-quit window is the spawn having
+      // fired, not a retriable offer — re-tapping there would stack
+      // a second wizard while the first installs.
+      if (deps.installerSpawnedInProcess?.() === true) {
+        return Promise.resolve();
+      }
       service.reapply();
       return Promise.resolve();
     },

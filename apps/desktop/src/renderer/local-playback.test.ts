@@ -5,8 +5,11 @@ import {
 import { createLocalPlayback } from './local-playback.ts';
 
 export function run(): void {
+  // Minted URIs are platform-shaped (file:///… POSIX, /C:/… Windows).
+  const UROOT = process.platform === 'win32' ? 'C:/' : '/';
+  const URI_ROOT = process.platform === 'win32' ? '/C:' : '';
   const uri = createLocalPlayback({
-    mediaDir: '/data/media',
+    mediaDir: `${UROOT}data/media`,
     fileFor: (id) => (id === 'dl' ? 'name.mp4' : null),
     uriFor: (id) => (id === 'local' ? 'file:///music/a.wav' : null),
   });
@@ -14,7 +17,7 @@ export function run(): void {
   // A stored download wins over a local file — the ledger owns bytes.
   assertEqual(
     uri('dl'),
-    'file:///data/media/name.mp4',
+    `file://${URI_ROOT}/data/media/name.mp4`,
     'downloads resolve under the managed dir',
   );
   // A provenance-local row falls through to its docUri.
@@ -25,13 +28,13 @@ export function run(): void {
   // Names and dirs with spaces/unicode encode per-segment, not as one
   // blob — the URI stays navigable for Chromium's file scheme parser.
   const spaced = createLocalPlayback({
-    mediaDir: '/data/my media',
+    mediaDir: `${UROOT}data/my media`,
     fileFor: () => 'a b.mp4',
     uriFor: () => null,
   });
   assertEqual(
     spaced('x'),
-    'file:///data/my%20media/a%20b.mp4',
+    `file://${URI_ROOT}/data/my%20media/a%20b.mp4`,
     'spaces percent-encode per segment',
   );
 

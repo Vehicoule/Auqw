@@ -59,6 +59,27 @@ const MAC_RELEASE = {
 const macFetchJson = () =>
   Promise.resolve({ status: 200, body: [MAC_RELEASE] });
 
+const WIN_RELEASE = {
+  tag_name: 'v9.9.9',
+  html_url: 'https://github.com/Vehicoule/Auqw/releases/tag/v9.9.9',
+  draft: false,
+  assets: [
+    {
+      name: 'auqw-9.9.9-win-x64-setup.exe',
+      browser_download_url:
+        'https://github.com/Vehicoule/Auqw/releases/download/v9.9.9/auqw-9.9.9-win-x64-setup.exe',
+    },
+    {
+      name: 'SHA256SUMS-Windows.txt',
+      browser_download_url:
+        'https://github.com/Vehicoule/Auqw/releases/download/v9.9.9/SHA256SUMS-Windows.txt',
+    },
+  ],
+};
+
+const winFetchJson = () =>
+  Promise.resolve({ status: 200, body: [WIN_RELEASE] });
+
 /** Ports whose apply resolves 'relaunch' — enough to drive a full run. */
 function fakeApplyPorts(
   applied: { count: number },
@@ -282,6 +303,37 @@ export async function run(): Promise<void> {
   });
   await idleUpdate.reapply();
   assertEqual(reopened.count, 2);
+
+  // a process that already handed the installer to the OS never
+  // refires — 'applied' inside the pre-quit window is the spawn
+  // having landed, not a retriable offer (one wizard per run)
+  const spawned = { count: 0 };
+  const guarded = createDesktopUpdate({
+    currentVersion: '0.0.1',
+    target: { os: 'win' },
+    fetchJson: winFetchJson,
+    openExternal: () => Promise.resolve(),
+    capability: 'download',
+    installerSpawnedInProcess: () => true,
+    applyPorts: {
+      ...fakeApplyPorts(spawned, 'auqw-9.9.9-win-x64-setup.exe'),
+      apply: () => {
+        spawned.count += 1;
+        return Promise.resolve('installed');
+      },
+    },
+  });
+  await guarded.check('manual');
+  await guarded.apply();
+  for (let i = 0; i < 30; i += 1) {
+    await Promise.resolve();
+  }
+  assertEqual(guarded.snapshot().apply.state, 'applied');
+  await guarded.reapply();
+  for (let i = 0; i < 30; i += 1) {
+    await Promise.resolve();
+  }
+  assertEqual(spawned.count, 1);
 
   // ---- the dmg leg ----
 

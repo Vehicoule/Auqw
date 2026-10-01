@@ -136,7 +136,10 @@ function fakeApi(): Rig {
           Promise.resolve({
             version: '0.0.0',
             platform: 'test',
-            userDataPath: '/tmp/auqw-test',
+            // OS-shaped abs path — minted file: URIs are platform-
+            // dependent (file:///… POSIX, file:///C:/… Windows).
+            userDataPath:
+              process.platform === 'win32' ? 'C:/tmp/auqw-test' : '/tmp/auqw-test',
           }),
       },
       chrome: {
@@ -668,7 +671,10 @@ function downloadRow(over: Partial<DownloadRecord> = {}): DownloadRecord {
 function localSourceRow(): LocalSource {
   return {
     sourceId: 'src-1',
-    treeUri: 'file:///music/rips',
+    treeUri:
+      process.platform === 'win32'
+        ? 'file:///C:/music/rips'
+        : 'file:///music/rips',
     label: 'rips',
     addedMs: 1,
     lastScanMs: 1,
@@ -736,7 +742,9 @@ async function downloadResolvesLocal(): Promise<void> {
   assertEqual(input.provider, 'local');
   assertEqual(
     input.sourceRef,
-    'file:///tmp/auqw-test/media/dl-1',
+    process.platform === 'win32'
+      ? 'file:///C:/tmp/auqw-test/media/dl-1'
+      : 'file:///tmp/auqw-test/media/dl-1',
     'owned download resolves the media-dir file uri',
   );
   player.settlePrepare(ok('h-1'));
@@ -779,7 +787,9 @@ async function localFileResolvesUri(): Promise<void> {
   assertEqual(input.provider, 'local');
   assertEqual(
     input.sourceRef,
-    'file:///music/rips/sub/rip.flac',
+    process.platform === 'win32'
+      ? 'file:///C:/music/rips/sub/rip.flac'
+      : 'file:///music/rips/sub/rip.flac',
     'local file resolves the source docUri',
   );
   player.settlePrepare(ok('h-1'));
@@ -820,7 +830,9 @@ async function rehydrateAfterImport(): Promise<void> {
   assert(local !== null, 'local source rebuilt off the new rows');
   assertEqual(
     local?.uriFor('rec-lf'),
-    'file:///music/rips/sub/rip.flac',
+    process.platform === 'win32'
+      ? 'file:///C:/music/rips/sub/rip.flac'
+      : 'file:///music/rips/sub/rip.flac',
   );
   player.cancelPendingPrepares();
   await controller.dispose();
@@ -875,7 +887,9 @@ async function localPlaybackProbe(): Promise<void> {
   await pump(); // let the meta probe land
   assertEqual(
     controller.localPlaybackFor('rec-dl'),
-    'file:///tmp/auqw-test/media/dl-1',
+    process.platform === 'win32'
+      ? 'file:///C:/tmp/auqw-test/media/dl-1'
+      : 'file:///tmp/auqw-test/media/dl-1',
     'owned download resolves the media-dir file uri',
   );
   assertEqual(
