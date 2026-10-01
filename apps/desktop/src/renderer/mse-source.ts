@@ -284,7 +284,7 @@ function runSession(
   let scanCursor = 0;
   let sigCursor = -1;
   const pending: PendingUnit[] = [];
-  let journal: JournalEntry[] = [];
+  const journal: JournalEntry[] = [];
   let cues: readonly WebmCue[] = [];
   let container: 'webm' | 'mp4' | null = null;
   let segDataStart = 0;
@@ -537,14 +537,10 @@ function runSession(
         evictQueue.push([aheadStart, end]);
       }
     }
-    // Journal entries wholly inside an evicted span lose their media;
-    // straddling entries keep mapping the still-buffered coverage.
-    journal = journal.filter(
-      (j) =>
-        !evictQueue.some(
-          ([s, e]) => j.mediaStart >= s * 1000 && j.mediaEnd <= e * 1000,
-        ),
-    );
+    // Evicted spans keep their journal entries — the byte↔media index
+    // stays valid (stream positions are immutable) and a back-seek
+    // into trimmed coverage still wants its exact anchor. Entries are
+    // ~64B and bounded by track length, so retention is cheap.
     evicting = true;
     removeNext();
   }
@@ -554,6 +550,10 @@ function runSession(
     if (next === undefined || buffer === null) {
       evicting = false;
       drain(); // the evicted append retries here, behind the removals
+      // A remove on an ended source re-opens it — re-run the terminal
+      // bookkeeping once the chain drains so an EOF that landed before
+      // or during eviction still ends the source.
+      checkEnd();
       return;
     }
     try {

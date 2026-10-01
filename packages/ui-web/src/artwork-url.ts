@@ -79,7 +79,9 @@ export function scaledArtworkUrl(url: string, targetPx: number): string {
   const sizedTail = url.match(
     /\/(\d{2,4})x(\d{2,4})([a-z]{0,4})((?:-\d+)*)\.(jpe?g|png|webp)(\?\S*)?$/i,
   );
-  if (sizedTail !== null) {
+  // Square-only: two differing numbers can encode a crop, and a square
+  // variant would silently reshape the artwork instead of shrinking it.
+  if (sizedTail !== null && sizedTail[1] === sizedTail[2]) {
     const offered = parseInt(sizedTail[1] ?? '0', 10);
     const ladder = url.includes('dzcdn.net') ? DEEZER_LADDER : LADDER;
     const px = Math.min(offered, pickSize(targetPx, ladder));
