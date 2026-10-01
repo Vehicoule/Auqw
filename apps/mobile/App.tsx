@@ -897,6 +897,7 @@ function Main({
     setStageOpenFor,
     stageMode,
     setStageMode,
+    stageReopenMode,
     reordering,
     toggleReordering,
     player,
@@ -2445,6 +2446,7 @@ function Main({
               nextEndsQueue={skipPreview.nextEndsQueue}
               mode={stageMode}
               onModeChange={setStageMode}
+              restMode={stageReopenMode}
               queue={queueModel}
               queueReordering={reordering}
               topInset={topInset}

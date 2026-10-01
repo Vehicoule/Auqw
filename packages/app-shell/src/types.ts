@@ -39,7 +39,11 @@ import {
   reportResult,
   t,
 } from '@auqw/ui-shared';
-import type { ActionTarget, DownloadChip } from '@auqw/ui-shared';
+import type {
+  ActionTarget,
+  DownloadChip,
+  StageMode,
+} from '@auqw/ui-shared';
 
 /** The overlay variants the factory can push itself. Apps extend the
     union with their own routes (mobile adds `{ type: 'sync' }`). */
@@ -597,6 +601,19 @@ export function stageDownloadChip(input: {
     (input.recordFor(id) !== null || input.downloadRefFor(id) !== null)
     ? (input.chipFor(id) ?? 'idle')
     : null;
+}
+
+/** The pane an open stage lands on: an idle stage whose queue ended
+    reopens on the queue so its rows stay replayable — the same
+    surface the idle-transition effect picks while it's open; anything
+    else lands on the player. A collapsed stage normalizes to this
+    pane ahead of the open so a morph's first frame already renders
+    it — the expand commit's pick arrives after the rise. */
+export function stageReopenMode(input: {
+  readonly playbackIdle: boolean;
+  readonly queueEnded: boolean;
+}): StageMode {
+  return input.playbackIdle && input.queueEnded ? 'queue' : 'player';
 }
 
 /** Report the failed-download's stored error before retrying — the

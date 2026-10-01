@@ -113,6 +113,7 @@ import {
   reportStoredDownloadError,
   rowActionsModel,
   stageDownloadChip,
+  stageReopenMode,
   suggestionMetaMap,
 } from './types.ts';
 import type {
@@ -3259,22 +3260,28 @@ export function useAppShell<E extends { readonly type: string } = never>(
     clearOverlays();
     setSearchFocusTick((n) => n + 1);
   }, [clearOverlays]);
-  // Every open lands on the player pane — a hidden stage that reopens
-  // must not revive the last mode. Except an idle stage with an ended
-  // queue: it reopens on the queue so its rows stay replayable — the
-  // same surface the idle-transition effect picks while it's open.
+  // The pane an open lands on — computed once so the open commit and
+  // the sheet's parked normalization never disagree. A collapsed
+  // stage must already name this pane by the next rise: the mobile
+  // morph renders `stageMode` from the drag's first frame, while the
+  // commit's pick only lands after it. The sheet owns the normalize
+  // moment (its parked signal) — firing at close-commit would swap
+  // the still-descending pane mid-fade.
+  const reopenMode = stageReopenMode({
+    playbackIdle,
+    queueEnded: queueModel.ended,
+  });
+  // Every open lands on the reopen pane — a hidden stage that reopens
+  // must not revive the last mode: player ordinarily, queue only for
+  // the idle-stage ended-queue reopen the idle effect also picks.
   const setStageOpenFor = useCallback(
     (open: boolean) => {
       if (open) {
-        setStageMode(
-          state.playback.type === 'idle' && queueModel.ended
-            ? 'queue'
-            : 'player',
-        );
+        setStageMode(reopenMode);
       }
       setStageOpen(open);
     },
-    [state.playback.type, queueModel.ended],
+    [reopenMode],
   );
 
   const toggleReordering = useCallback(() => {
@@ -3465,6 +3472,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     setStageOpenFor,
     stageMode,
     setStageMode,
+    stageReopenMode: reopenMode,
     reordering,
     toggleReordering,
     // models

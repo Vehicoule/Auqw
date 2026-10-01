@@ -26,6 +26,7 @@ import {
   rowActionsModel,
   skipTargetIds,
   stageDownloadChip,
+  stageReopenMode,
   suggestionMetaMap,
 } from './types.ts';
 import type { SourceRef } from '@auqw/application';
@@ -409,6 +410,31 @@ assertEqual(
   }),
   'stored',
   'a ledger row surfaces its chip even with no provider ref',
+);
+
+// ---- stageReopenMode -------------------------------------------------
+assertEqual(
+  stageReopenMode({ playbackIdle: false, queueEnded: false }),
+  'player',
+  'live playback lands on the player pane',
+);
+
+assertEqual(
+  stageReopenMode({ playbackIdle: true, queueEnded: false }),
+  'player',
+  'an idle stage with live queue rows still lands on the player',
+);
+
+assertEqual(
+  stageReopenMode({ playbackIdle: true, queueEnded: true }),
+  'queue',
+  'the ended queue keeps the reopen on its replayable rows',
+);
+
+assertEqual(
+  stageReopenMode({ playbackIdle: false, queueEnded: true }),
+  'player',
+  'playback resuming off an ended queue lands on the player',
 );
 
 // ---- playlistDownloadPlan -------------------------------------------
