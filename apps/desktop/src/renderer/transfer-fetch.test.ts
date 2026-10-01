@@ -23,6 +23,8 @@ function fakeApi(over: {
   bodyError?: ReturnType<typeof shellError>;
   /** Park head until `resolve` is called — aborts must still work. */
   holdHead?: boolean;
+  /** Park body until released — models a stalled mid-read stream. */
+  holdBody?: boolean;
 }): FetchApi & {
   calls: string[];
   releases: (() => void)[];
@@ -50,6 +52,13 @@ function fakeApi(over: {
     },
     fetchBody: (args: { requestId: string }) => {
       calls.push(`fetchBody:${args.requestId}`);
+      if (over.holdBody === true) {
+        return new Promise((_resolve, reject) => {
+          releases.push(() => {
+            reject(shellError('cancelled', 'aborted'));
+          });
+        });
+      }
       if (over.bodyError !== undefined) {
         return Promise.reject(over.bodyError);
       }
@@ -201,6 +210,42 @@ async function preCancelled(): Promise<void> {
   );
 }
 
+async function bodyPhaseCancelAborts(): Promise<void> {
+  // A cancel landing mid-body-read must still reach `fetchAbort` —
+  // the abort subscription can't die when the head answers.
+  const api = fakeApi({ holdBody: true });
+  const fetch = createTransferFetch(api, new SequenceIds());
+  const source = new CancellationSource();
+  const response = await fetch(
+    'https://cdn.example/x',
+    { headers: {} },
+    source.signal,
+  );
+  const pendingBody = response.arrayBuffer();
+  source.cancel();
+  api.releases.forEach((release) => {
+    release();
+  });
+  try {
+    await pendingBody;
+    assert(false, 'must throw');
+  } catch (thrown) {
+    assert(
+      thrown instanceof DownloadFailure && thrown.kind === 'cancelled',
+      'body-phase cancel → cancelled',
+    );
+  }
+  assertDeepEqual(
+    api.calls,
+    [
+      'fetch:fetch-1:https://cdn.example/x',
+      'fetchBody:fetch-1',
+      'fetchAbort:fetch-1',
+    ],
+    'cancel during body read still reaches fetchAbort',
+  );
+}
+
 async function non206Releases(): Promise<void> {
   // A 403/416 head is re-mint verdict — never read — so the parked
   // response is aborted immediately instead of holding its socket.
@@ -259,6 +304,7 @@ export async function run(): Promise<void> {
   await happyPath();
   await shellErrorKinds();
   await callerCancelAborts();
+  await bodyPhaseCancelAborts();
   await preCancelled();
   await non206Releases();
   await bodyErrorMaps();

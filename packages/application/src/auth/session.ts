@@ -257,6 +257,14 @@ export interface AuthSession {
    */
   signOut(): Promise<Result<void>>;
   setClientOverride(clientId: string | null): Promise<Result<void>>;
+  /**
+   * Ends the session's background work at host teardown: renewal and
+   * persist timers disarm, a live poll cancels, and queued renew/
+   * apply/resume lanes no-op. The persisted record is left alone —
+   * in-flight custody writes still land so a veto retract is never
+   * lost — and a disposed session's verbs are inert.
+   */
+  dispose(): void;
 }
 
 const RENEW_MARGIN_MS = 60_000;
@@ -316,6 +324,9 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
    *  record's `pendingFlow` field; resume hooks read it, terminal
    *  poll outcomes clear it. */
   let pendingFlow: AuthPendingFlow | null = null;
+  /** Host teardown (`dispose`) — disarms every lane; guards keep a
+   *  queued renew/apply/resume from reviving a dead session's grant. */
+  let disposed = false;
   let bearerLive = false;
   const listeners = new Set<() => void>();
   let current: AuthSnapshot = { status, clientId: null, bearerLive };
@@ -436,7 +447,12 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
    */
   function resumePendingFlow(): void {
     const pending = pendingFlow;
-    if (pending === null || flow !== null || pendingBegin !== null) {
+    if (
+      disposed ||
+      pending === null ||
+      flow !== null ||
+      pendingBegin !== null
+    ) {
       return;
     }
     const source = new CancellationSource();
@@ -480,7 +496,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
 
   async function persistRetry(): Promise<void> {
     const pending = pendingGrantWrite;
-    if (pending === null) {
+    if (disposed || pending === null) {
       return;
     }
     if (refreshToken !== pending.token) {
@@ -580,7 +596,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     owner: string,
   ): Promise<void> {
     await writeAccess(grant.accessToken);
-    if (refreshToken !== owner) {
+    if (disposed || refreshToken !== owner) {
       // The slot changed hands while the write was in flight — a
       // sign-out's null write is chained after ours; don't claim
       // liveness for a grant that no longer owns the slot.
@@ -642,7 +658,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
 
   async function renew(): Promise<void> {
     const token = refreshToken;
-    if (token === null) {
+    if (disposed || token === null) {
       return;
     }
     // The grant rides its issuing client for life — the override
@@ -650,7 +666,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     const res = await oauth.refreshAccessToken(grantCreds(), token, {
       timeoutMs: OAUTH_REQUEST_TIMEOUT_MS,
     });
-    if (refreshToken !== token) {
+    if (disposed || refreshToken !== token) {
       // The grant changed while the exchange was in flight — sign-out
       // or a newer grant owns the slot now; applying this late mint
       // would resurrect a cleared bearer.
@@ -766,14 +782,27 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     }
   }
 
+  /** The in-flight restore — dedupes retries so a stale read can
+   *  never resolve after a verb's write and clobber newer state. */
+  let restoring: Promise<void> | null = null;
+
   /**
    * The memoized restore — retried per call while the last read
    * failed, so a transient store error heals on the next verb
    * instead of persisting as an unseen-record risk for the session.
    */
   async function ensureRestore(): Promise<void> {
-    if (restored === null || restoreFailed) {
-      restored = doRestore();
+    if (restored === null || (restoreFailed && restoring === null)) {
+      restoring = doRestore();
+      restored = restoring;
+      void restoring.then(
+        () => {
+          restoring = null;
+        },
+        () => {
+          restoring = null;
+        },
+      );
     }
     await restored;
   }
@@ -968,11 +997,14 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     },
 
     restore() {
+      if (disposed) {
+        return Promise.resolve();
+      }
       return ensureRestore();
     },
 
     retryNow() {
-      if (refreshToken === null) {
+      if (disposed || refreshToken === null) {
         return;
       }
       disarmRenew();
@@ -981,6 +1013,7 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
 
     beginSignIn() {
       if (
+        disposed ||
         flow !== null ||
         pendingBegin !== null ||
         status.state === 'signed-in' ||
@@ -1093,10 +1126,25 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     },
 
     cancelSignIn() {
+      if (disposed) {
+        return;
+      }
       pendingBegin?.cancel();
-      flow?.source.cancel();
+      const dismissed = flow;
+      dismissed?.source.cancel();
       flow = null;
       pendingBegin = null;
+      // A grant minted by the dismissed flow must not outlive it:
+      // while flow still stands its apply may be in flight, and a
+      // 'failed' status can hide a grant whose apply threw. Only
+      // those retract — a stored grant's 'signed-in'/'starting'
+      // state is not the dismissed flow's doing.
+      if (
+        refreshToken !== null &&
+        (dismissed !== null || status.state === 'failed')
+      ) {
+        void dropGrant();
+      }
       if (
         status.state === 'starting' ||
         status.state === 'authorizing' ||
@@ -1108,7 +1156,18 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     },
 
     async signOut() {
+      if (disposed) {
+        // A dead session owns no lane or slot — nothing to drop.
+        return ok(undefined);
+      }
       await ensureRestore();
+      if (restoreFailed) {
+        // The record never loaded — a null-grant write here would
+        // clobber the stored grant AND the client-id preference.
+        return err(
+          appError('unavailable', 'oauth: custody read failed'),
+        );
+      }
       pendingBegin?.cancel();
       flow?.source.cancel();
       flow = null;
@@ -1157,6 +1216,11 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
     },
 
     async setClientOverride(clientId) {
+      if (disposed) {
+        return err(
+          appError('unavailable', 'oauth: session disposed'),
+        );
+      }
       const trimmed = clientId?.trim() ?? '';
       if (trimmed.length > 512) {
         return err(
@@ -1170,6 +1234,13 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         );
       }
       const next = trimmed === '' ? null : trimmed;
+      const prev = clientIdOverride;
+      // Assign + publish before the write — the preference is
+      // effective immediately and every custody writer reads the
+      // live value, so a write queued during this roundtrip can't
+      // land afterwards carrying the stale id.
+      clientIdOverride = next;
+      publish();
       const wrote = await writeCustody(() => ({
         v: 1 as const,
         refreshToken,
@@ -1180,11 +1251,25 @@ export function createAuthSession(deps: AuthSessionDeps): AuthSession {
         ...(pendingFlow !== null ? { pendingFlow } : {}),
       }));
       if (!wrote.ok) {
+        clientIdOverride = prev;
+        publish();
         return wrote;
       }
-      clientIdOverride = next;
-      publish();
       return ok(undefined);
+    },
+
+    dispose() {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      pendingBegin?.cancel();
+      flow?.source.cancel();
+      flow = null;
+      pendingBegin = null;
+      disarmRenew();
+      disarmPersist();
+      listeners.clear();
     },
   };
 }

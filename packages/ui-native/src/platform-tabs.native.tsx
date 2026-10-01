@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import TabView, { useBottomTabBarHeight } from 'react-native-bottom-tabs';
 import type { AppleIcon } from 'react-native-bottom-tabs';
 import { useTheme } from './theme.tsx';
+import { PaneVisibleContext } from './platform-tabs.tsx';
 import type { PlatformTabsProps } from './platform-tabs.tsx';
 import type { NavItemModel } from '@auqw/ui-shared';
 import iconHome from '../assets/tab-icons/home.png';
@@ -177,7 +178,12 @@ export function PlatformTabs({
               paddingBottom: androidDock ? ACCESSORY_RESERVE : 0,
             }}
           >
-            {sceneFor(route.key)}
+            {/* Scenes keep-alive off-screen like the fallback's panes —
+                visibility reaches consumers through context since a
+                hidden scene's element is frozen. */}
+            <PaneVisibleContext.Provider value={route.key === activeKey}>
+              {sceneFor(route.key)}
+            </PaneVisibleContext.Provider>
             {/* Scenes draw edge-to-edge — scrolled content passes
                 under the status bar mid-scroll and collides with the
                 clock/icons. An opaque canvas band over the inset area

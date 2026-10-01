@@ -1,10 +1,24 @@
-import { useEffect, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppNavbar } from './navbar.tsx';
 import { useTheme } from './theme.tsx';
 import type { NavItemModel } from '@auqw/ui-shared';
+
+/**
+ * Whether the pane containing the consumer is the visible one. Context
+ * — not a prop — because a hidden pane's element stays frozen on its
+ * last build: only a context change reaches inside it. True outside a
+ * keep-alive host (gallery, tests).
+ */
+const PaneVisibleContext = createContext(true);
+
+export function usePaneVisible(): boolean {
+  return useContext(PaneVisibleContext);
+}
+
+export { PaneVisibleContext };
 
 export type PlatformTabsProps = {
   readonly items: readonly NavItemModel[];
@@ -52,17 +66,18 @@ export function PlatformTabs({
             built.current.set(item.key, element);
           }
           return (
-            <View
-              key={item.key}
-              style={active ? { flex: 1 } : { display: 'none' }}
-              pointerEvents={active ? 'auto' : 'none'}
-              accessibilityElementsHidden={!active}
-              importantForAccessibility={
-                active ? 'auto' : 'no-hide-descendants'
-              }
-            >
-              {element}
-            </View>
+            <PaneVisibleContext.Provider key={item.key} value={active}>
+              <View
+                style={active ? { flex: 1 } : { display: 'none' }}
+                pointerEvents={active ? 'auto' : 'none'}
+                accessibilityElementsHidden={!active}
+                importantForAccessibility={
+                  active ? 'auto' : 'no-hide-descendants'
+                }
+              >
+                {element}
+              </View>
+            </PaneVisibleContext.Provider>
           );
         })}
         {/* An activeKey outside `items` still renders — the pane set is

@@ -1832,7 +1832,21 @@ export async function planCommit(
     trace.requestId,
     JSON.stringify(trace),
   ]);
+  // A landed-but-unacked COMMIT replays this whole batch: attempt
+  // inserts are append-only with no dedup constraint, so this batch's
+  // request_ids are deleted first — the replay re-inserts the
+  // identical set instead of doubling it. requestIds are generated
+  // per attempt, so the delete only ever names this batch's own rows.
   statements.push(
+    ...deleteStatements(
+      {
+        table: 'attempt_traces',
+        columns: ['request_id'],
+        key: ['request_id'],
+        reinsert: false,
+      },
+      attempts.map((trace) => [trace.requestId]),
+    ),
     ...insertStatements(
       { table: 'attempt_traces', columns: ['request_id', 'trace_json'], key: [], reinsert: false },
       attemptRows,

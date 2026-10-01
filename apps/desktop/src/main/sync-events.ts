@@ -26,6 +26,10 @@ interface PushService<E> {
 
 function createPushService<E>(channel: string): PushService<E> {
   const senders = new Map<NetSender, number>();
+  // A `destroyed` hook is registered once per sender and outlives a
+  // full detach (drop is reference-based and stays correct), so
+  // re-attachment must never stack another copy of it.
+  const destroyedHooked = new WeakSet<NetSender>();
 
   function drop(sender: NetSender): void {
     senders.delete(sender);
@@ -35,8 +39,13 @@ function createPushService<E>(channel: string): PushService<E> {
     attach(sender) {
       const count = senders.get(sender) ?? 0;
       senders.set(sender, count + 1);
-      if (count === 0) {
-        sender.on?.('destroyed', () => drop(sender));
+      if (
+        count === 0 &&
+        sender.on !== undefined &&
+        !destroyedHooked.has(sender)
+      ) {
+        destroyedHooked.add(sender);
+        sender.on('destroyed', () => drop(sender));
       }
     },
     detach(sender) {

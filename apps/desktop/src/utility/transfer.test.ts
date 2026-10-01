@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { LookupAddress } from 'node:dns';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { chmod, mkdir, readFile, utimes, writeFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
@@ -574,9 +575,20 @@ export async function run(): Promise<void> {
         typeof entry === 'function' ? entry(init) : entry,
       );
     }) as typeof fetch;
+    // Hosts resolve public unless a script pins them to a private
+    // answer — the private-host verdict consults DNS, not just the
+    // hostname string.
+    const dnsScript = new Map<string, LookupAddress[]>();
+    const fakeLookup = (hostname: string): Promise<LookupAddress[]> =>
+      Promise.resolve(
+        dnsScript.get(hostname) ?? [
+          { address: '93.184.216.34', family: 4 },
+        ],
+      );
     const svc = createTransferService({
       mediaDir: join(fetchRoot, 'media'),
       fetchImpl: fakeFetch,
+      lookupImpl: fakeLookup,
     });
     const fetchRoute = createUtilityRouter(svc.handlers);
     let fetchSeq = 1;
@@ -876,7 +888,196 @@ export async function run(): Promise<void> {
       'duplicate live requestId refused',
     );
     await fetchCall(CHANNELS.transferFetchAbort, { requestId: 'f-6' });
+
+    // A public NAME that answers with a private address refuses —
+    // the literal check can't see rebinding, so the resolved
+    // addresses get the same verdict, at the initial hop and on a
+    // redirect.
+    dnsScript.set('rebind.example', [
+      { address: '127.0.0.1', family: 4 },
+    ]);
+    const seenBeforeRebind = seen.length;
+    const rebound = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-rebind', 'https://rebind.example/x'),
+    );
+    assert(
+      !rebound.ok && rebound.error.kind === 'invalid-request',
+      'name resolving private refused',
+    );
+    assertEqual(
+      seen.length,
+      seenBeforeRebind,
+      'no fetch issued to a private-resolving name',
+    );
+    scripted.set(
+      'https://cdn.example/twist',
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://rebind.example/x' },
+      }),
+    );
+    const twist = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-twist', 'https://cdn.example/twist'),
+    );
+    assert(
+      !twist.ok && twist.error.kind === 'invalid-response',
+      'redirect to a private-resolving name refused',
+    );
+    assert(
+      seen.every((entry) => !entry.url.includes('rebind')),
+      'no fetch issued to the redirect target',
+    );
+
+    // Deterministic-failure inputs refuse non-retryably instead of
+    // reaching undici and surfacing as 'transient' — credentialed
+    // urls, and header values carrying control chars (the same byte
+    // rule the mint's header decoder enforces).
+    const credentialed = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-cred', 'https://u:p@cdn.example/x'),
+    );
+    assert(
+      !credentialed.ok && credentialed.error.kind === 'invalid-request',
+      'credentialed url refused non-retryably',
+    );
+    const seenBeforeCtrl = seen.length;
+    const ctrl = await fetchCall(CHANNELS.transferFetch, {
+      ...argsFor('f-ctrl', 'https://cdn.example/uni'),
+      headers: { 'x-client': 'a\nb' },
+    });
+    assert(
+      !ctrl.ok && ctrl.error.kind === 'invalid-request',
+      'control-char header value refused non-retryably',
+    );
+    assertEqual(
+      seen.length,
+      seenBeforeCtrl,
+      'no fetch issued for a control-char header',
+    );
+
+    // A refused redirect drains its hop body — the socket frees
+    // instead of parking in the pool to keepalive expiry.
+    let refusedHopCancelled = false;
+    scripted.set(
+      'https://cdn.example/refused-hop',
+      new Response(
+        new ReadableStream<Uint8Array>({
+          cancel: () => {
+            refusedHopCancelled = true;
+          },
+        }),
+        {
+          status: 302,
+          headers: { location: 'http://cdn.example/off' },
+        },
+      ),
+    );
+    const refusedHop = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-refhop', 'https://cdn.example/refused-hop'),
+    );
+    assert(
+      !refusedHop.ok && refusedHop.error.kind === 'invalid-response',
+      'off-https redirect refused',
+    );
+    assertEqual(
+      refusedHopCancelled,
+      true,
+      'refused hop drains its body',
+    );
+    // …and the chain-too-long refusal drains the tail response.
+    let chainTailCancelled = false;
+    scripted.set(
+      'https://cdn.example/chain-a',
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://cdn.example/chain-b' },
+      }),
+    );
+    scripted.set(
+      'https://cdn.example/chain-b',
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://cdn.example/chain-c' },
+      }),
+    );
+    scripted.set(
+      'https://cdn.example/chain-c',
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://cdn.example/chain-d' },
+      }),
+    );
+    scripted.set(
+      'https://cdn.example/chain-d',
+      new Response(
+        new ReadableStream<Uint8Array>({
+          cancel: () => {
+            chainTailCancelled = true;
+          },
+        }),
+        {
+          status: 302,
+          headers: { location: 'https://cdn.example/chain-e' },
+        },
+      ),
+    );
+    const chain = await fetchCall(
+      CHANNELS.transferFetch,
+      argsFor('f-chain', 'https://cdn.example/chain-a'),
+    );
+    assert(
+      !chain.ok && chain.error.kind === 'invalid-response',
+      'redirect chain beyond the cap refused',
+    );
+    assertEqual(chainTailCancelled, true, 'chain tail drains its body');
     svc.close();
+
+    // Parked fetches bound like sinks — beyond the cap new fetches
+    // fail 'unavailable' instead of stacking unbounded sockets,
+    // timers, and abort controllers on the broker.
+    const capped = createTransferService({
+      mediaDir: join(fetchRoot, 'media-capped'),
+      fetchImpl: fakeFetch,
+      lookupImpl: fakeLookup,
+      maxFetches: 2,
+    });
+    const cappedRoute = createUtilityRouter(capped.handlers);
+    let cappedSeq = 100;
+    const cappedCall = (
+      channel: string,
+      args?: unknown,
+    ): Promise<UtilityResponse> => {
+      const id = cappedSeq;
+      cappedSeq += 1;
+      return cappedRoute({ id, channel, args });
+    };
+    const parked1 = await cappedCall(
+      CHANNELS.transferFetch,
+      argsFor('c-1', 'https://cdn.example/ok2'),
+    );
+    const parked2 = await cappedCall(
+      CHANNELS.transferFetch,
+      argsFor('c-2', 'https://cdn.example/ok2'),
+    );
+    assert(parked1.ok && parked2.ok, 'fetches park within the cap');
+    const over = await cappedCall(
+      CHANNELS.transferFetch,
+      argsFor('c-3', 'https://cdn.example/ok2'),
+    );
+    assert(
+      !over.ok && over.error.kind === 'unavailable',
+      'fetch beyond the parked cap fails unavailable',
+    );
+    await cappedCall(CHANNELS.transferFetchAbort, { requestId: 'c-1' });
+    const afterFree = await cappedCall(
+      CHANNELS.transferFetch,
+      argsFor('c-4', 'https://cdn.example/ok2'),
+    );
+    assert(afterFree.ok, 'a freed slot admits a new fetch');
+    capped.close();
   } finally {
     rmSync(fetchRoot, { recursive: true, force: true });
   }

@@ -1,4 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
+import { lookup as dnsLookup } from 'node:dns';
+import type { LookupAddress } from 'node:dns';
+import { lookup as dnsLookupAll } from 'node:dns/promises';
 import { createReadStream } from 'node:fs';
 import {
   mkdir,
@@ -12,6 +15,7 @@ import {
 import type { FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { Agent, Dispatcher, interceptors } from 'undici';
 import { CHANNELS } from '../shared/channels.ts';
 import type {
   TransferAbortArgs,
@@ -73,8 +77,14 @@ type TransferServiceOptions = {
   readonly maxSinks?: number | undefined;
   /** Wait-queue cap; beyond it `begin` fails `unavailable`. */
   readonly maxWaiters?: number | undefined;
+  /** Parked-fetch cap; beyond it `transfer:fetch` fails `unavailable`. */
+  readonly maxFetches?: number | undefined;
   /** Wire fetch for `transfer:fetch*` — Node fetch in production. */
   readonly fetchImpl?: typeof fetch | undefined;
+  /** Host resolver for the private-address verdict — node:dns in production. */
+  readonly lookupImpl?:
+    | ((hostname: string) => Promise<LookupAddress[]>)
+    | undefined;
 };
 
 type TransferService = {
@@ -98,6 +108,10 @@ type Sink = {
 
 const DEFAULT_MAX_SINKS = 4;
 const DEFAULT_MAX_WAITERS = 32;
+/** Parked fetches each hold an AbortController, a backstop timer,
+ * and — once answered — a live socket plus up to `FETCH_MAX_BODY`
+ * buffered on read; bound them like the sink side bounds opens. */
+const DEFAULT_MAX_FETCHES = 32;
 const PART_SUFFIX = '.part';
 /** Manual-hop cap + backstop for a fetch whose cancel never arrives
  * (renderer gone). The policy's own chunk timeout stays the real
@@ -117,6 +131,9 @@ type LiveFetch = {
   consumed: boolean;
   timedOut: boolean;
 };
+/** RequestInit plus undici's dispatcher pin — a non-undici fetchImpl
+ * simply ignores it. */
+type FetchInit = RequestInit & { dispatcher?: Dispatcher };
 /** Reserved finalize-internal namespace: the parked incumbent of an
  * in-flight destination replace. */
 const REPLACE_SUFFIX = '.replace';
@@ -758,14 +775,64 @@ export function createTransferService(
    * 206 bodies; `fetchAbort` cancels a request at any phase.
    * ---------------------------------------------------------------- */
   const fetches = new Map<string, LiveFetch>();
+  const maxFetches = options.maxFetches ?? DEFAULT_MAX_FETCHES;
   const fetchImpl = options.fetchImpl ?? fetch;
+  const lookupImpl =
+    options.lookupImpl ??
+    ((hostname: string) =>
+      dnsLookupAll(hostname, { all: true, verbatim: true }));
+  /**
+   * The private-host verdict applied at connect time, not just to
+   * the URL string: every dial through this dispatcher re-runs the
+   * resolution and is pinned to the verified-public records, so a
+   * hostile name can't re-resolve to a private target between the
+   * check and the dial (DNS rebinding). The interceptor rewrites
+   * only the connect origin — SNI and the Host header keep the
+   * original hostname.
+   */
+  const fetchDispatcher: Dispatcher = new Agent().compose(
+    interceptors.dns({
+      lookup: (origin, _options, callback) => {
+        dnsLookup(
+          origin.hostname,
+          { all: true, verbatim: true },
+          (err, addresses) => {
+            if (err !== null) {
+              callback(err, []);
+              return;
+            }
+            if (
+              addresses.some(({ address }) => isPrivateFetchHost(address))
+            ) {
+              callback(
+                Object.assign(
+                  new Error('fetch host resolves to a private address'),
+                  { code: 'ENOTPUBLIC' },
+                ),
+                [],
+              );
+              return;
+            }
+            callback(
+              null,
+              addresses.map(({ address, family }) => ({
+                address,
+                ttl: 0,
+                family: family === 6 ? (6 as const) : (4 as const),
+              })),
+            );
+          },
+        );
+      },
+    }),
+  );
 
   /**
    * Minted urls are public CDN endpoints — a fetch that names a
    * private or loopback target is either a bug or a renderer trying
    * to ride the bridge past its own CSP. Refuse literal private
-   * hosts; a hostile name resolved via public DNS is the residual
-   * hole every http client shares.
+   * hosts here; a public NAME still has to resolve public, which
+   * `resolvesPublic` and the pinned dispatcher enforce per hop.
    */
   function isPrivateFetchHost(hostname: string): boolean {
     const host = hostname.toLowerCase().replace(/\.$/, '');
@@ -844,10 +911,36 @@ export function createTransferService(
     if (url.protocol !== 'https:') {
       throw shellError('invalid-request', 'fetch url must be https');
     }
+    // Credentials can't cross undici's Request construction — refuse
+    // non-retryably instead of TypeError → 'transient'.
+    if (url.username !== '' || url.password !== '') {
+      throw shellError('invalid-request', 'fetch url carries credentials');
+    }
     if (isPrivateFetchHost(url.hostname)) {
       throw shellError('invalid-request', 'fetch url is not public');
     }
     return url;
+  }
+
+  /**
+   * The hostname string check can't see a public name whose records
+   * point at loopback/RFC1918/link-local (nip.io-style, split-horizon,
+   * rebinding) — resolve it and apply the same private verdict to
+   * every answer. Lookup failures propagate as transport-class
+   * 'transient'; a private answer is a refusal.
+   */
+  async function resolvesPublic(hostname: string): Promise<boolean> {
+    const addresses = await lookupImpl(hostname);
+    return (
+      addresses.length > 0 &&
+      addresses.every(({ address }) => !isPrivateFetchHost(address))
+    );
+  }
+
+  /** Drop a response's body so its socket frees — required before
+   * every refusal throw, same as the follow path does. */
+  function discard(response: Response): void {
+    void response.body?.cancel().catch(() => undefined);
   }
 
   /** Transport failures → retryable; the caller's abort → cancelled; the
@@ -877,6 +970,9 @@ export function createTransferService(
     if (fetches.has(args.requestId)) {
       throw shellError('invalid-request', 'duplicate fetch requestId');
     }
+    if (fetches.size >= maxFetches) {
+      throw shellError('unavailable', 'too many fetches in flight');
+    }
     const live: LiveFetch = {
       controller: new AbortController(),
       timer: setTimeout(() => {
@@ -890,14 +986,19 @@ export function createTransferService(
     fetches.set(args.requestId, live);
     try {
       let target = parseFetchUrl(args.url);
-      // Node fetch demands ByteString header values (chars ≤0xff);
-      // a native-valid mint can admit ≥0x100 codepoints (UTF-8
-      // obs-text) this transport can't represent — refuse it
+      if (!(await resolvesPublic(target.hostname))) {
+        throw shellError('invalid-request', 'fetch url is not public');
+      }
+      // Node fetch demands ByteString header values — undici throws
+      // TypeError on a control char (<0x20, 0x7f) or a ≥0x100
+      // codepoint a native-valid mint admits (UTF-8 obs-text), the
+      // same byte rule toMintHeaders enforces. Refuse them
       // non-retryably rather than letting the TypeError surface as
       // a 'transient' that retries forever.
       for (const [name, value] of Object.entries(args.headers)) {
         for (const ch of value) {
-          if ((ch.codePointAt(0) ?? 0) > 0xff) {
+          const code = ch.codePointAt(0) ?? 0;
+          if (code < 0x20 || code === 0x7f || code > 0xff) {
             throw shellError(
               'invalid-request',
               `fetch header '${name}' is not byte-encodable`,
@@ -908,12 +1009,14 @@ export function createTransferService(
       // Manual hops like the pump's: the scheme is re-validated each
       // hop (a downgrade or a loop never passes) and the minted
       // headers ride verbatim.
-      let response = await fetchImpl(target, {
+      const init: FetchInit = {
         method: 'GET',
         headers: args.headers,
         redirect: 'manual',
         signal: live.controller.signal,
-      });
+        dispatcher: fetchDispatcher,
+      };
+      let response = await fetchImpl(target, init);
       for (let hops = 0; hops < FETCH_MAX_REDIRECTS; hops += 1) {
         const location = response.headers.get('location');
         if (
@@ -927,18 +1030,31 @@ export function createTransferService(
         try {
           next = new URL(location, target);
         } catch {
+          discard(response);
           throw shellError(
             'invalid-response',
             'fetch redirect location unparseable',
           );
         }
         if (next.protocol !== 'https:') {
+          discard(response);
           throw shellError(
             'invalid-response',
             'fetch redirected off https',
           );
         }
-        if (isPrivateFetchHost(next.hostname)) {
+        if (next.username !== '' || next.password !== '') {
+          discard(response);
+          throw shellError(
+            'invalid-response',
+            'fetch redirected to a credentialed url',
+          );
+        }
+        if (
+          isPrivateFetchHost(next.hostname) ||
+          !(await resolvesPublic(next.hostname))
+        ) {
+          discard(response);
           throw shellError(
             'invalid-response',
             'fetch redirected to a non-public host',
@@ -946,19 +1062,15 @@ export function createTransferService(
         }
         target = next;
         // Drop the hop's body before following so its socket frees.
-        void response.body?.cancel().catch(() => undefined);
-        response = await fetchImpl(target, {
-          method: 'GET',
-          headers: args.headers,
-          redirect: 'manual',
-          signal: live.controller.signal,
-        });
+        discard(response);
+        response = await fetchImpl(target, init);
       }
       if (
         response.status >= 300 &&
         response.status < 400 &&
         response.headers.get('location') !== null
       ) {
+        discard(response);
         throw shellError(
           'invalid-response',
           'fetch redirect chain too long',
@@ -1172,6 +1284,7 @@ export function createTransferService(
         live.controller.abort();
       }
       fetches.clear();
+      void fetchDispatcher.close().catch(() => undefined);
       for (const waiter of waiters.splice(0)) {
         waiter.reject(
           shellError('released', 'transfer service is closed'),

@@ -1124,6 +1124,13 @@ class AuqwExpoModule : Module() {
       ctx.startActivity(install)
       mapOf("status" to "installing")
     }
+
+    // The device's ABI preference list for the update check's APK
+    // pick — a foreign-ABI split downloads in full then dies at the
+    // package installer (INSTALL_FAILED_NO_MATCHING_ABIS).
+    Function("supportedAbis") { ->
+      Build.SUPPORTED_ABIS.toList()
+    }
   }
 
   // ---- player plumbing ----

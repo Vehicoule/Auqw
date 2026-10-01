@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { CapsLabel, DiagPressRow, Hairline, Icon, Pressable, Text } from './primitives.tsx';
 import { focusTargetAfterRemoval } from './settings-focus.ts';
+import { usePaneVisible } from './world-panes.tsx';
 import { settingsGroups, settingsRowConfirms, t } from '@auqw/ui-shared';
 import type {
   SettingsModel,
@@ -131,6 +132,11 @@ function Toggle({ enabled }: { readonly enabled: boolean }) {
   );
 }
 
+// How long an armed confirm may wait for the second tap — long enough
+// for a deliberate press, short enough that coming back later can't
+// land a stale commit.
+const ARM_TIMEOUT_MS = 10_000;
+
 function SettingsRow({
   row,
   onSelectRow,
@@ -179,12 +185,24 @@ function SettingsRow({
   // the first press arms, the armed slot splits into commit + cancel.
   const confirms = settingsRowConfirms(row);
   // Arm state must not outlive the row it was armed on — a re-rendered
-  // (disabled, rekeyed) row silently drops any pending confirm.
+  // (disabled, rekeyed) or hidden row silently drops any pending
+  // confirm. Keep-alive panes stay mounted while hidden, so visibility
+  // arrives via context, not props.
+  const paneVisible = usePaneVisible();
   useEffect(() => {
-    if (!confirms || !interactive || !row.enabled) {
+    if (!confirms || !interactive || !row.enabled || !paneVisible) {
       setArmed(false);
     }
-  }, [confirms, interactive, row.enabled, row.key]);
+  }, [confirms, interactive, row.enabled, row.key, paneVisible]);
+  // A pushed overlay hides the pane without deactivating it — the arm
+  // expires instead of surviving indefinitely under the cover.
+  useEffect(() => {
+    if (!armed) {
+      return undefined;
+    }
+    const timer = setTimeout(() => setArmed(false), ARM_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [armed]);
   if (armed && interactive) {
     const confirmLabel = t('settings.confirmAction', { action: row.label });
     return (

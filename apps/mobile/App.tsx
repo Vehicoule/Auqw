@@ -650,6 +650,10 @@ function Main({
   // token slot; construction kicks the memoized boot restore, so a
   // stored grant refreshes before the first sign-in UI ever reads.
   const authPort = useMemo(() => createMobileAuth(controller), [controller]);
+  // The session owns renewal timers + custody writes — it must not
+  // outlive Main: an orphan keeps renewing the grant and can re-arm
+  // the host bearer after a remounted session signs out.
+  useEffect(() => () => authPort.dispose(), [authPort]);
   // Release-update seam — the shared check over RN fetch; on Android
   // the act leg downloads the APK and fires the system installer,
   // everywhere else it opens the release page.

@@ -685,14 +685,15 @@ export function createWebPeaksPort(deps: {
 
     // Free coverage: the head already carries the first complete
     // clusters — decode them in one assembled doc (they're contiguous
-    // from cluster 0, so the PCM maps to [tc0, tc0 + pcmMs]).
-    let seeded = false;
+    // from cluster 0, so the PCM maps to [tc0, tc0 + pcmMs]). The
+    // seed is real measured coverage for the profile, but it is not
+    // a result: it can feed the coarse emit, never the settle.
     if (boundaries.length > 0) {
       const last = boundaries[boundaries.length - 1]!;
       const end = webmClusterEnd(head, last);
       const tc0 = webmClusterTimecode(head, boundaries[0]!, scaleMs);
       if (end > initEnd && tc0 !== null) {
-        seeded = await apply(head.subarray(0, end), tc0);
+        await apply(head.subarray(0, end), tc0);
       }
     }
 
@@ -730,12 +731,19 @@ export function createWebPeaksPort(deps: {
         positions.push({ byte, mediaMs: null });
       }
     }
-    if (positions.length === 0 && !seeded) {
+    // No addressable sample position means nothing honest can settle
+    // here — even a decoded head seed is head-only coverage, and a
+    // partial row reaches the UI through onCoarse or not at all.
+    if (positions.length === 0) {
       return ok(null); // nowhere honest to sample — legacy path
     }
 
     let next = 0;
     let coarseSent = false;
+    // Sampled coverage applied by the probe loop — the only coverage
+    // allowed to settle the request. The head seed deliberately does
+    // not count.
+    let sampledApplied = 0;
     const probeOne = async (): Promise<void> => {
       while (next < positions.length) {
         if (context.signal.cancelled || now() > context.deadlineMs) {
@@ -768,10 +776,13 @@ export function createWebPeaksPort(deps: {
         if (mediaMs === null) {
           continue;
         }
-        await apply(
+        const appliedSample = await apply(
           concatBytes([init, buf.subarray(clusterAt, end)]),
           mediaMs,
         );
+        if (appliedSample) {
+          sampledApplied += 1;
+        }
         // Coarse boundary: once enough MEASURED samples have landed
         // (a failed decode never counts — zeros are not bars), emit
         // the filled profile — real bars in the sub-200 ms window;
@@ -793,9 +804,14 @@ export function createWebPeaksPort(deps: {
     if (context.signal.cancelled) {
       return err(appError('cancelled', 'peak extraction cancelled'));
     }
-    if (applied === 0) {
-      // Every sample failed — the bytes aren't what the head claimed;
-      // the whole-file pull may still decode. 'null' = fall back.
+    if (sampledApplied === 0) {
+      // No sampled position produced coverage — every probe failed,
+      // or only the head seed decoded. Settling now would persist a
+      // row whose unmeasured buckets are clones of the head's last
+      // measured one: a fabricated tail marked final and cached
+      // forever. 'null' = fall back to the honest paths (whole-file
+      // pull, or a transient-null retry) — partial coverage only ever
+      // lands through onCoarse, it never settles.
       return ok(null);
     }
     return ok(buildProfile());

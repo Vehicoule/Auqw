@@ -509,14 +509,6 @@ export class Session {
   #publishSource: PublishSource | undefined;
   #playerUnsub: () => void;
   #disposed = false;
-  /**
-   * The connectivity value the session last sampled in
-   * `connectivityChanged` — the re-arm must see a real false→true
-   * transition; callers also fire the hook for non-edge reasons
-   * (boot re-derive, media ownership) where an old weather block
-   * must not suddenly autoplay. `undefined` = never sampled.
-   */
-  #lastOnline: boolean | undefined;
   readonly #localPlaybackFor: (recordingId: string) => string | null;
   readonly #isOnline: () => boolean;
   readonly #isMetered: () => boolean;
@@ -1560,21 +1552,17 @@ export class Session {
    * native queue so offline items lose their remote refs (and regain
    * them on reconnect), cancels in-flight speculative mapping, and
    * re-evaluates the successor/radio triggers under the new truth.
-   * On a reconnect it also re-arms a queue parked on connectivity
-   * weather — that block is interrupted play intent, not a verdict.
+   * While the sample reads online it also re-arms a queue parked on
+   * connectivity weather — that block is interrupted play intent,
+   * not a verdict.
    */
   connectivityChanged(): void {
-    // Sample before the readiness gate so an edge observed before
-    // restore still lands in the baseline the first ready call diffs.
-    const wasOnline = this.#lastOnline;
-    const isOnline = this.#isOnline();
-    this.#lastOnline = isOnline;
     if (!this.#requireReady().ok) {
       return;
     }
     this.#derived();
     const r = this.#ready;
-    if (r === null || wasOnline !== false || !isOnline) {
+    if (r === null || !this.#isOnline()) {
       return;
     }
     const queue = r.queue.snapshot();
@@ -1586,6 +1574,12 @@ export class Session {
     ) {
       // `resume()` is the explicit retry the surface would fire: it
       // clears the block, ticks 'playing', and re-attempts the row.
+      // The parked block itself is the re-arm condition — requiring
+      // a sampled false→true edge straddles two real cases: a
+      // provider/CDN blip parks the queue while the platform stays
+      // green (no NIC edge ever follows), and a suspended app's
+      // monitor coalesces the whole offline→online window into a
+      // single online report on resume.
       this.#own(this.#playback.resume());
     }
   }
@@ -1658,7 +1652,7 @@ export class Session {
       // A just-enqueued row is the likeliest next tap — the viewport
       // hand resolves+pins+mint-warms it before any surface reports
       // it visible.
-      this.#playback.prewarm({ occurrenceIds: [staged.value] });
+      this.#playback.prewarm({ enqueuedIds: [staged.value] });
     }
     return staged;
   }

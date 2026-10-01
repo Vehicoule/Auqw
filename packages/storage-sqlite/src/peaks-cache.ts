@@ -1,11 +1,28 @@
+import type { CancellationSignal } from '@auqw/application';
 import type { PeaksStore, WaveformPeak } from '@auqw/application';
+import { CANCELLED } from './driver.ts';
 import type { SqliteDriver } from './driver.ts';
+import { enqueueDriverTransaction } from './transaction-queue.ts';
 
 /**
  * Device-local LRU bound on persisted peak rows — one row is ~2 KB of
  * JSON, so hundreds of tracks cost well under a megabyte.
  */
 const PEAKS_CACHE_LIMIT = 256;
+
+// The port carries no OperationContext: persisted peaks are a
+// decoration lookup, not a cancellable operation. The queue still
+// needs a signal — one that can never flip.
+const NEVER_CANCELLED: CancellationSignal = {
+  cancelled: false,
+  subscribe: () => () => undefined,
+};
+
+function checkSignal(signal: CancellationSignal): void {
+  if (signal.cancelled) {
+    throw CANCELLED;
+  }
+}
 
 const isPeak = (value: unknown): value is WaveformPeak => {
   if (typeof value !== 'object' || value === null) {
@@ -41,24 +58,32 @@ export function createPeaksCacheStore(
   return {
     async load(recordingId) {
       try {
-        // The LRU bound prunes on last-touch order, so a hit bumps the
-        // row's recency in the same transaction — a frequently played
-        // profile can't be evicted by newer saves while it's still read.
-        const rows = await driver.transaction(async (conn) => {
-          const hit = await conn.query<{
-            recording_id: string;
-            peaks_json: string;
-          }>('SELECT peaks_json FROM peaks_cache WHERE recording_id = ?', [
-            recordingId,
-          ]);
-          if (hit.length > 0) {
-            await conn.execute(
-              'UPDATE peaks_cache SET fetched_ms = ? WHERE recording_id = ?',
-              [now(), recordingId],
-            );
-          }
-          return hit;
-        });
+        // enqueueDriverTransaction, not a bare driver.transaction:
+        // the driver is shared with SqliteStorage/sync-log on the
+        // same connection, so an unqueued BEGIN IMMEDIATE collides
+        // with any open transaction — peaks ops degrade silently,
+        // but the racing commit fails transiently. Every store over
+        // one driver must queue on the same tail.
+        const rows = await enqueueDriverTransaction(
+          driver,
+          async (conn) => {
+            const hit = await conn.query<{
+              recording_id: string;
+              peaks_json: string;
+            }>('SELECT peaks_json FROM peaks_cache WHERE recording_id = ?', [
+              recordingId,
+            ]);
+            if (hit.length > 0) {
+              await conn.execute(
+                'UPDATE peaks_cache SET fetched_ms = ? WHERE recording_id = ?',
+                [now(), recordingId],
+              );
+            }
+            return hit;
+          },
+          NEVER_CANCELLED,
+          checkSignal,
+        );
         const json = rows[0]?.['peaks_json'];
         if (typeof json !== 'string') {
           return null;
@@ -79,19 +104,24 @@ export function createPeaksCacheStore(
     },
     async save(recordingId, peaks) {
       try {
-        await driver.transaction(async (conn) => {
-          await conn.execute(
-            `INSERT OR REPLACE INTO peaks_cache (recording_id, peaks_json, fetched_ms)
+        await enqueueDriverTransaction(
+          driver,
+          async (conn) => {
+            await conn.execute(
+              `INSERT OR REPLACE INTO peaks_cache (recording_id, peaks_json, fetched_ms)
              VALUES (?, ?, ?)`,
-            [recordingId, JSON.stringify(peaks), now()],
-          );
-          await conn.execute(
-            `DELETE FROM peaks_cache WHERE recording_id NOT IN (
+              [recordingId, JSON.stringify(peaks), now()],
+            );
+            await conn.execute(
+              `DELETE FROM peaks_cache WHERE recording_id NOT IN (
                SELECT recording_id FROM peaks_cache
                ORDER BY fetched_ms DESC, recording_id DESC LIMIT ?)`,
-            [PEAKS_CACHE_LIMIT],
-          );
-        });
+              [PEAKS_CACHE_LIMIT],
+            );
+          },
+          NEVER_CANCELLED,
+          checkSignal,
+        );
       } catch {
         // Decoration — a dropped write only costs a cold start.
       }

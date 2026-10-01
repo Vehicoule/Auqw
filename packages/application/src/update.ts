@@ -35,7 +35,15 @@ export type UpdateRelease = {
 
 /** Which shipped artifact this build could consume, if it self-installs. */
 export type UpdateTarget =
-  | { readonly os: 'android' }
+  | {
+      readonly os: 'android';
+      /** The device's `Build.SUPPORTED_ABIS`, preference-ordered.
+       *  APK assets carry their ABI in the name ('…-android-<abi>.apk',
+       *  tooling/release.yml), and a foreign-ABI APK downloads in full
+       *  only to die at the system installer
+       *  (INSTALL_FAILED_NO_MATCHING_ABIS). */
+      readonly supportedAbis: readonly string[];
+    }
   | {
       readonly os: 'linux';
       /** AppImage can't self-update but rides as the informational
@@ -49,6 +57,12 @@ export type UpdateTarget =
 
 const VERSION_TAG = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
 
+/** The snapshot contract's bound on every version field
+ *  (apps/desktop shared/contract.ts `v.boundedString(64)`): a tag
+ *  that normalizes past it ships an 'available' snapshot no
+ *  delivery path accepts, so it reads like an unparseable tag. */
+const VERSION_MAX_LENGTH = 64;
+
 /**
  * Strip the `v` prefix and validate the semver shape the release
  * workflow stamps (`tooling/stamp-version.mjs`): `MAJOR.MINOR.PATCH`
@@ -61,9 +75,11 @@ export function parseVersionTag(tag: string): string | null {
   if (match === null || match[4] === '') {
     return null;
   }
-  return match[4] === undefined
-    ? `${match[1]}.${match[2]}.${match[3]}`
-    : `${match[1]}.${match[2]}.${match[3]}-${match[4]}`;
+  const version =
+    match[4] === undefined
+      ? `${match[1]}.${match[2]}.${match[3]}`
+      : `${match[1]}.${match[2]}.${match[3]}-${match[4]}`;
+  return version.length <= VERSION_MAX_LENGTH ? version : null;
 }
 
 type ParsedVersion = {
@@ -72,7 +88,11 @@ type ParsedVersion = {
 };
 
 function parse(version: string): ParsedVersion | null {
-  const [core, pre] = version.split('-', 2);
+  // The tail starts at the FIRST '-' — a hyphen inside it is a legal
+  // identifier char ('1.0.0-alpha-1'), not a second split point.
+  const hyphen = version.indexOf('-');
+  const core = hyphen < 0 ? version : version.slice(0, hyphen);
+  const pre = hyphen < 0 ? undefined : version.slice(hyphen + 1);
   const parts = core?.split('.').map((p) => Number.parseInt(p, 10));
   if (
     parts === undefined ||
@@ -148,6 +168,19 @@ export function compareVersions(a: string, b: string): number {
 
 // ---- GitHub payload parsing -----------------------------------------
 
+/** Every platform's staging joins the asset name into a directory —
+ *  only a bare basename is safe to join; a separator or dot-escape
+ *  would write outside the staging dir. */
+function isBareName(name: string): boolean {
+  return (
+    name.length > 0 &&
+    !name.includes('/') &&
+    !name.includes('\\') &&
+    name !== '.' &&
+    name !== '..'
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -184,14 +217,9 @@ export function parseRelease(value: unknown): UpdateRelease | null {
     const name = asset['name'];
     const download = asset['browser_download_url'];
     // The name becomes a path component on every platform's staging
-    // — it must arrive already a basename: a `..` or separator would
-    // escape the staging dir at join() time.
+    // — it must arrive already a basename.
     return typeof name === 'string' &&
-      name.length > 0 &&
-      !name.includes('/') &&
-      !name.includes('\\') &&
-      name !== '.' &&
-      name !== '..' &&
+      isBareName(name) &&
       typeof download === 'string' &&
       download.startsWith('https://')
       ? [{ name, url: download }]
@@ -278,15 +306,36 @@ export function parseSha256Sums(text: string): ReadonlyMap<string, string> {
   return map;
 }
 
+/** '<…>-android-<abi>.apk' → '<abi>' — the release workflow names
+ *  per-ABI splits 'auqw-<version>-android-<abi>.apk'. */
+function apkAbi(name: string): string | null {
+  return /-android-([0-9A-Za-z_-]+)\.apk$/.exec(name)?.[1] ?? null;
+}
+
 /** The artifact this target installs, if the release ships one. */
 export function pickArtifact(
   assets: readonly UpdateArtifact[],
   target: UpdateTarget,
 ): UpdateArtifact | null {
+  // Android selects by the device's ABI preference order, never by
+  // asset order — a release shipping several splits must land the
+  // one this CPU runs. 'universal' is the fallback when no split
+  // matches, and no match at all advertises 'open'.
+  if (target.os === 'android') {
+    const byAbi = (abi: string): UpdateArtifact | null =>
+      assets.find(
+        (asset) => isBareName(asset.name) && apkAbi(asset.name) === abi,
+      ) ?? null;
+    for (const abi of target.supportedAbis) {
+      const artifact = byAbi(abi);
+      if (artifact !== null) {
+        return artifact;
+      }
+    }
+    return byAbi('universal');
+  }
   const wants = (name: string): boolean => {
     switch (target.os) {
-      case 'android':
-        return name.includes('-android-') && name.endsWith('.apk');
       case 'linux':
         return target.prefer === 'flatpak'
           ? name.endsWith('.flatpak')
@@ -299,7 +348,12 @@ export function pickArtifact(
         return false;
     }
   };
-  return assets.find((asset) => wants(asset.name)) ?? null;
+  // The basename gate repeats the parse-side check: an artifact
+  // built outside parseRelease stages into the same dirs.
+  return (
+    assets.find((asset) => isBareName(asset.name) && wants(asset.name)) ??
+    null
+  );
 }
 
 // ---- the check -------------------------------------------------------

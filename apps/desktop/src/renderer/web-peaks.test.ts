@@ -782,4 +782,75 @@ export async function run(): Promise<void> {
       'no coarse emission without a single measured sample',
     );
   }
+
+  // An unknown-total webm with no Cues cannot address a single sample
+  // position. A decoded head seed is head-only coverage — it feeds
+  // the coarse emit, but it must never settle as the final profile:
+  // the row is ~95% nearest-neighbor fill, and caching it as done
+  // forecloses the honest whole-file pull.
+  {
+    const { file } = fakeWebm({
+      clusters: [{ tc: 0, payload: 128 }],
+      cues: false,
+    });
+    const stream = fakeStream({
+      // The head probe lands the container; total stays unknown and
+      // every other position is an unfetched hole.
+      probeChunks: new Map([[0, file]]),
+      chunks: new Map([
+        [0, file],
+        [file.length, new Uint8Array(0)],
+      ]),
+    });
+    const port = createWebPeaksPort({
+      stream,
+      decode: fakeDecode([new Float32Array(64).fill(0.4)]),
+      sampledMinTotalBytes: 1,
+      coarseProbes: 3,
+      refineProbes: 1,
+    });
+    const result = await port.peaks(
+      { handle: 'h-s6', durationMs: 4000 },
+      context(),
+    );
+    assert(result.ok, 'the fallback pull still resolves a profile');
+    assert(
+      stream.calls.some((c) => c.method === 'read'),
+      'a head-only seed never settles — the sequential pull runs',
+    );
+  }
+
+  // Cue-addressed positions exist but every sample probe holes out:
+  // the seeded head alone still cannot settle the request. Zero
+  // applied samples falls back to the honest pull — never a
+  // cloned-bucket row marked final.
+  {
+    const { file } = fakeWebm({
+      clusters: [0, 5000, 10000].map((tc) => ({ tc, payload: 64 })),
+      cues: true,
+    });
+    const stream = fakeStream({
+      probeChunks: new Map([[0, file]]),
+      chunks: new Map([
+        [0, file],
+        [file.length, new Uint8Array(0)],
+      ]),
+    });
+    const port = createWebPeaksPort({
+      stream,
+      decode: fakeDecode([new Float32Array(64).fill(0.4)]),
+      sampledMinTotalBytes: 1,
+      coarseProbes: 3,
+      refineProbes: 1,
+    });
+    const result = await port.peaks(
+      { handle: 'h-s7', durationMs: 15_000 },
+      context(),
+    );
+    assert(result.ok, 'the fallback pull covers what probes cannot');
+    assert(
+      stream.calls.some((c) => c.method === 'read'),
+      'zero applied samples settle nothing — the pull runs',
+    );
+  }
 }
