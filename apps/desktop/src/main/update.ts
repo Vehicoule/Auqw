@@ -126,6 +126,9 @@ export function createDesktopUpdate(deps: {
   readonly fetchJson: UpdateFetchJson;
   readonly openExternal: (url: string) => Promise<void>;
   readonly capability: UpdateCapability;
+  /** Override for the releases list endpoint — dev/test seam, same
+      role as mobile's EXPO_PUBLIC_UPDATE_RELEASES_URL. */
+  readonly releasesUrl?: string;
   /** Apply transport + format installer — required past 'open'. */
   readonly applyPorts?: UpdateApplyPorts;
   /** Relaunch hook — required on formats that self-apply on restart
@@ -141,6 +144,9 @@ export function createDesktopUpdate(deps: {
     currentVersion: deps.currentVersion,
     target: deps.target,
     fetchJson: deps.fetchJson,
+    ...(deps.releasesUrl !== undefined && deps.releasesUrl !== ''
+      ? { releasesUrl: deps.releasesUrl }
+      : {}),
     ...(applier !== undefined ? { applier } : {}),
   });
   const snapshot = (): DesktopUpdateSnapshot => ({

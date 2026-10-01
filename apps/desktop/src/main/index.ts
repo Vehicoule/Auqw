@@ -420,13 +420,20 @@ async function main(): Promise<void> {
   // AppImage leg stages a `.new` sibling of the running image instead
   // so the apply rename stays atomic (same filesystem).
   const updatesStageDir = join(userDataPath, 'updates');
+  const appimagePath = process.env['APPIMAGE'];
   if (updateCapability !== 'open') {
     mkdirSync(updatesStageDir, { recursive: true });
     for (const name of readdirSync(updatesStageDir)) {
       rmSync(join(updatesStageDir, name), { force: true, recursive: true });
     }
+    // The AppImage stage sits beside the running image, outside
+    // updatesStageDir — a `.new` killed mid-download strands there
+    // too, so sweep it (and its `.part`) the same way.
+    if (appimagePath !== undefined) {
+      rmSync(`${appimagePath}.new`, { force: true });
+      rmSync(`${appimagePath}.new.part`, { force: true });
+    }
   }
-  const appimagePath = process.env['APPIMAGE'];
   const CHECKSUMS_MAX_BYTES = 1024 * 1024;
   const updateApplyPorts: UpdateApplyPorts | undefined =
     updateCapability === 'open'
@@ -580,6 +587,10 @@ async function main(): Promise<void> {
             return Promise.resolve();
           },
         };
+  // Dev/test seam (mobile's EXPO_PUBLIC_UPDATE_RELEASES_URL twin):
+  // point the check at a local/staging releases payload — e.g. a
+  // fixture feed for deterministic update legs.
+  const updateReleasesUrl = process.env['AUQW_UPDATE_RELEASES_URL'];
   const updateService = createDesktopUpdate({
     currentVersion: app.getVersion(),
     target: updateTarget,
@@ -594,11 +605,26 @@ async function main(): Promise<void> {
     },
     openExternal: (url) => shell.openExternal(url),
     capability: updateCapability,
+    ...(updateReleasesUrl !== undefined && updateReleasesUrl !== ''
+      ? { releasesUrl: updateReleasesUrl }
+      : {}),
     ...(updateApplyPorts !== undefined ? { applyPorts: updateApplyPorts } : {}),
     ...(updateCapability === 'install' && updateTarget.os === 'linux'
       ? {
           relaunch: () => {
-            app.relaunch();
+            // The AppImage apply already renamed the new bytes over
+            // $APPIMAGE — the restart must exec THAT file. A bare
+            // app.relaunch() re-execs process.execPath, the binary
+            // inside the dying FUSE mount, so the "updated" app comes
+            // back as the old version (or dies with the mount). args
+            // defaults to [] under relaunch(), so pass argv back or
+            // the new image drops the user's launch flags.
+            app.relaunch({
+              args: process.argv.slice(1),
+              ...(appimagePath !== undefined
+                ? { execPath: appimagePath }
+                : {}),
+            });
             app.exit(0);
           },
         }
