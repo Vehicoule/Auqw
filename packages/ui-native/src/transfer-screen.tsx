@@ -217,16 +217,20 @@ function ImportBody({
           </Pressable>
         </View>
       ) : (
-        <View
-          style={{
-            flexDirection: 'row',
-            gap: theme.spacing.md,
-            marginTop: theme.spacing.md,
-          }}
-        >
+        <View style={{ marginTop: theme.spacing.md }}>
+          <Text variant="metadata" color="warn">
+            {footer.warning}
+          </Text>
+          <View
+            style={{
+              flexDirection: 'row',
+              gap: theme.spacing.md,
+              marginTop: theme.spacing.sm,
+            }}
+          >
           <PillButton
             label={footer.applyLabel}
-            tone="accent"
+            tone="warn"
             onPress={footer.onApply}
             disabled={footer.applying}
             accessibilityLabel={footer.applyA11yLabel}
@@ -238,6 +242,7 @@ function ImportBody({
             onPress={footer.onCancel}
             accessibilityLabel={footer.cancelA11yLabel}
           />
+          </View>
         </View>
       )}
     </View>

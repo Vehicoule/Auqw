@@ -389,6 +389,7 @@ export type TransferImportFooterView =
       readonly applyLabel: string;
       readonly applyA11yLabel: string;
       readonly onApply: MaybeFn;
+      readonly warning: string;
       readonly cancelLabel: string;
       readonly cancelA11yLabel: string;
       readonly onCancel: MaybeFn;
@@ -454,6 +455,7 @@ export function useTransferScreenController({
                   : t('transfer.apply'),
               applyA11yLabel: t('transfer.apply'),
               onApply: onApplyImport,
+              warning: t('transfer.replaceWarn'),
               cancelLabel: t('common.cancel'),
               cancelA11yLabel: t('transfer.cancelA11y'),
               onCancel: onResetImport,
