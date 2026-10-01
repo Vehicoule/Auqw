@@ -1774,10 +1774,12 @@ export function StageSheet({
                   )}
                   {onAddToPlaylist !== undefined && (
                     <IconButton
-                      icon="list-plus"
+                      icon={player.inPlaylist ? 'check' : 'list-plus'}
                       size={36}
                       iconSize={15}
-                      color={colors.textSecondary}
+                      color={
+                        player.inPlaylist ? colors.accent : colors.textSecondary
+                      }
                       accessibilityLabel={t('sheets.addToPlaylist')}
                       onPress={onAddToPlaylist}
                     />

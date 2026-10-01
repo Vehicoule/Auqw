@@ -1118,6 +1118,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       queue: state.queue,
       recordings: state.recordings,
       likes: state.likes,
+      playlistEntries: state.playlistEntries,
       repeat: state.repeat,
       shuffleOrder: state.shuffleOrder,
       // The wall CTA only exists when the auth seam can't serve a
@@ -1147,6 +1148,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     state.queue,
     state.recordings,
     state.likes,
+    state.playlistEntries,
     state.repeat,
     state.shuffleOrder,
     positionMs,
@@ -1240,6 +1242,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       queue: state.queue,
       recordings: state.recordings,
       likes: state.likes,
+      playlistEntries: state.playlistEntries,
       // Same honesty rule as the library rows: offline + unattachable
       // marks 'unavailable' so a dead press isn't a surprise.
       unavailableRecordingIds:
@@ -1262,6 +1265,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     state.queue,
     state.recordings,
     state.likes,
+    state.playlistEntries,
     playbackType,
     playbackOccurrenceId,
     state.shuffleOrder,
@@ -1553,11 +1557,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
         page: fetch?.page ?? null,
         error: fetch?.error ?? null,
         likes: state.likes,
+        playlistEntries: state.playlistEntries,
         entitySourceRefs: state.entitySourceRefs,
         loadingMore: fetch?.loadingMore ?? false,
         playingRef,
       }),
-    [state.likes, state.entitySourceRefs, playingRef, localeTick],
+    [state.likes, state.playlistEntries, state.entitySourceRefs, playingRef, localeTick],
   );
   // Row-key → TrackMetadata for entity items (resultMeta's contract)
   // — namespaced per stack entry so two entity screens never collide.
@@ -1609,6 +1614,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
     if (terms.length === 0) {
       return [];
     }
+    const inPlaylist = new Set(
+      state.playlistEntries.map((e) => e.recordingId),
+    );
     const liked = new Set(
       state.likes
         .filter((l) => l.entityKind === 'track')
@@ -1632,6 +1640,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
           toTrackRowModel(rec, {
             key: `local:${rec.id}`,
             liked: liked.has(rec.id),
+            inPlaylist: inPlaylist.has(rec.id),
             note: t('note.local'),
             playing: activeRecordingId === rec.id,
           }),
@@ -1649,6 +1658,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     committedQuery,
     state.recordings,
     state.likes,
+    state.playlistEntries,
     activeRecordingId,
     controller,
     ports.localCatalog,
@@ -1657,7 +1667,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
   ]);
 
   const searchModel = useMemo(() => {
-    const base = toSearchModel(searchState, playingRef);
+    const base = toSearchModel(
+      searchState,
+      playingRef,
+      state.playlistEntries,
+    );
     if (localResults.length === 0 || base.phase === 'idle') {
       return base;
     }
@@ -1669,7 +1683,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     // rows still play (owned bytes), so surface them instead of the
     // bare failure.
     return { ...base, phase: 'ready' as const, results };
-  }, [searchState, localResults, playingRef, localeTick]);
+  }, [searchState, localResults, playingRef, state.playlistEntries, localeTick]);
 
   const homeModel = useMemo(
     () =>

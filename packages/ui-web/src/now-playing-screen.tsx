@@ -507,7 +507,8 @@ export function NowPlayingScreen({
                     )}
                     {onAddToPlaylist !== undefined && (
                       <IconButton
-                        icon="list-plus"
+                        icon={player.inPlaylist ? 'check' : 'list-plus'}
+                        active={player.inPlaylist}
                         size={36}
                         iconSize={15}
                         color="var(--text-secondary)"

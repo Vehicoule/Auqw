@@ -18,6 +18,7 @@ import type {
   MatchReview,
   ProviderCapability,
   ProviderPort,
+  PlaylistEntry,
   Result,
   SearchState,
   Settings,
@@ -108,7 +109,17 @@ export type Boot<TController> =
 export function toSearchModel(
   state: SearchState,
   playingRef: SourceRef | null = null,
+  playlistEntries: readonly PlaylistEntry[] = [],
 ): SearchStateModel {
+  const inPlaylist = new Set(
+    playlistEntries
+      .map((entry) =>
+        entry.selectedRef === null
+          ? null
+          : `${entry.selectedRef.provider}:${entry.selectedRef.kind}:${entry.selectedRef.id}`,
+      )
+      .filter((key): key is string => key !== null),
+  );
   const base = {
     query: state.type === 'idle' ? '' : state.query,
     results: [],
@@ -126,7 +137,14 @@ export function toSearchModel(
         ...base,
         phase: state.page.items.length === 0 ? 'empty' : 'ready',
         results: state.page.items.map((meta, index) =>
-          toSearchRowModel(meta, index, playingRef),
+          toSearchRowModel(
+            meta,
+            index,
+            playingRef,
+            inPlaylist.has(
+              `${meta.sourceRef.provider}:${meta.sourceRef.kind}:${meta.sourceRef.id}`,
+            ),
+          ),
         ),
         message: errorText(state.refreshError),
       };
