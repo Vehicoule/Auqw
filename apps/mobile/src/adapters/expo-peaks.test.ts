@@ -15,14 +15,31 @@ function context(signal?: CancellationSource): OperationContext {
 
 type Call = { method: string; args: readonly unknown[] };
 
+type CoarseListener = (event: {
+  requestId: string;
+  peaks: readonly number[];
+}) => void;
+
 function fakeNative(
   result: readonly number[] | (() => Promise<readonly number[]>),
-): AuqwPeaksNative & { calls: Call[]; cancels: string[] } {
+): AuqwPeaksNative & {
+  calls: Call[];
+  cancels: string[];
+  coarseListeners: Set<CoarseListener>;
+  emitCoarse(requestId: string, peaks: readonly number[]): void;
+} {
   const calls: Call[] = [];
   const cancels: string[] = [];
+  const coarseListeners = new Set<CoarseListener>();
   return {
     calls,
     cancels,
+    coarseListeners,
+    emitCoarse(requestId, peaks) {
+      for (const listener of [...coarseListeners]) {
+        listener({ requestId, peaks });
+      }
+    },
     waveformPeaks(requestId, handle, count, maxBytes, provisionalCap) {
       calls.push({
         method: 'waveformPeaks',
@@ -34,6 +51,10 @@ function fakeNative(
     },
     waveformPeaksCancel(requestId) {
       cancels.push(requestId);
+    },
+    addWaveformPeaksCoarseListener(listener) {
+      coarseListeners.add(listener);
+      return { remove: () => coarseListeners.delete(listener) };
     },
   };
 }
@@ -245,5 +266,53 @@ export async function run(): Promise<void> {
     const result = await pending;
     assertEqual(native.cancels[0], 'peaks-test-1', 'cancel reaches native');
     assert(!result.ok && result.error.kind === 'cancelled');
+  }
+
+  // The coarse event relays a measured mid-sweep profile through
+  // `onCoarse` — normalized like the final result, requestId-scoped,
+  // and unsubscribed when the call settles.
+  {
+    const nativeCall: { resolve?: (v: readonly number[]) => void } = {};
+    const native = fakeNative(
+      () =>
+        new Promise<readonly number[]>((resolve) => {
+          nativeCall.resolve = resolve;
+        }),
+    );
+    const port = createExpoPeaksPort(native);
+    const coarse: (readonly { up: number; down: number }[] | null)[] = [];
+    const pending = port.peaks(
+      {
+        handle: 'h-12',
+        durationMs: 60_000,
+        onCoarse: (peaks) => coarse.push(peaks),
+      },
+      context(),
+    );
+    // A foreign request's coarse never reaches this call's callback.
+    native.emitCoarse('other-request', flatProfile(PEAKS_RESOLUTION));
+    assertEqual(coarse.length, 0, 'coarse is requestId-scoped');
+    // A malformed coarse is dropped, never drawn.
+    native.emitCoarse('peaks-test-1', [1, 2, 3]);
+    assertEqual(coarse.length, 0, 'malformed coarse is ignored');
+    native.emitCoarse('peaks-test-1', flatProfile(PEAKS_RESOLUTION));
+    assertEqual(coarse.length, 1, 'coarse relays once');
+    assert(
+      (coarse[0] ?? []).every(
+        (p) => p.up >= 0 && p.up <= 1 && p.down >= 0 && p.down <= 1,
+      ),
+      'coarse peaks land normalized',
+    );
+    nativeCall.resolve?.(flatProfile(PEAKS_RESOLUTION));
+    const result = await pending;
+    assert(result.ok, 'final result still lands after coarse');
+    assertEqual(
+      native.coarseListeners.size,
+      0,
+      'the coarse subscription is torn down',
+    );
+    // A late emit after settle is a no-op — no subscription remains.
+    native.emitCoarse('peaks-test-1', flatProfile(PEAKS_RESOLUTION));
+    assertEqual(coarse.length, 1, 'no coarse after settle');
   }
 }

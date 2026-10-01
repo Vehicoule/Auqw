@@ -767,6 +767,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_phase_marks(
     ): Int
+    external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_probe(
+    ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_read(
     ): Int
     external fun uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_release(
@@ -833,6 +835,8 @@ internal object UniffiLib {
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_peek(`ptr`: Long,`handle`: RustBuffer.ByValue,`position`: Long,`maxLen`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_phase_marks(`ptr`: Long,`handle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_probe(`ptr`: Long,`handle`: RustBuffer.ByValue,`position`: Long,`maxLen`: Long,`fetch`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_read(`ptr`: Long,`handle`: RustBuffer.ByValue,`position`: Long,`maxLen`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1000,6 +1004,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_phase_marks() and 0xFFFF) != 17009) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_probe() and 0xFFFF) != 14209) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_auqw_mobile_bindings_checksum_method_pluginhost_stream_read() and 0xFFFF) != 33146) {
@@ -1629,6 +1636,21 @@ public interface PluginHostInterface {
     fun `streamPhaseMarks`(`handle`: kotlin.String): StreamPhaseMarks
     
     /**
+     * Probing read for decorative consumers (waveform peaks): a
+     * committed hit serves already-buffered bytes; on a hole with
+     * `fetch` enabled it issues ONE bounded ranged GET through the
+     * session's own fetch and commits the bytes so later readers
+     * serve them for free. Queues no pump demand, moves no read
+     * position. Blocks the calling thread on the runtime — **foreign
+     * (JNI) threads only**, same rule as `stream_read`.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the session's kind otherwise.
+     */
+    fun `streamProbe`(`handle`: kotlin.String, `position`: kotlin.ULong, `maxLen`: kotlin.ULong, `fetch`: kotlin.Boolean): StreamProbeResult
+    
+    /**
      * Blocking read — **foreign (JNI/DataSource) threads only**;
      * parking a runtime worker is a bug. Empty bytes = EOF. Bounded by
      * the seam's read deadline; terminal transitions wake into their
@@ -2089,6 +2111,37 @@ open class PluginHost: Disposable, AutoCloseable, PluginHostInterface
         it,
         
         FfiConverterString.lower(`handle`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Probing read for decorative consumers (waveform peaks): a
+     * committed hit serves already-buffered bytes; on a hole with
+     * `fetch` enabled it issues ONE bounded ranged GET through the
+     * session's own fetch and commits the bytes so later readers
+     * serve them for free. Queues no pump demand, moves no read
+     * position. Blocks the calling thread on the runtime — **foreign
+     * (JNI) threads only**, same rule as `stream_read`.
+     *
+     * # Errors
+     * [`StreamError::Unavailable`] when the seam is not configured;
+     * [`StreamError::Failed`] with the session's kind otherwise.
+     */
+    @Throws(StreamException::class)override fun `streamProbe`(`handle`: kotlin.String, `position`: kotlin.ULong, `maxLen`: kotlin.ULong, `fetch`: kotlin.Boolean): StreamProbeResult {
+            return FfiConverterTypeStreamProbeResult.lift(
+    callWithHandle {
+    uniffiRustCallWithError(StreamException) { _status ->
+    UniffiLib.uniffi_auqw_mobile_bindings_fn_method_pluginhost_stream_probe(
+        it,
+        
+        FfiConverterString.lower(`handle`),
+        FfiConverterULong.lower(`position`),
+        FfiConverterULong.lower(`maxLen`),
+        FfiConverterBoolean.lower(`fetch`),_status)
 }
     }
     )
@@ -2794,6 +2847,63 @@ public object FfiConverterTypeStreamPhaseMarks: FfiConverterRustBuffer<StreamPha
             FfiConverterOptionalULong.write(value.`firstByteMs`, buf)
             FfiConverterOptionalULong.write(value.`headReadyMs`, buf)
             FfiConverterOptionalULong.write(value.`attachMs`, buf)
+    }
+}
+
+
+
+/**
+ * One `stream_probe` result: contiguous bytes at the requested
+ * position, the best-known stream total, and a confirmed-EOF flag.
+ */
+data class StreamProbeResult (
+    /**
+     * Contiguous bytes from `position` — empty on a confirmed EOF
+     * and on a fetch-disabled hole (`eof` distinguishes them).
+     */
+    var `data`: kotlin.ByteArray
+    , 
+    /**
+     * Best-known stream total, when one exists.
+     */
+    var `total`: kotlin.ULong?
+    , 
+    /**
+     * `position` is confirmed at/past end-of-stream.
+     */
+    var `eof`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeStreamProbeResult: FfiConverterRustBuffer<StreamProbeResult> {
+    override fun read(buf: ByteBuffer): StreamProbeResult {
+        return StreamProbeResult(
+            FfiConverterByteArray.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: StreamProbeResult) = (
+            FfiConverterByteArray.allocationSize(value.`data`) +
+            FfiConverterOptionalULong.allocationSize(value.`total`) +
+            FfiConverterBoolean.allocationSize(value.`eof`)
+    )
+
+    override fun write(value: StreamProbeResult, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`data`, buf)
+            FfiConverterOptionalULong.write(value.`total`, buf)
+            FfiConverterBoolean.write(value.`eof`, buf)
     }
 }
 
