@@ -32,7 +32,7 @@ The app boots and the full domain stack runs in Chrome via an `expo export --pla
    cp .agents/skills/testing-auqw-ui-native-web/reference/metro.config.js apps/mobile/metro.config.js
    bash .agents/skills/testing-auqw-ui-native-web/reference/make-plugin-assets.sh
    ```
-2. `pnpm add -D react-dom react-native-web` in `apps/mobile` (export fails without them). **Pin react-dom EXACTLY to the app's react version** (`pnpm add -D react-dom@<react version>` then strip the `^` in package.json or use `--save-exact`) — a caret range resolves to the newest minor (19.2.3 → 19.3.0) and the page renders blank with minified React error #527 "args[]=19.2.3&args[]=19.3.0" in the log sink.
+2. `pnpm add -D react-native-web` in `apps/mobile` (export fails without it). Do NOT add react-dom — it ships pinned at the app's react version as a runtime dep; a caret range resolves to the newest minor (19.2.3 → 19.3.0) and the page renders blank with minified React error #527 "args[]=19.2.3&args[]=19.3.0" in the log sink.
 3. Cert: `openssl req -x509 -newkey rsa:2048 -nodes -keyout apps/mobile/web-harness/key.pem -out apps/mobile/web-harness/cert.pem -days 7 -subj "/CN=localhost"`.
 4. `(cd apps/mobile && pnpm exec expo export --platform web)` → `node apps/mobile/web-harness/server.mjs`.
 5. If driving via computer tool, patch `dist/index.html` after EACH export with a `<pre id="__logSink">` console capture (`pointer-events:none` or it eats sheet clicks) and a small control strip calling `__auqwConn.set(online, metered)`. Put the sink top-left, not bottom-left — bottom-left overlays the navbar and ruins navbar captures (or hide it via the DevTools console when shooting the bar: `document.getElementById('__logSink').style.display='none'`).
