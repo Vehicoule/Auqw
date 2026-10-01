@@ -360,22 +360,24 @@ export function LibraryScreen({
             onPress={view.layoutChip.onPress}
           />
         </View>
-        <View
-          style={{
-            flexDirection: 'row',
-            flexWrap: 'wrap',
-            gap: theme.spacing.sm,
-          }}
-        >
-          {view.filterOptions.map((option) => (
-            <ToggleChip
-              key={option.key}
-              label={option.label}
-              active={option.active}
-              onPress={option.onPress}
-            />
-          ))}
-        </View>
+        {view.filterOptions.length > 2 && (
+          <View
+            style={{
+              flexDirection: 'row',
+              flexWrap: 'wrap',
+              gap: theme.spacing.sm,
+            }}
+          >
+            {view.filterOptions.map((option) => (
+              <ToggleChip
+                key={option.key}
+                label={option.label}
+                active={option.active}
+                onPress={option.onPress}
+              />
+            ))}
+          </View>
+        )}
       </View>
 
       {view.nameField !== null && (

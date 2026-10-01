@@ -212,20 +212,22 @@ export function LibraryScreen({
             onPress={view.layoutChip.onPress}
           />
         </div>
-        <div
-          className="uw-library__filters"
-          role="toolbar"
-          aria-label={view.filterA11yLabel}
-        >
-          {view.filterOptions.map((option) => (
-            <ToggleChip
-              key={option.key}
-              label={option.label}
-              active={option.active}
-              onPress={option.onPress}
-            />
-          ))}
-        </div>
+        {view.filterOptions.length > 2 && (
+          <div
+            className="uw-library__filters"
+            role="toolbar"
+            aria-label={view.filterA11yLabel}
+          >
+            {view.filterOptions.map((option) => (
+              <ToggleChip
+                key={option.key}
+                label={option.label}
+                active={option.active}
+                onPress={option.onPress}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
       {view.nameField !== null && (

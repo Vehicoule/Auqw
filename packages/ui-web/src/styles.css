@@ -715,16 +715,13 @@
   border-color: var(--fg25);
 }
 
-/* Inside a rail the state is a quiet stub — the default flex:1 shell
-   would stretch into a column of dead space mid-screen. */
-.uw-rail .uw-state {
-  flex: none;
-  align-items: flex-start;
+/* Inside a rail an empty section is a quiet placeholder line — the
+   full state treatment would shout over real content on the home. */
+.uw-rail__empty {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
   padding: var(--spacing-lg) 0;
-}
-
-.uw-rail .uw-state .uw-text {
-  text-align: left;
 }
 
 /* ---- progress ------------------------------------------------------ */
@@ -2264,6 +2261,7 @@
   border-radius: var(--radius-pill);
   background: var(--raised);
   border: var(--stroke-hairline) solid var(--hairline);
+  box-shadow: 0 var(--spacing-xs) var(--spacing-xl) var(--scrim);
   z-index: 70;
   text-align: center;
 }
@@ -2475,6 +2473,7 @@
   background: var(--raised);
   border: var(--stroke-hairline) solid var(--hairline);
   border-radius: var(--radius-float);
+  box-shadow: 0 var(--spacing-xs) var(--spacing-xl) var(--scrim);
   z-index: 31;
 }
 
