@@ -1452,17 +1452,15 @@ function EqBar({
     };
   }, [progress, run, delay, scale]);
   const animatedStyle = useAnimatedStyle(() => ({
-    transform: [{ scaleY: Math.max(2 / height, progress.value) }],
+    height: Math.max(2, progress.value * height),
   }));
   return (
     <Animated.View
       style={[
         {
           width: 2.5,
-          height,
           borderRadius: 1,
           backgroundColor: color,
-          transformOrigin: 'bottom',
         },
         animatedStyle,
       ]}
