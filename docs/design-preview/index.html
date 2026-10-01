@@ -57,7 +57,7 @@
   svg.ic.fill{fill:currentColor;stroke:none}
 
   /* ===== window — no titlebar band; stage runs to the top edge ===== */
-  .win{width:1040px;border:1px solid var(--divider);background:var(--bg);
+  .win{width:1300px;border:1px solid var(--divider);background:var(--bg);
        display:flex;margin-bottom:52px;overflow:hidden}
   .win.t-oled{border-color:#29241e}
   .chrome-mac{border-radius:10px}
@@ -152,9 +152,9 @@
   .chrome-linux .caps span{width:38px;border-left:1px solid var(--hair)}
 
   .wbody{flex:1;padding:12px 24px 24px;overflow:hidden}
-  /* search = one compact field in the toolbar beside the toggle, always rendered;
+  /* search = one compact field in the toolbar's right group, always rendered;
      on explore it carries the live query — there is no in-body field */
-  .srch{display:flex;align-items:center;gap:8px;height:32px;width:146px;overflow:hidden;flex:none;
+  .srch{display:flex;align-items:center;gap:8px;height:32px;width:150px;overflow:hidden;flex:none;
         color:var(--fg-muted);padding:0 8px;border-radius:var(--r-ctl);background:var(--fg08);
         transition:border-color .15s,color .15s}
   .srch:hover{color:var(--fg)}
@@ -503,13 +503,13 @@
     <div class="world">
       <div class="toolbar">
         <button class="tb"><svg class="ic"><use href="#i-side"/></svg></button>
-        <div class="srch"><svg class="ic"><use href="#i-search"/></svg><input placeholder="search"><kbd>⌘K</kbd></div>
         <div class="navtabs">
           <span class="on"><svg class="ic"><use href="#i-home"/></svg>home</span>
           <span><svg class="ic"><use href="#i-compass"/></svg>explore</span>
           <span><svg class="ic"><use href="#i-lib"/></svg>library</span>
         </div>
         <div class="tright">
+          <div class="srch"><svg class="ic"><use href="#i-search"/></svg><input placeholder="search"><kbd>⌘K</kbd></div>
           <button class="tb"><svg class="ic"><use href="#i-menu"/></svg></button>
         </div>
       </div>
@@ -568,13 +568,13 @@
     <div class="world">
       <div class="toolbar">
         <button class="tb"><svg class="ic"><use href="#i-side"/></svg></button>
-        <div class="srch"><svg class="ic"><use href="#i-search"/></svg><input placeholder="search"><kbd>⌃K</kbd></div>
         <div class="navtabs">
           <span><svg class="ic"><use href="#i-home"/></svg>home</span>
           <span><svg class="ic"><use href="#i-compass"/></svg>explore</span>
           <span class="on"><svg class="ic"><use href="#i-lib"/></svg>library</span>
         </div>
         <div class="tright">
+          <div class="srch"><svg class="ic"><use href="#i-search"/></svg><input placeholder="search"><kbd>⌃K</kbd></div>
           <button class="tb"><svg class="ic"><use href="#i-menu"/></svg></button>
           <div class="caps">
             <span><svg><use href="#c-min"/></svg></span>
@@ -676,13 +676,13 @@
     <div class="world">
       <div class="toolbar">
         <button class="tb"><svg class="ic"><use href="#i-side"/></svg></button>
-        <div class="srch open"><svg class="ic"><use href="#i-search"/></svg><input value="roads portishead"><kbd>esc</kbd></div>
         <div class="navtabs">
           <span><svg class="ic"><use href="#i-home"/></svg>home</span>
           <span class="on"><svg class="ic"><use href="#i-compass"/></svg>explore</span>
           <span><svg class="ic"><use href="#i-lib"/></svg>library</span>
         </div>
         <div class="tright">
+          <div class="srch open"><svg class="ic"><use href="#i-search"/></svg><input value="roads portishead"><kbd>esc</kbd></div>
           <button class="tb"><svg class="ic"><use href="#i-menu"/></svg></button>
           <div class="caps">
             <span><svg><use href="#c-min"/></svg></span>
