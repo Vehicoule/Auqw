@@ -779,4 +779,51 @@ export async function run(): Promise<void> {
       'a failed reapply clears the staged handoff — retry begins fresh',
     );
   }
+
+  // a checked NEWER release supersedes an 'applied' run: begin for a
+  // different version runs its own pipeline and reclaims the older
+  // stage — reapply is only the same-version affordance
+  {
+    const NEWER_NAME = 'b.apk';
+    const { calls, ports } = fakePorts({
+      sumsBody: `${GOOD_HEX}  ${APK_NAME}\n${GOOD_HEX}  ${NEWER_NAME}\n`,
+    });
+    const applier = createUpdateApplier(ports);
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'applied');
+    applier.begin({
+      ...APK_TARGET,
+      version: '0.0.1-alpha.19',
+      artifact: { ...APK_TARGET.artifact, name: NEWER_NAME },
+    });
+    await settle();
+    const snap = applier.snapshot();
+    assertEqual(snap.state, 'applied');
+    assert(snap.state === 'applied');
+    assertEqual(snap.version, '0.0.1-alpha.19');
+    assertEqual(calls.downloads, 2, 'a newer release starts its own pipeline');
+    assertDeepEqual(
+      calls.removed,
+      [`/stage/${APK_NAME}`],
+      'the superseded release stage is reclaimed',
+    );
+  }
+
+  // but a same-version begin on 'applied' still no-ops — reapply()
+  // owns that affordance
+  {
+    const { calls, ports } = fakePorts();
+    const applier = createUpdateApplier(ports);
+    applier.begin(APK_TARGET);
+    await settle();
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(
+      calls.downloads,
+      1,
+      'a same-version begin on applied stays inert',
+    );
+    assertEqual(calls.applies, 1);
+  }
 }

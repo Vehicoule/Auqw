@@ -735,10 +735,12 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
   const claims = new Map<string, number>();
   // The 'applied' run's verified stage — retained so `reapply` can
   // re-fire the platform's install surface without another download
-  // when the OS surface's outcome never landed.
+  // when the OS surface's outcome never landed. Bound to the run's
+  // version: a newer checked release owns its own run instead.
   let appliedRun: {
     readonly path: string;
     readonly artifact: UpdateArtifact;
+    readonly version: string;
   } | null = null;
 
   function publish(next: UpdateApplyStatus): void {
@@ -851,7 +853,7 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       // responsibility now, not the sweep's.
       claims.delete(path);
       if (outcome === 'installed') {
-        appliedRun = { path, artifact };
+        appliedRun = { path, artifact, version };
       }
       path = null;
       publishIfCurrent(
@@ -893,12 +895,20 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
         running ||
         live() ||
         state.state === 'ready-to-restart' ||
-        state.state === 'applied'
+        // 'applied' guards the SAME version's staged run — a begin for
+        // a different release is the supersede path, not a re-tap.
+        (state.state === 'applied' && state.version === target.version)
       ) {
         return;
       }
       running = true;
       generation += 1;
+      // A retained stage belongs to the applied release — a begin for
+      // another version reclaims that file rather than leaving the
+      // ~55 MB stranded.
+      if (appliedRun !== null && appliedRun.version !== target.version) {
+        void ports.remove(appliedRun.path).catch(() => undefined);
+      }
       appliedRun = null;
       const gen = generation;
       controller = new AbortController();

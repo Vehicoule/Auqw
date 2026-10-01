@@ -249,8 +249,18 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
       // 'applied' means the OS sheet owned the outcome — which may
       // never have landed (cancelled sheet, failed install). The
       // verified APK is still staged, so the affordance refires the
-      // handoff instead of dead-ending the offer.
-      if (applyState === 'applied') {
+      // handoff instead of dead-ending the offer — but only while the
+      // checked release IS the applied one: a newer release starts
+      // its own pipeline rather than re-prompting the old APK.
+      if (applyState === 'applied' && snapshot.apply.state === 'applied') {
+        const status = snapshot.status;
+        if (
+          status.state === 'available' &&
+          status.version !== snapshot.apply.version
+        ) {
+          service.apply();
+          return;
+        }
         service.reapply();
         return;
       }
