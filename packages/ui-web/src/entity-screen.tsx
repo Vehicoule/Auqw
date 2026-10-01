@@ -129,7 +129,6 @@ export function EntityScreen({
       </div>
 
       <div className="uw-entity__actions">
-        <HeaderPill view={view.play} />
         <HeaderPill view={view.shuffle} />
         {/*
          * Like only binds to a materialized entity (canLike); an

@@ -791,7 +791,11 @@ export function StageSheet({
     queueReordering,
     onToggleQueueReorder,
   );
-  const queueClear = queueClearButton(queue?.items.length ?? 0, onClearQueue);
+  const queueClear = queueClearButton(
+    queue?.items.length ?? 0,
+    queue?.currentOccurrenceId != null,
+    onClearQueue,
+  );
   const downloadButton =
     download === null ? null : downloadButtonView(download, onDownload);
 

@@ -298,7 +298,11 @@ export function NowPlayingScreen({
   );
   const radioRow = radioRowView(radio, onStartRadio, onStopRadio);
   const reorder = queueReorderButton(queueReordering, onToggleQueueReorder);
-  const clearQueue = queueClearButton(queue?.items.length ?? 0, onClearQueue);
+  const clearQueue = queueClearButton(
+    queue?.items.length ?? 0,
+    queue?.currentOccurrenceId != null,
+    onClearQueue,
+  );
   const downloadBtn =
     download === null ? null : downloadButtonView(download, onDownload);
   // Player mode is artwork-led — full-bleed art under the bottom

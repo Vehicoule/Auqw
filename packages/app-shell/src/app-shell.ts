@@ -2065,9 +2065,39 @@ export function useAppShell<E extends { readonly type: string } = never>(
         void playRecording(row.key.slice('local:'.length));
         return;
       }
-      playMetaRow(resultMeta.current.get(row.key), query);
+      const tapped = resultMeta.current.get(row.key);
+      if (tapped === undefined || !canPlayMeta(tapped)) {
+        return;
+      }
+      // The provider result list is the play context — the tapped
+      // result starts mid-list with its siblings queued behind it.
+      const items =
+        searchState.type === 'content' ? searchState.page.items : [];
+      const metas =
+        ports.entityPlayRequiresCanPlay === true
+          ? items.filter(canPlayMeta)
+          : items;
+      const startAt = metas.indexOf(tapped);
+      if (startAt < 0) {
+        return;
+      }
+      recordRecentSearch(query);
+      void dispatchPlay(
+        'action.playResult',
+        session.playMetadata(metas, { startAt }),
+      );
     },
-    [playMetaRow, playRecording, query, ports.localCatalog],
+    [
+      playRecording,
+      query,
+      ports.localCatalog,
+      ports.entityPlayRequiresCanPlay,
+      searchState,
+      canPlayMeta,
+      recordRecentSearch,
+      dispatchPlay,
+      session,
+    ],
   );
 
   // A home card carries either a materialized recording id (recents /
@@ -2875,7 +2905,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // ---- collection / playlist play + download -----------------------
 
   // The shared play-list funnel: filter to attachable rows, then play
-  // under the caller's action label.
+  // under the caller's action label. `startAt` indexes `rows` — the
+  // tapped row's context play starts mid-list; when it survives the
+  // playable filter its position lands the cursor.
   const playRows = useCallback(
     (
       action: MessageId,
@@ -2883,25 +2915,62 @@ export function useAppShell<E extends { readonly type: string } = never>(
         readonly recordingId: string;
         readonly selectedRef: SourceRef | null;
       }[],
+      startAt = 0,
     ) => {
       const playable = rows.filter((row) => canPlay(row.recordingId));
-      if (playable.length === 0) {
+      const tapped = rows[startAt];
+      const start = tapped === undefined ? 0 : playable.indexOf(tapped);
+      if (playable.length === 0 || start < 0) {
         return;
       }
-      void dispatchPlay(action, session.playRecordings(playable));
+      void dispatchPlay(
+        action,
+        session.playRecordings(playable, { startAt: start }),
+      );
     },
     [session, canPlay, dispatchPlay],
   );
 
+  // A collection row tap queues the whole collection — the tapped row
+  // starts playing with its siblings behind it.
   const playCollectionRows = useCallback(
-    (rows: readonly { recordingId: string }[]) =>
+    (rows: readonly CollectionRowModel[], tapped?: CollectionRowModel) => {
+      const startAt =
+        tapped === undefined
+          ? 0
+          : rows.findIndex((row) => row.key === tapped.key);
+      if (startAt < 0) {
+        return;
+      }
       playRows(
         'action.playCollection',
         rows.map((row) => ({
           recordingId: row.recordingId,
           selectedRef: null,
         })),
-      ),
+        startAt,
+      );
+    },
+    [playRows],
+  );
+
+  // A library row tap queues the whole library track list at the
+  // tapped recording — the recentlyAdded rail lands the same context.
+  const playLibraryItem = useCallback(
+    (items: readonly TrackRowModel[], recordingId: string) => {
+      const startAt = items.findIndex((row) => row.key === recordingId);
+      if (startAt < 0) {
+        return;
+      }
+      playRows(
+        'common.play',
+        items.map((row) => ({
+          recordingId: row.key,
+          selectedRef: null,
+        })),
+        startAt,
+      );
+    },
     [playRows],
   );
 
@@ -2916,29 +2985,29 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [isOwned, ports.preferOwnedRef],
   );
 
-  const playPlaylist = useCallback(
-    (model: ReturnType<typeof playlistModelFor>) =>
-      playRows(
-        'action.playPlaylist',
-        (model?.entries ?? []).map((entry) => ({
-          recordingId: entry.recordingId,
-          selectedRef: playRefFor(entry.recordingId, entry.selectedRef),
-        })),
-      ),
-    [playRows, playRefFor],
-  );
-
+  // A playlist row tap queues the playlist's entries with their pins,
+  // starting on the tapped entry — the playlist is the play context.
   const playPlaylistEntry = useCallback(
-    (entry: {
-      readonly recordingId: string;
-      readonly selectedRef: SourceRef | null;
-    }) =>
-      playRows('action.playPlaylistEntry', [
-        {
-          recordingId: entry.recordingId,
-          selectedRef: playRefFor(entry.recordingId, entry.selectedRef),
-        },
-      ]),
+    (
+      model: ReturnType<typeof playlistModelFor>,
+      entry: { readonly entryId: string },
+    ) => {
+      const entries = model?.entries ?? [];
+      const startAt = entries.findIndex(
+        (e) => e.entryId === entry.entryId,
+      );
+      if (startAt < 0) {
+        return;
+      }
+      playRows(
+        'action.playPlaylistEntry',
+        entries.map((e) => ({
+          recordingId: e.recordingId,
+          selectedRef: playRefFor(e.recordingId, e.selectedRef),
+        })),
+        startAt,
+      );
+    },
     [playRows, playRefFor],
   );
 
@@ -3225,12 +3294,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [session],
   );
 
-  // Entity-screen play — ports.entityPlayRequiresCanPlay gates the
-  // desktop canPlayMeta filter + empty early-return; mobile plays
-  // every fetched row.
-  const entityPlayAll = useCallback(
-    (fetch: EntityFetch | null, entryKey: string, shuffle: boolean) => {
-      const metas = entityModelFor(fetch)
+  // Entity-page metas in display order — the context a row tap
+  // queues (and the list shuffle draws from).
+  // ports.entityPlayRequiresCanPlay gates the desktop canPlayMeta
+  // filter; mobile keeps every fetched row.
+  const entityContextMetas = useCallback(
+    (fetch: EntityFetch | null, entryKey: string): TrackMetadata[] =>
+      entityModelFor(fetch)
         .items.map((row) =>
           entityMeta.current.get(`${entryKey}:${row.key}`),
         )
@@ -3239,7 +3309,15 @@ export function useAppShell<E extends { readonly type: string } = never>(
             m !== undefined &&
             (ports.entityPlayRequiresCanPlay !== true ||
               canPlayMeta(m)),
-        );
+        ),
+    [entityModelFor, canPlayMeta, ports.entityPlayRequiresCanPlay],
+  );
+
+  // Shuffle-play the entity's whole context — the one header action
+  // row taps can't express.
+  const entityShuffleAll = useCallback(
+    (fetch: EntityFetch | null, entryKey: string) => {
+      const metas = entityContextMetas(fetch, entryKey);
       if (
         ports.entityPlayRequiresCanPlay === true &&
         metas.length === 0
@@ -3247,17 +3325,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
         return;
       }
       void dispatchPlay(
-        shuffle ? 'action.shuffleAll' : 'collection.playAll',
-        session.playMetadata(
-          metas,
-          shuffle ? { shuffle: true } : undefined,
-        ),
+        'action.shuffleAll',
+        session.playMetadata(metas, { shuffle: true }),
       );
     },
     [
       session,
-      entityModelFor,
-      canPlayMeta,
+      entityContextMetas,
       dispatchPlay,
       ports.entityPlayRequiresCanPlay,
     ],
@@ -3269,10 +3343,25 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [],
   );
 
+  // An entity row tap queues the page's track list at the tapped row
+  // — the album's tracklist or the artist's top tracks is the context.
   const onEntityRowPress = useCallback(
-    (entryKey: string, row: TrackRowModel) =>
-      playMetaRow(entityRowMeta(entryKey, row), null),
-    [entityRowMeta, playMetaRow],
+    (entryKey: string, fetch: EntityFetch | null, row: TrackRowModel) => {
+      const tapped = entityRowMeta(entryKey, row);
+      if (tapped === undefined || !canPlayMeta(tapped)) {
+        return;
+      }
+      const metas = entityContextMetas(fetch, entryKey);
+      const startAt = metas.indexOf(tapped);
+      if (startAt < 0) {
+        return;
+      }
+      void dispatchPlay(
+        'action.playResult',
+        session.playMetadata(metas, { startAt }),
+      );
+    },
+    [entityRowMeta, entityContextMetas, canPlayMeta, dispatchPlay, session],
   );
 
   // ---- shell chrome helpers ----------------------------------------
@@ -3545,10 +3634,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
     onResultPress,
     onHomeCardPress,
     playCollectionRows,
-    playPlaylist,
+    playLibraryItem,
     playPlaylistEntry,
     playRefFor,
-    entityPlayAll,
+    entityShuffleAll,
     onEntityRowPress,
     reportPlay,
     // search

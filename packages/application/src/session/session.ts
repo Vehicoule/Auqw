@@ -1809,14 +1809,27 @@ export class Session {
    * A play tap recontextualizes the queue — the tapped content
    * becomes the whole queue, not an append-and-jump that orphans
    * every pending item into history. The parked engine state
-   * clears with the slate: a dead deal and a suggestion boundary
-   * both belong to the context being replaced, and the armed tail
-   * disarms so its suggestions never land on the new context.
+   * clears with the slate — but only the state the replaced context
+   * owned: a shuffle deal or a radio arm staged after this commit
+   * was cut is the user's newer intent, so it survives (the deal
+   * reconciles itself against the new queue on the next walk).
+   * `radioIds` clears unconditionally — its marks key occurrence ids
+   * that are all dead post-replace.
    */
-  #resetQueueContext(rr: Ready): void {
-    rr.shuffleOrder = null;
+  #resetQueueContext(
+    rr: Ready,
+    staged: {
+      readonly shuffleEpoch: number;
+      readonly radio: Ready['radio'];
+    },
+  ): void {
     rr.radioIds.clear();
-    this.#radio.clearRadio(rr);
+    if (rr.shuffleEpoch === staged.shuffleEpoch) {
+      rr.shuffleOrder = null;
+    }
+    if (rr.radio === staged.radio) {
+      this.#radio.clearRadio(rr);
+    }
   }
 
   async addAndPlay(metadata: TrackMetadata): Promise<Result<void>> {
@@ -1859,12 +1872,15 @@ export class Session {
    * occurrence (duplicates keep row identity, entries may pin a
    * selectedRef), one commit covers the batch, then the first new
    * occurrence plays. Validates the whole list before any enqueue.
+   * `startAt` names the list position that starts playing — the tapped
+   * row's index, so a context play starts mid-list.
    */
   async playRecordings(
     items: readonly {
       recordingId: string;
       selectedRef: SourceRef | null;
     }[],
+    options?: { readonly startAt?: number | undefined },
   ): Promise<Result<void>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -1903,12 +1919,23 @@ export class Session {
           selectedRef: item.ref,
         });
       }
+      const stagedEpoch = r.shuffleEpoch;
+      const stagedRadio = r.radio;
       return ok({
         batch: { queue: draft.snapshot() },
         apply: (rr) => {
           rr.queue = draft;
-          this.#resetQueueContext(rr);
-          return occurrenceIds[0] ?? '';
+          this.#resetQueueContext(rr, {
+            shuffleEpoch: stagedEpoch,
+            radio: stagedRadio,
+          });
+          const start =
+            options?.startAt !== undefined &&
+            options.startAt >= 0 &&
+            options.startAt < occurrenceIds.length
+              ? options.startAt
+              : 0;
+          return occurrenceIds[start] ?? '';
         },
       });
     });
@@ -1925,10 +1952,16 @@ export class Session {
    * one enqueue + one commit covers the batch, then the first new
    * occurrence plays. `shuffle` draws a uniform random order for the
    * enqueued occurrences — a play-order shuffle, not a queue mode.
+   * `startAt` names the list position that starts playing (the tapped
+   * row's context play); it indexes the enqueued order — shuffled when
+   * `shuffle` was also given, which callers don't combine.
    */
   async playMetadata(
     items: readonly TrackMetadata[],
-    options?: { readonly shuffle?: boolean | undefined },
+    options?: {
+      readonly shuffle?: boolean | undefined;
+      readonly startAt?: number | undefined;
+    },
   ): Promise<Result<void>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -1974,13 +2007,24 @@ export class Session {
               : null,
         });
       }
+      const stagedEpoch = r.shuffleEpoch;
+      const stagedRadio = r.radio;
       return ok({
         batch: { recordings, queue: draft.snapshot() },
         apply: (rr) => {
           rr.recordings = [...recordings];
           rr.queue = draft;
-          this.#resetQueueContext(rr);
-          return occurrenceIds[0] ?? '';
+          this.#resetQueueContext(rr, {
+            shuffleEpoch: stagedEpoch,
+            radio: stagedRadio,
+          });
+          const start =
+            options?.startAt !== undefined &&
+            options.startAt >= 0 &&
+            options.startAt < occurrenceIds.length
+              ? options.startAt
+              : 0;
+          return occurrenceIds[start] ?? '';
         },
       });
     });

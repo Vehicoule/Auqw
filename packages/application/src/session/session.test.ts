@@ -3247,6 +3247,49 @@ async function clearQueueEmptiesDead(): Promise<void> {
   await r.session.dispose();
 }
 
+async function playBatchStartAtCursor(): Promise<void> {
+  // Context play: tapping row N queues the whole list — rows above
+  // the tap stay as history and the tapped row owns the cursor.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C', 'D'].map((id) =>
+        recording(`r${id}`, [ref('youtube-music', `y${id}`)]),
+      ),
+      queue: {
+        revision: 0,
+        occurrences: [],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  const played = r.session.playRecordings(
+    ['rA', 'rB', 'rC', 'rD'].map((id) => ({
+      recordingId: id,
+      selectedRef: ref('youtube-music', `y${id.slice(1)}`),
+    })),
+    { startAt: 2 },
+  );
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.occurrences.length, 4, 'the whole context queued');
+  assertEqual(
+    snap.queue.currentOccurrenceId,
+    snap.queue.occurrences[2]?.occurrenceId,
+    'the tapped row owns the cursor — rows above it sit as history',
+  );
+  assertEqual(snap.queue.occurrences[2]?.recordingId, 'rC');
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'h-c'));
+  r.player.settlePrepare(ok('req-c'));
+  assert((await played).ok, 'the play attempt prepares');
+  await r.session.dispose();
+}
+
 async function shuffleToggleOffRestoresCanonical(): Promise<void> {
   const r = shuffleRig([0.8, 0.1]);
   await restoreOk(r);
@@ -6824,6 +6867,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['shuffleWrapCountsLoop', shuffleWrapCountsLoop],
   ['shuffleMutationReconciles', shuffleMutationReconciles],
   ['playTapReplacesQueue', playTapReplacesQueue],
+  ['playBatchStartAtCursor', playBatchStartAtCursor],
   ['enqueueAheadOfRadioTail', enqueueAheadOfRadioTail],
   ['playNextBehindCursor', playNextBehindCursor],
   ['playNextUnderShuffleSplicesDeal', playNextUnderShuffleSplicesDeal],

@@ -928,10 +928,10 @@ function Main({
     onResultPress,
     onHomeCardPress,
     playCollectionRows,
-    playPlaylist,
+    playLibraryItem,
     playPlaylistEntry,
     playRefFor,
-    entityPlayAll,
+    entityShuffleAll,
     onEntityRowPress,
     entityRowMeta,
     reportPlay,
@@ -1706,13 +1706,13 @@ function Main({
           break;
         case 'play-result': {
           const i = Number(params.get('i') ?? '0');
-          const meta =
+          const items =
             searchStateRef.current.type === 'content'
-              ? searchStateRef.current.page.items[i]
-              : undefined;
-          if (meta !== undefined) {
+              ? searchStateRef.current.page.items
+              : [];
+          if (items[i] !== undefined) {
             void s
-              .addAndPlay(meta)
+              .playMetadata(items, { startAt: i })
               .then((r) => reportPlay('action.playResult', r));
           }
           break;
@@ -2109,7 +2109,7 @@ function Main({
       <LibraryScreen
         model={libraryModel}
         topInset={topInset}
-        onPressItem={(id) => void playRecording(id)}
+        onPressItem={(id) => playLibraryItem(libraryModel.items, id)}
         onRowIntent={(id) => rowIntent({ kind: 'recording', id })}
         onToggleLike={(id) => void session.toggleLike(id)}
         onContext={(id) =>
@@ -2117,9 +2117,6 @@ function Main({
         }
         onOpenCollection={(key) =>
           pushOverlay({ type: 'collection', key })
-        }
-        onPlayCollection={(key) =>
-          playCollectionRows(libraryModel.collectionRows[key])
         }
         onOpenCard={onOpenCard}
         onOpenArtist={(artist) => {
@@ -2205,8 +2202,7 @@ function Main({
             model={model}
             topInset={topInset}
             onBack={closeOverlay}
-            onPlayAll={() => playCollectionRows(model.rows)}
-            onPressItem={(row) => void playRecording(row.recordingId)}
+            onPressItem={(row) => playCollectionRows(model.rows, row)}
             onRowIntent={(row) =>
               rowIntent({ kind: 'recording', id: row.recordingId })
             }
@@ -2224,7 +2220,7 @@ function Main({
             model={playlistModel}
             topInset={topInset}
             onBack={closeOverlay}
-            onPlayAll={() => playPlaylist(playlistModel)}
+
             onDownloadAll={() =>
               onPlaylistDownloadAll(playlistDownloadFor(playlistModel).requests)
             }
@@ -2234,7 +2230,9 @@ function Main({
               deletePlaylist(current.playlistId);
               dismissOverlay(entry.key);
             }}
-            onPressEntry={playPlaylistEntry}
+            onPressEntry={(entry) =>
+              playPlaylistEntry(playlistModel, entry)
+            }
             onRowIntent={(entry) =>
               rowIntent({
                 kind: 'recording',
@@ -2267,15 +2265,14 @@ function Main({
             model={entityModelFor(fetch)}
             topInset={topInset}
             onBack={closeOverlay}
-            onPlayAll={() => entityPlayAll(fetch, entry.key, false)}
-            onShuffleAll={() => entityPlayAll(fetch, entry.key, true)}
+            onShuffleAll={() => entityShuffleAll(fetch, entry.key)}
             onToggleLike={
               entityId === null
                 ? undefined
                 : () =>
                   void session.toggleEntityLike(current.ref.kind, entityId)
             }
-            onPressItem={(row) => onEntityRowPress(entry.key, row)}
+            onPressItem={(row) => onEntityRowPress(entry.key, fetch, row)}
             onRowIntent={(row) => {
               const meta = entityRowMeta(entry.key, row);
               if (meta !== undefined) {

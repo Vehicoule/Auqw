@@ -140,13 +140,19 @@ export type QueueClearButton = ControlView & {
 
 /**
  * The clear-queue toggle — absent when the host never binds a
- * handler, or when a lone cursor row leaves nothing to flush.
+ * handler, or when nothing could flush: an empty queue, or a lone
+ * row that IS the cursor (a drained/cursorless row still clears).
  */
 export function queueClearButton(
   itemCount: number,
+  hasCurrent: boolean,
   onClearQueue: MaybeFn,
 ): QueueClearButton | null {
-  if (onClearQueue === undefined || itemCount <= 1) {
+  if (
+    onClearQueue === undefined ||
+    itemCount === 0 ||
+    (itemCount === 1 && hasCurrent)
+  ) {
     return null;
   }
   return {
@@ -187,7 +193,11 @@ export function useQueueScreenController({
     title: t('queue.title'),
     countLabel: t('queue.count', { count: queue.items.length }),
     reorder: queueReorderButton(reordering, onToggleReorder),
-    clearQueue: queueClearButton(queue.items.length, onClearQueue),
+    clearQueue: queueClearButton(
+      queue.items.length,
+      queue.currentOccurrenceId !== null,
+      onClearQueue,
+    ),
     current:
       player === null
         ? null
@@ -544,9 +554,6 @@ export type LibraryScreenHandlers = {
   readonly onOpenCollection?: MaybeFn<
     [key: 'liked' | 'top50' | 'history' | 'downloads']
   >;
-  readonly onPlayCollection?: MaybeFn<
-    [key: 'liked' | 'top50' | 'history' | 'downloads']
-  >;
   readonly onOpenCard?: MaybeFn<[card: LibraryCardModel]>;
   readonly onOpenArtist?: MaybeFn<[artist: ArtistRailModel]>;
   readonly onCreatePlaylist?: MaybeFn<[name: string]>;
@@ -582,9 +589,7 @@ export type LibraryCollectionView = {
   readonly enabled: boolean;
   readonly a11yLabel: string;
   readonly countLabel: string;
-  readonly playA11yLabel: string;
   readonly onOpen: MaybeFn;
-  readonly onPlay: MaybeFn;
 };
 
 export type LibraryCardView = {
@@ -719,7 +724,6 @@ export function libraryScreenView(
     onAddToPlaylist,
     onContext,
     onOpenCollection,
-    onPlayCollection,
     onOpenCard,
     onOpenArtist,
     onCreatePlaylist,
@@ -736,10 +740,7 @@ export function libraryScreenView(
         count: tile.count,
       }),
       countLabel: tile.note ?? t('common.trackCount', { count: tile.count }),
-      playA11yLabel: t('library.tilePlayA11y', { label: tile.label }),
       onOpen: bind(onOpenCollection, tile.key),
-      onPlay:
-        tile.count === 0 ? undefined : bind(onPlayCollection, tile.key),
     })),
     headingLabel: t('library.heading'),
     sortChip: {
@@ -882,7 +883,6 @@ export function useLibraryScreenController({
 
 export type EntityScreenHandlers = {
   readonly onBack?: MaybeFn;
-  readonly onPlayAll?: MaybeFn;
   readonly onShuffleAll?: MaybeFn;
   readonly onToggleLike?: MaybeFn;
   readonly onPressItem?: MaybeFn<[row: TrackRowModel]>;
@@ -928,7 +928,6 @@ export type EntityScreenView =
       readonly model: EntityScreenModel;
       readonly backA11yLabel: string;
       readonly kindLabel: string;
-      readonly play: EntityPillView;
       readonly shuffle: EntityPillView;
       readonly like: {
         readonly icon: 'heart-filled' | 'heart';
@@ -959,7 +958,6 @@ export type EntityScreenView =
 
 export function useEntityScreenController({
   model,
-  onPlayAll,
   onShuffleAll,
   onToggleLike,
   onPressItem,
@@ -996,13 +994,6 @@ export function useEntityScreenController({
       model.kind === null
         ? t('entity.kind.fallback')
         : t(`entity.kind.${model.kind}`),
-    play: {
-      label: t('common.play'),
-      icon: 'play',
-      accent: true,
-      disabled: empty,
-      onPress: onPlayAll,
-    },
     shuffle: {
       label: t('entity.shuffle'),
       icon: 'shuffle',
