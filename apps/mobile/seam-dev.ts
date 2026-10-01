@@ -15,6 +15,10 @@
 //                                  &pos=… attaches at an offset (seek gate)
 //   auqw://seam-release?handle=…   releaseStream on a handle (teardown gate)
 //   auqw://seam-stop             player stop (teardown gate)
+//   auqw://seam-peaks?handle=…   waveform extraction leg — calls the
+//                                  native peaks sweep on a prepared
+//                                  handle and logs coarse-event +
+//                                  resolve timings (first-bars gate)
 //   auqw://seam-auth?token=…       session-trust leg — set the OAuth
 //                                  access token merged into resolves.
 //                                  Prefer `file=<path>` (a file containing
@@ -52,6 +56,8 @@ import {
   setAuthToken,
   stop,
   setQueueProjection,
+  waveformPeaks,
+  addWaveformPeaksCoarseListener,
   type PrepareOutcomeEvent,
 } from 'auqw-expo';
 
@@ -313,7 +319,7 @@ function parseFilePath(rawPath: string): string | null {
 }
 
 export async function runSeamLink(url: string): Promise<void> {
-  const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics|seam-url|seam-queue|seam-release|seam-stop|seam-auth-start|seam-auth-poll|seam-auth-refresh|seam-auth-clear|seam-auth|seam)(?:\?([^\s]*))?$/);
+  const match = url.match(/^auqw:\/\/(seam-file|seam-audio|seam-prepare|seam-attach|seam-metrics|seam-url|seam-queue|seam-release|seam-stop|seam-peaks|seam-auth-start|seam-auth-poll|seam-auth-refresh|seam-auth-clear|seam-auth|seam)(?:\?([^\s]*))?$/);
   if (!match?.[1]) {
     return;
   }
@@ -456,6 +462,32 @@ export async function runSeamLink(url: string): Promise<void> {
     } else if (match[1] === 'seam-stop') {
       await stop();
       slog(`seam-stop done t=${Date.now()}`);
+    } else if (match[1] === 'seam-peaks') {
+      // Waveform gate: the real native sweep over the last prepared
+      // handle — logs the coarse event's arrival (first real bars)
+      // and the refined resolve, both wall-clocked off prepare.
+      const handle = param(query, 'handle') ?? lastHandle;
+      if (!handle) {
+        slog('seam-peaks no handle');
+        return;
+      }
+      const requestId = `dev-peaks-${Date.now()}`;
+      const t0 = Date.now();
+      const coarseSub = addWaveformPeaksCoarseListener((event) => {
+        if (event.requestId === requestId) {
+          slog(`seam-peaks coarse +${Date.now() - t0}ms n=${event.peaks.length}`);
+        }
+      });
+      try {
+        const flat = await waveformPeaks(requestId, handle, 160, 24 * 1024 * 1024, false);
+        const nz = flat.reduce((n, v) => (v > 0 ? n + 1 : n), 0);
+        slog(`seam-peaks resolved +${Date.now() - t0}ms n=${flat.length} nonzero=${nz}`);
+      } catch (e) {
+        const code = e !== null && typeof e === 'object' && 'code' in e ? String((e as { code: unknown }).code) : 'internal';
+        slog(`seam-peaks failed kind=${code} +${Date.now() - t0}ms`);
+      } finally {
+        coarseSub.remove();
+      }
     } else if (match[1] === 'seam-auth') {
       const tokenFileParam = param(query, 'file');
       const tokenFile =

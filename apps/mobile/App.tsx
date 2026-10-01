@@ -819,6 +819,9 @@ function Main({
         }).statusLabel,
       }),
       peaksPort,
+      // Finished profiles persist content-keyed — a replay renders
+      // stored bars instead of re-extracting every cold track.
+      peaksStore: controller.peaksStore,
       // Durable recents rail — the device-local `search_history`
       // table hydrates on mount; a committed query persists through
       // the same store on both apps.

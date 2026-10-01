@@ -216,6 +216,7 @@ type AuqwExpoEvents = {
   onConnectivityChanged: (event: ConnectivityChangedEvent) => void;
   onSyncSocketData: (event: SyncSocketDataEvent) => void;
   onSyncSocketClosed: (event: SyncSocketClosedEvent) => void;
+  onWaveformPeaksCoarse: (event: WaveformPeaksCoarseEvent) => void;
 };
 
 declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
@@ -436,6 +437,15 @@ export function waveformPeaks(
 
 /** Cancels a running `waveformPeaks` sweep — its promise rejects 'cancelled'. */
 export function waveformPeaksCancel(requestId: string): void { seam.waveformPeaksCancel?.(requestId); }
+
+/** Coarse-but-measured profile while the refinement sweep still runs —
+ *  flat `[up, down]` pairs of the same length the request asked for,
+ *  sent at most once per `requestId`. */
+export type WaveformPeaksCoarseEvent = { requestId: string; peaks: readonly number[] };
+
+export function addWaveformPeaksCoarseListener(listener: (event: WaveformPeaksCoarseEvent) => void): EventSubscription {
+  return native.addListener('onWaveformPeaksCoarse', listener);
+}
 
 /**
  * Install one immutable identified queue revision for background

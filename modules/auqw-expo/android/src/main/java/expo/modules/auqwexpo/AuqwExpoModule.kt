@@ -66,6 +66,7 @@ private const val EVENT_SYNC_DATA = "onSyncSocketData"
 private const val EVENT_SYNC_CLOSED = "onSyncSocketClosed"
 private const val EVENT_SYNC_ACCEPTED = "onSyncSocketAccepted"
 private const val EVENT_SYNC_DISCOVERY = "onSyncDiscovery"
+private const val EVENT_WAVEFORM_PEAKS_COARSE = "onWaveformPeaksCoarse"
 private const val BIND_TIMEOUT_MS = 5_000L
 private const val REMOTE_PREVIOUS_RESTART_MS = 3_000L
 private const val POSITION_TICK_MS = 1_000L
@@ -442,7 +443,8 @@ class AuqwExpoModule : Module() {
       EVENT_SYNC_DATA,
       EVENT_SYNC_CLOSED,
       EVENT_SYNC_ACCEPTED,
-      EVENT_SYNC_DISCOVERY
+      EVENT_SYNC_DISCOVERY,
+      EVENT_WAVEFORM_PEAKS_COARSE
     )
 
     OnCreate {
@@ -954,7 +956,12 @@ class AuqwExpoModule : Module() {
         count.toInt(),
         maxBytes.toLong(),
         provisionalCap
-      )
+      ) { coarse ->
+        sendEvent(
+          EVENT_WAVEFORM_PEAKS_COARSE,
+          mapOf("requestId" to requestId, "peaks" to coarse)
+        )
+      }
     }
 
     /** Cancels a running `waveformPeaks` sweep — the in-flight promise
