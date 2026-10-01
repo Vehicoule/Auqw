@@ -178,13 +178,34 @@ function App() {
     };
   }, [attempt]);
 
+  const reducedMotion = usePrefersReducedMotion();
   return boot.type === 'ready' ? (
     <Shell controller={boot.controller} />
   ) : (
-    <ThemeProvider theme="system">
+    <ThemeProvider theme="system" reducedMotion={reducedMotion}>
       <BootGate boot={boot} onRetry={() => setAttempt((n) => n + 1)} />
     </ThemeProvider>
   );
+}
+
+/** Live `prefers-reduced-motion` read — the OS setting drives every
+    `data-reduced-motion` gate in the stylesheet. */
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(
+    () =>
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+  );
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') {
+      return undefined;
+    }
+    const query = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onChange = (e: MediaQueryListEvent) => setReduced(e.matches);
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  return reduced;
 }
 
 /** Full-screen centered gate frame shared by boot/restore/locale gates. */
@@ -256,8 +277,13 @@ function Shell({ controller }: { readonly controller: SessionController }) {
       setThemeSource(event.source);
     });
   }, [theme]);
+  const reducedMotion = usePrefersReducedMotion();
   return (
-    <ThemeProvider theme={theme} source={themeSource}>
+    <ThemeProvider
+      theme={theme}
+      source={themeSource}
+      reducedMotion={reducedMotion}
+    >
       <ChromeSchemeReporter />
       {state.type === 'ready' ? (
         <Main controller={controller} state={state} />

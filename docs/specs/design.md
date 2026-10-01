@@ -78,7 +78,7 @@ Settings gains `adaptive` alongside `dark · light · oled · system`: dark/ligh
 
 ## Type
 
-- **One family, sans:** Inter (OFL, bundled via `@expo-google-fonts/inter` on mobile; `Inter → ui-sans-serif → system-ui` stack on web/desktop) — chrome, controls, metadata, lists, display. Hierarchy is built from size + weight + the fg ramp, not from a second family.
+- **One family, sans:** Inter (OFL, bundled everywhere — `@expo-google-fonts/inter` on mobile; the wght-axis variable woff2 (`@fontsource-variable/inter`) copied into the desktop renderer, aliased to the `Inter_*` token names; `ui-sans-serif → system-ui` stays the fallback stack) — chrome, controls, metadata, lists, display. Hierarchy is built from size + weight + the fg ramp, not from a second family.
 - Track titles bold/bright; artists primary; album · year and durations muted; section labels uppercase-tracked.
 - CJK: platform fallbacks stay enabled; gallery fixtures include JP/KR/SC/TC titles and truncation is checked against CJK metrics, not Latin averages.
 

@@ -1,10 +1,13 @@
-import { copyFile, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { build } from 'esbuild';
 
 const require_ = createRequire(import.meta.url);
 const jsdomRoot = dirname(require_.resolve('jsdom/package.json'));
+const fontRoot = dirname(
+  require_.resolve('@fontsource-variable/inter/package.json'),
+);
 
 // jsdom reads its default stylesheet off disk by `__dirname` path,
 // which a bundle destroys — inline it at build time. css-tree (a
@@ -130,6 +133,19 @@ await build({
 
 await copyFile('src/renderer/index.html', 'dist/renderer/index.html');
 await copyFile('src/renderer/app.html', 'dist/renderer/app.html');
+await copyFile('src/renderer/fonts.css', 'dist/renderer/fonts.css');
+// Bundled Inter — fonts.css aliases the token sheet's Expo family names
+// to this wght-axis variable file (latin + latin-ext).
+await mkdir('dist/renderer/fonts', { recursive: true });
+for (const subset of ['latin', 'latin-ext']) {
+  await copyFile(
+    join(
+      fontRoot,
+      `files/inter-${subset}-wght-normal.woff2`,
+    ),
+    `dist/renderer/fonts/inter-${subset}-wght-normal.woff2`,
+  );
+}
 // The stylesheet is an export of @auqw/ui-web; the design-token sheet
 // is the package's generated css artifact (tracked, not bundled).
 await copyFile(
