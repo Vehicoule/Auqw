@@ -157,11 +157,25 @@ export function useResolvedArtworkUri(
       if (requested === null) {
         return;
       }
-      // The scaled variant failed — retry once at the provider's
-      // original size before declaring the artwork broken. A repeat
-      // error (or an unscaled request) falls through to the
-      // memo-drop path below.
-      if (url !== null && requested !== url && originalFor !== url) {
+      // What the Image actually painted: the resolver's file when the
+      // verdict (or memo) produced one, the remote request otherwise.
+      const shown =
+        outcome !== null && outcome.url === requested
+          ? (outcome.uri ?? requested)
+          : (painted ?? requested);
+      // Only a failed remote source retries at the provider's original
+      // size — the same retry the web <img> onError path makes. A
+      // failed cache file is a different fault: the memo answered a
+      // path the OS reclaimed, the scaled lookup in flight (or the
+      // fresh one the memo drop triggers) is already retrying at the
+      // same small size, and switching to the original here would pay
+      // a full-size download for a cache fault.
+      if (
+        url !== null &&
+        shown === requested &&
+        requested !== url &&
+        originalFor !== url
+      ) {
         setOriginalFor(url);
         return;
       }
