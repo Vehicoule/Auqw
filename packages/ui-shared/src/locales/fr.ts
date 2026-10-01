@@ -638,6 +638,7 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'update.action.reopen': "rouvrir l'installateur",
   'update.action.cancel': 'annuler',
   'update.dismiss': 'ignorer',
+  'update.entry': 'mises à jour',
 
   // ---- offline banner ----------------------------------------------------
   'offline.bannerDownloads':

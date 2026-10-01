@@ -803,6 +803,8 @@ function Main({
     updateCard,
     onUpdateBannerAct,
     onUpdateBannerDismiss,
+    onUpdateEntry,
+    onUpdateCheck,
     setActionsFor,
     closeRowActions,
     rowActions,
@@ -870,6 +872,18 @@ function Main({
     onOpenCard,
     onCreatePlaylist,
   } = shell;
+
+  // The update affordance is a quiet bar entry: the icon's dot is the
+  // only uninvited signal; clicking it engages the card (which also
+  // carries the download once the entry kicks it). Nothing pops on its
+  // own — a version that arrives while the card is disengaged just
+  // badges the icon.
+  const [updateEngaged, setUpdateEngaged] = useState(false);
+  useEffect(() => {
+    if (updateCard === null) {
+      setUpdateEngaged(false);
+    }
+  }, [updateCard]);
 
   // Metadata-targeted sheet openers — search rows and entity rows
   // share the {kind:'metadata'} target shape. Stable identities keep
@@ -1363,6 +1377,62 @@ function Main({
             onSelect={selectTab}
             onOpenSettings={() => selectTab('settings')}
             onFocusSearch={focusSearch}
+            updateEntry={
+              <span style={{ position: 'relative', display: 'inline-flex' }}>
+                <IconButton
+                  icon="download"
+                  size={32}
+                  iconSize={14}
+                  color="var(--text-secondary)"
+                  ariaLabel={t('update.entry')}
+                  active={updateEngaged}
+                  onPress={() => {
+                    if (updateCard === null) {
+                      // Nothing to show — the press re-checks silently
+                      // and NEVER acts: an undisplayed offer (dismissed
+                      // version, settled apply) must not start unseen.
+                      onUpdateCheck();
+                      return;
+                    }
+                    if (updateEngaged) {
+                      // Collapse only when the model says the surface
+                      // may hide — mid-run the card carries the cancel.
+                      if (updateCard.dismissible) {
+                        setUpdateEngaged(false);
+                      }
+                      return;
+                    }
+                    setUpdateEngaged(true);
+                    // Only a standing offer kicks its verb on entry —
+                    // 'stored'/'failed' reveal their own buttons instead
+                    // of restarting/retrying uninvited.
+                    if (updateCard.chip === 'idle') {
+                      onUpdateEntry();
+                    }
+                  }}
+                />
+                {updateCard !== null && (
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      position: 'absolute',
+                      top: 5,
+                      right: 5,
+                      width: 8,
+                      height: 8,
+                      borderRadius: 4,
+                      // The badge paints over the button's corner — it
+                      // must never eat the entry's clicks.
+                      pointerEvents: 'none',
+                      backgroundColor:
+                        updateCard.chip === 'failed'
+                          ? 'var(--warn)'
+                          : 'var(--accent)',
+                    }}
+                  />
+                )}
+              </span>
+            }
             stageOpen={stageOpen}
             onStageOpenChange={setStageOpenFor}
             stage={
@@ -1466,18 +1536,19 @@ function Main({
               </Text>
             </div>
           )}
-          {updateCard !== null && (
+          {updateCard !== null && updateEngaged && (
             <div
               className="uw-update-card"
               style={{
                 position: 'fixed',
-                // Below the 40px chrome strip — the strip's nav/tab
-                // controls stay clickable even mid-download (the card
-                // isn't dismissible while a run is live). Clears the
-                // offline pill (top:8, ~26px) the same way.
+                // Below the 40px chrome strip, anchored under the end
+                // cluster the update entry lives in — the engaged
+                // surface stays "in place" rather than center-popping,
+                // and the strip's nav/tab controls stay clickable even
+                // mid-download (the card isn't dismissible while a run
+                // is live).
                 top: 44,
-                left: '50%',
-                transform: 'translateX(-50%)',
+                right: 8,
                 width: 'min(420px, calc(100vw - 32px))',
                 borderRadius: 'var(--radius-float)',
                 backgroundColor: 'var(--raised)',
@@ -1553,7 +1624,10 @@ function Main({
                     size={28}
                     iconSize={10}
                     ariaLabel={t('update.dismiss')}
-                    onPress={onUpdateBannerDismiss}
+                    onPress={() => {
+                      setUpdateEngaged(false);
+                      onUpdateBannerDismiss();
+                    }}
                   />
                 ) : (
                   // Reserve the close slot (mobile parity): the action

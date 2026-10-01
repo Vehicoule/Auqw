@@ -622,6 +622,7 @@ export const en = {
   'update.action.reopen': 'open installer',
   'update.action.cancel': 'cancel',
   'update.dismiss': 'dismiss',
+  'update.entry': 'updates',
 
   // ---- storage usage -----------------------------------------------------
   'storage.usage': '{used} used · {free} free',

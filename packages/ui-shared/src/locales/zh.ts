@@ -610,6 +610,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'update.action.reopen': '打开安装器',
   'update.action.cancel': '取消',
   'update.dismiss': '忽略',
+  'update.entry': '更新',
 
   // ---- offline banner ----------------------------------------------------
   'offline.bannerDownloads': '离线 — 已下载的可播放；流媒体等待连接',
