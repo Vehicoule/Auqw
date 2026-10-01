@@ -492,19 +492,21 @@ None — the napi artifact is a local cargo build output.
   `Runtime.evaluate` for DOM state (`data-stage` on `.uw-chrome`,
   `elementFromPoint`, `getBoundingClientRect`) and
   `Input.dispatchMouseEvent` press+release for trusted input.
-- **JS `.click()` does NOT fire Pressable onPress** — the world-bar
-  IconButtons bind pointer events, not click. A programmatic
-  `el.click()` no-ops even when the button is perfect; don't read a
-  `.click()` failure as a dead handler — dispatch press+release.
+- **JS `.click()` DOES fire IconButton onPress** — `IconButton` binds
+  `onClick={onPress}` (primitives.tsx), so a programmatic
+  `el.click()` works when the button is actually under the cursor.
+  If a `.click()` no-ops, suspect element coverage (the update pill),
+  coordinate misses, or a corrupted instance — not the binding.
 - **Stage toggle = `.uw-world-bar__start button[0]`** with aria
   'show player'/'hide player' (NOT 'stage'); `data-stage` on
   `.uw-chrome` flips open/closed — the cheapest state probe.
-- **'update available' notification pill** is a pushed overlayStack
-  entry rendered `position:fixed; z-index:40` — while shown it COVERS
-  the world-bar `__start` cluster (toggle + search); elementFromPoint
-  returns its `uw-text` span and real clicks on the controls hit the
-  pill. If bar controls seem dead, check for an overlaying stack
-  notification first; its 'dismiss' × clears it.
+- **'update available' notification pill** is the renderer's separate
+  `updateBanner` render (app.tsx) — `position:fixed; z-index:40`,
+  centered top (stacks under the offline pill when both are up), NOT
+  an overlayStack entry — while shown it can COVER world-bar controls
+  (observed over `__start`: toggle + search); elementFromPoint returns
+  its `uw-text` span and real clicks on the controls hit the pill. If
+  bar controls seem dead, check for the banner first.
 - **Escape is NOT bound on the stage overlay** — Escape lives in
   stack.tsx sheets (menu popover, pushed pages). Escape doing nothing
   on the floating stage is correct-by-design, not a regression.
