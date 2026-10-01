@@ -28,6 +28,8 @@ import {
   stageCollapsedAlpha,
   stageSheetWrite,
 } from './stage-motion';
+// TEST-ONLY instrumentation — remove before merge
+const TLOG = (m: string) => console.log('[T]', Date.now(), m);
 import {
   IconButton,
   PlayPauseIcon,
@@ -53,6 +55,11 @@ export type MiniPlayerProps = {
   readonly onToggleLike?: (() => void) | undefined;
   /** Swipe-down: dismiss stops playback; the queue keeps its items. */
   readonly onDismiss?: (() => void) | undefined;
+  /** Gesture-release expand commit — distinct from `onPress` taps so
+      the sheet can token-gate queued swipe commits (a back press
+      cancels the anchor) without blocking direct taps. Falls back to
+      `onPress` when omitted. */
+  readonly onExpandCommit?: (() => void) | undefined;
   /** Drag release committed to collapse while grabbing a mid-flight
       sheet (never fires from the rest anchor — there the pill just
       settles back). */
@@ -160,6 +167,7 @@ export function MiniPlayer({
   onPrevious,
   onToggleLike,
   onDismiss,
+  onExpandCommit,
   onCollapse,
   progress: sheetProgress,
   travel: sheetTravel,
@@ -214,6 +222,7 @@ export function MiniPlayer({
     onPrevious,
     onPress,
     onDismiss,
+    onExpandCommit,
     onCollapse,
   });
   const skipData = useRef({ next: skipNext, previous: skipPrevious });
@@ -224,14 +233,27 @@ export function MiniPlayer({
       onPrevious,
       onPress,
       onDismiss,
+      onExpandCommit,
       onCollapse,
     };
     skipData.current = { next: skipNext, previous: skipPrevious };
     occurrenceId.current = player.occurrenceId;
   });
   const emit = useCallback(
-    (key: 'onNext' | 'onPrevious' | 'onPress' | 'onDismiss' | 'onCollapse') => {
-      callbacks.current[key]?.();
+    (
+      key:
+        | 'onNext'
+        | 'onPrevious'
+        | 'onPress'
+        | 'onDismiss'
+        | 'onExpandCommit'
+        | 'onCollapse',
+    ) => {
+      const pick =
+        key === 'onExpandCommit'
+          ? (callbacks.current.onExpandCommit ?? callbacks.current.onPress)
+          : callbacks.current[key];
+      pick?.();
     },
     [],
   );
@@ -474,7 +496,7 @@ export function MiniPlayer({
           if (e.translationY > 40) {
             scheduleOnRN(emit, 'onDismiss');
           } else if (e.translationY < -40) {
-            scheduleOnRN(emit, 'onPress');
+            scheduleOnRN(emit, 'onExpandCommit');
           }
           return;
         }
@@ -509,7 +531,7 @@ export function MiniPlayer({
                 velocity: velocityP,
               });
           if (target === 1) {
-            scheduleOnRN(emit, 'onPress');
+            scheduleOnRN(emit, 'onExpandCommit');
           } else if (dragStart.value > travel * 0.5) {
             scheduleOnRN(emit, 'onCollapse');
           }
@@ -524,6 +546,10 @@ export function MiniPlayer({
           collapsed,
           e.velocityY,
         );
+        scheduleOnRN(
+          TLOG,
+          `finalize target=${target} raw=${raw.toFixed(1)} velY=${e.velocityY.toFixed(0)} gone=${sheetGone.value.toFixed(3)}`,
+        );
         if (target === 'expanded') {
           if (sheetAnchor !== undefined) {
             sheetAnchor.value = 1;
@@ -531,8 +557,9 @@ export function MiniPlayer({
           if (theme.reducedMotion) {
             sheetGone.value = 0;
             sheetProgress.value = 1;
-            scheduleOnRN(emit, 'onPress');
+            scheduleOnRN(emit, 'onExpandCommit');
           } else if (sheetGone.value > 0.001) {
+            scheduleOnRN(TLOG, 'unwind_start');
             // A fling up out of a dismiss slide unwinds the slide to
             // rest before the sheet expands — the axes share one
             // visible offset, so two velocity-bearing springs would
@@ -546,15 +573,22 @@ export function MiniPlayer({
               0,
               { ...SHEET_SETTLE_SPRING, velocity: velocityG },
               (finished) => {
+                scheduleOnRN(
+                  TLOG,
+                  `unwind_fin ok=${finished} anchor=${sheetAnchor === undefined ? 'u' : sheetAnchor.value}`,
+                );
                 if (
                   finished === true &&
                   (sheetAnchor === undefined || sheetAnchor.value !== 0)
                 ) {
+                  scheduleOnRN(TLOG, 'expand_commit_fired');
                   sheetProgress.value = withSpring(1, {
                     ...SHEET_SETTLE_SPRING,
                     velocity: velocityP,
                   });
-                  scheduleOnRN(emit, 'onPress');
+                  scheduleOnRN(emit, 'onExpandCommit');
+                } else {
+                  scheduleOnRN(TLOG, 'expand_commit_CANCELLED');
                 }
               },
             );
@@ -564,7 +598,7 @@ export function MiniPlayer({
               ...SHEET_SETTLE_SPRING,
               velocity: velocityP,
             });
-            scheduleOnRN(emit, 'onPress');
+            scheduleOnRN(emit, 'onExpandCommit');
           }
           return;
         }

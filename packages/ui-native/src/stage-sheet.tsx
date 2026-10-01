@@ -2010,11 +2010,15 @@ export function StageSheet({
               gone={gone}
               hostHeight={sheetH}
               onPress={() => {
-                // Taps commit through the same anchor token a gesture
-                // release writes — a back-cancelled anchor drops both.
+                // A tap expands unconditionally — mint the commit
+                // token so commitAnchor's gate passes; gesture swipes
+                // commit through onExpandCommit instead, which checks
+                // the token written at release (a back press clears
+                // it and the queued commit drops itself).
                 anchor.value = 1;
                 commitAnchor(1);
               }}
+              onExpandCommit={() => commitAnchor(1)}
               onCollapse={() => commitAnchor(0)}
               onPlayPause={onPlayPause}
               onNext={onNext}
