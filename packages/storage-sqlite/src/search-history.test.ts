@@ -10,6 +10,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteStorage } from './storage.ts';
 import { createSearchHistoryStore } from './search-history.ts';
+import { CANCELLED } from './driver.ts';
+import { enqueueDriverTransaction } from './transaction-queue.ts';
 import { NodeSqliteDriver } from './testing/node-sqlite-driver.ts';
 
 const SETTINGS: Settings = {
@@ -151,6 +153,41 @@ const TESTS: [string, () => Promise<void>][] = [
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
+    },
+  ],
+  [
+    // A long domain commit holds the shared connection's BEGIN
+    // IMMEDIATE; the record must queue behind it, not collide
+    // and get swallowed by the store's catch.
+    'recordQueuesBehindAnOpenTransaction',
+    async () => {
+      const driver = new NodeSqliteDriver();
+      const recents = await migrated(driver);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const signal = new CancellationSource().signal;
+      const open = enqueueDriverTransaction(
+        driver,
+        () => gate,
+        signal,
+        (s) => {
+          if (s.cancelled) throw CANCELLED;
+        },
+      );
+      // The transaction is demonstrably open (gate unresolved) when
+      // record runs: unqueued, its BEGIN IMMEDIATE would throw inside
+      // record's catch and drop the write; queued, `recorded` only
+      // settles after `release()` lets the open commit out.
+      const recorded = recents.record('overlap');
+      release();
+      await Promise.all([open, recorded]);
+      assertDeepEqual(
+        await recents.load(),
+        ['overlap'],
+        'a queued record survives the collision window',
+      );
     },
   ],
   [
