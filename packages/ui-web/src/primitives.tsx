@@ -734,17 +734,18 @@ export function EqBars({
   const theme = useTheme();
   const ref = useRef<HTMLSpanElement>(null);
   // Off-screen bars keep compositing otherwise — pause mid-frame rather
-  // than restarting, so re-entry resumes in phase. The 48px lookahead
-  // has the loop already running by the time it scrolls into view.
+  // than restarting, so re-entry resumes in phase. scrollMargin widens
+  // the observed rect by 48px inside every clipping ancestor (nested
+  // scrollports included — rootMargin would only widen the viewport
+  // root), so the loop is already running by the time it scrolls in.
   const [visible, setVisible] = useState(true);
   useEffect(() => {
     const el = ref.current;
     if (el === null || typeof IntersectionObserver !== 'function') {
       return undefined;
     }
-    const observer = new IntersectionObserver(
-      ([entry]) => setVisible(entry?.isIntersecting !== false),
-      { rootMargin: '48px' },
+    const observer = new IntersectionObserver(([entry]) =>
+      setVisible(entry?.isIntersecting !== false),
     );
     observer.observe(el);
     return () => observer.disconnect();
@@ -755,7 +756,7 @@ export function EqBars({
       ref={ref}
       className="uw-eq"
       data-eq-paused={!visible ? 'true' : undefined}
-      style={{ height: size }}
+      style={{ height: size, scrollMargin: '48px' }}
       aria-hidden="true"
     >
       {EQ_HEIGHTS.map((h, i) => (
