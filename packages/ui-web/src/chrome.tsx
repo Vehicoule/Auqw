@@ -128,6 +128,12 @@ export type DesktopChromeProps = {
    */
   readonly onFocusSearch?: (() => void) | undefined;
   readonly onOpenSettings?: (() => void) | undefined;
+  /**
+   * Extra affordances in the bar's end cluster, rendered left of the
+   * primary menu — e.g. the quiet update entry (its badge carries the
+   * state; nothing here may pop a surface uninvited).
+   */
+  readonly updateEntry?: ReactNode;
   readonly children: ReactNode;
 };
 
@@ -141,6 +147,7 @@ export function DesktopChrome({
   onStageOpenChange,
   onFocusSearch,
   onOpenSettings,
+  updateEntry,
   children,
 }: DesktopChromeProps) {
   const [internalOpen, setInternalOpen] = useState(true);
@@ -206,6 +213,7 @@ export function DesktopChrome({
           </div>
           <WorldTabs tabs={tabs} activeKey={activeKey} onSelect={onSelect} />
           <div className="uw-world-bar__end">
+            {updateEntry}
             {onOpenSettings !== undefined && (
               <WorldMenu onOpenSettings={onOpenSettings} />
             )}

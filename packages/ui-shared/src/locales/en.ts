@@ -619,6 +619,7 @@ export const en = {
   'update.action.retry': 'retry',
   'update.action.cancel': 'cancel',
   'update.dismiss': 'dismiss',
+  'update.entry': 'updates',
 
   // ---- storage usage -----------------------------------------------------
   'storage.usage': '{used} used · {free} free',

@@ -641,6 +641,7 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'update.action.retry': 'reintentar',
   'update.action.cancel': 'cancelar',
   'update.dismiss': 'descartar',
+  'update.entry': 'actualizaciones',
 
   // ---- offline banner ----------------------------------------------------
   'offline.bannerDownloads':

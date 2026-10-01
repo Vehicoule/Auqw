@@ -470,6 +470,28 @@ export function useAppShell<E extends { readonly type: string } = never>(
         : null,
     );
   }, [updateSnapshot]);
+  const onUpdateEntry = useCallback(() => {
+    // The bar affordance mirrors the settings 'checkUpdate' row: a
+    // live apply ignores the press (the engaged surface carries the
+    // run); 'available' acts (apply / open / restart / retry on the
+    // live apply state); anything else re-checks — silent either way.
+    if (updatePort === undefined) {
+      return;
+    }
+    const applyState = updateSnapshot?.apply.state;
+    if (
+      applyState === 'downloading' ||
+      applyState === 'verifying' ||
+      applyState === 'applying'
+    ) {
+      return;
+    }
+    if (updateSnapshot?.status.state === 'available') {
+      updatePort.act();
+    } else {
+      updatePort.check('manual');
+    }
+  }, [updatePort, updateSnapshot]);
 
   // ---- locale -----------------------------------------------------
   // setLocale mutates module state and never notifies React — every
@@ -3602,6 +3624,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     updateCard,
     onUpdateBannerAct,
     onUpdateBannerDismiss,
+    onUpdateEntry,
     // settings + misc ops
     onSettingsSelect,
     onSettingsToggle,
