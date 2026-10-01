@@ -138,11 +138,36 @@ export function createDesktopUpdate(api: AuqwApi): UpdateShellPort {
         void api.update.restart().catch(() => undefined);
         return;
       }
+      if (applyState === 'applied' && snap.apply.state === 'applied') {
+        const status = snap.status;
+        // A newer release starts its own pipeline (or the page when
+        // this build can't install it); re-acting on the APPLIED
+        // release refires the OS handoff — the verified dmg is still
+        // staged, so re-mounting costs no download and a closed
+        // installer window never dead-ends the update.
+        if (
+          status.state === 'available' &&
+          status.version === snap.apply.version
+        ) {
+          void api.update.reapply().catch(() => undefined);
+          return;
+        }
+        if (
+          status.state === 'available' &&
+          capability !== 'open' &&
+          status.artifact !== null &&
+          status.checksums !== null
+        ) {
+          void api.update.apply().catch(() => undefined);
+        } else {
+          void api.update.open().catch(() => undefined);
+        }
+        return;
+      }
       if (
         applyState === 'downloading' ||
         applyState === 'verifying' ||
-        applyState === 'applying' ||
-        applyState === 'applied'
+        applyState === 'applying'
       ) {
         return;
       }

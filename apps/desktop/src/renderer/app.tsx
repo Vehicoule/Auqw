@@ -1468,6 +1468,7 @@ function Main({
           )}
           {updateCard !== null && (
             <div
+              className="uw-update-card"
               style={{
                 position: 'fixed',
                 // Below the 40px chrome strip — the strip's nav/tab

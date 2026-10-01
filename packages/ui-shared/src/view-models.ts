@@ -2134,10 +2134,34 @@ export function toUpdateCard(
             dismissible: true,
           };
     case 'applied':
-      // The OS surface owns the story; when its outcome never lands
-      // (cancelled sheet, failed install) the settings row re-offers
-      // the install — reapply refires the handoff, no re-download.
-      return null;
+      // A newer checked release owns the card — labeling it 'open
+      // installer' would send its tap at the new version's download,
+      // so it renders the ordinary offer below.
+      if (apply.version !== version) {
+        break;
+      }
+      // 'install' builds are done — the OS surface owns the story;
+      // when its outcome never lands (cancelled sheet, failed
+      // install) the settings row re-offers it (reapply refires the
+      // handoff, no re-download). 'download' builds are NOT done:
+      // the verified dmg sits mounted in Finder and the replace is
+      // still the user's drag, so the card stays up to name that
+      // step instead of silently retiring mid-journey.
+      if (action !== 'download') {
+        return null;
+      }
+      return dismissed
+        ? null
+        : {
+            version,
+            title: t('update.card.appliedTitle'),
+            detail: t('update.card.appliedDetail'),
+            progress: null,
+            chip: 'stored',
+            actionLabel: t('update.action.reopen'),
+            cancelable: false,
+            dismissible: true,
+          };
     case 'failed':
       return dismissed
         ? null

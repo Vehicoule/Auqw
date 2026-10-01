@@ -122,9 +122,13 @@ export const CHANNELS = {
   updateOpen: 'update:open',
   /** Begin the verified download→apply pipeline (capability-gated). */
   updateApply: 'update:apply',
+  /** Refire the install handoff on the retained stage after
+      'applied' — no re-download (dmg re-mount, APK sheet re-show). */
+  updateReapply: 'update:reapply',
   /** Abort the live apply. */
   updateCancel: 'update:cancel',
-  /** Relaunch into a self-replaced binary (AppImage leg only). */
+  /** Relaunch into the replaced build — AppImage rename leg, or a
+      packaged dmg install that swapped the .app. */
   updateRestart: 'update:restart',
   /** Main→renderer push of each new update snapshot. */
   updateState: 'update:state',

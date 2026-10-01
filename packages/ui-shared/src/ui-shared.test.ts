@@ -1626,8 +1626,9 @@ const tap = (s: string) => {
   assertEqual(failedCard.actionLabel, 'retry');
   assert(failedCard.dismissible);
 
-  // 'applied' renders nothing — the settings row re-offers the
-  // handoff (reapply) when the OS sheet's outcome never landed
+  // 'applied' renders nothing on self-install builds — the OS
+  // surface owns the story and the settings row re-offers the
+  // handoff (reapply) when its outcome never lands
   assertEqual(
     toUpdateCard(
       live({ state: 'applied', version: '0.0.1-alpha.22' }),
@@ -1636,6 +1637,50 @@ const tap = (s: string) => {
     ),
     null,
   );
+
+  // …but a 'download' build is NOT done at 'applied': the verified
+  // dmg sits mounted in Finder and the replace is still the user's
+  // drag — the card stays up to name the step and re-open the
+  // installer window on demand
+  const appliedDmg = toUpdateCard(
+    live({ state: 'applied', version: '0.0.1-alpha.22' }),
+    'download',
+    null,
+  );
+  assert(appliedDmg !== null);
+  assertEqual(appliedDmg.actionLabel, 'open installer');
+  assertEqual(appliedDmg.chip, 'stored');
+  assert(appliedDmg.dismissible);
+  assert(appliedDmg.detail.includes('applications'));
+  assertEqual(
+    toUpdateCard(
+      live({ state: 'applied', version: '0.0.1-alpha.22' }),
+      'download',
+      '0.0.1-alpha.22',
+    ),
+    null,
+  );
+
+  // a newer checked release outranks the applied handoff — 'open
+  // installer' on the new version would send its tap at a download,
+  // so the card renders the ordinary offer for it instead
+  const newerAvailable = toUpdateCard(
+    snap(
+      {
+        state: 'available',
+        version: '9.9.9',
+        url: 'https://example/releases',
+        artifact: null,
+        checksums: null,
+      },
+      { state: 'applied', version: '0.0.1-alpha.22' },
+    ),
+    'download',
+    null,
+  );
+  assert(newerAvailable !== null);
+  assertEqual(newerAvailable.version, '9.9.9');
+  assertEqual(newerAvailable.actionLabel, 'download');
 
   // ready-to-restart carries its verb and still honors dismissal
   assertEqual(

@@ -1738,10 +1738,13 @@ export type AuqwApi = {
     /** Begins the download→verify→apply pipeline — real only past
         the 'open' capability, a main-side refusal otherwise. */
     readonly apply: () => Promise<void>;
+    /** Refires the install handoff on the retained stage — valid
+        only inside 'applied' (re-opens the mounted dmg window). */
+    readonly reapply: () => Promise<void>;
     /** Aborts the live apply. */
     readonly cancel: () => Promise<void>;
-    /** Relaunches into a self-replaced binary — valid only inside
-        'ready-to-restart' (the AppImage leg). */
+    /** Relaunches into the replaced build — valid only inside
+        'ready-to-restart' (AppImage leg, assisted dmg install). */
     readonly restart: () => Promise<void>;
     readonly onState: (
       listener: (snapshot: UpdateSnapshotPayload) => void,
