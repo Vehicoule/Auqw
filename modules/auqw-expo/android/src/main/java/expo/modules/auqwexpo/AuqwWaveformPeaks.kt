@@ -61,6 +61,11 @@ private const val MAX_PCM_BYTES = 256 * 1024 * 1024
 /** Cold-start patience while position 0 stays uncommitted — the player's
  * own head fill takes a while too; peaks may wait for the same warm-up. */
 private const val FIRST_READ_TIMEOUT_MS = 15_000L
+/** First-hole patience after a probe met a session refusal — the fill
+ * that would commit the hole rides the same refused session, so the
+ * pull still serves whatever is already committed but gives up fast
+ * instead of parking through the provider's cooldown. */
+private const val REFUSED_PULL_PATIENCE_MS = 1_000L
 /** Patience for each later position: a hole still unfetched past this
  * sits ahead of committed bytes — a demanding read there would queue
  * fetch-through demand that outranks the player's own (demand serves
@@ -332,9 +337,10 @@ internal class AuqwWaveformPeaks(
         } catch (e: CancellationException) {
           throw e
         } catch (e: CodedException) {
-          // A refusal the probes already met can't be beaten by the
-          // whole-file pull — it rides the same refused session and
-          // would only park until its own deadline.
+          // A refusal met before anything committed (the head probe's
+          // own failure leaves position 0 a hole) can't be beaten by
+          // the whole-file pull — propagate the transient so the
+          // tracker retries once the session's cooldown lapses.
           if (e.code in PROPAGATE_KINDS ||
             (e.code == "transient" && probeRefused.get())
           ) {
@@ -346,8 +352,14 @@ internal class AuqwWaveformPeaks(
         if (sampled !== null) {
           return sampled
         }
+        // The pull only ever serves committed bytes — a refused
+        // session won't fill the holes, so its first-hole patience
+        // shortens to a beat: committed audio still drains, a cold
+        // refusal fails typed instead of parking through the cooldown.
         val pullStart = SystemClock.uptimeMillis()
-        val encoded = pullBytes(host, handle, cap, provisionalCap)
+        val encoded = pullBytes(
+          host, handle, cap, provisionalCap, probeRefused.get()
+        )
         Log.i(
           TAG,
           "peaks[$requestId] legacy pull +${SystemClock.uptimeMillis() - pullStart}ms bytes=${encoded.size}"
@@ -406,10 +418,12 @@ internal class AuqwWaveformPeaks(
     handle: String,
     cap: Long,
     provisionalCap: Boolean,
+    refused: Boolean = false,
   ): ByteArray {
     val out = ByteArrayOutputStream()
     var ended = false
-    var deadline = SystemClock.uptimeMillis() + FIRST_READ_TIMEOUT_MS
+    var deadline = SystemClock.uptimeMillis() +
+      if (refused) REFUSED_PULL_PATIENCE_MS else FIRST_READ_TIMEOUT_MS
     // `<=` so an exactly-`cap` stream still reaches its EOF read.
     while (out.size() <= cap) {
       coroutineContext.ensureActive()
@@ -541,15 +555,6 @@ internal class AuqwWaveformPeaks(
       )
     }
     if (seed === null || seed.durationUs <= 0 || !seed.seekable) {
-      // A seed killed by refused probes can't be rebuilt by the
-      // whole-file pull — it parks on the same refused session.
-      // Surface the transient for a cooled-down retry; a structural
-      // parse failure with no refusal still gets the pull.
-      if (probeRefused.get()) {
-        throw CodedException(
-          "transient", "seed probes refused mid-parse", null
-        )
-      }
       return null
     }
     val durationUs = seed.durationUs
@@ -643,14 +648,6 @@ internal class AuqwWaveformPeaks(
     // the result as finished and never retries. Degrade to the
     // whole-file sweep, which measures every bucket.
     if (applied.get() < SAMPLED_MIN_COVERAGE) {
-      if (probeRefused.get()) {
-        // Lanes died on refusals — the whole-file pull parks on the
-        // same refused session, so surface the transient for a
-        // cooled-down retry instead of a deadline's wait.
-        throw CodedException(
-          "transient", "probe reads refused mid-sweep", null
-        )
-      }
       Log.w(
         TAG,
         "peaks[$requestId] sampled under-covered " +
