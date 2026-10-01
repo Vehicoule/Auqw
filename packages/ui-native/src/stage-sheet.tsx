@@ -825,7 +825,15 @@ export function StageSheet({
     progress.value = theme.reducedMotion
       ? target
       : withSpring(target, STAGE_SETTLE_SPRING);
-  }, [expanded, theme.reducedMotion, progress, anchor]);
+    if (target === 0 && gone.value > 0) {
+      // An external close outruns an in-flight dismiss unwind —
+      // landing `gone` now makes its completion callback a no-op
+      // instead of a delayed reopen.
+      gone.value = theme.reducedMotion
+        ? 0
+        : withSpring(0, STAGE_SETTLE_SPRING);
+    }
+  }, [expanded, theme.reducedMotion, progress, anchor, gone]);
 
   // Gallery-only preview states — production never passes dragPreview,
   // and this must not run for ordinary `expanded` flips or it would
