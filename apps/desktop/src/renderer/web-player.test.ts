@@ -1738,6 +1738,52 @@ export async function run(): Promise<void> {
     );
   }
 
+  // A rejected OS play must not flip the widget to 'playing'.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    mediaSession.actions.get('pause')?.();
+    audio.play = () => Promise.reject(new Error('no media'));
+    mediaSession.actions.get('play')?.();
+    await settle();
+    assert(audio.paused, 'element stays paused');
+    assertEqual(
+      mediaSession.playbackState,
+      'paused',
+      'rejected OS play leaves the widget paused',
+    );
+  }
+
+  // A pause landing while an OS play() is still in flight wins — the
+  // late resolution must not resurrect 'playing'.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    mediaSession.actions.get('pause')?.();
+    let releasePlay: (() => void) | undefined;
+    audio.play = () =>
+      new Promise<void>((resolve) => {
+        releasePlay = () => resolve();
+      });
+    mediaSession.actions.get('play')?.();
+    mediaSession.actions.get('pause')?.();
+    releasePlay?.();
+    await settle();
+    assertEqual(
+      mediaSession.playbackState,
+      'paused',
+      'mid-flight pause beats the late play resolution',
+    );
+  }
+
   // The OS scrubber lands the same as a seekTo on the live attempt.
   {
     const audio = fakeAudio();
@@ -1768,7 +1814,9 @@ export async function run(): Promise<void> {
     audio.pause();
     const paused =
       mediaSession.positions[mediaSession.positions.length - 1];
-    assertEqual(paused?.playbackRate, 0, 'paused rate is 0');
+    // Rate must stay nonzero — a 0 update is rejected; the paused
+    // signal rides playbackState, not this field.
+    assertEqual(paused?.playbackRate, 1, 'paused keeps a nonzero rate');
   }
 
   // Stop clears the card — the widget must not freeze on the last track.

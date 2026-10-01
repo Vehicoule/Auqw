@@ -517,10 +517,11 @@ export function createWebPlayerPort(deps: {
   }
 
   /** Position mirror — the OS interpolates between pushes via
-   * playbackRate (0 while paused), so publishing on element state
-   * changes is enough; `status()` runs on every relevant event. A
-   * finite duration is required for a meaningful state — before
-   * `loadedmetadata` there is nothing to report. */
+   * playbackRate, so publishing on element state changes is enough;
+   * `status()` runs on every relevant event. A finite duration is
+   * required for a meaningful state — before `loadedmetadata` there
+   * is nothing to report. The rate must be nonzero (a 0 update is
+   * rejected): paused rides `playbackState`, not this field. */
   function publishPosition(): void {
     const duration = durMs();
     if (
@@ -532,7 +533,7 @@ export function createWebPlayerPort(deps: {
     }
     mediaSession.setPositionState({
       duration: duration / 1000,
-      playbackRate: audio.paused ? 0 : 1,
+      playbackRate: 1,
       position: Math.min(posMs(), duration) / 1000,
     });
   }
@@ -1024,10 +1025,18 @@ export function createWebPlayerPort(deps: {
     }
     mediaActionsInstalled = true;
     mediaSession.setActionHandler('play', () => {
-      void audio.play().catch(() => undefined);
-      // The OS commanded the change — mirror it in the session state
-      // or the widget keeps showing the stale transport.
-      mediaSession.playbackState = 'playing';
+      void audio
+        .play()
+        .then(() => {
+          // 'playing' only once the element confirms — a rejected
+          // play leaves the state alone, and a pause/stop landing
+          // mid-flight wins (the element is paused and already
+          // reported its newer state).
+          if (!audio.paused) {
+            mediaSession.playbackState = 'playing';
+          }
+        })
+        .catch(() => undefined);
     });
     mediaSession.setActionHandler('pause', () => {
       // A media-key pause is transport-wide — each killed pending play
