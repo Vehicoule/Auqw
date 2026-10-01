@@ -38,6 +38,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.coroutineContext
 import kotlin.math.ceil
 import kotlin.math.sqrt
@@ -328,7 +329,10 @@ internal class AuqwWaveformPeaks(
         // instead of trailing a whole-file pull. Structural misses
         // (unknown total, small file, unseekable container, no
         // decodable sample) fall through to the whole-file sweep.
-        val probeRefused = AtomicBoolean(false)
+        // null = no probe refused yet; non-null = the FIRST refusal's
+        // seam kind — a terminal kind (dead handle, invalid-response)
+        // must stay terminal through the pull, not decay to transient.
+        val probeRefused = AtomicReference<String?>(null)
         val sampled = try {
           sampledStream(
             requestId, host, handle, count, cap, provisionalCap, job,
@@ -342,7 +346,7 @@ internal class AuqwWaveformPeaks(
           // the whole-file pull — propagate the transient so the
           // tracker retries once the session's cooldown lapses.
           if (e.code in PROPAGATE_KINDS ||
-            (e.code == "transient" && probeRefused.get())
+            (e.code == "transient" && probeRefused.get() != null)
           ) {
             throw e
           }
@@ -418,12 +422,12 @@ internal class AuqwWaveformPeaks(
     handle: String,
     cap: Long,
     provisionalCap: Boolean,
-    refused: Boolean = false,
+    refusalKind: String? = null,
   ): ByteArray {
     val out = ByteArrayOutputStream()
     var ended = false
     var deadline = SystemClock.uptimeMillis() +
-      if (refused) REFUSED_PULL_PATIENCE_MS else FIRST_READ_TIMEOUT_MS
+      if (refusalKind != null) REFUSED_PULL_PATIENCE_MS else FIRST_READ_TIMEOUT_MS
     // `<=` so an exactly-`cap` stream still reaches its EOF read.
     while (out.size() <= cap) {
       coroutineContext.ensureActive()
@@ -444,11 +448,12 @@ internal class AuqwWaveformPeaks(
           // and unlike a parked streamRead, nothing stays behind
           // competing with playback when the window lapses.
           if (SystemClock.uptimeMillis() >= deadline) {
-            // A hole with refusal evidence is a provider 'no', not
-            // unbuffered content — type it transient so direct
-            // callers read it as retryable-after-cooldown, not absent.
+            // A hole with refusal evidence fails as the refusal's
+            // own kind — a terminal one (dead handle, invalid-response)
+            // stays terminal instead of decaying to retry weather; an
+            // unrefused hole is genuinely unbuffered content.
             throw CodedException(
-              if (refused) "transient" else "unavailable",
+              refusalKind ?: "unavailable",
               "stream bytes not yet buffered", null
             )
           }
@@ -503,7 +508,7 @@ internal class AuqwWaveformPeaks(
     provisionalCap: Boolean,
     job: Job?,
     onCoarse: ((List<Double>) -> Unit)?,
-    probeRefused: AtomicBoolean,
+    probeRefused: AtomicReference<String?>,
   ): List<Double>? {
     val t0 = SystemClock.uptimeMillis()
     // Head probe: warms position 0 (the extractor's own sniff reads
@@ -513,7 +518,7 @@ internal class AuqwWaveformPeaks(
         host.streamProbe(handle, 0uL, HEAD_PROBE_BYTES.toULong(), true)
       }
     } catch (e: StreamException) {
-      probeRefused.set(true)
+      probeRefused.compareAndSet(null, seamKind(e))
       throw seamError(e)
     }
     val total = head.total?.toLong() ?: return null
@@ -688,7 +693,7 @@ internal class AuqwWaveformPeaks(
     count: Int,
     job: Job?,
     probeWindow: Long,
-    probeRefused: AtomicBoolean,
+    probeRefused: AtomicReference<String?>,
     onSample: (mediaMs: Double, pcmMs: Double, windows: List<Double>) -> Unit,
   ) {
     val reader = ProbeDataReader(
@@ -995,7 +1000,7 @@ internal class AuqwWaveformPeaks(
     budget: AtomicLong,
     probeCalls: AtomicLong,
     job: Job?,
-    probeRefused: AtomicBoolean,
+    probeRefused: AtomicReference<String?>,
   ): SeedInfo? {
     val reader = ProbeDataReader(
       host, handle, total, budget, probeCalls,
@@ -1398,13 +1403,18 @@ internal class AuqwWaveformPeaks(
   /** Seam failures → the ABI kind the JS adapter maps — the same table
    *  the desktop port's `toError` applies. */
   private fun seamError(e: StreamException): CodedException {
-    val kind = when {
-      e !is StreamException.Failed -> "unavailable"
-      e.kind in DEAD_HANDLE_KINDS -> "released"
-      e.kind in INVALID_RESPONSE_KINDS -> "invalid-response"
-      else -> "transient"
-    }
-    return CodedException(kind, e.message, e)
+    return CodedException(seamKind(e), e.message, e)
+  }
+}
+
+/** The seam's kind mapping at file scope — probe readers below the
+ *  peaks class need the same table to keep a refusal's own kind. */
+private fun seamKind(e: StreamException): String {
+  return when {
+    e !is StreamException.Failed -> "unavailable"
+    e.kind in DEAD_HANDLE_KINDS -> "released"
+    e.kind in INVALID_RESPONSE_KINDS -> "invalid-response"
+    else -> "transient"
   }
 }
 
@@ -1531,7 +1541,7 @@ private class ProbeDataReader(
   private val budget: AtomicLong,
   private val calls: AtomicLong,
   private val windowBytes: Long,
-  private val refused: AtomicBoolean,
+  private val refused: AtomicReference<String?>,
 ) : DataReader {
   var position = 0L
 
@@ -1563,8 +1573,17 @@ private class ProbeDataReader(
     val want = minOf(size - position, windowBytes).toULong()
     val result = try {
       host.streamProbe(handle, position.toULong(), want, true)
+    } catch (e: StreamException) {
+      // First refusal keeps its seam kind — a terminal kind (dead
+      // handle, invalid-response) must not decay to `transient` and
+      // retry a session that cannot serve.
+      refused.compareAndSet(null, seamKind(e))
+      if (++strikes >= PROBE_MAX_STRIKES) {
+        dead = true
+      }
+      return -1
     } catch (_: Exception) {
-      refused.set(true)
+      refused.compareAndSet(null, "transient")
       if (++strikes >= PROBE_MAX_STRIKES) {
         dead = true
       }
@@ -1573,7 +1592,7 @@ private class ProbeDataReader(
     if (result.data.isEmpty()) {
       // A refused or empty probe reports EOF to the parser — the
       // sweep counts fewer measured windows, never fabricated ones.
-      refused.set(true)
+      refused.compareAndSet(null, "transient")
       if (++strikes >= PROBE_MAX_STRIKES) {
         dead = true
       }
