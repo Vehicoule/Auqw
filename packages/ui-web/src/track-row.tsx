@@ -163,6 +163,7 @@ export function TrackRow({
             <DownloadIcon
               state={row.download}
               size={13}
+              animated={false}
               color={
                 row.download === 'failed'
                   ? 'var(--warn)'

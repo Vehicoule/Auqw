@@ -2,7 +2,7 @@
   "name": "auqw-mobile",
   "version": "0.0.1-alpha.1",
   "private": true,
-  "main": "index.ts",
+  "main": "index.web.ts",
   "scripts": {
     "start": "expo start",
     "android": "expo run:android",
@@ -53,7 +53,9 @@
     "react-native-worklets": "0.10.4"
   },
   "devDependencies": {
+    "@expo/metro-runtime": "^57.0.16",
     "@types/react": "~19.2.2",
+    "react-native-web": "^0.21.2",
     "typescript": "~6.0.3"
   }
 }

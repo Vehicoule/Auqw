@@ -891,11 +891,16 @@ function render(node: ReactNode): string {
   assertIncludes('warn mark draws triangle + dot', warn, 'uw-mark__dot');
 }
 {
-  // Row chips mount the state machine directly — the chip attr stays
-  // for tests/a11y while the icon morphs through the shared phases.
+  // Row chips mount the state machine on its static path — lists render
+  // phase-appropriate end states without paying for transitions.
   const busy = { ...fixtureRowStates[2]!, download: 'downloading' as const };
   const markup = render(h(TrackRow, { row: busy }));
-  assertIncludes('row chip mounts the animated icon', markup, 'uw-dlicon');
+  assertIncludes('row chip mounts the icon state machine', markup, 'uw-dlicon');
+  assertIncludes(
+    'dense list takes the no-motion path',
+    markup,
+    'uw-dlicon--still',
+  );
   assertIncludes('row chip keeps its data state', markup, 'data-chip="downloading"');
 }
 {

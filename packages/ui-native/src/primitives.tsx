@@ -30,7 +30,14 @@ import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
 import { useResolvedArtworkUri } from './artwork.tsx';
-import { clamp01, morphPlayPause, quadPath } from './motion.ts';
+import {
+  clamp01,
+  DOWNLOAD_TARGETS,
+  markDotProgress,
+  markStrokeProgress,
+  morphPlayPause,
+  quadPath,
+} from './motion.ts';
 import {
   CHECK_DRAW_LENGTH,
   CHECK_DRAW_PATH,
@@ -1098,12 +1105,6 @@ export function Spinner({
 //
 // `animated={false}` (dense lists) and `theme.reducedMotion` snap the
 // same layers to their end state — same markup, zero motion.
-const DOWNLOAD_TARGETS = {
-  idle: { morph: 0, draw: 0, spin: false },
-  busy: { morph: 1, draw: 0, spin: true },
-  done: { morph: 1, draw: 1, spin: false },
-  error: { morph: 1, draw: 1, spin: false },
-} as const;
 
 export type DownloadIconProps = {
   readonly state: DownloadChip;
@@ -1171,17 +1172,16 @@ export function DownloadIcon({
   // The terminal mark waits for the ring to be mostly closed, then
   // draws inside the same `draw` sweep (sub-progress of the channel).
   const checkProps = useAnimatedProps(() => ({
-    strokeDashoffset:
-      CHECK_MINI_LENGTH * (1 - clamp01((draw.value - 0.35) / 0.65)),
+    strokeDashoffset: CHECK_MINI_LENGTH * (1 - markStrokeProgress(draw.value)),
     opacity: phase === 'done' ? 1 : 0,
   }));
   const warnLineProps = useAnimatedProps(() => ({
     strokeDashoffset:
-      WARN_MINI_LINE_LENGTH * (1 - clamp01((draw.value - 0.35) / 0.65)),
+      WARN_MINI_LINE_LENGTH * (1 - markStrokeProgress(draw.value)),
     opacity: phase === 'error' ? 1 : 0,
   }));
   const warnDotProps = useAnimatedProps(() => ({
-    opacity: phase === 'error' ? clamp01((draw.value - 0.75) / 0.25) : 0,
+    opacity: phase === 'error' ? markDotProgress(draw.value) : 0,
   }));
   return (
     <View style={{ width: size, height: size }} accessible={false}>
@@ -1326,7 +1326,7 @@ export function StatusMark({
       WARN_DRAW_DETAIL_LENGTH * (1 - clamp01((draw.value - 0.5) / 0.5)),
   }));
   const dotProps = useAnimatedProps(() => ({
-    opacity: clamp01((draw.value - 0.75) / 0.25),
+    opacity: markDotProgress(draw.value),
   }));
   return (
     <Svg

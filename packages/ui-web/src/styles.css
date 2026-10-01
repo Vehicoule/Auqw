@@ -510,18 +510,15 @@
 .uw-dlicon--done .uw-dlicon__check {
   opacity: 1;
   stroke-dashoffset: 0;
-  transition-delay: 90ms;
 }
 
 .uw-dlicon--error .uw-dlicon__warnline {
   opacity: 1;
   stroke-dashoffset: 0;
-  transition-delay: 80ms;
 }
 
 .uw-dlicon--error .uw-dlicon__warndot {
   opacity: 1;
-  transition-delay: 170ms;
 }
 
 .ui-web:not([data-reduced-motion='true'])
@@ -546,6 +543,27 @@
     opacity var(--motion-state) ease,
     transform var(--motion-state) ease,
     stroke-dashoffset var(--motion-state) ease;
+}
+
+/* Staggered marks — declared after the transition shorthand at the same
+   specificity so the delays survive it: the terminal mark waits for the
+   ring to be mostly closed before it draws. */
+.ui-web:not([data-reduced-motion='true'])
+  .uw-dlicon--done:not(.uw-dlicon--still)
+  .uw-dlicon__check {
+  transition-delay: 90ms;
+}
+
+.ui-web:not([data-reduced-motion='true'])
+  .uw-dlicon--error:not(.uw-dlicon--still)
+  .uw-dlicon__warnline {
+  transition-delay: 80ms;
+}
+
+.ui-web:not([data-reduced-motion='true'])
+  .uw-dlicon--error:not(.uw-dlicon--still)
+  .uw-dlicon__warndot {
+  transition-delay: 170ms;
 }
 
 /* ---- status marks (draw-on-mount check / warn) -------------------- */
