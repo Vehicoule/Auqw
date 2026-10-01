@@ -507,28 +507,31 @@ segment is a floating pill near the bottom nav inset
 1080x2400 pixel_6 profile). Tap it for transport + waveform.
 
 ### logcat marks (native tag `AuqwWaveformPeaks`)
-- Info-level sweep marks: `peaks[<requestId>] head-probe +Xms total=N`
-  → `seed +Xms durationMs=N fetched=N` → `coarse +Xms applied=N` →
-  `sampled-done +Xms samples=N fetched=N probes=N`.
-- Per-point lanes are DEBUG (`lane=L point=P +Xms seek->Nms pcmMs=N
-  fetched+N probes+N`) — enable with
-  `adb shell setprop log.tag.AuqwWaveformPeaks DEBUG` BEFORE the run
-  (re-set after every emulator reboot).
-- Honest-path signatures: `legacy pull`/`decode`/`bucket` = whole-file
-  pull+decode; `sampled bailed: <code>` = graceful exit mid-sweep.
-- `fetched=` on `sampled-done` counts bytes delivered through probe
-  reads INCLUDING re-reads of already-committed regions (player pump +
-  overlapping probes) — it can exceed `total=`; not a fabrication tell.
+- Info-level sweep marks: `peaks[<requestId>] head-probe +Xms total=N
+  head=B` → `coarse +Xms` (first real bars — fires at min(~20 s of
+  audio, 35% of duration) decoded) → `streamed-done +Xms slices=N
+  fetched=N probes=N`.
+- Enable with `adb shell setprop log.tag.AuqwWaveformPeaks DEBUG`
+  BEFORE the run (re-set after every emulator reboot).
+- `fetched=` counts bytes DELIVERED through lane probes — committed
+  hits count too (bytes the player already pulled) — it can exceed
+  `total=`; `probes=` counts probe calls (~256 KiB each).
 - JS-side `seam-peaks` dev leg logs `[s1.5] seam-peaks coarse +Xms n=`
-  / `resolved +Xms n= nonzero=` (tag ReactNativeJS).
+  / `resolved +Xms n= nonzero=` / `failed kind=K +Xms` (tag
+  ReactNativeJS). Measured on the auqw AVD: coarse +883 ms cold WAN,
+  +464 ms committed, done ~8 s at ~1.1 MB/s pull pace; dead handle
+  `released` +4 ms; refused stream `transient` ~1.5 s.
 
-### The 4MiB gate decides which path a stream takes
-`SAMPLED_MIN_TOTAL_BYTES = 4MiB`: streams ≤4MiB skip the sampled sweep
-silently (no `head-probe` line — `sampledStream` returns null before it
-logs) and take the legacy pull — honest, not a bug. At ~128kbps opus a
-4MiB file is ≈4.2 min: for sampled-path evidence pick tracks ~4.5+ min
-(e.g. queue items ≥4:30). `lf-*` local files always decode whole-file
-off disk — INVALID evidence for the fast path.
+### The stripe-pull path — no size gate
+`streamedStream` handles every stream size: a head probe learns the
+total, ≤4 contiguous stripe lanes of `streamProbe(fetch=true)` pull
+the file through the session's own Fetch (every probed byte is player
+prefetch), and ONE forward demux+decode lane over a blocking sparse
+reader folds PCM into 50 ms slices as bytes land. >256 MiB total or a
+>8 min parsed duration fails `budget-exceeded`/`not-applicable`; a
+lane abandoning after 3 refused probes truncates decode at its hole
+and surfaces a typed refusal. `lf-*` local files always decode
+whole-file off disk — INVALID evidence for this path.
 
 ### Getting a REAL session play when provider search is walled
 `catalog.search` can die JS-side on this egress with ZERO `request`
@@ -579,3 +582,29 @@ completion mark after; no `peaks_cache` row for its recording_id; the
 next track's sweep proceeds under its own requestId; zero
 FATAL/ANR lines for the app pid (grep `AndroidRuntime` false-positives
 from uiautomator's shell process, uid 2000 — filter by app pid).
+
+### Wall-window realities (verified 2026-10-01, PR #256 leg)
+- The innertube resolve wall is per-request-burst, NOT per-provider:
+  during a ~47 min burst `catalog.search` (deezer fanout) returned 25
+  real matches and every `request req-N` metadata call `succeeded`,
+  while ~48 stream prepares all failed `kind=transient … bot-check`
+  (media session never left NONE(0)). Distinguish metadata-OK /
+  resolve-denied — do not call it 'provider down'.
+- Denial-robustness evidence is free while walled: each `play-result`
+  drive emits `[journey] play-result` + `prepare req-N failed
+  bot-check`, the queue walk-forward tries subsequent rows (~30 tracks
+  attempted), the mini player lands the last target with the
+  `couldn't play` badge — and after ~10 denials the single row marks
+  unplayable so later journeys emit no prepares at all (re-search to
+  reseed rows). Zero FATAL/ANR across ~50 min of denial retries.
+- Read `peaks_cache` without root: `adb shell run-as com.vehicoule.auqw
+  "cat files/SQLite/auqw.db" > /tmp/auqw.db`, then query with
+  `~/Android/Sdk/platform-tools/sqlite3` (the file lives under
+  `files/SQLite/`, not `databases/`). The cat can tear mid-write —
+  verify the copy opens cleanly (`PRAGMA integrity_check` /
+  `SELECT count(*) FROM sqlite_master`) and re-snapshot before treating
+  a MISSING row as evidence; a present row is proof regardless.
+- TLOG process: any in-tree gate stub in the shared worktree gets
+  swept by a lead-side `git add -A` — apply → leg →
+  `git checkout -- <file>` IMMEDIATELY (a stub reached a pushed PR once
+  and broke CI).
