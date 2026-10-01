@@ -385,6 +385,14 @@ export function MiniPlayer({
           wroteProgress.value = false;
         }
       })
+      .onStart(() => {
+        // The drag is live: mint the in-flight marker so a hardware
+        // back pressed mid-gesture can mark the pending release
+        // cancelled (-2) before it mints a fresh commit token.
+        if (sheetAnchor !== undefined) {
+          sheetAnchor.value = 2;
+        }
+      })
       .onUpdate((e) => {
         if (axis.value === 0) {
           const ax = Math.abs(e.translationX);
@@ -442,6 +450,22 @@ export function MiniPlayer({
         // dismisses/skips/commits. Restore whatever it wrote and stop.
         const released = axis.value;
         axis.value = 0;
+        if (sheetAnchor !== undefined) {
+          if (sheetAnchor.value === -2) {
+            // A hardware back mid-drag cancelled the pending release —
+            // retreat to rest without minting a commit over the
+            // navigation that press already ran.
+            sheetAnchor.value = -1;
+            settleBack();
+            springHome();
+            return;
+          }
+          // The in-flight drag marker is consumed — the release
+          // branches below mint their own commit token.
+          if (sheetAnchor.value === 2) {
+            sheetAnchor.value = -1;
+          }
+        }
         if (!success) {
           settleBack();
           springHome();

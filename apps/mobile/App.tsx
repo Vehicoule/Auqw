@@ -1525,6 +1525,10 @@ function Main({
         return true;
       }
       if (expanded) {
+        // Clear a pending commit token too — an expand commit queued
+        // just before this press would otherwise land after the close
+        // and reopen the sheet.
+        stageAnchor.value = 0;
         setExpanded(false);
         return true;
       }
@@ -1543,6 +1547,14 @@ function Main({
         stageAnchor.value = 0;
         stageProgress.value = 0;
         setExpanded(false);
+        return true;
+      }
+      // A sheet drag still in flight mints a fresh commit token at
+      // release — writing -2 marks it cancelled so the finalize
+      // worklet retreats without committing over the navigation this
+      // press just ran.
+      if (stageAnchor.value === 2) {
+        stageAnchor.value = -2;
         return true;
       }
       if (tab !== 'home') {

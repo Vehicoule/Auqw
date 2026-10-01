@@ -2010,12 +2010,14 @@ export function StageSheet({
               gone={gone}
               hostHeight={sheetH}
               onPress={() => {
-                // A tap expands like a velocity-0 gesture release:
-                // mint the commit token AND launch the settle, so the
+                // A tap is a synchronous JS commit — no queue window
+                // exists to cancel through, so it commits directly
+                // rather than through the token gate (a JS-side
+                // anchor write isn't visible to a same-tick JS read
+                // anyway). It still mints the token and launches the
+                // settle like a velocity-0 gesture release, so the
                 // expanded effect's gestureOwned check sees a spring
-                // actually in flight (a bare token would flip
-                // `expanded` while `progress` stays parked — a
-                // phantom sheet). Gesture swipes commit through
+                // actually in flight. Gesture swipes commit through
                 // onExpandCommit instead, which checks the token
                 // written at release (a back press clears it and the
                 // queued commit drops itself).
@@ -2023,7 +2025,7 @@ export function StageSheet({
                 progress.value = theme.reducedMotion
                   ? 1
                   : withSpring(1, SHEET_SETTLE_SPRING);
-                commitAnchor(1);
+                onExpandChangeRef.current?.(true);
               }}
               onExpandCommit={() => commitAnchor(1)}
               onCollapse={() => commitAnchor(0)}
