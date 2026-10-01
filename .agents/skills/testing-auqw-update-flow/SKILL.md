@@ -7,7 +7,20 @@ description: How to exercise the desktop Linux update flow end-to-end (AppImage 
 
 Extends `testing-auqw-desktop-electron` — the update surface legs.
 
-## Fixture (/tmp/auqw-sim, provided per-run or recreate from PR context)
+## Fixture — materialize /tmp/auqw-sim from `fixture/` beside this skill
+
+Everything a fresh runner needs is committed under `fixture/`:
+
+```sh
+D=/tmp/auqw-sim
+fixture/make-fixture.sh "$D"          # cert pair + padded marker artifacts
+cp fixture/feed.mjs fixture/launch-*.sh "$D/"
+chmod +x "$D"/launch-*.sh
+```
+
+(`make-fixture.sh` regenerates the volatile pieces that aren't committed —
+the throwaway self-signed cert pair and the ~4MB-padded AppImage stand-ins.
+Its inline artifact recipe is the same marker script described below.)
 
 - `feed.mjs` — self-signed HTTPS GitHub-releases-shaped feed on 127.0.0.1:4477.
   Knobs: `FEED_PORT`, `FEED_BPS` (250000 ≈ 16s download — cancel-friendly),
