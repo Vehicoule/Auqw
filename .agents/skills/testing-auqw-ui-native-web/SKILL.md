@@ -63,7 +63,7 @@ fuser -k 8087/tcp 8088/tcp 2>/dev/null || true
 
 ## Alternative: gallery-only harness (no app wiring)
 
-When you only need `packages/ui-native` components — not the session/download stack — the lighter path still works: `index.web.ts` registering a `web-gallery.tsx` that wraps `GalleryScreen` in `GestureHandlerRootView` + `SafeAreaProvider` with `useFonts(JetBrainsMono_*)`, `main: index.web.ts` + `@expo/metro-runtime`, then export + static-serve. No fake ports needed; everything is fixtures — callbacks are `noop`, gestures don't track mouse drags (use the state chips), and App-level wiring (tab bar, sheets, theme picker) is unreachable.
+When you only need `packages/ui-native` components — not the session/download stack — the lighter path still works: `index.web.ts` registering a `web-gallery.tsx` that wraps `GalleryScreen` in `GestureHandlerRootView` + `SafeAreaProvider` with `useFonts(Inter_*)` (`@expo-google-fonts/inter`, already an apps/mobile dep — NOT JetBrainsMono), `main: index.web` + `@expo/metro-runtime` + `react-native-web`, then export + static-serve. No fake ports needed; everything is fixtures — callbacks are `noop`, gestures don't track mouse drags (use the state chips), and App-level wiring (tab bar, sheets, theme picker) is unreachable.
 
 - Gallery `Frame`s are full-width, not phone-width: at ~950px desktop width the `StageSheet` artwork (`aspectRatio: 1`, `fill`) is taller than the 620px frame and clips the transport controls — resize the Chrome window to ~530px wide (`wmctrl -r Auqw -e 0,10,40,530,720`) so sheet content renders fully before judging it.
 - `browser_console` CDP may attach to a different Chrome window when several are open (evals returning `querySelectorAll('div').length === 0` = wrong target). Visual assertions from screenshots are sufficient; close extra windows if you need console evals.
@@ -118,6 +118,24 @@ When you only need `packages/ui-native` components — not the session/download 
 - **Navbar tab hitboxes**: the four items are at the bottom bar — home /
   explore / library / settings(gear). The gear is unlabeled — zoom the
   bar if a click doesn't switch.
+
+# Suggested additions to testing-auqw-ui-native-web (verified 2026-10-01 on devin/1790815851-visual-polish)
+
+- **Stale-bundle trap when reusing `apps/mobile/dist`**: a leftover
+  export can be *mid-change* — it includes edits made before the export
+  ran but misses edits landed after. Compare the bundle mtime against
+  each changed source file, or grep the bundle for a distinguishing
+  token (e.g. `filterOptions.length`); when unsure, re-export (~1 min).
+  A false-positive "verified" is worse than a rebuild.
+- **Navigating the long gallery page**: fixture `Frame`s contain inner
+  ScrollViews that swallow wheel events — `scroll` over the page center
+  often moves nothing. Drag the **page scrollbar at the far right
+  edge** (~x=1009 in 1024 tool-space) to jump sections, then fine-tune.
+- Gallery `index.web.ts` needs `import '@expo/metro-runtime'` first,
+  then `registerRootComponent` — and revert is
+  `git checkout -- apps/mobile/package.json pnpm-lock.yaml
+  pnpm-workspace.yaml` + `rm index.web.ts web-gallery.tsx`
+  (`dist/` is gitignored).
 
 ## Devin Secrets Needed
 - none

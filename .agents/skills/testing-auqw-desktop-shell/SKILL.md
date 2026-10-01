@@ -65,4 +65,15 @@ Test-only unlock (plain-text backend — exercises the real SecureStore→safeSt
 - `pkill -f`/`pgrep -f` self-match: use the bracket trick (`pgrep -f "nod[e].mojom"`) or kill by PID.
 - `konsole -e 'bash -c "..."'` is not interactive; launch plain `konsole`.
 - `scripts/cdp-eval.mjs`/`cdp-inspect.mjs` need `(async()=>{...})()` wrappers; bare `require`/`import()` don't work in inspector eval — use `process.mainModule.require`.
-- Rebuild `dist/` if it predates branch HEAD — stale dist silently tests old code.
+- Rebuild `dist/` if it predates branch HEAD — stale dist silently tests old code. Check `dist/renderer` mtime against the last commit touching `packages/ui-web`/`ui-shared`, not just HEAD: a build can predate a follow-up commit. `pnpm build` may also wipe `node_modules/electron/dist` (re-run `node install.js` inside `node_modules/electron` if the binary is gone).
+
+# Suggested additions to testing-auqw-desktop-shell (verified 2026-10-01 on devin/1790815851-visual-polish)
+
+## Pushed screens keep the base screen mounted
+
+`pushOverlay` pushes are full-bleed overlays (`uw-push`) on top of the stack — the underlying screen **stays mounted and keeps its hook state** (e.g. the library screen's `useLibraryControls` filter/sort/layout). This makes retained-state edge cases reachable through pure UI:
+
+- **Library retained kind-filter** (the `filterOptions.length > 2 || non-all-active` rule): create a playlist via the 'new playlist' dashed card → search a track → right-click a result row → 'open album' → heart the entity page (two kinds → chip row appears) → select 'playlists' → open the playlist card → 'delete' → 'confirm delete' → lands back on library with the playlist kind gone but the filter retained → the chip row must still render ('all' is the escape). Clicking 'all' then hides it.
+- **Library kinds come from**: playlists (the dashed card), albums/artists (entity-page heart — via track-row right-click → 'open album'/'open artist'). A single kind (2 options incl. 'all') correctly hides the row.
+- Reset afterwards: unheart the entity to return to a zero-card library.
+- Relaunch caveat: a second `electron .` while the first is still closing exits via the single-instance lock and leaves the OLD process running — wait for `pgrep -f "[d]ist/electron"` to go empty before relaunching after a rebuild, or you test stale `dist/`.
