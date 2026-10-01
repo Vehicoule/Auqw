@@ -1533,6 +1533,9 @@ function Main({
       // `expanded` state lands — a back press inside that window would
       // navigate away and the in-flight commit would reopen the sheet
       // over it. Cancel the pending commit and swallow the press.
+      // The unwind callback re-checks `stageAnchor` before expanding,
+      // and queued commits gate on it in `commitAnchor` — writing 0
+      // cancels both rather than just moving the shared value.
       if (stageAnchor.value === 1) {
         stageAnchor.value = 0;
         return true;

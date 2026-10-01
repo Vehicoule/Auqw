@@ -537,16 +537,18 @@ export function MiniPlayer({
             // rest before the sheet expands — the axes share one
             // visible offset, so two velocity-bearing springs would
             // double the release speed. The expand commit rides the
-            // same callback: a hardware back during the unwind clears
-            // the anchor, and reopening without that check would
-            // morph the leaf over navigated-away content.
+            // same callback: a hardware back or a newer collapse
+            // commit clears the anchor to 0 during the unwind, and
+            // reopening without that check would morph the leaf over
+            // navigated-away content. (-1 = consumed already — only
+            // 0 means cancelled.)
             sheetGone.value = withSpring(
               0,
               { ...SHEET_SETTLE_SPRING, velocity: velocityG },
               (finished) => {
                 if (
                   finished === true &&
-                  (sheetAnchor === undefined || sheetAnchor.value === 1)
+                  (sheetAnchor === undefined || sheetAnchor.value !== 0)
                 ) {
                   sheetProgress.value = withSpring(1, {
                     ...SHEET_SETTLE_SPRING,

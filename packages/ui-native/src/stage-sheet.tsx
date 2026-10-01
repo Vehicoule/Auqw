@@ -851,9 +851,18 @@ export function StageSheet({
     gone.value = dragPreview === 'dismissed' ? 1 : 0;
   }, [dragPreview, expanded, progress, gone]);
 
-  const commitAnchor = useCallback((target: number) => {
-    onExpandChangeRef.current?.(target === 1);
-  }, []);
+  const commitAnchor = useCallback(
+    (target: number) => {
+      // Gesture commits are queued to JS — a hardware back (or a newer
+      // gesture) that moved the anchor in between must cancel them,
+      // not let the stale callback reopen the sheet.
+      if (anchor.value !== target) {
+        return;
+      }
+      onExpandChangeRef.current?.(target === 1);
+    },
+    [anchor],
+  );
 
   // Tap on the uncovered region dismisses — including mid-morph, where
   // `expanded` is still false and the state flip alone wouldn't move
@@ -995,14 +1004,15 @@ export function StageSheet({
               0,
               e.velocityY / collapsed,
               (ok) => {
-                // A hardware back during the unwind cancels a pending
-                // expand by clearing the anchor; reopening without
+                // A hardware back or a newer collapse commit clears
+                // the anchor to 0 during the unwind; reopening without
                 // that check would morph the leaf over navigated-away
-                // content.
+                // content. (1 = still pending, -1 = already consumed
+                // by the expanded effect — only 0 means cancelled.)
                 if (
                   ok === true &&
                   num === 1 &&
-                  (expanded || anchor.value === 1)
+                  (expanded || anchor.value !== 0)
                 ) {
                   progress.value = springTo(1, -e.velocityY / travel);
                   if (!expanded) {
@@ -1011,6 +1021,9 @@ export function StageSheet({
                 }
               },
             );
+            if (num === 0 && expanded) {
+              scheduleOnRN(commitAnchor, 0);
+            }
           } else {
             progress.value = springTo(num, -e.velocityY / travel);
             // A settle that lands on the anchor we're already on is a
@@ -1996,7 +2009,12 @@ export function StageSheet({
               anchor={anchor}
               gone={gone}
               hostHeight={sheetH}
-              onPress={() => commitAnchor(1)}
+              onPress={() => {
+                // Taps commit through the same anchor token a gesture
+                // release writes — a back-cancelled anchor drops both.
+                anchor.value = 1;
+                commitAnchor(1);
+              }}
               onCollapse={() => commitAnchor(0)}
               onPlayPause={onPlayPause}
               onNext={onNext}
