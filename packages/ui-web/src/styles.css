@@ -2484,12 +2484,12 @@
 }
 
 /* Golden-ratio stage column — the GTK sidebar's split fraction
-   (0.382) inside its 280/480 clamps. */
+   (0.382) with a 280px floor. No ceiling: the ratio holds on wide
+   windows too (a pixel cap read as a shrunken strip). */
 .uw-stage-col {
   position: relative;
   flex: 0 0 38.2%;
   min-width: 280px;
-  max-width: 480px;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -2499,29 +2499,14 @@
 .uw-chrome[data-stage='closed'] .uw-stage-col {
   display: none;
 }
-/* The stage column's head strip — the sidebar's own header bar,
-   aligned with the world toolbar's height so the two columns share
-   one chrome line. It doubles as the column's drag grip; the traffic
-   lights pin over its left on macOS. */
-.uw-stage-head {
-  flex: none;
-  height: var(--uw-titlebar-h);
-  display: flex;
-  align-items: center;
-  padding: 0 var(--spacing-sm);
-  -webkit-app-region: drag;
-}
-.uw-stage-head__fill {
-  flex: 1;
-}
-/* Children of a drag strip drag by default — the collapse button
-   opts out; the fill stays the grip. */
-.uw-stage-head > .uw-icon-btn {
-  -webkit-app-region: no-drag;
-}
-/* macOS traffic lights pin over the stage column's top-left. */
-[data-platform='darwin'] .uw-stage-head {
-  padding-left: 96px;
+/* The stage carries no chrome of its own — it runs to the window's
+   top edge and macOS traffic lights overlay its top-left. List modes
+   reserve the strip so headings never sit under the lights; the
+   immersive player keeps artwork full-bleed (its interactive
+   controls are center/right, so nothing collides). */
+[data-platform='darwin'] .uw-stage-col .uw-stage[data-mode='lyrics'],
+[data-platform='darwin'] .uw-stage-col .uw-stage[data-mode='queue'] {
+  padding-top: var(--uw-titlebar-h);
 }
 .uw-stage-col__body {
   flex: 1;
