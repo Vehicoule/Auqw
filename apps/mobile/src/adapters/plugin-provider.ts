@@ -92,57 +92,6 @@ export function createPluginProvider(
     context: OperationContext,
     decode: (value: unknown) => T | null,
   ): Promise<Result<T>> {
-    // TLOG gate stub — catalog.search is bot-walled on this egress;
-    // return real youtube-music source_refs so session plays still
-    // resolve through the genuine innertube path. REVERT after gate.
-    if (capability === 'catalog.search') {
-      return Promise.resolve(
-        decodeProviderOutcome(
-          {
-            type: 'succeeded',
-            resultJson: JSON.stringify({
-              items: [
-                {
-                  source_ref: {
-                    provider: 'youtube-music',
-                    kind: 'track',
-                    id: 'fJ9rUzIMcZQ',
-                  },
-                  title: 'Bohemian Rhapsody',
-                  artist: 'Queen',
-                  album: null,
-                  duration_ms: 355000,
-                  release_year: null,
-                  artwork: [],
-                  explicit: false,
-                  genre: null,
-                  storefront: null,
-                },
-                {
-                  source_ref: {
-                    provider: 'youtube-music',
-                    kind: 'track',
-                    id: 'hTWKbfoikeg',
-                  },
-                  title: 'Smells Like Teen Spirit',
-                  artist: 'Nirvana',
-                  album: null,
-                  duration_ms: 278000,
-                  release_year: null,
-                  artwork: [],
-                  explicit: false,
-                  genre: null,
-                  storefront: null,
-                },
-              ],
-              storefront: null,
-            }),
-          } as AuqwExpoRequestOutcome,
-          (slug) => appErrorKind(slug ?? ''),
-          decode,
-        ),
-      );
-    }
     const signal = context.signal;
     if (disposed) {
       return Promise.resolve(
