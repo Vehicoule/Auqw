@@ -799,28 +799,53 @@ function testCollections(): void {
     'top 50 must follow the playCounts ranking',
   );
   const history = toCollectionModel(fixtureLibraryModel, 'history');
+  const resolvableRecordingIds = new Set(
+    fixtureRecordings.map((recording) => recording.id),
+  );
+  const distinctResolvableRecordingIds = new Set(
+    fixturePlayHistory
+      .filter((event) => resolvableRecordingIds.has(event.recordingId))
+      .map((event) => event.recordingId),
+  );
   assertEqual(
     history.rows.length,
-    fixturePlayHistory.length,
-    'one row per counted play',
+    distinctResolvableRecordingIds.size,
+    'one row per distinct resolvable recording',
   );
-  const sorted = [...fixturePlayHistory].sort(
-    (a, b) => b.playedMs - a.playedMs,
-  );
+  const seenHistoryRecordings = new Set<string>();
+  const expectedHistoryEvents = [...fixturePlayHistory]
+    .sort((a, b) => b.playedMs - a.playedMs)
+    .filter((event) => {
+      if (
+        !resolvableRecordingIds.has(event.recordingId) ||
+        seenHistoryRecordings.has(event.recordingId)
+      ) {
+        return false;
+      }
+      seenHistoryRecordings.add(event.recordingId);
+      return true;
+    });
   assertDeepEqual(
     history.rows.map((r) => r.key),
-    sorted.map((e) => `hist-${e.eventId}`),
-    'history rows must be newest-first and event-keyed',
+    expectedHistoryEvents.map((event) => `hist-${event.recordingId}`),
+    'history rows must be newest-first and deduplicated by recording',
   );
   const dracula = history.rows.filter((r) => r.recordingId === 'rec-dracula');
   assertEqual(
     dracula.length,
-    2,
-    'repeated plays keep separate history rows',
+    1,
+    'repeated plays collapse to one history row',
   );
   assert(
-    new Set(dracula.map((r) => r.key)).size === 2,
-    'repeat history rows keep distinct keys',
+    history.rows.findIndex((row) => row.recordingId === 'rec-dracula') ===
+      expectedHistoryEvents.findIndex(
+        (event) => event.recordingId === 'rec-dracula',
+      ),
+    'repeated plays keep the position of their latest play',
+  );
+  assert(
+    history.rows.every((row) => resolvableRecordingIds.has(row.recordingId)),
+    'unresolvable play-history recordings drop',
   );
   const liked = toCollectionModel(fixtureLibraryModel, 'liked');
   assertEqual(
