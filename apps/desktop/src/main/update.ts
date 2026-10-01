@@ -56,10 +56,14 @@ export interface DesktopUpdate {
   /** Begins the download→verify→apply pipeline for the advertised
       artifact — a no-op on 'open' builds or while a run is live. */
   apply(): Promise<void>;
+  /** Refires the install handoff on the retained stage — a no-op
+      outside 'applied'. The dmg leg re-opens the mounted image so
+      a user who closed the installer window isn't dead-ended. */
+  reapply(): Promise<void>;
   /** Aborts the live apply. */
   cancel(): Promise<void>;
-  /** Relaunches into the replaced binary — only honest inside
-      'ready-to-restart' (the AppImage leg). */
+  /** Relaunches into the replaced build — only honest inside
+      'ready-to-restart' (AppImage rename, packaged dmg install). */
   restart(): Promise<void>;
 }
 
@@ -149,8 +153,8 @@ export function createDesktopUpdate(deps: {
   /** Apply transport + format installer — required past 'open'. */
   readonly applyPorts?: UpdateApplyPorts;
   /** Relaunch hook — required on formats that self-apply on restart
-      (AppImage); absent elsewhere because 'ready-to-restart' can't
-      be reached. */
+      (AppImage rename, packaged dmg install); absent elsewhere
+      because 'ready-to-restart' can't be reached. */
   readonly relaunch?: () => void;
 }): DesktopUpdate {
   const applier =
@@ -207,6 +211,10 @@ export function createDesktopUpdate(deps: {
         );
       }
       service.apply();
+      return Promise.resolve();
+    },
+    reapply: () => {
+      service.reapply();
       return Promise.resolve();
     },
     cancel: () => {

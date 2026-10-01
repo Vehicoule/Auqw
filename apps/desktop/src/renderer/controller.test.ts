@@ -294,6 +294,7 @@ function fakeApi(): Rig {
           }),
         open: () => Promise.resolve(),
         apply: () => Promise.resolve(),
+        reapply: () => Promise.resolve(),
         cancel: () => Promise.resolve(),
         restart: () => Promise.resolve(),
         onState: () => () => {},

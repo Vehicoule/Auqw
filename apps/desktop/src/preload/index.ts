@@ -478,6 +478,8 @@ const api: AuqwApi = {
       invoke(CHANNELS.updateCheck, { kind }, isUpdateSnapshot),
     open: () => invoke(CHANNELS.updateOpen, undefined, isUndefinedResult),
     apply: () => invoke(CHANNELS.updateApply, undefined, isUndefinedResult),
+    reapply: () =>
+      invoke(CHANNELS.updateReapply, undefined, isUndefinedResult),
     cancel: () =>
       invoke(CHANNELS.updateCancel, undefined, isUndefinedResult),
     restart: () =>

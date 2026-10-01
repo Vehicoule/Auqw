@@ -1626,13 +1626,37 @@ const tap = (s: string) => {
   assertEqual(failedCard.actionLabel, 'retry');
   assert(failedCard.dismissible);
 
-  // 'applied' renders nothing — the settings row re-offers the
-  // handoff (reapply) when the OS sheet's outcome never landed
+  // 'applied' renders nothing on self-install builds — the OS
+  // surface owns the story and the settings row re-offers the
+  // handoff (reapply) when its outcome never lands
   assertEqual(
     toUpdateCard(
       live({ state: 'applied', version: '0.0.1-alpha.22' }),
       'install',
       null,
+    ),
+    null,
+  );
+
+  // …but a 'download' build is NOT done at 'applied': the verified
+  // dmg sits mounted in Finder and the replace is still the user's
+  // drag — the card stays up to name the step and re-open the
+  // installer window on demand
+  const appliedDmg = toUpdateCard(
+    live({ state: 'applied', version: '0.0.1-alpha.22' }),
+    'download',
+    null,
+  );
+  assert(appliedDmg !== null);
+  assertEqual(appliedDmg.actionLabel, 'open installer');
+  assertEqual(appliedDmg.chip, 'stored');
+  assert(appliedDmg.dismissible);
+  assert(appliedDmg.detail.includes('applications'));
+  assertEqual(
+    toUpdateCard(
+      live({ state: 'applied', version: '0.0.1-alpha.22' }),
+      'download',
+      '0.0.1-alpha.22',
     ),
     null,
   );

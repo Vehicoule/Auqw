@@ -405,6 +405,10 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     channel(noArgs, (_args, deps) => deps.update.apply()),
   ],
   [
+    CHANNELS.updateReapply,
+    channel(noArgs, (_args, deps) => deps.update.reapply()),
+  ],
+  [
     CHANNELS.updateCancel,
     channel(noArgs, (_args, deps) => deps.update.cancel()),
   ],

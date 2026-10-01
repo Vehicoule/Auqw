@@ -1,6 +1,16 @@
 import { assertDeepEqual, assertEqual } from '@auqw/application/testing';
 import type { UpdateApplyPorts } from '@auqw/application';
 import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { applyDmg, bundleForExe } from './darwin-apply.ts';
+import {
   appImageRelaunchOptions,
   createDesktopUpdate,
   updateCapabilityFor,
@@ -28,12 +38,36 @@ const RELEASE = {
 const fetchJson = () =>
   Promise.resolve({ status: 200, body: [RELEASE] });
 
+const MAC_RELEASE = {
+  tag_name: 'v9.9.9',
+  html_url: 'https://github.com/Vehicoule/Auqw/releases/tag/v9.9.9',
+  draft: false,
+  assets: [
+    {
+      name: 'auqw-9.9.9-mac-arm64.dmg',
+      browser_download_url:
+        'https://github.com/Vehicoule/Auqw/releases/download/v9.9.9/auqw-9.9.9-mac-arm64.dmg',
+    },
+    {
+      name: 'SHA256SUMS-macOS.txt',
+      browser_download_url:
+        'https://github.com/Vehicoule/Auqw/releases/download/v9.9.9/SHA256SUMS-macOS.txt',
+    },
+  ],
+};
+
+const macFetchJson = () =>
+  Promise.resolve({ status: 200, body: [MAC_RELEASE] });
+
 /** Ports whose apply resolves 'relaunch' — enough to drive a full run. */
-function fakeApplyPorts(applied: { count: number }): UpdateApplyPorts {
+function fakeApplyPorts(
+  applied: { count: number },
+  assetName = 'auqw-9.9.9.AppImage',
+): UpdateApplyPorts {
   return {
     stagePath: (artifact) => `/stage/${artifact.name}`,
     fetchText: () =>
-      Promise.resolve(`${'f'.repeat(64)}  auqw-9.9.9.AppImage\n`),
+      Promise.resolve(`${'f'.repeat(64)}  ${assetName}\n`),
     download: (_u, _p, onProgress) => {
       onProgress(1, 1);
       return Promise.resolve();
@@ -206,4 +240,145 @@ export async function run(): Promise<void> {
     openError = thrown.kind ?? 'raw';
   });
   assertEqual(openError, 'invalid-request');
+
+  // reapply refires the OS handoff on the retained stage — no
+  // re-download (the dmg re-mount / APK re-sheet affordance)
+  const reopened = { count: 0 };
+  const installedPorts: UpdateApplyPorts = {
+    ...fakeApplyPorts(reopened, 'auqw-9.9.9-mac-arm64.dmg'),
+    apply: () => {
+      reopened.count += 1;
+      return Promise.resolve('installed');
+    },
+  };
+  const settled = createDesktopUpdate({
+    currentVersion: '0.0.1',
+    target: { os: 'mac' },
+    fetchJson: macFetchJson,
+    openExternal: () => Promise.resolve(),
+    capability: 'download',
+    applyPorts: installedPorts,
+  });
+  await settled.check('manual');
+  await settled.apply();
+  for (let i = 0; i < 30; i += 1) {
+    await Promise.resolve();
+  }
+  assertEqual(settled.snapshot().apply.state, 'applied');
+  await settled.reapply();
+  for (let i = 0; i < 30; i += 1) {
+    await Promise.resolve();
+  }
+  assertEqual(reopened.count, 2);
+  assertEqual(settled.snapshot().apply.state, 'applied');
+  // reapply outside 'applied' is a no-op, not a third run
+  const idleUpdate = createDesktopUpdate({
+    currentVersion: '0.0.1',
+    target: { os: 'mac' },
+    fetchJson: macFetchJson,
+    openExternal: () => Promise.resolve(),
+    capability: 'download',
+    applyPorts: installedPorts,
+  });
+  await idleUpdate.reapply();
+  assertEqual(reopened.count, 2);
+
+  // ---- the dmg leg ----
+
+  assertEqual(
+    bundleForExe('/Applications/auqw.app/Contents/MacOS/auqw'),
+    '/Applications/auqw.app',
+  );
+  assertEqual(bundleForExe('/opt/electron/Electron'), null);
+
+  // unpackaged → the manual leg: Finder opens the image, 'installed'
+  const manualCalls: string[] = [];
+  assertEqual(
+    await applyDmg({
+      dmgPath: '/stage/auqw-9.9.9.dmg',
+      isPackaged: false,
+      exePath: '/opt/electron/Electron',
+      openPath: (p) => {
+        manualCalls.push(`open:${p}`);
+        return Promise.resolve('');
+      },
+      showItemInFolder: (p) => manualCalls.push(`reveal:${p}`),
+    }),
+    'installed',
+  );
+  assertDeepEqual(manualCalls, ['open:/stage/auqw-9.9.9.dmg']);
+
+  // a refused mount reveals the staged file and lands 'failed'
+  // (retryable 'transient'), never a false 'installed'
+  let openFailure: string | null = null;
+  await applyDmg({
+    dmgPath: '/stage/auqw-9.9.9.dmg',
+    isPackaged: false,
+    exePath: '/opt/electron/Electron',
+    openPath: () => Promise.resolve('mount failed'),
+    showItemInFolder: (p) => manualCalls.push(`reveal:${p}`),
+  }).catch((thrown: { kind?: string }) => {
+    openFailure = thrown.kind ?? 'raw';
+  });
+  assertEqual(openFailure, 'transient');
+  assertEqual(manualCalls[1], 'reveal:/stage/auqw-9.9.9.dmg');
+
+  // packaged → the assist does the user's drag: the fake run serves
+  // a mounted bundle + copies it, the leg swaps it over the running
+  // .app and reports 'relaunch'
+  const dir = mkdtempSync(join(tmpdir(), 'auqw-dmg-test-'));
+  const running = join(dir, 'auqw.app');
+  mkdirSync(join(running, 'Contents', 'MacOS'), { recursive: true });
+  const exe = join(running, 'Contents', 'MacOS', 'auqw');
+  const fakeRun = (cmd: string, args: readonly string[]) => {
+    if (cmd === 'hdiutil' && args[0] === 'attach') {
+      // The fixture 'mounts' a bundle at the private mountpoint
+      const mount = args[args.length - 1];
+      if (mount === undefined) {
+        return Promise.reject(new Error('no mountpoint'));
+      }
+      mkdirSync(join(mount, 'auqw.app', 'Contents', 'MacOS'), {
+        recursive: true,
+      });
+      return Promise.resolve();
+    }
+    if (cmd === 'ditto' && args[0] !== undefined && args[1] !== undefined) {
+      cpSync(args[0], args[1], { recursive: true });
+      return Promise.resolve();
+    }
+    return Promise.resolve();
+  };
+  assertEqual(
+    await applyDmg({
+      dmgPath: join(dir, 'auqw-9.9.9.dmg'),
+      isPackaged: true,
+      exePath: exe,
+      openPath: () => Promise.resolve('should not open'),
+      showItemInFolder: () => undefined,
+      run: fakeRun,
+    }),
+    'relaunch',
+  );
+  // The new bundle took the running path; no .auqw-new/.auqw-old
+  // staging residue lingers beside it
+  assertDeepEqual(readdirSync(dir), ['auqw.app']);
+
+  // a refused assist (e.g. hdiutil fails) still gets the manual leg
+  let refusedOpen = false;
+  assertEqual(
+    await applyDmg({
+      dmgPath: join(dir, 'auqw-9.9.9.dmg'),
+      isPackaged: true,
+      exePath: exe,
+      openPath: () => {
+        refusedOpen = true;
+        return Promise.resolve('');
+      },
+      showItemInFolder: () => undefined,
+      run: () => Promise.reject(new Error('attach failed')),
+    }),
+    'installed',
+  );
+  assertEqual(refusedOpen, true);
+  rmSync(dir, { force: true, recursive: true });
 }

@@ -154,6 +154,7 @@ export async function run(): Promise<void> {
         subscribe: () => () => undefined,
         open: () => Promise.resolve(),
         apply: () => Promise.resolve(),
+        reapply: () => Promise.resolve(),
         cancel: () => Promise.resolve(),
         restart: () => Promise.resolve(),
       },

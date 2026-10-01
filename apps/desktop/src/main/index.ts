@@ -69,6 +69,7 @@ import {
   updateCapabilityFor,
   updateTargetFor,
 } from './update.ts';
+import { applyDmg } from './darwin-apply.ts';
 import {
   createSyncKeysHandler,
   migrateSyncCustody,
@@ -562,17 +563,17 @@ async function main(): Promise<void> {
               });
             }
             if (process.platform === 'darwin') {
-              // A dmg can't self-apply: the verified file reveals in
-              // Finder and mounts — drag-to-Applications is the
-              // user's move. openPath resolves its error text rather
-              // than rejecting, so a failed mount must still land
-              // 'failed' (retryable), not a false 'installed'.
-              shell.showItemInFolder(path);
-              return shell.openPath(path).then((error) => {
-                if (error !== '') {
-                  throw shellError('transient', `dmg open: ${error}`);
-                }
-                return 'installed' as const;
+              // A dmg can't self-apply in place, but a packaged build
+              // can do the user's drag for them: mount the verified
+              // image, swap the .app, relaunch. Unpackaged dev runs
+              // and refused assists get the manual leg — Finder
+              // opens the image and the card names the move.
+              return applyDmg({
+                dmgPath: path,
+                isPackaged: app.isPackaged,
+                exePath: app.getPath('exe'),
+                openPath: (p) => shell.openPath(p),
+                showItemInFolder: (p) => shell.showItemInFolder(p),
               });
             }
             return Promise.reject(
@@ -615,7 +616,8 @@ async function main(): Promise<void> {
       ? { releasesUrl: updateReleasesUrl }
       : {}),
     ...(updateApplyPorts !== undefined ? { applyPorts: updateApplyPorts } : {}),
-    ...(updateCapability === 'install' && updateTarget.os === 'linux'
+    ...(updateTarget.os === 'mac' ||
+    (updateCapability === 'install' && updateTarget.os === 'linux')
       ? {
           relaunch: () => {
             // The AppImage apply already renamed the new bytes over
