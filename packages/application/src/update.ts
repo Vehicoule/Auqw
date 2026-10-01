@@ -309,7 +309,21 @@ export function parseSha256Sums(text: string): ReadonlyMap<string, string> {
 /** '<…>-android-<abi>.apk' → '<abi>' — the release workflow names
  *  per-ABI splits 'auqw-<version>-android-<abi>.apk'. */
 function apkAbi(name: string): string | null {
-  return /-android-([0-9A-Za-z_-]+)\.apk$/.exec(name)?.[1] ?? null;
+  // Parsed by hand: a /-android-(<word class with '-'>+)\.apk$/ pattern
+  // lets the tag and the body each claim every '-android-' segment —
+  // polynomial backtracking on repeated tags (CodeQL js/redos). The
+  // LAST tag wins: a version's own prerelease may contain '-android-'.
+  const TAG = '-android-';
+  const EXT = '.apk';
+  if (!name.endsWith(EXT)) {
+    return null;
+  }
+  const tag = name.lastIndexOf(TAG);
+  if (tag < 0) {
+    return null;
+  }
+  const abi = name.slice(tag + TAG.length, -EXT.length);
+  return /^[0-9A-Za-z_-]+$/.test(abi) ? abi : null;
 }
 
 /** The artifact this target installs, if the release ships one. */

@@ -215,6 +215,28 @@ export async function run(): Promise<void> {
     })?.name,
     'auqw-0.0.1-alpha.18-android-universal.apk',
   );
+  // a version prerelease may itself contain '-android-' — the LAST
+  // tag carries the abi; and a wall of repeated tags parses
+  // linearly, never backtracking (CodeQL js/redos on the regex)
+  assertEqual(
+    pickArtifact(
+      [
+        {
+          name: 'auqw-1.2.3-android-beta-android-arm64-v8a.apk',
+          url: 'https://example.com/a',
+        },
+      ],
+      { os: 'android', supportedAbis: ['arm64-v8a'] },
+    )?.name,
+    'auqw-1.2.3-android-beta-android-arm64-v8a.apk',
+  );
+  assertEqual(
+    pickArtifact(
+      [{ name: `${'-android-'.repeat(4000)}x.apk`, url: 'https://example.com/b' }],
+      ANDROID_ARM64,
+    ),
+    null,
+  );
   // pickArtifact's own basename gate — an artifact built outside
   // parseRelease (the seam's sanitizing boundary) stages into the
   // same dirs, so separators must not pick either
