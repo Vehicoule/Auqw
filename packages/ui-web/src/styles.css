@@ -919,10 +919,6 @@
   height: 48px;
 }
 
-.uw-wave__fill {
-  transition: width 180ms linear;
-}
-
 .uw-wave__input {
   position: absolute;
   inset: 0 0 auto;
@@ -951,18 +947,10 @@
   .uw-wave__shimmer {
     animation: none;
   }
-
-  .uw-wave__fill {
-    transition: none;
-  }
 }
 
 .ui-web[data-reduced-motion='true'] .uw-wave__shimmer {
   animation: none;
-}
-
-.ui-web[data-reduced-motion='true'] .uw-wave__fill {
-  transition: none;
 }
 
 .uw-wave__labels {

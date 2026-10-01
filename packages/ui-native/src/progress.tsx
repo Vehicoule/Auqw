@@ -144,11 +144,13 @@ export function ArtworkRing({
   useEffect(() => {
     const delta = Math.abs(clamped - previousProgress.current);
     previousProgress.current = clamped;
-    const duration =
-      delta > 0.05 ? theme.motion.state : theme.motion.state * 5;
-    animatedProgress.value = theme.reducedMotion
-      ? clamped
-      : withTiming(clamped, { duration });
+    if (theme.reducedMotion || delta <= 0.05) {
+      animatedProgress.value = clamped;
+    } else {
+      animatedProgress.value = withTiming(clamped, {
+        duration: theme.motion.state,
+      });
+    }
   }, [
     animatedProgress,
     clamped,
