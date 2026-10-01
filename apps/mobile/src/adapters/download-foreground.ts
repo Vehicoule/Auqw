@@ -41,9 +41,13 @@ async function drain(): Promise<void> {
         await transport(next);
         delivered = next;
       } catch {
-        // A failed edge stays undelivered — the next emit retries
-        // it, so a dropped zero can't leave the service running.
-        return;
+        // A failed edge stays undelivered — retried by the next
+        // report, or RIGHT NOW when a report arrived during the
+        // failed send: the newer desired count still owes the wire
+        // one attempt, then the loop exits (bounded).
+        if (mediaCount + extraHolds === next) {
+          return;
+        }
       }
     }
   } finally {

@@ -574,6 +574,43 @@ export async function run(): Promise<void> {
     );
   }
 
+  // ownership is per PATH: a stale run drops its leftover even when
+  // a successor claimed a DIFFERENT path (another release's name)
+  {
+    const { calls, ports } = fakePorts({
+      sumsBody: `${GOOD_HEX}  a.apk\n${GOOD_HEX}  b.apk\n`,
+    });
+    const hashes = new Map<string, (hex: string) => void>();
+    const applier = createUpdateApplier({
+      ...ports,
+      sha256Hex: (p) =>
+        new Promise<string>((resolve) => {
+          hashes.set(p, resolve);
+        }),
+    });
+    const target = (name: string): UpdateApplyTarget => ({
+      ...APK_TARGET,
+      artifact: { ...APK_TARGET.artifact, name },
+    });
+    applier.begin(target('a.apk'));
+    await settle();
+    assertEqual(applier.snapshot().state, 'verifying');
+    applier.cancel();
+    applier.begin(target('b.apk'));
+    await settle();
+    assertEqual(applier.snapshot().state, 'verifying');
+    hashes.get('/stage/a.apk')!(GOOD_HEX);
+    await settle();
+    assertDeepEqual(
+      calls.removed,
+      ['/stage/a.apk'],
+      'a stale run must drop its own path even after another version claimed staging',
+    );
+    hashes.get('/stage/b.apk')!(GOOD_HEX);
+    await settle();
+    assertEqual(applier.snapshot().state, 'applied');
+  }
+
   // service.apply() gates: no-op while not 'available', and merges
   // the applier feed into the snapshot
   {

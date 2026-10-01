@@ -648,9 +648,10 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
   // publish would otherwise admit a second begin — two downloads
   // racing one staging path.
   let running = false;
-  // Which generation last claimed the staging path — a stale run
-  // may delete its own leftover but never a successor's download.
-  let claimedGen = 0;
+  // Which generation last claimed EACH staging path — a stale run
+  // deletes its own leftover but never a successor's download, even
+  // when successive releases stage under different names.
+  const claims = new Map<string, number>();
 
   function publish(next: UpdateApplyStatus): void {
     state = next;
@@ -690,11 +691,12 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
     let path: string | null = null;
     // A stale run still drops its OWN staged file — a cancel mid-
     // verify must not strand a download — but never the path a
-    // newer run just claimed (claimedGen marks the latest claimant).
+    // newer run just claimed (claims marks each path's claimant).
     const dropOwned = (): void => {
-      if (path !== null && claimedGen === gen) {
+      if (path !== null && claims.get(path) === gen) {
         const staged = path;
         path = null;
+        claims.delete(staged);
         void ports.remove(staged).catch(() => undefined);
       }
     };
@@ -717,7 +719,7 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
         );
       }
       path = ports.stagePath(artifact);
-      claimedGen = gen;
+      claims.set(path, gen);
       publishIfCurrent({
         state: 'downloading',
         version,
@@ -759,6 +761,7 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       // The apply leg consumed the file (renamed into place, spawned
       // as the installer, revealed in Finder) — cleanup is its
       // responsibility now, not the sweep's.
+      claims.delete(path);
       path = null;
       publishIfCurrent(
         outcome === 'relaunch'
