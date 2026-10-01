@@ -360,7 +360,10 @@ export function LibraryScreen({
             onPress={view.layoutChip.onPress}
           />
         </View>
-        {view.filterOptions.length > 2 && (
+        {(view.filterOptions.length > 2 ||
+          // A retained kind filter whose kind left the library must keep
+          // the row — `all` is the way back to the remaining cards.
+          !view.filterOptions.some((o) => o.key === 'all' && o.active)) && (
           <View
             style={{
               flexDirection: 'row',
