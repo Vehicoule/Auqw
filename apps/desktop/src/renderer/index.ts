@@ -92,6 +92,10 @@ async function boot(): Promise<void> {
       'mediaSession' in navigator
         ? (navigator.mediaSession as MediaSessionLike)
         : null,
+    mediaMetadata:
+      'MediaMetadata' in globalThis
+        ? (init) => new MediaMetadata(init)
+        : null,
   });
 
   let preparedHandle: string | null = null;

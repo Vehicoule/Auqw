@@ -164,6 +164,10 @@ export async function createSessionController(
             'mediaSession' in navigator
               ? (navigator.mediaSession as MediaSessionLike)
               : null,
+          mediaMetadata:
+            'MediaMetadata' in globalThis
+              ? (init) => new MediaMetadata(init)
+              : null,
           mse: browserMse(),
           // Extensionless `dl-*` names carry their container mime in the
           // download ledger — a `file://` URI under the media dir resolves

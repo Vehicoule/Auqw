@@ -46,13 +46,35 @@ export type AudioLike = {
   removeEventListener(type: string, listener: () => void): void;
 };
 
-/** `navigator.mediaSession` — OS media-key actions only. */
+/** Details on a transport action — only `seekto` carries one. */
+export type MediaActionDetails = { seekTime?: number };
+
+/** The `MediaMetadata` init bag — the DOM ctor is injected as a
+ * factory so the port stays testable under plain node. */
+export type MediaMetadataInit = {
+  title: string;
+  artist?: string;
+  album?: string;
+  artwork?: Array<{ src: string; sizes?: string; type?: string }>;
+};
+
+/** `navigator.mediaSession` — transport actions plus the OS
+ * now-playing surface (macOS Now Playing, Windows SMTC, Linux MPRIS —
+ * Chromium feeds all three from this one API). */
 export type MediaSessionLike = {
   playbackState: string;
+  /** The `MediaMetadata` instance the factory minted, or null. */
+  metadata: unknown;
   setActionHandler(
-    action: 'play' | 'pause' | 'nexttrack' | 'previoustrack',
-    handler: (() => void) | null,
+    action: 'play' | 'pause' | 'nexttrack' | 'previoustrack' | 'seekto',
+    handler: ((details?: MediaActionDetails) => void) | null,
   ): void;
+  /** Optional — older embeds may lack it; publishing is best-effort. */
+  setPositionState?(state: {
+    duration: number;
+    playbackRate: number;
+    position: number;
+  }): void;
 };
 
 /** Dead-resource kinds — a failed op with one of these means the
@@ -145,6 +167,9 @@ export function createWebPlayerPort(deps: {
   stream: StreamClient;
   audio: AudioLike;
   mediaSession?: MediaSessionLike | null;
+  /** `MediaMetadata` ctor as a factory — the projection row's
+   * title/artist/artwork lands on the OS surface through it. */
+  mediaMetadata?: ((init: MediaMetadataInit) => unknown) | null;
   now?: () => number;
   /** MSE factories — present under Electron; absent in tests/node,
    * where the serve-url path is the only leg. */
@@ -160,6 +185,7 @@ export function createWebPlayerPort(deps: {
   const { stream, audio } = deps;
   const now = deps.now ?? Date.now;
   const mediaSession = deps.mediaSession ?? null;
+  const mediaMetadata = deps.mediaMetadata ?? null;
   const localResolve = deps.localResolve ?? null;
   const listeners = new Set<(event: PlayerEvent) => void>();
   let current: {
@@ -453,6 +479,74 @@ export function createWebPlayerPort(deps: {
       ? Math.round(audio.duration * 1000)
       : undefined;
 
+  /** The projection row `current` names — the only honest source for
+   * the OS surface; a missing row clears rather than guesses. */
+  function projectedItem(
+    occurrenceId: string | null,
+  ): QueueProjectionItem | null {
+    if (occurrenceId === null) {
+      return null;
+    }
+    return (
+      projection?.items.find(
+        (item) => item.occurrenceId === occurrenceId,
+      ) ?? null
+    );
+  }
+
+  /** Now-playing title/artist/art — published when `current` changes
+   * and when the projection it reads is swapped (corrections,
+   * re-queues). A different current occurrence is left for the
+   * successor's own attach to publish — eagerly naming it would
+   * mislabel the track still playing. */
+  function publishMetadata(): void {
+    if (mediaSession === null || mediaMetadata === null) {
+      return;
+    }
+    const item = projectedItem(current?.occurrenceId ?? null);
+    mediaSession.metadata =
+      item === null
+        ? null
+        : mediaMetadata({
+            title: item.title,
+            ...(item.artist === null ? {} : { artist: item.artist }),
+            ...(item.artworkUrl === null
+              ? {}
+              : { artwork: [{ src: item.artworkUrl }] }),
+          });
+  }
+
+  /** Position mirror — the OS interpolates between pushes via
+   * playbackRate (0 while paused), so publishing on element state
+   * changes is enough; `status()` runs on every relevant event. A
+   * finite duration is required for a meaningful state — before
+   * `loadedmetadata` there is nothing to report. */
+  function publishPosition(): void {
+    const duration = durMs();
+    if (
+      mediaSession?.setPositionState === undefined ||
+      duration === undefined ||
+      duration <= 0
+    ) {
+      return;
+    }
+    mediaSession.setPositionState({
+      duration: duration / 1000,
+      playbackRate: audio.paused ? 0 : 1,
+      position: Math.min(posMs(), duration) / 1000,
+    });
+  }
+
+  /** Playback torn down — the OS card goes blank rather than freeze
+   * on the last track's info. */
+  function clearOsSurface(): void {
+    if (mediaSession === null) {
+      return;
+    }
+    mediaSession.playbackState = 'none';
+    mediaSession.metadata = null;
+  }
+
   function emit(event: PlayerEvent): void {
     for (const listener of [...listeners]) {
       try {
@@ -477,6 +571,7 @@ export function createWebPlayerPort(deps: {
       ...(duration === undefined ? {} : { durationMs: duration }),
       ...(error === undefined ? {} : { error }),
     });
+    publishPosition();
   }
 
   function emitTransition(
@@ -603,6 +698,7 @@ export function createWebPlayerPort(deps: {
       };
       current = { handle, identity, occurrenceId: item.occurrenceId };
       attached = true;
+      publishMetadata();
       audio.src = first.url;
       audio.currentTime = 0;
       emitTransition(p, item.occurrenceId, reason, 0, identity, handle);
@@ -783,8 +879,12 @@ export function createWebPlayerPort(deps: {
         current = null;
         audio.pause();
         audio.src = '';
+        clearOsSurface();
+      } else {
+        // A natural end at the tail keeps the element loaded —
+        // 'paused' keeps the OS transport live for a replay.
         if (mediaSession !== null) {
-          mediaSession.playbackState = 'none';
+          mediaSession.playbackState = 'paused';
         }
       }
       // Tail of the queue — a null target means the cursor ran off.
@@ -871,6 +971,9 @@ export function createWebPlayerPort(deps: {
     status('ended');
     advanceQueue('ended');
   });
+  // Duration can resolve late under MSE appends — the OS scrubber
+  // needs the push even though no status event maps to it.
+  audio.addEventListener('durationchange', () => publishPosition());
   audio.addEventListener('error', () => {
     const owner = current;
     if (owner === null) {
@@ -922,6 +1025,9 @@ export function createWebPlayerPort(deps: {
     mediaActionsInstalled = true;
     mediaSession.setActionHandler('play', () => {
       void audio.play().catch(() => undefined);
+      // The OS commanded the change — mirror it in the session state
+      // or the widget keeps showing the stale transport.
+      mediaSession.playbackState = 'playing';
     });
     mediaSession.setActionHandler('pause', () => {
       // A media-key pause is transport-wide — each killed pending play
@@ -930,6 +1036,7 @@ export function createWebPlayerPort(deps: {
       const killed = [...pendingPlayGens.entries()];
       invalidatePendingPlays(null);
       audio.pause();
+      mediaSession.playbackState = 'paused';
       for (const [handle, pending] of killed) {
         emit({
           type: 'status',
@@ -946,6 +1053,24 @@ export function createWebPlayerPort(deps: {
     mediaSession.setActionHandler('previoustrack', () =>
       advanceQueue('remote-previous'),
     );
+    // The OS scrubber — same landing as a seekTo on the live attempt:
+    // a mid-attach play owns the seek in its pending slot instead.
+    mediaSession.setActionHandler('seekto', (details) => {
+      if (details?.seekTime === undefined) {
+        return;
+      }
+      const positionMs = Math.max(0, Math.round(details.seekTime * 1000));
+      for (const pending of pendingPlayGens.values()) {
+        if (
+          current === null ||
+          identityEq(pending.identity, current.identity)
+        ) {
+          pending.positionMs = positionMs;
+        }
+      }
+      audio.currentTime = positionMs / 1000;
+      activeMse?.source.seekTo(positionMs);
+    });
   }
 
   function stale(identity: PlaybackIdentity): Result<never> | null {
@@ -1152,6 +1277,7 @@ export function createWebPlayerPort(deps: {
               projection?.currentOccurrenceId ??
               null,
           };
+          publishMetadata();
           audio.src = first.url;
           audio.currentTime =
             (pending?.positionMs ?? input.positionMs ?? 0) / 1000;
@@ -1246,9 +1372,7 @@ export function createWebPlayerPort(deps: {
       dropMse();
       audio.pause();
       audio.src = '';
-      if (mediaSession !== null) {
-        mediaSession.playbackState = 'none';
-      }
+      clearOsSurface();
       status('idle');
       current = null;
       return ok(undefined);
@@ -1279,6 +1403,7 @@ export function createWebPlayerPort(deps: {
         audio.pause();
         audio.src = '';
         current = null;
+        clearOsSurface();
       }
       dropMse(input.handle);
       abortPendingAttaches(input.handle);
@@ -1330,6 +1455,7 @@ export function createWebPlayerPort(deps: {
         }
       }
       installMediaActions();
+      publishMetadata();
       return ok(undefined);
     },
 
