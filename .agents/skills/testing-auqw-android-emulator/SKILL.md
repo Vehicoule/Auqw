@@ -600,7 +600,10 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
 - Read `peaks_cache` without root: `adb shell run-as com.vehicoule.auqw
   "cat files/SQLite/auqw.db" > /tmp/auqw.db`, then query with
   `~/Android/Sdk/platform-tools/sqlite3` (the file lives under
-  `files/SQLite/`, not `databases/`).
+  `files/SQLite/`, not `databases/`). The cat can tear mid-write —
+  verify the copy opens cleanly (`PRAGMA integrity_check` /
+  `SELECT count(*) FROM sqlite_master`) and re-snapshot before treating
+  a MISSING row as evidence; a present row is proof regardless.
 - TLOG process: any in-tree gate stub in the shared worktree gets
   swept by a lead-side `git add -A` — apply → leg →
   `git checkout -- <file>` IMMEDIATELY (a stub reached a pushed PR once
