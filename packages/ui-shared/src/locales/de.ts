@@ -307,8 +307,10 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'transfer.resetA11y': 'import zurücksetzen',
   'transfer.failed': 'import fehlgeschlagen',
   'transfer.startOver': 'von vorn beginnen',
-  'transfer.apply': 'import übernehmen',
-  'transfer.applying': 'wird übernommen…',
+  'transfer.apply': 'bibliothek ersetzen',
+  'transfer.applying': 'wird ersetzt…',
+  'transfer.replaceWarn':
+    'löscht bibliothek, downloads, warteschlange, verlauf und einstellungen auf diesem gerät — ein export sichert die bibliothek, nicht downloads oder warteschlange',
   'transfer.cancelA11y': 'import abbrechen',
   'transfer.readFailed': 'die gewählte datei konnte nicht gelesen werden',
   'transfer.exportWriteFailed': 'export fehlgeschlagen',

@@ -156,13 +156,17 @@ function ImportBody({
         </div>
       ) : (
         <div className="uw-import-preview__actions">
+          <Text variant="metadata" color="warn">
+            {footer.warning}
+          </Text>
+          <div className="uw-import-preview__buttons">
           <Pressable
             onPress={footer.onApply}
             disabled={footer.applying}
             ariaLabel={footer.applyA11yLabel}
-            className="uw-cta"
+            className="uw-cta uw-cta--warn"
           >
-            <Text variant="metadata" color="canvas">
+            <Text variant="metadata" color="warn">
               {footer.applyLabel}
             </Text>
           </Pressable>
@@ -175,6 +179,7 @@ function ImportBody({
               {footer.cancelLabel}
             </Text>
           </Pressable>
+          </div>
         </div>
       )}
     </div>

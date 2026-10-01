@@ -295,8 +295,10 @@ export const en = {
   'transfer.resetA11y': 'reset import',
   'transfer.failed': 'import failed',
   'transfer.startOver': 'start over',
-  'transfer.apply': 'apply import',
-  'transfer.applying': 'applying…',
+  'transfer.apply': 'replace library',
+  'transfer.applying': 'replacing…',
+  'transfer.replaceWarn':
+    'erases this device\'s library, downloads, queue, history and settings — an export preserves the library, not downloads or the queue',
   'transfer.cancelA11y': 'cancel import',
   'transfer.readFailed': 'could not read the picked file',
   'transfer.exportWriteFailed': 'export write failed',
