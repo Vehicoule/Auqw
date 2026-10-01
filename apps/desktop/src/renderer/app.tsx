@@ -1546,7 +1546,7 @@ function Main({
                     </Text>
                   </button>
                 )}
-                {updateCard.dismissible && (
+                {updateCard.dismissible ? (
                   <IconButton
                     icon="close"
                     size={28}
@@ -1554,6 +1554,13 @@ function Main({
                     ariaLabel={t('update.dismiss')}
                     onPress={onUpdateBannerDismiss}
                   />
+                ) : (
+                  // Reserve the close slot (mobile parity): the action
+                  // verb holds its x-position when a live 'cancel'
+                  // replaces a dismissible 'install' + ×.
+                  updateCard.actionLabel !== null && (
+                    <span style={{ width: 28, flexShrink: 0 }} />
+                  )
                 )}
               </div>
               {updateCard.progress !== null && (
