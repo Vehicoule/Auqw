@@ -536,8 +536,9 @@ None — the napi artifact is a local cargo build output.
 - `rm -rf ~/.config/auqw-desktop` — deleting only `auqw.db*` leaves
   `sync-log.jsonl`/`streams/` which REPLAY persisted events on next boot
   (old play_history rows reappear; local recordings get double-committed).
-  The local-folder grant lives in renderer Local Storage — it survives a
-  full wipe and auto-restores/rescans; re-add only if it doesn't.
+  The local-folder grant lives in renderer Local Storage + `local_sources`
+  rows — deleting `auqw.db*` keeps neither intact (sync-log replays it),
+  but a full `rm -rf` wipe removes both, so re-add the folder afterward.
 - Ground truth: `sqlite3 "file:$HOME/.config/auqw-desktop/auqw.db?mode=ro&immutable=1"`
   (expand `$HOME` — `~` fails inside the URI). Key tables:
   `recordings` (title, provenance), `source_refs`, `queue_occurrences`,
@@ -564,8 +565,12 @@ None — the napi artifact is a local cargo build output.
 - Add the folder via menu → settings → "add local folder"; GTK dialog:
   Ctrl+L, type the absolute path, click the "Open" BUTTON — pressing Enter
   returns "nothing came back" (empty selection).
-- A replayed occurrence does NOT re-count (dedup by occurrenceId+cycle).
-  To mint a SECOND counted play of the same song reliably:
+- Dedupe key is `${occurrenceId}#${listenCycle}` — a plain replay of the
+  same occurrence does NOT re-count, but `bumpListenCycle` gives repeat-one
+  loops and repeat-all wraps a fresh cycle, so each loop counts once
+  (playback-engine.ts `#maybeRecordPlay`). Easiest second play of the same
+  song: put the ~4s fixture on repeat-one and let it loop — it counts per
+  pass. When repeat is hard to drive, the deterministic path is:
   empty the queue (`delete from queue_occurrences`, keep `queue_state`),
   relaunch, then press the row — `queuedOccurrenceFor` misses →
   `session.enqueueRecording` mints a new occurrence → a real counted play.
