@@ -76,6 +76,8 @@ import {
   lyricsHeaderView,
   lyricsPaneView,
   queueClearButton,
+  queueMetaLabel,
+  queueOriginView,
   queueReorderButton,
   radioRowView,
   stageMetaView,
@@ -83,6 +85,7 @@ import {
   stageModeTabs,
   useStageMode,
   useTransportView,
+  type StageQueueHandlers,
 } from '@auqw/ui-shared/controllers';
 
 
@@ -643,6 +646,7 @@ export type StageSheetProps = {
   | undefined;
   readonly onRemoveQueueItem?: ((occurrenceId: string) => void) | undefined;
   readonly onClearQueue?: (() => void) | undefined;
+  readonly onOpenQueueContext?: StageQueueHandlers['onOpenQueueContext'];
   readonly onToggleQueueReorder?: (() => void) | undefined;
   readonly onMoveQueueItem?:
   | ((occurrenceId: string, direction: -1 | 1) => void)
@@ -700,6 +704,7 @@ export function StageSheet({
   onQueueViewport,
   onRemoveQueueItem,
   onClearQueue,
+  onOpenQueueContext,
   onToggleQueueReorder,
   onMoveQueueItem,
   onMoveQueueItemTo,
@@ -796,6 +801,11 @@ export function StageSheet({
     queue?.currentOccurrenceId != null,
     onClearQueue,
   );
+  const queueOrigin = queueOriginView(
+    queue?.origin ?? null,
+    onOpenQueueContext,
+  );
+  const queueMeta = queue === undefined ? null : queueMetaLabel(queue);
   const downloadButton =
     download === null ? null : downloadButtonView(download, onDownload);
 
@@ -1855,7 +1865,10 @@ export function StageSheet({
             </GestureDetector>
           ) : (
             <>
-              {(queueReorder !== null || queueClear !== null) && (
+              {(queueReorder !== null ||
+                queueClear !== null ||
+                queueOrigin !== null ||
+                queueMeta !== null) && (
                 <GestureDetector gesture={queueChromePan}>
                   <View
                     style={{
@@ -1865,6 +1878,44 @@ export function StageSheet({
                       marginBottom: theme.spacing.xs,
                     }}
                   >
+                    <View
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: theme.spacing.xs,
+                      }}
+                    >
+                      {queueOrigin !== null && (
+                        <Pressable
+                          onPress={queueOrigin.onPress}
+                          accessibilityLabel={queueOrigin.label}
+                          accessibilityRole="button"
+                          compact
+                          feedback="opacity"
+                          style={{ flexShrink: 1, minWidth: 0 }}
+                        >
+                          <Text
+                            variant="metadata"
+                            color="secondary"
+                            numberOfLines={1}
+                          >
+                            {queueOrigin.label}
+                          </Text>
+                        </Pressable>
+                      )}
+                      {queueMeta !== null && (
+                        <Text
+                          variant="metadata"
+                          color="secondary"
+                          numberOfLines={1}
+                          style={{ flexShrink: 1 }}
+                        >
+                          {queueMeta}
+                        </Text>
+                      )}
+                    </View>
                     {queueClear !== null && (
                       <IconButton
                         icon={queueClear.icon}

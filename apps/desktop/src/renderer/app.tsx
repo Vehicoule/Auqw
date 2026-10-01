@@ -795,6 +795,7 @@ function Main({
     onMoveQueueItemTo,
     removeQueueOccurrence,
     clearQueue,
+    openQueueContext,
     seekToPosition,
     playRecording,
     onResultPress,
@@ -1236,7 +1237,9 @@ function Main({
           <CollectionScreen
             model={model}
             onBack={closeOverlay}
-            onPressItem={(row) => playCollectionRows(model.rows, row)}
+            onPressItem={(row) =>
+              playCollectionRows(current.key, model.rows, row)
+            }
             onRowIntent={(row) =>
               rowIntent({ kind: 'recording', id: row.recordingId })
             }
@@ -1496,6 +1499,7 @@ function Main({
                   }
                   onRemoveQueueItem={removeQueueOccurrence}
                   onClearQueue={clearQueue}
+                  onOpenQueueContext={openQueueContext}
                   onToggleQueueReorder={toggleReordering}
                   onMoveQueueItem={onMoveQueueItem}
                   onMoveQueueItemTo={onMoveQueueItemTo}
@@ -1517,6 +1521,7 @@ function Main({
                   }
                   onRemoveQueueItem={removeQueueOccurrence}
                   onClearQueue={clearQueue}
+                  onOpenQueueContext={openQueueContext}
                   onMoveQueueItem={onMoveQueueItem}
                   onMoveQueueItemTo={onMoveQueueItemTo}
                 />

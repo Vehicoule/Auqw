@@ -1,6 +1,14 @@
 import type { AppError } from '../errors.ts';
-import { isSafeNonNegative, isSourceRef } from '../domain.ts';
-import type { QueueOccurrence, SourceRef } from '../domain.ts';
+import {
+  isQueueOrigin,
+  isSafeNonNegative,
+  isSourceRef,
+} from '../domain.ts';
+import type {
+  QueueOccurrence,
+  QueueOrigin,
+  SourceRef,
+} from '../domain.ts';
 import { sameRef } from '../session/util.ts';
 
 export type QueueMode = 'stopped' | 'paused' | 'playing';
@@ -12,6 +20,13 @@ export type QueueSnapshot = {
   readonly positionMs: number;
   readonly mode: QueueMode;
   readonly blockedError?: AppError;
+  /**
+   * Which surface minted this queue — set on the context-switching
+   * play verbs, cleared by `clear()`, kept through `clearExceptCurrent`
+   * (the surviving row still belongs to that source). Absent on
+   * pre-v3 snapshots and contextless plays.
+   */
+  readonly origin?: QueueOrigin;
 };
 
 function cloneRef(ref: SourceRef | null): SourceRef | null {
@@ -33,6 +48,36 @@ function cloneOccurrence(occurrence: QueueOccurrence): QueueOccurrence {
  */
 function cloneError(error: AppError | undefined): AppError | undefined {
   return error === undefined ? undefined : Object.freeze({ ...error });
+}
+
+function cloneOrigin(
+  origin: QueueOrigin | undefined,
+): QueueOrigin | undefined {
+  return origin === undefined ? undefined : Object.freeze({ ...origin });
+}
+
+function sameOrigin(
+  a: QueueOrigin | undefined,
+  b: QueueOrigin | undefined,
+): boolean {
+  if (a === undefined || b === undefined || a.kind !== b.kind) {
+    return a === b;
+  }
+  switch (a.kind) {
+    case 'collection':
+      return a.collection === (b as typeof a).collection;
+    case 'playlist':
+      return (
+        a.playlistId === (b as typeof a).playlistId &&
+        a.name === (b as typeof a).name
+      );
+    case 'entity':
+      return a.name === (b as typeof a).name && sameRef(a.ref, (b as typeof a).ref);
+    case 'search':
+      return a.query === (b as typeof a).query;
+    case 'library':
+      return true;
+  }
 }
 
 function requireStr(value: unknown, name: string): void {
@@ -87,6 +132,7 @@ export class QueueEngine {
   #positionMs: number;
   #mode: QueueMode;
   #blockedError: AppError | undefined;
+  #origin: QueueOrigin | undefined;
   /**
    * Occurrences that failed playback this engine lifetime —
    * `markUnplayable` flags the failed current; a fresh play intent
@@ -114,6 +160,7 @@ export class QueueEngine {
     const positionMs = initial?.positionMs ?? 0;
     const mode = initial?.mode ?? 'stopped';
     const blockedError = initial?.blockedError;
+    const origin = initial?.origin;
 
     if (!isSafeNonNegative(revision)) {
       throw new TypeError('revision must be a safe nonnegative integer');
@@ -152,6 +199,9 @@ export class QueueEngine {
         throw new TypeError('blockedError requires the paused mode');
       }
     }
+    if (origin !== undefined && !isQueueOrigin(origin)) {
+      throw new TypeError('origin must be a valid QueueOrigin');
+    }
 
     this.#revision = revision;
     this.#occurrences = occurrences.map(cloneOccurrence);
@@ -159,6 +209,7 @@ export class QueueEngine {
     this.#positionMs = positionMs;
     this.#mode = mode;
     this.#blockedError = cloneError(blockedError);
+    this.#origin = cloneOrigin(origin);
     // Carried marks are pruned to live members — a mark for an id the
     // snapshot doesn't hold would never get removed() to clean it up.
     for (const id of unplayable ?? []) {
@@ -230,6 +281,7 @@ export class QueueEngine {
       ...(this.#blockedError === undefined
         ? {}
         : { blockedError: this.#blockedError }),
+      ...(this.#origin === undefined ? {} : { origin: this.#origin }),
     };
     this.#snapshotCache = Object.freeze(snap);
     return this.#snapshotCache;
@@ -359,7 +411,23 @@ export class QueueEngine {
     this.#requireTick();
     this.#occurrences = [];
     this.#unplayable.clear();
+    this.#origin = undefined;
     this.#apply(null, 0, 'stopped');
+  }
+
+  /**
+   * Provenance for the queue — the context-switching play verbs set
+   * it after `clear()` (which resets it); every other verb leaves it
+   * alone so an enqueue or a cursor jump can't rewrite where the
+   * queue "came from".
+   */
+  setOrigin(origin: QueueOrigin | undefined): void {
+    if (sameOrigin(this.#origin, origin)) {
+      return;
+    }
+    this.#requireTick();
+    this.#origin = cloneOrigin(origin);
+    this.#tick();
   }
 
   /**

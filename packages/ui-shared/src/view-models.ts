@@ -19,6 +19,7 @@ import type {
   PlaylistEntry,
   PlayCount,
   PlayEvent,
+  QueueOrigin,
   QueueSnapshot,
   RadioTail,
   Recording,
@@ -145,6 +146,13 @@ export type QueueModel = {
    * dropping to an empty state.
    */
   readonly ended: boolean;
+  /** Which surface minted this queue — the "playing from …" line. */
+  readonly origin: QueueOrigin | null;
+  /**
+   * Whole-queue duration — null when any occurrence's recording is
+   * missing or has no duration so the header never under-reports.
+   */
+  readonly totalDurationMs: number | null;
 };
 
 type SearchPhase = 'idle' | 'loading' | 'ready' | 'empty' | 'error' | 'unavailable';
@@ -709,6 +717,18 @@ export function formatClock(ms: number | null): string {
   return `${Math.floor(total / 60)}:${(total % 60).toString().padStart(2, '0')}`;
 }
 
+/** Long-form duration for header chrome — `48m`, `1h 12m`. */
+export function formatLongDuration(ms: number): string {
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const remainder = minutes % 60;
+  return remainder === 0
+    ? `${Math.floor(minutes / 60)}h`
+    : `${Math.floor(minutes / 60)}h ${remainder}m`;
+}
+
 export function formatRemaining(
   positionMs: number,
   durationMs: number | null,
@@ -1109,6 +1129,15 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
       };
     },
   );
+  let totalDurationMs = 0;
+  for (const occurrence of queue.occurrences) {
+    const durationMs = byId.get(occurrence.recordingId)?.durationMs;
+    if (durationMs === undefined || durationMs === null) {
+      totalDurationMs = -1;
+      break;
+    }
+    totalDurationMs += durationMs;
+  }
   const sections: QueueSection[] = (
     ['nowPlaying', 'upNext', 'history'] as const
   ).flatMap((key) => {
@@ -1129,6 +1158,8 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
     positionMs: queue.positionMs,
     currentOccurrenceId: queue.currentOccurrenceId,
     ended: items.length > 0 && queue.currentOccurrenceId === null,
+    origin: queue.origin ?? null,
+    totalDurationMs: totalDurationMs <= 0 ? null : totalDurationMs,
   };
 }
 

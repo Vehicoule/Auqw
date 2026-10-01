@@ -111,6 +111,8 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'queue.reorderDone': 'umsortieren beendet',
   'queue.clear': 'warteschlange leeren',
   'queue.badge.repeat': 'wiederholung',
+  'queue.origin': 'wird abgespielt von {name}',
+  'queue.origin.search': 'suche “{query}”',
 
   // ---- search -------------------------------------------------------------
   'search.fieldLabel': 'suchen',

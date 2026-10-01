@@ -752,6 +752,9 @@ function Main({
       // The stage sheet morph owns the mount lifecycle — a queue end
       // holds the last player until the sheet settles collapsed.
       holdEndedPlayer: true,
+      // The "playing from …" origin tap navigates inside an overlay —
+      // the expanded sheet would cover it, so it closes on mobile.
+      closeStageOnContextNav: true,
       resetStageMorph: () => {
         stageProgress.value = 0;
         stageTravel.value = 0;
@@ -922,6 +925,7 @@ function Main({
     onMoveQueueItemTo,
     removeQueueOccurrence,
     clearQueue,
+    openQueueContext,
     seekToPosition,
     canPlay,
     playRecording,
@@ -2202,7 +2206,9 @@ function Main({
             model={model}
             topInset={topInset}
             onBack={closeOverlay}
-            onPressItem={(row) => playCollectionRows(model.rows, row)}
+            onPressItem={(row) =>
+              playCollectionRows(current.key, model.rows, row)
+            }
             onRowIntent={(row) =>
               rowIntent({ kind: 'recording', id: row.recordingId })
             }
@@ -2521,6 +2527,7 @@ function Main({
               onQueueViewport={onQueueViewport}
               onRemoveQueueItem={removeQueueOccurrence}
               onClearQueue={clearQueue}
+              onOpenQueueContext={openQueueContext}
               onToggleQueueReorder={toggleReordering}
               onMoveQueueItem={onMoveQueueItem}
               onMoveQueueItemTo={onMoveQueueItemTo}

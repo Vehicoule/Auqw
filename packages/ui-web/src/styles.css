@@ -1219,6 +1219,24 @@
   flex: 1;
 }
 
+.uw-queue__origin {
+  display: block;
+  max-width: 100%;
+  margin: calc(var(--spacing-sm) * -1) 0 var(--spacing-sm);
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.uw-queue__origin:disabled {
+  cursor: default;
+}
+.uw-queue__origin:not(:disabled):hover span,
+.uw-queue__origin:not(:disabled):hover .uw-text {
+  color: var(--accent);
+}
+
 .uw-queue__current {
   display: flex;
   align-items: center;
@@ -2289,8 +2307,35 @@
 
 .uw-stage__queue-tools {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: var(--spacing-xs);
   margin-bottom: var(--spacing-xs);
+}
+
+.uw-stage__queue-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.uw-stage__queue-origin {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.uw-stage__queue-origin:disabled {
+  cursor: default;
+}
+.uw-stage__queue-origin:not(:disabled):hover span {
+  color: var(--accent);
 }
 
 .uw-transport {

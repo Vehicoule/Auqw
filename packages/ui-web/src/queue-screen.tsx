@@ -20,6 +20,7 @@ export function QueueScreen({
   scrollEnabled = true,
   onToggleReorder,
   onClearQueue,
+  onOpenContext,
   ...listHandlers
 }: QueueScreenProps) {
   const view = useQueueScreenController({
@@ -28,6 +29,7 @@ export function QueueScreen({
     reordering,
     onToggleReorder,
     onClearQueue,
+    onOpenContext,
   });
   return (
     <div
@@ -65,6 +67,17 @@ export function QueueScreen({
           />
         )}
       </div>
+      {view.origin !== null && (
+        <button
+          className="uw-queue__origin"
+          onClick={view.origin.onPress}
+          disabled={view.origin.onPress === undefined}
+        >
+          <Text variant="metadata" color="secondary" numberOfLines={1}>
+            {view.origin.label}
+          </Text>
+        </button>
+      )}
       {view.current !== null && (
         <div className="uw-queue__current" data-status={view.current.status}>
           <span className="uw-track-row__art">

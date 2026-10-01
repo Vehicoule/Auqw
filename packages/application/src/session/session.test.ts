@@ -1,6 +1,7 @@
 import type {
   EntityRef,
   QueueOccurrence,
+  QueueOrigin,
   Recording,
   Settings,
   SourceRef,
@@ -3350,6 +3351,63 @@ async function playBatchStartAtCursor(): Promise<void> {
   r.player.emit(preparedEvent(identity, 'h-c'));
   r.player.settlePrepare(ok('req-c'));
   assert((await played).ok, 'the play attempt prepares');
+  await r.session.dispose();
+}
+
+async function queueOriginSemantics(): Promise<void> {
+  // Provenance rides the queue snapshot: a play that names an origin
+  // stamps it; replace-play without one clears it; clearQueue keeps it.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B'].map((id) =>
+        recording(`r${id}`, [ref('youtube-music', `y${id}`)]),
+      ),
+      queue: {
+        revision: 0,
+        occurrences: [],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  const liked: QueueOrigin = { kind: 'collection', collection: 'liked' };
+  const played = r.session.playRecordings(
+    ['rA', 'rB'].map((id) => ({
+      recordingId: id,
+      selectedRef: ref('youtube-music', `y${id.slice(1)}`),
+    })),
+    { origin: liked },
+  );
+  await pump();
+  assertDeepEqual(readyOf(r).queue.origin, liked, 'the origin stamps');
+  const identity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(identity, 'h-a'));
+  r.player.settlePrepare(ok('req-a'));
+  assert((await played).ok, 'the play attempt prepares');
+  assert((await r.session.clearQueue()).ok);
+  assertDeepEqual(
+    readyOf(r).queue.origin,
+    liked,
+    'clearQueue keeps the origin — the surviving row still belongs to it',
+  );
+  void r.session.playRecordings([
+    { recordingId: 'rA', selectedRef: ref('youtube-music', 'yA') },
+  ]);
+  await pump();
+  assertEqual(
+    readyOf(r).queue.origin,
+    undefined,
+    'a contextless play clears the origin',
+  );
+  const invalid = await r.session.playRecordings(
+    [{ recordingId: 'rA', selectedRef: ref('youtube-music', 'yA') }],
+    { origin: { kind: 'nonsense' } as unknown as QueueOrigin },
+  );
+  assert(!invalid.ok, 'invalid origin rejected');
+  assertEqual(invalid.error.kind, 'invalid-response');
   await r.session.dispose();
 }
 
@@ -6931,6 +6989,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['shuffleMutationReconciles', shuffleMutationReconciles],
   ['playTapReplacesQueue', playTapReplacesQueue],
   ['playBatchStartAtCursor', playBatchStartAtCursor],
+  ['queueOriginSemantics', queueOriginSemantics],
   ['enqueueAheadOfRadioTail', enqueueAheadOfRadioTail],
   ['playNextBehindCursor', playNextBehindCursor],
   ['playNextUnderShuffleSplicesDeal', playNextUnderShuffleSplicesDeal],

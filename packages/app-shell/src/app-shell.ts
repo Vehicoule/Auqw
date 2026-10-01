@@ -37,6 +37,7 @@ import type {
   LocalFileSource,
   OperationContext,
   PrewarmFocus,
+  QueueOrigin,
   Result,
   SearchState,
   Settings,
@@ -140,6 +141,14 @@ function shellOverlayOf<E extends { readonly type: string }>(
 }
 
 const freshSignal = () => new CancellationSource().signal;
+
+// Queue provenance for entity plays — the page fetch names both the
+// navigable ref and the display title; a fetch without its page can't
+// name itself honestly, so it mints no origin.
+const entityOriginFor = (fetch: EntityFetch | null): QueueOrigin | undefined =>
+  fetch?.page == null
+    ? undefined
+    : { kind: 'entity', ref: fetch.ref, name: fetch.page.entity.title };
 
 const refKey = (r: {
   readonly provider: string;
@@ -2084,7 +2093,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       recordRecentSearch(query);
       void dispatchPlay(
         'action.playResult',
-        session.playMetadata(metas, { startAt }),
+        session.playMetadata(metas, {
+          startAt,
+          origin: { kind: 'search', query },
+        }),
       );
     },
     [
@@ -2917,6 +2929,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         readonly selectedRef: SourceRef | null;
       }[],
       startAt = 0,
+      origin?: QueueOrigin,
     ) => {
       const playable = rows.filter((row) => canPlay(row.recordingId));
       const tapped = rows[startAt];
@@ -2926,7 +2939,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       }
       void dispatchPlay(
         action,
-        session.playRecordings(playable, { startAt: start }),
+        session.playRecordings(playable, { startAt: start, origin }),
       );
     },
     [session, canPlay, dispatchPlay],
@@ -2935,7 +2948,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // A collection row tap queues the whole collection — the tapped row
   // starts playing with its siblings behind it.
   const playCollectionRows = useCallback(
-    (rows: readonly CollectionRowModel[], tapped?: CollectionRowModel) => {
+    (
+      key: 'liked' | 'top50' | 'history' | 'downloads',
+      rows: readonly CollectionRowModel[],
+      tapped?: CollectionRowModel,
+    ) => {
       const startAt =
         tapped === undefined
           ? 0
@@ -2950,6 +2967,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
           selectedRef: null,
         })),
         startAt,
+        { kind: 'collection', collection: key },
       );
     },
     [playRows],
@@ -2970,6 +2988,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
           selectedRef: null,
         })),
         startAt,
+        { kind: 'library' },
       );
     },
     [playRows],
@@ -3014,6 +3033,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
           selectedRef: playRefFor(e.recordingId, e.selectedRef),
         })),
         startAt,
+        model === null
+          ? undefined
+          : {
+              kind: 'playlist',
+              playlistId: model.playlistId,
+              name: model.name,
+            },
       );
     },
     [state.recordings, playRows, playRefFor],
@@ -3333,7 +3359,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       }
       void dispatchPlay(
         'action.shuffleAll',
-        session.playMetadata(metas, { shuffle: true }),
+        session.playMetadata(metas, {
+          shuffle: true,
+          origin: entityOriginFor(fetch),
+        }),
       );
     },
     [
@@ -3365,7 +3394,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       }
       void dispatchPlay(
         'action.playResult',
-        session.playMetadata(metas, { startAt }),
+        session.playMetadata(metas, {
+          startAt,
+          origin: entityOriginFor(fetch),
+        }),
       );
     },
     [entityRowMeta, entityContextMetas, canPlayMeta, dispatchPlay, session],
@@ -3389,6 +3421,43 @@ export function useAppShell<E extends { readonly type: string } = never>(
     clearOverlays();
     setSearchFocusTick((n) => n + 1);
   }, [clearOverlays]);
+
+  // Queue chrome "playing from …" — navigates back to the surface
+  // that minted the queue. ports.closeStageOnContextNav: mobile's
+  // sheet covers the world — it folds so the destination is visible;
+  // desktop's stage column sits beside the world and stays.
+  const openQueueContext = useCallback(
+    (origin: QueueOrigin) => {
+      switch (origin.kind) {
+        case 'collection':
+          pushOverlay({ type: 'collection', key: origin.collection });
+          break;
+        case 'playlist':
+          pushOverlay({ type: 'playlist', playlistId: origin.playlistId });
+          break;
+        case 'entity':
+          openEntity(origin.ref);
+          break;
+        case 'search':
+          selectTab('explore');
+          applySearchText(origin.query);
+          break;
+        case 'library':
+          selectTab('library');
+          break;
+      }
+      if (ports.closeStageOnContextNav === true) {
+        setStageOpen(false);
+      }
+    },
+    [
+      pushOverlay,
+      openEntity,
+      selectTab,
+      applySearchText,
+      ports.closeStageOnContextNav,
+    ],
+  );
   // The pane an open lands on — computed once so the open commit and
   // the sheet's parked normalization never disagree. A collapsed
   // stage must already name this pane by the next rise: the mobile
@@ -3635,6 +3704,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     onMoveQueueItemTo,
     removeQueueOccurrence,
     clearQueue,
+    openQueueContext,
     seekToPosition,
     canPlay,
     playRecording,

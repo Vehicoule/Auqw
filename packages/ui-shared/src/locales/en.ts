@@ -109,6 +109,8 @@ export const en = {
   'queue.reorderDone': 'done reordering',
   'queue.clear': 'clear queue',
   'queue.badge.repeat': 'repeat',
+  'queue.origin': 'playing from {name}',
+  'queue.origin.search': 'search “{query}”',
 
   // ---- search -------------------------------------------------------------
   'search.fieldLabel': 'search',

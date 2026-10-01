@@ -110,6 +110,8 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'queue.reorderDone': '排序完成',
   'queue.clear': '清空队列',
   'queue.badge.repeat': '重复',
+  'queue.origin': '正在播放：{name}',
+  'queue.origin.search': '搜索“{query}”',
 
   // ---- search -------------------------------------------------------------
   'search.fieldLabel': '搜索',

@@ -237,6 +237,13 @@ export interface AppShellPorts<E> {
    * settle; desktop unmounts immediately. Default false.
    */
   readonly holdEndedPlayer?: boolean | undefined;
+
+  /**
+   * Mobile's "playing from …" queue chrome folds the covering sheet
+   * after navigating to the source surface; desktop's stage column
+   * sits beside the world and stays open. Default false.
+   */
+  readonly closeStageOnContextNav?: boolean | undefined;
   /**
    * Runs inside the held-player release timer — mobile re-seeds its
    * morph shared values to rest so a fresh player starts collapsed.

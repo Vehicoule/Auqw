@@ -97,6 +97,8 @@ import {
   libraryScreenView,
   librarySortedCards,
   lyricsPaneView,
+  queueMetaLabel,
+  queueOriginView,
   queueReorderButton,
   queueSectionLabel,
   radioRowView,
@@ -1023,7 +1025,32 @@ const tap = (s: string) => {
   });
   assertEqual(
     view.countLabel,
-    t('queue.count', { count: fixtureQueueModel.items.length }),
+    queueMetaLabel(fixtureQueueModel),
+  );
+  assert(
+    view.countLabel.includes(`${fixtureQueueModel.items.length} tracks`),
+    'meta label keeps the count text',
+  );
+  assertEqual(
+    queueOriginView({ kind: 'collection', collection: 'liked' }, undefined)
+      ?.label,
+    t('queue.origin', { name: t('collection.liked') }),
+  );
+  assertEqual(
+    queueOriginView(
+      { kind: 'playlist', playlistId: 'p1', name: 'Mix' },
+      undefined,
+    )?.label,
+    t('queue.origin', { name: 'Mix' }),
+  );
+  assertEqual(
+    queueOriginView({ kind: 'search', query: 'q' }, undefined)?.label,
+    t('queue.origin', { name: t('queue.origin.search', { query: 'q' }) }),
+  );
+  assertEqual(
+    queueOriginView(null, undefined),
+    null,
+    'no origin → no provenance line',
   );
   assertEqual(view.current?.title, fixturePlayerPlaying.title);
   assertEqual(view.current?.playing, true);

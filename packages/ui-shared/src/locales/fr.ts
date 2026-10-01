@@ -110,6 +110,8 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'queue.reorderDone': 'réordonnancement terminé',
   'queue.clear': 'vider la file',
   'queue.badge.repeat': 'répéter',
+  'queue.origin': 'lecture depuis {name}',
+  'queue.origin.search': 'recherche « {query} »',
 
   // ---- search -------------------------------------------------------------
   'search.fieldLabel': 'recherche',

@@ -18,6 +18,7 @@ import type {
   Like,
   LocalFile,
   QueueOccurrence,
+  QueueOrigin,
   Recording,
   Settings,
   SourceRef,
@@ -25,6 +26,7 @@ import type {
 } from '../domain.ts';
 import {
   isEntityRef,
+  isQueueOrigin,
   isSafeNonNegative,
   isSettings,
   isString,
@@ -1911,7 +1913,10 @@ export class Session {
       recordingId: string;
       selectedRef: SourceRef | null;
     }[],
-    options?: { readonly startAt?: number | undefined },
+    options?: {
+      readonly startAt?: number | undefined;
+      readonly origin?: QueueOrigin | undefined;
+    },
   ): Promise<Result<void>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
@@ -1920,6 +1925,12 @@ export class Session {
     const r = ready.value;
     if (items.length === 0) {
       return err(appError('invalid-response', 'empty play list'));
+    }
+    if (
+      options?.origin !== undefined &&
+      !isQueueOrigin(options.origin)
+    ) {
+      return err(appError('invalid-response', 'invalid queue origin'));
     }
     const resolved: { recordingId: string; ref: SourceRef | null }[] = [];
     for (const item of items) {
@@ -1940,6 +1951,7 @@ export class Session {
     const staged = await this.#commitStaged((r) => {
       const draft = r.queue.fork();
       draft.clear();
+      draft.setOrigin(options?.origin);
       const occurrenceIds: string[] = [];
       for (const item of resolved) {
         const occurrenceId = this.#ids.next('occ');
@@ -1993,11 +2005,18 @@ export class Session {
     options?: {
       readonly shuffle?: boolean | undefined;
       readonly startAt?: number | undefined;
+      readonly origin?: QueueOrigin | undefined;
     },
   ): Promise<Result<void>> {
     const ready = this.#requireReady();
     if (!ready.ok) {
       return ready;
+    }
+    if (
+      options?.origin !== undefined &&
+      !isQueueOrigin(options.origin)
+    ) {
+      return err(appError('invalid-response', 'invalid queue origin'));
     }
     if (items.length === 0) {
       return err(appError('invalid-response', 'empty play list'));
@@ -2020,6 +2039,7 @@ export class Session {
       let recordings = r.recordings;
       const draft = r.queue.fork();
       draft.clear();
+      draft.setOrigin(options?.origin);
       const occurrenceIds: string[] = [];
       for (const metadata of ordered) {
         const up = upsertRecordingIn(

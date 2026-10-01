@@ -33,6 +33,8 @@ import {
   lyricsHeaderView,
   lyricsPaneView,
   queueClearButton,
+  queueMetaLabel,
+  queueOriginView,
   queueReorderButton,
   radioRowView,
   stageMetaView,
@@ -279,6 +281,7 @@ export function NowPlayingScreen({
   onQueueRowIntent,
   onRemoveQueueItem,
   onClearQueue,
+  onOpenQueueContext,
   onToggleQueueReorder,
   onMoveQueueItem,
   onMoveQueueItemTo,
@@ -303,6 +306,11 @@ export function NowPlayingScreen({
     queue?.currentOccurrenceId != null,
     onClearQueue,
   );
+  const queueOrigin = queueOriginView(
+    queue?.origin ?? null,
+    onOpenQueueContext,
+  );
+  const queueMeta = queue === undefined ? null : queueMetaLabel(queue);
   const downloadBtn =
     download === null ? null : downloadButtonView(download, onDownload);
   // Player mode is artwork-led — full-bleed art under the bottom
@@ -570,8 +578,37 @@ export function NowPlayingScreen({
               />
             ) : (
               <>
-                {(reorder !== null || clearQueue !== null) && (
+                {(queueOrigin !== null ||
+                  queueMeta !== null ||
+                  reorder !== null ||
+                  clearQueue !== null) && (
                   <div className="uw-stage__queue-tools">
+                    <span className="uw-stage__queue-meta">
+                      {queueOrigin !== null && (
+                        <button
+                          className="uw-stage__queue-origin"
+                          onClick={queueOrigin.onPress}
+                          disabled={queueOrigin.onPress === undefined}
+                        >
+                          <Text
+                            variant="metadata"
+                            color="secondary"
+                            numberOfLines={1}
+                          >
+                            {queueOrigin.label}
+                          </Text>
+                        </button>
+                      )}
+                      {queueMeta !== null && (
+                        <Text
+                          variant="metadata"
+                          color="secondary"
+                          numberOfLines={1}
+                        >
+                          {queueMeta}
+                        </Text>
+                      )}
+                    </span>
                     {clearQueue !== null && (
                       <IconButton
                         icon={clearQueue.icon}
@@ -687,6 +724,7 @@ export type StageIdlePaneProps = {
   readonly queueReordering?: QueueScreenProps['reordering'];
   readonly onToggleQueueReorder?: QueueScreenProps['onToggleReorder'];
   readonly onClearQueue?: QueueScreenProps['onClearQueue'];
+  readonly onOpenQueueContext?: QueueScreenProps['onOpenContext'];
   readonly onPressQueueItem?: QueueScreenProps['onPressItem'];
   readonly onQueueRowIntent?: QueueScreenProps['onRowIntent'];
   readonly onRemoveQueueItem?: QueueScreenProps['onRemoveItem'];
@@ -706,6 +744,7 @@ export function StageIdlePane({
   queueReordering,
   onToggleQueueReorder,
   onClearQueue,
+  onOpenQueueContext,
   onPressQueueItem,
   onQueueRowIntent,
   onRemoveQueueItem,
@@ -720,6 +759,7 @@ export function StageIdlePane({
           reordering={queueReordering}
           onToggleReorder={onToggleQueueReorder}
           onClearQueue={onClearQueue}
+          onOpenContext={onOpenQueueContext}
           onPressItem={onPressQueueItem}
           onRowIntent={onQueueRowIntent}
           onRemoveItem={onRemoveQueueItem}

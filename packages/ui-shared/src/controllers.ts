@@ -9,10 +9,10 @@
  */
 import { useMemo, useState } from 'react';
 import type { ThemeName } from '@auqw/design-tokens';
-import type { RepeatMode } from '@auqw/application';
+import type { QueueOrigin, RepeatMode } from '@auqw/application';
 import { t } from './i18n.ts';
 import type { MessageId } from './i18n.ts';
-import { formatClock } from './view-models.ts';
+import { formatClock, formatLongDuration } from './view-models.ts';
 import type {
   ArtistRailModel,
   CollectionKey,
@@ -109,6 +109,8 @@ export type QueueScreenHandlers = {
   readonly onMoveItemTo?: MaybeFn<[occurrenceId: string, toIndex: number]>;
   /** Clear-queue intent — drops every row except the current one. */
   readonly onClearQueue?: MaybeFn;
+  /** "Playing from …" tap — navigate back to the queue's source surface. */
+  readonly onOpenContext?: MaybeFn<[origin: QueueOrigin]>;
 };
 
 export type QueueReorderButton = ControlView & {
@@ -162,9 +164,60 @@ export function queueClearButton(
   };
 }
 
+/** The queue header's provenance line — null when the queue carries no origin. */
+export type QueueOriginView = {
+  readonly label: string;
+  readonly onPress: MaybeFn;
+} | null;
+
+const QUEUE_ORIGIN_COLLECTION_LABELS = {
+  liked: 'collection.liked',
+  top50: 'collection.top50',
+  history: 'collection.history',
+  downloads: 'collection.downloads',
+} as const satisfies Record<string, MessageId>;
+
+export function queueOriginView(
+  origin: QueueOrigin | null,
+  onOpen: MaybeFn<[origin: QueueOrigin]>,
+): QueueOriginView {
+  if (origin === null) {
+    return null;
+  }
+  let name: string;
+  switch (origin.kind) {
+    case 'collection':
+      name = t(QUEUE_ORIGIN_COLLECTION_LABELS[origin.collection]);
+      break;
+    case 'playlist':
+    case 'entity':
+      name = origin.name;
+      break;
+    case 'search':
+      name = t('queue.origin.search', { query: origin.query });
+      break;
+    case 'library':
+      name = t('nav.library');
+      break;
+  }
+  return {
+    label: t('queue.origin', { name }),
+    onPress: onOpen === undefined ? undefined : () => onOpen(origin),
+  };
+}
+
+/** `{count} tracks · {duration}` — duration drops out when any row can't attest its length. */
+export function queueMetaLabel(queue: QueueModel): string {
+  const count = t('queue.count', { count: queue.items.length });
+  return queue.totalDurationMs === null
+    ? count
+    : `${count} · ${formatLongDuration(queue.totalDurationMs)}`;
+}
+
 export type QueueScreenView = {
   readonly title: string;
   readonly countLabel: string;
+  readonly origin: QueueOriginView;
   readonly reorder: QueueReorderButton | null;
   readonly clearQueue: QueueClearButton | null;
   readonly current: {
@@ -182,16 +235,19 @@ export function useQueueScreenController({
   reordering = false,
   onToggleReorder,
   onClearQueue,
+  onOpenContext,
 }: {
   readonly queue: QueueModel;
   readonly player?: PlayerModel | null | undefined;
   readonly reordering?: boolean | undefined;
   readonly onToggleReorder?: MaybeFn;
   readonly onClearQueue?: MaybeFn;
+  readonly onOpenContext?: MaybeFn<[origin: QueueOrigin]>;
 }): QueueScreenView {
   return {
     title: t('queue.title'),
-    countLabel: t('queue.count', { count: queue.items.length }),
+    countLabel: queueMetaLabel(queue),
+    origin: queueOriginView(queue.origin, onOpenContext),
     reorder: queueReorderButton(reordering, onToggleReorder),
     clearQueue: queueClearButton(
       queue.items.length,
@@ -1319,6 +1375,8 @@ export type StageQueueHandlers = {
   readonly onRemoveQueueItem?: MaybeFn<[occurrenceId: string]>;
   /** Clear-queue intent — drops every row except the current one. */
   readonly onClearQueue?: MaybeFn;
+  /** "Playing from …" tap — navigate back to the queue's source surface. */
+  readonly onOpenQueueContext?: MaybeFn<[origin: QueueOrigin]>;
   readonly onToggleQueueReorder?: MaybeFn;
   readonly onMoveQueueItem?: MaybeFn<[occurrenceId: string, direction: -1 | 1]>;
   readonly onMoveQueueItemTo?: MaybeFn<[occurrenceId: string, toIndex: number]>;
