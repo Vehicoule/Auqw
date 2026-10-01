@@ -1,4 +1,5 @@
 import type { CSSProperties, MouseEvent, ReactNode, Ref } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTheme } from './theme.tsx';
 import {
   CHECK_DRAW_PATH,
@@ -731,10 +732,29 @@ export function EqBars({
   readonly size?: number | undefined;
 }) {
   const theme = useTheme();
+  const ref = useRef<HTMLSpanElement>(null);
+  // Off-screen bars keep compositing otherwise — pause mid-frame rather
+  // than restarting, so re-entry resumes in phase. The 48px lookahead
+  // has the loop already running by the time it scrolls into view.
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    const el = ref.current;
+    if (el === null || typeof IntersectionObserver !== 'function') {
+      return undefined;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => setVisible(entry?.isIntersecting !== false),
+      { rootMargin: '48px' },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   const run = animated && !theme.reducedMotion;
   return (
     <span
+      ref={ref}
       className="uw-eq"
+      data-eq-paused={!visible ? 'true' : undefined}
       style={{ height: size }}
       aria-hidden="true"
     >

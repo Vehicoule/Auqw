@@ -415,6 +415,10 @@
   animation: none;
 }
 
+.uw-eq[data-eq-paused='true'] .uw-eq__bar--run {
+  animation-play-state: paused;
+}
+
 .uw-heart {
   position: relative;
   display: inline-block;
