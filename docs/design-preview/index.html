@@ -43,7 +43,7 @@
   :root{--r-ctl:8px;--r-float:16px;--r-thumb:5px}
   body{background:#0a0908;color:#e6e1d8;font-family:'Inter',ui-sans-serif,system-ui,sans-serif;
        font-size:12px;padding:48px 36px 96px;-webkit-font-smoothing:antialiased}
-  header,.rowset,.cap,.foot{max-width:1180px;margin:0 auto}
+  header,.rowset,.cap,.foot{max-width:1360px;margin:0 auto}
   h1{font-weight:700;font-size:19px;color:#f5f1e9;letter-spacing:-.01em}
   h1 span{color:#6b6257}
   .sub{color:#6b6257;margin-top:8px;font-size:11.5px;line-height:1.75;max-width:920px}
@@ -65,7 +65,7 @@
   .chrome-linux{border-radius:8px}
 
   /* ----- stage: full-height chromeless column — immersive, artwork-led ----- */
-  .stage{width:340px;flex:none;background:var(--bg-stage);border-right:1px solid var(--divider);
+  .stage{width:38.2%;min-width:340px;flex:none;background:var(--bg-stage);border-right:1px solid var(--divider);
          display:flex;flex-direction:column;padding:8px 20px 78px;position:relative}
   /* macOS traffic lights pin over the stage's top-left — no strip of its own */
   .chrome-mac .stage{padding-top:56px}
@@ -138,6 +138,8 @@
   /* world navigation = the same segmented construction, sized up */
   .navtabs{position:absolute;left:50%;transform:translateX(-50%);
            display:flex;gap:2px;background:var(--fg08);padding:3px;border-radius:10px}
+  /* caption buttons eat the strip's right edge — nav centers on the usable region */
+  .chrome-win .navtabs,.chrome-linux .navtabs{left:calc(50% - 69px)}
   .navtabs span{display:flex;align-items:center;gap:7px;padding:6px 16px;font-size:12px;
                 color:var(--fg-muted);border-radius:7px}
   .navtabs span:hover{color:var(--fg)}
@@ -966,6 +968,7 @@
 
 <script>
 const PAT=[14,24,38,52,34,62,44,28,42,68,52,36,26,40,58,72,54,40,30,44,62,50,36,24,38,56,64,44,30,18];
+PAT.push(...PAT);
 document.querySelectorAll('.wf').forEach(el=>{
   const p=parseFloat(el.dataset.p||'0.5');
   PAT.forEach((h,i)=>{
