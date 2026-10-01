@@ -423,7 +423,9 @@ states deterministically.
 - Sheet drag surfaces are per-region, not whole-surface: the parked
   mini-player pill has its own `swipe` pan (`mini-player.tsx`); on the
   OPEN sheet the draggable chrome is the top grab handle, the player
-  pane body (`playerPanePan`), and the queue/lyrics chrome regions
+  pane body (`playerPanePan` — disabled by `playerCanScroll` when the
+  player content overflows its viewport, so a body swipe then scrolls
+  instead; use the grab handle), and the queue/lyrics chrome regions
   (`queueChromePan`/`lyricsChromePan` in `stage-sheet.tsx`) — gaps
   between them start no recognizer. `input swipe` DOES drive
   `onUpdate` on those regions — but Pressables inside (transport
