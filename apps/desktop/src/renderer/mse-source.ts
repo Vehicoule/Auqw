@@ -284,7 +284,7 @@ function runSession(
   let scanCursor = 0;
   let sigCursor = -1;
   const pending: PendingUnit[] = [];
-  let journal: JournalEntry[] = [];
+  const journal: JournalEntry[] = [];
   let cues: readonly WebmCue[] = [];
   let container: 'webm' | 'mp4' | null = null;
   let segDataStart = 0;
@@ -509,7 +509,7 @@ function runSession(
     maybeGrant();
   }
 
-  function startEviction(): void {
+  function startEviction(includeAhead = true): void {
     const ranges = buffer?.buffered;
     if (ranges === undefined) {
       drain();
@@ -533,18 +533,14 @@ function runSession(
         evictQueue.push([start, behindEnd]);
       }
       const aheadStart = Math.max(start, anchorS + KEEP_AHEAD_S);
-      if (end > aheadStart) {
+      if (includeAhead && end > aheadStart) {
         evictQueue.push([aheadStart, end]);
       }
     }
-    // Journal entries wholly inside an evicted span lose their media;
-    // straddling entries keep mapping the still-buffered coverage.
-    journal = journal.filter(
-      (j) =>
-        !evictQueue.some(
-          ([s, e]) => j.mediaStart >= s * 1000 && j.mediaEnd <= e * 1000,
-        ),
-    );
+    // Evicted spans keep their journal entries — the byte↔media index
+    // stays valid (stream positions are immutable) and a back-seek
+    // into trimmed coverage still wants its exact anchor. Entries are
+    // ~64B and bounded by track length, so retention is cheap.
     evicting = true;
     removeNext();
   }
@@ -554,6 +550,10 @@ function runSession(
     if (next === undefined || buffer === null) {
       evicting = false;
       drain(); // the evicted append retries here, behind the removals
+      // A remove on an ended source re-opens it — re-run the terminal
+      // bookkeeping once the chain drains so an EOF that landed before
+      // or during eviction still ends the source.
+      checkEnd();
       return;
     }
     try {
@@ -562,6 +562,54 @@ function runSession(
       // Eviction is best-effort; a refused range skips to the next.
       removeNext();
     }
+  }
+
+  /**
+   * Quota-triggered eviction runs once Chromium's SourceBuffer
+   * cap (~100+ MB of audio) is hit — every track before that stays
+   * buffered whole, so an hour of listening parks hundreds of MB of
+   * played media in renderer shared memory. The playhead moves on the
+   * same cadence as `notePosition`, so a throttled pass there trims
+   * consumed media trailing the keep-behind window — behind-only,
+   * because the pump's byte cursor can't rewind: evicting buffered
+   * media ahead of the playhead opens a hole the contiguous stream
+   * never refills and playback stalls dead at the trim frontier.
+   * Ahead is already bounded by the ingest grant window.
+   */
+  let lastProactiveEvictAtMs = -1;
+  const PROACTIVE_EVICT_INTERVAL_MS = 10_000;
+  function maybeProactiveEvict(): void {
+    const now = performance.now();
+    if (
+      destroyed ||
+      evicting ||
+      buffer === null ||
+      buffer.updating ||
+      (lastProactiveEvictAtMs >= 0 &&
+        now - lastProactiveEvictAtMs < PROACTIVE_EVICT_INTERVAL_MS)
+    ) {
+      return;
+    }
+    // Only trim when the anchor sits inside buffered coverage — a
+    // playhead outside every range (stalled at the frontier, or a
+    // pre-play attach still filling) has nothing provably stale, and
+    // a blind pass could evict the very media about to play.
+    const last = journal[journal.length - 1];
+    const anchorS =
+      playheadS >= 0 ? playheadS : last === undefined ? 0 : last.mediaEnd / 1000;
+    const ranges = buffer.buffered;
+    let anchorCovered = false;
+    for (let i = 0; i < ranges.length; i++) {
+      if (ranges.start(i) <= anchorS && anchorS <= ranges.end(i)) {
+        anchorCovered = true;
+        break;
+      }
+    }
+    if (!anchorCovered) {
+      return;
+    }
+    lastProactiveEvictAtMs = now;
+    startEviction(false);
   }
 
   function drain(): void {
@@ -676,6 +724,7 @@ function runSession(
         seekTo: (ms) => seek(ms),
         notePosition: (ms) => {
           playheadS = ms / 1000;
+          maybeProactiveEvict();
         },
         onFail: (listener) => {
           // A failure that already landed fires immediately — the

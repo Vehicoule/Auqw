@@ -955,6 +955,67 @@ function render(node: ReactNode): string {
   assertIncludes('auth failure draws the warn mark', failed, 'uw-mark--warn');
 }
 
+// ---- artwork URL scaling ----------------------------------------------------------
+
+{
+  const { scaledArtworkUrl } = await import('./artwork-url.ts');
+  const deezer =
+    'https://cdn-images.dzcdn.net/images/cover/abc/1000x1000-000000-80-0-0.jpg';
+  check(
+    'deezer tail shrinks to the smallest served step',
+    scaledArtworkUrl(deezer, 40) ===
+      'https://cdn-images.dzcdn.net/images/cover/abc/56x56-000000-80-0-0.jpg',
+  );
+  check(
+    'deezer caps at its largest served step',
+    scaledArtworkUrl(deezer, 1024) === deezer,
+  );
+  check(
+    'a source smaller than the target is never upscaled',
+    scaledArtworkUrl(
+      'https://cdn-images.dzcdn.net/images/cover/abc/250x250-000000-80-0-0.jpg',
+      500,
+    ) ===
+      'https://cdn-images.dzcdn.net/images/cover/abc/250x250-000000-80-0-0.jpg',
+  );
+  const google =
+    'https://lh3.googleusercontent.com/xyz=w544-h544-l90-rj';
+  check(
+    'googleusercontent w-h suffix shrinks in place, flags kept',
+    scaledArtworkUrl(google, 40) ===
+      'https://lh3.googleusercontent.com/xyz=w64-h64-l90-rj',
+  );
+  check(
+    'bare googleusercontent path gains a size suffix',
+    scaledArtworkUrl('https://yt3.googleusercontent.com/xyz', 40) ===
+      'https://yt3.googleusercontent.com/xyz=w64-h64',
+  );
+  check(
+    'google s-suffix shrinks in place',
+    scaledArtworkUrl('https://yt3.googleusercontent.com/a=s900-c', 200) ===
+      'https://yt3.googleusercontent.com/a=s256-c',
+  );
+  check(
+    'mzstatic tail shrinks with flags kept',
+    scaledArtworkUrl(
+      'https://is1-ssl.mzstatic.com/image/thumb/x/3000x3000bb.jpg',
+      384,
+    ) === 'https://is1-ssl.mzstatic.com/image/thumb/x/384x384bb.jpg',
+  );
+  check(
+    'non-square tails pass through — differing numbers can encode a crop',
+    scaledArtworkUrl('https://images.example/art/600x400.jpg', 40) ===
+      'https://images.example/art/600x400.jpg',
+  );
+  check(
+    'non-https and unknown shapes pass through untouched',
+    scaledArtworkUrl('data:image/png;base64,xx', 40) ===
+      'data:image/png;base64,xx' &&
+      scaledArtworkUrl('https://img.example/a.png', 40) ===
+        'https://img.example/a.png',
+  );
+}
+
 // ---- source-scan guards -----------------------------------------------------------
 
 {

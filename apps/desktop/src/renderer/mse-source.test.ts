@@ -111,6 +111,16 @@ class FakeSourceBuffer implements SourceBufferLike {
 
   remove(start: number, end: number): void {
     this.removes.push([start, end]);
+    // Per the MSE spec, a remove on an ended source re-opens it — the
+    // same transition an append performs — and the remove itself sets
+    // `updating` until its own updateend.
+    if (this.media !== null && this.media.readyState === 'ended') {
+      const media = this.media;
+      media.ended = false;
+      media.readyState = 'open';
+      queueMicrotask(() => media.fireSourceopen());
+    }
+    this.updating = true;
     // Real SourceBuffers split on partial overlap — a remove of the
     // middle of a merged range leaves the uncovered pieces buffered.
     const next: Array<[number, number]> = [];
@@ -128,6 +138,7 @@ class FakeSourceBuffer implements SourceBufferLike {
     }
     this.buffered.list = next;
     queueMicrotask(() => {
+      this.updating = false;
       for (const l of this.listeners.get('updateend') ?? []) l();
     });
   }
@@ -574,6 +585,70 @@ export async function run(): Promise<void> {
     feedData(port, webmFixture(), webmFixture().length);
     await settle();
     assertDeepEqual(sb.removes, [[0, 180]], 'eviction kept the playhead window');
+  }
+
+  // notePosition-driven eviction: the same keep-window trim runs on
+  // playhead reports, ahead of quota pressure — but only while the
+  // anchor sits inside buffered coverage.
+  {
+    const { attach, media, port } = beginAttach('h-4d2');
+    await settle();
+    media.fireSourceopen();
+    feedData(port, webmFixture(), 0);
+    const source = await (await attach).ready;
+    await settle();
+    const sb = media.sourceBuffer;
+    assert(sb !== null);
+    sb.buffered.list = [[0, 800]];
+    // Playhead at 300s is covered → [0,180) is stale and trims with
+    // no quota error ever raised. [600,800] stays: evicting unplayed
+    // media ahead opens a hole the contiguous pump never refills.
+    source.notePosition(300_000);
+    await settle();
+    assertDeepEqual(
+      sb.removes,
+      [[0, 180]],
+      'notePosition trims behind only, ahead coverage survives',
+    );
+  }
+  {
+    const { attach, media, port } = beginAttach('h-4d3');
+    await settle();
+    media.fireSourceopen();
+    feedData(port, webmFixture(), 0);
+    const source = await (await attach).ready;
+    await settle();
+    const sb = media.sourceBuffer;
+    assert(sb !== null);
+    sb.buffered.list = [[0, 500]];
+    // Anchor outside every range — a blind trim could evict media the
+    // playhead still needs, so nothing runs.
+    source.notePosition(900_000);
+    await settle();
+    assertDeepEqual(sb.removes, [], 'an uncovered anchor trims nothing');
+  }
+
+  // EOF + eviction ordering: a remove on an ended source re-opens it;
+  // the evict chain must re-run checkEnd so the source ends again —
+  // otherwise the element never emits `ended` and a completed track
+  // stalls the queue.
+  {
+    const { attach, media, port } = beginAttach('h-4d4');
+    await settle();
+    media.fireSourceopen();
+    feedData(port, webmFixture(), 0);
+    const source = await (await attach).ready;
+    await settle();
+    const sb = media.sourceBuffer;
+    assert(sb !== null);
+    port.feed({ kind: 'eof', epoch: 0 });
+    await settle();
+    assert(media.ended, 'eof ended the source');
+    sb.buffered.list = [[0, 500]];
+    source.notePosition(300_000);
+    await settle();
+    assertDeepEqual(sb.removes, [[0, 180]], 'post-eof trim still ran');
+    assert(media.ended, 'the source re-ends once eviction drains');
   }
 
   // abort() settles `ready` with MseAborted — a killed attach must

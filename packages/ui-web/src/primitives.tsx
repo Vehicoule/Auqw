@@ -22,6 +22,7 @@ import {
 } from '@auqw/ui-shared';
 import type { DownloadChip } from '@auqw/ui-shared';
 import type { DownloadButtonView } from '@auqw/ui-shared/controllers';
+import { scaledArtworkUrl } from './artwork-url.ts';
 
 export type TextVariant =
   | 'display'
@@ -250,6 +251,21 @@ export function Artwork({
   loading = false,
   className,
 }: ArtworkProps) {
+  // Provider covers decode at their full served size — a 1000px Deezer
+  // cover is ~4 MB retained per row while Chromium's image cache lets
+  // it sit. Request only the pixels the frame actually renders; an
+  // unrecognized shape keeps the original URL, and a rewrite that
+  // fails to load falls back to it.
+  const px = Math.ceil(
+    (fill ? 384 : size) *
+      (typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1),
+  );
+  const [src, setSrc] = useState(() =>
+    url === null ? null : scaledArtworkUrl(url, px),
+  );
+  useEffect(() => {
+    setSrc(url === null ? null : scaledArtworkUrl(url, px));
+  }, [url, px]);
   const classes = [
     'uw-artwork',
     fill ? 'uw-artwork--fill' : '',
@@ -281,11 +297,14 @@ export function Artwork({
       ) : (
         <img
           className="uw-artwork__img"
-          src={url}
+          src={src ?? url}
           alt=""
           draggable={false}
           decoding="async"
           loading="lazy"
+          onError={
+            src !== null && src !== url ? () => setSrc(url) : undefined
+          }
         />
       )}
     </div>
