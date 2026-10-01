@@ -135,6 +135,19 @@ private const val SAMPLE_PARSE_PULLS = 200
  *  format + SeekMap — container headers plus sniff retries. */
 private const val SEED_PARSE_PULLS = 400
 
+/** Decorative decode bound — the JS port's `PEAKS_MAX_DECODE_MS`:
+ *  tracks longer than this refuse extraction. The caller gates
+ *  known durations; the sampled path re-gates on the PARSED
+ *  duration so an unknown-duration stream can't produce a profile
+ *  the legacy pull would have refused. */
+private const val PEAKS_MAX_DECODE_MS = 8L * 60 * 1000
+
+/** Minimum decoded points for a profile to count as finished —
+ *  half the sweep. A run where most seeks failed stays provisional:
+ *  it falls to the whole-file fallback rather than persisting a
+ *  profile whose bars are mostly nearest-measured fill. */
+private const val SAMPLED_MIN_COVERAGE = SAMPLED_POINTS / 2
+
 private val DEAD_HANDLE_KINDS = setOf(
   "released", "evicted", "expired", "superseded", "not-found"
 )
@@ -142,10 +155,13 @@ private val INVALID_RESPONSE_KINDS = setOf(
   "invalid-request", "invalid-response", "invalid-message"
 )
 /** Sampled-path failures that must surface, not fall back: a dead
- * handle would just die again on the legacy pull. Everything else
- * (parse, codec, budget, cooldown) still earns the honest whole-file
- * attempt — the pull rides already-committed bytes regardless. */
-private val PROPAGATE_KINDS = DEAD_HANDLE_KINDS + setOf("cancelled")
+ * handle would just die again on the legacy pull, and a refusal
+ * (`budget-exceeded`/`not-applicable`) IS the honest answer — the
+ * whole-file pull would only rediscover it. Everything else (parse,
+ * codec, budget, cooldown) still earns the honest whole-file attempt
+ * — the pull rides already-committed bytes regardless. */
+private val PROPAGATE_KINDS =
+  DEAD_HANDLE_KINDS + setOf("cancelled", "budget-exceeded", "not-applicable")
 
 /** A provider:'local' backing for an lf-* handle — the file or content
  *  URI, the Context the extractor needs to open it, and the resolved
@@ -299,7 +315,7 @@ internal class AuqwWaveformPeaks(
         // (unknown total, small file, unseekable container, no
         // decodable sample) fall through to the whole-file sweep.
         val sampled = try {
-          sampledStream(requestId, host, handle, count, job, onCoarse)
+          sampledStream(requestId, host, handle, count, cap, provisionalCap, job, onCoarse)
         } catch (e: CancellationException) {
           throw e
         } catch (e: CodedException) {
@@ -445,6 +461,8 @@ internal class AuqwWaveformPeaks(
     host: PluginHost,
     handle: String,
     count: Int,
+    cap: Long,
+    provisionalCap: Boolean,
     job: Job?,
     onCoarse: ((List<Double>) -> Unit)?,
   ): List<Double>? {
@@ -461,6 +479,15 @@ internal class AuqwWaveformPeaks(
     val total = head.total?.toLong() ?: return null
     if (total <= SAMPLED_MIN_TOTAL_BYTES || head.data.isEmpty()) {
       return null
+    }
+    // Same encoded-size refusal the local/pull paths apply — a
+    // sampled profile can't ship bars the legacy sweep would refuse.
+    if (total > cap) {
+      throw CodedException(
+        if (provisionalCap) "not-applicable" else "budget-exceeded",
+        "audio too large for peak extraction",
+        null
+      )
     }
     Log.i(
       TAG,
@@ -496,6 +523,14 @@ internal class AuqwWaveformPeaks(
     }
     val durationUs = seed.durationUs
     val durationMs = durationUs / 1000.0
+    // The JS gate only sees the declared duration — a stream whose
+    // catalog entry lacks one still answers to the same bound once
+    // the container parses.
+    if (durationMs > PEAKS_MAX_DECODE_MS) {
+      throw CodedException(
+        "budget-exceeded", "track too long for decorative peaks", null
+      )
+    }
     Log.i(
       TAG,
       "peaks[$requestId] seed +${SystemClock.uptimeMillis() - t0}ms " +
@@ -560,7 +595,16 @@ internal class AuqwWaveformPeaks(
         }
       }.forEach { it.await() }
     }
-    if (applied.get() == 0) {
+    // Coverage floor: below it the filled profile would be mostly
+    // nearest-measured copies — honest bars, but the tracker persists
+    // the result as finished and never retries. Degrade to the
+    // whole-file sweep, which measures every bucket.
+    if (applied.get() < SAMPLED_MIN_COVERAGE) {
+      Log.w(
+        TAG,
+        "peaks[$requestId] sampled under-covered " +
+          "${applied.get()}/$SAMPLED_POINTS — falling back"
+      )
       return null
     }
     val flat = synchronized(sparseLock) { fillFlat(sparse, count) }
