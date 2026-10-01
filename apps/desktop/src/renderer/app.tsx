@@ -56,6 +56,7 @@ import {
   CollectionScreen,
   CorrectionsScreen,
   DesktopChrome,
+  DownloadIcon,
   EntityScreen,
   ErrorState,
   HomeScreen,
@@ -799,7 +800,7 @@ function Main({
     lyricsModel,
     transfer,
     pickerItems,
-    updateBanner,
+    updateCard,
     onUpdateBannerAct,
     onUpdateBannerDismiss,
     setActionsFor,
@@ -1465,7 +1466,7 @@ function Main({
               </Text>
             </div>
           )}
-          {updateBanner !== null && (
+          {updateCard !== null && (
             <div
               style={{
                 position: 'fixed',
@@ -1473,38 +1474,97 @@ function Main({
                 top: online === false ? 36 : 8,
                 left: '50%',
                 transform: 'translateX(-50%)',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '5px 8px 5px 12px',
-                borderRadius: 999,
+                width: 'min(420px, calc(100vw - 32px))',
+                borderRadius: 'var(--radius-float)',
                 backgroundColor: 'var(--raised)',
                 border: 'var(--stroke-hairline) solid var(--hairline)',
+                overflow: 'hidden',
                 zIndex: 40,
               }}
+              role="status"
+              aria-live="polite"
             >
-              <Text variant="metadata" color="secondary">
-                {updateBanner.label}
-              </Text>
-              {updateBanner.actionLabel !== null && (
-                <button
-                  type="button"
-                  className="uw-pressable"
-                  style={{ padding: '2px 8px', borderRadius: 999 }}
-                  onClick={onUpdateBannerAct}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: '6px 6px 6px 12px',
+                }}
+              >
+                <span
+                  style={{
+                    width: 32,
+                    height: 32,
+                    borderRadius: 16,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                    backgroundColor:
+                      updateCard.chip === 'failed'
+                        ? 'var(--fg08)'
+                        : 'var(--accent-soft)',
+                  }}
                 >
-                  <Text variant="metadata" color="accent">
-                    {updateBanner.actionLabel}
+                  <DownloadIcon
+                    state={updateCard.chip}
+                    size={16}
+                    color={
+                      updateCard.chip === 'failed'
+                        ? 'var(--warn)'
+                        : 'var(--accent)'
+                    }
+                  />
+                </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <Text variant="body" color="primary">
+                    {updateCard.title}
                   </Text>
-                </button>
+                  {updateCard.detail !== '' && (
+                    <Text variant="metadata" color="secondary">
+                      {updateCard.detail}
+                    </Text>
+                  )}
+                </div>
+                {updateCard.actionLabel !== null && (
+                  <button
+                    type="button"
+                    className="uw-pressable"
+                    style={{
+                      padding: '8px 10px',
+                      borderRadius: 999,
+                      flexShrink: 0,
+                    }}
+                    onClick={onUpdateBannerAct}
+                  >
+                    <Text variant="body" color="accent">
+                      {updateCard.actionLabel}
+                    </Text>
+                  </button>
+                )}
+                {updateCard.dismissible && (
+                  <IconButton
+                    icon="close"
+                    size={28}
+                    iconSize={10}
+                    ariaLabel={t('update.dismiss')}
+                    onPress={onUpdateBannerDismiss}
+                  />
+                )}
+              </div>
+              {updateCard.progress !== null && (
+                <div style={{ height: 2, backgroundColor: 'var(--fg18)' }}>
+                  <div
+                    style={{
+                      width: `${Math.round(updateCard.progress * 100)}%`,
+                      height: '100%',
+                      backgroundColor: 'var(--accent)',
+                      transition: 'width 160ms linear',
+                    }}
+                  />
+                </div>
               )}
-              <IconButton
-                icon="close"
-                size={20}
-                iconSize={10}
-                ariaLabel={t('update.dismiss')}
-                onPress={onUpdateBannerDismiss}
-              />
             </div>
           )}
           {toast !== null && (
