@@ -5,7 +5,6 @@ package expo.modules.auqwexpo
 import android.content.Context
 import android.media.AudioFormat
 import android.media.MediaCodec
-import android.media.MediaDataSource
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
@@ -34,11 +33,13 @@ import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import java.util.Collections
 import java.util.LinkedHashMap
+import java.util.TreeMap
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 import kotlin.coroutines.coroutineContext
 import kotlin.math.ceil
 import kotlin.math.sqrt
@@ -54,114 +55,71 @@ import uniffi.auqw_mobile_bindings.PluginHost
 import uniffi.auqw_mobile_bindings.StreamException
 
 private const val TAG = "AuqwWaveformPeaks"
-private const val READ_CHUNK = 1024 * 1024
 /** Decoration, not analysis — the same encoded pull cap as the desktop port. */
 private const val MAX_PEAK_BYTES = 24 * 1024 * 1024
 /** Post-decode belt — matches the desktop port's PCM ceiling. */
 private const val MAX_PCM_BYTES = 256 * 1024 * 1024
-/** Cold-start patience while position 0 stays uncommitted — the player's
- * own head fill takes a while too; peaks may wait for the same warm-up. */
-private const val FIRST_READ_TIMEOUT_MS = 15_000L
-/** First-hole patience after a probe met a session refusal — the fill
- * that would commit the hole rides the same refused session, so the
- * pull still serves whatever is already committed but gives up fast
- * instead of parking through the provider's cooldown. */
-private const val REFUSED_PULL_PATIENCE_MS = 1_000L
-/** Patience for each later position: a hole still unfetched past this
- * sits ahead of committed bytes — a demanding read there would queue
- * fetch-through demand that outranks the player's own (demand serves
- * min position first), stalling playback for a decoration. Abort
- * instead; the seeded pattern stays. */
-private const val PARK_TIMEOUT_MS = 400L
-/** Poll gap between peeks on an unfetched hole — a peek queues no
- * demand, so the poll is a store-level probe, not a retry. */
-private const val PEEK_POLL_MS = 50L
 /** Whole-decode deadline — a wedged codec never owns the sweep. */
 private const val DECODE_DEADLINE_MS = 60_000L
 /** Bound on pending cancel tombstones — see `cancels`. */
 private const val MAX_TOMBSTONES = 64
 private const val DEQUEUE_US = 10_000L
 
-/* ---- sampled extraction bounds ------------------------------------------
+/* ---- streamed extraction bounds -------------------------------------------
  * `streamProbe` reads are bounded ranged fetches that commit into the
  * session's sparse store — every fetched byte is real media data the
- * player could later serve, never a discarded duplicate. The caps keep
- * a decoration's total spend under ~8 MiB (the desktop port's ~4 MiB
- * plus one head/seed read per lane of seek-index traffic).
+ * player serves for free, never a discarded duplicate. Extraction runs
+ * as parallel contiguous stripe pulls feeding one forward decode lane,
+ * so the sweep completes in lockstep with the bytes the track itself
+ * needs instead of paying a scattered round-trip per sampled window.
  */
-/** Head probe: learns the stream total and warms the container head —
- * the extractor's own setDataSource reads then serve as hits. */
+/** Head probe: learns the stream total and commits the container head —
+ *  the extractor's sniff + header reads then serve off committed bytes. */
 private const val HEAD_PROBE_BYTES = 256 * 1024
-/** Per-call read bound inside a probe-backed data source — one readAt
- * is at most one ranged GET (the seam itself clamps at chunk_bytes). */
-private const val PROBE_READ_MAX = 256 * 1024
-/** Probe-window floor — under it the demuxer's own read pattern
- * re-probes inside a single sample window. */
-private const val PROBE_WINDOW_MIN = 48 * 1024
-/** Container slack over a sample's encoded span — cues and cluster
- * headers sit between the seek point and the audio blocks. */
-private const val PROBE_WINDOW_SLACK = 32 * 1024
-/** Consecutive refused probes before a lane's reader gives up — one
- * stalled or rate-limited response must not kill the lane outright. */
-private const val PROBE_MAX_STRIKES = 3
-/** Whole-sweep probe spend across all lanes: a runaway extractor scan
- * fails closed at this — reads past it report EOF so the sampled path
- * gives up instead of pulling the whole file for a decoration. */
-private const val PROBE_BUDGET_BYTES = 8L * 1024 * 1024
-/** Small streams sit inside the pump's speculative head fill — the
- * legacy pull serves them off committed bytes without spending probe
- * requests, so sampling only pays off past this total. */
-private const val SAMPLED_MIN_TOTAL_BYTES = 4L * 1024 * 1024
-/** Seek points per sweep — the desktop port's coarse+refine count. */
-private const val SAMPLED_POINTS = 24
-/** Parallel extractor+codec lanes; probe fetches are the latency, so
- * flights overlap — committed hits serve instantly on any lane. */
-private const val SAMPLE_LANES = 4
-/** A coarse profile may render once this many samples have MEASURED
- * bars — a failed decode never counts (zeros are not bars). */
-private const val COARSE_MIN_SAMPLES = 5
-/** Decoded PCM to collect per seek point — enough coverage that the
- * nearest-measured fill reads as the real shape, bounded so the whole
- * sweep decodes a fraction of the track instead of all of it. */
-private const val SAMPLE_PCM_MS = 2_000L
-/** Packet-feed bound past the seek point — the decode loop stops
- * reading samples once the extractor's own clock passes it, so a
- * dense-bytes/slow-clock source can't over-deliver PCM. */
-private const val SAMPLE_FEED_US = 6_000_000L
-/** Per-sample PCM spill bound — a window's decoded audio lives on the
- * heap only until its windows are computed. ~3.9 s of stereo 16-bit
- * 48 kHz; float/PCM paths count bytes the same way. */
-private const val SAMPLE_PCM_CAP_BYTES = 1536 * 1024
-/** Dequeue iterations before one sample gives up — a wedged lane
- * abandons its point, never the sweep. */
-private const val SAMPLE_MAX_LOOPS = 600
-
-/** Absolute input bound per window — a frozen `sampleTime` can
- * never trip the `SAMPLE_FEED_US` guard, so packets are counted too.
- * Opus ~20ms frames make 2k packets ≈ 40s of media: far past the
- * window, still far under a whole-file drain. */
-private const val SAMPLE_MAX_PACKETS = 2_000
-
-/** Parser pulls to yield one queued sample before the window calls
- *  its feed done — a wedged demuxer dies here instead of looping. */
+/** Per-probe pull bound — the seam clamps each probe at its own
+ *  `chunk_bytes`, so a lane never asks for more than one ranged GET. */
+private const val PULL_CHUNK_BYTES = 256 * 1024
+/** Parallel contiguous stripe pulls; the seam's probe issues its own
+ *  ranged GET rather than queueing on the pump's fill lane, so lanes
+ *  overlap wire latency. */
+private const val PULL_LANES = 4
+/** Smallest stripe worth a lane of its own — below it a sequential lane
+ *  beats splitting (fewer probes, no join). */
+private const val STRIPE_MIN_BYTES = 512 * 1024
+/** Consecutive refused or empty probes before a lane abandons its
+ *  stripe — one stalled or rate-limited reply must not kill it. */
+private const val LANE_MAX_STRIKES = 3
+/** Backoff between a lane's probe retries — a refusal is usually a
+ *  provider cooldown; the tracker's own retry heals what three strikes
+ *  cannot. */
+private const val LANE_STRIKE_BACKOFF_MS = 120L
+/** RMS accumulation granularity — slices fold into `count` windows at
+ *  emit, so the decode lane never needs the duration early. A slice
+ *  straddling a window boundary lands by midpoint (~25 ms of blur, far
+ *  under one bucket's width). */
+private const val SLICE_US = 50_000L
+/** A coarse profile renders once this share of the stream has decoded —
+ *  a contiguous-prefix measurement beats a sparse scatter of samples
+ *  at the same coverage. */
+private const val COARSE_FRACTION = 0.35
+/** Leading-edge milestone: the coarse emit fires at the tighter of this
+ *  pts bound and the fraction — the head fill is already committed at
+ *  attach, so first real bars land at the pace of the first seconds of
+ *  audio, not at a third of the track. */
+private const val COARSE_LEAD_PTS_US = 20_000_000L
+/** Parser pulls to land the audio track's format — container headers
+ *  plus sniff retries. */
+private const val FORMAT_PARSE_PULLS = 400
+/** Parser pulls to yield one queued sample before the decode loop
+ *  treats the demuxer as wedged — a stalled parser ends the feed, not
+ *  the sweep. */
 private const val SAMPLE_PARSE_PULLS = 200
-
-/** Parser pulls allowed for the seed/await phase to land the track
- *  format + SeekMap — container headers plus sniff retries. */
-private const val SEED_PARSE_PULLS = 400
-
 /** Decorative decode bound — the JS port's `PEAKS_MAX_DECODE_MS`:
- *  tracks longer than this refuse extraction. The caller gates
- *  known durations; the sampled path re-gates on the PARSED
- *  duration so an unknown-duration stream can't produce a profile
- *  the legacy pull would have refused. */
+ *  tracks longer than this refuse extraction. The caller gates known
+ *  durations; the decode lane re-gates on the PARSED duration so an
+ *  unknown-duration stream can't produce a profile the same check
+ *  would have refused. */
 private const val PEAKS_MAX_DECODE_MS = 8L * 60 * 1000
-
-/** Minimum decoded points for a profile to count as finished —
- *  half the sweep. A run where most seeks failed stays provisional:
- *  it falls to the whole-file fallback rather than persisting a
- *  profile whose bars are mostly nearest-measured fill. */
-private const val SAMPLED_MIN_COVERAGE = SAMPLED_POINTS / 2
 
 private val DEAD_HANDLE_KINDS = setOf(
   "released", "evicted", "expired", "superseded", "not-found"
@@ -169,14 +127,6 @@ private val DEAD_HANDLE_KINDS = setOf(
 private val INVALID_RESPONSE_KINDS = setOf(
   "invalid-request", "invalid-response", "invalid-message"
 )
-/** Sampled-path failures that must surface, not fall back: a dead
- * handle would just die again on the legacy pull, and a refusal
- * (`budget-exceeded`/`not-applicable`) IS the honest answer — the
- * whole-file pull would only rediscover it. Everything else (parse,
- * codec, budget, cooldown) still earns the honest whole-file attempt
- * — the pull rides already-committed bytes regardless. */
-private val PROPAGATE_KINDS =
-  DEAD_HANDLE_KINDS + setOf("cancelled", "budget-exceeded", "not-applicable")
 
 /** A provider:'local' backing for an lf-* handle — the file or content
  *  URI, the Context the extractor needs to open it, and the resolved
@@ -203,16 +153,16 @@ private class DecodedPcm(
  * γ1.2) on the JS side for both platforms, so this class only ever
  * returns raw per-window RMS magnitudes as flat `[up, down]` pairs.
  *
- * The pull borrows the playing stream's own positional `streamPeek` —
- * never `streamOpen`/`streamClose`, which would re-anchor the pump's
- * speculative fill or detach the session under the player — so
- * extraction costs no new wire surface and never sees a signed URL.
- * A peek serves only already-committed bytes: it queues no
- * fetch-through demand and never parks, so a timed-out or cancelled
- * sweep leaves nothing competing with the player's reads (decisions.md
- * row on `stream:read` cancellation — the per-read cancel is a peek
- * instead). `provider:'local'` (lf-*) handles never reach the seam —
- * they resolve to their file/content URI and decode straight off disk.
+ * The streamed path borrows the playing stream's own `streamProbe` —
+ * parallel contiguous stripe pulls each issuing bounded ranged GETs
+ * that commit into the session's sparse store, so extraction costs
+ * only the wire latency the track itself needs and every fetched byte
+ * is player prefetch. A single forward demux+decode lane folds PCM
+ * into 50 ms RMS slices as bytes land — nothing seeks, nothing waits
+ * on whole-file delivery, and cancellation unwinds without leaving
+ * fetch-through demand competing with the player's reads.
+ * `provider:'local'` (lf-*) handles never reach the seam — they resolve
+ * to their file/content URI and decode straight off disk.
  */
 internal class AuqwWaveformPeaks(
   private val registry: AuqwStreamRegistry,
@@ -260,13 +210,13 @@ internal class AuqwWaveformPeaks(
   }
 
   /**
-   * Sample → decode → bucket. Returns `count` flat `[up, down]` pairs of
+   * Pull → decode → bucket. Returns `count` flat `[up, down]` pairs of
    * raw RMS magnitudes. Every failure is a typed [CodedException] whose
-   * code is the application kind (`unavailable` for not-yet-buffered
-   * bytes or an unsupported PCM encoding, `released` for a dead
-   * handle, `budget-exceeded` over caps, `not-applicable` for the
-   * provisional unknown-duration cap, `invalid-response` for
-   * undecodable bytes, `cancelled` on cancel).
+   * code is the application kind (`unavailable` for an unsupported PCM
+   * encoding or a wedged codec, `released` for a dead handle,
+   * `budget-exceeded` over caps, `not-applicable` for the provisional
+   * unknown-duration cap, `invalid-response` for undecodable bytes,
+   * `cancelled` on cancel).
    *
    * `onCoarse` fires at most once with the coarse-but-measured profile
    * (the shared progressive contract — real bars land while the
@@ -284,7 +234,8 @@ internal class AuqwWaveformPeaks(
     val cap = minOf(maxBytes, MAX_PEAK_BYTES.toLong())
     // PCM spills to a cache file, not the heap: bucketing memory-maps
     // it, so peak allocation stays ~bounded regardless of track size
-    // alongside the player.
+    // alongside the player. Only the local-file path uses it — the
+    // streamed path accumulates RMS straight off the codec.
     val pcmFile = File(
       cacheDirFor(),
       "auqw-peaks-" +
@@ -311,70 +262,29 @@ internal class AuqwWaveformPeaks(
         throw CancellationException("cancelled before extraction started")
       }
       val local = localFor(handle)
-      val setSource: (MediaExtractor) -> Unit
-      if (local !== null) {
-        if (local.bytes > cap) {
-          throw CodedException(
-            if (provisionalCap) "not-applicable" else "budget-exceeded",
-            "audio too large for peak extraction",
-            null
-          )
-        }
-        setSource = { it.setDataSource(local.context, local.uri, null) }
-      } else {
+      if (local === null) {
         val host = registry.hostFor(handle)
           ?: throw CodedException("released", "unknown stream handle", null)
-        // Sampled ranged extraction first — scattered probe fetches
-        // plus per-window decode land real bars in probe-RTT time
-        // instead of trailing a whole-file pull. Structural misses
-        // (unknown total, small file, unseekable container, no
-        // decodable sample) fall through to the whole-file sweep.
-        // null = no probe refused yet; non-null = the FIRST refusal's
-        // seam kind — a terminal kind (dead handle, invalid-response)
-        // must stay terminal through the pull, not decay to transient.
-        val probeRefused = AtomicReference<String?>(null)
-        val sampled = try {
-          sampledStream(
-            requestId, host, handle, count, cap, provisionalCap, job,
-            onCoarse, probeRefused
-          )
-        } catch (e: CancellationException) {
-          throw e
-        } catch (e: CodedException) {
-          // A refusal met before anything committed (the head probe's
-          // own failure leaves position 0 a hole) can't be beaten by
-          // the whole-file pull — propagate the transient so the
-          // tracker retries once the session's cooldown lapses.
-          if (e.code in PROPAGATE_KINDS ||
-            (e.code == "transient" && probeRefused.get() != null)
-          ) {
-            throw e
-          }
-          Log.w(TAG, "peaks[$requestId] sampled bailed: ${e.code}")
+        return streamedStream(
+          requestId, host, handle, count, cap, provisionalCap, onCoarse
+        )
+      }
+      if (local.bytes > cap) {
+        throw CodedException(
+          if (provisionalCap) "not-applicable" else "budget-exceeded",
+          "audio too large for peak extraction",
           null
-        }
-        if (sampled !== null) {
-          return sampled
-        }
-        // The pull only ever serves committed bytes — a refused
-        // session won't fill the holes, so its first-hole patience
-        // shortens to a beat: committed audio still drains, a cold
-        // refusal fails typed instead of parking through the cooldown.
-        val pullStart = SystemClock.uptimeMillis()
-        val encoded = pullBytes(
-          host, handle, cap, provisionalCap, probeRefused.get()
         )
-        Log.i(
-          TAG,
-          "peaks[$requestId] legacy pull +${SystemClock.uptimeMillis() - pullStart}ms bytes=${encoded.size}"
-        )
-        setSource = { it.setDataSource(ByteArrayMediaDataSource(encoded)) }
       }
       val decodeStart = SystemClock.uptimeMillis()
-      val decoded = decodePcm(setSource, cap, provisionalCap, pcmFile)
+      val decoded = decodePcm(
+        { it.setDataSource(local.context, local.uri, null) },
+        cap, provisionalCap, pcmFile
+      )
       Log.i(
         TAG,
-        "peaks[$requestId] decode +${SystemClock.uptimeMillis() - decodeStart}ms pcm=${decoded.bytes}"
+        "peaks[$requestId] decode " +
+          "+${SystemClock.uptimeMillis() - decodeStart}ms pcm=${decoded.bytes}"
       )
       return try {
         val bucketStart = SystemClock.uptimeMillis()
@@ -411,122 +321,45 @@ internal class AuqwWaveformPeaks(
     }
   }
 
-  /** Sequential non-demanding positional reads to EOF or the cap —
-   *  the same pull discipline as the desktop port, but on
-   *  `streamPeek`: a hole returns `null` at once (nothing queued,
-   *  nothing to retract) and the poll re-probes within the
-   *  position's patience window — cold-start head fill for the
-   *  first bytes, the short hole window after the flow starts. */
-  private suspend fun pullBytes(
-    host: PluginHost,
-    handle: String,
-    cap: Long,
-    provisionalCap: Boolean,
-    refusalKind: String? = null,
-  ): ByteArray {
-    val out = ByteArrayOutputStream()
-    var ended = false
-    var deadline = SystemClock.uptimeMillis() +
-      if (refusalKind != null) REFUSED_PULL_PATIENCE_MS else FIRST_READ_TIMEOUT_MS
-    // `<=` so an exactly-`cap` stream still reaches its EOF read.
-    while (out.size() <= cap) {
-      coroutineContext.ensureActive()
-      val chunk = try {
-        withContext(Dispatchers.IO) {
-          host.streamPeek(handle, out.size().toULong(), READ_CHUNK.toULong())
-        }
-      } catch (e: StreamException) {
-        throw seamError(e)
-      } catch (e: CancellationException) {
-        throw e
-      } catch (e: Exception) {
-        throw CodedException("transient", e.message ?: "stream read failed", e)
-      }
-      when {
-        chunk === null -> {
-          // An unfetched hole, not a failure worth caching hard —
-          // and unlike a parked streamRead, nothing stays behind
-          // competing with playback when the window lapses.
-          if (SystemClock.uptimeMillis() >= deadline) {
-            // A hole with refusal evidence fails as the refusal's
-            // own kind — a terminal one (dead handle, invalid-response)
-            // stays terminal instead of decaying to retry weather; an
-            // unrefused hole is genuinely unbuffered content.
-            throw CodedException(
-              refusalKind ?: "unavailable",
-              "stream bytes not yet buffered", null
-            )
-          }
-          delay(PEEK_POLL_MS)
-        }
-        chunk.isEmpty() -> {
-          ended = true
-          break
-        }
-        else -> {
-          out.write(chunk, 0, chunk.size)
-          deadline = SystemClock.uptimeMillis() + PARK_TIMEOUT_MS
-        }
-      }
-    }
-    if (!ended) {
-      throw CodedException(
-        if (provisionalCap) "not-applicable" else "budget-exceeded",
-        "stream too large for peak extraction",
-        null
-      )
-    }
-    return out.toByteArray()
-  }
-
-  /* ---- sampled ranged extraction ------------------------------------------
-   * The whole-file pull trails the pump's speculative fill — on a real
-   * network the waveform lands seconds after 'playing' because every
-   * byte must first arrive for the player. Sampling flips the shape:
-   * a probe-backed MediaDataSource turns MediaExtractor's own reads
-   * (container head, seek index, seeked sample windows) into one
-   * bounded ranged GET each, all committed into the session's sparse
-   * store where the player serves them for free. `SAMPLE_LANES`
-   * parallel extractor+codec pairs overlap the probe RTTs; each lane
-   * seeks to evenly spaced media times and decodes ~SAMPLE_PCM_MS of
-   * audio per point. Buckets a sample never measured stay unmeasured
-   * until the nearest-measured fill at emit — nothing is fabricated.
+  /* ---- streamed extraction --------------------------------------------------
+   * Whole-file arrival at wire pace: a head probe learns the total,
+   * contiguous stripes pull the rest in parallel ranged GETs (each
+   * committed into the session's sparse store — player prefetch), and
+   * a forward demux+decode lane over a blocking sparse reader folds
+   * PCM into per-slice RMS as the bytes land. No seeks, no probe-per-
+   * window scatter, no PCM spill file.
    */
 
   /**
-   * Returns the flat `[up, down]` pair list, or `null` when the stream
-   * isn't samplable (unknown total, small file, no decodable sample,
-   * unseekable container) so the caller can run the honest whole-file
-   * fallback. Throws only for sweep-fatal conditions.
+   * Returns the flat `[up, down]` pair list. Throws the seam's typed
+   * kind on every failure — a lane that abandons truncates the decode
+   * at its dead hole; whatever bars were measured still emit as the
+   * coarse profile before the throw, so a retry (the tracker's own
+   * healing path) re-probes off committed hits instead of starting
+   * cold.
    */
-  private suspend fun sampledStream(
+  private suspend fun streamedStream(
     requestId: String,
     host: PluginHost,
     handle: String,
     count: Int,
     cap: Long,
     provisionalCap: Boolean,
-    job: Job?,
     onCoarse: ((List<Double>) -> Unit)?,
-    probeRefused: AtomicReference<String?>,
-  ): List<Double>? {
+  ): List<Double> {
     val t0 = SystemClock.uptimeMillis()
-    // Head probe: warms position 0 (the extractor's own sniff reads
-    // then serve as committed hits) and reports the stream total.
+    val probeRefused = AtomicReference<String?>(null)
     val head = try {
       withContext(Dispatchers.IO) {
         host.streamProbe(handle, 0uL, HEAD_PROBE_BYTES.toULong(), true)
       }
     } catch (e: StreamException) {
-      recordRefusal(probeRefused, seamKind(e))
       throw seamError(e)
     }
-    val total = head.total?.toLong() ?: return null
-    if (total <= SAMPLED_MIN_TOTAL_BYTES || head.data.isEmpty()) {
-      return null
+    if (head.eof && head.data.isEmpty()) {
+      throw CodedException("invalid-response", "empty stream", null)
     }
-    // Same encoded-size refusal the local/pull paths apply — a
-    // sampled profile can't ship bars the legacy sweep would refuse.
+    val total = head.total?.toLong() ?: -1L
     if (total > cap) {
       throw CodedException(
         if (provisionalCap) "not-applicable" else "budget-exceeded",
@@ -534,545 +367,417 @@ internal class AuqwWaveformPeaks(
         null
       )
     }
+    // `end` bounds both the stripes and the buffer's completion check:
+    // a known total clamps at the cap (already gated above); an unknown
+    // total runs one open-ended lane until a confirmed EOF or the cap.
+    val end = if (total > 0) minOf(total, cap) else cap
+    val buf = PullBuffer(end)
+    if (head.data.isNotEmpty()) {
+      buf.put(0L, head.data)
+      buf.observeTotal(total)
+    }
     Log.i(
       TAG,
-      "peaks[$requestId] head-probe +${SystemClock.uptimeMillis() - t0}ms total=$total"
+      "peaks[$requestId] head-probe +${SystemClock.uptimeMillis() - t0}ms " +
+        "total=$total head=${head.data.size}"
     )
-    // Shared sweep spend: every lane's reads draw down one budget so a
-    // container that makes the extractor scan forward (no seek index)
-    // fails closed into the honest fallback rather than pulling the
-    // whole file through probes.
-    val budget = AtomicLong(0)
-    val probeCalls = AtomicLong(0)
-    // Seed pass: one bundled extractor parses the container IN-PROCESS
-    // — the platform MediaExtractor's every call is a Binder trip into
-    // a service that serializes all lanes, so the sweep rides Media3's
-    // own demuxer (same OS-level demux semantics, no IPC). Its probe
-    // reads leave the head committed for every later lane.
-    var seed: SeedInfo? = null
-    try {
-      seed = withContext(Dispatchers.IO) {
-        seedParse(host, handle, total, budget, probeCalls, job, probeRefused)
+
+    val slices = TreeMap<Long, DoubleArray>()
+    val durationUs = AtomicLong(-1L)
+    val lastPtsUs = AtomicLong(-1L)
+    val coarseSent = AtomicBoolean(false)
+    // `slices` is written on the decode lane and folded on it (coarse)
+    // or after it (final/abort emit) — no lock needed.
+    val buildFlat = {
+      val dur = durationUs.get().takeIf { it > 0 } ?: lastPtsUs.get()
+      if (dur <= 0) {
+        null
+      } else {
+        fillFlat(foldSlices(slices, count, dur), count)
       }
-    } catch (e: CancellationException) {
-      throw e
-    } catch (e: Exception) {
-      Log.w(
-        TAG,
-        "peaks[$requestId] seed parse failed: " +
-          "${e.javaClass.simpleName} ${e.message}"
-      )
     }
-    if (seed === null || seed.durationUs <= 0 || !seed.seekable) {
-      return null
+    val emitCoarse = {
+      // Fold first: a null profile (duration never landed, nothing
+      // decoded yet) must not burn the one-shot emit flag.
+      val flat = buildFlat()
+      if (flat !== null && coarseSent.compareAndSet(false, true)) {
+        try {
+          onCoarse?.invoke(flat)
+        } catch (_: Exception) {
+          Log.w(TAG, "peaks[$requestId] coarse emit failed")
+        }
+        Log.i(
+          TAG,
+          "peaks[$requestId] coarse " +
+            "+${SystemClock.uptimeMillis() - t0}ms"
+        )
+      }
     }
-    val durationUs = seed.durationUs
-    val durationMs = durationUs / 1000.0
-    // The JS gate only sees the declared duration — a stream whose
-    // catalog entry lacks one still answers to the same bound once
-    // the container parses.
-    if (durationMs > PEAKS_MAX_DECODE_MS) {
-      throw CodedException(
-        "budget-exceeded", "track too long for decorative peaks", null
-      )
-    }
-    Log.i(
-      TAG,
-      "peaks[$requestId] seed +${SystemClock.uptimeMillis() - t0}ms " +
-        "durationMs=${durationMs.toLong()} fetched=${budget.get()}"
-    )
-    val bucketMs = durationMs / count
-    if (!(bucketMs > 0)) {
-      return null
+    val maybeCoarse = {
+      val dur = durationUs.get()
+      if (dur > 0 && !coarseSent.get() &&
+        lastPtsUs.get() >=
+          minOf(COARSE_LEAD_PTS_US, (dur * COARSE_FRACTION).toLong())
+      ) {
+        emitCoarse()
+      }
     }
 
-    // One window = the sample's own encoded span plus container slack,
-    // sized off the stream's average bitrate — a fixed 256KiB fetch
-    // makes every point a ~6MiB-share ranged GET on throttled links
-    // for audio the window never decodes, while a fixed small window
-    // would re-probe mid-sample on fat streams.
-    val probeWindow = (
-      total * (SAMPLE_PCM_MS + 1_000L) / durationMs +
-        PROBE_WINDOW_SLACK
-      ).toLong().coerceIn(
-        PROBE_WINDOW_MIN.toLong(), PROBE_READ_MAX.toLong()
+    // Stripes: [headSize, end) split over lanes only when wide enough —
+    // an unknown total runs one open-ended lane until EOF or the cap.
+    val start = head.data.size.toLong()
+    val laneCount = if (total > 0) {
+      minOf(
+        PULL_LANES,
+        maxOf(1, ceil((end - start).toDouble() / STRIPE_MIN_BYTES).toInt())
       )
-    val sparse = arrayOfNulls<DoubleArray>(count)
-    val sparseLock = Any()
-    val applied = AtomicInteger(0)
-    val coarseSent = AtomicBoolean(false)
-    val lanes = minOf(SAMPLE_LANES, SAMPLED_POINTS)
+    } else {
+      1
+    }
+    val stripe = if (end > start) {
+      ceil((end - start).toDouble() / laneCount).toLong()
+    } else {
+      0L
+    }
+    var decodeError: Exception? = null
     coroutineScope {
-      (0 until lanes).map { lane ->
+      val pullers = (0 until laneCount).map { lane ->
+        val lo = start + lane * stripe
+        val hi = minOf(lo + stripe, end)
         async(Dispatchers.IO) {
-          sampleLane(
-            requestId, host, handle, total, budget, probeCalls,
-            lane, lanes, durationUs, durationMs, count, job,
-            probeWindow, probeRefused
-          ) { mediaMs, _, windows ->
-            // Merge the sample's per-window RMS under the lock — an
-            // overlap keeps the louder measured value, never averages
-            // a transient away. `windows` is flat [up, down] pairs.
-            synchronized(sparseLock) {
-              val first = (mediaMs / bucketMs).toInt()
-              var j = 0
-              while (j < windows.size && first + j / 2 < count) {
-                val i = first + j / 2
-                if (i >= 0) {
-                  val up = windows[j]
-                  val down = windows[j + 1]
-                  val prev = sparse[i]
-                  sparse[i] = when {
-                    prev === null -> doubleArrayOf(up, down)
-                    else -> doubleArrayOf(
-                      maxOf(prev[0], up), maxOf(prev[1], down)
-                    )
-                  }
-                }
-                j += 2
-              }
-            }
-            val done = applied.incrementAndGet()
-            if (done >= COARSE_MIN_SAMPLES &&
-              coarseSent.compareAndSet(false, true)
-            ) {
-              val flat = synchronized(sparseLock) { fillFlat(sparse, count) }
-              Log.i(
-                TAG,
-                "peaks[$requestId] coarse " +
-                  "+${SystemClock.uptimeMillis() - t0}ms applied=$done"
-              )
-              try {
-                onCoarse?.invoke(flat)
-              } catch (e: Exception) {
-                Log.w(TAG, "peaks[$requestId] coarse emit failed")
-              }
-            }
-          }
+          pullLane(
+            host, handle, buf, lo, hi,
+            total <= 0, provisionalCap, probeRefused
+          )
         }
-      }.forEach { it.await() }
+      }
+      val decoding = async(Dispatchers.IO) {
+        streamDecode(
+          buf, total, count, slices, durationUs, lastPtsUs,
+          maybeCoarse
+        )
+      }
+      // A lane's typed failure propagates through `await` — the scope
+      // cancels the decode lane and sibling stripes; a lane that
+      // abandons returns normally after marking its hole dead. The
+      // decode lane's own failure is captured, not thrown yet: an
+      // incomplete pull means the pull's refusal is the honest cause.
+      pullers.forEach { it.await() }
+      buf.markPullDone()
+      try {
+        decoding.await()
+      } catch (e: CancellationException) {
+        throw e
+      } catch (e: Exception) {
+        decodeError = e
+      }
     }
-    // Coverage floor: below it the filled profile would be mostly
-    // nearest-measured copies — honest bars, but the tracker persists
-    // the result as finished and never retries. Degrade to the
-    // whole-file sweep, which measures every bucket.
-    if (applied.get() < SAMPLED_MIN_COVERAGE) {
-      Log.w(
-        TAG,
-        "peaks[$requestId] sampled under-covered " +
-          "${applied.get()}/$SAMPLED_POINTS — falling back"
+
+    if (!buf.pullComplete()) {
+      // A lane abandoned: decode stopped at the dead hole. Emit what
+      // was measured (prefix bars are honest) and surface a typed
+      // failure so the tracker's retry heals off committed bytes —
+      // hits on the next attempt return instantly. The pull's refusal
+      // kind wins over whatever the starved decode surfaced.
+      emitCoarse()
+      throw CodedException(
+        probeRefused.get() ?: "transient",
+        "stream pull stopped before end of stream",
+        null
       )
-      return null
     }
-    val flat = synchronized(sparseLock) { fillFlat(sparse, count) }
+    decodeError?.let { throw it }
+    val flat = buildFlat()
+      ?: throw CodedException("invalid-response", "no decodable audio", null)
     Log.i(
       TAG,
-      "peaks[$requestId] sampled-done " +
-        "+${SystemClock.uptimeMillis() - t0}ms " +
-        "samples=${applied.get()} fetched=${budget.get()} probes=${probeCalls.get()}"
+      "peaks[$requestId] streamed-done +${SystemClock.uptimeMillis() - t0}ms " +
+        "slices=${slices.size} fetched=${buf.fetchedBytes.get()} " +
+        "probes=${buf.probeCalls.get()}"
     )
     return flat
   }
 
-  /** One extractor+codec lane's share of the sweep: seeks to its
-   *  strided slice of evenly spaced media times and decodes a bounded
-   *  PCM window at each, reporting per-window RMS to the merger. A
-   *  lane's own extractor/codec failures end the lane only — sibling
-   *  lanes still deliver their coverage. */
-  private suspend fun sampleLane(
-    requestId: String,
+  /** One stripe's sequential probe pull: bounded ranged GETs from `lo`
+   *  to `hi`, each committed into the shared sparse store (player
+   *  prefetch). A refused or empty probe retries with a short backoff;
+   *  three in a row abandons the stripe — the decode lane ends at the
+   *  dead hole and the caller's typed failure lets the tracker retry
+   *  re-probe off committed hits. `openEnded` (unknown total) reaching
+   *  `hi` without a confirmed EOF means the stream outruns the cap —
+   *  the same size refusal the local path applies. */
+  private suspend fun pullLane(
     host: PluginHost,
     handle: String,
-    total: Long,
-    budget: AtomicLong,
-    probeCalls: AtomicLong,
-    lane: Int,
-    lanes: Int,
-    durationUs: Long,
-    durationMs: Double,
-    count: Int,
-    job: Job?,
-    probeWindow: Long,
+    buf: PullBuffer,
+    lo: Long,
+    hi: Long,
+    openEnded: Boolean,
+    provisionalCap: Boolean,
     probeRefused: AtomicReference<String?>,
-    onSample: (mediaMs: Double, pcmMs: Double, windows: List<Double>) -> Unit,
   ) {
-    val reader = ProbeDataReader(
-      host, handle, total, budget, probeCalls, probeWindow, probeRefused
-    )
+    var pos = lo
+    var strikes = 0
+    while (pos < hi) {
+      coroutineContext.ensureActive()
+      // Another lane already died — bytes past its hole can never be
+      // decoded, so this stripe stops spending probes on them.
+      if (buf.aborted) return
+      val want = minOf(PULL_CHUNK_BYTES.toLong(), hi - pos)
+      val res = try {
+        host.streamProbe(handle, pos.toULong(), want.toULong(), true)
+      } catch (e: StreamException) {
+        recordRefusal(probeRefused, seamKind(e))
+        if (++strikes >= LANE_MAX_STRIKES) {
+          buf.abandonFrom(pos)
+          return
+        }
+        delay(LANE_STRIKE_BACKOFF_MS * strikes)
+        continue
+      } catch (e: CancellationException) {
+        throw e
+      } catch (e: Exception) {
+        recordRefusal(probeRefused, "transient")
+        if (++strikes >= LANE_MAX_STRIKES) {
+          buf.abandonFrom(pos)
+          return
+        }
+        delay(LANE_STRIKE_BACKOFF_MS * strikes)
+        continue
+      }
+      buf.probeCalls.incrementAndGet()
+      if (res.data.isEmpty()) {
+        if (res.eof) {
+          buf.observeEof(pos)
+          return
+        }
+        // A fetch on a hole returned nothing — a refusal without a
+        // classified kind; strike and retry rather than fabricate EOF.
+        recordRefusal(probeRefused, "transient")
+        if (++strikes >= LANE_MAX_STRIKES) {
+          buf.abandonFrom(pos)
+          return
+        }
+        delay(LANE_STRIKE_BACKOFF_MS * strikes)
+        continue
+      }
+      buf.put(pos, res.data)
+      buf.fetchedBytes.addAndGet(res.data.size.toLong())
+      pos += res.data.size
+      res.total?.let { buf.observeTotal(it.toLong()) }
+      if (res.eof) {
+        buf.observeEof(pos)
+        return
+      }
+      strikes = 0
+    }
+    if (openEnded) {
+      // Unknown-total lane reached the cap without ever seeing EOF —
+      // the stream is larger than the decorative bound.
+      throw CodedException(
+        if (provisionalCap) "not-applicable" else "budget-exceeded",
+        "stream too large for peak extraction",
+        null
+      )
+    }
+  }
+
+  /** Forward demux+decode over the pull buffer — the bundled extractor
+   *  drives a blocking sparse reader that parks on uncommitted holes
+   *  until a stripe lands them (or the pull ends/abandons → EOF). Each
+   *  decoded buffer folds straight into `slices` by presentation time
+   *  so no PCM ever spills to disk; `maybeCoarse` fires once past the
+   *  coarse fraction. End-of-input means truly drained (pull done) or
+   *  truncated at a dead hole — the caller checks `buf.pullComplete`. */
+  private suspend fun streamDecode(
+    buf: PullBuffer,
+    total: Long,
+    count: Int,
+    slices: TreeMap<Long, DoubleArray>,
+    durationUs: AtomicLong,
+    lastPtsUs: AtomicLong,
+    maybeCoarse: () -> Unit,
+  ) {
+    // The decode lane's OWN job — a cancelled scope (puller failure,
+    // tracker cancel) must unwind a reader parked on the frontier,
+    // which is exactly where the coroutine's ensureActive can't reach.
+    val self = coroutineContext[Job]
+    val reader = PullReader(buf) { self?.isActive != false }
     val pump = SampleQueue()
     val adapter = BundledExtractorsAdapter(DefaultExtractorsFactory())
     var codec: MediaCodec? = null
     try {
-      adapter.init(reader, Uri.EMPTY, emptyMap(), 0, total, pump)
-      val format = awaitTrackFormat(reader, adapter, pump, total, job) ?: return
-      val mime = format.sampleMimeType ?: return
+      adapter.init(
+        reader, Uri.EMPTY, emptyMap(), 0L,
+        if (total > 0) total else C.LENGTH_UNSET.toLong(), pump
+      )
+      val ph = PositionHolder()
+      var pulls = 0
+      while (pump.audioFormat === null && pulls++ < FORMAT_PARSE_PULLS) {
+        coroutineContext.ensureActive()
+        when (adapter.read(ph)) {
+          Extractor.RESULT_SEEK ->
+            reposition(reader, adapter, pump, ph.position, total)
+          Extractor.RESULT_END_OF_INPUT -> break
+        }
+      }
+      val format = pump.audioFormat
+        ?: throw CodedException("invalid-response", "no audio track", null)
+      val mime = format.sampleMimeType
+        ?: throw CodedException("invalid-response", "audio track has no mime", null)
       val decoder = try {
         MediaCodec.createDecoderByType(mime)
-      } catch (_: Exception) {
-        return
+      } catch (e: Exception) {
+        throw CodedException("invalid-response", "no decoder for $mime", e)
       }
       codec = decoder
       decoder.configure(codecFormat(format), null, null, 0)
       decoder.start()
-      for (point in lane until SAMPLED_POINTS step lanes) {
-        job?.ensureActive()
-        val targetUs = durationUs * (point * 2L + 1) / (SAMPLED_POINTS * 2L)
-        val wt = SystemClock.uptimeMillis()
-        val fetchBefore = reader.srcFetched.get()
-        val callsBefore = reader.srcCalls.get()
-        val pcm = sampleWindowPcm(
-          reader, adapter, pump, decoder, format, total, targetUs, job
-        )
-        Log.d(
-          TAG,
-          "peaks[$requestId] lane=$lane point=$point " +
-            "+${SystemClock.uptimeMillis() - wt}ms " +
-            "seek->${(pcm?.mediaMs ?: -1.0).toLong()}ms " +
-            "pcmMs=${(pcm?.pcmMs ?: 0.0).toLong()} " +
-            "fetched+${reader.srcFetched.get() - fetchBefore} " +
-            "probes+${reader.srcCalls.get() - callsBefore}"
-        )
-        if (pcm === null) {
-          continue
+      var channels = format.channelCount
+      var sampleRate = format.sampleRate
+      var pcmEncoding = AudioFormat.ENCODING_PCM_16BIT
+      var pcmBytes = 0L
+      val info = MediaCodec.BufferInfo()
+      var inputEOS = false
+      var outputEOS = false
+      var parseEnded = false
+      val deadline = SystemClock.uptimeMillis() + DECODE_DEADLINE_MS
+      while (!outputEOS) {
+        coroutineContext.ensureActive()
+        if (SystemClock.uptimeMillis() > deadline) {
+          throw CodedException("unavailable", "audio decode timed out", null)
         }
-        // A sample claims only the buckets its PCM honestly covers —
-        // capped so an over-long window can't paint the whole row.
-        val bucketMs = durationMs / count
-        val windows = minOf(
-          8,
-          maxOf(1, ceil(pcm.pcmMs / bucketMs).toInt()),
-        )
-        onSample(
-          pcm.mediaMs,
-          pcm.pcmMs,
-          rmsWindows(
-            ByteBuffer.wrap(pcm.data).order(ByteOrder.LITTLE_ENDIAN),
-            pcm.data.size.toLong(),
-            pcm.channels,
-            pcm.floatPcm,
-            windows,
-            job,
-          ),
-        )
-      }
-    } catch (e: CancellationException) {
-      throw e
-    } catch (_: Exception) {
-      // Lane-local failure — the sweep keeps the lanes that did land.
-    } finally {
-      quiet("lane codec stop") { codec?.stop() }
-      quiet("lane codec release") { codec?.release() }
-      quiet("lane extractor release") { adapter.release() }
-    }
-  }
-
-  /** One decoded sample window: PCM bytes plus the negotiated shape,
-   *  at the extractor's own post-seek media time — never a guessed
-   *  offset. `pcmMs` is the covered media span measured off the
-   *  decoded output timestamps (falling back to the byte count when a
-   *  codec stamps nothing). */
-  private class SamplePcm(
-    val mediaMs: Double,
-    val pcmMs: Double,
-    val data: ByteArray,
-    val channels: Int,
-    val floatPcm: Boolean,
-  )
-
-  /**
-   * Seek → bounded decode at one sample point, driven through the
-   * bundled extractor: `adapter.seek` posts the target, `read()`
-   * repositions the probe reader at the returned byte offset and
-   * demuxes samples into `pump.samples`; each whole access unit feeds
-   * the codec at most `SAMPLE_FEED_US` of media past the first
-   * delivered sample and keeps at most `SAMPLE_PCM_MS` of decoded
-   * audio. `null` means the point produced nothing honest (dead
-   * seek, empty decode).
-   */
-  private fun sampleWindowPcm(
-    reader: ProbeDataReader,
-    adapter: BundledExtractorsAdapter,
-    pump: SampleQueue,
-    decoder: MediaCodec,
-    trackFormat: Format,
-    total: Long,
-    targetUs: Long,
-    job: Job?,
-  ): SamplePcm? {
-    job?.ensureActive()
-    pump.samples.clear()
-    // Extractor.seek takes (byte position, timeUs) — resolve the
-    // media-time target to a byte offset through the container's
-    // SeekMap, re-anchor the reader there with a fresh input (stale
-    // peek bytes must not splice onto the new position), then reset
-    // the extractor's parser state.
-    val seekMap = pump.seekMap ?: return null
-    val bytePos = try {
-      seekMap.getSeekPoints(targetUs).first.position
-    } catch (_: Exception) {
-      return null
-    }
-    try {
-      adapter.seek(bytePos, targetUs)
-      reposition(reader, adapter, pump, bytePos, total)
-    } catch (_: Exception) {
-      return null
-    }
-    try {
-      decoder.flush()
-    } catch (_: Exception) {
-      return null
-    }
-    // Shape comes from the demuxed track format first — a codec that
-    // never reports OUTPUT_FORMAT_CHANGED would otherwise starve the
-    // early-exit math and decode the whole feed bound per window.
-    var channels = trackFormat.channelCount
-    var sampleRate = trackFormat.sampleRate
-    var pcmEncoding = AudioFormat.ENCODING_PCM_16BIT
-    var pcmBytes = 0L
-    var firstPts = -1L
-    var lastPts = -1L
-    var firstSampleUs = -1L
-    val out = ByteArrayOutputStream(SAMPLE_PCM_CAP_BYTES.coerceAtMost(256 * 1024))
-    val info = MediaCodec.BufferInfo()
-    val ph = PositionHolder()
-    var inputEOS = false
-    var parseEnded = false
-    var fedPackets = 0
-    var loops = 0
-    while (true) {
-      job?.ensureActive()
-      if (loops++ > SAMPLE_MAX_LOOPS) {
-        break
-      }
-      if (!inputEOS) {
-        val inIdx = decoder.dequeueInputBuffer(DEQUEUE_US)
-        if (inIdx >= 0) {
-          var s = pump.samples.removeFirstOrNull()
-          var pulls = 0
-          while ((s === null || s.timeUs < 0) && !parseEnded &&
-            pulls++ < SAMPLE_PARSE_PULLS
-          ) {
-            if (s !== null) {
-              // Untimestamped access unit — unplaceable, drop it and
-              // keep pulling rather than feed the codec a lie.
-              s = null
-              continue
-            }
-            when (adapter.read(ph)) {
-              Extractor.RESULT_SEEK -> {
-                try {
-                  reposition(reader, adapter, pump, ph.position, total)
-                } catch (_: Exception) {
-                  // A broken re-anchor only ends this window's feed —
-                  // decode what already queued and report the honest
-                  // remainder instead of dying to the next point.
-                  parseEnded = true
-                }
+        if (!inputEOS) {
+          val inIdx = decoder.dequeueInputBuffer(DEQUEUE_US)
+          if (inIdx >= 0) {
+            var s = pump.samples.removeFirstOrNull()
+            var innerPulls = 0
+            while ((s === null || s.timeUs < 0) && !parseEnded &&
+              innerPulls++ < SAMPLE_PARSE_PULLS
+            ) {
+              if (s !== null) {
+                // Untimestamped access unit — unplaceable, drop it and
+                // keep pulling rather than feed the codec a lie.
+                s = null
+                continue
               }
-              Extractor.RESULT_END_OF_INPUT -> parseEnded = true
+              when (adapter.read(ph)) {
+                Extractor.RESULT_SEEK ->
+                  reposition(reader, adapter, pump, ph.position, total)
+                Extractor.RESULT_END_OF_INPUT -> parseEnded = true
+              }
+              s = pump.samples.removeFirstOrNull()
             }
-            s = pump.samples.removeFirstOrNull()
-          }
-          val overFeed = s !== null && firstSampleUs >= 0 &&
-            s.timeUs - firstSampleUs > SAMPLE_FEED_US
-          if (s === null || overFeed || fedPackets > SAMPLE_MAX_PACKETS) {
-            decoder.queueInputBuffer(
-              inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM
-            )
-            inputEOS = true
-          } else {
-            if (firstSampleUs < 0) {
-              firstSampleUs = s.timeUs
-            }
-            val buf = decoder.getInputBuffer(inIdx)
-            if (buf === null || buf.remaining() < s.data.size) {
-              // Access units must stay whole — a packet past the
-              // codec's input capacity ends the window's feed.
+            val ib = decoder.getInputBuffer(inIdx)
+            if (s === null || s.timeUs < 0 || ib === null ||
+              ib.remaining() < s.data.size
+            ) {
+              // No more honest samples (drained, wedged, or one too
+              // large for the codec's input slot) — end the feed.
               decoder.queueInputBuffer(
                 inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM
               )
               inputEOS = true
             } else {
-              buf.put(s.data)
+              ib.put(s.data)
               decoder.queueInputBuffer(inIdx, 0, s.data.size, s.timeUs, 0)
-              fedPackets += 1
             }
           }
         }
-      }
-      val outIdx = decoder.dequeueOutputBuffer(info, DEQUEUE_US)
-      when {
-        outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-          val outFormat = decoder.outputFormat
-          channels = formatInt(outFormat, MediaFormat.KEY_CHANNEL_COUNT)
-            ?: channels
-          sampleRate = formatInt(outFormat, MediaFormat.KEY_SAMPLE_RATE)
-            ?: sampleRate
-          pcmEncoding = formatInt(outFormat, MediaFormat.KEY_PCM_ENCODING)
-            ?: AudioFormat.ENCODING_PCM_16BIT
-          if (pcmEncoding != AudioFormat.ENCODING_PCM_16BIT &&
-            pcmEncoding != AudioFormat.ENCODING_PCM_FLOAT
-          ) {
-            return null
+        val outIdx = decoder.dequeueOutputBuffer(info, DEQUEUE_US)
+        when {
+          outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+            val outFormat = decoder.outputFormat
+            channels = formatInt(outFormat, MediaFormat.KEY_CHANNEL_COUNT)
+              ?: channels
+            sampleRate = formatInt(outFormat, MediaFormat.KEY_SAMPLE_RATE)
+              ?: sampleRate
+            pcmEncoding = formatInt(outFormat, MediaFormat.KEY_PCM_ENCODING)
+              ?: AudioFormat.ENCODING_PCM_16BIT
+            if (pcmEncoding != AudioFormat.ENCODING_PCM_16BIT &&
+              pcmEncoding != AudioFormat.ENCODING_PCM_FLOAT
+            ) {
+              throw CodedException(
+                "unavailable", "unsupported PCM encoding $pcmEncoding", null
+              )
+            }
           }
-        }
-        outIdx >= 0 -> {
-          if (info.size > 0) {
-            val buf = decoder.getOutputBuffer(outIdx)
-            if (buf !== null && pcmBytes + info.size <= SAMPLE_PCM_CAP_BYTES) {
-              val slice = ByteArray(info.size)
-              buf.position(info.offset)
-              buf.limit(info.offset + info.size)
-              buf.get(slice)
-              out.write(slice)
-              pcmBytes += info.size
-              if (firstPts < 0) {
-                firstPts = info.presentationTimeUs
+          outIdx >= 0 -> {
+            if (info.size > 0) {
+              if (pcmBytes + info.size > MAX_PCM_BYTES) {
+                throw CodedException(
+                  "budget-exceeded", "decoded audio too large for peaks", null
+                )
               }
-              lastPts = info.presentationTimeUs
+              pcmBytes += info.size
+              val ob = decoder.getOutputBuffer(outIdx)
+              if (ob !== null && channels > 0 && sampleRate > 0) {
+                ob.position(info.offset)
+                ob.limit(info.offset + info.size)
+                accumPcm(
+                  slices, info.presentationTimeUs, ob,
+                  channels, sampleRate,
+                  pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT
+                )
+              }
+              lastPtsUs.updateAndGet { maxOf(it, info.presentationTimeUs) }
             }
-          }
-          decoder.releaseOutputBuffer(outIdx, false)
-          if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-            break
-          }
-          // Enough real audio for the window — stop early instead of
-          // draining the rest of the feed bound. Past the cap more
-          // slices would only be dropped — stop there too.
-          if (pcmBytes >= SAMPLE_PCM_CAP_BYTES) {
-            break
-          }
-          if (sampleRate > 0 && channels > 0) {
-            val bytesPerMs =
-              channels.toLong() *
-              (if (pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT) 4 else 2) *
-              sampleRate / 1000
-            if (bytesPerMs > 0 && pcmBytes >= SAMPLE_PCM_MS * bytesPerMs) {
-              break
+            decoder.releaseOutputBuffer(outIdx, false)
+            if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+              outputEOS = true
             }
           }
         }
-      }
-    }
-    if (pcmBytes <= 0 || channels <= 0) {
-      return null
-    }
-    val bytesMs = if (sampleRate > 0) {
-      pcmBytes * 1000.0 /
-        (channels * (if (pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT) 4 else 2) *
-          sampleRate)
-    } else {
-      0.0
-    }
-    val ptsMs = if (firstPts >= 0 && lastPts > firstPts) {
-      (lastPts - firstPts) / 1000.0
-    } else {
-      0.0
-    }
-    val pcmMs = maxOf(ptsMs, bytesMs)
-    if (pcmMs <= 0) {
-      return null
-    }
-    return SamplePcm(
-      (if (firstPts >= 0) firstPts else firstSampleUs) / 1000.0,
-      pcmMs,
-      out.toByteArray(),
-      channels,
-      pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT,
-    )
-  }
-
-  /** What the seed pass proves about a stream: a seekable demuxer and
-   *  its media duration — without both, the sweep can't sample. */
-  private class SeedInfo(
-    val durationUs: Long,
-    val seekable: Boolean,
-  )
-
-  /** One bundled extractor over the probe reader, parsed just far
-   *  enough for the audio track's format and the SeekMap duration to
-   *  land — head bytes the player will later reuse. */
-  private fun seedParse(
-    host: PluginHost,
-    handle: String,
-    total: Long,
-    budget: AtomicLong,
-    probeCalls: AtomicLong,
-    job: Job?,
-    probeRefused: AtomicReference<String?>,
-  ): SeedInfo? {
-    val reader = ProbeDataReader(
-      host, handle, total, budget, probeCalls,
-      PROBE_READ_MAX.toLong(), probeRefused
-    )
-    val pump = SampleQueue()
-    val adapter = BundledExtractorsAdapter(DefaultExtractorsFactory())
-    try {
-      adapter.init(reader, Uri.EMPTY, emptyMap(), 0, total, pump)
-      val ph = PositionHolder()
-      var pulls = 0
-      while ((pump.audioFormat === null || pump.durationUs <= 0) &&
-        pulls++ < SEED_PARSE_PULLS
-      ) {
-        job?.ensureActive()
-        when (adapter.read(ph)) {
-          Extractor.RESULT_SEEK -> reposition(reader, adapter, pump, ph.position, total)
-          Extractor.RESULT_END_OF_INPUT -> break
+        // The SeekMap may land mid-parse — duration settles whenever
+        // the container publishes it.
+        val dur = pump.durationUs
+        if (dur > 0) {
+          if (dur > PEAKS_MAX_DECODE_MS * 1000) {
+            throw CodedException(
+              "budget-exceeded", "track too long for decorative peaks", null
+            )
+          }
+          durationUs.set(dur)
         }
+        maybeCoarse()
       }
+    } catch (e: CodedException) {
+      throw e
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      throw CodedException(
+        "invalid-response", e.message ?: "audio decode failed", e
+      )
     } finally {
-      adapter.release()
+      quiet("decode codec stop") { codec?.stop() }
+      quiet("decode codec release") { codec?.release() }
+      quiet("decode extractor release") { adapter.release() }
     }
-    if (pump.audioFormat === null) {
-      return null
-    }
-    return SeedInfo(pump.durationUs, pump.seekable)
   }
 
   /**
-   * Honor a RESULT_SEEK: re-anchor the probe reader at the parser's
-   *  requested byte offset AND re-init the adapter there. `init`
-   *  always swaps in a fresh DefaultExtractorInput (it only sniffs
-   *  when no extractor was picked yet), so the stale peek buffer the
-   *  old input carried can never splice head bytes onto the new
-   *  stream position.
+   * Honor a RESULT_SEEK: re-anchor the pull reader at the parser's
+   * requested byte offset AND re-init the adapter there. `init`
+   * always swaps in a fresh DefaultExtractorInput (it only sniffs
+   * when no extractor was picked yet), so the stale peek buffer the
+   * old input carried can never splice head bytes onto the new
+   * stream position. Samples queued from the old position are stale —
+   * drop them rather than feed the codec pre-seek access units.
    */
   private fun reposition(
-    reader: ProbeDataReader,
+    reader: PullReader,
     adapter: BundledExtractorsAdapter,
     pump: SampleQueue,
     position: Long,
     total: Long,
   ) {
+    pump.samples.clear()
     reader.position = position
     adapter.init(
-      reader, Uri.EMPTY, emptyMap(), position, total - position, pump
+      reader, Uri.EMPTY, emptyMap(), position,
+      if (total > 0) total - position else C.LENGTH_UNSET.toLong(), pump
     )
-  }
-
-  /** Parse until the audio track's format AND SeekMap land — the
-   *  codec needs the first to configure; every window seek needs the
-   *  second to resolve media-time → byte offset. */
-  private fun awaitTrackFormat(
-    reader: ProbeDataReader,
-    adapter: BundledExtractorsAdapter,
-    pump: SampleQueue,
-    total: Long,
-    job: Job?,
-  ): Format? {
-    val ph = PositionHolder()
-    var pulls = 0
-    while ((pump.audioFormat === null || pump.seekMap === null) &&
-      pulls++ < SEED_PARSE_PULLS
-    ) {
-      job?.ensureActive()
-      when (adapter.read(ph)) {
-        Extractor.RESULT_SEEK -> reposition(reader, adapter, pump, ph.position, total)
-        Extractor.RESULT_END_OF_INPUT -> break
-      }
-    }
-    return pump.audioFormat
   }
 
   /** MediaCodec format from the demuxed track — mime, shape, and the
@@ -1092,122 +797,112 @@ internal class AuqwWaveformPeaks(
     return mf
   }
 
-  /**
-   * Raw `[up, down]` RMS windows over a little-endian PCM buffer — the
-   * shared scan `bucket` runs on the whole-file spill and each decoded
-   * sample runs on its own window: stereo+ feeds even channels to `up`
-   * and odd to `down`; mono splits by sign. Returns `count` pairs.
-   */
-  private fun rmsWindows(
+  /** Fold one decoded PCM buffer into `slices`: every frame's squared
+   *  magnitude accumulates under its 50 ms media slice — stereo+ feeds
+   *  even channels to `up` and odd to `down`, mono splits by sign —
+   *  the same split `rmsWindows` applies to whole-file PCM. Runs on
+   *  the decode lane only, so `slices` needs no lock. */
+  private fun accumPcm(
+    slices: TreeMap<Long, DoubleArray>,
+    ptsUs: Long,
     buf: ByteBuffer,
-    pcmBytes: Long,
     channels: Int,
+    sampleRate: Int,
     floatPcm: Boolean,
-    count: Int,
-    job: Job?,
-  ): List<Double> {
-    val out = ArrayList<Double>(count * 2)
-    if (count <= 0 || channels <= 0 || pcmBytes <= 0) {
-      return out
-    }
-    val sampleCount: Int
+  ) {
+    if (ptsUs < 0 || channels <= 0 || sampleRate <= 0) return
+    val stereo = channels >= 2
+    val bps = if (floatPcm) 4 else 2
+    val frames = buf.remaining() / (channels * bps)
+    if (frames <= 0) return
     val sample: (Int) -> Double
     if (floatPcm) {
-      val floats = buf.asFloatBuffer()
-      sampleCount = floats.remaining()
+      val floats = buf.order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
       sample = { i -> floats.get(i).toDouble() }
     } else {
-      val shorts = buf.asShortBuffer()
-      sampleCount = shorts.remaining()
+      val shorts = buf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
       sample = { i -> shorts.get(i).toDouble() / 32768.0 }
     }
-    val frames = sampleCount / channels
-    if (frames <= 0) {
-      return out
-    }
-    val stereo = channels >= 2
-    for (w in 0 until count) {
-      job?.ensureActive()
-      val from = (w.toLong() * frames / count).toInt()
-      val to = minOf(
-        frames,
-        maxOf(((w + 1).toLong() * frames / count).toInt(), from + 1)
-      )
-      var upSq = 0.0
-      var downSq = 0.0
-      var upN = 0
-      var downN = 0
-      for (f in from until to) {
-        val base = f * channels
-        if (stereo) {
-          for (c in 0 until channels) {
-            val v = sample(base + c)
-            if (c % 2 == 0) {
-              upSq += v * v
-              upN += 1
-            } else {
-              downSq += v * v
-              downN += 1
-            }
-          }
-        } else {
-          val v = sample(base)
-          if (v >= 0) {
-            upSq += v * v
-            upN += 1
+    val frameUs = 1_000_000.0 / sampleRate
+    var us = ptsUs.toDouble()
+    var acc = slices.getOrPut(us.toLong() / SLICE_US) { DoubleArray(4) }
+    var nextSliceUs = ((us.toLong() / SLICE_US) + 1).toDouble() * SLICE_US
+    for (f in 0 until frames) {
+      if (us >= nextSliceUs) {
+        val idx = us.toLong() / SLICE_US
+        acc = slices.getOrPut(idx) { DoubleArray(4) }
+        nextSliceUs = (idx + 1).toDouble() * SLICE_US
+      }
+      val base = f * channels
+      if (stereo) {
+        var c = 0
+        while (c < channels) {
+          val v = sample(base + c)
+          if (c % 2 == 0) {
+            acc[0] += v * v
+            acc[1] += 1
           } else {
-            downSq += v * v
-            downN += 1
+            acc[2] += v * v
+            acc[3] += 1
           }
+          c += 1
+        }
+      } else {
+        val v = sample(base)
+        if (v >= 0) {
+          acc[0] += v * v
+          acc[1] += 1
+        } else {
+          acc[2] += v * v
+          acc[3] += 1
         }
       }
-      out.add(if (upN > 0) sqrt(upSq / upN) else 0.0)
-      out.add(if (downN > 0) sqrt(downSq / downN) else 0.0)
+      us += frameUs
     }
-    return out
   }
 
-  /** Sparse → dense: unmeasured buckets take their nearest measured
-   *  neighbor (ties prefer the earlier one — a seek bar reads
-   *  left-to-right). All-empty input is honest zeros. Callers hold
-   *  the sparse lock. */
-  private fun fillFlat(
-    sparse: Array<DoubleArray?>,
+  /** Fold 50 ms slices into `count` sparse `[up, down]` windows — a
+   *  slice lands in the window containing its midpoint, sum-of-squares
+   *  merged first so the RMS root is taken once per window. */
+  private fun foldSlices(
+    slices: Map<Long, DoubleArray>,
     count: Int,
-  ): List<Double> {
-    val out = ArrayList<Double>(count * 2)
-    for (i in 0 until count) {
-      var w = sparse[i]
-      if (w === null) {
-        var d = 1
-        while (d < count) {
-          val a = if (i - d >= 0) sparse[i - d] else null
-          if (a !== null) {
-            w = a
-            break
-          }
-          val b = if (i + d < count) sparse[i + d] else null
-          if (b !== null) {
-            w = b
-            break
-          }
-          d += 1
-        }
-      }
-      out.add(w?.get(0) ?: 0.0)
-      out.add(w?.get(1) ?: 0.0)
+    durationUs: Long,
+  ): Array<DoubleArray?> {
+    val sparse = arrayOfNulls<DoubleArray>(count)
+    if (count <= 0 || durationUs <= 0) {
+      return sparse
     }
-    return out
+    val bucketUs = durationUs.toDouble() / count
+    for ((idx, a) in slices) {
+      val w = ((idx * SLICE_US + SLICE_US / 2) / bucketUs)
+        .toInt().coerceIn(0, count - 1)
+      val prev = sparse[w]
+      if (prev === null) {
+        sparse[w] = a.copyOf()
+      } else {
+        prev[0] += a[0]
+        prev[1] += a[1]
+        prev[2] += a[2]
+        prev[3] += a[3]
+      }
+    }
+    for (i in sparse.indices) {
+      val a = sparse[i] ?: continue
+      sparse[i] = doubleArrayOf(
+        if (a[1] > 0) sqrt(a[0] / a[1]) else 0.0,
+        if (a[3] > 0) sqrt(a[2] / a[3]) else 0.0
+      )
+    }
+    return sparse
   }
 
-  /** MediaExtractor + MediaCodec over `setSource` → PCM spilled to
-   *  `pcmFile` (never the heap — a long stereo track is ~92 MiB of
-   *  PCM alongside the player), plus the negotiated shape the
-   *  bucketer needs. The source is either the pulled stream bytes
-   *  or a local file/content URI — decode is identical from there,
-   *  and `encodedCap` bounds consumed compressed bytes for sources
-   *  whose size was unknown (local paths that couldn't be stat'ed).
-   */
+  /** MediaExtractor + MediaCodec over a local file/content URI → PCM
+   *  spilled to `pcmFile` (never the heap — a long stereo track is
+   *  ~92 MiB of PCM alongside the player), plus the negotiated shape
+   *  the bucketer needs. `encodedCap` bounds consumed compressed
+   *  bytes for sources whose size was unknown (local paths that
+   *  couldn't be stat'ed). */
   private suspend fun decodePcm(
     setSource: (MediaExtractor) -> Unit,
     encodedCap: Long,
@@ -1384,18 +1079,116 @@ internal class AuqwWaveformPeaks(
     }
   }
 
+  /**
+   * Raw `[up, down]` RMS windows over a little-endian PCM buffer —
+   * stereo+ feeds even channels to `up` and odd to `down`; mono splits
+   * by sign. Returns `count` pairs.
+   */
+  private fun rmsWindows(
+    buf: ByteBuffer,
+    pcmBytes: Long,
+    channels: Int,
+    floatPcm: Boolean,
+    count: Int,
+    job: Job?,
+  ): List<Double> {
+    val out = ArrayList<Double>(count * 2)
+    if (count <= 0 || channels <= 0 || pcmBytes <= 0) {
+      return out
+    }
+    val sampleCount: Int
+    val sample: (Int) -> Double
+    if (floatPcm) {
+      val floats = buf.asFloatBuffer()
+      sampleCount = floats.remaining()
+      sample = { i -> floats.get(i).toDouble() }
+    } else {
+      val shorts = buf.asShortBuffer()
+      sampleCount = shorts.remaining()
+      sample = { i -> shorts.get(i).toDouble() / 32768.0 }
+    }
+    val frames = sampleCount / channels
+    if (frames <= 0) {
+      return out
+    }
+    val stereo = channels >= 2
+    for (w in 0 until count) {
+      job?.ensureActive()
+      val from = (w.toLong() * frames / count).toInt()
+      val to = minOf(
+        frames,
+        maxOf(((w + 1).toLong() * frames / count).toInt(), from + 1)
+      )
+      var upSq = 0.0
+      var downSq = 0.0
+      var upN = 0
+      var downN = 0
+      for (f in from until to) {
+        val base = f * channels
+        if (stereo) {
+          for (c in 0 until channels) {
+            val v = sample(base + c)
+            if (c % 2 == 0) {
+              upSq += v * v
+              upN += 1
+            } else {
+              downSq += v * v
+              downN += 1
+            }
+          }
+        } else {
+          val v = sample(base)
+          if (v >= 0) {
+            upSq += v * v
+            upN += 1
+          } else {
+            downSq += v * v
+            downN += 1
+          }
+        }
+      }
+      out.add(if (upN > 0) sqrt(upSq / upN) else 0.0)
+      out.add(if (downN > 0) sqrt(downSq / downN) else 0.0)
+    }
+    return out
+  }
+
+  /** Sparse → dense: unmeasured buckets take their nearest measured
+   *  neighbor (ties prefer the earlier one — a seek bar reads
+   *  left-to-right). All-empty input is honest zeros. */
+  private fun fillFlat(
+    sparse: Array<DoubleArray?>,
+    count: Int,
+  ): List<Double> {
+    val out = ArrayList<Double>(count * 2)
+    for (i in 0 until count) {
+      var w = sparse[i]
+      if (w === null) {
+        var d = 1
+        while (d < count) {
+          val a = if (i - d >= 0) sparse[i - d] else null
+          if (a !== null) {
+            w = a
+            break
+          }
+          val b = if (i + d < count) sparse[i + d] else null
+          if (b !== null) {
+            w = b
+            break
+          }
+          d += 1
+        }
+      }
+      out.add(w?.get(0) ?: 0.0)
+      out.add(w?.get(1) ?: 0.0)
+    }
+    return out
+  }
+
   private fun formatInt(format: MediaFormat, key: String): Int? =
     if (!format.containsKey(key)) null
     else try {
       format.getInteger(key)
-    } catch (_: Exception) {
-      null
-    }
-
-  private fun formatLong(format: MediaFormat, key: String): Long? =
-    if (!format.containsKey(key)) null
-    else try {
-      format.getLong(key)
     } catch (_: Exception) {
       null
     }
@@ -1438,26 +1231,6 @@ private fun recordRefusal(ref: AtomicReference<String?>, kind: String) {
   }
 }
 
-/** In-memory positional source for `MediaExtractor` over the pulled
- *  encoded bytes — the stream seam's own contract shape. */
-private class ByteArrayMediaDataSource(
-  private val bytes: ByteArray,
-) : MediaDataSource() {
-  override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
-    if (position < 0 || position >= bytes.size.toLong()) return -1
-    // Long→Int narrowing is safe past this guard: n ≤ size and
-    // position < bytes.size, both under Int.MAX_VALUE.
-    val n = minOf(size.toLong(), bytes.size.toLong() - position).toInt()
-    if (n <= 0) return -1
-    System.arraycopy(bytes, position.toInt(), buffer, offset, n)
-    return n
-  }
-
-  override fun getSize(): Long = bytes.size.toLong()
-
-  override fun close() {}
-}
-
 /** An encoded sample awaiting the codec — its presentation time and
  *  whole payload, demuxed by the bundled extractor. */
 private class QueuedSample(
@@ -1467,8 +1240,8 @@ private class QueuedSample(
 
 /** The ExtractorOutput side of a bundled parse: the first audio
  *  track's format + the SeekMap's duration land as state, and every
- *  demuxed access unit queues as a QueuedSample for the window's
- *  codec loop. Non-audio tracks discard. */
+ *  demuxed access unit queues as a QueuedSample for the decode loop.
+ *  Non-audio tracks discard. */
 private class SampleQueue : ExtractorOutput {
   var audioFormat: Format? = null
   var durationUs = -1L
@@ -1542,92 +1315,170 @@ private class SampleQueue : ExtractorOutput {
   }
 }
 
-/**
- * Sequential DataReader over `streamProbe` — the bundled extractor's
- * `DefaultExtractorInput` drives it with small sequential reads, so a
- * fetched window is held and misses become the next ranged GET of
- * `windowBytes`. `position` is the cursor `seek` moves via RESULT_SEEK
- * handling in the caller. A failed probe counts one strike and dies
- * after `PROBE_MAX_STRIKES` in a row — a lone 429 or stalled reply
- * abandons the point, not the lane — while `refused` records for the
- * caller that the session itself said no. Past `budget` it fails
- * closed (EOF) — a runaway scan dies instead of pulling the whole
- * file for a decoration.
- */
-private class ProbeDataReader(
-  private val host: PluginHost,
-  private val handle: String,
-  private val size: Long,
-  private val budget: AtomicLong,
-  private val calls: AtomicLong,
-  private val windowBytes: Long,
-  private val refused: AtomicReference<String?>,
+/** The stripe pool's shared sparse store: probe-fetched chunks keyed
+ *  at their stream offset, a contiguous-prefix frontier the decode
+ *  lane reads at, and the terminal conditions a blocked reader ends
+ *  on — pull done, an abandoned hole, confirmed EOF, a known total
+ *  passed, or the job cancelled. Bytes stay resident until the sweep
+ *  ends: an extractor's internal seek may walk back into them, and at
+ *  ≤ MAX_PEAK_BYTES they cost the same footprint the old whole-pull
+ *  byte array took. */
+private class PullBuffer(
+  private val end: Long,
+) {
+  private val lock = ReentrantLock()
+  private val changed = lock.newCondition()
+  private val chunks = TreeMap<Long, ByteArray>()
+  /** Longest unbroken [0, ·) coverage — the only region a forward
+   *  reader may ever serve. */
+  @Volatile var contiguousEnd = 0L
+    private set
+  /** Lowest stripe position a lane abandoned — decode truncates here
+   *  because bytes past it can never be read in order anyway. */
+  private val deadPos = AtomicLong(Long.MAX_VALUE)
+  /** Lowest position a lane saw a confirmed EOF — an unknown total
+   *  resolves here. */
+  private val eofPos = AtomicLong(Long.MAX_VALUE)
+  /** Every pull lane has exited — nothing more will ever commit. */
+  @Volatile var pullDone = false
+    private set
+  @Volatile var knownTotal = -1L
+    private set
+  val probeCalls = AtomicLong(0)
+  val fetchedBytes = AtomicLong(0)
+  val aborted: Boolean get() = deadPos.get() != Long.MAX_VALUE
+
+  fun put(position: Long, data: ByteArray) {
+    if (data.isEmpty()) return
+    lock.lock()
+    try {
+      chunks[position] = data
+      // Extend the contiguous frontier while a chunk covers or starts
+      // exactly at it — stripes are disjoint, so one floorEntry hop
+      // per landed chunk is the whole walk.
+      while (true) {
+        val e = chunks.floorEntry(contiguousEnd) ?: break
+        val eEnd = e.key + e.value.size
+        if (eEnd <= contiguousEnd) break
+        contiguousEnd = eEnd
+      }
+      changed.signalAll()
+    } finally {
+      lock.unlock()
+    }
+  }
+
+  /** A lane gave up on `position` — readers end at the hole rather
+   *  than park on bytes that will never arrive. */
+  fun abandonFrom(position: Long) {
+    deadPos.updateAndGet { minOf(it, position) }
+    lock.lock()
+    try {
+      changed.signalAll()
+    } finally {
+      lock.unlock()
+    }
+  }
+
+  /** A lane met a confirmed EOF at `position`. */
+  fun observeEof(position: Long) {
+    eofPos.updateAndGet { minOf(it, position) }
+    lock.lock()
+    try {
+      changed.signalAll()
+    } finally {
+      lock.unlock()
+    }
+  }
+
+  fun observeTotal(total: Long) {
+    if (total > 0) {
+      knownTotal = total
+    }
+  }
+
+  /** All pull lanes exited — a blocked reader at the frontier is EOF
+   *  for real, whether the frontier reached `end` or a hole died. */
+  fun markPullDone() {
+    pullDone = true
+    lock.lock()
+    try {
+      changed.signalAll()
+    } finally {
+      lock.unlock()
+    }
+  }
+
+  /** True when the sweep's bytes fully arrived — the frontier reached
+   *  the bounded end or a lane saw a confirmed EOF inside it, with no
+   *  dead hole anywhere before them (an abandoned stripe can never
+   *  complete the prefix, whatever lands after it). */
+  fun pullComplete(): Boolean =
+    !aborted && (eofPos.get() != Long.MAX_VALUE || contiguousEnd >= end)
+
+  /** Serve committed bytes at `position` — parks on an uncommitted
+   *  hole until a stripe lands it or a terminal condition lands: pull
+   *  done at the frontier, an abandoned hole, a confirmed EOF, the
+   *  known total passed, or `alive` reporting the reader's coroutine
+   *  dead (scope cancellation can't reach a parked wait any other
+   *  way). Returns the byte count or -1 at end-of-input. */
+  fun readAt(
+    position: Long,
+    buffer: ByteArray,
+    offset: Int,
+    length: Int,
+    alive: () -> Boolean,
+  ): Int {
+    if (position < 0 || length <= 0) return -1
+    while (true) {
+      lock.lock()
+      try {
+        if (position < contiguousEnd) {
+          var remaining = minOf(length.toLong(), contiguousEnd - position)
+          var p = position
+          var wrote = 0
+          while (remaining > 0) {
+            val e = chunks.floorEntry(p) ?: break
+            val avail = e.key + e.value.size - p
+            if (avail <= 0) break
+            val n = minOf(remaining, avail).toInt()
+            System.arraycopy(
+              e.value, (p - e.key).toInt(), buffer, offset + wrote, n
+            )
+            p += n
+            wrote += n
+            remaining -= n
+          }
+          if (wrote > 0) return wrote
+        }
+        if (position >= deadPos.get() || position >= eofPos.get() ||
+          pullDone ||
+          (knownTotal > 0 && position >= knownTotal) ||
+          !alive()
+        ) {
+          return -1
+        }
+        changed.await(50, TimeUnit.MILLISECONDS)
+      } finally {
+        lock.unlock()
+      }
+    }
+  }
+}
+
+/** Blocking sequential reader over the pull buffer — the bundled
+ *  extractor's DefaultExtractorInput drives it with small reads that
+ *  park at the contiguous-prefix frontier until a stripe lands the
+ *  bytes. `position` moves on adapter-initiated repositions. */
+private class PullReader(
+  private val buf: PullBuffer,
+  private val alive: () -> Boolean,
 ) : DataReader {
   var position = 0L
 
-  // The last probe's payload — the parser's reads are small and many,
-  // so reads inside the held window never cross the JNI seam.
-  private var winStart = -1L
-  private var win = ByteArray(0)
-  private var dead = false
-  private var strikes = 0
-
-  /** This source's own probe traffic — the shared `budget` counts
-   *  payload across all lanes, these two attribute it per window. */
-  val srcFetched = AtomicLong(0)
-  val srcCalls = AtomicLong(0)
-
   override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-    if (position < 0 || position >= size || dead ||
-      budget.get() >= PROBE_BUDGET_BYTES
-    ) {
-      return -1
-    }
-    val winEnd = winStart + win.size
-    if (winStart >= 0 && position >= winStart && position < winEnd) {
-      val n = minOf(length.toLong(), winEnd - position).toInt()
-      System.arraycopy(win, (position - winStart).toInt(), buffer, offset, n)
-      position += n
-      return n
-    }
-    val want = minOf(size - position, windowBytes).toULong()
-    val result = try {
-      host.streamProbe(handle, position.toULong(), want, true)
-    } catch (e: StreamException) {
-      // A refusal keeps its seam kind — a terminal one (dead
-      // handle, invalid-response) must not decay to `transient` and
-      // retry a session that cannot serve.
-      recordRefusal(refused, seamKind(e))
-      if (++strikes >= PROBE_MAX_STRIKES) {
-        dead = true
-      }
-      return -1
-    } catch (_: Exception) {
-      recordRefusal(refused, "transient")
-      if (++strikes >= PROBE_MAX_STRIKES) {
-        dead = true
-      }
-      return -1
-    }
-    if (result.data.isEmpty()) {
-      // A refused or empty probe reports EOF to the parser — the
-      // sweep counts fewer measured windows, never fabricated ones.
-      recordRefusal(refused, "transient")
-      if (++strikes >= PROBE_MAX_STRIKES) {
-        dead = true
-      }
-      return -1
-    }
-    strikes = 0
-    calls.incrementAndGet()
-    srcCalls.incrementAndGet()
-    budget.addAndGet(result.data.size.toLong())
-    srcFetched.addAndGet(result.data.size.toLong())
-    winStart = position
-    win = result.data
-    val n = minOf(length, result.data.size)
-    System.arraycopy(result.data, 0, buffer, offset, n)
-    position += n
+    val n = buf.readAt(position, buffer, offset, length, alive)
+    if (n > 0) position += n
     return n
   }
 }
