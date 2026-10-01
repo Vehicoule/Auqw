@@ -60,6 +60,12 @@ const nodeBundle = {
   logLevel: 'warning',
 };
 
+const browserDefine = {
+  'process.env.NODE_ENV': JSON.stringify(
+    process.env.NODE_ENV === 'development' ? 'development' : 'production',
+  ),
+};
+
 // ESM main entry — Electron >= 28 loads ESM mains from `main` when the
 // package is `"type": "module"`.
 await build({
@@ -101,6 +107,7 @@ await build({
   platform: 'browser',
   target: 'chrome152',
   format: 'iife',
+  define: browserDefine,
   sourcemap: true,
   logLevel: 'warning',
   entryPoints: ['src/renderer/index.ts'],
@@ -114,6 +121,7 @@ await build({
   platform: 'browser',
   target: 'chrome152',
   format: 'iife',
+  define: browserDefine,
   sourcemap: true,
   logLevel: 'warning',
   // shared/local-paths.ts pulls node:url/node:path into this browser
