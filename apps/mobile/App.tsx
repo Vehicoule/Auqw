@@ -2551,7 +2551,7 @@ function Main({
               miniplayer pill when one is up). Hidden while the stage
               sheet owns the screen; the toast owns this slot only
               transiently. */}
-          {updateCard !== null && !expanded && (
+          {updateCard !== null && !(expanded && sheetPlayer !== null) && (
             <View
               pointerEvents="box-none"
               style={{

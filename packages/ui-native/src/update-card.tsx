@@ -105,7 +105,7 @@ export function UpdateCard({
             </Text>
           </Pressable>
         )}
-        {model.dismissible && (
+        {model.dismissible ? (
           <IconButton
             icon="close"
             size={32}
@@ -113,6 +113,11 @@ export function UpdateCard({
             accessibilityLabel={t('update.dismiss')}
             onPress={onDismiss}
           />
+        ) : (
+          // Reserve the close slot: the action verb keeps its
+          // position when a live leg (cancel) replaces a
+          // dismissible offer (install + ×).
+          model.actionLabel !== null && <View style={{ width: 32 }} />
         )}
       </View>
       {model.progress !== null && (
