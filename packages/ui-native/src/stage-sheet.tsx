@@ -1157,12 +1157,16 @@ export function StageSheet({
     expandedShared.value = expanded;
   }, [expanded, expandedShared]);
   useAnimatedReaction(
-    () => progress.value > 0.001,
+    // `expandedShared` is a tracked input, not just a fire-time read:
+    // a drag that parks the surface at progress 0 while still expanded
+    // keeps `risen` true through the release's `expanded` flip — only
+    // this second input firing parks the reaction for real.
+    () => progress.value > 0.001 || expandedShared.value,
     (risen, prev) => {
       if (risen === prev) return;
-      scheduleOnRN(setRisenOn, risen || expandedShared.value);
+      scheduleOnRN(setRisenOn, risen);
     },
-    [progress],
+    [progress, expandedShared],
   );
   // The dismiss surface's touch + a11y gate rides the morph on the
   // UI thread: on native the surface stays mounted and starts
