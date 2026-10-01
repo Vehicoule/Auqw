@@ -313,11 +313,36 @@ export const IDLE_TRANSFER: TransferModel = {
  * every dependency list.
  */
 let toastSink: ((text: string) => void) | null = null;
+// Notices can fire before the shell installs its sink (a post-
+// install "updated" receipt lands during Main's first render,
+// before the effect that sets the sink) — a pre-sink line queues
+// instead of vanishing, flushed the moment a sink attaches.
+let queuedNotices: string[] = [];
+const NOTICE_QUEUE_MAX = 8;
 
 export function setToastSink(
   sink: ((text: string) => void) | null,
 ): void {
   toastSink = sink;
+  if (sink !== null && queuedNotices.length > 0) {
+    const pending = queuedNotices;
+    queuedNotices = [];
+    for (const text of pending) {
+      sink(text);
+    }
+  }
+}
+
+/** A non-error line through the same toast sink — sparingly used
+    (post-install "updated" receipt), errors still go reportResult. */
+export function notify(text: string): void {
+  if (toastSink !== null) {
+    toastSink(text);
+    return;
+  }
+  if (queuedNotices.length < NOTICE_QUEUE_MAX) {
+    queuedNotices.push(text);
+  }
 }
 
 export function reportResult(

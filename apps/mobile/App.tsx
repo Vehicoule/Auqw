@@ -2509,16 +2509,18 @@ function Main({
               <Text variant="metadata" color="secondary">
                 {updateBanner.label}
               </Text>
-              <Pressable
-                onPress={onUpdateBannerAct}
-                accessibilityRole="button"
-                accessibilityLabel={updateBanner.actionLabel}
-                style={{ paddingHorizontal: 6, paddingVertical: 3 }}
-              >
-                <Text variant="metadata" color="accent">
-                  {updateBanner.actionLabel}
-                </Text>
-              </Pressable>
+              {updateBanner.actionLabel !== null && (
+                <Pressable
+                  onPress={onUpdateBannerAct}
+                  accessibilityRole="button"
+                  accessibilityLabel={updateBanner.actionLabel}
+                  style={{ paddingHorizontal: 6, paddingVertical: 3 }}
+                >
+                  <Text variant="metadata" color="accent">
+                    {updateBanner.actionLabel}
+                  </Text>
+                </Pressable>
+              )}
               <IconButton
                 icon="close"
                 size={24}

@@ -1509,6 +1509,13 @@ const isUpdateArtifact = v.object({
   url: v.boundedString(2048),
 });
 
+const isUpdateErrorPayload = v.object({
+  kind: v.boundedString(64),
+  message: v.boundedString(1024),
+  retryable: v.boolean(),
+  retryAfterMs: v.optional(v.finite()),
+});
+
 const isUpdateStatusPayload = v.union(
   v.object({ state: v.literal('idle') }),
   v.object({ state: v.literal('checking') }),
@@ -1518,15 +1525,33 @@ const isUpdateStatusPayload = v.union(
     version: v.boundedString(64),
     url: v.boundedString(2048),
     artifact: v.nullable(isUpdateArtifact),
+    checksums: v.nullable(isUpdateArtifact),
   }),
   v.object({
     state: v.literal('failed'),
-    error: v.object({
-      kind: v.boundedString(64),
-      message: v.boundedString(1024),
-      retryable: v.boolean(),
-      retryAfterMs: v.optional(v.finite()),
-    }),
+    error: isUpdateErrorPayload,
+  }),
+);
+
+const isUpdateApplyPayload = v.union(
+  v.object({ state: v.literal('idle') }),
+  v.object({
+    state: v.literal('downloading'),
+    version: v.boundedString(64),
+    receivedBytes: v.finite(),
+    totalBytes: v.nullable(v.finite()),
+  }),
+  v.object({ state: v.literal('verifying'), version: v.boundedString(64) }),
+  v.object({ state: v.literal('applying'), version: v.boundedString(64) }),
+  v.object({
+    state: v.literal('ready-to-restart'),
+    version: v.boundedString(64),
+  }),
+  v.object({ state: v.literal('applied'), version: v.boundedString(64) }),
+  v.object({
+    state: v.literal('failed'),
+    version: v.boundedString(64),
+    error: isUpdateErrorPayload,
   }),
 );
 
@@ -1534,6 +1559,10 @@ const isUpdateStatusPayload = v.union(
 export const isUpdateSnapshot = v.object({
   status: isUpdateStatusPayload,
   currentVersion: v.boundedString(64),
+  apply: isUpdateApplyPayload,
+  /** How far `update:apply` can honestly take this build — main's own
+      verdict, not a renderer request. */
+  capability: v.literals('open', 'download', 'install'),
 });
 
 export type UpdateSnapshotPayload = v.Guarded<typeof isUpdateSnapshot>;
@@ -1706,6 +1735,14 @@ export type AuqwApi = {
     ) => Promise<UpdateSnapshotPayload>;
     /** Opens the available release's page (or the releases index). */
     readonly open: () => Promise<void>;
+    /** Begins the download→verify→apply pipeline — real only past
+        the 'open' capability, a main-side refusal otherwise. */
+    readonly apply: () => Promise<void>;
+    /** Aborts the live apply. */
+    readonly cancel: () => Promise<void>;
+    /** Relaunches into a self-replaced binary — valid only inside
+        'ready-to-restart' (the AppImage leg). */
+    readonly restart: () => Promise<void>;
     readonly onState: (
       listener: (snapshot: UpdateSnapshotPayload) => void,
     ) => () => void;

@@ -282,13 +282,20 @@ function fakeApi(): Rig {
           Promise.resolve({
             status: { state: 'idle' },
             currentVersion: '0.1.0',
+            apply: { state: 'idle' },
+            capability: 'open' as const,
           }),
         check: () =>
           Promise.resolve({
             status: { state: 'idle' },
             currentVersion: '0.1.0',
+            apply: { state: 'idle' },
+            capability: 'open' as const,
           }),
         open: () => Promise.resolve(),
+        apply: () => Promise.resolve(),
+        cancel: () => Promise.resolve(),
+        restart: () => Promise.resolve(),
         onState: () => () => {},
       },
     },

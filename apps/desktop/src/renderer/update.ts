@@ -1,4 +1,9 @@
-import type { UpdateSnapshot, UpdateStatus } from '@auqw/application';
+import type {
+  UpdateApplyStatus,
+  UpdateSnapshot,
+  UpdateStatus,
+} from '@auqw/application';
+import type { AppError } from '@auqw/application';
 import { appErrorKind } from '@auqw/application';
 import type { UpdateShellPort } from '@auqw/app-shell';
 import type { AuqwApi, UpdateSnapshotPayload } from '../shared/contract.ts';
@@ -7,45 +12,66 @@ import type { AuqwApi, UpdateSnapshotPayload } from '../shared/contract.ts';
  * The renderer's UpdateShellPort: a local snapshot cache fed by the
  * `update:state` push channel plus one `update:status` pull on first
  * subscribe (the pull covers publishes that landed before the page
- * subscribed) — same shape as `createDesktopAuth`. The check itself
- * runs in main: the renderer CSP admits only 'self', and the only
- * egress is the releases list. Desktop's install level is 'open' —
- * no updater infra ships in the alpha packaging, so `act()` opens
- * the release page through main's allowlisted `update:open`.
+ * subscribed) — same shape as `createDesktopAuth`. The check + the
+ * whole apply pipeline run in main: the renderer CSP admits only
+ * 'self', so the artifact's bytes and its SHA256SUMS verification
+ * never cross the bridge — snapshots and verbs only. `action` is
+ * main's own capability verdict riding the snapshot: 'install' on
+ * AppImage + NSIS, 'download' on dmg, 'open' on flatpak and unknown
+ * builds — `act()` routes on it and on the live apply phase.
  */
 export function createDesktopUpdate(api: AuqwApi): UpdateShellPort {
   let snap: UpdateSnapshot = {
     status: { state: 'idle' },
     currentVersion: '',
+    apply: { state: 'idle' },
   };
+  let capability: UpdateSnapshotPayload['capability'] = 'open';
   const listeners = new Set<() => void>();
   let wired = false;
   let pushes = 0;
 
-  function toStatus(status: UpdateSnapshotPayload['status']): UpdateStatus {
+  type WireError = {
+    readonly kind: string;
+    readonly message: string;
+    readonly retryable: boolean;
+    readonly retryAfterMs?: number;
+  };
+
+  function toError(error: WireError): AppError {
     // The wire error's `kind` is a slug — map back through the
     // taxonomy so an untyped value never reaches errorText.
+    return {
+      kind: appErrorKind(error.kind),
+      message: error.message,
+      retryable: error.retryable,
+      ...(error.retryAfterMs !== undefined
+        ? { retryAfterMs: error.retryAfterMs }
+        : {}),
+    };
+  }
+
+  function toStatus(status: UpdateSnapshotPayload['status']): UpdateStatus {
     if (status.state === 'failed') {
-      return {
-        state: 'failed',
-        error: {
-          kind: appErrorKind(status.error.kind),
-          message: status.error.message,
-          retryable: status.error.retryable,
-          ...(status.error.retryAfterMs !== undefined
-            ? { retryAfterMs: status.error.retryAfterMs }
-            : {}),
-        },
-      };
+      return { state: 'failed', error: toError(status.error) };
     }
     return status;
+  }
+
+  function toApply(apply: UpdateSnapshotPayload['apply']): UpdateApplyStatus {
+    if (apply.state === 'failed') {
+      return { ...apply, error: toError(apply.error) };
+    }
+    return apply;
   }
 
   function apply(payload: UpdateSnapshotPayload): void {
     snap = {
       status: toStatus(payload.status),
       currentVersion: payload.currentVersion,
+      apply: toApply(payload.apply),
     };
+    capability = payload.capability;
     for (const listener of [...listeners]) {
       try {
         listener();
@@ -96,9 +122,45 @@ export function createDesktopUpdate(api: AuqwApi): UpdateShellPort {
         .then(apply)
         .catch(() => undefined);
     },
-    action: 'open',
+    get action() {
+      // The banner label follows the capability, except when the
+      // release can't prove the artifact — no artifact at all, or
+      // one it ships without checksums: an unverifiable artifact
+      // never installs, so the page is the honest affordance.
+      return snap.status.state === 'available' &&
+        (snap.status.artifact === null || snap.status.checksums === null)
+        ? 'open'
+        : capability;
+    },
     act() {
-      void api.update.open().catch(() => undefined);
+      const applyState = snap.apply.state;
+      if (applyState === 'ready-to-restart') {
+        void api.update.restart().catch(() => undefined);
+        return;
+      }
+      if (
+        applyState === 'downloading' ||
+        applyState === 'verifying' ||
+        applyState === 'applying' ||
+        applyState === 'applied'
+      ) {
+        return;
+      }
+      // 'idle' or 'failed' — the affordance starts (or retries) the
+      // pipeline on self-install builds, opens the page on 'open'.
+      if (
+        capability !== 'open' &&
+        snap.status.state === 'available' &&
+        snap.status.artifact !== null &&
+        snap.status.checksums !== null
+      ) {
+        void api.update.apply().catch(() => undefined);
+      } else {
+        void api.update.open().catch(() => undefined);
+      }
+    },
+    cancel() {
+      void api.update.cancel().catch(() => undefined);
     },
   };
 }

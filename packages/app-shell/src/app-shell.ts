@@ -446,8 +446,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
     updateDismissed,
   );
   const onUpdateBannerAct = useCallback(() => {
-    updatePort?.act();
-  }, [updatePort]);
+    // A 'cancelable' banner's action aborts the live apply; every
+    // other state runs the port's own affordance.
+    if (updateBanner?.cancelable === true) {
+      updatePort?.cancel();
+    } else {
+      updatePort?.act();
+    }
+  }, [updatePort, updateBanner]);
   const onUpdateBannerDismiss = useCallback(() => {
     setUpdateDismissed(
       updateSnapshot?.status.state === 'available'
@@ -1725,6 +1731,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
           ? undefined
           : {
               status: updateSnapshot.status,
+              apply: updateSnapshot.apply,
               currentVersion: updateSnapshot.currentVersion,
             },
     });
@@ -2168,10 +2175,17 @@ export function useAppShell<E extends { readonly type: string } = never>(
           setAuthClientDraft(authSnapshot?.clientId ?? '');
           return;
         case 'checkUpdate':
-          // 'available' → the row's select IS the install affordance;
-          // anything else re-runs the check.
+          // 'available' → the row's select IS the install affordance
+          // (and, past 'failed', the retry); a live apply ignores the
+          // select; anything else re-runs the check.
           if (updatePort === undefined) {
             return;
+          }
+          {
+            const applyState = updateSnapshot?.apply.state;
+            if (applyState === 'downloading' || applyState === 'verifying' || applyState === 'applying') {
+              return;
+            }
           }
           if (updateSnapshot?.status.state === 'available') {
             updatePort.act();

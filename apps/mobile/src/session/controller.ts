@@ -42,6 +42,7 @@ import type {
   AuqwTagReaderNative,
 } from '../adapters/auqw-expo-surface.ts';
 import { createExpoArtwork } from '../adapters/expo-artwork.ts';
+import { mediaDownloadsActive } from '../adapters/download-foreground.ts';
 import { createExpoAudioPlayer } from '../adapters/expo-audio-player.ts';
 import type { PluginProvider } from '../adapters/plugin-provider.ts';
 import {
@@ -584,14 +585,26 @@ export async function createSessionController(
           ).length;
           if (active !== lastActive) {
             lastActive = active;
+            // The foreground service counts EVERY download — this is
+            // the media side of the aggregate (the update APK holds
+            // its own ref through download-foreground), so reporting
+            // can't zero another writer's protection.
             try {
-              void host.downloadsActiveChanged(active).catch((thrown) => {
-                void log.write({
-                  level: 'warn',
-                  message: `fgs update failed: ${nativeMessage(thrown)}`,
-                  atMs: clock.nowMs(),
-                });
-              });
+              void mediaDownloadsActive(
+                // Log the native failure, then rethrow — the
+                // aggregate only marks an edge delivered on resolve,
+                // so a swallowed rejection would suppress its retry.
+                (count) =>
+                  host.downloadsActiveChanged(count).catch((thrown) => {
+                    void log.write({
+                      level: 'warn',
+                      message: `fgs update failed: ${nativeMessage(thrown)}`,
+                      atMs: clock.nowMs(),
+                    });
+                    throw thrown;
+                  }),
+                active,
+              );
             } catch {
               // Method absent on this platform — downloads still work;
               // only Doze-protected long transfers are degraded.
@@ -911,9 +924,13 @@ export async function createSessionController(
         unsub();
       }
       // Belt: start() may never have run, or an edge may have been
-      // missed — the dataSync service must come down regardless.
+      // missed — report media zero through the same aggregate so an
+      // in-flight non-media hold (the update APK) still counts.
       try {
-        await host.downloadsActiveChanged(0);
+        await mediaDownloadsActive(
+          (count) => host.downloadsActiveChanged(count),
+          0,
+        );
       } catch {
         // Method absent on this platform.
       }

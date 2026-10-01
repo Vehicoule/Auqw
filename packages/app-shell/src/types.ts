@@ -112,8 +112,10 @@ export interface AuthShellPort {
  * main and feeds it over `update:*` IPC; mobile fetches directly).
  * Only the snapshot + verbs cross the port. `action` advertises the
  * install affordance this platform reached so the banner labels
- * itself honestly: 'open' opens the release page, 'install' runs the
- * platform's install path (today: Android APK download + intent).
+ * itself honestly: 'open' opens the release page, 'download' fetches
+ * and verifies the artifact then hands it to the OS (dmg in Finder),
+ * 'install' runs the platform's install path (Android APK intent,
+ * NSIS setup launch, AppImage replace).
  */
 export interface UpdateShellPort {
   /** The latest snapshot — stable ref between publishes. */
@@ -122,10 +124,18 @@ export interface UpdateShellPort {
   subscribe(listener: () => void): () => void;
   /** 'boot' is once-per-process inside the port; 'manual' refetches. */
   check(kind: UpdateCheckKind): void;
-  /** What `act()` does — the banner action label reads this. */
-  readonly action: 'open' | 'install';
-  /** Run the install affordance on the currently-available release. */
+  /** What `act()` does while the apply pipeline is idle — the banner
+      action label reads this. */
+  readonly action: 'open' | 'download' | 'install';
+  /**
+   * Run the affordance on the currently-available release: while the
+   * apply pipeline is idle it opens/downloads/installs per `action`;
+   * in 'ready-to-restart' it relaunches; mid-pipeline it is a no-op;
+   * 'failed' retries.
+   */
   act(): void;
+  /** Abort an in-flight apply — back to the install affordance. */
+  cancel(): void;
 }
 
 export interface AppShellPorts<E> {

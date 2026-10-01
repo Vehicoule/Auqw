@@ -525,6 +525,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
 
   // ---- toasts ------------------------------------------------------------
   'toast.failed': '{action} fehlgeschlagen — {detail}',
+  'toast.updated': 'aktualisiert auf v{version}',
   'toast.storefrontCode': 'storefront muss ein zweistelliger ländercode sein',
 
   // ---- error reasons -----------------------------------------------------
@@ -606,9 +607,26 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'update.value.current': 'aktuell',
   'update.value.available': 'v{version} verfügbar',
   'update.value.failed': 'prüfung fehlgeschlagen — zum wiederholen tippen',
+  'update.value.downloading': 'lade herunter — {percent}%',
+  'update.value.downloadingUnknown': 'lade herunter — {mb} mb',
+  'update.value.verifying': 'verifiziere…',
+  'update.value.applying': 'installiere…',
+  'update.value.restart': 'neustart zum abschluss',
+  'update.value.applied': 'an den installer übergeben',
+  'update.value.applyFailed': 'update fehlgeschlagen — zum wiederholen tippen',
   'update.banner': 'update verfügbar — v{version}',
+  'update.banner.downloading': 'lade update herunter — {percent}%',
+  'update.banner.downloadingUnknown': 'lade update herunter — {mb} mb',
+  'update.banner.verifying': 'verifiziere update…',
+  'update.banner.applying': 'installiere update…',
+  'update.banner.restart': 'v{version} bereit — neustart zum updaten',
+  'update.banner.failed': 'update fehlgeschlagen — erneut versuchen',
   'update.action.open': 'holen',
+  'update.action.download': 'herunterladen',
   'update.action.install': 'installieren',
+  'update.action.restart': 'neustarten',
+  'update.action.retry': 'wiederholen',
+  'update.action.cancel': 'abbrechen',
   'update.dismiss': 'schließen',
 
   // ---- offline banner ----------------------------------------------------

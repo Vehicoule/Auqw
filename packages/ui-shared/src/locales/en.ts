@@ -505,6 +505,7 @@ export const en = {
 
   // ---- toasts ------------------------------------------------------------
   'toast.failed': '{action} failed — {detail}',
+  'toast.updated': 'updated to v{version}',
   'toast.storefrontCode': 'storefront must be a two-letter country code',
 
   // ---- error reasons (errorText — reason line next to each surface's
@@ -591,9 +592,26 @@ export const en = {
   'update.value.current': 'up to date',
   'update.value.available': 'v{version} available',
   'update.value.failed': 'check failed — tap to retry',
+  'update.value.downloading': 'downloading — {percent}%',
+  'update.value.downloadingUnknown': 'downloading — {mb} mb',
+  'update.value.verifying': 'verifying…',
+  'update.value.applying': 'installing…',
+  'update.value.restart': 'restart to finish',
+  'update.value.applied': 'handed to the installer',
+  'update.value.applyFailed': 'update failed — tap to retry',
   'update.banner': 'update available — v{version}',
+  'update.banner.downloading': 'downloading update — {percent}%',
+  'update.banner.downloadingUnknown': 'downloading update — {mb} mb',
+  'update.banner.verifying': 'verifying update…',
+  'update.banner.applying': 'installing update…',
+  'update.banner.restart': 'v{version} ready — restart to update',
+  'update.banner.failed': 'update failed — try again',
   'update.action.open': 'get it',
+  'update.action.download': 'download',
   'update.action.install': 'install',
+  'update.action.restart': 'restart',
+  'update.action.retry': 'retry',
+  'update.action.cancel': 'cancel',
   'update.dismiss': 'dismiss',
 
   // ---- storage usage -----------------------------------------------------
