@@ -1279,15 +1279,17 @@ export function toLibraryModel(input: {
     ),
   );
 
-  // History: one row per counted play, most recent first; repeated
-  // plays of one recording keep their own event-keyed rows.
+  // History: one row per recording at its most recent counted play,
+  // newest first; play events themselves stay intact.
+  const seen = new Set<string>();
   const history: CollectionRowModel[] = [...input.playHistory]
     .sort((a, b) => b.playedMs - a.playedMs)
     .flatMap((event) => {
+      if (seen.has(event.recordingId)) return [];
       const recording = byId.get(event.recordingId);
-      return recording === undefined
-        ? []
-        : [collectionRow(`hist-${event.eventId}`, recording, null)];
+      if (recording === undefined) return [];
+      seen.add(event.recordingId);
+      return [collectionRow(`hist-${recording.id}`, recording, null)];
     });
 
   const likedRows: CollectionRowModel[] = items.map((row) => {
