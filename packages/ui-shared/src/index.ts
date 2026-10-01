@@ -1,3 +1,4 @@
+export * from './artwork-url.ts';
 export * from './view-models.ts';
 export * from './error-text.ts';
 export * from './shell.ts';

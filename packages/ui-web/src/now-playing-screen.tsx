@@ -18,8 +18,7 @@ import { QueueList } from './queue-list.tsx';
 import { QueueScreen } from './queue-screen.tsx';
 import type { QueueScreenProps } from './queue-screen.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
-import { scaledArtworkUrl } from './artwork-url.ts';
-import { t } from '@auqw/ui-shared';
+import { scaledArtworkUrl, t } from '@auqw/ui-shared';
 import type {
   DownloadChip,
   LyricsModel,

@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { CancellationSource } from '@auqw/application';
 import type { CancellationSignal } from '@auqw/application';
+import { scaledArtworkUrl } from '@auqw/ui-shared';
 
 /**
  * Resolves a remote artwork url to a cache-local file uri through the
@@ -81,12 +82,23 @@ function memoizeUri(url: string, uri: string): void {
  * lookup has answered, an unreadable file means the answer itself
  * is bad: the memo is dropped and `uri` falls back to remote.
  */
-export function useResolvedArtworkUri(url: string | null): {
+export function useResolvedArtworkUri(
+  url: string | null,
+  targetPx?: number | undefined,
+): {
   readonly uri: string | null;
   readonly pending: boolean;
   readonly markSourceError: () => void;
 } {
   const resolve = useArtworkResolver();
+  // The url whose scaled variant already failed to paint — a scaled
+  // request the CDN can't serve retries once at the provider's
+  // original size, the same retry the web <img> onError path makes.
+  const [originalFor, setOriginalFor] = useState<string | null>(null);
+  const requested =
+    url !== null && targetPx !== undefined && originalFor !== url
+      ? scaledArtworkUrl(url, targetPx)
+      : url;
   // Tag the outcome with the url it was made for — a late landing
   // from a superseded url is ignored without a state reset effect.
   const [outcome, setOutcome] = useState<{
@@ -95,8 +107,9 @@ export function useResolvedArtworkUri(url: string | null): {
     readonly uri: string | null;
   } | null>(null);
   const cacheable =
-    resolve !== null && url !== null && url.startsWith('https://');
-  const memoized = url !== null ? resolvedUriMemo.get(url) : undefined;
+    resolve !== null && requested !== null && requested.startsWith('https://');
+  const memoized =
+    requested !== null ? resolvedUriMemo.get(requested) : undefined;
   /**
    * A url whose painted source errored while its lookup was still
    * in flight: the memo answered with a file the OS reclaimed. The
@@ -105,50 +118,58 @@ export function useResolvedArtworkUri(url: string | null): {
    */
   const [broken, setBroken] = useState<string | null>(null);
   const resolving =
-    cacheable && (outcome === null || outcome.url !== url);
-  const painted = broken === url ? undefined : memoized;
+    cacheable && (outcome === null || outcome.url !== requested);
+  const painted = broken === requested ? undefined : memoized;
   useEffect(() => {
-    if (!cacheable || url === null) {
+    if (!cacheable || requested === null) {
       return;
     }
     const source = new CancellationSource();
-    void resolve(url, source.signal)
+    void resolve(requested, source.signal)
       .then((fileUri) => {
         // A live answer refreshes the memo; an empty one clears it —
         // null means the cache holds nothing, so a stale memo entry
         // would only keep painting a path that no longer resolves.
         if (fileUri !== null) {
-          memoizeUri(url, fileUri);
+          memoizeUri(requested, fileUri);
         } else {
-          resolvedUriMemo.delete(url);
+          resolvedUriMemo.delete(requested);
         }
         // The verdict is in: a `broken` marker for this url is stale —
         // leaving it would suppress the refreshed memo on the next
         // revisit and paint a placeholder over a cache-ready file.
-        setBroken((b) => (b === url ? null : b));
-        setOutcome({ url, uri: fileUri });
+        setBroken((b) => (b === requested ? null : b));
+        setOutcome({ url: requested, uri: fileUri });
       })
       .catch(() => {
-        setBroken((b) => (b === url ? null : b));
-        setOutcome({ url, uri: null });
+        setBroken((b) => (b === requested ? null : b));
+        setOutcome({ url: requested, uri: null });
       });
     return () => source.cancel();
-  }, [url, resolve, cacheable]);
+  }, [requested, resolve, cacheable]);
   return {
     uri:
-      outcome !== null && outcome.url === url
-        ? (outcome.uri ?? url)
-        : (painted ?? url),
+      outcome !== null && outcome.url === requested
+        ? (outcome.uri ?? requested)
+        : (painted ?? requested),
     pending: resolving && painted === undefined,
     markSourceError: () => {
-      if (url === null) {
+      if (requested === null) {
         return;
       }
-      resolvedUriMemo.delete(url);
+      // The scaled variant failed — retry once at the provider's
+      // original size before declaring the artwork broken. A repeat
+      // error (or an unscaled request) falls through to the
+      // memo-drop path below.
+      if (url !== null && requested !== url && originalFor !== url) {
+        setOriginalFor(url);
+        return;
+      }
+      resolvedUriMemo.delete(requested);
       if (resolving) {
-        setBroken(url);
+        setBroken(requested);
       } else {
-        setOutcome({ url, uri: null });
+        setOutcome({ url: requested, uri: null });
       }
     },
   };
