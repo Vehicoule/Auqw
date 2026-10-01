@@ -14,7 +14,13 @@ const ARTIFACT_NAME = 'auqw-9.9.9-linux-x86_64.AppImage';
 const ARTIFACT_PATH = `${DIR}appimage/${ARTIFACT_NAME}`;
 const FLATPAK_NAME = 'auqw-9.9.9-linux-x86_64.flatpak';
 
-const artifact = readFileSync(ARTIFACT_PATH);
+const onDisk = readFileSync(ARTIFACT_PATH);
+// A run of '#'s after the trailing newline is still a valid shell comment;
+// sha256 rides the served bytes, so padding here just throttles the download.
+const artifact =
+  onDisk.length >= PAD
+    ? onDisk
+    : Buffer.concat([onDisk, Buffer.alloc(PAD - onDisk.length, '#')]);
 const artifactSha = createHash('sha256').update(artifact).digest('hex');
 const checksums = `${artifactSha}  ${ARTIFACT_NAME}\n`;
 
