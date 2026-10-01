@@ -65,7 +65,7 @@
   .chrome-linux{border-radius:8px}
 
   /* ----- stage: full-height chromeless column — immersive, artwork-led ----- */
-  .stage{width:38.2%;min-width:340px;flex:none;background:var(--bg-stage);border-right:1px solid var(--divider);
+  .stage{width:38.2%;min-width:280px;flex:none;background:var(--bg-stage);border-right:1px solid var(--divider);
          display:flex;flex-direction:column;padding:8px 20px 78px;position:relative}
   /* macOS traffic lights pin over the stage's top-left — no strip of its own */
   .chrome-mac .stage{padding-top:56px}
@@ -167,6 +167,8 @@
             padding:2px 6px;border-radius:4px;background:var(--bg)}
   .srch:focus-within{color:var(--fg);box-shadow:0 0 0 3px var(--accent-soft)}
   .srch.open{color:var(--fg)}
+  /* caption buttons compress the right group — the field narrows before it collapses */
+  .chrome-win .srch,.chrome-linux .srch{width:112px}
 
   .greet{color:var(--fg-bright);font-size:20px;font-weight:700;letter-spacing:-.02em;margin-top:8px}
   .greet-sub{color:var(--fg-muted);font-size:10.5px;margin:5px 0 4px}
