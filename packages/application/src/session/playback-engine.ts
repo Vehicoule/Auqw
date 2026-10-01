@@ -2659,6 +2659,10 @@ export class PlaybackEngine {
         legal = true;
         repeatEdge = true;
       }
+    } else if (event.reason === 'remote-stop') {
+      // A service stop is not a cursor move — only the null target
+      // (queue ran off / stopped) is legal.
+      legal = edgeUnverifiable || event.toOccurrenceId === null;
     }
     if (
       projection === null ||
@@ -2833,15 +2837,17 @@ export class PlaybackEngine {
       // playing earns the resume; a stale transition landing on an
       // already-paused queue, a non-drain, or a failed write revokes
       // it. The flag marks only when the drain committed — a failed
-      // write must not authorize a later paused drain to resume.
+      // write must not authorize a later paused drain to resume. An
+      // explicit remote-stop is no drain: the user stopped on purpose.
       const rec = radioAtTransition;
+      const drain = toId === null && event.reason !== 'remote-stop';
       if (rec !== null && r.radio === rec && rec.status === 'growing') {
         rec.resumeOnDrain =
-          toId === null && wasPlaying && queueWritten.ok;
+          drain && wasPlaying && queueWritten.ok;
       }
       // A native drain bypasses host.derived: chase the armed tail's
       // continuation here too, or a drained queue strands forever.
-      if (toId === null && wasPlaying && rec !== null && r.radio === rec) {
+      if (drain && wasPlaying && rec !== null && r.radio === rec) {
         this.#host.resumeDrainedQueue(r, rec, undefined);
       }
     }

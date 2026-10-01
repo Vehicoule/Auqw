@@ -189,7 +189,13 @@ export type QueueProjection = {
 export type QueueTransitionReason =
   | 'ended'
   | 'remote-next'
-  | 'remote-previous';
+  | 'remote-previous'
+  /**
+   * The service stopped the queue outright (OS transport stop) — not
+   * a cursor move: only a null target is legal, and the session must
+   * not read it as a natural drain for armed-tail resume purposes.
+   */
+  | 'remote-stop';
 
 export type PlayerEvent =
   | {

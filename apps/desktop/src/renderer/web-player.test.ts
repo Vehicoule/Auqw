@@ -1917,7 +1917,45 @@ export async function run(): Promise<void> {
     assertEqual(audio.currentTime, 0, 'seekbackward floors at zero');
   }
 
-  // The OS stop action runs the same teardown as a port stop.
+  // A step seek during a pending play starts from the pending resume
+  // target — not the element's still-stale position.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    let resolveA: ((v: { url: string }) => void) | undefined;
+    const stream = fakeStream({
+      serveUrl: (args) => {
+        const { handle } = args as { handle: string };
+        if (handle === 'h-a') {
+          return new Promise((resolve) => {
+            resolveA = resolve;
+          });
+        }
+        return Promise.resolve({ url: `http://127.0.0.1:9/s/${handle}` });
+      },
+    });
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    const pendingA = player.play({
+      handle: 'h-a',
+      identity,
+      positionMs: 30_000,
+    });
+    // Element untouched at 0; the pending slot holds the 30s resume.
+    mediaSession.actions.get('seekforward')?.({});
+    resolveA?.({ url: 'http://127.0.0.1:9/s/h-a' });
+    await pendingA;
+    await settle();
+    assertEqual(
+      audio.currentTime,
+      40,
+      'seekforward steps from the pending resume target',
+    );
+  }
+
+  // The OS stop action reports a 'remote-stop' transition — the
+  // session reconciles it (queue stops) and its release is what
+  // tears the element down, so no local queue state can phantom.
   {
     const audio = fakeAudio();
     const mediaSession = fakeMediaSession();
@@ -1928,14 +1966,28 @@ export async function run(): Promise<void> {
       mediaSession,
       mediaMetadata: (init) => init,
     });
+    const events = collect(player);
     await player.setQueueProjection(twoItemProjection());
     await player.play({ handle: 'h-1', identity });
     assert(!audio.paused, 'precondition: playing');
     mediaSession.actions.get('stop')?.();
-    assert(audio.paused, 'stop pauses the element');
-    assertEqual(audio.src, '', 'stop detaches the element');
+    assert(audio.paused, 'stop silences the element now');
+    assertEqual(mediaSession.playbackState, 'paused');
+    const transition = events.find((e) => e.type === 'queue-transition');
+    assert(
+      transition !== undefined &&
+        transition.type === 'queue-transition' &&
+        transition.reason === 'remote-stop' &&
+        transition.toOccurrenceId === null &&
+        transition.identity === null &&
+        transition.handle === null,
+      'stop is reported as a remote-stop drain transition',
+    );
+    // The session's release is what clears the surface.
+    await player.release({ handle: 'h-1', identity });
+    assertEqual(audio.src, '', 'release detaches the element');
     assertEqual(mediaSession.playbackState, 'none');
-    assertEqual(mediaSession.metadata, null, 'stop clears the card');
+    assertEqual(mediaSession.metadata, null, 'release clears the card');
   }
 
   // A natural end at the tail reports 'paused' — the element stays

@@ -1107,14 +1107,17 @@ export function createWebPlayerPort(deps: {
     });
     mediaSession.setActionHandler('seekbackward', (details) => {
       applyOsSeek(
-        Math.max(0, posMs() - Math.round((details?.seekOffset ?? 10) * 1000)),
+        Math.max(
+          0,
+          osSeekBaseMs() - Math.round((details?.seekOffset ?? 10) * 1000),
+        ),
       );
     });
     mediaSession.setActionHandler('seekforward', (details) => {
       applyOsSeek(
         Math.min(
           durMs() ?? Number.MAX_SAFE_INTEGER,
-          posMs() + Math.round((details?.seekOffset ?? 10) * 1000),
+          osSeekBaseMs() + Math.round((details?.seekOffset ?? 10) * 1000),
         ),
       );
     });
@@ -1126,10 +1129,35 @@ export function createWebPlayerPort(deps: {
         audio.pause();
         return;
       }
-      hardStop();
+      // No queue installed (dev harness): the session can't reconcile
+      // a reported stop, so the teardown is local.
+      if (projection === null) {
+        hardStop();
+        return;
+      }
+      // Silence now; the reported stop is what the session reconciles
+      // — its release of this handle runs the real teardown.
+      audio.pause();
+      mediaSession.playbackState = 'paused';
+      emitTransition(projection, null, 'remote-stop', posMs(), null, null);
     });
     // next/previous grey at the walk's edges rather than no-op.
     refreshTransportButtons();
+  }
+
+  /** The position a step seek starts from — a mid-attach play's
+   * pending resume target when one owns the element's future, else
+   * the element's live position. */
+  function osSeekBaseMs(): number {
+    for (const pending of pendingPlayGens.values()) {
+      if (
+        current === null ||
+        identityEq(pending.identity, current.identity)
+      ) {
+        return pending.positionMs;
+      }
+    }
+    return posMs();
   }
 
   /** The shared landing for every OS seek shape — a mid-attach play
