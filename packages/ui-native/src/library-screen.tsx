@@ -93,7 +93,7 @@ function ToggleChip({
         minHeight: 30,
         justifyContent: 'center',
         paddingHorizontal: theme.spacing.md,
-        borderRadius: theme.radius.pill,
+        borderRadius: theme.radius.control,
         borderWidth: theme.strokes.hairline,
         borderColor: active ? theme.colors.accent : theme.colors.hairline,
         backgroundColor: active ? theme.colors.accentSoft : 'transparent',

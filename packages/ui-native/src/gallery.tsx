@@ -106,7 +106,7 @@ function Chip({
         paddingHorizontal: theme.spacing.md,
         minHeight: 28,
         justifyContent: 'center',
-        borderRadius: theme.radius.pill,
+        borderRadius: theme.radius.control,
         backgroundColor: active ? theme.colors.accentSoft : theme.colors.fg08,
       }}
     >

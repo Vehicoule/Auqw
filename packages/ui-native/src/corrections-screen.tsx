@@ -76,7 +76,7 @@ export function CorrectionsScreen({
             style={{
               paddingHorizontal: theme.spacing.sm,
               paddingVertical: theme.spacing.xs,
-              borderRadius: theme.radius.pill,
+              borderRadius: theme.radius.control,
               borderWidth: filter.selected ? theme.strokes.hairline : 0,
               borderColor: theme.colors.hairline,
             }}

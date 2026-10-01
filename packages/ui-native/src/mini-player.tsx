@@ -825,7 +825,7 @@ export function MiniPlayer({
           height: 32,
           alignItems: 'center',
           justifyContent: 'center',
-          borderRadius: ios ? 16 : 12,
+          borderRadius: theme.radius.card,
           backgroundColor: ios
             ? theme.colors.glassControl
             : theme.colors.accentSoft,
