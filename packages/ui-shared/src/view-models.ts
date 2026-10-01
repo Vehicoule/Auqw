@@ -1619,18 +1619,25 @@ export function toHomeModel(input: {
     })
     .slice(0, 12)
     .map(toRailCard);
-  const playedIds = new Set<string>();
-  const played = [...input.playHistory]
-    .sort((a, b) => b.playedMs - a.playedMs)
-    .flatMap((event) => {
-      if (playedIds.has(event.recordingId)) return [];
-      const recording = byId.get(event.recordingId);
-      if (recording === undefined) return [];
-      playedIds.add(event.recordingId);
-      return [recording];
-    })
+  // Latest play wins per recording — ties (clamped timestamps after a
+  // clock rollback) resolve to the later array element, which is the
+  // more recent event on both orderings this list can carry (live
+  // appends; restored `played_ms, event_id` order).
+  const latestById = new Map<
+    string,
+    { recording: Recording; playedMs: number; at: number }
+  >();
+  input.playHistory.forEach((event, at) => {
+    const recording = byId.get(event.recordingId);
+    const cur = latestById.get(event.recordingId);
+    if (recording !== undefined && (cur === undefined || event.playedMs >= cur.playedMs)) {
+      latestById.set(event.recordingId, { recording, playedMs: event.playedMs, at });
+    }
+  });
+  const played = [...latestById.values()]
+    .sort((a, b) => b.playedMs - a.playedMs || b.at - a.at)
     .slice(0, 12)
-    .map(toRailCard);
+    .map((entry) => toRailCard(entry.recording));
   const suggestions = input.suggestions.slice(0, 12).map((metadata) => ({
     key: `${metadata.sourceRef.provider}:${metadata.sourceRef.id}`,
     title: metadata.title,
