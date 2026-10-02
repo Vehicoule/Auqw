@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 14;
+export const CURRENT_SCHEMA_VERSION = 15;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -446,6 +446,53 @@ const MIGRATION_14: readonly string[] = [
   `ALTER TABLE play_counts ADD COLUMN logged_ours INTEGER CHECK (logged_ours >= 0)`,
 ];
 
+/**
+ * v14 -> v15: 'playlist' joins the entity taxonomy — `entities.kind`
+ * and `likes.entity_kind` CHECKs can't be widened in place (SQLite
+ * CHECKs are immutable), so both tables rebuild. A DROP TABLE under
+ * `foreign_keys = ON` implicit-DELETEs the parent's rows, which fires
+ * every child's ON DELETE CASCADE — so `entity_source_refs` stages in
+ * a TEMP backup (no FK, cascade-immune) while the parent rebuilds,
+ * then recreates under its final name bound to the renamed parent.
+ * `likes` has no dependents and rebuilds like v2.
+ */
+const MIGRATION_15: readonly string[] = [
+  `CREATE TABLE entities_new (
+  entity_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('album','artist','playlist')),
+  title TEXT NOT NULL,
+  artist_name TEXT,
+  artwork_json TEXT,
+  created_ms INTEGER NOT NULL CHECK (created_ms >= 0)
+)`,
+  `INSERT INTO entities_new (entity_id, kind, title, artist_name, artwork_json, created_ms)
+   SELECT entity_id, kind, title, artist_name, artwork_json, created_ms FROM entities`,
+  `CREATE TEMP TABLE entity_source_refs_backup AS
+   SELECT entity_id, provider, ref_json FROM entity_source_refs`,
+  `DROP TABLE entity_source_refs`,
+  `DROP TABLE entities`,
+  `ALTER TABLE entities_new RENAME TO entities`,
+  `CREATE TABLE entity_source_refs (
+  entity_id TEXT NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  ref_json TEXT NOT NULL,
+  PRIMARY KEY (entity_id, provider)
+)`,
+  `INSERT INTO entity_source_refs (entity_id, provider, ref_json)
+   SELECT entity_id, provider, ref_json FROM entity_source_refs_backup`,
+  `DROP TABLE entity_source_refs_backup`,
+  `CREATE TABLE likes_new (
+  entity_kind TEXT NOT NULL CHECK (entity_kind IN ('track','album','artist','playlist')),
+  target_id TEXT NOT NULL,
+  liked_ms INTEGER NOT NULL CHECK (liked_ms >= 0),
+  PRIMARY KEY (entity_kind, target_id)
+)`,
+  `INSERT INTO likes_new (entity_kind, target_id, liked_ms)
+   SELECT entity_kind, target_id, liked_ms FROM likes`,
+  `DROP TABLE likes`,
+  `ALTER TABLE likes_new RENAME TO likes`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
@@ -462,6 +509,7 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_12]),
   Object.freeze([...MIGRATION_13]),
   Object.freeze([...MIGRATION_14]),
+  Object.freeze([...MIGRATION_15]),
 ]);
 
 const CREATED_OBJECT_NAME =

@@ -26,6 +26,7 @@ import type {
   SourceRef,
   TrackMetadata,
 } from '@auqw/application';
+import { searchPageHasContent } from '@auqw/application';
 import { schemes } from '@auqw/design-tokens';
 import { deriveScheme } from '@auqw/design-tokens/adaptive';
 import type { ThemeSource } from '@auqw/design-tokens/adaptive';
@@ -226,7 +227,8 @@ export function toSearchModel(
       const heroRow = results[0];
       return {
         ...base,
-        phase: state.page.items.length === 0 ? 'empty' : 'ready',
+        // Entity-only pages (no track rows) are still content.
+        phase: searchPageHasContent(state.page) ? 'ready' : 'empty',
         results,
         playItems: items.map(({ meta }) => meta),
         hero:

@@ -2591,6 +2591,82 @@ async function migrationV3toV4(): Promise<void> {
   driver.close();
 }
 
+// v14 -> v15: 'playlist' widens the entities/likes CHECKs via rebuild.
+// The FK child stages in a temp backup so the parent's implicit-DELETE
+// cascade can't wipe it — every attachment must arrive intact.
+async function migrationV14toV15(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  for (const step of MIGRATIONS.slice(0, 14)) {
+    driver.execScript(`${step.join(';\n')};`);
+  }
+  driver.execScript(`
+    INSERT INTO schema_version (id, version) VALUES (1, 14);
+    INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered, language)
+      VALUES (1, 'a', 'b', NULL, 256, 'dark', 1, NULL, NULL, NULL, 0, NULL);
+    INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+      VALUES (1, 0, NULL, 0, 'stopped', NULL);
+    INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json, provenance)
+      VALUES ('r1', 'Roads', 'Portishead', 'Dummy', 302000, 1994, '[]', NULL, NULL, NULL, '[]', 'provider');
+    INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
+      VALUES ('r1', 0, 'itunes', 'track', 'i1');
+    INSERT INTO entities (entity_id, kind, title, artist_name, artwork_json, created_ms)
+      VALUES ('e1', 'album', 'Dummy', 'Portishead', '[]', 100),
+             ('e2', 'artist', 'Portishead', NULL, '[]', 101);
+    INSERT INTO entity_source_refs (entity_id, provider, ref_json)
+      VALUES ('e1', 'deezer', '{"provider":"deezer","kind":"album","id":"d-alb"}'),
+             ('e2', 'deezer', '{"provider":"deezer","kind":"artist","id":"d-art"}');
+    INSERT INTO likes (entity_kind, target_id, liked_ms)
+      VALUES ('album', 'e1', 7), ('track', 'r1', 8);
+  `);
+  const storage = new SqliteStorage(driver, SETTINGS);
+  assert((await storage.initialize(ctx().context)).ok, 'v14 -> v15 runs');
+  const state = await loadOk(storage);
+  assertEqual(state.entities.length, 2, 'entities preserved');
+  assertEqual(
+    state.entitySourceRefs.length,
+    2,
+    'refs survive the parent rebuild — cascade cannot reach the backup',
+  );
+  assertEqual(state.likes.length, 2, 'likes preserved');
+  // The widened CHECKs accept the new kind end to end.
+  const committed = await storage.commit(
+    {
+      entities: [
+        {
+          entityId: 'e3',
+          kind: 'playlist',
+          title: 'Chill Mix',
+          artistName: 'Deezer',
+          artwork: [],
+          createdMs: 102,
+        },
+      ],
+      entitySourceRefs: [
+        {
+          entityId: 'e3',
+          provider: 'deezer',
+          ref: { provider: 'deezer', kind: 'playlist', id: 'd-pl' },
+        },
+      ],
+      likes: [{ entityKind: 'playlist', targetId: 'e3', likedAtMs: 9 }],
+    },
+    ctx().context,
+  );
+  assert(committed.ok, 'playlist-kind rows commit');
+  const next = await loadOk(storage);
+  assert(
+    next.entities.some((e) => e.entityId === 'e3' && e.kind === 'playlist'),
+    'playlist entity persisted',
+  );
+  assert(
+    next.likes.some(
+      (l) => l.entityKind === 'playlist' && l.targetId === 'e3',
+    ),
+    'playlist like persisted',
+  );
+  driver.close();
+}
+
 // 18. `recordingsMerge` applies to the transaction's fresh read —
 // rows written between a caller's snapshot and its commit survive.
 async function recordingsMergeCommit(): Promise<void> {
@@ -3062,6 +3138,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['migrationBackupFile', migrationBackupFile],
   ['migrationV2toV3', migrationV2toV3],
   ['migrationV3toV4', migrationV3toV4],
+  ['migrationV14toV15', migrationV14toV15],
   ['downloadLocalRoundtrip', downloadLocalRoundtrip],
   ['recordingsMergeCommit', recordingsMergeCommit],
   ['backupRetryAfterFailure', backupRetryAfterFailure],

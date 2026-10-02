@@ -1790,7 +1790,10 @@ async function portThrows(): Promise<void> {
     id: 'youtube-music',
     capabilities: ['playback.candidates'],
     version: null,
-    search: () => Promise.resolve(ok({ items: [], storefront: null })),
+    search: () =>
+      Promise.resolve(
+        ok({ items: [], entities: [], topHit: null, continuation: null, storefront: null }),
+      ),
     candidates: () => Promise.reject(new Error('secret-boom')),
     resolvePlayback: () =>
       Promise.resolve(
@@ -6589,8 +6592,10 @@ const ALBUM_PAGE = {
     title: 'Deadbeat',
     subtitle: 'Tame Impala',
     artwork: [],
+    group: null,
   },
   items: [],
+  related: [],
   continuation: null,
   complete: true,
 };

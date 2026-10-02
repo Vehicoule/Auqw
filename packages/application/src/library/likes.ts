@@ -40,8 +40,8 @@ export function toggleEntityLike(
   entityId: string,
   nowMs: number,
 ): readonly Like[] {
-  if (kind !== 'album' && kind !== 'artist') {
-    throw new TypeError('kind must be album or artist');
+  if (kind !== 'album' && kind !== 'artist' && kind !== 'playlist') {
+    throw new TypeError('kind must be an entity kind');
   }
   return toggle(likes, kind, entityId, nowMs, 'entityId');
 }

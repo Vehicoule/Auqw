@@ -1203,7 +1203,13 @@ function testPlaylistMembership(): void {
       type: 'content',
       revision: 1,
       query: 'roads',
-      page: { items: fixtureSearchResults, storefront: null },
+      page: {
+        items: fixtureSearchResults,
+        entities: [],
+        topHit: null,
+        continuation: null,
+        storefront: null,
+      },
     },
     null,
     [
@@ -1324,7 +1330,13 @@ function testListingDedupe(): void {
       type: 'content',
       revision: 1,
       query: 'roads',
-      page: { items, storefront: null },
+      page: {
+        items,
+        entities: [],
+        topHit: null,
+        continuation: null,
+        storefront: null,
+      },
     },
     null,
   );
@@ -1343,8 +1355,10 @@ function testListingDedupe(): void {
         title: 'Dummy',
         subtitle: 'Portishead',
         artwork: [],
+        group: null,
       },
       items,
+      related: [],
       complete: true,
       continuation: null,
     },
@@ -1368,6 +1382,9 @@ function testListingDedupe(): void {
           { ...meta('ytm-e', 'Intro'), artist: 'Band A' },
           { ...meta('ytm-f', 'Intro'), artist: 'Band B' },
         ],
+        entities: [],
+        topHit: null,
+        continuation: null,
         storefront: null,
       },
     },
@@ -1387,6 +1404,9 @@ function testListingDedupe(): void {
       query: 'roads',
       page: {
         items: [meta('ytm-g', 'Roads'), meta('ytm-h', 'Roads (Live)')],
+        entities: [],
+        topHit: null,
+        continuation: null,
         storefront: null,
       },
     },
@@ -1410,6 +1430,9 @@ function testListingDedupe(): void {
           { ...meta('ytm-j', 'Roads'), isrc: 'GBAAA0000002' },
           { ...meta('ytm-k', 'Roads - Topic'), isrc: 'GBAAA0000001' },
         ],
+        entities: [],
+        topHit: null,
+        continuation: null,
         storefront: null,
       },
     },
@@ -1435,6 +1458,9 @@ function testListingDedupe(): void {
           { ...meta('ytm-m', 'Roads'), isrc: 'GBAAA0000001' },
           { ...meta('ytm-n', 'Roads'), isrc: 'GBAAA0000002' },
         ],
+        entities: [],
+        topHit: null,
+        continuation: null,
         storefront: null,
       },
     },
@@ -1454,7 +1480,13 @@ function testListingDedupe(): void {
       type: 'content',
       revision: 4,
       query: 'roads',
-      page: { items, storefront: null },
+      page: {
+        items,
+        entities: [],
+        topHit: null,
+        continuation: null,
+        storefront: null,
+      },
     },
     { provider: 'youtube-music', kind: 'track', id: 'ytm-b' },
   );
@@ -1559,7 +1591,13 @@ function testSearchFilters(): void {
     type: 'content' as const,
     revision: 1,
     query: 'roads',
-    page: { items, storefront: null },
+    page: {
+        items,
+        entities: [],
+        topHit: null,
+        continuation: null,
+        storefront: null,
+      },
   };
   // 'all' — every deduped row, hero on the first.
   const all = toSearchModel(state, null, [], [libraryRec], 'all');
@@ -1605,7 +1643,16 @@ function testSearchFilters(): void {
   );
   // No library-owned matches → an honest empty result list.
   const none = toSearchModel(
-    { ...state, page: { items: [meta('ytm-x', 'Nils Frahm')], storefront: null } },
+    {
+        ...state,
+        page: {
+          items: [meta('ytm-x', 'Nils Frahm')],
+          entities: [],
+          topHit: null,
+          continuation: null,
+          storefront: null,
+        },
+      },
     null,
     [],
     [libraryRec],

@@ -1722,7 +1722,10 @@ function finishProjection(
       }
       const kind = fold.fields.get('kind');
       const title = strField(fold.fields, 'title');
-      if ((kind !== 'album' && kind !== 'artist') || title === null) {
+      if (
+        (kind !== 'album' && kind !== 'artist' && kind !== 'playlist') ||
+        title === null
+      ) {
         pend(fold);
         continue;
       }
