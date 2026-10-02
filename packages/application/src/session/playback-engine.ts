@@ -2609,6 +2609,12 @@ export class PlaybackEngine {
         ? 'buffering'
         : event.state;
     if (mapped === 'buffering' || mapped === 'playing' || mapped === 'paused') {
+      if (mapped === 'playing') {
+        // A parked attempt going live spends its parked marker — the
+        // finish it recorded already deduped its matching transition;
+        // the next end must count under a fresh cycle.
+        delete active.endedCycleAtPark;
+      }
       const prev = r.playback;
       r.playback = {
         type: mapped,

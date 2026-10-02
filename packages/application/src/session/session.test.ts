@@ -4440,6 +4440,40 @@ async function naturalEndParksTail(): Promise<void> {
     playsBefore + 2,
     'the replay counted as a fresh listen',
   );
+  // One more replay + end: every fresh listen mints its own play — a
+  // parked marker that survived the resume would pin later ends to
+  // an already-recorded cycle key and lose them.
+  const parkedId =
+    'identity' in parkedAgain.playback
+      ? parkedAgain.playback.identity
+      : replayId;
+  r.player.emit(statusEvent(parkedId, 'h-oB', 'playing', 250));
+  await pump();
+  const third = readyOf(r);
+  const thirdId =
+    'identity' in third.playback ? third.playback.identity : replayId;
+  for (const positionMs of [2_500, 5_000, 7_500, 10_000, 12_500]) {
+    r.player.emit(statusEvent(thirdId, 'h-oB', 'playing', positionMs));
+    await pump();
+  }
+  r.player.emit(statusEvent(thirdId, 'h-oB', 'ended', 20_000));
+  await pump();
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oB',
+      to: null,
+      reason: 'ended',
+      positionMs: 20_000,
+      identity: null,
+      handle: null,
+    }),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).playHistory.length,
+    playsBefore + 3,
+    'each replay counted as its own listen',
+  );
 }
 
 async function remotePausePlay(): Promise<void> {
