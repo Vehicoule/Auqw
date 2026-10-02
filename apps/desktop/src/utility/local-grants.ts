@@ -126,20 +126,20 @@ export function createLocalGrants(options: LocalGrantsOptions): LocalGrants {
     } else {
       // One-shot import: the absent file means this store never ran,
       // so pre-existing `local_sources` rows (picked before the store
-      // existed) keep their grants. Writing immediately — even empty —
-      // consumes the bootstrap: a renderer row minted later must not
-      // become a grant on the next boot. And the reverse holds too —
-      // when the sentinel can't land on disk the import must not land
-      // in memory: a store that can't prove its bootstrap ran behaves
+      // existed) keep their grants. The landed file is the whole
+      // sentinel — ONE persist of the full imported set, so a
+      // half-written bootstrap can never strand an empty file that
+      // reads as "bootstrap ran, nothing granted". And the reverse
+      // holds: when the write can't land, the import must not land in
+      // memory — a store that can't prove its bootstrap ran behaves
       // as if it never did.
+      for (const treeUri of existingTreeUris(
+        options.database,
+        options.log,
+      )) {
+        granted.add(treeUri);
+      }
       try {
-        persist();
-        for (const treeUri of existingTreeUris(
-          options.database,
-          options.log,
-        )) {
-          granted.add(treeUri);
-        }
         persist();
       } catch {
         granted.clear();

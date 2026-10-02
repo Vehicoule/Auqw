@@ -71,6 +71,13 @@ export async function run(): Promise<void> {
     nextId += 1;
     return route({ id, channel, args });
   };
+  // `local:add` only mints for paths main attested through the
+  // main→utility `local:picks` channel — this helper plays the
+  // main-process half the OS dialog triggers.
+  const pickAdd = async (paths: string[]): Promise<UtilityResponse> => {
+    await call(CHANNELS.localPicks, { paths });
+    return call(CHANNELS.localAdd, { paths });
+  };
   const insertRecording = (id: string, provenance = 'provider'): void => {
     dbW.prepare(
       `INSERT INTO recordings (id, title, artwork_json, version_labels_json, provenance)
@@ -86,8 +93,22 @@ export async function run(): Promise<void> {
     const audio = join(folder, 'demo.wav');
     await writeFile(audio, Buffer.alloc(2048, 1));
 
-    const added = await call(CHANNELS.localAdd, { paths: [folder] });
+    // `local:add` alone proves nothing about OS-pick provenance — an
+    // unattested absolute path denies (the compromised-renderer
+    // self-grant); an attested one mints; the attestation is consumed
+    // by the mint, so a replayed `local:add` denies again.
+    const unattested = await call(CHANNELS.localAdd, { paths: [folder] });
+    assert(
+      !unattested.ok && unattested.error?.kind === 'permission-denied',
+      'unattested path cannot self-grant',
+    );
+    const added = await pickAdd([folder]);
     assert(added.ok, 'local:add validates a picked dir');
+    const replayed = await call(CHANNELS.localAdd, { paths: [folder] });
+    assert(
+      !replayed.ok && replayed.error?.kind === 'permission-denied',
+      'a consumed attestation cannot re-mint',
+    );
     const pick = (added.result as {
       picks: { treeUri: string; label: string; kind: string }[];
     }).picks[0];
@@ -242,13 +263,13 @@ export async function run(): Promise<void> {
     }
 
     // Picked files validate as audio-only, single-doc trees.
-    const filePick = await call(CHANNELS.localAdd, { paths: [audio] });
+    const filePick = await pickAdd([audio]);
     assert(
       !filePick.ok && filePick.error?.kind === 'invalid-request',
       'a deleted path is not pickable',
     );
     await writeFile(audio, Buffer.alloc(16, 9));
-    const pickedFile = await call(CHANNELS.localAdd, { paths: [audio] });
+    const pickedFile = await pickAdd([audio]);
     assert(pickedFile.ok, 'picked file resolves');
     const fileDesc = (pickedFile.result as {
       picks: { treeUri: string; kind: string }[];
@@ -260,14 +281,14 @@ export async function run(): Promise<void> {
     );
     const notAudio = join(root, 'notes.txt');
     await writeFile(notAudio, 'nope');
-    const rejected = await call(CHANNELS.localAdd, { paths: [notAudio] });
+    // Attestation only proves pick provenance — the picked path's own
+    // validation (audio-only, absolute) still applies to the mint.
+    const rejected = await pickAdd([notAudio]);
     assert(
       !rejected.ok && rejected.error?.kind === 'invalid-request',
       'non-audio file refused',
     );
-    const relative = await call(CHANNELS.localAdd, {
-      paths: ['not/absolute.wav'],
-    });
+    const relative = await pickAdd(['not/absolute.wav']);
     assert(
       !relative.ok && relative.error?.kind === 'invalid-request',
       'relative path refused',
@@ -576,9 +597,7 @@ export async function run(): Promise<void> {
     // the outside target — resolve and read must stay denied.
     const pickedSwap = join(root, 'picked-swap.wav');
     await writeFile(pickedSwap, Buffer.alloc(16, 4));
-    const pickedAdd = await call(CHANNELS.localAdd, {
-      paths: [pickedSwap],
-    });
+    const pickedAdd = await pickAdd([pickedSwap]);
     assert(pickedAdd.ok, 'picked file for the anchor swap');
     const pickedTree = (pickedAdd.result as {
       picks: { treeUri: string }[];
@@ -632,9 +651,7 @@ export async function run(): Promise<void> {
     const anchorDir = join(root, 'anchored');
     await mkdir(anchorDir);
     await writeFile(join(anchorDir, 'inner.wav'), Buffer.alloc(8, 6));
-    const anchorAdd = await call(CHANNELS.localAdd, {
-      paths: [anchorDir],
-    });
+    const anchorAdd = await pickAdd([anchorDir]);
     assert(anchorAdd.ok, 'picked dir for the anchor swap');
     const anchorTree = (anchorAdd.result as {
       picks: { treeUri: string }[];
@@ -830,9 +847,7 @@ export async function run(): Promise<void> {
     const revocableDir = join(root, 'revocable');
     await mkdir(revocableDir);
     await writeFile(join(revocableDir, 'gone.wav'), Buffer.alloc(8, 3));
-    const revAdd = await call(CHANNELS.localAdd, {
-      paths: [revocableDir],
-    });
+    const revAdd = await pickAdd([revocableDir]);
     assert(revAdd.ok, 'revocable pick adds');
     const revTree = (revAdd.result as { picks: { treeUri: string }[] })
       .picks[0]?.treeUri;

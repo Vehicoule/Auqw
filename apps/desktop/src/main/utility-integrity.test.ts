@@ -47,12 +47,33 @@ export function run(): void {
       'utility-integrity: digest mismatch: app.asar.unpacked/index.cjs',
     );
 
-    // A manifest entry for a file that is gone refuses too.
+    // A loose file the manifest does not cover refuses too — coverage
+    // is enumerated on disk, so an omitted planted file can't ride in.
     writeFileSync(
       join(dir, 'app.asar.unpacked', 'index.cjs'),
       'utility entry',
       'utf8',
     );
+    writeFileSync(
+      join(dir, 'utility-integrity.sha256'),
+      `${sha('utility entry')}  app.asar.unpacked/index.cjs\n`,
+      'utf8',
+    );
+    assertEqual(
+      throws(() => verifyUtilityIntegrity(dir)),
+      'utility-integrity: manifest omits loose file: auqw_node_bindings.node',
+    );
+    writeFileSync(
+      join(dir, 'utility-integrity.sha256'),
+      [
+        `${sha('utility entry')}  app.asar.unpacked/index.cjs`,
+        `${sha('napi')}  auqw_node_bindings.node`,
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    // A manifest entry for a file that is gone refuses too.
     rmSync(join(dir, 'auqw_node_bindings.node'));
     assertEqual(
       throws(() => verifyUtilityIntegrity(dir)),

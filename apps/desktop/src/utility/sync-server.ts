@@ -180,6 +180,10 @@ export type SyncServiceDeps = {
    * or the service failed to bind).
    */
   readonly potPort?: () => number | null;
+  /** Bound host of the POT socket — needed because the endpoint is
+   * advertised to LAN phones: a loopback-bound minter publishes
+   * nothing rather than an unreachable LAN address. */
+  readonly potHost?: () => string | null;
   readonly nowMs?: () => number;
   /* Tuning knobs — production defaults; tests shrink them. */
   readonly handshakeCap?: number;
@@ -375,6 +379,12 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
    * advertises nothing rather than a dead socket.
    */
   function potEndpoint(): string | null {
+    // The endpoint is dialed by paired phones on the LAN — only a
+    // wildcard bind can serve them. A loopback-bound minter (the
+    // default) advertises nothing instead of an unreachable address.
+    if (deps.potHost?.() !== '0.0.0.0') {
+      return null;
+    }
     const port = deps.potPort?.() ?? null;
     if (port === null) {
       return null;

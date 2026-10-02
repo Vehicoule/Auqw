@@ -264,25 +264,40 @@ async function main(): Promise<void> {
   // through to the default loader — and the file:// origin is kept,
   // since Chrome refuses non-file subresources into a file-less
   // parent scheme (local media playback rides media-src file:).
-  const imgSrc = imgSrcSources(
+  const pluginDir =
     process.env['AUQW_PLUGIN_DIR'] ??
-      (app.isPackaged
-        ? join(process.resourcesPath, 'plugins')
-        : join(here, '../../plugins')),
-  );
+    (app.isPackaged
+      ? join(process.resourcesPath, 'plugins')
+      : join(here, '../../plugins'));
   session.defaultSession.protocol.handle('file', (request) => {
+    let filePath: string;
     try {
-      if (fileURLToPath(request.url) === RENDERER) {
-        return new Response(
-          rewriteCsp(readFileSync(RENDERER, 'utf8'), imgSrc),
-          { headers: { 'content-type': 'text/html; charset=utf-8' } },
-        );
-      }
+      filePath = fileURLToPath(request.url);
     } catch {
-      // Fall through to the default file loader — a malformed request
-      // URL or unreadable document is not ours to answer for.
+      // A malformed request URL is not ours to answer for.
+      return net.fetch(request, { bypassCustomProtocolHandlers: true });
     }
-    return net.fetch(request, { bypassCustomProtocolHandlers: true });
+    if (filePath !== RENDERER) {
+      return net.fetch(request, { bypassCustomProtocolHandlers: true });
+    }
+    // The renderer document never falls through: the static bytes carry
+    // a blanket `img-src https:` — serving them unrewritten on a read
+    // failure reopens the egress this rewrite exists to close. The
+    // allowed origins are re-enumerated per serve so an install/update
+    // of a plugin's manifest needs no app restart to take effect.
+    try {
+      return new Response(
+        rewriteCsp(
+          readFileSync(RENDERER, 'utf8'),
+          imgSrcSources(pluginDir),
+        ),
+        { headers: { 'content-type': 'text/html; charset=utf-8' } },
+      );
+    } catch {
+      return new Response('renderer document unavailable', {
+        status: 500,
+      });
+    }
   });
 
   const userDataPath = app.getPath('userData');
@@ -759,6 +774,19 @@ async function main(): Promise<void> {
         win === null
           ? await dialog.showOpenDialog(options)
           : await dialog.showOpenDialog(win, options);
+      if (!result.canceled && result.filePaths.length > 0) {
+        // Attest the dialog's output to the utility before handing the
+        // path back — `local:add` only mints for picks it can match
+        // here, so a renderer cannot self-grant an arbitrary path.
+        await supervisor
+          .request(CHANNELS.localPicks, { paths: result.filePaths })
+          .catch((thrown) => {
+            console.warn(
+              '[dialog] local:picks attestation failed:',
+              thrown instanceof Error ? thrown.message : thrown,
+            );
+          });
+      }
       return result.canceled ? null : (result.filePaths[0] ?? null);
     },
     pickFiles: async (args, sender) => {
@@ -772,6 +800,16 @@ async function main(): Promise<void> {
         win === null
           ? await dialog.showOpenDialog(options)
           : await dialog.showOpenDialog(win, options);
+      if (!result.canceled && result.filePaths.length > 0) {
+        await supervisor
+          .request(CHANNELS.localPicks, { paths: result.filePaths })
+          .catch((thrown) => {
+            console.warn(
+              '[dialog] local:picks attestation failed:',
+              thrown instanceof Error ? thrown.message : thrown,
+            );
+          });
+      }
       return result.canceled ? [] : result.filePaths;
     },
     net: netService,

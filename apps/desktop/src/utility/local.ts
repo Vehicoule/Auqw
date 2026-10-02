@@ -6,12 +6,14 @@ import { CHANNELS } from '../shared/channels.ts';
 import { errorCode } from '../shared/check.ts';
 import type {
   LocalAddArgs,
+  LocalPicksArgs,
   LocalProbeArgs,
   LocalReadArgs,
   LocalResolveArgs,
 } from '../shared/contract.ts';
 import {
   isLocalAddArgs,
+  isLocalPicksArgs,
   isLocalProbeArgs,
   isLocalReadArgs,
   isLocalResolveArgs,
@@ -263,17 +265,40 @@ function localRows(db: DatabaseSync, grants: LocalGrants): LocalRow[] {
 }
 
 export function createLocalService(options: LocalServiceOptions): LocalService {
+  // Paths the main process attested through `local:picks` — each OS
+  // dialog result lands here before the renderer's `local:add` can
+  // name it. Minting consumes the entry: a grant may only ever come
+  // from a path an OS picker actually produced, so a compromised
+  // renderer cannot mint by passing an arbitrary absolute path.
+  const pendingPicks = new Set<string>();
+
   async function add(args: LocalAddArgs): Promise<unknown> {
+    for (const path of args.paths) {
+      if (!pendingPicks.has(path)) {
+        throw shellError(
+          'permission-denied',
+          'path was not produced by an OS pick',
+        );
+      }
+    }
     const picks: PickedTree[] = [];
     for (const path of args.paths) {
       const pick = await describePick(path);
       // The one grant-mint path: only a pick this service validated
       // (absolute, real, readable, dir or known-audio file) can grant
-      // the tree it names.
+      // the tree it names — and only when main attested the pick.
       options.grants.grant(pick.treeUri);
+      pendingPicks.delete(path);
       picks.push(pick);
     }
     return { picks };
+  }
+
+  function attest(args: LocalPicksArgs): unknown {
+    for (const path of args.paths) {
+      pendingPicks.add(path);
+    }
+    return undefined;
   }
 
   /**
@@ -781,6 +806,11 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         CHANNELS.localAdd,
         isLocalAddArgs,
         add,
+      ),
+      [CHANNELS.localPicks]: guarded(
+        CHANNELS.localPicks,
+        isLocalPicksArgs,
+        attest,
       ),
       [CHANNELS.localProbe]: guarded(
         CHANNELS.localProbe,

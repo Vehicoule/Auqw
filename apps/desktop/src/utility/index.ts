@@ -319,6 +319,7 @@ if (port === null) {
             }
             return bound;
           },
+          potHost: () => pot.host(),
         }
       : {}),
     disabled: process.env['AUQW_SYNC_DISABLED'] === '1',
