@@ -911,12 +911,35 @@ export async function createSessionController(
             // writes a past kill stranded re-emit against the
             // materialized (kind, recordId)→fields map the same
             // view just walked: absent records AND stale field
-            // values, upserts only (Review #46).
+            // values, upserts only (Review #46). 'sum' fields
+            // additionally need per-device components — a merged
+            // total can't prove our share landed.
             const synced = new Map<string, Record<string, unknown>>();
+            const components = new Map<
+              string,
+              Readonly<Record<string, Readonly<Record<string, number>>>>
+            >();
+            const winners = new Map<
+              string,
+              Readonly<Record<string, string>>
+            >();
             for (const rec of materialized) {
-              synced.set(syncedRecordKey(rec.kind, rec.recordId), rec.fields);
+              const key = syncedRecordKey(rec.kind, rec.recordId);
+              synced.set(key, rec.fields);
+              if (rec.sumComponents !== undefined) {
+                components.set(key, rec.sumComponents);
+              }
+              if (rec.winnerDeviceIds !== undefined) {
+                winners.set(key, rec.winnerDeviceIds);
+              }
             }
-            await session.emitUnsynced(synced).catch(() => undefined);
+            await session
+              .emitUnsynced(synced, {
+                deviceId: syncSurface.engine.deviceId,
+                components,
+                winners,
+              })
+              .catch(() => undefined);
           })().catch(() => undefined);
         } else {
           void log.write({

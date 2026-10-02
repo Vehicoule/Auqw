@@ -15,7 +15,10 @@ import {
   projectMaterialized,
   unsyncedWrites,
 } from '../sync/sync-projection.ts';
-import type { SyncProjectionInput } from '../sync/sync-projection.ts';
+import type {
+  SyncEmitEvidence,
+  SyncProjectionInput,
+} from '../sync/sync-projection.ts';
 import { utf8ByteLength } from '../utf8.ts';
 import type { ProviderCapability } from '../ports/provider.ts';
 import type { StorageBatch, StoragePort } from '../ports/storage.ts';
@@ -585,6 +588,7 @@ export class SyncIngress {
    */
   async emitUnsynced(
     synced: ReadonlyMap<string, Record<string, unknown>>,
+    evidence?: SyncEmitEvidence,
   ): Promise<void> {
     const r = this.#host.ready();
     if (r === null || this.#sync === undefined) {
@@ -608,6 +612,7 @@ export class SyncIngress {
         unsyncedWrites(
           { ...syncEmitInput(r), matchReviews },
           synced,
+          evidence,
         ),
       );
       // Survivors of a ready generation swap still owe tombstones —

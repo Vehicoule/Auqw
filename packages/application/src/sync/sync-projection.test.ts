@@ -45,6 +45,7 @@ import {
   unsyncedWrites,
 } from './sync-projection.ts';
 import type {
+  SyncEmitEvidence,
   SyncEmitInput,
   SyncProjectionInput,
 } from './sync-projection.ts';
@@ -1545,8 +1546,34 @@ function testUnsyncedWrites(): void {
     return map;
   };
   const synced = syncedMap(allWrites);
-  const none = unsyncedWrites(input, synced);
+  const DEV = 'dev-us';
+  const evidence = (
+    components: Record<
+      string,
+      Record<string, Record<string, number>>
+    > = {},
+    winners: Record<string, Record<string, string>> = {},
+  ): SyncEmitEvidence => ({
+    deviceId: DEV,
+    components: new Map(Object.entries(components)),
+    winners: new Map(Object.entries(winners)),
+  });
+  const none = unsyncedWrites(
+    input,
+    synced,
+    evidence({ 'playCount\u001fr-1': { count: { [DEV]: 5 } } }),
+  );
   assertEqual(none.length, 0, 'fully synced domain emits nothing');
+  // Without per-device evidence a 'sum' write can't prove delivery —
+  // the merged total might be a coincidental remote match — so it
+  // re-emits rather than trusting aggregate equality.
+  assert(
+    unsyncedWrites(input, synced).some(
+      (w) =>
+        w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'a sum write without component evidence re-emits',
+  );
 
   // Recording absent → its field + presence writes re-emit; the
   // still-synced like/playlist/review/count do not.
@@ -1554,7 +1581,10 @@ function testUnsyncedWrites(): void {
   for (const w of recordingUpsertWrites(rec)) {
     withoutRec.delete(`${w.kind}\u001f${w.recordId}`);
   }
-  const onlyRec = unsyncedWrites(input, withoutRec);
+  const coveredEvidence = evidence({
+    'playCount\u001fr-1': { count: { [DEV]: 5 } },
+  });
+  const onlyRec = unsyncedWrites(input, withoutRec, coveredEvidence);
   assert(
     onlyRec.length > 0 && onlyRec.every((w) => !('tombstone' in w)),
     'recovery emits upserts only',
@@ -1580,7 +1610,7 @@ function testUnsyncedWrites(): void {
   const recFields = staleTitle.get(`recording\u001fr-1`);
   assert(recFields !== undefined, 'recording record present');
   recFields['title'] = 'old name';
-  const titleWrites = unsyncedWrites(input, staleTitle);
+  const titleWrites = unsyncedWrites(input, staleTitle, coveredEvidence);
   assertEqual(titleWrites.length, 1, 'one stale field emits one write');
   assert(
     titleWrites[0]?.kind === 'recording' &&
@@ -1600,9 +1630,10 @@ function testUnsyncedWrites(): void {
     'a field the record lacks re-emits',
   );
 
-  // 'sum' delivery can't be proven inside the merged total — remote
-  // coverage above ours hides a lost increment, so only an exact
-  // match suppresses; 'max' still suppresses provably-dead writes.
+  // 'sum' delivery is per-device evidence, not merged equality —
+  // remote coverage above ours hides a lost increment either way,
+  // so an evidence-less pass re-emits; 'max' still suppresses
+  // provably-dead writes.
   const remoteAhead = syncedMap(allWrites);
   remoteAhead.get(`playCount\u001fr-1`)!['count'] = 9;
   assert(
@@ -1621,6 +1652,115 @@ function testUnsyncedWrites(): void {
         w.kind === 'playCount' && 'field' in w && w.field === 'count',
     ),
     'local-ahead sum re-emits the gap',
+  );
+
+  // BUG_0002 — per-device component evidence: a peer component
+  // coincidentally equal to our domain value can't hide a lost
+  // local component, and the re-emit asserts our recovered
+  // component plus the remote share (stamps our plays — never a
+  // sumComponentFor-clamped 0).
+  const countValue = (writes: readonly LocalWrite[]): unknown =>
+    writes.find(
+      (w): w is Extract<LocalWrite, { field: string }> =>
+        w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    )?.value;
+  const fiveEvents = [
+    playEvent('ev-a', 'r-1'),
+    playEvent('ev-b', 'r-1'),
+    playEvent('ev-c', 'r-1'),
+    playEvent('ev-d', 'r-1'),
+    playEvent('ev-e', 'r-1'),
+  ];
+  const playInput = emitInput({
+    playHistory: fiveEvents,
+    playCounts: [{ recordingId: 'r-1', count: 5, lastMs: 9 }],
+  });
+  // Peer-equal: synced total 5 is the peer's, our 5 plays never
+  // reached the log — the 5 domain events carry no synced playEvent
+  // record, so the recovery target is 5 and the emit asserts
+  // 5 + remoteShare(5) = 10 (stamps our 5).
+  const lostPeerEqual = unsyncedWrites(
+    playInput,
+    new Map([['playCount\u001fr-1', { count: 5 }]]),
+    evidence({ 'playCount\u001fr-1': { count: { 'peer-x': 5 } } }),
+  );
+  assertEqual(
+    countValue(lostPeerEqual),
+    10,
+    'peer-equal loss re-emits our component plus the remote share',
+  );
+  // Peer-ahead: synced 9 is the peer's against a stale domain 5 —
+  // the emit asserts 5 + 9 = 14, stamping our 5 rather than the
+  // domain total's clamped 0.
+  const lostPeerAhead = unsyncedWrites(
+    playInput,
+    new Map([['playCount\u001fr-1', { count: 9 }]]),
+    evidence({ 'playCount\u001fr-1': { count: { 'peer-x': 9 } } }),
+  );
+  assertEqual(
+    countValue(lostPeerAhead),
+    14,
+    'peer-ahead loss re-emits the recovered aggregate',
+  );
+  // Covered: our component already accounts for all five of our
+  // events plus the peer's five — nothing re-emits.
+  const covered = unsyncedWrites(
+    emitInput({
+      playHistory: fiveEvents,
+      playCounts: [{ recordingId: 'r-1', count: 10, lastMs: 9 }],
+    }),
+    new Map<string, Record<string, unknown>>([
+      ['playCount\u001fr-1', { count: 10 }],
+      ...fiveEvents.map(
+        (e) => [`playEvent\u001f${e.eventId}`, { event: e }] as const,
+      ),
+    ]),
+    evidence(
+      { 'playCount\u001fr-1': { count: { [DEV]: 5, 'peer-x': 5 } } },
+      Object.fromEntries(
+        fiveEvents.map((e) => [
+          `playEvent\u001f${e.eventId}`,
+          { event: DEV },
+        ]),
+      ),
+    ),
+  );
+  assert(
+    !covered.some(
+      (w) =>
+        w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'a covered component stays suppressed',
+  );
+  // Partial loss: three of our five events delivered (winner is us),
+  // two never emitted — the recovery target outgrows our stamped 3
+  // and the re-emit asserts the true 5.
+  const partial = unsyncedWrites(
+    emitInput({
+      playHistory: fiveEvents,
+      playCounts: [{ recordingId: 'r-1', count: 3, lastMs: 9 }],
+    }),
+    new Map<string, Record<string, unknown>>([
+      ['playCount\u001fr-1', { count: 3 }],
+      ...fiveEvents
+        .slice(0, 3)
+        .map(
+          (e) => [`playEvent\u001f${e.eventId}`, { event: e }] as const,
+        ),
+    ]),
+    evidence(
+      { 'playCount\u001fr-1': { count: { [DEV]: 3 } } },
+      Object.fromEntries(
+        fiveEvents
+          .slice(0, 3)
+          .map((e) => [`playEvent\u001f${e.eventId}`, { event: DEV }]),
+      ),
+    ),
+  );
+  assertEqual(
+    countValue(partial),
+    5,
+    'a partially lost component re-emits the recovered total',
   );
 
   // A tombstoned synced record (empty fields) counts as absent —
@@ -1660,7 +1800,7 @@ function testUnsyncedWrites(): void {
   staleSettings.get(`settings\u001f${SETTINGS_RECORD_ID}`)!['theme'] =
     'other';
   assertEqual(
-    unsyncedWrites(input, staleSettings).length,
+    unsyncedWrites(input, staleSettings, coveredEvidence).length,
     1,
     'stale settings field re-emits alone',
   );

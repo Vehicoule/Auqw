@@ -106,6 +106,7 @@ import {
   recordingDeleteWrites,
   recordingUpsertWrites,
 } from '../sync/sync-projection.ts';
+import type { SyncEmitEvidence } from '../sync/sync-projection.ts';
 import type {
   LocalWrite,
   MaterializedRecord,
@@ -1400,8 +1401,9 @@ export class Session {
    */
   emitUnsynced(
     synced: ReadonlyMap<string, Record<string, unknown>>,
+    evidence?: SyncEmitEvidence,
   ): Promise<void> {
-    return this.#syncIngress.emitUnsynced(synced);
+    return this.#syncIngress.emitUnsynced(synced, evidence);
   }
 
   // ---- restore ----------------------------------------------------

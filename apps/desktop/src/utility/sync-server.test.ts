@@ -230,6 +230,7 @@ function createEchoEngine(): SyncEnginePort & {
     [];
   return {
     applied,
+    deviceId: 'echo',
     exportDelta(since: string): Promise<Result<unknown>> {
       return Promise.resolve(ok({ kind: 'echo', since }));
     },
@@ -927,6 +928,7 @@ export async function run(): Promise<void> {
   {
     const { service } = await startService({
       engine: {
+        deviceId: 'fake',
         exportDelta(): Promise<Result<unknown>> {
           return Promise.resolve({
             ok: false,
@@ -976,6 +978,7 @@ export async function run(): Promise<void> {
     const { service, port } = await startService({
       sessionCap: 8 * 1_024,
       engine: {
+        deviceId: 'fake',
         exportDelta(): Promise<Result<unknown>> {
           return Promise.resolve(ok({ blob: 'x'.repeat(9 * 1_024) }));
         },
@@ -1014,6 +1017,7 @@ export async function run(): Promise<void> {
   {
     const { service, port } = await startService({
       engine: {
+        deviceId: 'fake',
         exportDelta(): Promise<Result<unknown>> {
           // `undefined` silently drops on serialize — the wire must
           // refuse instead of delivering a rewritten document.
@@ -1053,6 +1057,7 @@ export async function run(): Promise<void> {
   {
     const { service, port } = await startService({
       engine: {
+        deviceId: 'fake',
         exportDelta(): Promise<Result<unknown>> {
           let reads = 0;
           const doc: Record<string, unknown> = {};
@@ -1095,6 +1100,7 @@ export async function run(): Promise<void> {
   {
     const { service, port } = await startService({
       engine: {
+        deviceId: 'fake',
         exportDelta(): Promise<Result<unknown>> {
           return Promise.resolve(
             ok(new Proxy({ puts: [{ id: 'a', v: 1 }] }, {})),
@@ -1496,6 +1502,7 @@ export async function run(): Promise<void> {
   {
     const { service, port } = await startService({
       engine: {
+        deviceId: 'fake',
         exportDelta(): Promise<Result<unknown>> {
           return Promise.resolve({
             ok: false,
@@ -2059,6 +2066,7 @@ export async function run(): Promise<void> {
     };
     const { service, port } = await startService({
       engine: {
+        deviceId: 'fake',
         exportDelta(): Promise<Result<unknown>> {
           return Promise.resolve(ok(bigDoc));
         },
@@ -2389,6 +2397,7 @@ export async function run(): Promise<void> {
   {
     const { service } = await startService({
       engine: {
+        deviceId: 'fake',
         exportDelta(): Promise<Result<unknown>> {
           return Promise.resolve(ok({}));
         },

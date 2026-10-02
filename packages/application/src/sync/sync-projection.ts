@@ -725,6 +725,93 @@ export function emissionWrites(
 }
 
 /**
+ * Per-device delivery evidence for `unsyncedWrites`, lifted from the
+ * same `MaterializedRecord[]` `synced` is built from — the merged
+ * field values alone can't prove a `sum` write landed, because a
+ * per-device component is invisible inside the merged total.
+ */
+export type SyncEmitEvidence = {
+  /** This device's engine identity — the emitter's own partition. */
+  readonly deviceId: string;
+  /** `syncedRecordKey` → field → deviceId → that device's live 'sum' component. */
+  readonly components: ReadonlyMap<
+    string,
+    Readonly<Record<string, Readonly<Record<string, number>>>>
+  >;
+  /** `syncedRecordKey` → field → the winning entry's deviceId. */
+  readonly winners: ReadonlyMap<string, Readonly<Record<string, string>>>;
+};
+
+/** Remote devices' combined live share of a 'sum' field. */
+function remoteShare(
+  evidence: SyncEmitEvidence,
+  write: Extract<LocalWrite, { field: string }>,
+): number {
+  const perDevice = evidence.components
+    .get(`${write.kind}${KEY_SEP}${write.recordId}`)?.[write.field];
+  if (perDevice === undefined) {
+    return 0;
+  }
+  let sum = 0;
+  for (const [dev, component] of Object.entries(perDevice)) {
+    if (dev !== evidence.deviceId) {
+      sum += component;
+    }
+  }
+  return sum;
+}
+
+/**
+ * The component value a `sum` write must prove against — evidence-
+ * backed, never the bare domain aggregate:
+ *
+ * - `domainEstimate` covers the consistent case: the domain row
+ *   folds every delivered remote share, so domain-minus-remote
+ *   estimates our intended component whenever the projection is
+ *   current (it under-estimates, bounded at 0, when a remote share
+ *   reached the log ahead of the domain fold).
+ * - `playCount.count` additionally counts our attributed events:
+ *   domain `playHistory` rows enter only through commits, and a
+ *   remote event can only arrive via the log — so a domain event
+ *   with no synced `playEvent` record is a lost local emission, and
+ *   one whose winner is our deviceId is ours delivered. Retention
+ *   prunes the evidence set, bounding this leg honestly; the max
+ *   keeps whichever estimator sees more.
+ */
+function sumDeliveryTarget(
+  write: Extract<LocalWrite, { field: string }>,
+  input: SyncEmitInput,
+  synced: ReadonlyMap<string, Record<string, unknown>>,
+  evidence: SyncEmitEvidence,
+): number {
+  const domainEstimate =
+    typeof write.value === 'number'
+      ? Math.max(0, write.value - remoteShare(evidence, write))
+      : 0;
+  if (write.kind === 'playCount' && write.field === 'count') {
+    let ours = 0;
+    for (const event of input.playHistory) {
+      if (event.recordingId !== write.recordId) {
+        continue;
+      }
+      const recKey = `playEvent${KEY_SEP}${event.eventId}`;
+      const eventFields = synced.get(recKey);
+      if (eventFields === undefined || Object.keys(eventFields).length === 0) {
+        // Never synced — a remote device can't have injected it, so
+        // this is a lost local emission.
+        ours += 1;
+        continue;
+      }
+      if (evidence.winners.get(recKey)?.['event'] === evidence.deviceId) {
+        ours += 1;
+      }
+    }
+    return Math.max(domainEstimate, ours);
+  }
+  return domainEstimate;
+}
+
+/**
  * Boot-time emit recovery (Review #46): emission is post-commit and
  * the pending queue is memory-only, so a shutdown or dead emit port
  * can strand committed writes forever. `synced` maps each live
@@ -739,10 +826,20 @@ export function emissionWrites(
  *   but never emitted);
  * - for `max` fields, only when the local value is LARGER —
  *   asserting a smaller ceiling is a guaranteed no-op.
- * - for `sum` fields, only when the materialized value differs —
- *   a per-device component can't be proven inside the merged sum,
- *   so remote coverage above ours is not evidence of delivery
- *   (a lost increment under remote coverage must re-emit).
+ * - for `sum` fields, only per-device components count as delivery
+ *   evidence (see `SyncEmitEvidence`): a live component of ours at
+ *   or above the recovery target proves this write (or a
+ *   superseding one) reached the log; the merged total can't —
+ *   remote coverage equal to or above our value is not evidence,
+ *   and a lost increment under it must re-emit.
+ *
+ * Re-emitted `sum` writes assert the recovered aggregate — our
+ * evidence-backed component target plus the remote share the merged
+ * value already carries — never the raw domain value: a stale
+ * domain row can under-assert our component when a remote share
+ * landed in the log but not yet the domain (the peer-equal/
+ * peer-ahead loss cases), and `sumComponentFor` would clamp the
+ * stamped component to zero.
  *
  * Tombstones never emit — absent-from-domain can't be told apart
  * from a remote create the inbound pass hasn't folded yet, so a
@@ -752,6 +849,7 @@ export function emissionWrites(
 export function unsyncedWrites(
   input: SyncEmitInput,
   synced: ReadonlyMap<string, Record<string, unknown>>,
+  evidence?: SyncEmitEvidence,
 ): LocalWrite[] {
   const delivered = (write: LocalWrite): boolean => {
     if ('tombstone' in write) {
@@ -772,11 +870,16 @@ export function unsyncedWrites(
     }
     const merge = SYNC_FIELD_RULES[write.kind][write.field]?.merge;
     if (merge === 'sum' && typeof write.value === 'number') {
-      // The merged sum can't prove OUR component landed — remote
-      // coverage above (or coincidentally equal to) ours suppresses a
-      // genuinely lost increment under `>=`. Only the exact match is
-      // suppression-safe; everything else re-emits.
-      return syncedValue === write.value;
+      if (evidence === undefined) {
+        return false;
+      }
+      const ours = evidence.components
+        .get(`${write.kind}${KEY_SEP}${write.recordId}`)
+        ?.[write.field]?.[evidence.deviceId];
+      return (
+        ours !== undefined &&
+        ours >= sumDeliveryTarget(write, input, synced, evidence)
+      );
     }
     if (merge === 'max' && typeof write.value === 'number') {
       return typeof syncedValue === 'number' && syncedValue >= write.value;
@@ -830,7 +933,31 @@ export function unsyncedWrites(
       }
     }
   }
-  return writes.filter((write) => !delivered(write));
+  return writes
+    .filter((write) => !delivered(write))
+    .map((write) => {
+      // A re-emitted 'sum' write asserts the recovered aggregate —
+      // our evidence-backed target plus the remote share the merged
+      // value carries — never the raw domain value, which can
+      // under-assert our component when a remote share reached the
+      // log ahead of the domain fold (`sumComponentFor` would then
+      // clamp the stamped component to 0 and lose it again).
+      if (
+        evidence === undefined ||
+        'tombstone' in write ||
+        !('field' in write) ||
+        SYNC_FIELD_RULES[write.kind]?.[write.field]?.merge !== 'sum' ||
+        typeof write.value !== 'number'
+      ) {
+        return write;
+      }
+      return {
+        ...write,
+        value:
+          sumDeliveryTarget(write, input, synced, evidence) +
+          remoteShare(evidence, write),
+      };
+    });
 }
 
 /**

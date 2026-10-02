@@ -583,10 +583,25 @@ export async function createSessionController(
     // the next page's fold — memory stays page-bounded while the
     // cross-page ordering resolves itself (Review #46).
     const synced = new Map<string, Record<string, unknown>>();
+    const components = new Map<
+      string,
+      Readonly<Record<string, Readonly<Record<string, number>>>>
+    >();
+    const winners = new Map<
+      string,
+      Readonly<Record<string, string>>
+    >();
     for (let offset = 0; ; ) {
       const page = await api.sync.materialized({ offset });
       for (const rec of page.records as readonly MaterializedRecord[]) {
-        synced.set(syncedRecordKey(rec.kind, rec.recordId), rec.fields);
+        const key = syncedRecordKey(rec.kind, rec.recordId);
+        synced.set(key, rec.fields);
+        if (rec.sumComponents !== undefined) {
+          components.set(key, rec.sumComponents);
+        }
+        if (rec.winnerDeviceIds !== undefined) {
+          winners.set(key, rec.winnerDeviceIds);
+        }
       }
       if (page.records.length > 0) {
         // A failed apply keeps the served page in the session's
@@ -619,8 +634,20 @@ export async function createSessionController(
         // records AND stale field values, upserts only (Review
         // #46). Runs only on a complete pass; an early exit leaves
         // the map partial and would double-emit still-synced rows.
+        // 'sum' fields need the per-device component + winner
+        // attribution the same records carry — a merged total
+        // can't prove our share landed.
         if (emitDiff && !disposed) {
-          await session.emitUnsynced(synced).catch(() => undefined);
+          const status = await api.sync.status().catch(() => null);
+          const deviceId = status?.deviceId ?? null;
+          await session
+            .emitUnsynced(
+              synced,
+              deviceId === null
+                ? undefined
+                : { deviceId, components, winners },
+            )
+            .catch(() => undefined);
         }
         return true;
       }

@@ -38,6 +38,7 @@ function jsonCursor(since: string): SyncCursor | null {
 
 export function createSyncEnginePort(engine: SyncEngine): SyncEnginePort {
   return {
+    deviceId: engine.deviceId,
     async exportDelta(
       since: string,
       signal?: CancellationSignal,
