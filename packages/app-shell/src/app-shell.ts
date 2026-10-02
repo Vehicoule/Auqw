@@ -122,6 +122,7 @@ import {
   reportStoredDownloadError,
   rowActionsModel,
   sameNavLocation,
+  searchRowTarget,
   stageDownloadChip,
   stageReopenMode,
   suggestionMetaMap,
@@ -1665,7 +1666,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // provider routing): match the submitted query against
   // provenance-local rows. Keys are `local:<recordingId>` so a press
   // routes to the owned-bytes path, not addAndPlay. ports.localCatalog
-  // gates the merge — desktop surfaces no local rows in search.
+  // gates the merge; both apps enable it.
   const localResults = useMemo(() => {
     if (ports.localCatalog !== true) {
       return [];
@@ -1757,13 +1758,25 @@ export function useAppShell<E extends { readonly type: string } = never>(
       return base;
     }
     const results = [...localResults, ...base.results];
+    // Local hits lead the visible list — the hero names the same top
+    // row instead of a lower-ranked provider hit.
+    const first = results[0];
+    const hero =
+      first === undefined
+        ? base.hero
+        : {
+            row: first,
+            metaLabel: [first.note, first.artist, first.album]
+              .filter((part): part is string => part !== null && part !== '')
+              .join(' · '),
+          };
     if (base.phase === 'ready' || base.phase === 'loading') {
-      return { ...base, results };
+      return { ...base, results, hero };
     }
     // Provider empty/error/unavailable but local files matched — the
     // rows still play (owned bytes), so surface them instead of the
     // bare failure.
-    return { ...base, phase: 'ready' as const, results };
+    return { ...base, phase: 'ready' as const, results, hero };
   }, [
     searchState,
     localResults,
@@ -2189,8 +2202,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
     (row: TrackRowModel) => {
       // Local merged rows are existing recordings — play through the
       // owned-bytes path rather than re-ingesting provider metadata.
-      // `local:` keys exist only under ports.localCatalog, so the
-      // branch can never shadow a catalog row on desktop.
+      // `local:` keys are written only by the localResults merge
+      // under ports.localCatalog — a plain catalog key can never
+      // enter this branch.
       if (
         ports.localCatalog === true &&
         row.key.startsWith('local:')
@@ -3758,6 +3772,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
     (key: string) => resultMeta.current.get(key),
     [],
   );
+  // Row actions on merged local results need a recording target, not
+  // the provider meta the catalog map holds — decode both kinds.
+  const resultTargetFor = useCallback(
+    (key: string) => searchRowTarget(key, resultMetaFor),
+    [resultMetaFor],
+  );
 
   // ---- picker sheets (epoch-gated serialized writes) ---------------
   // These handlers feed dep arrays (mobile's BackHandler chain) — they
@@ -3978,6 +3998,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     suggestions,
     searchSession: search,
     resultMetaFor,
+    resultTargetFor,
     // sheets
     actionsFor,
     setActionsFor,

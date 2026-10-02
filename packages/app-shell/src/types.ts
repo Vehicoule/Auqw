@@ -676,6 +676,24 @@ export function suggestionMetaMap(
 }
 
 /**
+ * Search-row action target. Merged local rows carry `local:<id>` keys
+ * (built by the shell's localResults memo — the only writer of the
+ * prefix); they decode to recording targets, the same shape library
+ * entries take. Provider rows resolve through the result-meta map.
+ * Returns null when the row carries no actionable identity.
+ */
+export function searchRowTarget(
+  key: string,
+  metaFor: (key: string) => TrackMetadata | undefined,
+): ActionTarget | null {
+  if (key.startsWith('local:')) {
+    return { kind: 'recording', recordingId: key.slice('local:'.length) };
+  }
+  const meta = metaFor(key);
+  return meta === undefined ? null : { kind: 'metadata', meta };
+}
+
+/**
  * Playlist download-all state + the missing-only request list.
  * Requesting an already-owned recording with a changed mapping would
  * delete its stored file first — 'download missing' must never cost
