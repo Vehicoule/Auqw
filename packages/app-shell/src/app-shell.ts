@@ -2384,9 +2384,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
     // queue's mode, not the transport: during a retry backoff playback
     // publishes 'preparing' with no handle and the tap must still
     // pause; a natively-arrived transport 'paused' (queue still
-    // 'playing') means the tap resumes.
+    // 'playing') means the tap resumes. A 'failed' attempt keeps the
+    // queue's 'playing' intent though there is nothing to pause —
+    // the tap is a retry, so it must route to resume(), not pause().
     const intentPlaying =
-      state.queue.mode === 'playing' && state.playback.type !== 'paused';
+      state.queue.mode === 'playing' &&
+      state.playback.type !== 'paused' &&
+      state.playback.type !== 'failed';
     if (
       !intentPlaying &&
       currentRecordingId !== null &&
