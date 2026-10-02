@@ -79,6 +79,9 @@ const config: ExpoConfig = {
     // The stream seam serves audio over plain HTTP on loopback —
     // cleartext stays permitted for 127.0.0.1/localhost only.
     './plugins/with-loopback-cleartext.cjs',
+    // Material3 parent theme — the dock's M3 active indicator is
+    // theme-gated (suppressed entirely under AppCompat).
+    './plugins/with-material3-theme.cjs',
     [
       'expo-navigation-bar',
       {

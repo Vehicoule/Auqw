@@ -1,9 +1,11 @@
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Platform, View } from 'react-native';
+import type { LayoutChangeEvent } from 'react-native';
 import { BlurView } from 'expo-blur';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
+  withSpring,
   withTiming,
 } from 'react-native-reanimated';
 import { useTheme } from './theme.tsx';
@@ -75,10 +77,39 @@ export function AndroidNavbar({
   onSelect,
 }: NavbarProps) {
   const theme = useTheme();
+  // One selection mark, not per-slot fills — the accent pill is a
+  // single element that glides between slots (the seg indicator's
+  // treatment on the dock). Equal flex:1 slots make the target x a
+  // pure function of slot width; reduced motion snaps it.
+  const [rowW, setRowW] = useState(0);
+  const placed = useRef(false);
+  const slotW = rowW / Math.max(1, items.length);
+  const pillW = Math.max(0, Math.min(56, slotW - theme.spacing.xs));
+  const foundIndex = items.findIndex((item) => item.key === activeKey);
+  const targetX = Math.max(0, foundIndex) * slotW + (slotW - pillW) / 2;
+  const pillX = useSharedValue(0);
+  useEffect(() => {
+    if (rowW === 0 || pillW === 0) {
+      return;
+    }
+    if (!placed.current || theme.reducedMotion) {
+      pillX.value = targetX;
+      placed.current = true;
+      return;
+    }
+    pillX.value = withSpring(targetX, { stiffness: 260, damping: 26 });
+  }, [pillX, targetX, rowW, pillW, theme.reducedMotion]);
+  const pillStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: pillX.value }],
+  }));
+  const onRowLayout = (event: LayoutChangeEvent) => {
+    setRowW(event.nativeEvent.layout.width);
+  };
   return (
     <View>
       <View
         accessibilityRole="tablist"
+        onLayout={onRowLayout}
         style={{
           // The preview's native bar sits on the deep surface.
           backgroundColor: theme.colors.deep,
@@ -87,6 +118,23 @@ export function AndroidNavbar({
           paddingBottom: 10,
         }}
       >
+        {rowW > 0 && pillW > 0 && foundIndex >= 0 && (
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              {
+                position: 'absolute',
+                top: theme.spacing.sm,
+                left: 0,
+                width: pillW,
+                height: 30,
+                borderRadius: theme.radius.control,
+                backgroundColor: theme.colors.accentSoft,
+              },
+              pillStyle,
+            ]}
+          />
+        )}
         {items.map((item) => {
           const active = item.key === activeKey;
           return (
@@ -112,9 +160,6 @@ export function AndroidNavbar({
                   paddingHorizontal: theme.spacing.screen,
                   alignItems: 'center',
                   justifyContent: 'center',
-                  backgroundColor: active
-                    ? theme.colors.accentSoft
-                    : 'transparent',
                 }}
               >
                 <NavIcon
