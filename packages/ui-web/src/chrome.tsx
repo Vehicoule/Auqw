@@ -294,13 +294,21 @@ export function DesktopChrome({
   // to load — and drops the whole layer (data-bleed off, so the stage
   // re-solidifies) when the source itself can't load. The failure
   // state is keyed by its artwork URL and the live src is derived
-  // during render, so a track change never paints the old bleed.
+  // during render, so a track change never paints the old bleed — and
+  // a recorded failure only applies to the current uninterrupted visit:
+  // leaving an artwork and returning re-requests it fresh.
   const [bleed, setBleed] = useState<{
     readonly url: string;
     readonly src: string | null;
   } | null>(null);
+  const lastArtwork = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    lastArtwork.current = backdropArtwork;
+  }, [backdropArtwork]);
   const bleedSrc =
-    bleed !== null && bleed.url === backdropArtwork
+    bleed !== null &&
+    bleed.url === backdropArtwork &&
+    lastArtwork.current === backdropArtwork
       ? bleed.src
       : backdropArtwork != null
         ? scaledArtworkUrl(backdropArtwork, 512)
