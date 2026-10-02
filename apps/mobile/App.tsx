@@ -1052,6 +1052,13 @@ function Main({
     onCreatePlaylist,
   } = shell;
 
+  // The tonal source powers the adaptive card's real palette — live
+  // while adaptive is picked (the provider's own read) and while the
+  // theme sheet is open so the preview matches what picking applies.
+  const themeSource = useAdaptiveSource(
+    state.settings.theme === 'adaptive' || themePickerOpen,
+  );
+
   // A swipe-dismissed sheet parks `stageGone` at 1 until the held
   // mount releases; a player taking over inside that window must not
   // inherit a pill translated offscreen. Only the dismiss axis resets
@@ -2802,7 +2809,7 @@ function Main({
           >
             <ThemePickerSheet
               title={t('settings.theme')}
-              cards={themeCardViews(osScheme)}
+              cards={themeCardViews(osScheme, themeSource)}
               selectedKey={state.settings.theme}
               onPick={onPickTheme}
               onDismiss={closeThemePicker}

@@ -210,6 +210,27 @@ function usePrefersReducedMotion(): boolean {
   return reduced;
 }
 
+/** Live `prefers-color-scheme` read — the theme picker's 'system' and
+    'adaptive' preview cards re-derive on an OS flip even while a fixed
+    theme is picked (the provider's context can't see it then). */
+function usePrefersDarkScheme(): 'dark' | 'light' {
+  const [dark, setDark] = useState(
+    () =>
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches,
+  );
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') {
+      return undefined;
+    }
+    const query = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = (e: MediaQueryListEvent) => setDark(e.matches);
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  return dark ? 'dark' : 'light';
+}
+
 /** Full-screen centered gate frame shared by boot/restore/locale gates. */
 const gateStyle: CSSProperties = {
   height: '100vh',
@@ -905,6 +926,23 @@ function Main({
     onOpenCard,
     onCreatePlaylist,
   } = shell;
+
+  // The OS light/dark read + palette source drive the theme-card
+  // previews: 'system'/'adaptive' track the OS live, and the adaptive
+  // card shows the real derived palette — the source stays live while
+  // adaptive is picked (the provider's own subscription) and while the
+  // theme sheet is open so the preview matches what picking applies.
+  const osScheme = usePrefersDarkScheme();
+  const [themeSource, setThemeSource] = useState<ThemeSource | null>(null);
+  useEffect(() => {
+    if (state.settings.theme !== 'adaptive' && !themePickerOpen) {
+      setThemeSource(null);
+      return undefined;
+    }
+    return window.auqw.theme.subscribe((event) => {
+      setThemeSource(event.source);
+    });
+  }, [state.settings.theme, themePickerOpen]);
 
   // The update affordance is a quiet bar entry: the icon's dot is the
   // only uninvited signal; clicking it engages the card (which also
@@ -1841,12 +1879,7 @@ function Main({
         {sheet('sheet-theme', closeThemePicker, themePickerOpen, () => (
           <ThemePickerSheet
             title={t('settings.theme')}
-            cards={themeCardViews(
-              typeof window.matchMedia === 'function' &&
-                window.matchMedia('(prefers-color-scheme: dark)').matches
-                ? 'dark'
-                : 'light',
-            )}
+            cards={themeCardViews(osScheme, themeSource)}
             selectedKey={state.settings.theme}
             onPick={onPickTheme}
             onDismiss={closeThemePicker}

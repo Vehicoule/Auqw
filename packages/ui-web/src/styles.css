@@ -292,6 +292,7 @@
 .ui-web:not([data-reduced-motion='true']) .uw-pressable,
 .ui-web:not([data-reduced-motion='true']) .uw-back,
 .ui-web:not([data-reduced-motion='true']) .uw-sheet-panel__close,
+.ui-web:not([data-reduced-motion='true']) .uw-tcard,
 .ui-web:not([data-reduced-motion='true']) .uw-namefield__action,
 .ui-web:not([data-reduced-motion='true']) .uw-mini,
 .ui-web:not([data-reduced-motion='true']) .uw-mini__play,
@@ -311,6 +312,7 @@
 /* Press feedback is limited to button-style targets — a scale on a
    full-width row reads as a glitch. */
 .uw-icon-btn:active:not(:disabled),
+.uw-tcard:active:not(:disabled),
 .uw-chip:active:not(:disabled),
 .uw-headbtn:active:not(:disabled),
 .uw-pill:active:not(:disabled),
@@ -2265,17 +2267,12 @@
   background: transparent;
   cursor: pointer;
   text-align: left;
-  transition: transform 140ms ease;
 }
 
 .uw-tcard[aria-pressed='true'] {
   border-color: var(--accent);
   outline: var(--stroke-hairline) solid var(--accent);
   outline-offset: calc(-1 * var(--stroke-hairline));
-}
-
-.uw-tcard:active {
-  transform: scale(0.96);
 }
 
 .uw-tcard__pv {

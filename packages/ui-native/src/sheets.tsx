@@ -405,131 +405,138 @@ export function ThemePickerSheet({
   readonly onDismiss?: (() => void) | undefined;
 }) {
   const theme = useTheme();
+  // The card grid outgrows short (e.g. landscape) viewports; bound it
+  // to the viewport and scroll like LanguagePickerSheet rather than let
+  // the sheet spill past its edge.
+  const listMaxHeight = Math.round(useWindowDimensions().height * 0.6);
   return (
     <SheetScaffold title={title} onDismiss={onDismiss}>
-      <View
-        style={{
-          flexDirection: 'row',
-          flexWrap: 'wrap',
-          gap: theme.spacing.sm,
-          paddingHorizontal: theme.spacing.sm,
-          paddingBottom: theme.spacing.sm,
-        }}
-      >
-        {cards.map((card) => {
-          const selected = card.key === selectedKey;
-          return (
-            <Pressable
-              key={card.key}
-              onPress={bind(onPick, card.key)}
-              accessibilityLabel={card.label}
-              style={{
-                flexBasis: '47%',
-                flexGrow: 1,
-                borderRadius: theme.radius.float,
-                borderWidth: selected
-                  ? theme.strokes.hairline * 2
-                  : theme.strokes.hairline,
-                borderColor: selected
-                  ? theme.colors.accent
-                  : theme.colors.hairline,
-                padding: theme.spacing.sm,
-                gap: theme.spacing.xs,
-              }}
-            >
-              {/* Mini-window preview in the option's own palette */}
-              <View
+      <ScrollView style={{ maxHeight: listMaxHeight }}>
+        <View
+          style={{
+            flexDirection: 'row',
+            flexWrap: 'wrap',
+            gap: theme.spacing.sm,
+            paddingHorizontal: theme.spacing.sm,
+            paddingBottom: theme.spacing.sm,
+          }}
+        >
+          {cards.map((card) => {
+            const selected = card.key === selectedKey;
+            return (
+              <Pressable
+                key={card.key}
+                onPress={bind(onPick, card.key)}
+                accessibilityLabel={card.label}
+                accessibilityState={{ selected }}
                 style={{
-                  height: 56,
-                  borderRadius: theme.radius.control,
-                  overflow: 'hidden',
-                  backgroundColor: card.palette.canvas,
-                  borderWidth: theme.strokes.hairline,
-                  borderColor: card.palette.hairline,
-                  flexDirection: 'row',
+                  flexBasis: '47%',
+                  flexGrow: 1,
+                  borderRadius: theme.radius.float,
+                  borderWidth: selected
+                    ? theme.strokes.hairline * 2
+                    : theme.strokes.hairline,
+                  borderColor: selected
+                    ? theme.colors.accent
+                    : theme.colors.hairline,
+                  padding: theme.spacing.sm,
+                  gap: theme.spacing.xs,
                 }}
               >
+                {/* Mini-window preview in the option's own palette */}
                 <View
                   style={{
-                    width: '34%',
-                    backgroundColor: card.palette.deep,
-                  }}
-                />
-                <View
-                  style={{
-                    flex: 1,
-                    margin: theme.spacing.xs,
+                    height: 56,
                     borderRadius: theme.radius.control,
-                    backgroundColor: card.palette.raised,
+                    overflow: 'hidden',
+                    backgroundColor: card.palette.canvas,
                     borderWidth: theme.strokes.hairline,
                     borderColor: card.palette.hairline,
-                    padding: theme.spacing.xs,
-                    justifyContent: 'center',
-                    gap: 4,
+                    flexDirection: 'row',
                   }}
                 >
                   <View
                     style={{
-                      height: 4,
-                      width: '60%',
-                      borderRadius: 2,
-                      backgroundColor: card.palette.text,
+                      width: '34%',
+                      backgroundColor: card.palette.deep,
                     }}
                   />
                   <View
                     style={{
-                      height: 4,
-                      width: '80%',
-                      borderRadius: 2,
-                      backgroundColor: card.palette.text,
-                      opacity: 0.35,
-                    }}
-                  />
-                  <View
-                    style={{
-                      width: 10,
-                      height: 10,
+                      flex: 1,
+                      margin: theme.spacing.xs,
                       borderRadius: theme.radius.control,
-                      backgroundColor: card.palette.accent,
-                      marginTop: 2,
+                      backgroundColor: card.palette.raised,
+                      borderWidth: theme.strokes.hairline,
+                      borderColor: card.palette.hairline,
+                      padding: theme.spacing.xs,
+                      justifyContent: 'center',
+                      gap: 4,
                     }}
-                  />
-                </View>
-              </View>
-              <View
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: theme.spacing.xs,
-                }}
-              >
-                <View style={{ flex: 1, minWidth: 0 }}>
-                  <Text
-                    variant="metadata"
-                    color={selected ? 'accent' : 'primary'}
-                    numberOfLines={1}
                   >
-                    {card.label}
-                  </Text>
-                  {card.detail != null && (
-                    <Text variant="metadata" color="secondary" numberOfLines={1}>
-                      {card.detail}
+                    <View
+                      style={{
+                        height: 4,
+                        width: '60%',
+                        borderRadius: 2,
+                        backgroundColor: card.palette.text,
+                      }}
+                    />
+                    <View
+                      style={{
+                        height: 4,
+                        width: '80%',
+                        borderRadius: 2,
+                        backgroundColor: card.palette.text,
+                        opacity: 0.35,
+                      }}
+                    />
+                    <View
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: theme.radius.control,
+                        backgroundColor: card.palette.accent,
+                        marginTop: 2,
+                      }}
+                    />
+                  </View>
+                </View>
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: theme.spacing.xs,
+                  }}
+                >
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text
+                      variant="metadata"
+                      color={selected ? 'accent' : 'primary'}
+                      numberOfLines={1}
+                    >
+                      {card.label}
                     </Text>
+                    {card.detail != null && (
+                      <Text variant="metadata" color="secondary" numberOfLines={1}>
+                        {card.detail}
+                      </Text>
+                    )}
+                  </View>
+                  {selected && (
+                    <StatusMark
+                      kind="check"
+                      size={12}
+                      color={theme.colors.accent}
+                    />
                   )}
                 </View>
-                {selected && (
-                  <StatusMark
-                    kind="check"
-                    size={12}
-                    color={theme.colors.accent}
-                  />
-                )}
-              </View>
-            </Pressable>
-          );
-        })}
-      </View>
+              </Pressable>
+            );
+          })}
+          </View>
+      </ScrollView>
     </SheetScaffold>
   );
 }

@@ -27,6 +27,8 @@ import type {
   TrackMetadata,
 } from '@auqw/application';
 import { schemes } from '@auqw/design-tokens';
+import { deriveScheme } from '@auqw/design-tokens/adaptive';
+import type { ThemeSource } from '@auqw/design-tokens/adaptive';
 import { t, type MessageId } from './i18n.ts';
 import { errorText } from './error-text.ts';
 import {
@@ -123,17 +125,24 @@ export type ThemeCardView = ProviderPickerOption & {
   };
 };
 
-/** Preview palettes for the theme picker's cards — 'system' and
-    'adaptive' preview under the live system scheme (the OS decides
-    both, so the card shows what resolving lands on). */
+/** Preview palettes for the theme picker's cards — 'system' previews
+    under the live system scheme and 'adaptive' derives from the OS
+    source when one's live (a Material You palette preview, not the
+    built-in accent). No source → the OS-scheme base. */
 export function themeCardViews(
   system: 'light' | 'dark',
+  adaptiveSource?: ThemeSource | null,
 ): readonly ThemeCardView[] {
+  const adaptive = deriveScheme(adaptiveSource ?? null, system).values;
   return themeOptions().map((option) => {
     const base =
-      option.key === 'dark' || option.key === 'light' || option.key === 'oled'
-        ? schemes[option.key]
-        : schemes[system];
+      option.key === 'adaptive'
+        ? adaptive
+        : option.key === 'dark' ||
+            option.key === 'light' ||
+            option.key === 'oled'
+          ? schemes[option.key]
+          : schemes[system];
     return {
       ...option,
       palette: {
