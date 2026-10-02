@@ -267,11 +267,16 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   // ---- position channel ------------------------------------------
   // Position ticks ride the session's light channel — position-only
-  // ticks skip the state publish, so the read subscribes here.
-  const positionMs = useSyncExternalStore(
-    useCallback((l: () => void) => session.subscribePosition(l), [session]),
-    () => session.positionMs(),
-  );
+  // ticks skip the state publish, so the read subscribes here. A plain
+  // state read, not useSyncExternalStore: engine ticks land every
+  // ~250ms–1s, and a tick arriving mid-render marks the store mutated —
+  // React heals by re-rendering synchronously, the next tick lands
+  // mid-pass again, and on a big tree the retries hit the nested-update
+  // cap ("Maximum update depth exceeded" thrown inside the position
+  // listener). A subscription queues one normal update per tick; ticks
+  // during a render just batch into the following one.
+  const [positionMs, setPositionMs] = useState(() => session.positionMs());
+  useEffect(() => session.subscribePosition(setPositionMs), [session]);
 
   // ---- shell chrome state ----------------------------------------
   const [tab, setTab] = useState('home');
