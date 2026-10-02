@@ -38,6 +38,7 @@ import {
   displayIdentityKey,
   isBotCheckWall,
   matchDisplayKey,
+  sameSongIdentity,
   topPlayed,
 } from '@auqw/application';
 import { fromTag, t, type Locale, type MessageId } from './i18n.ts';
@@ -1727,9 +1728,9 @@ export function dedupeTrackListings(
       hidden duplicate's ref still lights the visible row. */
   group: readonly TrackMetadata[];
 }[] {
-  const groups = new Map<
+  const groupsByKey = new Map<
     string,
-    { meta: TrackMetadata; index: number; group: TrackMetadata[] }
+    { meta: TrackMetadata; index: number; group: TrackMetadata[] }[]
   >();
   const kept: {
     meta: TrackMetadata;
@@ -1743,13 +1744,21 @@ export function dedupeTrackListings(
       artist: meta.artist,
       durationMs: meta.durationMs,
     });
-    const existing = groups.get(key);
-    if (existing === undefined) {
-      const entry = { meta, index, group: [meta] };
-      groups.set(key, entry);
-      kept.push(entry);
+    const groups = groupsByKey.get(key);
+    // Same display key alone doesn't make one song — the identity
+    // verdict does (different ISRCs veto even look-alike rows), so a
+    // distinct recording keeps its own row and its own indicators.
+    const host = groups?.find((g) => sameSongIdentity(g.meta, meta));
+    if (host !== undefined) {
+      host.group.push(meta);
     } else {
-      existing.group.push(meta);
+      const entry = { meta, index, group: [meta] };
+      if (groups === undefined) {
+        groupsByKey.set(key, [entry]);
+      } else {
+        groups.push(entry);
+      }
+      kept.push(entry);
     }
   });
   return kept;

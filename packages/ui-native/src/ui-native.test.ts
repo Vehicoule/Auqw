@@ -1288,6 +1288,31 @@ function testListingDedupe(): void {
     2,
     'a live cut keeps its own row next to the studio take',
   );
+  // Different ISRCs are different recordings even under look-alike
+  // metadata — each keeps its own row.
+  const searchIsrcs = toSearchModel(
+    {
+      type: 'content',
+      revision: 5,
+      query: 'roads',
+      page: {
+        items: [
+          { ...meta('ytm-i', 'Roads'), isrc: 'GBAAA0000001' },
+          { ...meta('ytm-j', 'Roads'), isrc: 'GBAAA0000002' },
+          { ...meta('ytm-k', 'Roads - Topic'), isrc: 'GBAAA0000001' },
+        ],
+        storefront: null,
+      },
+    },
+    null,
+  );
+  assertEqual(
+    searchIsrcs.results.length,
+    2,
+    'conflicting ISRCs hold rows apart',
+  );
+  assertEqual(searchIsrcs.results[0]?.key, 'youtube-music:ytm-i:0');
+  assertEqual(searchIsrcs.results[1]?.key, 'youtube-music:ytm-j:1');
   // A hidden look-alike's ref still lights the kept row — playing a
   // deduped member marks the surviving row as playing.
   const searchPlaying = toSearchModel(
