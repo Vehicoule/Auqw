@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 12;
+export const CURRENT_SCHEMA_VERSION = 13;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -414,6 +414,18 @@ const MIGRATION_12: readonly string[] = [
 )`,
 ];
 
+/**
+ * v12 -> v13: `queue_state.origin_json` — the queue's play-context
+ * provenance, persisted inside the snapshot it describes
+ * (docs/decisions.md). Nullable with no default: NULL means a
+ * contextless queue, and only a snapshot minted by a
+ * context-switching play verb ever writes a document — every stored
+ * value re-validates as QueueOrigin on load.
+ */
+const MIGRATION_13: readonly string[] = [
+  `ALTER TABLE queue_state ADD COLUMN origin_json TEXT`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
@@ -428,6 +440,7 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_10]),
   Object.freeze([...MIGRATION_11]),
   Object.freeze([...MIGRATION_12]),
+  Object.freeze([...MIGRATION_13]),
 ]);
 
 const CREATED_OBJECT_NAME =

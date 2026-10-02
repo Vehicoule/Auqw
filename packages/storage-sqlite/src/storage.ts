@@ -34,6 +34,7 @@ import {
   isAttemptTrace,
   isExportDocument,
   isPersistedState,
+  isQueueOrigin,
   isSettings,
   ok,
 } from '@auqw/application';
@@ -517,12 +518,14 @@ export class SqliteStorage implements StoragePort {
         await conn.execute(
           `UPDATE queue_state
            SET revision = revision + 1, current_occurrence_id = NULL,
-               position_ms = 0, mode = 'stopped', blocked_error_json = NULL
+               position_ms = 0, mode = 'stopped', blocked_error_json = NULL,
+               origin_json = NULL
            WHERE id = 1
              AND (current_occurrence_id IS NOT NULL
                   OR position_ms <> 0
                   OR mode <> 'stopped'
                   OR blocked_error_json IS NOT NULL
+                  OR origin_json IS NOT NULL
                   OR EXISTS (SELECT 1 FROM queue_occurrences))`,
           undefined,
           signal,
@@ -1239,6 +1242,16 @@ function decodeState(rows: TableRows): PersistedState | null {
     queueRow['blocked_error_json'] === null
       ? undefined
       : (json(queueRow['blocked_error_json']) as AppError);
+  // The persisted origin must re-validate against the snapshot
+  // contract: a document that fails is corruption, not an origin to
+  // silently drop back into the engine.
+  const origin =
+    queueRow['origin_json'] === null
+      ? undefined
+      : (json(queueRow['origin_json']) as QueueSnapshot['origin']);
+  if (origin !== undefined && !isQueueOrigin(origin)) {
+    fail();
+  }
   const mode = queueRow['mode'];
   if (mode !== 'stopped' && mode !== 'paused' && mode !== 'playing') {
     fail();
@@ -1287,6 +1300,7 @@ function decodeState(rows: TableRows): PersistedState | null {
     positionMs: reqNonNegInt(queueRow['position_ms']),
     mode: mode as QueueSnapshot['mode'],
     ...(blocked === undefined ? {} : { blockedError: blocked }),
+    ...(origin === undefined ? {} : { origin }),
   };
   const settings: Settings = {
     catalogProvider: reqStr(settingsRow['catalog_provider']),
