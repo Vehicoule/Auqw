@@ -649,10 +649,12 @@ None — the napi artifact is a local cargo build output.
 
 ## Queue restore + autoplay legs (post-#289)
 
-- `queue_state`/`queue_occurrences` rows persist but are NOT
-  rehydrated into the session on relaunch — the app boots to 'nothing
-  playing'. DB-seeding a queue does nothing; rebuild it through the UI
-  (search → play a row → context enqueues).
+- `queue_state`/`queue_occurrences` rows DO rehydrate on relaunch —
+  `restore()` loads them into the QueueEngine and parks the cursor
+  paused (restore never auto-plays), so the player surface reads
+  'nothing playing' even with a full queue — check the queue pane,
+  not the player, for seeded rows. A malformed seed (missing columns,
+  bad mode enum) instead surfaces 'couldn't restore your library'.
 - Reaching an autoplay section: `playback.resolve` is bot-checked so
   `selected_provider` stays null, and the 'start radio' chip gates on
   `selectedRef ?? sourceRefs[0]` being radioSeed-capable (only

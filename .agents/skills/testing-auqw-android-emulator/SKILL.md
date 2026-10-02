@@ -672,5 +672,6 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   stage player's 'start radio' chip arms a real tail and the queue
   gains 'autoplay · similar to {seed}' (dimmed rows, no × removes).
   The chip requires `selectedRef ?? sourceRefs[0]` on a
-  radioSeed-capable provider — youtube-music-first rows only;
-  deezer-first rows won't show it.
+  radioSeed-capable provider — youtube-music-first rows work
+  directly; a deezer-first row needs a youtube-music PIN
+  (`selectedRef`) to expose it.
