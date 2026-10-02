@@ -621,7 +621,9 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   dismiss (Cancel) or it swallows later taps/keys.
 - Switching worktrees under the same dev-client keeps the PREVIOUS
   branch's JS bundle (the client only refetches on a Metro reconnect).
-  Force a refetch: `am force-stop com.vehicoule.auqw` + relaunch (clears
+  First restart Metro against the right worktree per the Metro section
+  above — force-stop alone refetches from whatever Metro is still
+  serving. Then `am force-stop com.vehicoule.auqw` + relaunch (clears
   in-memory state too), and sanity-check which bundle is running via a
   marker symbol or the served bundle itself
   (`curl ".../apps/mobile/index.bundle?platform=android&dev=true"` —
