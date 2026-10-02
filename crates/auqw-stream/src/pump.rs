@@ -447,15 +447,16 @@ async fn retry_or_stall(
     })
 }
 
-/// Whether a `416` proves end-of-stream: the offset is at/past a known
-/// total, or the same request already failed `416` once across a
-/// re-mint — a second refusal means the resource ends below `offset`.
+/// Whether a `416` proves end-of-stream: the offset is at/past the
+/// wire `Content-Range` total, or the same request already failed
+/// `416` once across a re-mint — a second refusal means the resource
+/// ends below `offset`. The resolve-time hint is never EOF authority.
 fn eof_confirmed(session: &Arc<SessionInner>, offset: u64, retried: bool) -> bool {
     if retried {
         return true;
     }
     session
-        .effective_total()
+        .wire_total()
         .map(|t| t.is_some_and(|t| offset >= t))
         .unwrap_or(false)
 }
@@ -1815,6 +1816,40 @@ mod tests {
             "drained demand still preempted the fill"
         );
         assert!(!s.is_terminal());
+        stop_pump(&s, task).await;
+    }
+
+    /// §3.7(b): a hint that under-reports the wire total must not cap
+    /// the stream — a read past the hinted end fetches and serves
+    /// normally, and only the wire `Content-Range` total proves EOF.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn under_reported_hint_never_ends_the_read() {
+        let d = TestDir::new("under-eof");
+        let mut cfg = config(&d);
+        // Park speculative fill — the demand leg alone drives the
+        // fetch, so no earlier request can land a wire total first.
+        cfg.head_bytes = 0;
+        let mut src = source();
+        // The hint says 512; the wire later proves 2048.
+        src.content_length = Some(512);
+        let handle = format!("t-{}", unique());
+        let s = SessionInner::new(handle, src, remint_ok(), cfg, PoolSignals::new())
+            .unwrap_or_else(|e| panic!("session: {e}"));
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(resp(
+            206, 600, 128, 2048,
+        ))]));
+        let task = spawn_pump(&s, fetch);
+        // 600 is past the hinted end but inside the real resource —
+        // a hard EOF here would end playback early.
+        let bytes = s
+            .read(600, 64)
+            .unwrap_or_else(|e| panic!("read past hint: {e}"));
+        assert_eq!(bytes.len(), 64);
+        // And the wire total remains the real EOF authority.
+        let end = s
+            .read(2048, 64)
+            .unwrap_or_else(|e| panic!("read at wire end: {e}"));
+        assert!(end.is_empty());
         stop_pump(&s, task).await;
     }
 

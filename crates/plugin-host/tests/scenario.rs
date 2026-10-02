@@ -6,13 +6,14 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use auqw_plugin_host::{
-    invoke, load, Budgets, FileKeyValueStore, HostClock, HostServices, HttpClient, HttpError,
-    HttpErrorKind, HttpRequest, HttpResponse, Invocation, InvokeError, KeyValueStore, KvError,
-    Manifest, MemoryKeyValueStore,
+    invoke, load, BudgetDimension, Budgets, FileKeyValueStore, HostClock, HostServices, HttpClient,
+    HttpError, HttpErrorKind, HttpRequest, HttpResponse, Invocation, InvokeError, KeyValueStore,
+    KvError, Manifest, MemoryKeyValueStore,
 };
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -775,4 +776,78 @@ fn over_cap_on_disk_namespace_is_corrupt() {
         Ok(_) => panic!("expected Corrupt, got store"),
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A KV backend wedged in the commit window must not hold the
+/// invocation past its deadline — the commit leg races the same bound
+/// the guest entries do, mapped to the same typed error. The gate
+/// releases the worker once `invoke` has reported, so the detached
+/// leg never leaks a thread past teardown.
+struct GatedCommitKv {
+    release: Arc<AtomicBool>,
+}
+
+impl KeyValueStore for GatedCommitKv {
+    fn snapshot(&self, _plugin_id: &str) -> Result<BTreeMap<String, Vec<u8>>, KvError> {
+        Ok(BTreeMap::new())
+    }
+
+    fn commit_admitting(
+        &self,
+        _plugin_id: &str,
+        _writes: BTreeMap<String, Option<Vec<u8>>>,
+        _admit: &(dyn Fn() -> bool + Send + Sync),
+        _secrets: &[String],
+    ) -> Result<(), KvError> {
+        while !self.release.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn deadline_caps_kv_commit_leg() {
+    let release = Arc::new(AtomicBool::new(false));
+    let kv: Arc<dyn KeyValueStore> = Arc::new(GatedCommitKv {
+        release: Arc::clone(&release),
+    });
+    let http = CannedHttp {
+        status: 200,
+        body: vec![],
+    };
+    let clock = FixedClock(0);
+    let budgets = Budgets {
+        deadline: Duration::from_millis(50),
+        ..Budgets::default()
+    };
+    let plugin = ok(load(
+        SCENARIO_WASM,
+        manifest_for(SCENARIO_WASM, &["kv"]),
+        &budgets,
+    ));
+    let started = std::time::Instant::now();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        json!({"scenario": "kv_commit", "key": "k", "value": "v1"}),
+        &budgets,
+        CancellationToken::new(),
+        services(&http, kv.clone(), &clock),
+    )
+    .await;
+    release.store(true, Ordering::Relaxed);
+    assert!(
+        matches!(
+            err(result),
+            InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Deadline
+            }
+        ),
+        "expected deadline cap on the commit leg"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "wedged commit outlived the deadline"
+    );
 }

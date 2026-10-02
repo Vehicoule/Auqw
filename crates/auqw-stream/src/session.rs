@@ -448,6 +448,14 @@ impl SessionInner {
         Ok(lock(&self.store)?.effective_total())
     }
 
+    /// Wire-authoritative total length: the `Content-Range` total only,
+    /// never the resolve-time hint. Hard EOF verdicts derive from this
+    /// — a hint may over- or under-report and must never stand in as
+    /// proof of the stream's end.
+    pub(crate) fn wire_total(&self) -> Result<Option<u64>, StreamError> {
+        Ok(lock(&self.store)?.wire_total())
+    }
+
     /// Record a wire total; a changed total across chunks is a wire-rule
     /// violation (`InvalidResponse`), not a silent update.
     pub(crate) fn check_total(&self, total: u64) -> Result<(), StreamError> {
@@ -1014,7 +1022,9 @@ impl SessionInner {
         if store.covers(position) {
             return Ok(Some(store.read_at(position, max_len)?));
         }
-        if store.effective_total().is_some_and(|t| position >= t)
+        // EOF answers only to wire evidence: the `Content-Range` total
+        // or a latched `416` ceiling — the hint can't prove an end.
+        if store.wire_total().is_some_and(|t| position >= t)
             || sh.eof_below.is_some_and(|b| position >= b)
         {
             return Ok(Some(Vec::new()));
@@ -1039,7 +1049,8 @@ impl SessionInner {
             self.pump_notify.notify_one();
             return Ok(Some(bytes));
         }
-        if store.effective_total().is_some_and(|t| position >= t) {
+        // Same wire-only authority as `peek` — the hint is advisory.
+        if store.wire_total().is_some_and(|t| position >= t) {
             return Ok(Some(Vec::new()));
         }
         if sh.eof_below.is_some_and(|b| position >= b) {

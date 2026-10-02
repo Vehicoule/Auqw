@@ -33,7 +33,8 @@ pub trait KeyValueStore: Send + Sync {
     /// Atomically apply a staged patch to the current committed
     /// namespace: `Some(bytes)` sets, `None` deletes. Disjoint writes
     /// staged by concurrent invocations both survive; last committer
-    /// wins only for the same key.
+    /// wins only for the same key. No redaction set — callers outside
+    /// an invocation have no collected secrets to mask.
     ///
     /// # Errors
     /// [`KvError::TooLarge`] when the resulting namespace would violate
@@ -44,14 +45,18 @@ pub trait KeyValueStore: Send + Sync {
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
     ) -> Result<(), KvError> {
-        self.commit_admitting(plugin_id, writes, &|| true)
+        self.commit_admitting(plugin_id, writes, &|| true, &[])
     }
 
     /// `commit` gated by `admit`, evaluated inside the store's write
     /// serialization immediately before publication — admission and
     /// publish are one critical section, so a precondition that flips
     /// concurrently (e.g. an invocation cancel) cannot lose to a
-    /// commit that already left the gate.
+    /// commit that already left the gate. `secrets` is the
+    /// invocation's collected token material: a guest that names a
+    /// key after a secret must not write it back out in a
+    /// cap-violation message, so the message is redacted with the
+    /// same set as every other guest-controlled surface.
     ///
     /// # Errors
     /// [`KvError::Rejected`] when `admit` declines — nothing is
@@ -61,6 +66,7 @@ pub trait KeyValueStore: Send + Sync {
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
         admit: &(dyn Fn() -> bool + Send + Sync),
+        secrets: &[String],
     ) -> Result<(), KvError>;
 }
 
@@ -70,20 +76,22 @@ type StoreMap = BTreeMap<String, BTreeMap<String, Vec<u8>>>;
 /// The cap violation `ns` commits, if any — a detail message the
 /// caller wraps in the typed error that fits its path. The store is
 /// the final authority on caps: invocation-side checks are only early
-/// feedback.
-fn caps_violation(ns: &BTreeMap<String, Vec<u8>>) -> Option<String> {
+/// feedback. Key names embed in the message — they are
+/// guest-controlled text redacted with the same secrets set as every
+/// other guest surface (empty on paths with no invocation context).
+fn caps_violation(ns: &BTreeMap<String, Vec<u8>>, secrets: &[String]) -> Option<String> {
     let mut total = 0usize;
     for (key, value) in ns {
         if key.is_empty() || key.len() > MAX_KV_KEY_BYTES {
             return Some(format!(
                 "key {:?} violates the 128-byte cap",
-                redact_text(key, &[])
+                redact_text(key, secrets)
             ));
         }
         if value.len() > MAX_KV_VALUE_BYTES {
             return Some(format!(
                 "key {:?} value exceeds 64 KiB",
-                redact_text(key, &[])
+                redact_text(key, secrets)
             ));
         }
         total += key.len() + value.len();
@@ -145,6 +153,7 @@ impl KeyValueStore for MemoryKeyValueStore {
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
         admit: &(dyn Fn() -> bool + Send + Sync),
+        secrets: &[String],
     ) -> Result<(), KvError> {
         if writes.is_empty() {
             return Ok(());
@@ -152,7 +161,7 @@ impl KeyValueStore for MemoryKeyValueStore {
         let mut maps = self.lock()?;
         let mut ns = maps.get(plugin_id).cloned().unwrap_or_default();
         apply_patch(&mut ns, writes);
-        if let Some(msg) = caps_violation(&ns) {
+        if let Some(msg) = caps_violation(&ns, secrets) {
             return Err(KvError::TooLarge(msg));
         }
         if !admit() {
@@ -220,7 +229,9 @@ impl FileKeyValueStore {
                 })?;
                 values.insert(key, value);
             }
-            if let Some(msg) = caps_violation(&values) {
+            // The load path has no invocation context — no collected
+            // secrets exist to redact against.
+            if let Some(msg) = caps_violation(&values, &[]) {
                 return Err(KvError::Corrupt(format!(
                     "{}: {plugin_id}: {msg}",
                     self.path.display()
@@ -296,6 +307,7 @@ impl KeyValueStore for FileKeyValueStore {
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
         admit: &(dyn Fn() -> bool + Send + Sync),
+        secrets: &[String],
     ) -> Result<(), KvError> {
         if writes.is_empty() {
             return Ok(());
@@ -304,7 +316,7 @@ impl KeyValueStore for FileKeyValueStore {
         let mut all = self.read_all()?;
         let mut ns = all.get(plugin_id).cloned().unwrap_or_default();
         apply_patch(&mut ns, writes);
-        if let Some(msg) = caps_violation(&ns) {
+        if let Some(msg) = caps_violation(&ns, secrets) {
             return Err(KvError::TooLarge(msg));
         }
         // The gate runs under the write lock on the doorstep of the
@@ -321,5 +333,32 @@ impl KeyValueStore for FileKeyValueStore {
             all.insert(plugin_id.to_string(), ns);
         }
         self.write_all(&all)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cap-violating key is quoted in the `TooLarge` message — guest
+    /// token material inside it must be masked by the collected set,
+    /// not echoed verbatim (deferred-appendix F-6).
+    #[test]
+    fn caps_violation_masks_collected_secrets() {
+        let kv = MemoryKeyValueStore::new();
+        let secret = "tok-secret-value-9".to_string();
+        let key = format!("{secret}{}", "k".repeat(200));
+        let writes = BTreeMap::from([(key, Some(b"v".to_vec()))]);
+        let e = match kv.commit_admitting("p", writes, &|| true, std::slice::from_ref(&secret)) {
+            Err(e) => e,
+            Ok(()) => panic!("expected TooLarge, got Ok"),
+        };
+        match e {
+            KvError::TooLarge(m) => {
+                assert!(!m.contains(&secret), "{m}");
+                assert!(m.contains("***"), "{m}");
+            }
+            e => panic!("expected TooLarge, got {e:?}"),
+        }
     }
 }

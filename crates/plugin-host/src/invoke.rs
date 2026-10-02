@@ -35,6 +35,15 @@ const MAX_GUEST_LOG_ENTRIES: usize = 128;
 /// Levels a guest `log` request may use.
 const LOG_LEVELS: &[&str] = &["debug", "info", "warn", "error"];
 
+/// Redaction-set caps: a `pot_token` response is provider-controlled
+/// JSON and could declare an unbounded number of secrets — real
+/// provider bodies are a couple of token strings (`{"poToken":
+/// "…"}`), so 256 entries / 64 KiB sits far above the honest shape
+/// while bounding the collection's memory and the O(secrets × text)
+/// `redact_text` loop every guest message pays.
+const MAX_COLLECTED_SECRETS: usize = 256;
+const MAX_COLLECTED_SECRET_BYTES: usize = 64 * 1024;
+
 /// Header names an `http_request` may not set (matched
 /// ASCII-case-insensitively): `Host` must come from the authorized URL,
 /// never the guest, and the rest are hop-by-hop or body-framing fields
@@ -343,18 +352,23 @@ async fn run(
         // and the no-secrets-in-logs rule outranks log legibility.
         attempt.secrets.push(token.to_string());
     }
+
     // The namespace snapshot is staged for the whole invocation; on a
     // valid `done` only the staged patch commits — every other
     // terminal path drops it. A file-backed store does a blocking
     // read+parse here — hand it to the blocking pool so a runtime
-    // worker never stalls on fs I/O.
+    // worker never stalls on fs I/O, and race it against the
+    // invocation deadline so a wedged backend can never hold the
+    // invocation past its bound.
     let staged_base = if ctx.plugin.manifest.allows_kv() {
         let kv = Arc::clone(&ctx.services.kv);
         let plugin_id = ctx.plugin.manifest.id.clone();
-        tokio::task::spawn_blocking(move || kv.snapshot(&plugin_id))
-            .await
-            .map_err(|e| InvokeError::HostService(format!("kv worker: {e}")))?
-            .map_err(|e| InvokeError::HostService(e.to_string()))?
+        race_blocking(
+            ctx,
+            tokio::task::spawn_blocking(move || kv.snapshot(&plugin_id)),
+        )
+        .await?
+        .map_err(|e| InvokeError::HostService(e.to_string()))?
     } else {
         BTreeMap::new()
     };
@@ -447,20 +461,13 @@ async fn run(
                     .get("result")
                     .cloned()
                     .ok_or_else(|| InvokeError::InvalidMessage("done.result missing".into()))?;
-                // A result `url` is the fetch target the caller will open
-                // on the plugin's behalf; it must be an https destination
-                // the manifest already permits — same policy as the
-                // guest's own requests, no trust by origin.
-                if let Some(url) = result.get("url") {
-                    let permitted = url
-                        .as_str()
-                        .is_some_and(|u| ctx.plugin.manifest.allows_destination(u));
-                    if !permitted {
-                        return Err(InvokeError::InvalidMessage(
-                            "done.result.url is not an allowed destination".into(),
-                        ));
-                    }
-                }
+                // Every `url` in the result is a fetch target handed
+                // to the caller — `result.url` and the `artworkRef.url`
+                // values nested inside catalog/entity payloads alike —
+                // and each must be an https destination the manifest
+                // already permits, the same policy as the guest's own
+                // requests. No trust by origin.
+                check_result_destinations(&result, &ctx.plugin.manifest)?;
                 // A cancel landing in the commit's fsync+rename window
                 // must not commit — check once more on the doorstep.
                 check_preemption(ctx)?;
@@ -468,26 +475,47 @@ async fn run(
                 // staged patch apply against the committed namespace.
                 // Committing means the fsync+rename chain of a
                 // file-backed store — offloaded for the same reason as
-                // the snapshot above.
+                // the snapshot above, and raced against the same
+                // deadline so the leg can never hang the invocation.
                 if ctx.plugin.manifest.allows_kv() && staged_kv.has_writes() {
                     let kv = Arc::clone(&ctx.services.kv);
                     let plugin_id = ctx.plugin.manifest.id.clone();
                     let writes = staged_kv.writes();
+                    let secrets = attempt.secrets.clone();
                     let token = ctx.cancel.clone();
-                    // The cancel token is the commit's admission gate:
-                    // the store evaluates it under its write lock on
-                    // the doorstep of publication, so a cancel can
-                    // never be beaten by a commit it should have
-                    // stopped — the two are one critical section.
-                    let outcome = tokio::task::spawn_blocking(move || {
-                        kv.commit_admitting(&plugin_id, writes, &move || !token.is_cancelled())
-                    })
-                    .await
-                    .map_err(|e| InvokeError::HostService(format!("kv worker: {e}")))?;
+                    let deadline = ctx.started + ctx.budgets.deadline;
+                    // The cancel token and the deadline together are
+                    // the commit's admission gate: abi.md discards
+                    // staged changes on a deadline the same as on a
+                    // cancel, so a leg detached by `race_blocking`'s
+                    // expiry can never publish past the invocation's
+                    // bound. A commit that admitted before either
+                    // fired legitimately won its race.
+                    let outcome = race_blocking(
+                        ctx,
+                        tokio::task::spawn_blocking(move || {
+                            kv.commit_admitting(
+                                &plugin_id,
+                                writes,
+                                &move || !token.is_cancelled() && Instant::now() < deadline,
+                                &secrets,
+                            )
+                        }),
+                    )
+                    .await?;
                     match outcome {
-                        // Admission declined = the cancel won before
-                        // publication — report cancelled, not a host error.
-                        Err(KvError::Rejected(_)) => return Err(InvokeError::Cancelled),
+                        // Admission declined — report whichever gate
+                        // fired: a cancel reads `Cancelled`, a
+                        // deadline reads `Deadline`.
+                        Err(KvError::Rejected(_)) => {
+                            return Err(if ctx.cancel.is_cancelled() {
+                                InvokeError::Cancelled
+                            } else {
+                                InvokeError::BudgetExceeded {
+                                    dimension: BudgetDimension::Deadline,
+                                }
+                            });
+                        }
                         Err(e) => return Err(InvokeError::HostService(e.to_string())),
                         Ok(()) => check_preemption(ctx)?,
                     }
@@ -564,6 +592,47 @@ fn check_keys(
     Ok(())
 }
 
+/// Apply the manifest destination allowlist to every `url` property a
+/// `done` result carries across to the caller: the top-level
+/// `result.url` and the `artworkRef.url` values nested under catalog
+/// and entity payloads (`items[].url`, `items[].artwork[].url`,
+/// `entity.artwork[].url`) all name fetches the renderer will open on
+/// the plugin's behalf. `headers` maps are request-header name/value
+/// pairs — a header literally named `url` is not a fetch target, so
+/// that subtree is not walked.
+fn check_result_destinations(result: &Value, manifest: &Manifest) -> Result<(), InvokeError> {
+    fn walk(v: &Value, path: &str, manifest: &Manifest) -> Result<(), InvokeError> {
+        match v {
+            Value::Object(map) => {
+                for (key, value) in map {
+                    if key == "headers" {
+                        continue;
+                    }
+                    let path = format!("{path}.{key}");
+                    if key == "url"
+                        && !value
+                            .as_str()
+                            .is_some_and(|u| manifest.allows_destination(u))
+                    {
+                        return Err(InvokeError::InvalidMessage(format!(
+                            "{path} is not an allowed destination"
+                        )));
+                    }
+                    walk(value, &path, manifest)?;
+                }
+            }
+            Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    walk(item, &format!("{path}[{i}]"), manifest)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    walk(result, "done.result", manifest)
+}
+
 /// The caller-side preemption check: cancellation first (intent), then
 /// the wall-clock deadline. Runs before every guest entry and once more
 /// after `handle` returns, so a cancel/expiry that landed while the
@@ -578,6 +647,33 @@ fn check_preemption(ctx: &StepCtx<'_>) -> Result<(), InvokeError> {
         });
     }
     Ok(())
+}
+
+/// Race a `spawn_blocking` leg against the invocation's cancel token
+/// and wall-clock deadline — the same bound `call_entry` applies to a
+/// guest entry, mapped the same way: `Cancelled`, `Deadline`, or the
+/// join failure as a host-service error. On expiry the leg detaches
+/// and finishes in the background (the commit leg's admission gate
+/// makes a post-deadline publication a no-op). A `timeout`-based race
+/// rather than `sleep_until` so the map lands on the same typed
+/// error the entry race uses.
+async fn race_blocking<T>(
+    ctx: &StepCtx<'_>,
+    join: tokio::task::JoinHandle<T>,
+) -> Result<T, InvokeError> {
+    let remaining = ctx.budgets.deadline.saturating_sub(ctx.started.elapsed());
+    tokio::select! {
+        // Cancel outranks expiry — same ordering as `check_preemption`.
+        biased;
+        () = ctx.cancel.cancelled() => Err(InvokeError::Cancelled),
+        outcome = tokio::time::timeout(remaining, join) => match outcome {
+            Err(_elapsed) => Err(InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Deadline,
+            }),
+            Ok(Err(e)) => Err(InvokeError::HostService(format!("kv worker: {e}"))),
+            Ok(Ok(v)) => Ok(v),
+        },
+    }
 }
 
 /// Global bound on concurrently-executing guest entries. Wasmi cannot
@@ -679,7 +775,12 @@ where
                     dimension: BudgetDimension::Deadline,
                 })
             }
-            Ok(Err(join_err)) => Err(InvokeError::GuestTrap(join_err.to_string())),
+            Ok(Err(join_err)) => {
+                // Same full-grant booking as the detach paths — a
+                // join failure still lost its allowance to the run.
+                attempt.fuel_used += allowance;
+                Err(InvokeError::GuestTrap(join_err.to_string()))
+            }
             Ok(Ok((store, result))) => {
                 let fuel_remaining = store.get_fuel().unwrap_or(0);
                 attempt.fuel_used += allowance.saturating_sub(fuel_remaining);
@@ -829,14 +930,45 @@ fn authorize_resume(
 
 /// Collect every non-empty string leaf of a JSON value into `out` —
 /// used to register pot-provider token material in the redaction set;
-/// a short leaf is still token material, so no length floor.
-fn collect_secret_strings(v: &Value, out: &mut Vec<String>) {
-    match v {
-        Value::String(s) if !s.is_empty() => out.push(s.clone()),
-        Value::Array(a) => a.iter().for_each(|i| collect_secret_strings(i, out)),
-        Value::Object(m) => m.values().for_each(|i| collect_secret_strings(i, out)),
-        _ => {}
+/// a short leaf is still token material, so no length floor. Bounded
+/// by `MAX_COLLECTED_SECRETS` entries and
+/// `MAX_COLLECTED_SECRET_BYTES` total (bytes already in `out` count
+/// toward the total): the response is provider-controlled JSON, so an
+/// uncapped set would grow memory and the O(secrets × text)
+/// `redact_text` loop without limit. Leaves that don't fit are
+/// skipped — smaller siblings still land — and the return reports
+/// whether the caps dropped anything.
+fn collect_secret_strings(v: &Value, out: &mut Vec<String>) -> bool {
+    fn walk(v: &Value, out: &mut Vec<String>, byte_room: &mut usize) -> bool {
+        match v {
+            Value::String(s) if !s.is_empty() => {
+                if out.len() >= MAX_COLLECTED_SECRETS || s.len() > *byte_room {
+                    return true;
+                }
+                *byte_room -= s.len();
+                out.push(s.clone());
+                false
+            }
+            Value::Array(a) => {
+                let mut truncated = false;
+                for i in a {
+                    truncated |= walk(i, out, byte_room);
+                }
+                truncated
+            }
+            Value::Object(m) => {
+                let mut truncated = false;
+                for i in m.values() {
+                    truncated |= walk(i, out, byte_room);
+                }
+                truncated
+            }
+            _ => false,
+        }
     }
+    let mut byte_room =
+        MAX_COLLECTED_SECRET_BYTES.saturating_sub(out.iter().map(|s| s.len()).sum::<usize>());
+    walk(v, out, &mut byte_room)
 }
 
 /// Whether a `206` response's `Content-Range` agrees with the range a
@@ -1027,7 +1159,20 @@ async fn perform_call(
             // masked rather than leaked.
             if collect_secrets {
                 if let Ok(v) = serde_json::from_slice::<Value>(&resp.body) {
-                    collect_secret_strings(&v, &mut attempt.secrets);
+                    if collect_secret_strings(&v, &mut attempt.secrets)
+                        && attempt.guest_log.len() < MAX_GUEST_LOG_ENTRIES
+                    {
+                        // One redaction-path diagnostic per truncated
+                        // collection: past the cap the response's
+                        // later leaves are not masked, and an operator
+                        // needs to see that on the diagnostics surface.
+                        attempt.guest_log.push(GuestLogEntry {
+                            level: "warn".into(),
+                            message: format!(
+                                "secret collection truncated at {MAX_COLLECTED_SECRETS} entries / {MAX_COLLECTED_SECRET_BYTES} bytes"
+                            ),
+                        });
+                    }
                 }
             }
             // A `resume` call that lands a `206` must agree with the
@@ -1392,4 +1537,53 @@ fn now_ms_step(
         "now_ms": ctx.services.clock.now_ms(),
     }))
     .map_err(|e| InvokeError::InvalidMessage(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The collection caps hold on adversarial provider JSON: a sea of
+    /// string leaves never grows the set past the entry cap, and an
+    /// over-budget leaf is skipped rather than starving the smaller
+    /// siblings behind it.
+    #[test]
+    fn collect_secret_strings_honors_the_caps() {
+        // More leaves than the entry cap — only the first cap's worth
+        // land, and the return reports the truncation.
+        let many = json!({
+            "pad": (0..MAX_COLLECTED_SECRETS + 40)
+                .map(|i| format!("s{i}"))
+                .collect::<Vec<_>>(),
+        });
+        let mut out = Vec::new();
+        assert!(collect_secret_strings(&many, &mut out));
+        assert_eq!(out.len(), MAX_COLLECTED_SECRETS);
+
+        // A leaf larger than the byte budget is skipped, not stuffed —
+        // the small sibling behind it still lands.
+        let mixed = json!({
+            "big": "x".repeat(MAX_COLLECTED_SECRET_BYTES + 1),
+            "small": "tok-1",
+        });
+        let mut out = Vec::new();
+        assert!(collect_secret_strings(&mixed, &mut out));
+        assert_eq!(out, vec!["tok-1".to_string()]);
+
+        // Under the caps the honest provider shape collects fully and
+        // reports no truncation.
+        let honest = json!({"poToken": "tok", "visitorData": "vd"});
+        let mut out = Vec::new();
+        assert!(!collect_secret_strings(&honest, &mut out));
+        assert_eq!(out.len(), 2);
+    }
+
+    /// Bytes already in `out` count toward the byte budget — an
+    /// earlier collection (or the seeded token) leaves less room.
+    #[test]
+    fn collect_secret_strings_counts_prior_bytes() {
+        let mut out = vec!["x".repeat(MAX_COLLECTED_SECRET_BYTES)];
+        assert!(collect_secret_strings(&json!("tok"), &mut out));
+        assert_eq!(out.len(), 1);
+    }
 }

@@ -493,10 +493,51 @@ async fn read_deadline_is_a_named_bound() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_at_known_end_is_eof() {
     let d = TestDir::new("eofread");
+    // "Known end" is wire evidence, not the resolve-time hint: the
+    // first demand leg latches the `Content-Range` total, after which
+    // a read at that offset is a proven EOF and never reaches for the
+    // wire again.
+    let mut pages = HashMap::new();
+    pages.insert(0u64, VecDeque::from([Step::Reply(chunk(0, 64, 100, 1))]));
+    let fetch = Arc::new(MapFetch::new(pages));
     let reg = StreamRegistry::with_fetch(
         config(&d),
         tokio::runtime::Handle::current(),
-        Arc::new(MapFetch::new(HashMap::new())),
+        Arc::clone(&fetch) as Arc<dyn Fetch>,
+    )
+    .unwrap_or_else(|e| panic!("registry: {e}"));
+    let h = reg
+        .prepare(source(100), Arc::new(NeverRemint))
+        .unwrap_or_else(|e| panic!("prepare: {e}"))
+        .handle;
+    reg.attach(&h, 0).unwrap_or_else(|e| panic!("attach: {e}"));
+    let head = std::thread::scope(|s| s.spawn(|| reg.read(&h, 0, 64)).join())
+        .unwrap_or_else(|e| panic!("join: {e:?}"))
+        .unwrap_or_else(|e| panic!("read: {e}"));
+    assert_eq!(head.len(), 64);
+    let got = std::thread::scope(|s| s.spawn(|| reg.read(&h, 100, 64)).join())
+        .unwrap_or_else(|e| panic!("join: {e:?}"))
+        .unwrap_or_else(|e| panic!("read: {e}"));
+    assert!(got.is_empty());
+    assert_eq!(fetch.count_at(100), 0, "EOF demanded a fetch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_past_hint_is_a_hole_not_eof() {
+    let d = TestDir::new("eofhint");
+    // The same 100-byte hint, but nothing on the wire yet: the read
+    // past it asks the wire rather than ending, and the resource
+    // turns out longer than the hint said.
+    let mut pages = HashMap::new();
+    pages.insert(
+        100u64,
+        VecDeque::from([Step::Reply(chunk(100, 64, 164, 7))]),
+    );
+    let fetch = Arc::new(MapFetch::new(pages));
+    let reg = StreamRegistry::with_fetch(
+        config(&d),
+        tokio::runtime::Handle::current(),
+        Arc::clone(&fetch) as Arc<dyn Fetch>,
     )
     .unwrap_or_else(|e| panic!("registry: {e}"));
     let h = reg
@@ -507,7 +548,7 @@ async fn read_at_known_end_is_eof() {
     let got = std::thread::scope(|s| s.spawn(|| reg.read(&h, 100, 64)).join())
         .unwrap_or_else(|e| panic!("join: {e:?}"))
         .unwrap_or_else(|e| panic!("read: {e}"));
-    assert!(got.is_empty());
+    assert_eq!(got, vec![7u8; 64]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
