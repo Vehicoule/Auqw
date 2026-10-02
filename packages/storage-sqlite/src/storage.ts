@@ -434,7 +434,7 @@ export class SqliteStorage implements StoragePort {
     }
     const signal = context.signal;
     try {
-      return await this.#transaction(async (conn) => {
+      const result = await this.#transaction(async (conn) => {
         this.#check(signal);
         const planned = await planCommit(conn, batch, signal);
         if (!planned.ok) {
@@ -442,12 +442,16 @@ export class SqliteStorage implements StoragePort {
         }
         this.#check(signal);
         await conn.executeAll(planned.value.statements, signal);
-        // Report only after the statements land — a rolled-back commit
-        // dropped nothing.
-        this.#reportDrops('commit', planned.value.dropped);
         this.#check(signal);
-        return ok(undefined);
+        return ok(planned.value.dropped);
       }, signal);
+      if (!result.ok) {
+        return result;
+      }
+      // Report only after the transaction commits — a rolled-back
+      // commit dropped nothing.
+      this.#reportDrops('commit', result.value);
+      return ok(undefined);
     } catch (thrown) {
       return err(this.#mapError(thrown, signal));
     }
