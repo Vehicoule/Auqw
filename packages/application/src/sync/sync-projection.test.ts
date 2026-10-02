@@ -1356,6 +1356,56 @@ function testSnapshotCountFloorDeliveredPlays(): void {
   );
 }
 
+// A tombstone removing OUR component stays deleted: `loggedOurs`
+// marks the share that already delivered, so the page's shrink
+// reads as deletion — not stranded plays to resurrect.
+function testSnapshotCountFloorHonorsOurTombstone(): void {
+  const current = projInput({
+    recordings: [recording('r-1', [ref('itunes', 't-1')])],
+    playCounts: [
+      {
+        recordingId: 'r-1',
+        count: 10,
+        lastMs: 100,
+        loggedRemote: 7,
+        loggedOurs: 3,
+      },
+    ],
+    deviceId: 'dev-us',
+  });
+  const outcome = applied(
+    fieldEntry('playCount', 'r-1', 'count', 2),
+    [],
+    {
+      kind: 'playCount',
+      recordId: 'r-1',
+      fields: { count: 7, lastMs: 900 },
+      // Our 3 is gone from the log; the peer's 7 remains.
+      sumComponents: { count: { 'peer-x': 7 } },
+    },
+  );
+  const folded = projectAppliedEntries([outcome], current).batch
+    .playCounts?.[0];
+  assertEqual(
+    folded?.count,
+    7,
+    'our tombstoned component stays deleted',
+  );
+  assertEqual(
+    folded?.loggedOurs,
+    0,
+    'the stamp re-anchors at the live share',
+  );
+  assertEqual(
+    projectAppliedEntries([outcome], {
+      ...current,
+      playCounts: folded === undefined ? [] : [folded],
+    }).batch.playCounts?.[0]?.count,
+    7,
+    'replay does not resurrect the deleted share',
+  );
+}
+
 // The baseline keeps plays the log never saw — stranded increments
 // and imported totals — and remote growth between pages can't eat
 // them: stored 300, baseline remote 70, page ours 30 + remote 120.
@@ -1936,6 +1986,35 @@ function testUnsyncedWrites(): void {
     'an unsent aggregate re-emits the complete component',
   );
 
+  // A tombstoned local component is not ours to recover: loggedOurs
+  // above the live share was delivered, then deleted — every
+  // ours-side leg discounts it, so the count write stays
+  // suppressed instead of resurrecting the deleted plays.
+  const deleted = unsyncedWrites(
+    emitInput({
+      playCounts: [
+        {
+          recordingId: 'r-1',
+          count: 10,
+          lastMs: 9,
+          localCount: 3,
+          loggedRemote: 7,
+          loggedOurs: 3,
+        },
+      ],
+    }),
+    new Map([['playCount\u001fr-1', { count: 7 }]]),
+    evidence({
+      'playCount\u001fr-1': { count: { 'peer-x': 7 } },
+    }),
+  );
+  assert(
+    !deleted.some(
+      (w) => w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'a deleted local component does not re-emit',
+  );
+
   // A remote share at the wire bound fills it — the merge can't
   // represent any further component, so the write is delivered.
   const saturatedRemote = unsyncedWrites(
@@ -2175,6 +2254,7 @@ export function run(): void {
   testSnapshotCountAbsolute();
   testSnapshotCountFloorHonorsTombstone();
   testSnapshotCountFloorDeliveredPlays();
+  testSnapshotCountFloorHonorsOurTombstone();
   testSnapshotCountFloorsAtLoggedRemote();
   testSnapshotNewestWins();
   testProjectMaterialized();

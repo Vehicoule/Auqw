@@ -1739,6 +1739,7 @@ function ownedSections(): OwnedSections {
         lastMs: 100,
         localCount: 7,
         loggedRemote: 5,
+        loggedOurs: 7,
       },
       { recordingId: 'r2', count: 1, lastMs: 200 },
     ],

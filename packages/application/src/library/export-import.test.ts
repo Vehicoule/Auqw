@@ -176,6 +176,7 @@ const SEEDED: PersistedState = persisted({
       lastMs: 50,
       localCount: 3,
       loggedRemote: 2,
+      loggedOurs: 1,
     },
   ],
   matchReviews: [],
@@ -345,6 +346,7 @@ async function applyReplaces(): Promise<void> {
           lastMs: 1,
           localCount: 4,
           loggedRemote: 5,
+          loggedOurs: 1,
         },
       ],
     }),
@@ -369,6 +371,7 @@ async function applyReplaces(): Promise<void> {
       lastMs: 50,
       localCount: 4,
       loggedRemote: 5,
+      loggedOurs: 1,
     },
   ]);
 }

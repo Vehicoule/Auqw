@@ -108,6 +108,16 @@ export type PlayCount = {
    * took an absolute count write.
    */
   loggedRemote?: number;
+  /**
+   * This device's own component the sync log last materialized.
+   * Pairing it with `loggedRemote` splits a tombstoned local
+   * component from unsent evidence: when the log shrinks our share
+   * below this stamp the deleted plays were already delivered —
+   * `max(ourComponent, loggedOurs)` keeps them out of the unsent
+   * surplus instead of resurrecting them on every reconcile.
+   * Stamped beside `loggedRemote`; absent on the same rows.
+   */
+  loggedOurs?: number;
 };
 
 /** A candidate frozen at review time for later confirmation. */
@@ -347,18 +357,20 @@ export function isPlayEvent(value: unknown): value is PlayEvent {
 
 export function isPlayCount(value: unknown): value is PlayCount {
   if (!isRecord(value)) return false;
-  const { recordingId, count, lastMs, localCount, loggedRemote } = value;
+  const { recordingId, count, lastMs, localCount, loggedRemote, loggedOurs } =
+    value;
   return (
     hasKeys(
       value,
       ['recordingId', 'count', 'lastMs'],
-      ['localCount', 'loggedRemote'],
+      ['localCount', 'loggedRemote', 'loggedOurs'],
     ) &&
     isString(recordingId, 64) &&
     isSafeNonNegative(count) &&
     isSafeNonNegative(lastMs) &&
     (localCount === undefined || isSafeNonNegative(localCount)) &&
-    (loggedRemote === undefined || isSafeNonNegative(loggedRemote))
+    (loggedRemote === undefined || isSafeNonNegative(loggedRemote)) &&
+    (loggedOurs === undefined || isSafeNonNegative(loggedOurs))
   );
 }
 

@@ -794,9 +794,26 @@ function sumDeliveryTarget(
   synced: ReadonlyMap<string, Record<string, unknown>>,
   evidence: SyncEmitEvidence,
 ): number {
+  const row = input.playCounts.find(
+    (c) => c.recordingId === write.recordId,
+  );
+  const oursLive = evidence.components
+    .get(`${write.kind}${KEY_SEP}${write.recordId}`)
+    ?.[write.field]?.[evidence.deviceId];
+  // A tombstoned local component was delivered, then deleted — the
+  // share of the stored stamp above the live one is no longer ours
+  // to recover. Subtracting it keeps a reconcile from resurrecting
+  // the deleted plays as either estimate's intended component.
+  const deletedOurs = Math.max(
+    0,
+    (row?.loggedOurs ?? oursLive ?? 0) - (oursLive ?? 0),
+  );
   const domainEstimate =
     typeof write.value === 'number'
-      ? Math.max(0, write.value - remoteShare(evidence, write))
+      ? Math.max(
+          0,
+          write.value - remoteShare(evidence, write) - deletedOurs,
+        )
       : 0;
   if (write.kind === 'playCount' && write.field === 'count') {
     let ours = 0;
@@ -821,9 +838,6 @@ function sumDeliveryTarget(
     // touched by remote folds — it still proves a lost increment
     // after the bounded event window expires or a remote share lands
     // ahead of the domain fold.
-    const row = input.playCounts.find(
-      (c) => c.recordingId === write.recordId,
-    );
     // The aggregate-side baseline: `count - loggedRemote` is our
     // intended component — every committed play that isn't a remote
     // share emits under this device's id, delivered or not. Remote
@@ -831,12 +845,17 @@ function sumDeliveryTarget(
     // charged separately at emit time.
     const pendingAggregate =
       typeof write.value === 'number'
-        ? Math.max(0, write.value - (row?.loggedRemote ?? write.value))
+        ? Math.max(
+            0,
+            write.value - (row?.loggedRemote ?? write.value) - deletedOurs,
+          )
         : 0;
+    // Every ours-side leg discounts the tombstoned share — a deleted
+    // component was delivered once, not pending evidence.
     return Math.max(
       domainEstimate,
-      ours,
-      row?.localCount ?? 0,
+      Math.max(0, ours - deletedOurs),
+      Math.max(0, (row?.localCount ?? 0) - deletedOurs),
       pendingAggregate,
     );
   }
@@ -916,9 +935,15 @@ export function unsyncedWrites(
       if (remoteShare(evidence, write) >= Number.MAX_SAFE_INTEGER) {
         return true;
       }
-      const ours = evidence.components
-        .get(`${write.kind}${KEY_SEP}${write.recordId}`)
-        ?.[write.field]?.[evidence.deviceId];
+      // An absent key IS a live component of zero — the
+      // components breakdown is authoritative — so a tombstoned
+      // local component with nothing left to deliver still
+      // suppresses (a zero-target emit would only restamp the
+      // remote share).
+      const ours =
+        evidence.components
+          .get(`${write.kind}${KEY_SEP}${write.recordId}`)
+          ?.[write.field]?.[evidence.deviceId] ?? 0;
       // Only the headroom under the wire bound is stampable — a
       // target beyond it clamps on emit, so the stamped component
       // can never reach the raw target; comparing against the
@@ -926,12 +951,11 @@ export function unsyncedWrites(
       // loop on near-saturated counts.
       const headroom = Number.MAX_SAFE_INTEGER - remoteShare(evidence, write);
       return (
-        ours !== undefined &&
         ours >=
-          Math.min(
-            sumDeliveryTarget(write, input, synced, evidence),
-            headroom,
-          )
+        Math.min(
+          sumDeliveryTarget(write, input, synced, evidence),
+          headroom,
+        )
       );
     }
     if (merge === 'max' && typeof write.value === 'number') {
@@ -2058,15 +2082,19 @@ function finishProjection(
       countFoldIds.add(count.recordingId);
       const foldedLast = numField(fold.fields, 'lastMs');
       const appliedCount = numField(fold.fields, 'count');
-      // `count - ourComponent - loggedRemote` is exactly the plays
-      // the log never saw: our live component reads out of the
-      // page's own `sumComponents`, so plays that already delivered
-      // stop counting as unsent, and remote growth between pages
-      // can't eat the surplus the way a surplus-over-page floor
-      // would. Without the baseline or the breakdown the surplus
-      // over the page itself is the conservative bound — per-device
-      // components grow only, so it can never over-claim — capped
-      // further by this device's own committed plays.
+      // `count - max(ourComponent, loggedOurs) - loggedRemote` is
+      // exactly the plays the log never saw: our live component
+      // reads out of the page's own `sumComponents`, so plays that
+      // already delivered stop counting as unsent; remote growth
+      // between pages can't eat the surplus the way a
+      // surplus-over-page floor would; and `loggedOurs` keeps a
+      // tombstoned local component — delivered, then deleted —
+      // from masquerading as unsent and resurrecting on every
+      // reconcile. Without the baseline or the breakdown the
+      // surplus over the page itself is the conservative bound —
+      // per-device components grow only, so it can never
+      // over-claim — capped further by this device's own committed
+      // plays.
       const countComponents = fold.sumComponents?.['count'];
       const oursNow =
         countComponents === undefined || current.deviceId === undefined
@@ -2074,7 +2102,12 @@ function finishProjection(
           : (countComponents[current.deviceId] ?? 0);
       const unlogged =
         count.loggedRemote !== undefined && oursNow !== undefined
-          ? Math.max(0, count.count - oursNow - count.loggedRemote)
+          ? Math.max(
+              0,
+              count.count -
+                Math.max(oursNow, count.loggedOurs ?? oursNow) -
+                count.loggedRemote,
+            )
           : Math.min(
               Math.max(0, count.count - (appliedCount ?? count.count)),
               count.localCount ?? 0,
@@ -2097,6 +2130,17 @@ function finishProjection(
                 count.loggedRemote + (fold.remoteDeltas.get('count') ?? 0),
               ),
             );
+      // Our entries echoing back are delivered plays, not remote
+      // share — the delta path advances our stamp by them and the
+      // remote one only by `remoteDeltas`.
+      const ourDelta =
+        (fold.sumDeltas.get('count') ?? 0) -
+        (fold.remoteDeltas.get('count') ?? 0);
+      const stampedOurs = fold.absolute
+        ? (oursNow ?? count.loggedOurs)
+        : count.loggedOurs === undefined
+          ? undefined
+          : Math.min(mergedCount, Math.max(0, count.loggedOurs + ourDelta));
       const candidate: PlayCount = {
         recordingId: count.recordingId,
         // Remote folds never touch the local-only baseline — it is
@@ -2106,6 +2150,9 @@ function finishProjection(
           : {}),
         ...(stampedRemote !== undefined
           ? { loggedRemote: stampedRemote }
+          : {}),
+        ...(stampedOurs !== undefined
+          ? { loggedOurs: stampedOurs }
           : {}),
         count: Math.min(
           Number.MAX_SAFE_INTEGER,
@@ -2157,9 +2204,13 @@ function finishProjection(
         recordingId: fold.recordId,
         count: mergedCount,
         // A fresh row holds only what the log materialized — the
-        // remote baseline stamps the non-ours share of it.
+        // remote baseline stamps the non-ours share of it, ours
+        // the rest.
         ...(oursNow !== undefined
-          ? { loggedRemote: Math.max(0, mergedCount - oursNow) }
+          ? {
+              loggedRemote: Math.max(0, mergedCount - oursNow),
+              loggedOurs: oursNow,
+            }
           : {}),
         lastMs: Math.max(0, numField(fold.fields, 'lastMs') ?? 0),
       };

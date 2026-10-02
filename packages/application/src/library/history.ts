@@ -115,10 +115,13 @@ export function recordPlay(
     recordingId: input.recordingId,
     count: (existing?.count ?? 0) + 1,
     localCount: (existing?.localCount ?? 0) + 1,
-    // A local play widens the unsent gap — the log's baseline
-    // advances only when a synced fold stamps it.
+    // A local play widens the unsent gap — the log's baselines
+    // advance only when a synced fold stamps them.
     ...(existing?.loggedRemote !== undefined
       ? { loggedRemote: existing.loggedRemote }
+      : {}),
+    ...(existing?.loggedOurs !== undefined
+      ? { loggedOurs: existing.loggedOurs }
       : {}),
     lastMs: Math.max(horizon, existing?.lastMs ?? 0),
   };

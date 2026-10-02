@@ -166,7 +166,7 @@ export async function applyImport(
   // it knew before.
   const ownBaseline = new Map<
     string,
-    { localCount?: number; loggedRemote?: number }
+    { localCount?: number; loggedRemote?: number; loggedOurs?: number }
   >();
   const prior = await storage.load(context);
   if (!prior.ok) {
@@ -183,6 +183,9 @@ export async function applyImport(
       ...(count.loggedRemote !== undefined
         ? { loggedRemote: count.loggedRemote }
         : {}),
+      ...(count.loggedOurs !== undefined
+        ? { loggedOurs: count.loggedOurs }
+        : {}),
     });
   }
   const owned: ExportDocument = {
@@ -191,6 +194,7 @@ export async function applyImport(
       const {
         localCount: _importedLocal,
         loggedRemote: _importedLogged,
+        loggedOurs: _importedLoggedOurs,
         ...rest
       } = count;
       const own = ownBaseline.get(count.recordingId);
@@ -206,6 +210,9 @@ export async function applyImport(
         // count stays entirely unsent until the next absolute page.
         ...(own.loggedRemote !== undefined
           ? { loggedRemote: own.loggedRemote }
+          : {}),
+        ...(own.loggedOurs !== undefined
+          ? { loggedOurs: own.loggedOurs }
           : {}),
         // The merged total can't sit below this device's own
         // stamped component — the sync log survives the import, so

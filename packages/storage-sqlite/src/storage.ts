@@ -751,14 +751,15 @@ export class SqliteStorage implements StoragePort {
         }
         for (const count of doc.playCounts) {
           await conn.execute(
-            `INSERT INTO play_counts (recording_id, count, last_ms, local_count, logged_remote)
-             VALUES (?, ?, ?, ?, ?)`,
+            `INSERT INTO play_counts (recording_id, count, last_ms, local_count, logged_remote, logged_ours)
+             VALUES (?, ?, ?, ?, ?, ?)`,
             [
               count.recordingId,
               count.count,
               count.lastMs,
               count.localCount ?? null,
               count.loggedRemote ?? null,
+              count.loggedOurs ?? null,
             ],
             signal,
           );
@@ -1155,6 +1156,7 @@ function decodeState(
     const count = keep('play_counts', keyOf(row['recording_id']), (t) => {
       const local = row['local_count'];
       const logged = row['logged_remote'];
+      const loggedOurs = row['logged_ours'];
       const candidate: PlayCount = {
         recordingId: t.reqStr(row['recording_id']),
         count: t.reqNonNegInt(row['count']),
@@ -1166,6 +1168,9 @@ function decodeState(
           : {}),
         ...(logged !== null && logged !== undefined
           ? { loggedRemote: t.reqNonNegInt(logged) }
+          : {}),
+        ...(loggedOurs !== null && loggedOurs !== undefined
+          ? { loggedOurs: t.reqNonNegInt(loggedOurs) }
           : {}),
       };
       if (
