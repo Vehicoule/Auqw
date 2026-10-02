@@ -1,7 +1,9 @@
 import type {
   DownloadRecord,
+  LocalEntry,
   LocalFile,
   LocalSource,
+  LocalTags,
   OperationContext,
   PersistedState,
   QueueSnapshot,
@@ -96,6 +98,9 @@ type Rig = {
   transferSwept: number;
   transferRemoved: string[];
   tagreadEnumerated: string[];
+  tagreadEntries: LocalEntry[] | null;
+  tagreadFingerprints: Map<string, string> | null;
+  tagreadTags: Map<string, LocalTags> | null;
   transferStats: {
     readonly bytes: number;
     readonly files: number;
@@ -131,6 +136,9 @@ function fakeApi(): Rig {
     transferSwept: 0,
     transferRemoved: [],
     tagreadEnumerated: [],
+    tagreadEntries: null,
+    tagreadFingerprints: null,
+    tagreadTags: null,
     transferStats: { bytes: 0, files: 0, partials: 0, freeBytes: null },
     api: {
       app: {
@@ -256,10 +264,32 @@ function fakeApi(): Rig {
       tagread: {
         enumerate: (args: { readonly treeUri: string }) => {
           rig.tagreadEnumerated.push(args.treeUri);
-          return Promise.resolve({ entries: [] });
+          if (rig.tagreadEntries === null) {
+            return Promise.resolve({ entries: [] });
+          }
+          return Promise.resolve({ entries: rig.tagreadEntries });
         },
-        fingerprint: () => Promise.reject(new Error('seam: inject tagread')),
-        read: () => Promise.reject(new Error('seam: inject tagread')),
+        fingerprint: (args: { readonly docIds: readonly string[] }) => {
+          if (rig.tagreadFingerprints === null) {
+            return Promise.reject(new Error('seam: inject tagread'));
+          }
+          return Promise.resolve({
+            fingerprints: args.docIds.map((docId) => {
+              const fp = rig.tagreadFingerprints!.get(docId);
+              return fp === undefined ? null : { docId, fingerprint: fp };
+            }),
+          });
+        },
+        read: (args: { readonly docIds: readonly string[] }) => {
+          if (rig.tagreadTags === null) {
+            return Promise.reject(new Error('seam: inject tagread'));
+          }
+          return Promise.resolve({
+            tags: args.docIds.map(
+              (docId) => rig.tagreadTags!.get(docId) ?? null,
+            ),
+          });
+        },
       },
       local: {
         add: () => Promise.reject(new Error('seam: inject local')),
@@ -958,14 +988,40 @@ async function replaceLibraryDrainsDownloads(): Promise<void> {
 async function replaceLibraryRescansSources(): Promise<void> {
   const rig = fakeApi();
   const player = new FakePlayer();
+  const storage = new FakeStorage(
+    persisted({
+      recordings: [rec('rec-lf', 'local')],
+      localSources: [localSourceRow()],
+      localFiles: [localFileRow()],
+    }),
+  );
+  // The survived folder's tree carries one document — the rescan
+  // must rejoin it as a file row and mint its recording cover.
+  const entry: LocalEntry = {
+    docId: 'sub/rip.flac',
+    name: 'rip.flac',
+    size: 5,
+    mime: 'audio/flac',
+    modifiedMs: 2,
+  };
+  rig.tagreadEntries = [entry];
+  rig.tagreadFingerprints = new Map([[entry.docId, 'fp-rejoin']]);
+  rig.tagreadTags = new Map([
+    [
+      entry.docId,
+      {
+        docId: entry.docId,
+        title: 'Rejoined Rip',
+        artist: 'Ripper',
+        album: null,
+        durationMs: 3210,
+        genre: null,
+        artworkUri: 'file:///u/art/cover.png',
+      },
+    ],
+  ]);
   const controller = await boot(rig.api, {
-    storage: new FakeStorage(
-      persisted({
-        recordings: [rec('rec-lf', 'local')],
-        localSources: [localSourceRow()],
-        localFiles: [localFileRow()],
-      }),
-    ),
+    storage,
     player,
     providers: defaultProviders(),
   });
@@ -997,6 +1053,25 @@ async function replaceLibraryRescansSources(): Promise<void> {
     rigEmpty.tagreadEnumerated.length,
     0,
     'a failed or no-source import never scans',
+  );
+  // The rescan actually rejoins rows: the file index is rebuilt and
+  // the re-minted recording carries its extracted embedded cover.
+  const state = await storage.load(ctx());
+  assert(state.ok, 'post-rescan load failed');
+  assertEqual(state.value.localFiles.length, 1, 'file row not rejoined');
+  assertEqual(
+    state.value.localFiles[0]?.fingerprint,
+    'fp-rejoin',
+    'file row fingerprint',
+  );
+  const rejoined = state.value.recordings.find(
+    (r) => r.title === 'Rejoined Rip',
+  );
+  assert(rejoined !== undefined, 'rescan did not mint the recording');
+  assertDeepEqual(
+    rejoined.artwork,
+    [{ url: 'file:///u/art/cover.png', width: null, height: null }],
+    'embedded cover not applied to the re-minted recording',
   );
   player.cancelPendingPrepares();
   await controller.dispose();

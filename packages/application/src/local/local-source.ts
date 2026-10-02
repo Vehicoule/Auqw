@@ -1,4 +1,5 @@
 import type { CancellationSignal } from '../cancellation.ts';
+import { CancellationSource } from '../cancellation.ts';
 import {
   localTrackRef,
   LOCAL_PROVIDER,
@@ -103,6 +104,12 @@ export class LocalFileSource {
   #uriByRecording: Map<string, string>;
   /** Serializes scans: at most one per source at a time. */
   readonly #scans = new Map<string, Promise<unknown>>();
+  /**
+   * Instance lifecycle — `retire()` cancels every op linked to it and
+   * the drain promise covers the write tail plus in-flight scans, so
+   * after it resolves a superseded instance issues no more commits.
+   */
+  readonly #lifecycle = new CancellationSource();
   /** fileIds whose tags were read this boot and carried no embedded
    * cover — the art-backfill leg skips them for the rest of the boot
    * (next boot retries once more). */
@@ -187,8 +194,9 @@ export class LocalFileSource {
    * `no-result`, not an error the caller must paper over.
    */
   async addFolder(
-    signal: CancellationSignal,
+    callerSignal: CancellationSignal,
   ): Promise<Result<LocalSource>> {
+    const signal = this.#linked(callerSignal);
     if (signal.cancelled) {
       return err(cancelled());
     }
@@ -232,8 +240,9 @@ export class LocalFileSource {
    */
   async rescan(
     sourceId: string | undefined,
-    signal: CancellationSignal,
+    callerSignal: CancellationSignal,
   ): Promise<Result<readonly ScanReport[]>> {
+    const signal = this.#linked(callerSignal);
     const targets =
       sourceId === undefined
         ? this.#sources.map((s) => s.sourceId)
@@ -254,11 +263,51 @@ export class LocalFileSource {
     return ok(reports);
   }
 
+  /**
+   * Supersede this instance: ops linked to it cancel where they can
+   * and the returned promise settles once the write tail and the scan
+   * set have drained — after it resolves the instance is guaranteed
+   * to issue no further commits. Callers replacing or discarding the
+   * source (import swap, rebuild, dispose) retire the old instance
+   * so a stale commit can never resurrect rows the swap wiped.
+   */
+  retire(): Promise<void> {
+    this.#lifecycle.cancel();
+    return Promise.allSettled([
+      this.#writeTail,
+      ...this.#scans.values(),
+    ]).then(() => undefined);
+  }
+
+  /**
+   * Union of the caller's signal with the instance lifecycle: ops
+   * respond to either — the caller canceling, or `retire()` landing
+   * mid-flight. Linked signals are composable (a linked signal passed
+   * to another op just links again).
+   */
+  #linked(signal: CancellationSignal): CancellationSignal {
+    const life = this.#lifecycle.signal;
+    return {
+      get cancelled() {
+        return signal.cancelled || life.cancelled;
+      },
+      subscribe(listener: () => void) {
+        const offCaller = signal.subscribe(listener);
+        const offLife = life.subscribe(listener);
+        return () => {
+          offCaller();
+          offLife();
+        };
+      },
+    };
+  }
+
   /** Drop a folder grant: its file rows go, recordings persist. */
   async removeSource(
     sourceId: string,
-    signal: CancellationSignal,
+    callerSignal: CancellationSignal,
   ): Promise<Result<void>> {
+    const signal = this.#linked(callerSignal);
     if (signal.cancelled) {
       return err(cancelled());
     }

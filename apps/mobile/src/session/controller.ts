@@ -485,6 +485,10 @@ export async function createSessionController(
       });
       return null;
     }
+    // A superseded instance's in-flight scan commits straight to
+    // storage — retire it so its stale snapshot can't clobber rows
+    // the swap just wrote.
+    void localSource?.retire();
     localSource = buildLocalSource(loaded.value);
     return loaded.value;
   };
@@ -913,6 +917,10 @@ export async function createSessionController(
         });
         return err(stopped.error);
       }
+      // An older import's post-swap rescan can still be in flight —
+      // drain it before this swap lands or its commit resurrects
+      // rows the previous import already replaced.
+      await localSource?.retire();
       let importedOk = false;
       try {
         const imported = await session.importLibrary(text);
@@ -959,6 +967,7 @@ export async function createSessionController(
       // (Review #46). dispose() also bars new session work, so the
       // client can't be re-entered once it goes down.
       await session.dispose();
+      void localSource?.retire();
       // Scheduler before the client: its timers die here so no round
       // can fire against a closing socket surface.
       syncScheduler?.stop();

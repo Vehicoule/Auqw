@@ -404,6 +404,10 @@ export async function createSessionController(
       warn('media rehydrate skipped: storage load failed');
       return;
     }
+    // A superseded instance's in-flight scan commits straight to
+    // storage — retire it so its stale snapshot can't clobber rows
+    // the swap just wrote.
+    void localSource?.retire();
     localSource = new LocalFileSource(
       { storage, tagReader, ids, clock, log },
       {
@@ -755,6 +759,10 @@ export async function createSessionController(
         warn(`pre-import stop failed: ${stopped.error.kind}`);
         return err(stopped.error);
       }
+      // An older import's post-swap rescan can still be in flight —
+      // drain it before this swap lands or its commit resurrects
+      // rows the previous import already replaced.
+      await localSource?.retire();
       let importedOk = false;
       try {
         const imported = await session.importLibrary(text);
@@ -786,6 +794,7 @@ export async function createSessionController(
       unsubscribeApplied();
       unsubscribeNet();
       await downloads.stop(new CancellationSource().signal);
+      void localSource?.retire();
       for (const unsub of mediaUnsubs.splice(0)) {
         unsub();
       }
