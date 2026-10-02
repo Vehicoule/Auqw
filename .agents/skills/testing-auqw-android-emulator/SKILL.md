@@ -182,11 +182,12 @@ writer that runs MIGRATIONS + every INSERT/UPDATE/DELETE.
   NOT at the scaled-screenshot position you might estimate. Tapping
   the scrim ABOVE a sheet dismisses it silently — always dump the
   sheet's nodes for exact bounds before tapping a button.
-- **The toast pill renders at `bottom: insets.bottom + 88`** in the root
-  StackItem — it sits BEHIND any pushed overlay (sheets, the stage), so
-  a toast fired while a sheet is open is invisible (e.g. the
-  `toast.storefrontCode` pill on a failed storefront save). Don't waste
-  screenshots hunting it there.
+- **The toast pill mounts a copy inside EVERY screen layer** (post-#277)
+  — root/pushed copies float at `bottom: insets.bottom + 88`; in-sheet
+  copies render in-flow BELOW the sheet's rows (the fit-to-contents
+  sheet grows to fit, canvas bg on the raised layer). A toast fired
+  while a sheet is open IS visible there — e.g. `toast.storefrontCode`
+  under the storefront sheet's rows.
 - **Provider play failures do NOT reach the toast.** A bot-check prepare
   marks the queue occurrence 'couldn't play' and surfaces the humanized
   'still loading — try again' line on the player — no `reportResult`,
