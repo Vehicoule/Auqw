@@ -40,6 +40,24 @@ export function WorldSearch({
   onFocusChange,
 }: WorldSearchProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  // What we last told the chrome — reported focus is widget-level
+  // (input + its buttons), reconciled against the DOM each render.
+  const reportedFocus = useRef(false);
+  const reportFocus = (focused: boolean) => {
+    if (focused !== reportedFocus.current) {
+      reportedFocus.current = focused;
+      onFocusChange?.(focused);
+    }
+  };
+  // Removing a focused button (clear empties the query, cancel ends
+  // loading) emits no blur — reconcile the reported state against
+  // where the active element actually is after every render.
+  useEffect(() => {
+    if (rootRef.current !== null) {
+      reportFocus(rootRef.current.contains(document.activeElement));
+    }
+  });
   // The signal must *change* to focus — the always-mounted toolbar
   // field would otherwise steal focus on startup and route the app
   // to explore before the user asked.
@@ -77,6 +95,7 @@ export function WorldSearch({
     // cancel moves focus inside the field — an input-level blur would
     // collapse it before the click lands and swallow the action.
     <div
+      ref={rootRef}
       className="uw-wsearch"
       data-live={live || undefined}
       onFocus={(event) => {
@@ -84,8 +103,12 @@ export function WorldSearch({
           event.relatedTarget === null ||
           !event.currentTarget.contains(event.relatedTarget as Node)
         ) {
-          onFocusChange?.(true);
-          onNavigateToSearch?.();
+          reportFocus(true);
+          // Only the input navigates — landing on clear/cancel is a
+          // field action, not a request to switch surfaces.
+          if (event.target === inputRef.current) {
+            onNavigateToSearch?.();
+          }
         }
       }}
       onBlur={(event) => {
@@ -93,7 +116,7 @@ export function WorldSearch({
           event.relatedTarget === null ||
           !event.currentTarget.contains(event.relatedTarget as Node)
         ) {
-          onFocusChange?.(false);
+          reportFocus(false);
         }
       }}
     >
