@@ -2109,8 +2109,14 @@ export function StageSheet({
           thread — a JS-gated ancestor in the hit path would reopen
           the hop — while on web it is inert and the Pressable's own
           mount plus its explicit pointerEvents='auto' (overriding
-          the wrapper's inherited dead class) is the gate. */}
+          the wrapper's inherited dead class) is the gate.
+          collapsable=false pins it concrete: the gated pointerEvents/
+          a11y pair flips it flattened↔concrete on every morph, which
+          would re-parent the Pressable under the nearest concrete
+          ancestor each transition — the same viewless-parent remove
+          class PR 311 killed on the panes. */}
       <Animated.View
+        collapsable={false}
         animatedProps={dismissSurfaceProps}
         style={StyleSheet.absoluteFill}
       >
@@ -2194,8 +2200,14 @@ export function StageSheet({
           )}
           {/* The collapsed row sits at the surface's top edge — the
               same slot OpenTune's collapsedContent occupies — fading
-              out as the morph takes over. */}
+              out as the morph takes over. collapsable=false keeps the
+              wrapper permanently concrete: its gated pointerEvents/
+              a11y pair otherwise flips it concrete↔flattened between
+              parked and risen states, re-parenting the whole
+              MiniPlayer subtree on every morph — the viewless-parent
+              remove class PR 311 pinned on the panes. */}
           <Animated.View
+            collapsable={false}
             animatedProps={rowGateProps}
             style={[
               {
