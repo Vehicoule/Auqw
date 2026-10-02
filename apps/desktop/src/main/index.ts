@@ -826,7 +826,9 @@ function titleBarOverlay(payload: ChromeSchemePayload): TitleBarOverlay {
   return {
     color: payload.canvas ?? tokens.canvas,
     symbolColor: payload.symbol ?? tokens.textBright,
-    height: 40,
+    // Matches --uw-titlebar-h in ui-web styles.css — the shell header
+    // is a tall strip, so the overlay draws the same height.
+    height: 56,
   };
 }
 
@@ -850,7 +852,7 @@ function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
     },
   };
   if (isMac) {
-    options.trafficLightPosition = { x: 14, y: 12 };
+    options.trafficLightPosition = { x: 14, y: 22 };
   } else {
     options.titleBarOverlay = titleBarOverlay({
       scheme: nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
