@@ -529,6 +529,73 @@ async function sessionImportDuringPlayback(): Promise<void> {
   assertDeepEqual(snap.recordings, SEEDED.recordings, 'imported rows land');
 }
 
+// 9. Device-local art-store refs never cross the doc boundary —
+// stripped at emission, and stripped again on accept so a hand-built
+// or older doc can't land a path that only exists on another device.
+async function artRefsStayPortable(): Promise<void> {
+  const fileArt = {
+    url: 'file:///home/u/.config/auqw/art/abc.png',
+    width: null,
+    height: null,
+  };
+  const httpsArt = {
+    url: 'https://images.example.com/a.jpg',
+    width: 100,
+    height: 100,
+  };
+  const seeded = persisted({
+    recordings: [
+      { ...recording('r1', [ref('local', 'lf-1')]), artwork: [fileArt, httpsArt] },
+    ],
+    entities: [
+      {
+        entityId: 'ent-1',
+        kind: 'album' as const,
+        title: 'Album One',
+        artistName: 'Artist',
+        artwork: [fileArt],
+        createdMs: 10,
+      },
+    ],
+  });
+  const storage = new FakeStorage(seeded);
+  const exported = await exportLibrary(
+    storage,
+    new FakeClock(9_000),
+    ctx().context,
+  );
+  assert(exported.ok, 'export resolves');
+  assertDeepEqual(
+    exported.value.doc.recordings[0]?.artwork,
+    [httpsArt],
+    'recording art emits https only',
+  );
+  assertDeepEqual(
+    exported.value.doc.entities[0]?.artwork,
+    [],
+    'entity art emits https only',
+  );
+
+  // Inbound strip: a doc carrying a foreign device's path keeps the
+  // recording but drops the ref — the slot backfills from the file.
+  const foreign = {
+    ...exported.value.doc,
+    recordings: [
+      {
+        ...exported.value.doc.recordings[0]!,
+        artwork: [fileArt],
+      },
+    ],
+  };
+  const parsed = parseExportJson(JSON.stringify(foreign));
+  assert(parsed.ok, 'doc parses');
+  assertDeepEqual(
+    parsed.value.recordings[0]?.artwork,
+    [],
+    'inbound file:// refs strip on accept',
+  );
+}
+
 const TESTS: readonly [string, () => Promise<void>][] = [
   ['exportRoundtrip', exportRoundtrip],
   ['parseRejects', parseRejects],
@@ -538,6 +605,7 @@ const TESTS: readonly [string, () => Promise<void>][] = [
   ['sessionImportRejects', sessionImportRejects],
   ['exportRoundtripLocalRows', exportRoundtripLocalRows],
   ['sessionImportDuringPlayback', sessionImportDuringPlayback],
+  ['artRefsStayPortable', artRefsStayPortable],
 ];
 
 export async function run(): Promise<void> {

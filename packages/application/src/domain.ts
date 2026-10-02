@@ -334,7 +334,20 @@ export function isPublicHttpsUrl(url: string): boolean {
   );
 }
 
-export function isArtworkRef(value: unknown): value is ArtworkRef {
+/**
+ * Artwork url: a public https cover (catalog art) or a `file://` ref
+ * into the platform's content-addressed local-art store (embedded
+ * covers extracted by the tag reader). The `file://` form is
+ * device-local — it never round-trips an export meaningfully.
+ */
+export function isArtworkUrl(url: string): boolean {
+  return isPublicHttpsUrl(url) || url.startsWith('file:///');
+}
+
+function isArtworkRefWith(
+  isUrl: (url: string) => boolean,
+  value: unknown,
+): value is ArtworkRef {
   const isDim = (dim: unknown): boolean =>
     dim === null ||
     (typeof dim === 'number' && Number.isSafeInteger(dim) && dim >= 1);
@@ -342,10 +355,35 @@ export function isArtworkRef(value: unknown): value is ArtworkRef {
     isRecord(value) &&
     hasExactKeys(value, ['url', 'width', 'height']) &&
     isString(value['url'], 2048) &&
-    isPublicHttpsUrl(value['url']) &&
+    isUrl(value['url']) &&
     isDim(value['width']) &&
     isDim(value['height'])
   );
+}
+
+export function isArtworkRef(value: unknown): value is ArtworkRef {
+  return isArtworkRefWith(isArtworkUrl, value);
+}
+
+/**
+ * Guest- and wire-facing artwork — public https only. A `file://` ref
+ * is minted exclusively by the platform tag reader against its own
+ * art store; admitting one from a provider payload or a sync write
+ * would let remote data point the renderer at local files.
+ */
+export function isRemoteArtworkRef(value: unknown): value is ArtworkRef {
+  return isArtworkRefWith(isPublicHttpsUrl, value);
+}
+
+/**
+ * Artwork as it may cross an export or sync boundary — device-local
+ * `file://` store refs are stripped; a receiving device re-derives
+ * them from the backing file's own embedded cover.
+ */
+export function portableArtwork(
+  artwork: readonly ArtworkRef[],
+): readonly ArtworkRef[] {
+  return artwork.filter(isRemoteArtworkRef);
 }
 
 export function isSourceRef(value: unknown): value is SourceRef {
@@ -434,19 +472,36 @@ export function isSourceMapping(value: unknown): value is SourceMapping {
   );
 }
 
-function isArtworkList(value: unknown): value is readonly ArtworkRef[] {
-  return Array.isArray(value) && value.length <= 8 && value.every(isArtworkRef);
+export function isArtworkList(
+  value: unknown,
+): value is readonly ArtworkRef[] {
+  return (
+    Array.isArray(value) && value.length <= 8 && value.every(isArtworkRef)
+  );
+}
+
+export function isRemoteArtworkList(
+  value: unknown,
+): value is readonly ArtworkRef[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 8 &&
+    value.every(isRemoteArtworkRef)
+  );
 }
 
 /** The audio-metadata fields TrackMetadata and Recording agree on. */
-function hasAudioFields(value: Record<string, unknown>): boolean {
+function hasAudioFields(
+  value: Record<string, unknown>,
+  artworkOk: (artwork: unknown) => boolean,
+): boolean {
   return (
     isString(value['title'], 512) &&
     isOptString(value['artist'], 512) &&
     isOptString(value['album'], 512) &&
     isOptSafeNonNegative(value['durationMs']) &&
     isOptSafeNonNegative(value['releaseYear']) &&
-    isArtworkList(value['artwork']) &&
+    artworkOk(value['artwork']) &&
     (value['explicit'] === null || typeof value['explicit'] === 'boolean') &&
     isOptString(value['genre'], 512)
   );
@@ -472,7 +527,7 @@ export function isTrackMetadata(value: unknown): value is TrackMetadata {
       ['artistRef', 'albumRef', 'isrc'],
     ) &&
     isTrackRef(value['sourceRef']) &&
-    hasAudioFields(value) &&
+    hasAudioFields(value, isRemoteArtworkList) &&
     isStorefront(value['storefront']) &&
     (value['artistRef'] === undefined ||
       value['artistRef'] === null ||
@@ -512,7 +567,7 @@ export function isRecording(value: unknown): value is Recording {
       'provenance',
     ]) &&
     isString(value['id'], 64) &&
-    hasAudioFields(value) &&
+    hasAudioFields(value, isArtworkList) &&
     isOptString(value['isrc'], 64) &&
     isVersionLabelArray(value['versionLabels']) &&
     Array.isArray(value['sourceRefs']) &&

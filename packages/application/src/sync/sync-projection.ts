@@ -25,7 +25,12 @@ import type {
   SourceMapping,
   SourceRef,
 } from '../domain.ts';
-import { isLike, isRecording, isSettings } from '../domain.ts';
+import {
+  isLike,
+  isRecording,
+  isSettings,
+  portableArtwork,
+} from '../domain.ts';
 import type {
   Entity,
   EntitySourceRef,
@@ -279,7 +284,17 @@ export function recordingUpsertWrites(
 ): LocalWrite[] {
   const writes: LocalWrite[] = [];
   for (const field of RECORDING_SYNC_FIELDS) {
-    writes.push(fieldWrite('recording', next.id, field, next[field]));
+    // Artwork emits in its portable form — a device-local `file://`
+    // store ref is meaningless off this device and would also block
+    // the receiver's own backfill (a nonempty slot never refills).
+    writes.push(
+      fieldWrite(
+        'recording',
+        next.id,
+        field,
+        field === 'artwork' ? portableArtwork(next.artwork) : next[field],
+      ),
+    );
   }
   const prevRefs = prev?.sourceRefs ?? [];
   for (const ref of next.sourceRefs) {
@@ -381,7 +396,12 @@ export function entityUpsertWrites(
   const writes: LocalWrite[] = [];
   for (const field of ENTITY_SYNC_FIELDS) {
     writes.push(
-      fieldWrite('entity', entity.entityId, field, entity[field]),
+      fieldWrite(
+        'entity',
+        entity.entityId,
+        field,
+        field === 'artwork' ? portableArtwork(entity.artwork) : entity[field],
+      ),
     );
   }
   const prev = prevRefs ?? [];

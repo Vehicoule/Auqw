@@ -1142,6 +1142,7 @@ export class FakeTagReader implements TagReaderPort {
     appError('no-result', 'folder pick cancelled'),
   );
   fingerprintCalls: string[][] = [];
+  tagCalls: string[][] = [];
 
   async pickFolder(
     _signal: CancellationSignal,
@@ -1173,6 +1174,7 @@ export class FakeTagReader implements TagReaderPort {
     docIds: readonly string[],
     _signal: CancellationSignal,
   ): Promise<Result<readonly (LocalTags | null)[]>> {
+    this.tagCalls.push([...docIds]);
     return ok(docIds.map((id) => this.tags.get(id) ?? null));
   }
 

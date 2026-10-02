@@ -216,6 +216,13 @@ export type TagReaderTags = {
   album: string | null;
   durationMs: number | null;
   genre: string | null;
+  /**
+   * Embedded cover extracted with the tags — a `file://` ref into the
+   * app's content-addressed `filesDir/art/` store; null when the file
+   * carries no picture or the store write failed. Older native builds
+   * omit the key.
+   */
+  artworkUri?: string | null;
 };
 
 type AuqwExpoEvents = {

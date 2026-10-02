@@ -13,13 +13,13 @@ import type {
 } from '../domain.ts';
 import {
   hasExactKeys,
-  isArtworkRef,
   isEntityRef,
   isFiniteNumber,
   isLike,
   isOptSafeNonNegative,
   isOptString,
   isRecord,
+  isRemoteArtworkRef,
   isSafeNonNegative,
   isSourceMapping,
   isString,
@@ -669,10 +669,14 @@ const isReleaseYear = (value: unknown): boolean =>
   value === null ||
   (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0);
 
+// The wire form is remote-only: `file://` store refs are minted by
+// the platform tag reader and never cross a boundary — emission strips
+// them (sync-projection's portableArtwork) and this rule refuses one
+// a non-conforming peer would send.
 const isArtworkList = (value: unknown): boolean =>
   Array.isArray(value) &&
   value.length <= 8 &&
-  value.every(isArtworkRef);
+  value.every(isRemoteArtworkRef);
 
 // Mirrors domain.ts's VersionLabel set — duplicated here so the wire
 // whitelist stays self-describing next to the fields it gates.

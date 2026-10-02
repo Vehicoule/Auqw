@@ -2,10 +2,10 @@ import type { OperationContext } from '../cancellation.ts';
 import {
   hasExactKeys,
   hasKeys,
-  isArtworkRef,
   isEntityRef,
   isOptString,
   isRecord,
+  isRemoteArtworkRef,
   isSourceRef,
   isStorefront,
   isString,
@@ -447,7 +447,7 @@ function toEntityMetadata(value: unknown): EntityMetadata | null {
     !isOptWireString(subtitle) ||
     !Array.isArray(artwork) ||
     artwork.length > 8 ||
-    !artwork.every(isArtworkRef)
+    !artwork.every(isRemoteArtworkRef)
   ) {
     return null;
   }
@@ -663,7 +663,7 @@ function toArtworkItems(
   if (
     !Array.isArray(items) ||
     items.length > 8 ||
-    !items.every(isArtworkRef)
+    !items.every(isRemoteArtworkRef)
   ) {
     return null;
   }

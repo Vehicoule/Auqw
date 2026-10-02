@@ -1,14 +1,19 @@
 import { createHash } from 'node:crypto';
 import {
+  mkdir,
   open,
   readdir,
   realpath,
   stat,
+  writeFile,
 } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { basename, join, relative, sep } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parseFile } from 'music-metadata';
 import type { LocalGrants } from './local-grants.ts';
+import type { IPicture } from 'music-metadata';
+import type { DatabaseSync } from 'node:sqlite';
 import { CHANNELS } from '../shared/channels.ts';
 import type {
   TagreadBatchArgs,
@@ -209,6 +214,63 @@ function boundedField(value: string | undefined | null): string | null {
   return value.length > MAX_TAG_FIELD ? value.slice(0, MAX_TAG_FIELD) : value;
 }
 
+/**
+ * Embedded cover → the content-addressed art store under
+ * `AUQW_USER_DATA/art/`. The file's sha256 names it, so identical
+ * covers across tracks land once and an existing file short-circuits
+ * the write entirely. Original bytes go to disk un-resized — the
+ * renderer's `<img>` downscales GPU-side, and skipping a re-encode
+ * keeps the art bit-faithful without an image-codec dependency in
+ * the utility process. `file://` renders as 'self' under the CSP's
+ * default-src; the artwork LRU cache is https-only and skips these.
+ */
+async function artworkUriFor(
+  picture: IPicture | undefined,
+): Promise<string | null> {
+  const userData = process.env['AUQW_USER_DATA'];
+  if (
+    picture === undefined ||
+    picture.data === undefined ||
+    picture.data.length === 0 ||
+    userData === undefined
+  ) {
+    return null;
+  }
+  const data = picture.data;
+  const format = picture.format.toLowerCase();
+  const ext = format.startsWith('image/')
+    ? format.slice(6).replace(/[^a-z0-9]/g, '')
+    : 'img';
+  const name = createHash('sha256').update(data).digest('hex');
+  const dir = join(userData, 'art');
+  const abs = join(dir, `${name}.${ext}`);
+  const exists = await stat(abs)
+    .then((info) => info.isFile())
+    .catch(() => false);
+  if (!exists) {
+    try {
+      await mkdir(dir, { recursive: true });
+      await writeFile(abs, data);
+    } catch {
+      // Art is best-effort inside the batch — a store failure must
+      // not turn into a per-doc null.
+      return null;
+    }
+  }
+  return pathToFileURL(abs).href;
+}
+
+/** Front cover wins when several pictures ride one file. */
+function coverOf(pictures: readonly IPicture[] | undefined): IPicture | undefined {
+  if (pictures === undefined || pictures.length === 0) {
+    return undefined;
+  }
+  return (
+    pictures.find((p) => p.type?.toLowerCase().includes('front')) ??
+    pictures[0]
+  );
+}
+
 async function readTags(
   abs: string,
   docId: string,
@@ -216,7 +278,7 @@ async function readTags(
   try {
     const meta = await parseFile(abs, {
       duration: true,
-      skipCovers: true,
+      skipCovers: false,
     });
     return {
       docId,
@@ -234,6 +296,7 @@ async function readTags(
           ? Math.round(meta.format.duration * 1000)
           : null,
       genre: boundedField(meta.common.genre?.[0]),
+      artworkUri: await artworkUriFor(coverOf(meta.common.picture)),
     };
   } catch {
     // Unparseable or vanished — per-doc null, never fatal to the batch.

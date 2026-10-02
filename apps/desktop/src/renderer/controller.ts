@@ -87,6 +87,10 @@ export type SessionController = {
    * Re-loads persisted state into the media owners after a
    * whole-library replace (import): rebuilds the local source and
    * re-inits the download ledger so their rows can't go stale.
+   * A rebuild that lands on live folder grants over an empty file
+   * index re-arms the rescan itself — the scan can always be
+   * cancelled by a newer rebuild, so only the surviving instance may
+   * carry it.
    */
   rehydrateMedia(signal: CancellationSignal): Promise<void>;
   /**
@@ -388,14 +392,46 @@ export async function createSessionController(
    * and the download ledger re-inits. After an import the session
    * re-adopts provenance-local rows from the source's snapshot.
    */
-  const rehydrateMedia = async (
+  /**
+   * Rehydrates serialize on a tail: overlapping callers (import
+   * finally, applied-sync, boot) each rebuild in order, so an older
+   * load can never overwrite a newer replacement instance.
+   */
+  let rehydrateTail: Promise<unknown> = Promise.resolve();
+  const doRehydrateMedia = async (
     signal: CancellationSignal,
   ): Promise<void> => {
-    const loaded = await storage.load({
+    // Retire BEFORE the load: a scan committing between the snapshot
+    // and the swap would land its files in storage but never in the
+    // new instance's index — drained first, every old commit lands in
+    // the snapshot we actually read. `null` the slot up front so
+    // `local()` never hands out a zombie while we rebuild.
+    const superseded = localSource;
+    localSource = null;
+    await superseded?.retire();
+    let loaded = await storage.load({
       requestId: ids.next('media-rehydrate'),
       deadlineMs: clock.nowMs() + 30_000,
       signal,
     });
+    if (!loaded.ok && !signal.cancelled) {
+      // A transient load failure must not strand intact rows — the
+      // superseded source is gone, so retry the snapshot once. The
+      // retry is linked to the caller's signal so a cancel still
+      // releases the rehydrate tail instead of pinning every queued
+      // rebuild behind a load that can no longer land.
+      const retryGate = new CancellationSource();
+      const release = signal.subscribe(() => retryGate.cancel());
+      try {
+        loaded = await storage.load({
+          requestId: ids.next('media-rehydrate'),
+          deadlineMs: clock.nowMs() + 30_000,
+          signal: retryGate.signal,
+        });
+      } finally {
+        release();
+      }
+    }
     if (!loaded.ok || signal.cancelled) {
       warn('media rehydrate skipped: storage load failed');
       return;
@@ -408,14 +444,50 @@ export async function createSessionController(
         recordings: loaded.value.recordings,
       },
     );
+    // Imported recordings replace prior local rows — the session
+    // re-merges provenance-local rows through this hook. Runs before
+    // the download-ledger init: an init failure must not starve the
+    // media merge of the rows the session already loaded.
+    void session.syncLocalRecordings(localSource.recordings());
+    if (
+      loaded.value.localSources.length > 0 &&
+      loaded.value.localFiles.length === 0
+    ) {
+      // Live folder grants over an empty file index mean the index
+      // was wiped (import replace) or its rescan died with a retired
+      // predecessor — either way this surviving instance re-arms it.
+      // The scan belongs to the instance, not the caller: retire()
+      // cancels it through the linked lifecycle signal.
+      const source = localSource;
+      void source
+        .rescan(undefined, new CancellationSource().signal)
+        .then((scanned) => {
+          if (!scanned.ok) {
+            warn(`local: empty-index rescan failed: ${scanned.error.kind}`);
+            return;
+          }
+          // A later rehydrate may have swapped the instance mid-flight
+          // — committing the captured one's snapshot would clobber rows
+          // it never saw (same guard as afterLocalMutation).
+          if (localSource === source) {
+            void session.syncLocalRecordings(source.recordings());
+          }
+        });
+    }
     const inited = await downloads.init(loaded.value.downloads, signal);
     if (!inited.ok) {
       warn(`download init failed: ${inited.error.kind}`);
       return;
     }
-    // Imported recordings replace prior local rows — the session
-    // re-merges provenance-local rows through this hook.
-    void session.syncLocalRecordings(localSource.recordings());
+  };
+  const rehydrateMedia = (
+    signal: CancellationSignal,
+  ): Promise<void> => {
+    const run = rehydrateTail.then(() => doRehydrateMedia(signal));
+    // A throwing run must not poison the tail — the next queued
+    // rehydrate still rebuilds in order.
+    rehydrateTail = run.catch(() => undefined);
+    return run;
   };
   let edged = false;
   const onlineListeners = new Set<(online: boolean) => void>();
@@ -732,6 +804,14 @@ export async function createSessionController(
         warn(`pre-import stop failed: ${stopped.error.kind}`);
         return err(stopped.error);
       }
+      // An older import's post-swap rescan can still be in flight —
+      // drain it before this swap lands or its commit resurrects
+      // rows the previous import already replaced. `null` the slot so
+      // `local()` never exposes the retired instance during the swap.
+      const superseded = localSource;
+      localSource = null;
+      const hadSource = superseded !== null;
+      await superseded?.retire();
       try {
         const imported = await session.importLibrary(text);
         if (imported.ok) {
@@ -753,6 +833,12 @@ export async function createSessionController(
         // manager re-inits off the persisted ledger so it can never
         // sit stopped with a stale row map.
         await rehydrateMedia(signal);
+        // A failed import plus a failed load (dead caller signal or a
+        // transient error) must not strand the source slot null while
+        // folder grants persist — retry the rebuild on a fresh signal.
+        if (hadSource && localSource === null) {
+          await rehydrateMedia(new CancellationSource().signal);
+        }
       }
     },
     async dispose() {
@@ -761,6 +847,7 @@ export async function createSessionController(
       unsubscribeApplied();
       unsubscribeNet();
       await downloads.stop(new CancellationSource().signal);
+      void localSource?.retire();
       for (const unsub of mediaUnsubs.splice(0)) {
         unsub();
       }

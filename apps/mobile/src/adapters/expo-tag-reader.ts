@@ -138,6 +138,7 @@ export function createExpoTagReader(native: AuqwTagReaderNative): TagReaderPort 
                   album: r.album,
                   durationMs: r.durationMs,
                   genre: r.genre,
+                  artworkUri: r.artworkUri ?? null,
                 },
           ),
         );

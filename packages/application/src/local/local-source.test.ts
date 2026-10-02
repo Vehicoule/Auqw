@@ -91,6 +91,7 @@ function tags(
     album: null,
     durationMs: null,
     genre: null,
+    artworkUri: null,
     ...extra,
   };
 }
@@ -946,6 +947,265 @@ async function runUnicodeDocIdsNoCollision(): Promise<void> {
   );
 }
 
+/**
+ * Embedded cover extracted with the tags mints the recording's
+ * artwork — the file:// ref lands alongside the other tag fields.
+ */
+async function runArtworkMintedOnScan(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  tagReader.tags.set(
+    'd1',
+    tags('d1', 'Alpha', { artworkUri: 'file:///art/aaa.png' }),
+  );
+  must(await source.addFolder(signal()));
+  const rec = source.recordings()[0]!;
+  assertEqual(rec.artwork[0]?.url, 'file:///art/aaa.png', 'cover minted');
+  assert(
+    rec.artwork[0]?.width === null && rec.artwork[0]?.height === null,
+    'tag reads report no dims',
+  );
+}
+
+/**
+ * A recording minted before embedded-art extraction has an empty
+ * artwork slot — its unchanged file re-tags once per boot and the
+ * merge fills art only (no mint, no ref churn).
+ */
+async function runArtworkBackfillsUnchangedFile(): Promise<void> {
+  const { storage, tagReader, source } = rig({
+    localSources: [
+      {
+        sourceId: 's1',
+        treeUri: TREE,
+        label: 'Music',
+        addedMs: 1,
+        lastScanMs: 1,
+      },
+    ],
+    localFiles: [
+      {
+        fileId: 'lf-1',
+        sourceId: 's1',
+        docId: 'd1',
+        size: 100,
+        fingerprint: 'fpa',
+        modifiedMs: 1_700_000_000_000,
+        title: 'Alpha',
+        artist: 'A',
+        album: null,
+        durationMs: 9000,
+        genre: null,
+        recordingId: 'rec-1',
+      },
+    ],
+    recordings: [
+      {
+        id: 'rec-1',
+        title: 'Alpha',
+        artist: 'A',
+        album: null,
+        durationMs: 9000,
+        releaseYear: null,
+        artwork: [],
+        explicit: null,
+        genre: null,
+        isrc: null,
+        versionLabels: [],
+        sourceRefs: [{ provider: 'local', kind: 'track', id: 'lf-1' }],
+        mappings: [],
+        provenance: 'local',
+      },
+    ],
+  });
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.tags.set(
+    'd1',
+    tags('d1', 'Alpha', { artworkUri: 'file:///art/bbb.png' }),
+  );
+
+  must(await source.rescan('s1', signal()));
+  const committed = must(
+    await storage.load({ requestId: 't', deadlineMs: 0, signal: signal() }),
+  ).recordings;
+  const rec = committed.find((r) => r.id === 'rec-1')!;
+  assertEqual(rec.artwork[0]?.url, 'file:///art/bbb.png', 'art backfilled');
+  assert(
+    rec.sourceRefs.some((s) => s.provider === 'local' && s.id === 'lf-1'),
+    'live ref untouched',
+  );
+}
+
+/**
+ * A file with no embedded cover is the honest-none case: the
+ * backfill leg checks it once per boot instead of re-reading the
+ * tags on every rescan.
+ */
+async function runArtworkHonestNoneReadsOncePerBoot(): Promise<void> {
+  const { tagReader, source } = rig({
+    localSources: [
+      {
+        sourceId: 's1',
+        treeUri: TREE,
+        label: 'Music',
+        addedMs: 1,
+        lastScanMs: 1,
+      },
+    ],
+    localFiles: [
+      {
+        fileId: 'lf-1',
+        sourceId: 's1',
+        docId: 'd1',
+        size: 100,
+        fingerprint: 'fpa',
+        modifiedMs: 1_700_000_000_000,
+        title: 'Alpha',
+        artist: null,
+        album: null,
+        durationMs: null,
+        genre: null,
+        recordingId: 'rec-1',
+      },
+    ],
+    recordings: [
+      {
+        id: 'rec-1',
+        title: 'Alpha',
+        artist: null,
+        album: null,
+        durationMs: null,
+        releaseYear: null,
+        artwork: [],
+        explicit: null,
+        genre: null,
+        isrc: null,
+        versionLabels: [],
+        sourceRefs: [{ provider: 'local', kind: 'track', id: 'lf-1' }],
+        mappings: [],
+        provenance: 'local',
+      },
+    ],
+  });
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.tags.set('d1', tags('d1', 'Alpha'));
+
+  must(await source.rescan('s1', signal()));
+  assertEqual(tagReader.tagCalls.length, 1, 'backfill read ran once');
+  must(await source.rescan('s1', signal()));
+  assertEqual(tagReader.tagCalls.length, 1, 'none not re-read');
+}
+
+/**
+ * A provider recording that joined a local file keeps its catalog
+ * art — embedded cover fills only an empty slot.
+ */
+async function runArtworkProviderJoinKeepsCatalogArt(): Promise<void> {
+  const { storage, tagReader, source } = rig({
+    localSources: [
+      {
+        sourceId: 's1',
+        treeUri: TREE,
+        label: 'Music',
+        addedMs: 1,
+        lastScanMs: 1,
+      },
+    ],
+    recordings: [
+      {
+        id: 'rec-prov',
+        title: 'Catalog Alpha',
+        artist: 'A',
+        album: null,
+        durationMs: 9000,
+        releaseYear: null,
+        artwork: [{ url: 'https://images.example.com/alpha.jpg', width: 1200, height: 1200 }],
+        explicit: null,
+        genre: null,
+        isrc: null,
+        versionLabels: [],
+        sourceRefs: [
+          { provider: 'youtube-music', kind: 'track', id: 'yt-1' },
+          { provider: 'local', kind: 'track', id: 'fp:fpa' },
+        ],
+        mappings: [],
+        provenance: 'provider',
+      },
+    ],
+  });
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  tagReader.tags.set(
+    'd1',
+    tags('d1', 'Alpha', { artworkUri: 'file:///art/ccc.png' }),
+  );
+
+  must(await source.rescan('s1', signal()));
+  const rec = must(
+    await storage.load({ requestId: 't', deadlineMs: 0, signal: signal() }),
+  ).recordings.find((r) => r.id === 'rec-prov')!;
+  assertEqual(rec.artwork[0]?.url, 'https://images.example.com/alpha.jpg', 'catalog art kept');
+  assert(
+    rec.sourceRefs.some(
+      (s) => s.provider === 'local' && s.id !== 'fp:fpa',
+    ),
+    'live fileId ref restored',
+  );
+}
+
+/**
+ * Same join with an empty artwork slot: the embedded cover fills
+ * it instead of leaving the recording artless.
+ */
+async function runArtworkProviderEmptyFillsOnJoin(): Promise<void> {
+  const { storage, tagReader, source } = rig({
+    localSources: [
+      {
+        sourceId: 's1',
+        treeUri: TREE,
+        label: 'Music',
+        addedMs: 1,
+        lastScanMs: 1,
+      },
+    ],
+    recordings: [
+      {
+        id: 'rec-prov',
+        title: 'Catalog Alpha',
+        artist: 'A',
+        album: null,
+        durationMs: 9000,
+        releaseYear: null,
+        artwork: [],
+        explicit: null,
+        genre: null,
+        isrc: null,
+        versionLabels: [],
+        sourceRefs: [
+          { provider: 'youtube-music', kind: 'track', id: 'yt-1' },
+          { provider: 'local', kind: 'track', id: 'fp:fpa' },
+        ],
+        mappings: [],
+        provenance: 'provider',
+      },
+    ],
+  });
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  tagReader.tags.set(
+    'd1',
+    tags('d1', 'Alpha', { artworkUri: 'file:///art/ddd.png' }),
+  );
+
+  must(await source.rescan('s1', signal()));
+  const rec = must(
+    await storage.load({ requestId: 't', deadlineMs: 0, signal: signal() }),
+  ).recordings.find((r) => r.id === 'rec-prov')!;
+  assertEqual(rec.artwork[0]?.url, 'file:///art/ddd.png', 'cover filled');
+}
+
 export async function run(): Promise<void> {
   await runAddFolderScan();
   await runUntaggedTitleFromName();
@@ -971,4 +1231,9 @@ export async function run(): Promise<void> {
   await runMovedDuplicateKeepsPresentRows();
   await runRescanRelinksImported();
   await runUnicodeDocIdsNoCollision();
+  await runArtworkMintedOnScan();
+  await runArtworkBackfillsUnchangedFile();
+  await runArtworkHonestNoneReadsOncePerBoot();
+  await runArtworkProviderJoinKeepsCatalogArt();
+  await runArtworkProviderEmptyFillsOnJoin();
 }
