@@ -188,22 +188,46 @@ export function DesktopChrome({
   const [searchCollapsed, setSearchCollapsed] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
   const lastScrollTop = useRef(0);
-  // When the bar can't fit field + tabs + caption buttons, the end
-  // cluster overflows its grid track and the field would paint over
-  // the tabs. Tight bars keep the field collapsed by default and
-  // expanding renders it as an overlay on top of them instead.
+  // When the bar can't fit field + tabs + caption buttons, the field
+  // would paint over the tabs. Tightness must not depend on the
+  // field's current form (measuring its own cluster oscillates:
+  // expand → overflow → collapse → fits → repeat), so derive it from
+  // stable geometry — the bar's content box, the tabs' width, and the
+  // end cluster's non-field siblings. Each outer grid track gets half
+  // the space left over from the tabs (floor 68px, per the grid def).
+  const barRef = useRef<HTMLElement | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const [endTight, setEndTight] = useState(false);
   const [expandedWhileTight, setExpandedWhileTight] = useState(false);
   useEffect(() => {
-    const el = endRef.current;
-    if (el === null) {
+    const bar = barRef.current;
+    const end = endRef.current;
+    if (bar === null || end === null) {
       return;
     }
     const observer = new ResizeObserver(() => {
-      setEndTight(el.scrollWidth > el.clientWidth + 1);
+      const tabs = bar.querySelector('.uw-tabs');
+      const style = globalThis.getComputedStyle(bar);
+      const content =
+        bar.clientWidth -
+        parseFloat(style.paddingLeft) -
+        parseFloat(style.paddingRight);
+      const trackHalf = Math.max(
+        68,
+        (content - (tabs === null ? 0 : tabs.clientWidth)) / 2,
+      );
+      let others = 0;
+      for (const child of Array.from(end.children)) {
+        if (!child.classList.contains('uw-wsearch')) {
+          others += (child as HTMLElement).offsetWidth;
+        }
+      }
+      // 200 = the expanded field's width (.uw-wsearch) + 8px of slack
+      // so the overlay engages just before the clip edge.
+      setEndTight(trackHalf < others + 208);
     });
-    observer.observe(el);
+    observer.observe(bar);
+    observer.observe(end);
     return () => observer.disconnect();
   }, []);
   useEffect(() => {
@@ -251,7 +275,7 @@ export function DesktopChrome({
         />
       )}
       <div className="uw-world">
-        <header className="uw-world-bar">
+        <header className="uw-world-bar" ref={barRef}>
           <div className="uw-world-bar__start">
             <IconButton
               icon="sidebar"
