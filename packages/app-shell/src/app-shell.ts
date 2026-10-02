@@ -276,7 +276,17 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // listener). A subscription queues one normal update per tick; ticks
   // during a render just batch into the following one.
   const [positionMs, setPositionMs] = useState(() => session.positionMs());
-  useEffect(() => session.subscribePosition(setPositionMs), [session]);
+  useEffect(() => {
+    // Subscribe before re-reading: a tick between the render-time
+    // initial state and this effect would otherwise be lost for good —
+    // subscribePosition never replays the current value, and the
+    // overlay would stamp the stale number over every fresh publish.
+    // The read always lands at least as fresh as any listener fire it
+    // follows, since both run inside this same synchronous block.
+    const unsubscribe = session.subscribePosition(setPositionMs);
+    setPositionMs(session.positionMs());
+    return unsubscribe;
+  }, [session]);
 
   // ---- shell chrome state ----------------------------------------
   const [tab, setTab] = useState('home');
