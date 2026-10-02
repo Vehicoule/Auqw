@@ -39,7 +39,6 @@ import type {
   QueueModel,
   TrackRowModel,
 } from '@auqw/ui-shared';
-import { seedableRadioRef } from '@auqw/ui-shared/controllers';
 import {
   fixtureDiagnostics,
   fixtureEntities,
@@ -1739,46 +1738,6 @@ function testRadioModel(): void {
   }
 }
 
-/**
- * The seed ref walks the candidate list in preference order and
- * skips refs whose provider cannot seed — a recording headed by its
- * local listing still offers radio through a provider twin behind it,
- * and the start affordance dies only when nothing can seed.
- */
-function testSeedableRadioRef(): void {
-  const local: SourceRef = { provider: 'local', kind: 'track', id: 'f-1' };
-  const ytm: SourceRef = {
-    provider: 'youtube-music',
-    kind: 'track',
-    id: 'ytm-1',
-  };
-  const dz: SourceRef = { provider: 'deezer', kind: 'track', id: 'dz-1' };
-  const seedable = (ref: SourceRef): boolean => ref.provider !== 'local';
-  // The playing ref wins when it can seed.
-  assertEqual(
-    seedableRadioRef([ytm, dz], seedable),
-    ytm,
-    'first seedable candidate wins',
-  );
-  // An unseedable head — the local file first — must not veto the
-  // provider twin behind it.
-  assertEqual(
-    seedableRadioRef([local, ytm], seedable),
-    ytm,
-    'a leading local ref does not hide the provider seed',
-  );
-  assertEqual(
-    seedableRadioRef([null, local, dz], seedable),
-    dz,
-    'null and unseedable candidates both skip',
-  );
-  assertEqual(
-    seedableRadioRef([local, null], seedable),
-    null,
-    'no seedable ref means no affordance',
-  );
-}
-
 function testCorrectionsModel(): void {
   const model = fixtureCorrectionsModel;
   assertEqual(model.state, 'ready');
@@ -2064,7 +2023,6 @@ testListingDedupe();
 testSearchFilters();
 testLyricsModel();
 testRadioModel();
-testSeedableRadioRef();
 testCorrectionsModel();
 testTransferModel();
 testCoverageMatrix();

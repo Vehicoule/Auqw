@@ -9,6 +9,7 @@
  */
 import { useMemo, useState } from 'react';
 import type { ThemeName } from '@auqw/design-tokens';
+import { LOCAL_PROVIDER } from '@auqw/application';
 import type { QueueOrigin, RepeatMode, SourceRef } from '@auqw/application';
 import { t } from './i18n.ts';
 import type { MessageId } from './i18n.ts';
@@ -1796,6 +1797,34 @@ export function seedableRadioRef(
     }
   }
   return null;
+}
+
+/**
+ * The stage radio seed, mirroring the coordinator's derivation (the
+ * gate must answer exactly what the op would arm): a resolved
+ * non-local playing ref is a verdict — seed that exact version or
+ * nothing, since a different provider's ref would mix from another
+ * rendition. Local playback carries no provider identity, so it and
+ * the unresolved pick fall through to the candidates (occurrence pin,
+ * then the recording's catalog refs). A playing ref for another
+ * occurrence says nothing about this row and likewise falls through.
+ */
+export function stageRadioSeedRef(input: {
+  readonly playingRef: SourceRef | undefined;
+  readonly playingOccurrenceId: string | undefined;
+  readonly currentOccurrenceId: string | undefined;
+  readonly candidates: readonly (SourceRef | null | undefined)[];
+  readonly isSeedable: (ref: SourceRef) => boolean;
+}): SourceRef | null {
+  const { playingRef, playingOccurrenceId, currentOccurrenceId } = input;
+  if (
+    playingRef !== undefined &&
+    playingRef.provider !== LOCAL_PROVIDER &&
+    playingOccurrenceId === currentOccurrenceId
+  ) {
+    return input.isSeedable(playingRef) ? playingRef : null;
+  }
+  return seedableRadioRef(input.candidates, input.isSeedable);
 }
 
 export function radioRowView(

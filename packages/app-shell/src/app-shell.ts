@@ -106,7 +106,10 @@ import type {
   TrackRowModel,
   TransferModel,
 } from '@auqw/ui-shared';
-import { seedableRadioRef } from '@auqw/ui-shared/controllers';
+import {
+  seedableRadioRef,
+  stageRadioSeedRef,
+} from '@auqw/ui-shared/controllers';
 import {
   advanceTargetId,
   skipTargetIds,
@@ -2667,11 +2670,15 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [controller],
   );
 
-  // The stage radio control seeds from the playing occurrence's
-  // selected ref, falling back to the recording's first seedable
-  // source ref — the same derivation the seed op uses so the gate
-  // mirrors it.
+  // The stage radio control mirrors the coordinator's derivation:
+  // a resolved non-local playing ref is a verdict — seed that exact
+  // version or nothing (a different provider's ref would mix from
+  // another rendition); local playback and the unresolved pick fall
+  // through to the occurrence pin then the catalog refs. The shared
+  // helper carries the rule so the gate and the op can't drift.
   const radioSeedRef = useMemo((): SourceRef | null => {
+    const seedableTrack = (ref: SourceRef): boolean =>
+      ref.kind === 'track' && radioSeedable(ref);
     const current = state.queue.occurrences.find(
       (o) => o.occurrenceId === state.queue.currentOccurrenceId,
     );
@@ -2679,24 +2686,44 @@ export function useAppShell<E extends { readonly type: string } = never>(
       currentRecordingId === null
         ? undefined
         : state.recordings.find((r) => r.id === currentRecordingId);
-    return seedableRadioRef(
-      [current?.selectedRef, ...(recording?.sourceRefs ?? [])],
-      radioSeedable,
-    );
-  }, [state.queue, state.recordings, currentRecordingId, radioSeedable]);
+    const playback = state.playback;
+    const playing =
+      playback.type === 'preparing' ||
+      playback.type === 'buffering' ||
+      playback.type === 'playing' ||
+      playback.type === 'paused'
+        ? { ref: playback.ref, occurrenceId: playback.occurrenceId }
+        : null;
+    return stageRadioSeedRef({
+      playingRef: playing?.ref,
+      playingOccurrenceId: playing?.occurrenceId,
+      currentOccurrenceId: current?.occurrenceId,
+      candidates: [current?.selectedRef, ...(recording?.sourceRefs ?? [])],
+      isSeedable: seedableTrack,
+    });
+  }, [
+    state.queue,
+    state.recordings,
+    state.playback,
+    currentRecordingId,
+    radioSeedable,
+  ]);
 
   // The row-action seed: a metadata row seeds its own ref; a library
-  // row seeds its first seedable source ref.
+  // row seeds its first seedable source ref. A row names one version
+  // per ref, so any seedable listing is a faithful seed here.
   const actionRadioRef = useMemo((): SourceRef | null => {
     if (actionsFor === null) {
       return null;
     }
+    const seedableTrack = (ref: SourceRef): boolean =>
+      ref.kind === 'track' && radioSeedable(ref);
     return actionsFor.kind === 'metadata'
-      ? seedableRadioRef([actionsFor.meta.sourceRef], radioSeedable)
+      ? seedableRadioRef([actionsFor.meta.sourceRef], seedableTrack)
       : seedableRadioRef(
           state.recordings.find((r) => r.id === actionsFor.recordingId)
             ?.sourceRefs ?? [],
-          radioSeedable,
+          seedableTrack,
         );
   }, [actionsFor, state.recordings, radioSeedable]);
 
