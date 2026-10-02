@@ -409,11 +409,22 @@ export async function createSessionController(
     const superseded = localSource;
     localSource = null;
     await superseded?.retire();
-    const loaded = await storage.load({
+    let loaded = await storage.load({
       requestId: ids.next('media-rehydrate'),
       deadlineMs: clock.nowMs() + 30_000,
       signal,
     });
+    if (!loaded.ok && !signal.cancelled) {
+      // A transient load failure must not strand intact rows — the
+      // superseded source is gone, so retry the snapshot once on a
+      // fresh signal. A cancelled caller bails without retrying:
+      // teardown owns that signal.
+      loaded = await storage.load({
+        requestId: ids.next('media-rehydrate'),
+        deadlineMs: clock.nowMs() + 30_000,
+        signal: new CancellationSource().signal,
+      });
+    }
     if (!loaded.ok || signal.cancelled) {
       warn('media rehydrate skipped: storage load failed');
       return;
