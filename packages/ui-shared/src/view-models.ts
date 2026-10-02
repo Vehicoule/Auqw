@@ -35,6 +35,7 @@ import type {
 } from '@auqw/application';
 import {
   ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
+  LOCAL_PROVIDER,
   displayIdentityKey,
   isBotCheckWall,
   matchDisplayKey,
@@ -1848,6 +1849,41 @@ export function dedupeTrackListings(
       kept.push(entry);
     }
   });
+  return kept;
+}
+
+/**
+ * The local-catalog sibling of `dedupeTrackListings`: recordings the
+ * user cannot tell apart — same analyzed title, artist, whole-second
+ * duration — collapse to the first in library order, with the hidden
+ * rows returned as `group` so their flags (liked, playing, playlist)
+ * still light the surviving row. There is no identity evidence to
+ * weigh for owned files, so the display key alone is the verdict.
+ */
+export function dedupeRecordings(
+  recordings: readonly Recording[],
+): readonly {
+  rec: Recording;
+  group: readonly Recording[];
+}[] {
+  const kept: { rec: Recording; group: Recording[] }[] = [];
+  const byKey = new Map<string, { rec: Recording; group: Recording[] }>();
+  for (const rec of recordings) {
+    const key = displayIdentityKey({
+      provider: LOCAL_PROVIDER,
+      title: rec.title,
+      artist: rec.artist,
+      durationMs: rec.durationMs,
+    });
+    const existing = byKey.get(key);
+    if (existing === undefined) {
+      const entry = { rec, group: [rec] };
+      byKey.set(key, entry);
+      kept.push(entry);
+    } else {
+      existing.group.push(rec);
+    }
+  }
   return kept;
 }
 
