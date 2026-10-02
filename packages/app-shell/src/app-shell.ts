@@ -2134,10 +2134,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
       if (tapped === undefined || !canPlayMeta(tapped)) {
         return;
       }
-      // The provider result list is the play context — the tapped
-      // result starts mid-list with its siblings queued behind it.
-      const items =
-        searchState.type === 'content' ? searchState.page.items : [];
+      // The *visible* result set is the play context — the tapped row
+      // starts mid-list with the rows behind it queued. playItems is
+      // the filtered deduped view, not the raw page: materializing
+      // filtered-out items would save them as recordings and expand
+      // the 'in your library' filter against the user's intent.
+      const items = searchModel.playItems;
       const metas =
         ports.entityPlayRequiresCanPlay === true || online === false
           ? items.filter(canPlayMeta)
@@ -2163,7 +2165,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       online,
       ports.localCatalog,
       ports.entityPlayRequiresCanPlay,
-      searchState,
+      searchModel,
       canPlayMeta,
       recordRecentSearch,
       dispatchPlay,

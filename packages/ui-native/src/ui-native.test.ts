@@ -1523,6 +1523,11 @@ function testSearchFilters(): void {
   // 'songs' — the whole set too; the chip names the reserved subset.
   const songs = toSearchModel(state, null, [], [libraryRec], 'songs');
   assertEqual(songs.results.length, 2, 'songs filter keeps every track');
+  // The play context mirrors the visible list — deduped reps only,
+  // post-filter; the raw page's hidden twins never get materialized.
+  assertEqual(all.playItems.length, 2, 'playItems follows the rows');
+  assertEqual(all.playItems[0]?.sourceRef.id, 'ytm-lib');
+  assertEqual(all.playItems[1]?.sourceRef.id, 'ytm-out');
   // 'library' — membership is evaluated across the deduped group: the
   // kept rep ref 'ytm-lib' is unowned but its twin 'ytm-lib2' is, so
   // the row still counts as in-library.
@@ -1536,6 +1541,11 @@ function testSearchFilters(): void {
   assert(
     library.hero?.row.key === 'youtube-music:ytm-lib:0',
     'the hero re-centers on the filtered #1',
+  );
+  assertEqual(
+    library.playItems.length,
+    1,
+    'the play context is the filtered list — filtered-out tracks never import',
   );
   // No library-owned matches → an honest empty result list.
   const none = toSearchModel(

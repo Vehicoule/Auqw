@@ -184,6 +184,13 @@ export type SearchStateModel = {
   readonly filter: SearchFilter;
   /** Provider's top-ranked result after the filter — the hero card. */
   readonly hero: SearchHeroModel | null;
+  /**
+   * The play context behind `results` — the visible provider items
+   * (deduped reps, post-filter). Playing a row queues exactly what the
+   * list shows; feeding the raw page would materialize filtered-out
+   * tracks as recordings and re-expand 'in your library' membership.
+   */
+  readonly playItems: readonly TrackMetadata[];
   readonly providerId: string | null;
   readonly message: string | null;
   readonly retryable: boolean;

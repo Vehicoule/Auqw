@@ -146,6 +146,7 @@ export function toSearchModel(
     results: [],
     filter,
     hero: null,
+    playItems: [],
     providerId: null,
     message: null,
     retryable: false,
@@ -180,6 +181,7 @@ export function toSearchModel(
         ...base,
         phase: state.page.items.length === 0 ? 'empty' : 'ready',
         results,
+        playItems: items.map(({ meta }) => meta),
         hero:
           first === undefined || heroRow === undefined
             ? null

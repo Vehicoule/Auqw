@@ -1316,9 +1316,17 @@ export function useSearchScreenController({
     !draft &&
     (state.phase === 'ready' || state.phase === 'loading') &&
     state.results.length > 0;
+  // Chips own the result set even when a filter empties it — hiding
+  // them on a filtered-empty list would strand the user with no way
+  // back to 'all'. They ride the ready phase (or a reload carrying
+  // retained rows); a provider 'empty'/'error' never shows them.
+  const chipsVisible =
+    !draft &&
+    (state.phase === 'ready' ||
+      (state.phase === 'loading' && state.results.length > 0));
   return {
     draft,
-    filters: listed
+    filters: chipsVisible
       ? {
           a11yLabel: t('search.a11y.filters'),
           chips: (['all', 'songs', 'library'] as const).map((key) => ({

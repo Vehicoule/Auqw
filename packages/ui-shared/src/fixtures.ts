@@ -629,6 +629,7 @@ const searchState = (
   filter: 'all',
   results: [],
   hero: null,
+  playItems: [],
   providerId: 'youtube-music',
   message: null,
   retryable: false,
@@ -642,6 +643,7 @@ export const fixtureSearchStates: readonly SearchStateModel[] = [
     results: fixtureSearchResults.map((meta, index) =>
       toSearchRowModel(meta, index),
     ),
+    playItems: fixtureSearchResults,
     hero: (() => {
       const meta = fixtureSearchResults[0];
       if (meta === undefined) {
