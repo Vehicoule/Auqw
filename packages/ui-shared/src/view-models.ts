@@ -35,8 +35,10 @@ import type {
 } from '@auqw/application';
 import {
   ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
+  displayIdentityKey,
   isBotCheckWall,
   matchDisplayKey,
+  sameSongIdentity,
   topPlayed,
 } from '@auqw/application';
 import { fromTag, t, type Locale, type MessageId } from './i18n.ts';
@@ -1674,6 +1676,7 @@ export function toEntityModel(input: {
     input.playlistEntries ?? [],
     input.recordings ?? [],
   );
+  const playingKey = refKey(input.playingRef);
   const liked =
     entityId !== null &&
     input.likes.some(
@@ -1690,19 +1693,78 @@ export function toEntityModel(input: {
     complete: page.complete,
     liked,
     canLike: entityId !== null,
-    items: page.items.map((meta, index) =>
-      toSearchRowModel(
+    items: dedupeTrackListings(page.items).map(({ meta, index, group }) => ({
+      ...toSearchRowModel(
         meta,
         index,
-        input.playingRef,
-        inPlaylist.has(refKey(meta.sourceRef) ?? ''),
+        null,
+        group.some((m) => inPlaylist.has(refKey(m.sourceRef) ?? '')),
       ),
-    ),
+      playing:
+        playingKey !== null &&
+        group.some((m) => refKey(m.sourceRef) === playingKey),
+    })),
     hasMore: page.continuation !== null,
     loadingMore: input.loadingMore ?? false,
     // A refresh error while content stays surfaces as a flagged note.
     message: errorText(error),
   };
+}
+
+/**
+ * Drops provider listings a user cannot tell apart — same analyzed
+ * song title, artist, and whole-second duration under different ids
+ * — keeping the first (provider-relevance order) of each group. The
+ * surviving rows carry their ORIGINAL page index: row keys embed it,
+ * and callers' key→metadata lookup maps still resolve the press.
+ */
+export function dedupeTrackListings(
+  items: readonly TrackMetadata[],
+): readonly {
+  meta: TrackMetadata;
+  index: number;
+  /** Every listing sharing the kept row's display identity — callers
+      propagate indicators (playing, playlist membership) across it so a
+      hidden duplicate's ref still lights the visible row. */
+  group: readonly TrackMetadata[];
+}[] {
+  const groupsByKey = new Map<
+    string,
+    { meta: TrackMetadata; index: number; group: TrackMetadata[] }[]
+  >();
+  const kept: {
+    meta: TrackMetadata;
+    index: number;
+    group: readonly TrackMetadata[];
+  }[] = [];
+  items.forEach((meta, index) => {
+    const key = displayIdentityKey({
+      provider: meta.sourceRef.provider,
+      title: meta.title,
+      artist: meta.artist,
+      durationMs: meta.durationMs,
+    });
+    const groups = groupsByKey.get(key);
+    // Same display key alone doesn't make one song — the identity
+    // verdict does, against EVERY member: an uncoded listing can
+    // absorb coded ones whose ISRCs conflict, so checking only the
+    // representative would merge distinct recordings into one row.
+    const host = groups?.find((g) =>
+      g.group.every((m) => sameSongIdentity(m, meta)),
+    );
+    if (host !== undefined) {
+      host.group.push(meta);
+    } else {
+      const entry = { meta, index, group: [meta] };
+      if (groups === undefined) {
+        groupsByKey.set(key, [entry]);
+      } else {
+        groups.push(entry);
+      }
+      kept.push(entry);
+    }
+  });
+  return kept;
 }
 
 export function toRailCard(recording: Recording): RailCardModel {
@@ -1752,12 +1814,14 @@ export function toHomeModel(input: {
     .sort((a, b) => b.playedMs - a.playedMs || b.at - a.at)
     .slice(0, 12)
     .map((entry) => toRailCard(entry.recording));
-  const suggestions = input.suggestions.slice(0, 12).map((metadata) => ({
-    key: `${metadata.sourceRef.provider}:${metadata.sourceRef.id}`,
-    title: metadata.title,
-    subtitle: metadata.artist,
-    artworkUrl: pickArtworkUrl(metadata.artwork),
-  }));
+  const suggestions = dedupeTrackListings(input.suggestions)
+    .slice(0, 12)
+    .map(({ meta: metadata }) => ({
+      key: `${metadata.sourceRef.provider}:${metadata.sourceRef.id}`,
+      title: metadata.title,
+      subtitle: metadata.artist,
+      artworkUrl: pickArtworkUrl(metadata.artwork),
+    }));
   const paused =
     input.playback.type === 'paused' ? input.playback : null;
   const resumeRecording =

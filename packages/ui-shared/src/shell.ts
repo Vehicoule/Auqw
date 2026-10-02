@@ -29,6 +29,7 @@ import type {
 import { t, type MessageId } from './i18n.ts';
 import { errorText } from './error-text.ts';
 import {
+  dedupeTrackListings,
   formatClock,
   playlistSourceRefs,
   refKey,
@@ -119,6 +120,7 @@ export function toSearchModel(
   recordings: readonly Recording[] = [],
 ): SearchStateModel {
   const inPlaylist = playlistSourceRefs(playlistEntries, recordings);
+  const playingKey = refKey(playingRef);
   const base = {
     query: state.type === 'idle' ? '' : state.query,
     results: [],
@@ -135,13 +137,18 @@ export function toSearchModel(
       return {
         ...base,
         phase: state.page.items.length === 0 ? 'empty' : 'ready',
-        results: state.page.items.map((meta, index) =>
-          toSearchRowModel(
-            meta,
-            index,
-            playingRef,
-            inPlaylist.has(refKey(meta.sourceRef) ?? ''),
-          ),
+        results: dedupeTrackListings(state.page.items).map(
+          ({ meta, index, group }) => ({
+            ...toSearchRowModel(
+              meta,
+              index,
+              null,
+              group.some((m) => inPlaylist.has(refKey(m.sourceRef) ?? '')),
+            ),
+            playing:
+              playingKey !== null &&
+              group.some((m) => refKey(m.sourceRef) === playingKey),
+          }),
         ),
         message: errorText(state.refreshError),
       };

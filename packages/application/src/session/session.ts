@@ -59,7 +59,11 @@ import type {
   Corrections,
   ReviewFilter,
 } from '../library/corrections.ts';
-import { localTrackRef } from '../domain.ts';
+import { localTrackRef, LOCAL_PROVIDER } from '../domain.ts';
+import {
+  cleanerTitle,
+  sameSongIdentity,
+} from '../matching/matching-engine.ts';
 import {
   applyAcceptance,
   lyricsCacheEntry,
@@ -419,16 +423,40 @@ function upsertRecordingIn(
   newId: string,
 ): { readonly recordings: Recording[]; readonly recording: Recording } {
   const ref = metadata.sourceRef;
-  const existing = recordings.find((rec) =>
+  const byRef = recordings.find((rec) =>
     rec.sourceRefs.some((s) => sameRef(s, ref)),
   );
+  // Content identity: a provider listing for a song the library
+  // already holds under a different ref joins that recording — one
+  // row, one more playable fallback — instead of minting a twin the
+  // user cannot tell apart from the first.
+  const byContent =
+    byRef === undefined && ref.provider !== LOCAL_PROVIDER
+      ? recordings.find(
+          (rec) =>
+            rec.provenance === 'provider' && sameSongIdentity(rec, metadata),
+        )
+      : undefined;
+  const existing = byRef ?? byContent;
   if (existing === undefined) {
     const recording = recordingFromMetadata(metadata, newId);
     return { recordings: [...recordings, recording], recording };
   }
   const hasRef = existing.sourceRefs.some((s) => sameRef(s, ref));
+  const merged = mergeRecordingMetadata(existing, metadata);
+  // A content join keeps the less decorated listing title — 'Sunset'
+  // outlives 'Sunset - Topic' — with its own labels/explicit intact;
+  // a same-ref refresh takes the provider's newest fields verbatim.
+  const title =
+    byContent === undefined
+      ? merged.title
+      : cleanerTitle(existing.title, metadata.title);
   const updated: Recording = {
-    ...mergeRecordingMetadata(existing, metadata),
+    ...merged,
+    title,
+    ...(byContent !== undefined && title === existing.title
+      ? { explicit: existing.explicit, versionLabels: existing.versionLabels }
+      : {}),
     sourceRefs: hasRef
       ? existing.sourceRefs
       : [...existing.sourceRefs, ref],

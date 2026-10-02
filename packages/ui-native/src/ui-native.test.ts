@@ -25,6 +25,7 @@ import type {
   PlaylistEntry,
   Recording,
   SourceRef,
+  TrackMetadata,
 } from '@auqw/application';
 import {
   assert,
@@ -1185,6 +1186,176 @@ function testSearchStates(): void {
   }
 }
 
+/**
+ * Listings a user cannot tell apart — same song under several ids —
+ * render once per surface while keeping their original page index
+ * so row keys still resolve back to the pressed item's metadata.
+ */
+function testListingDedupe(): void {
+  const meta = (id: string, title: string): TrackMetadata => ({
+    sourceRef: { provider: 'youtube-music', kind: 'track', id },
+    title,
+    artist: 'Portishead',
+    album: 'Dummy',
+    durationMs: 302_000,
+    releaseYear: 1994,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    storefront: 'AU',
+  });
+  const items: TrackMetadata[] = [
+    meta('ytm-a', 'Roads'),
+    meta('ytm-b', 'Roads - Topic'),
+    meta('ytm-c', 'Roads (Official Video)'),
+    meta('ytm-d', 'Glory Box'),
+  ];
+  const search = toSearchModel(
+    {
+      type: 'content',
+      revision: 1,
+      query: 'roads',
+      page: { items, storefront: null },
+    },
+    null,
+  );
+  assertEqual(
+    search.results.length,
+    2,
+    'three indistinguishable listings render as one row',
+  );
+  assertEqual(search.results[0]?.key, 'youtube-music:ytm-a:0');
+  assertEqual(search.results[1]?.key, 'youtube-music:ytm-d:3');
+  const entity = toEntityModel({
+    page: {
+      entity: {
+        sourceRef: { provider: 'youtube-music', kind: 'album', id: 'dummy' },
+        kind: 'album',
+        title: 'Dummy',
+        subtitle: 'Portishead',
+        artwork: [],
+      },
+      items,
+      complete: true,
+      continuation: null,
+    },
+    error: null,
+    likes: fixtureLikes,
+    entitySourceRefs: [],
+  });
+  assertEqual(
+    entity.items.length,
+    2,
+    'entity pages drop look-alike rows the same way',
+  );
+  // Genuinely different rows — a distinct artist — always survive.
+  const searchTwo = toSearchModel(
+    {
+      type: 'content',
+      revision: 2,
+      query: 'intro',
+      page: {
+        items: [
+          { ...meta('ytm-e', 'Intro'), artist: 'Band A' },
+          { ...meta('ytm-f', 'Intro'), artist: 'Band B' },
+        ],
+        storefront: null,
+      },
+    },
+    null,
+  );
+  assertEqual(
+    searchTwo.results.length,
+    2,
+    'same-name rows by different artists stay distinct',
+  );
+  // A distinct version keeps its own row — 'Roads (Live)' is not a
+  // look-alike of 'Roads'.
+  const searchVersions = toSearchModel(
+    {
+      type: 'content',
+      revision: 3,
+      query: 'roads',
+      page: {
+        items: [meta('ytm-g', 'Roads'), meta('ytm-h', 'Roads (Live)')],
+        storefront: null,
+      },
+    },
+    null,
+  );
+  assertEqual(
+    searchVersions.results.length,
+    2,
+    'a live cut keeps its own row next to the studio take',
+  );
+  // Different ISRCs are different recordings even under look-alike
+  // metadata — each keeps its own row.
+  const searchIsrcs = toSearchModel(
+    {
+      type: 'content',
+      revision: 5,
+      query: 'roads',
+      page: {
+        items: [
+          { ...meta('ytm-i', 'Roads'), isrc: 'GBAAA0000001' },
+          { ...meta('ytm-j', 'Roads'), isrc: 'GBAAA0000002' },
+          { ...meta('ytm-k', 'Roads - Topic'), isrc: 'GBAAA0000001' },
+        ],
+        storefront: null,
+      },
+    },
+    null,
+  );
+  assertEqual(
+    searchIsrcs.results.length,
+    2,
+    'conflicting ISRCs hold rows apart',
+  );
+  assertEqual(searchIsrcs.results[0]?.key, 'youtube-music:ytm-i:0');
+  assertEqual(searchIsrcs.results[1]?.key, 'youtube-music:ytm-j:1');
+  // Identity isn't transitive — an uncoded first listing must not
+  // absorb two coded listings whose ISRCs conflict.
+  const searchUncoded = toSearchModel(
+    {
+      type: 'content',
+      revision: 6,
+      query: 'roads',
+      page: {
+        items: [
+          meta('ytm-l', 'Roads'),
+          { ...meta('ytm-m', 'Roads'), isrc: 'GBAAA0000001' },
+          { ...meta('ytm-n', 'Roads'), isrc: 'GBAAA0000002' },
+        ],
+        storefront: null,
+      },
+    },
+    null,
+  );
+  assertEqual(
+    searchUncoded.results.length,
+    2,
+    'an uncoded row absorbs one coded twin, never two conflicting ones',
+  );
+  assertEqual(searchUncoded.results[0]?.key, 'youtube-music:ytm-l:0');
+  assertEqual(searchUncoded.results[1]?.key, 'youtube-music:ytm-n:2');
+  // A hidden look-alike's ref still lights the kept row — playing a
+  // deduped member marks the surviving row as playing.
+  const searchPlaying = toSearchModel(
+    {
+      type: 'content',
+      revision: 4,
+      query: 'roads',
+      page: { items, storefront: null },
+    },
+    { provider: 'youtube-music', kind: 'track', id: 'ytm-b' },
+  );
+  assertEqual(
+    searchPlaying.results[0]?.playing,
+    true,
+    "the hidden member's ref marks the kept row playing",
+  );
+}
+
 function sheetOf(kind: LyricsSheet['kind']): LyricsSheet {
   const base = {
     provider: 'lyrics-lrclib',
@@ -1637,6 +1808,7 @@ testEntityModel();
 testPlaylistMembership();
 testHomeAndNav();
 testSearchStates();
+testListingDedupe();
 testLyricsModel();
 testRadioModel();
 testCorrectionsModel();

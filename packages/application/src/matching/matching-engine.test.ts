@@ -1,6 +1,7 @@
 import {
   extractVersionLabels,
   MatchingEngine,
+  sameSongIdentity,
 } from './matching-engine.ts';
 import type { MatchCandidate } from './matching-engine.ts';
 import type {
@@ -374,20 +375,22 @@ function adversarialTests(): void {
   // 9d. The five-group cap admits new groups, never drops a member of
   // an admitted one: a duplicate arriving after the cap still parks,
   // so a reject vetoes it too (unparked duplicates stay playable).
+  // Distinct durations keep every group a genuinely different choice —
+  // same-song listings would collapse before the cap matters.
   {
     const out = MatchingEngine.match(
       recording({ title: 'Same', artist: 'Artist' }),
       [
         // Five distinct display groups fill the cap...
-        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p1', kind: 'track', id: 'p1-a' } }),
-        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p2', kind: 'track', id: 'p2' } }),
-        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p3', kind: 'track', id: 'p3' } }),
-        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p4', kind: 'track', id: 'p4' } }),
-        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p5', kind: 'track', id: 'p5' } }),
+        candidate({ title: 'Same', artist: 'Artist', durationMs: 200_000, sourceRef: { provider: 'p1', kind: 'track', id: 'p1-a' } }),
+        candidate({ title: 'Same', artist: 'Artist', durationMs: 300_000, sourceRef: { provider: 'p2', kind: 'track', id: 'p2' } }),
+        candidate({ title: 'Same', artist: 'Artist', durationMs: 400_000, sourceRef: { provider: 'p3', kind: 'track', id: 'p3' } }),
+        candidate({ title: 'Same', artist: 'Artist', durationMs: 500_000, sourceRef: { provider: 'p4', kind: 'track', id: 'p4' } }),
+        candidate({ title: 'Same', artist: 'Artist', durationMs: 600_000, sourceRef: { provider: 'p5', kind: 'track', id: 'p5' } }),
         // ...a sixth group is skipped...
-        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p6', kind: 'track', id: 'p6' } }),
+        candidate({ title: 'Same', artist: 'Artist', durationMs: 700_000, sourceRef: { provider: 'p6', kind: 'track', id: 'p6' } }),
         // ...but a late member of the first group still parks.
-        candidate({ title: 'Same', artist: 'Artist', sourceRef: { provider: 'p1', kind: 'track', id: 'p1-b' } }),
+        candidate({ title: 'Same', artist: 'Artist', durationMs: 200_500, sourceRef: { provider: 'p1', kind: 'track', id: 'p1-b' } }),
       ],
     );
     assert(out.type === 'ambiguous', `9d: ${out.type}`);
@@ -400,6 +403,194 @@ function adversarialTests(): void {
       !out.candidates.some((c) => c.candidate.sourceRef.id === 'p6'),
       'sixth display group stays out',
     );
+  }
+
+  // 9e. One song under several ids is one choice — the ' - Topic'
+  // auto-upload and the '(Official Video)' share title base, artist,
+  // and duration, so parking them would ask a question the rows
+  // cannot answer. The best listing wins outright.
+  {
+    const rTopic = ref();
+    const rVideo = ref();
+    const out = MatchingEngine.match(
+      recording({ title: 'Sunset', artist: 'Artist', durationMs: 200_000 }),
+      [
+        candidate({
+          title: 'Sunset - Topic',
+          artist: 'Artist',
+          durationMs: 200_000,
+          sourceRef: rTopic,
+        }),
+        candidate({
+          title: 'Sunset (Official Video)',
+          artist: 'Artist',
+          durationMs: 200_300,
+          sourceRef: rVideo,
+        }),
+      ],
+    );
+    assert(out.type === 'matched', `9e: ${out.type}`);
+    assertEqual(out.candidate.sourceRef, rTopic);
+  }
+
+  // 9f. The collapse crosses providers too — the same song listed by
+  // two catalogs is still one choice.
+  {
+    const rYtm = ref();
+    const out = MatchingEngine.match(
+      recording({ title: 'Same', artist: 'Artist', durationMs: 200_000 }),
+      [
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 200_000,
+          sourceRef: rYtm,
+        }),
+        candidate({
+          title: 'Same',
+          artist: 'Artist',
+          durationMs: 200_100,
+          sourceRef: { provider: 'itunes', kind: 'track', id: 'it-1' },
+        }),
+      ],
+    );
+    assert(out.type === 'matched', `9f: ${out.type}`);
+    assertEqual(out.candidate.sourceRef, rYtm);
+  }
+
+  // 9g. Genuinely different songs in a near-tie still gate — the
+  // collapse removes only choices the rows cannot distinguish.
+  {
+    const out = MatchingEngine.match(
+      recording({ title: 'Blue Bird', artist: 'Artist' }),
+      [
+        candidate({ title: 'Blue Bird', artist: 'Artist', durationMs: 200_000 }),
+        candidate({ title: 'Blue Birds', artist: 'Artist', durationMs: 200_000 }),
+      ],
+    );
+    assert(out.type === 'ambiguous', `9g: ${out.type}`);
+    assertEqual(out.candidates.length, 2);
+  }
+
+  // 9h. ISRC verdicts are decisive: equal codes are the same recording,
+  // different ones veto — even when every other field reads identical.
+  {
+    const sameIsrc = { title: 'Song', artist: 'Artist', durationMs: 200_000, isrc: 'USAA1000001' };
+    assertEqual(
+      sameSongIdentity(sameIsrc, { ...sameIsrc }),
+      true,
+      'equal ISRCs merge',
+    );
+    assertEqual(
+      sameSongIdentity(sameIsrc, { ...sameIsrc, isrc: 'USAA1000002' }),
+      false,
+      'different ISRCs veto',
+    );
+    // One missing ISRC falls through to the metadata axes.
+    assertEqual(
+      sameSongIdentity(sameIsrc, { ...sameIsrc, isrc: null }),
+      true,
+      'one missing ISRC defers to metadata',
+    );
+    // Title alone never merges — two artists' 'Intro' rows differ.
+    assertEqual(
+      sameSongIdentity(
+        { title: 'Intro', artist: null, durationMs: null },
+        { title: 'Intro', artist: null, durationMs: null },
+      ),
+      false,
+      'title alone is not evidence',
+    );
+    assertEqual(
+      sameSongIdentity(
+        { title: 'Intro', artist: 'Band A', durationMs: 200_000 },
+        { title: 'Intro', artist: 'Band B', durationMs: 200_000 },
+      ),
+      false,
+      'a different artist holds the rows apart',
+    );
+    // A version-conflicting listing is a different recording, not a
+    // listing of this one — the merge must not flatten 'Song (Live)'
+    // into 'Song'.
+    assertEqual(
+      sameSongIdentity(
+        { title: 'Song', artist: 'Artist', durationMs: 200_000 },
+        { title: 'Song (Live)', artist: 'Artist', durationMs: 200_000 },
+      ),
+      false,
+      'a live cut is not the studio recording',
+    );
+    assertEqual(
+      sameSongIdentity(
+        { title: 'Song', artist: 'Artist', durationMs: 200_000, explicit: true },
+        { title: 'Song', artist: 'Artist', durationMs: 200_000, explicit: false },
+      ),
+      false,
+      'clean and explicit cuts are different recordings',
+    );
+    assertEqual(
+      sameSongIdentity(
+        { title: 'Song', artist: 'Artist', durationMs: 200_000, explicit: true },
+        { title: 'Song', artist: 'Artist', durationMs: 200_000 },
+      ),
+      true,
+      'an unreported rating does not veto',
+    );
+  }
+
+  // 9i. The collapse judges only the near-tie window — an unrelated
+  // distant group cannot veto the identical top listings.
+  {
+    const rTopic = ref();
+    const out = MatchingEngine.match(
+      recording({ title: 'Sunset', artist: 'Artist', durationMs: 200_000 }),
+      [
+        candidate({
+          title: 'Sunset - Topic',
+          artist: 'Artist',
+          durationMs: 200_000,
+          sourceRef: rTopic,
+        }),
+        candidate({ title: 'Sunset', artist: 'Artist', durationMs: 200_300 }),
+        // A different song far enough below to stay out of the review —
+        // pre-fix it still vetoed the collapse.
+        candidate({
+          title: 'Sunsets',
+          artist: 'Artist',
+          durationMs: 240_000,
+        }),
+      ],
+    );
+    assert(out.type === 'matched', `9i: ${out.type}`);
+    assertEqual(out.candidate.sourceRef, rTopic);
+  }
+
+  // 9j. Identity isn't transitive — an uncoded top matches two coded
+  // members whose ISRCs conflict, and the clique check keeps them
+  // parked as the distinct recordings they are.
+  {
+    const out = MatchingEngine.match(
+      recording({ title: 'Song', artist: 'Artist', durationMs: 200_000 }),
+      [
+        candidate({ title: 'Song', artist: 'Artist', durationMs: 200_000 }),
+        candidate({
+          title: 'Song',
+          artist: 'Artist',
+          durationMs: 200_000,
+          isrc: 'USAA1000001',
+          sourceRef: { provider: 'itunes', kind: 'track', id: 'it-aaa' },
+        }),
+        candidate({
+          title: 'Song',
+          artist: 'Artist',
+          durationMs: 200_100,
+          isrc: 'USAA1000002',
+          sourceRef: { provider: 'deezer', kind: 'track', id: 'dz-bbb' },
+        }),
+      ],
+    );
+    assert(out.type === 'ambiguous', `9j: ${out.type}`);
+    assertEqual(out.candidates.length, 3);
   }
 
   // 10. Hard label mismatch rejects even an exact-ISRC candidate.

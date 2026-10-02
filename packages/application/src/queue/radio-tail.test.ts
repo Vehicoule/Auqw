@@ -442,6 +442,52 @@ async function purePlanDedupe(): Promise<void> {
   assertEqual(plan3.occurrences.length, 0, 'queued recording refs dedupe');
 }
 
+/**
+ * A suggestion naming a song the library holds under another ref
+ * joins that recording — the tail fills with distinct songs instead
+ * of the same recording re-uploaded.
+ */
+async function purePlanSameSongJoins(): Promise<void> {
+  const ids = new SequenceIds();
+  const existing = recording('rX', [ref('youtube-music', 'v-old')]);
+  const plan = planRadioPage(
+    [existing],
+    [],
+    [meta('youtube-music', 'v-new', 'Song rX - Topic', 'Artist', 300_000)],
+    ids,
+    'youtube-music',
+    5,
+  );
+  assertEqual(plan.recordings.length, 1, 'no twin recording minted');
+  const rec = plan.recordings[0];
+  assert(rec !== undefined && rec.id === 'rX', 'library recording reused');
+  assert(
+    rec.sourceRefs.some((s) => s.id === 'v-new'),
+    'the suggestion lands as another source ref',
+  );
+  assert(
+    rec.mappings.some((m) => m.ref.id === 'v-new' && m.status === 'automatic'),
+    'the new ref records its own automatic mapping',
+  );
+  assertEqual(plan.occurrences.length, 1, 'the merged song still queues');
+  // ...and once it is queued, the plain listing of the same song is
+  // a duplicate the tail drops.
+  const queued = queue({
+    occurrences: plan.occurrences,
+    currentOccurrenceId: plan.occurrences[0]?.occurrenceId ?? null,
+    mode: 'paused',
+  });
+  const plan2 = planRadioPage(
+    plan.recordings,
+    queued.occurrences,
+    [meta('youtube-music', 'v-third', 'Song rX', 'Artist', 300_000)],
+    ids,
+    'youtube-music',
+    6,
+  );
+  assertEqual(plan2.occurrences.length, 0, 'same-song dupe is skipped');
+}
+
 async function purePlanMint(): Promise<void> {
   const ids = new SequenceIds();
   const item = meta('youtube-music', 'v1', 'Roads', 'Portishead', 300_000);
@@ -2094,6 +2140,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pureShouldGrow', pureShouldGrow],
   ['purePublish', purePublish],
   ['purePlanDedupe', purePlanDedupe],
+  ['purePlanSameSongJoins', purePlanSameSongJoins],
   ['purePlanMint', purePlanMint],
   ['purePlanExisting', purePlanExisting],
   ['purePlanRejectsMismatched', purePlanRejectsMismatched],

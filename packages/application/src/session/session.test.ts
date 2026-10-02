@@ -6750,6 +6750,112 @@ async function enqueueCommitFailureHonest(): Promise<void> {
   );
 }
 
+/**
+ * Two listings of one song under different provider ids join one
+ * recording — the library never carries a row pair the user cannot
+ * tell apart, and the second ref lands as another playable source.
+ */
+async function enqueueSameSongJoinsRecording(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const first = await r.session.enqueueMetadata(
+    meta('youtube-music', 'y1', 'Sunset', 'Artist', 200_000),
+  );
+  assert(first.ok, 'first enqueue failed');
+  const second = await r.session.enqueueMetadata(
+    meta('youtube-music', 'y2', 'Sunset - Topic', 'Artist', 200_300),
+  );
+  assert(second.ok, 'second enqueue failed');
+  const recs = readyOf(r).recordings;
+  assertEqual(recs.length, 1, 'same-song listings join one recording');
+  const rec = recs[0];
+  assert(
+    rec?.sourceRefs.some((s) => s.id === 'y1') === true,
+    'original ref kept',
+  );
+  assert(
+    rec?.sourceRefs.some((s) => s.id === 'y2') === true,
+    'the second listing lands as another source ref',
+  );
+  assertEqual(
+    rec?.title,
+    'Sunset',
+    'the canonical title outlives the noisier listing',
+  );
+}
+
+/**
+ * Genuinely different songs keep their own rows — same-name tracks
+ * from different artists must not collapse into each other.
+ */
+async function enqueueDistinctSongsStaySeparate(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const first = await r.session.enqueueMetadata(
+    meta('youtube-music', 'y1', 'Intro', 'Band A', 200_000),
+  );
+  assert(first.ok, 'first enqueue failed');
+  const second = await r.session.enqueueMetadata(
+    meta('youtube-music', 'y2', 'Intro', 'Band B', 200_000),
+  );
+  assert(second.ok, 'second enqueue failed');
+  assertEqual(
+    readyOf(r).recordings.length,
+    2,
+    'different artists stay different recordings',
+  );
+}
+
+/**
+ * A distinct version keeps its own row — 'Song (Live)' is another
+ * recording, not another listing of 'Song'.
+ */
+async function enqueueVersionsStaySeparate(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const first = await r.session.enqueueMetadata(
+    meta('youtube-music', 'y1', 'Song', 'Artist', 200_000),
+  );
+  assert(first.ok, 'first enqueue failed');
+  const second = await r.session.enqueueMetadata(
+    meta('youtube-music', 'y2', 'Song (Live)', 'Artist', 200_500),
+  );
+  assert(second.ok, 'second enqueue failed');
+  assertEqual(
+    readyOf(r).recordings.length,
+    2,
+    'a live cut is not the studio recording',
+  );
+}
+
+/**
+ * A same-ref refresh takes the provider's newest fields — a rating
+ * correction must survive the merge that also keeps the title.
+ */
+async function enqueueSameRefRefreshKeepsCorrections(): Promise<void> {
+  const r = rig(persisted());
+  await restoreOk(r);
+  const first = await r.session.enqueueMetadata(
+    meta('youtube-music', 'y1', 'Sunset', 'Artist', 200_000),
+  );
+  assert(first.ok, 'first enqueue failed');
+  const second = await r.session.enqueueMetadata({
+    ...meta('youtube-music', 'y1', 'Sunset', 'Artist', 200_000),
+    explicit: true,
+  });
+  assert(second.ok, 'second enqueue failed');
+  const rec = readyOf(r).recordings[0];
+  assertEqual(
+    rec?.explicit,
+    true,
+    'a provider correction survives the refresh',
+  );
+  assert(
+    rec?.versionLabels.includes('explicit') === true,
+    'the corrected rating lands in version labels',
+  );
+}
+
 // ---- sync projection seam -------------------------------------------------
 
 let syncSeq = 0;
@@ -7192,6 +7298,13 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['pauseDuringPreparing', pauseDuringPreparing],
   ['seekDuringPreparing', seekDuringPreparing],
   ['enqueueCommitFailureHonest', enqueueCommitFailureHonest],
+  ['enqueueSameSongJoinsRecording', enqueueSameSongJoinsRecording],
+  ['enqueueDistinctSongsStaySeparate', enqueueDistinctSongsStaySeparate],
+  ['enqueueVersionsStaySeparate', enqueueVersionsStaySeparate],
+  [
+    'enqueueSameRefRefreshKeepsCorrections',
+    enqueueSameRefRefreshKeepsCorrections,
+  ],
   ['concurrentLikes', concurrentLikes],
   ['libraryFlow', libraryFlow],
   ['historyFlow', historyFlow],
