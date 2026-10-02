@@ -27,6 +27,13 @@ const DEEZER_LADDER = [28, 56, 120, 250, 500, 1000] as const;
  * pick the discrete-size ladder. */
 const DEEZER_HOST = /^https:\/\/(?:[a-z0-9-]{1,63}\.){0,4}dzcdn\.net(?::\d{1,5})?\//i;
 
+/** Google's image CDNs serve `=wN-hN`/`=sN` size params only on
+ * googleusercontent/ggpht hosts — the same test the bare-append branch
+ * applies. A look-alike tail on another host (a signed query value, a
+ * tracking token) is opaque data, not a size knob — rewriting it
+ * corrupts the URL. */
+const GOOGLE_HOST = /\.googleusercontent\.com\/|ggpht\.com\//;
+
 function pickSize(targetPx: number, ladder: readonly number[]): number {
   for (const step of ladder) {
     if (step >= targetPx) {
@@ -56,13 +63,13 @@ export function scaledArtworkUrl(url: string, targetPx: number): string {
   // artist images): size rides a `=w544-h544-...` or `=s544` suffix;
   // any pixel value is servable.
   const googleSize = url.match(/=w(\d{1,8})-h(\d{1,8})(-\S{1,127})?$/);
-  if (googleSize !== null) {
+  if (googleSize !== null && GOOGLE_HOST.test(url)) {
     const offered = parseInt(googleSize[1] ?? '0', 10);
     const px = Math.min(offered, pickSize(targetPx, LADDER));
     return `${url.slice(0, googleSize.index ?? 0)}=w${px}-h${px}${googleSize[3] ?? ''}`;
   }
   const googleSquare = url.match(/=s(\d{1,8})(-\S{1,127})?$/);
-  if (googleSquare !== null) {
+  if (googleSquare !== null && GOOGLE_HOST.test(url)) {
     const offered = parseInt(googleSquare[1] ?? '0', 10);
     const px = Math.min(offered, pickSize(targetPx, LADDER));
     return `${url.slice(0, googleSquare.index ?? 0)}=s${px}${googleSquare[2] ?? ''}`;
@@ -71,10 +78,7 @@ export function scaledArtworkUrl(url: string, targetPx: number): string {
   // ~900px default — appending the size param picks the small one.
   // The last segment must be parameter-free or the append would
   // double a suffix too long for the matchers above.
-  if (
-    (/\.googleusercontent\.com\//.test(url) || /ggpht\.com\//.test(url)) &&
-    /\/[^/?=]{0,255}$/.test(url)
-  ) {
+  if (GOOGLE_HOST.test(url) && /\/[^/?=]{0,255}$/.test(url)) {
     const px = pickSize(targetPx, LADDER);
     return `${url}=w${px}-h${px}`;
   }

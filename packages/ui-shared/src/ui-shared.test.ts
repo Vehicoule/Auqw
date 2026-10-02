@@ -1775,6 +1775,23 @@ const tap = (s: string) => {
     'https://yt3.googleusercontent.com/a=s256-c',
     'google s-suffix shrinks in place',
   );
+  // A `=wN-hN`/`=sN` tail is only a size knob on Google's CDNs — the
+  // same suffix on another host is an opaque token (a signed query
+  // value, a tracking param); rewriting it corrupts the URL.
+  assertEqual(
+    scaledArtworkUrl(
+      'https://img.example/art/600x600.jpg?sig==w1000-h1000',
+      40,
+    ),
+    'https://img.example/art/64x64.jpg?sig==w1000-h1000',
+    'non-google =wN-hN tail is not rewritten — the sized path shrinks with the signature kept',
+  );
+  const tracked = 'https://cdn.example/cover.jpg?track=s500';
+  assertEqual(
+    scaledArtworkUrl(tracked, 40),
+    tracked,
+    'non-google =sN tail passes through untouched',
+  );
   assertEqual(
     scaledArtworkUrl(
       'https://is1-ssl.mzstatic.com/image/thumb/x/3000x3000bb.jpg',
