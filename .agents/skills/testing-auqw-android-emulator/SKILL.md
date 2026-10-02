@@ -556,8 +556,9 @@ states deterministically.
 
 `curl ".../apps/mobile/index.bundle?platform=android&dev=true"` — dev
 bundles may partially strip comments, so match CODE not comments: e.g.
-`grep -n -A1 'animatedProps: dismissSurfaceProps' bundle.js` shows
-`collapsable: false` on the preceding lines for the pinned-wrapper fix.
+`grep -n -B1 'animatedProps: dismissSurfaceProps' bundle.js` shows
+`collapsable: false` on the preceding line for the pinned-wrapper fix
+(the prop compiles before `animatedProps` — `-A1` can't show it).
 Bundle-curl beats guessing which worktree Metro serves.
 
 ### Process notes (auqw AVD)
