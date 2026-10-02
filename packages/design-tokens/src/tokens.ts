@@ -33,7 +33,7 @@ export const schemes = {
     raised: '#ffffff',
     textPrimary: '#232326',
     textBright: '#101013',
-    textSecondary: '#6b6b73',
+    textSecondary: '#66666d',
     divider: '#d6d6dc',
     accent: '#c2410c',
     accentSoft: 'rgba(194,65,12,0.11)',

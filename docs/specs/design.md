@@ -56,7 +56,7 @@ Typed JSON source (DTCG), one authority; generated TS/CSS outputs. Three schemes
 | surface.raised | `#303030` | `#ffffff` | `#16140f` | — |
 | text.primary | `#ececf0` | `#232326` | `#e6e1d8` | on canvas: 13.2 / 15.0 / 16.1 |
 | text.bright | `#ffffff` | `#101013` | `#f5f1e9` | on canvas: 15.5 / 18.2 / 18.6 |
-| text.secondary | `#9c9ca3` | `#6b6b73` | `#a8a094` | on canvas: 5.7 / 5.1 / 8.1 |
+| text.secondary | `#9c9ca3` | `#66666d` | `#a8a094` | on canvas: 5.7 / 5.5 / 8.1 |
 | accent.active | `#ff8a3d` | `#c2410c` | `#ff8a3d` | on canvas: 6.6 / 5.0 / 9.0 |
 | accent.soft | `rgba(255,138,61,.16)` | `rgba(194,65,12,.11)` | `rgba(255,138,61,.18)` | fill for selected/active only |
 | status.warn | `#ff8787` | `#a61e1e` | `#ff8787` | on canvas: 6.7 / 7.1 / 9.1 |

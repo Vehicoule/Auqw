@@ -50,17 +50,17 @@ const BLACK: Rgb = [0, 0, 0];
 const MIN_CONTRAST = 4.5;
 
 // Surface luminance ratios measured off the built-in ramps: dark
-// stage/deep/raised sit at 0.61×/0.35×/2.27× canvas, light at
-// 0.91×/0.85×/1.06×. fg-alpha and secondary mixes likewise come from
-// the built-ins (hairline 14%/15%, divider ≈fg@16% over bg,
-// text.secondary ≈fg 30% toward bg, text.bright ≈±12% luminance).
+// stage/deep/raised sit at 0.74×/0.55×/1.68× canvas, light at
+// 0.88×/0.72×/1.05×. fg-alpha and secondary mixes likewise come from
+// the built-ins (hairline 14%, divider ≈fg@16% over bg,
+// text.secondary ≈fg 30% toward bg, text.bright ≈±19%/±31% luminance).
 const STEPS = {
-  dark: { stage: 0.61, deep: 0.35, raised: 2.27, bright: 1.12 },
-  light: { stage: 0.91, deep: 0.85, raised: 1.06, bright: 0.55 },
+  dark: { stage: 0.74, deep: 0.55, raised: 1.68, bright: 1.19 },
+  light: { stage: 0.88, deep: 0.72, raised: 1.05, bright: 0.31 },
 } as const;
 const FG_ALPHAS = {
   dark: { hairline: 0.14, fg08: 0.08, fg18: 0.16, fg25: 0.26, fg40: 0.42 },
-  light: { hairline: 0.15, fg08: 0.06, fg18: 0.13, fg25: 0.26, fg40: 0.42 },
+  light: { hairline: 0.14, fg08: 0.06, fg18: 0.13, fg25: 0.26, fg40: 0.42 },
 } as const;
 const SECONDARY_MIX = 0.3;
 const DIVIDER_MIX = 0.16;

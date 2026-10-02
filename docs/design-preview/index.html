@@ -20,7 +20,7 @@
   }
   .t-light{
     --bg:#fafafa; --bg-stage:#ececee; --bg-deep:#d8d8dd; --bg-raise:#ffffff;
-    --fg:#232326; --fg-bright:#101013; --fg-muted:#6b6b73;
+    --fg:#232326; --fg-bright:#101013; --fg-muted:#66666d;
     --divider:#d6d6dc; --hair:rgba(35,35,39,.14);
     --accent:#c2410c; --accent-soft:rgba(194,65,12,.11);
     --sel:#e4e4e8; --warn:#a61e1e; --pink:#b0214f;
@@ -381,7 +381,7 @@
   .sheet .transport{margin-top:12px}
   /* immersive = the artwork-led player surface shared by the desktop stage
      column and the phone sheet — backdrop art + progressive frost + scrim */
-  .immersive{isolation:isolate;background:#100e0c}
+  .immersive{isolation:isolate;background:var(--bg-stage)}
   .immersive .sheet-art,.immersive .sheet-frost,.immersive .sheet-scrim{
     position:absolute;inset:0;pointer-events:none}
   .immersive .sheet-art{z-index:0}

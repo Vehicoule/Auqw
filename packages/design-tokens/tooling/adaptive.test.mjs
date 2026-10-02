@@ -71,7 +71,7 @@ const TEXT_ROLES = [
       bg: '#241f1a',
       fg: '#e8e2d5',
       accent: '#38b8ff',
-      warn: '#ff5555',
+      warn: '#a03838',
       sel: '#1c4a63',
     },
   };
@@ -98,7 +98,7 @@ const TEXT_ROLES = [
   );
   check(
     'warn nudges when it fails on the raised surface',
-    d.values.warn !== '#ff5555' &&
+    d.values.warn !== '#a03838' &&
       contrast(d.values.warn, d.values.raised) >= 4.5,
   );
   check('hairline is an fg alpha', d.values.hairline === 'rgba(232,226,213,0.14)');
@@ -132,6 +132,28 @@ const TEXT_ROLES = [
     'no sel → accentSoft is accent alpha',
     d.values.accentSoft === 'rgba(13,79,168,0.14)',
   );
+}
+
+// ---------- built-in reproduction: STEPS must round-trip the built-ins ----------
+{
+  // Derived surfaces come out neutral — compare by luminance step, not
+  // per-channel hex (the built-ins carry a slight cool tint a neutral
+  // derivative can't reproduce).
+  const near = (a, b, tol = 0.01) => Math.abs(luminance(a) - luminance(b)) <= tol;
+  const dark = deriveScheme(
+    { scheme: 'dark', palette: { bg: '#242424', fg: '#ececf0' } },
+    'dark',
+  );
+  check('dark palette reproduces dark stage', near(dark.values.stage, '#1e1e1e'));
+  check('dark palette reproduces dark deep', near(dark.values.deep, '#191919'));
+  check('dark palette reproduces dark raised', near(dark.values.raised, '#303030'));
+  const light = deriveScheme(
+    { scheme: 'light', palette: { bg: '#fafafa', fg: '#232326' } },
+    'light',
+  );
+  check('light palette reproduces light stage', near(light.values.stage, '#ececee'));
+  check('light palette reproduces light deep', near(light.values.deep, '#d8d8dd'));
+  check('light palette reproduces light raised', near(light.values.raised, '#ffffff'));
 }
 
 // ---------- polarity follows the palette's bg, not the flag ----------
@@ -189,12 +211,12 @@ const TEXT_ROLES = [
 
 // ---------- degenerate palette → honest built-in fallback ----------
 {
-  // bg luminance ~0.09: dark enough to pick the white pole, bright
+  // bg luminance ~0.12: dark enough to pick the white pole, bright
   // enough that raised pushes past the pole's reach → honest fallback.
   const d = deriveScheme(
     {
       scheme: 'dark',
-      palette: { bg: '#555555', fg: '#555555', accent: '#555555' },
+      palette: { bg: '#626262', fg: '#626262', accent: '#626262' },
     },
     'dark',
   );
