@@ -76,6 +76,7 @@ export const CHANNELS = {
   transferStat: 'transfer:stat',
   transferRemove: 'transfer:remove',
   transferSweepPartials: 'transfer:sweepPartials',
+  transferSweepFinalized: 'transfer:sweepFinalized',
   transferList: 'transfer:list',
   transferStatus: 'transfer:status',
   transferStats: 'transfer:stats',

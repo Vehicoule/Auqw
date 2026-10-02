@@ -258,6 +258,8 @@ function fakeApi(): Rig {
         },
         sweepPartials: () =>
           Promise.resolve({ swept: rig.transferSwept }),
+        sweepFinalized: () =>
+          Promise.resolve({ swept: 0 }),
         list: () => Promise.resolve({ sinks: [], files: [] }),
         status: () => Promise.reject(new Error('seam: inject transfer')),
         stats: () => Promise.resolve(rig.transferStats),

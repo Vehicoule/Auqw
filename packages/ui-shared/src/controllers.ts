@@ -9,7 +9,8 @@
  */
 import { useMemo, useState } from 'react';
 import type { ThemeName } from '@auqw/design-tokens';
-import type { QueueOrigin, RepeatMode } from '@auqw/application';
+import { LOCAL_PROVIDER } from '@auqw/application';
+import type { QueueOrigin, RepeatMode, SourceRef } from '@auqw/application';
 import { t } from './i18n.ts';
 import type { MessageId } from './i18n.ts';
 import { formatClock, formatLongDuration } from './view-models.ts';
@@ -1778,6 +1779,53 @@ export type RadioRowView = {
     readonly onPress: MaybeFn;
   };
 };
+
+/**
+ * The ref a radio seed would arm with: the first candidate whose
+ * provider can seed, in the caller's preference order (playing ref,
+ * then source refs). A recording's own listings all name the same
+ * song, so a leading unseedable ref — a local file first — must not
+ * veto a provider twin behind it.
+ */
+export function seedableRadioRef(
+  candidates: readonly (SourceRef | null | undefined)[],
+  isSeedable: (ref: SourceRef) => boolean,
+): SourceRef | null {
+  for (const ref of candidates) {
+    if (ref !== null && ref !== undefined && isSeedable(ref)) {
+      return ref;
+    }
+  }
+  return null;
+}
+
+/**
+ * The stage radio seed, mirroring the coordinator's derivation (the
+ * gate must answer exactly what the op would arm): a resolved
+ * non-local playing ref is a verdict — seed that exact version or
+ * nothing, since a different provider's ref would mix from another
+ * rendition. Local playback carries no provider identity, so it and
+ * the unresolved pick fall through to the candidates (occurrence pin,
+ * then the recording's catalog refs). A playing ref for another
+ * occurrence says nothing about this row and likewise falls through.
+ */
+export function stageRadioSeedRef(input: {
+  readonly playingRef: SourceRef | undefined;
+  readonly playingOccurrenceId: string | undefined;
+  readonly currentOccurrenceId: string | undefined;
+  readonly candidates: readonly (SourceRef | null | undefined)[];
+  readonly isSeedable: (ref: SourceRef) => boolean;
+}): SourceRef | null {
+  const { playingRef, playingOccurrenceId, currentOccurrenceId } = input;
+  if (
+    playingRef !== undefined &&
+    playingRef.provider !== LOCAL_PROVIDER &&
+    playingOccurrenceId === currentOccurrenceId
+  ) {
+    return input.isSeedable(playingRef) ? playingRef : null;
+  }
+  return seedableRadioRef(input.candidates, input.isSeedable);
+}
 
 export function radioRowView(
   radio: RadioModel | undefined,

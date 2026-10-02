@@ -1069,6 +1069,7 @@ export class FakeTransfer implements MediaTransferPort {
     { exists: boolean; bytes: number | null }
   >();
   sweepCalls: string[][] = [];
+  finalizedSweepCalls: string[][] = [];
 
   /** Queue a sink script for the next begin(). */
   enqueueSink(script: FakeSinkScript = {}): void {
@@ -1106,6 +1107,14 @@ export class FakeTransfer implements MediaTransferPort {
     _signal: CancellationSignal,
   ): Promise<Result<number>> {
     this.sweepCalls.push([...keepPaths]);
+    return ok(0);
+  }
+
+  async sweepFinalized(
+    keepPaths: readonly string[],
+    _signal: CancellationSignal,
+  ): Promise<Result<number>> {
+    this.finalizedSweepCalls.push([...keepPaths]);
     return ok(0);
   }
 

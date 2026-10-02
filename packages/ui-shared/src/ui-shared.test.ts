@@ -31,9 +31,11 @@ import {
   toUpdateCard,
 } from './index.ts';
 import type { Locale, MessageId, OverlayEntry } from './index.ts';
+import { seedableRadioRef, stageRadioSeedRef } from './controllers.ts';
 import type {
   DownloadProgress,
   Result,
+  SourceRef,
   UpdateApplyStatus,
   UpdateSnapshot,
   UpdateStatus,
@@ -1977,6 +1979,88 @@ const tap = (s: string) => {
     byKey.get('light')?.palette.accent !== byKey.get('dark')?.palette.accent,
     'each card carries its own scheme accent',
   );
+}
+
+{
+  // The seed ref walks the candidate list in preference order and
+  // skips refs whose provider cannot seed — a recording headed by its
+  // local listing still offers radio through a provider twin behind
+  // it, and the start affordance dies only when nothing can seed.
+  const local: SourceRef = { provider: 'local', kind: 'track', id: 'f-1' };
+  const ytm: SourceRef = {
+    provider: 'youtube-music',
+    kind: 'track',
+    id: 'ytm-1',
+  };
+  const dz: SourceRef = { provider: 'deezer', kind: 'track', id: 'dz-1' };
+  const seedable = (ref: SourceRef): boolean => ref.provider !== 'local';
+  assertEqual(
+    seedableRadioRef([ytm, dz], seedable),
+    ytm,
+    'first seedable candidate wins',
+  );
+  assertEqual(
+    seedableRadioRef([local, ytm], seedable),
+    ytm,
+    'a leading local ref does not hide the provider seed',
+  );
+  assertEqual(
+    seedableRadioRef([null, local, dz], seedable),
+    dz,
+    'null and unseedable candidates both skip',
+  );
+  assertEqual(
+    seedableRadioRef([local, null], seedable),
+    null,
+    'no seedable ref means no affordance',
+  );
+}
+
+{
+  // The stage derivation mirrors the coordinator: a resolved
+  // non-local playing ref is a verdict — the radio chips mirror what
+  // the op would arm, so an unseedable live version means no
+  // affordance rather than a substitute rendition.
+  const local: SourceRef = { provider: 'local', kind: 'track', id: 'f-1' };
+  const ytm: SourceRef = {
+    provider: 'youtube-music',
+    kind: 'track',
+    id: 'ytm-1',
+  };
+  const dz: SourceRef = { provider: 'deezer', kind: 'track', id: 'dz-1' };
+  const seedable = (ref: SourceRef): boolean => ref.provider === 'deezer';
+  const call = (
+    playingRef: SourceRef | undefined,
+    playingOccurrenceId = 'occ-1',
+  ): SourceRef | null =>
+    stageRadioSeedRef({
+      playingRef,
+      playingOccurrenceId,
+      currentOccurrenceId: 'occ-1',
+      candidates: [ytm, dz],
+      isSeedable: seedable,
+    });
+  assertEqual(
+    call(ytm),
+    null,
+    'an unseedable playing ref is a verdict, not a fallback',
+  );
+  assertEqual(
+    call(dz),
+    dz,
+    'a seedable playing ref seeds that exact version',
+  );
+  assertEqual(
+    call(local),
+    dz,
+    'local playback falls through to the catalog refs',
+  );
+  assertEqual(
+    call(ytm, 'occ-other'),
+    dz,
+    'a playing ref for another occurrence falls through',
+  );
+  assertEqual(call(undefined), dz, 'an unresolved pick falls through');
 }
 
 console.log('ui-shared tests passed');

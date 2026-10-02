@@ -1691,6 +1691,9 @@ export type AuqwApi = {
     readonly sweepPartials: (
       args: TransferSweepArgs,
     ) => Promise<TransferSweepResult>;
+    readonly sweepFinalized: (
+      args: TransferSweepArgs,
+    ) => Promise<TransferSweepResult>;
     readonly list: () => Promise<TransferListResult>;
     readonly status: (args: TransferSinkArgs) => Promise<TransferStatusResult>;
     readonly stats: () => Promise<TransferStatsResult>;

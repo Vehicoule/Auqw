@@ -322,6 +322,29 @@ export function createExpoTransfer(deps: ExpoTransferDeps = {}): {
         return ok(swept);
       }),
 
+    sweepFinalized: (keepPaths, signal) =>
+      guardFs(signal, async () => {
+        if (!directory.exists) {
+          return ok(0);
+        }
+        const keep = new Set(keepPaths);
+        let swept = 0;
+        for (const entry of directory.list()) {
+          if (signal.cancelled) {
+            return cancelled();
+          }
+          if (!(entry instanceof File)) {
+            continue;
+          }
+          if (entry.name.endsWith(PART_SUFFIX) || keep.has(entry.name)) {
+            continue;
+          }
+          entry.delete();
+          swept += 1;
+        }
+        return ok(swept);
+      }),
+
     usage: (signal) =>
       guardFs(signal, async () => {
         // Missing directory on a clean install reads as zero bytes.

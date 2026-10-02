@@ -272,6 +272,9 @@ export async function createSessionController(
       ),
   );
   const defaults = defaultSettings(providers);
+  // Ahead of the storage ctor: decode-drop reports ride the session
+  // log, so the port must exist before storage does.
+  const log = createLog();
   const sqliteDriver = await createExpoSqliteDriver(options.databasePath, {
     openDb: openDatabaseAsync,
     deleteIfExists: async (filePath) => {
@@ -281,7 +284,7 @@ export async function createSessionController(
       }
     },
   });
-  const storage = new SqliteStorage(sqliteDriver, defaults);
+  const storage = new SqliteStorage(sqliteDriver, defaults, log);
   // Sync-log tables ride the same file + driver — the shared
   // transaction tail serializes sync writes with library writes.
   const syncLogStore = new SqliteSyncLogStore(sqliteDriver);
@@ -337,7 +340,6 @@ export async function createSessionController(
   // mapping + the advisory stream warm) — same seed-then-edge feed as
   // `lastOnline`; iOS's unwatched port reports false.
   let lastMetered = false;
-  const log = createLog();
   const session = new Session({
     storage,
     player,

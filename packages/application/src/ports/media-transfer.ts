@@ -69,6 +69,17 @@ export interface MediaTransferPort {
     keepPaths: readonly string[],
     signal: CancellationSignal,
   ): Promise<Result<number>>;
+  /**
+   * Delete finalized media files no transfer row owns — the mirror of
+   * `sweepPartials` for committed (non-`.part`) names. A cascade or
+   * purge that removes ledger rows without going through `removeFile`
+   * leaves its files behind; this reclaims them. `keepPaths` are the
+   * finalized NAMES (e.g. `dl-42`) to keep. Reclaimed file count.
+   */
+  sweepFinalized(
+    keepPaths: readonly string[],
+    signal: CancellationSignal,
+  ): Promise<Result<number>>;
   /** Total bytes the managed directory currently holds. */
   usage(signal: CancellationSignal): Promise<Result<number>>;
   /** Bytes free on the volume that holds the managed dir. */

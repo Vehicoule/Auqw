@@ -156,9 +156,12 @@ export async function createSessionController(
     );
   }
   const defaults = defaultSettings(providers);
+  // The storage decode-drop reports ride the renderer log — create it
+  // ahead of the storage ctor so it can be passed in.
+  const log = options?.log ?? createLog();
   const storage =
     options?.storage ??
-    new SqliteStorage(createSqliteDriver(api.storage), defaults);
+    new SqliteStorage(createSqliteDriver(api.storage), defaults, log);
   const webPlayer =
     options?.player === undefined
       ? createWebPlayerPort({
@@ -207,7 +210,6 @@ export async function createSessionController(
 
   const clock = options?.clock ?? createClock();
   const ids = options?.ids ?? createIds();
-  const log = options?.log ?? createLog();
   const warn = (message: string): void => {
     void log.write({ level: 'warn', message, atMs: clock.nowMs() });
   };
