@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CancellationSource } from '@auqw/application';
+import { CancellationSource, ok } from '@auqw/application';
 import type { CancellationSignal } from '@auqw/application';
 import type {
   ArtworkCacheEntry,
@@ -473,6 +473,29 @@ async function malformedRows(): Promise<void> {
         assertDeepEqual(state.queue, base().queue);
       },
     ],
+    // JSON that parses but isn't a queue error drops only the field —
+    // the playhead and position stand.
+    [
+      'invalid blocked error shape',
+      `UPDATE queue_state SET blocked_error_json = '{}' WHERE id = 1`,
+      (state) => {
+        assertDeepEqual(state.recordings, base().recordings);
+        assertDeepEqual(state.queue, base().queue);
+      },
+    ],
+    // A schema-legal occurrence row that's doc-invalid (empty key)
+    // drops; the dangling playhead parks.
+    [
+      'empty occurrence id',
+      `UPDATE queue_occurrences SET occurrence_id = '' WHERE occurrence_id = 'o1'`,
+      (state) => {
+        assertDeepEqual(state.recordings, base().recordings);
+        assertDeepEqual(state.queue.occurrences, []);
+        assertEqual(state.queue.currentOccurrenceId, null);
+        assertEqual(state.queue.mode, 'stopped');
+        assertEqual(state.queue.positionMs, 0);
+      },
+    ],
     [
       'deleted recording row',
       `PRAGMA foreign_keys = OFF; DELETE FROM recordings WHERE id = 'r1'`,
@@ -770,12 +793,27 @@ async function mergePurgeMalformedStored(): Promise<void> {
       VALUES ('rec-poison', 'p', 'plain', '"x"', 1);
     INSERT INTO play_history (event_id, recording_id, played_ms, listened_ms)
       VALUES ('ev-p2', 'rec-badjson', 2, 2);
+    INSERT INTO recordings (id, title, artwork_json, version_labels_json, provenance)
+      VALUES ('rec-heal', 'Heal', '{oops', '[]', 'provider');
+    INSERT INTO play_counts (recording_id, count, last_ms)
+      VALUES ('rec-heal', 3, 1);
+    -- Evidence that parses but isn't a SourceMapping shape drops only
+    -- the mapping; r1 and its dependents survive.
+    INSERT INTO mappings
+      (recording_id, ordinal, provider, kind, source_id, status, matched_at_ms, evidence_json)
+      VALUES ('r1', 0, 'youtube-music', 'track', 'y1', 'automatic', 1, '{"bogus":true}');
   `);
   // The removeSource shape: a recordings merge over stored rows. It
   // completes — the poisoned rows purge with their dependents instead
-  // of failing the decode.
+  // of failing the decode. 'rec-heal' is decode-dropped but repaired
+  // by the merge, so its dependents stay.
   const committed = await storage.commit(
-    { recordingsMerge: (current) => current },
+    {
+      recordingsMerge: (current) => [
+        ...current,
+        recording('rec-heal', [ref('itunes', 'ih')]),
+      ],
+    },
     ctx().context,
   );
   assert(committed.ok, 'merge commit tolerates malformed stored rows');
@@ -792,6 +830,33 @@ async function mergePurgeMalformedStored(): Promise<void> {
     ),
     0,
     'dropped recordings purged',
+  );
+  assertEqual(
+    await count(`SELECT COUNT(*) AS n FROM recordings WHERE id = 'r1'`),
+    1,
+    'recording kept when only its mapping row was malformed',
+  );
+  assertEqual(
+    await count(
+      `SELECT COUNT(*) AS n FROM recordings WHERE id = 'rec-heal'`,
+    ),
+    1,
+    'merge-repaired recording kept',
+  );
+  assertEqual(
+    await count(
+      `SELECT COUNT(*) AS n FROM play_counts
+       WHERE recording_id = 'rec-heal'`,
+    ),
+    1,
+    'merge-retained recording keeps dependents',
+  );
+  assertEqual(
+    await count(
+      `SELECT COUNT(*) AS n FROM mappings WHERE recording_id = 'r1'`,
+    ),
+    0,
+    'malformed mapping row dropped',
   );
   for (const table of [
     'play_history',
@@ -832,7 +897,7 @@ async function mergePurgeMalformedStored(): Promise<void> {
   const state = await loadOk(storage);
   assertDeepEqual(
     state.recordings.map((r) => r.id),
-    ['r1'],
+    ['r1', 'rec-heal'],
     'surviving document intact',
   );
   assertDeepEqual(state.queue.occurrences.map((o) => o.occurrenceId), ['o1']);
@@ -883,6 +948,50 @@ async function mergeRemovalStillGuarded(): Promise<void> {
     (await loadOk(storage)).recordings.map((r) => r.id),
     ['r1'],
     'stored recordings untouched',
+  );
+  driver.close();
+}
+
+// A commit whose statements fail mid-flight reports no drops — the
+// warn lands only after the write plan succeeds.
+async function commitDropReportAfterExecute(): Promise<void> {
+  const { driver, failing } = rig();
+  const entries: { level: string; message: string }[] = [];
+  const storage = new SqliteStorage(failing, SETTINGS, {
+    write: (entry) => {
+      entries.push({ level: entry.level, message: entry.message });
+      return Promise.resolve(ok(undefined));
+    },
+  });
+  const r1 = recording('r1', [ref('itunes', 'i1')]);
+  assert(
+    (await storage.commit({ recordings: [r1] }, ctx().context)).ok,
+    'seed commit ok',
+  );
+  driver.execScript(`
+    INSERT INTO recordings (id, title, artwork_json, version_labels_json, provenance)
+      VALUES ('rec-bad', 'Bad', '{oops', '[]', 'provider');
+  `);
+  failing.failBeforeExecute(1);
+  const failed = await storage.commit(
+    { recordingsMerge: (current) => current },
+    ctx().context,
+  );
+  assert(!failed.ok, 'injected plan failure surfaces');
+  assert(
+    !entries.some((e) => e.message.includes('commit')),
+    'no drop report for a rolled-back commit',
+  );
+  const landed = await storage.commit(
+    { recordingsMerge: (current) => current },
+    ctx().context,
+  );
+  assert(landed.ok, 'retry commits');
+  assert(
+    entries.some(
+      (e) => e.level === 'warn' && e.message.includes('commit'),
+    ),
+    'drop report lands after a successful commit',
   );
   driver.close();
 }
@@ -2930,6 +3039,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['corruptedRelations', corruptedRelations],
   ['mergePurgeMalformedStored', mergePurgeMalformedStored],
   ['mergeRemovalStillGuarded', mergeRemovalStillGuarded],
+  ['commitDropReportAfterExecute', commitDropReportAfterExecute],
   ['localSourceOrphansHeal', localSourceOrphansHeal],
   ['strictSingletonRows', strictSingletonRows],
   ['schemaVersionEdges', schemaVersionEdges],

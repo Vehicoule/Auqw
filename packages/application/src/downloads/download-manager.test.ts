@@ -551,6 +551,12 @@ async function initIntegrity(): Promise<void> {
     ['dl-p1.part'],
     'sweep keeps owned partials',
   );
+  // the finalized sweep keeps every ledger-owned name
+  assertDeepEqual(
+    r.transfer.finalizedSweepCalls[0]?.sort(),
+    ['dl-p1', 'dl-r1', 'dl-v1'],
+    'finalized sweep keeps ledger-owned names',
+  );
 }
 
 /**

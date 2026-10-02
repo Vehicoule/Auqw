@@ -144,6 +144,7 @@ export async function downloadTo(options: {
       return ok(sink);
     },
     sweepPartials: () => Promise.resolve(ok(0)),
+    sweepFinalized: () => Promise.resolve(ok(0)),
     usage: () => Promise.resolve(ok(0)),
     freeBytes: () => Promise.resolve(ok(Number.MAX_SAFE_INTEGER)),
     removeFile: () => Promise.resolve(ok(undefined)),

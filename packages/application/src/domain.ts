@@ -636,7 +636,7 @@ export function isLike(value: unknown): value is Like {
   );
 }
 
-function isQueueOccurrence(value: unknown): value is QueueOccurrence {
+export function isQueueOccurrence(value: unknown): value is QueueOccurrence {
   return (
     isRecord(value) &&
     hasExactKeys(value, ['occurrenceId', 'recordingId', 'selectedRef']) &&
@@ -646,7 +646,7 @@ function isQueueOccurrence(value: unknown): value is QueueOccurrence {
   );
 }
 
-function isAppErrorLike(value: unknown): boolean {
+export function isAppErrorLike(value: unknown): boolean {
   return (
     isRecord(value) &&
     typeof value['kind'] === 'string' &&

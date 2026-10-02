@@ -33,6 +33,7 @@ import type {
 import {
   appError,
   err,
+  isAppErrorLike,
   isArtworkCacheEntry,
   isAttemptTrace,
   isDownloadRecord,
@@ -49,6 +50,7 @@ import {
   isPlayEvent,
   isPlaylist,
   isPlaylistEntry,
+  isQueueOccurrence,
   isQueueSnapshot,
   isSettings,
   ok,
@@ -439,8 +441,10 @@ export class SqliteStorage implements StoragePort {
           return err(planned.error);
         }
         this.#check(signal);
-        this.#reportDrops('commit', planned.value.dropped);
         await conn.executeAll(planned.value.statements, signal);
+        // Report only after the statements land — a rolled-back commit
+        // dropped nothing.
+        this.#reportDrops('commit', planned.value.dropped);
         this.#check(signal);
         return ok(undefined);
       }, signal);
@@ -1395,7 +1399,8 @@ function decodeState(
         };
         if (
           occurrenceIds.has(candidate.occurrenceId) ||
-          !recordingIds.has(candidate.recordingId)
+          !recordingIds.has(candidate.recordingId) ||
+          !isQueueOccurrence(candidate)
         ) {
           return null;
         }
@@ -1428,6 +1433,14 @@ function decodeState(
     queueRow['blocked_error_json'] === null
       ? undefined
       : (blockedTools.json(queueRow['blocked_error_json']) as AppError);
+  if (
+    !blockedBad &&
+    blocked !== undefined &&
+    !isAppErrorLike(blocked)
+  ) {
+    // Parses but isn't a queue error — drop the field, keep the row.
+    blockedBad = true;
+  }
   if (blockedBad) {
     dropped.push({ table: 'queue_state', key: 'blocked_error_json' });
   }

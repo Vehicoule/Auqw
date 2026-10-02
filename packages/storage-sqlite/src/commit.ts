@@ -43,6 +43,7 @@ import {
   isQueueSnapshot,
   isRecording,
   isSettings,
+  isSourceMapping,
   ok,
 } from '@auqw/application';
 import { CANCELLED } from './driver.ts';
@@ -273,7 +274,12 @@ export function decodeRecordingRows(
       matchedAtMs: t.reqNonNegInt(row['matched_at_ms']),
       evidence: t.json(row['evidence_json']) as SourceMapping['evidence'],
     };
-    if (bad || row['kind'] !== 'track' || target === undefined) {
+    if (
+      bad ||
+      row['kind'] !== 'track' ||
+      target === undefined ||
+      !isSourceMapping(mapping)
+    ) {
       dropped.push({ table: 'mappings', key: recordingId });
       continue;
     }
@@ -1818,7 +1824,14 @@ export async function planCommit(
   // downloads/local_files cascade; entity_source_refs key on
   // entities). The queue_state playhead must release before the
   // occurrence rows it can name are deleted.
-  const purgedIds = [...purgedRecordingIds];
+  // A merge that rewrites a decode-dropped recording keeps that
+  // recording's dependents: purge only ids absent from the merged doc.
+  const retainedIds = new Set(
+    (mergedRecordings ?? []).map((recording) => recording.id),
+  );
+  const purgedIds = [...purgedRecordingIds].filter(
+    (id) => !retainedIds.has(id),
+  );
   for (let i = 0; i < purgedIds.length; i += MAX_PARAMS) {
     const chunk = purgedIds.slice(i, i + MAX_PARAMS);
     const inIds = placeholders(chunk.length);
