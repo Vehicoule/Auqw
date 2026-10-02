@@ -37,9 +37,11 @@ unsafe_code = "forbid"
 # the Android AAB — size is the constraint there. thin LTO +
 # codegen-units=1 + strip take ~36% off each .so; panic=abort drops the
 # landing pads the FFI boundary could never unwind across anyway.
+# strip = "debuginfo" keeps the symbol table: uniffi-bindgen reads the
+# UniFFI metadata out of .symtab, and "symbols" removes it entirely.
 [profile.release]
 lto = "thin"
 codegen-units = 1
-strip = "symbols"
+strip = "debuginfo"
 panic = "abort"
 opt-level = "z"
