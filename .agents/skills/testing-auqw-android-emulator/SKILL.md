@@ -654,3 +654,24 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   report them untested rather than faked.
 - Pushed screens' back chevron sits ~y180 device-px (not y57 — that's
   the status bar).
+
+## Queue pane + autoplay legs (post-#289)
+
+- The in-product mobile queue surface is the stage sheet's 'queue'
+  segment — standalone `QueueScreen` exists only via `auqw://gallery`
+  fixtures (same queue-list code). Segment buttons sit ~y2248
+  device-px, sometimes covered by the dev-client warnings toast —
+  dismiss it first. `auqw://open?tab=queue` remains the reliable open.
+- `input draganddrop x1 y1 x2 y2 ~1200` drives DraggableFlatList
+  long-press drags (handle a11y label 'drag') — a plain `input swipe`
+  moves before the long-press fires.
+- Screencap↔device scale ~1.525 (images read ~708×1568 on the
+  1080×2400 device) — taps are DEVICE px; prefer uiautomator bounds
+  for targets, screencaps for verification only.
+- `radio.seed` is NOT bot-checked (unlike `playback.resolve`) — the
+  stage player's 'start radio' chip arms a real tail and the queue
+  gains 'autoplay · similar to {seed}' (dimmed rows, no × removes).
+  The chip requires `selectedRef ?? sourceRefs[0]` on a
+  radioSeed-capable provider — youtube-music-first rows work
+  directly; a deezer-first row needs a youtube-music PIN
+  (`selectedRef`) to expose it.
