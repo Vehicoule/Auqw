@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
 
@@ -242,7 +242,14 @@ impl FileKeyValueStore {
         Ok(out)
     }
 
-    fn write_all(&self, map: &StoreMap) -> Result<(), KvError> {
+    /// Encode `map` into a unique sibling tmp and fsync it — the
+    /// publishable state for the next rename. A unique tmp per write:
+    /// two store instances on one path must not clobber each other's
+    /// staging file (they'd still last-writer-wins at rename — a
+    /// documented one-store-per-path assumption — but the committed
+    /// file stays whole). The caller removes the tmp if the commit is
+    /// declined; a failed staging removes it itself.
+    fn stage_all(&self, map: &StoreMap) -> Result<PathBuf, KvError> {
         let encoded: BTreeMap<String, BTreeMap<String, String>> = map
             .iter()
             .map(|(plugin_id, ns)| {
@@ -253,10 +260,6 @@ impl FileKeyValueStore {
             })
             .collect();
         let json = serde_json::to_vec(&encoded).map_err(|e| KvError::Io(format!("encode: {e}")))?;
-        // A unique sibling tmp per write: two store instances on one
-        // path must not clobber each other's staging file (they'd still
-        // last-writer-wins at rename — a documented one-store-per-path
-        // assumption — but the committed file stays whole).
         static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut tmp_name = self.path.as_os_str().to_os_string();
         tmp_name.push(format!(
@@ -265,27 +268,29 @@ impl FileKeyValueStore {
             TMP_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         let tmp = PathBuf::from(tmp_name);
-        // Unique per write means a failed commit leaves its own debris —
-        // best-effort remove the staging file on any error before the
-        // rename lands.
         let staged = (|| -> Result<(), KvError> {
-            {
-                let mut file = std::fs::File::create(&tmp)
-                    .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
-                file.write_all(&json)
-                    .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
-                file.sync_all()
-                    .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
-            }
-            std::fs::rename(&tmp, &self.path)
-                .map_err(|e| KvError::Io(format!("{}: {e}", self.path.display())))
+            let mut file = std::fs::File::create(&tmp)
+                .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+            file.write_all(&json)
+                .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+            file.sync_all()
+                .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+            Ok(())
         })();
         if staged.is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
-        staged?;
-        // The rename's directory entry needs its own sync — without it
-        // a crash could still lose the committed file.
+        staged.map(|()| tmp)
+    }
+
+    /// Rename a staged tmp over the store path, then fsync the
+    /// directory entry — the rename is the publication boundary, and
+    /// the dir sync keeps a crash from losing the committed file.
+    fn commit_staged(&self, tmp: &Path) -> Result<(), KvError> {
+        if let Err(e) = std::fs::rename(tmp, &self.path) {
+            let _ = std::fs::remove_file(tmp);
+            return Err(KvError::Io(format!("{}: {e}", self.path.display())));
+        }
         if let Some(parent) = self.path.parent() {
             let dir = std::fs::File::open(parent)
                 .map_err(|e| KvError::Io(format!("{}: {e}", parent.display())))?;
@@ -319,20 +324,25 @@ impl KeyValueStore for FileKeyValueStore {
         if let Some(msg) = caps_violation(&ns, secrets) {
             return Err(KvError::TooLarge(msg));
         }
-        // The gate runs under the write lock on the doorstep of the
-        // rename — a cancel that lands after this point has already
-        // won or lost atomically, never mid-publication.
-        if !admit() {
-            return Err(KvError::Rejected(format!(
-                "{plugin_id}: admission declined"
-            )));
-        }
         if ns.is_empty() {
             all.remove(plugin_id);
         } else {
             all.insert(plugin_id.to_string(), ns);
         }
-        self.write_all(&all)
+        // Stage before gating: the tmp write + sync is the slow leg,
+        // and the rename is the publication boundary — the gate must
+        // run after staging, still under the write lock, so a cancel
+        // or deadline that lands while bytes were being staged still
+        // discards them instead of publishing past a bound the caller
+        // already reported.
+        let tmp = self.stage_all(&all)?;
+        if !admit() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(KvError::Rejected(format!(
+                "{plugin_id}: admission declined"
+            )));
+        }
+        self.commit_staged(&tmp)
     }
 }
 

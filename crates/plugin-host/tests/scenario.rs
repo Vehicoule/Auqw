@@ -754,6 +754,33 @@ async fn no_write_done_does_not_touch_store() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The admission gate runs after staging, on the doorstep of the
+/// rename: a declined commit publishes nothing and removes its tmp
+/// file — a caller that already reported a deadline leaves neither
+/// committed bytes nor debris behind.
+#[test]
+fn declined_admission_leaves_no_tmp_debris() {
+    let dir = std::env::temp_dir().join(format!("auqw-kv-decline-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    ok(std::fs::create_dir_all(&dir).map_err(|e| format!("{e:?}")));
+    let path = dir.join("plugin-kv.json");
+    let kv = ok(FileKeyValueStore::new(&path));
+    let writes = BTreeMap::from([("k".to_string(), Some(b"v".to_vec()))]);
+    match kv.commit_admitting("test-plugin", writes, &|| false, &[]) {
+        Err(KvError::Rejected(_)) => {}
+        Err(e) => panic!("expected Rejected, got {e:?}"),
+        Ok(()) => panic!("expected Rejected, got Ok"),
+    }
+    assert!(!path.exists());
+    let debris: Vec<_> = ok(std::fs::read_dir(&dir).map_err(|e| format!("{e:?}")))
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name())
+        .filter(|n| n.to_string_lossy().contains(".tmp."))
+        .collect();
+    assert!(debris.is_empty(), "{debris:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An on-disk namespace over the committed cap is corruption — the
 /// store refuses it at open instead of serving it to a guest.
 #[test]
