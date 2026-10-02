@@ -2964,7 +2964,6 @@
   border-radius: var(--radius-float);
   background: var(--canvas);
   border: var(--stroke-hairline) solid var(--hairline);
-  box-shadow: 0 var(--spacing-sm) var(--spacing-xxxl) var(--scrim);
   overflow: hidden;
 }
 
@@ -3022,6 +3021,17 @@
   }
   .uw-chrome[data-bleed='art'] .uw-stage {
     padding-right: calc(var(--spacing-xl) + 24px);
+  }
+  /* Padding can't move the stage's absolute right-edge controls —
+     stop + the track menu inset past the card overlap too. */
+  .uw-chrome[data-bleed='art'] .uw-stage__stop {
+    right: calc(var(--spacing-sm) + 24px);
+  }
+  .uw-chrome[data-bleed='art'] .uw-stage__menu {
+    right: calc(var(--spacing-sm) + 40px + 24px);
+  }
+  .uw-chrome[data-bleed='art'] .uw-stage__segment {
+    right: calc(var(--spacing-xl) + 24px);
   }
 }
 
