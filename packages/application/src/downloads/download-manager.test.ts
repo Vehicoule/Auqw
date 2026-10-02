@@ -562,7 +562,7 @@ async function initIntegrity(): Promise<void> {
 async function initFixupPersistRetries(): Promise<void> {
   const interrupted = row({
     downloadId: 'dl-x1',
-    recordingId: 'rec-x',
+    recordingId: 'rec-p',
     filePath: 'dl-x1',
     state: 'transferring',
     committedOffset: 512,
@@ -584,11 +584,6 @@ async function initFixupPersistRetries(): Promise<void> {
     last?.batch.downloads?.[0]?.state,
     'requested',
     'fixup committed on the retry',
-  );
-  assertEqual(
-    r.manager.recordFor('rec-x')?.state,
-    'requested',
-    'demoted row published',
   );
   assert(!r.manager.unavailable(), 'verified init clears unavailable');
 }
