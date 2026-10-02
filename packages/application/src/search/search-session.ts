@@ -40,6 +40,30 @@ const RATE_LIMIT_FALLBACK_MS = 60_000;
 
 type CacheEntry = { readonly page: SearchPage; readonly storedAtMs: number };
 
+const refKey = (ref: { provider: string; kind: string; id: string }): string =>
+  `${ref.provider}:${ref.kind}:${ref.id}`;
+
+/** A next page extends the base rather than replacing it — same refs
+    dedupe (providers overlap page boundaries), the base's top hit
+    stands, and the fresh token replaces the continuation. */
+export function mergeSearchPage(base: SearchPage, next: SearchPage): SearchPage {
+  const seen = new Set(base.items.map((m) => refKey(m.sourceRef)));
+  const entitySeen = new Set(base.entities.map((e) => refKey(e.sourceRef)));
+  return {
+    items: [
+      ...base.items,
+      ...next.items.filter((m) => !seen.has(refKey(m.sourceRef))),
+    ],
+    entities: [
+      ...base.entities,
+      ...next.entities.filter((e) => !entitySeen.has(refKey(e.sourceRef))),
+    ],
+    topHit: base.topHit ?? next.topHit,
+    continuation: next.continuation,
+    storefront: next.storefront ?? base.storefront,
+  };
+}
+
 type Inflight = {
   readonly source: CancellationSource;
   promise: Promise<SearchState>;
@@ -126,6 +150,9 @@ export class SearchSession {
     kinds?: readonly SearchKind[] | undefined;
     /** Next-page token from a prior result; absent fetches page one. */
     continuation?: string | undefined;
+    /** Base page a next-page result merges into — searchMore
+        plumbing; absent publishes the page as returned. */
+    appendBase?: SearchPage | undefined;
   }): Promise<SearchState> {
     const query = input.query.trim();
     if (query.length === 0) {
@@ -207,7 +234,12 @@ export class SearchSession {
     const source = new CancellationSource();
     this.#source = source;
     const revision = this.#state.revision + 1;
-    this.#publish({ type: 'loading', revision, query });
+    // An append keeps its base page on screen — the row-level busy
+    // affordance covers progress; only a fresh query blanks to
+    // 'loading'.
+    if (input.appendBase === undefined) {
+      this.#publish({ type: 'loading', revision, query });
+    }
 
     const context: OperationContext = {
       requestId: this.#ids.next('search'),
@@ -224,6 +256,7 @@ export class SearchSession {
         storefront: input.storefront,
         kinds: filter,
         continuation,
+        appendBase: input.appendBase,
       },
       context,
       revision,
@@ -231,6 +264,29 @@ export class SearchSession {
     );
     this.#inflight.set(key, record);
     return record.promise;
+  }
+
+  /** Page the live content state forward through its continuation
+      token; the next page merges into the base so the model grows
+      rather than swaps. A no-op on anything but content with a
+      pending continuation — callers gate on `page.continuation`. */
+  searchMore(input: {
+    limit: number;
+    storefront: string | null;
+    kinds?: readonly SearchKind[] | undefined;
+  }): Promise<SearchState> {
+    const state = this.#state;
+    if (state.type !== 'content' || state.page.continuation === null) {
+      return Promise.resolve(state);
+    }
+    return this.search({
+      query: state.query,
+      limit: input.limit,
+      storefront: input.storefront,
+      kinds: input.kinds,
+      continuation: state.page.continuation,
+      appendBase: state.page,
+    });
   }
 
   async #run(
@@ -241,6 +297,7 @@ export class SearchSession {
       storefront: string | null;
       kinds?: readonly SearchKind[] | undefined;
       continuation?: string | undefined;
+      appendBase?: SearchPage | undefined;
     },
     context: OperationContext,
     revision: number,
@@ -291,7 +348,10 @@ export class SearchSession {
     }
 
     if (result.ok) {
-      const page = result.value;
+      const page =
+        input.appendBase === undefined
+          ? result.value
+          : mergeSearchPage(input.appendBase, result.value);
       // Re-validate the clock before caching; an unsafe timestamp
       // skips caching but still publishes the content.
       const storedNow = this.#clock.nowMs();
@@ -318,13 +378,14 @@ export class SearchSession {
     // Our own cancels were filtered above; a provider-side 'cancelled'
     // still settles the search — it flows through the stale-cache and
     // error paths like any other failure rather than leaving 'loading'.
-    const stale = this.#cache.get(key);
-    if (stale !== undefined && searchPageHasContent(stale.page)) {
+    const stalePage =
+      input.appendBase ?? this.#cache.get(key)?.page;
+    if (stalePage !== undefined && searchPageHasContent(stalePage)) {
       const state: SearchState = {
         type: 'content',
         revision,
         query,
-        page: stale.page,
+        page: stalePage,
         refreshError: error,
       };
       this.#publish(state);

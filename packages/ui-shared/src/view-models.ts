@@ -6,6 +6,7 @@ import type {
   DownloadProgress,
   Entity,
   EntityKind,
+  EntityMetadata,
   EntityPage,
   EntityRef,
   EntitySourceRef,
@@ -24,6 +25,7 @@ import type {
   RadioTail,
   Recording,
   RepeatMode,
+  SearchKind,
   SessionPlayback,
   Settings,
   SourceRef,
@@ -178,23 +180,85 @@ export type QueueModel = {
 
 type SearchPhase = 'idle' | 'loading' | 'ready' | 'empty' | 'error' | 'unavailable';
 
-/** Result-set filter — 'songs' is the whole set today (every result
-    is a track) but names the subset the contract reserves. */
-export type SearchFilter = 'all' | 'songs' | 'library';
+/** Result-set filter — kind-scoped chips re-query the provider for
+    their entity kind; 'library' stays a display filter over the
+    committed page. */
+export type SearchFilter =
+  | 'all'
+  | 'songs'
+  | 'artists'
+  | 'albums'
+  | 'playlists'
+  | 'library';
 
-export type SearchHeroModel = {
-  readonly row: TrackRowModel;
-  /** 'song · artist · year/album' — composed from the #1 result. */
-  readonly metaLabel: string;
+/** The provider scope a search chip asks for — 'all' and 'library'
+    query unscoped ('library' narrows locally); kind chips scope the
+    call itself so their pages fetch a real limit of that kind. */
+export function searchKindsFor(
+  filter: SearchFilter,
+): readonly SearchKind[] | undefined {
+  switch (filter) {
+    case 'songs':
+      return ['track'];
+    case 'artists':
+      return ['artist'];
+    case 'albums':
+      return ['album'];
+    case 'playlists':
+      return ['playlist'];
+    default:
+      return undefined;
+  }
+}
+
+/** A typed entity row — an artist/album/playlist hit. `ref` opens
+    its entity page; `canLike` marks that the provider ref resolved
+    to an app-side entity the like can target. */
+export type EntityCardModel = {
+  readonly key: string;
+  readonly ref: EntityRef;
+  readonly kind: EntityKind;
+  readonly title: string;
+  readonly subtitle: string | null;
+  readonly artworkUrl: string | null;
+  readonly liked: boolean;
+  readonly canLike: boolean;
 };
+
+/** A section of entity cards — a kind rail on search, a group rail
+    on an entity page. */
+export type EntityRailModel = {
+  readonly key: string;
+  readonly title: string;
+  readonly cards: readonly EntityCardModel[];
+};
+
+export type SearchHeroModel =
+  | {
+      readonly type: 'track';
+      readonly row: TrackRowModel;
+      /** 'song · artist · year/album' — composed from the #1 result. */
+      readonly metaLabel: string;
+    }
+  | {
+      readonly type: 'entity';
+      readonly card: EntityCardModel;
+      /** 'artist · followers', 'album · year' — the kind + subtitle. */
+      readonly metaLabel: string;
+    };
 
 export type SearchStateModel = {
   readonly phase: SearchPhase;
   readonly query: string;
   readonly results: readonly TrackRowModel[];
   readonly filter: SearchFilter;
+  /** Typed entity hits grouped into rails — canonical kind order. */
+  readonly rails: readonly EntityRailModel[];
   /** Provider's top-ranked result after the filter — the hero card. */
   readonly hero: SearchHeroModel | null;
+  /** The page can page forward — `continuation` token pending. */
+  readonly hasMore: boolean;
+  readonly loadingMore: boolean;
   /**
    * The play context behind `results` — the visible provider items
    * (deduped reps, post-filter). Playing a row queues exactly what the
@@ -331,6 +395,9 @@ export type EntityScreenModel = {
   readonly liked: boolean;
   readonly canLike: boolean;
   readonly items: readonly TrackRowModel[];
+  /** Discography / related / featured / appears-on rails, in
+      canonical group order — `related` catches untagged entries. */
+  readonly rails: readonly EntityRailModel[];
   readonly hasMore: boolean;
   readonly loadingMore: boolean;
   readonly message: string | null;
@@ -1363,12 +1430,33 @@ export function skipPeekFor(
   };
 }
 
-function likedEntityIds(likes: readonly Like[]): ReadonlySet<string> {
+export function likedEntityIds(likes: readonly Like[]): ReadonlySet<string> {
   return new Set(
     likes
       .filter((like) => like.entityKind !== 'track')
       .map((like) => `${like.entityKind} ${like.targetId}`),
   );
+}
+
+/** The EntityCardModel for a catalog entityMetadata row — resolved
+    entityId decides `canLike`/`liked`, artwork picked at rail size. */
+export function toEntityCard(
+  entity: EntityMetadata,
+  entitySourceRefs: readonly EntitySourceRef[],
+  entityLikes: ReadonlySet<string>,
+): EntityCardModel {
+  const entityId = entityIdForRef(entitySourceRefs, entity.sourceRef);
+  return {
+    key: entityRefKey(entity.sourceRef),
+    ref: entity.sourceRef,
+    kind: entity.kind,
+    title: entity.title,
+    subtitle: entity.subtitle,
+    artworkUrl: pickArtworkUrl(entity.artwork, 240),
+    liked:
+      entityId !== null && entityLikes.has(`${entity.kind} ${entityId}`),
+    canLike: entityId !== null,
+  };
 }
 
 const EMPTY_ENTRIES: readonly PlaylistEntry[] = [];
@@ -1730,6 +1818,14 @@ export function toPlaylistModel(input: {
   };
 }
 
+/** Canonical related-rail order — untagged entries ride 'related'. */
+const RELATED_RAIL_ORDER = [
+  'discography',
+  'related',
+  'featured',
+  'appears-on',
+] as const;
+
 export function toEntityModel(input: {
   readonly page: EntityPage | null;
   readonly error: AppError | null;
@@ -1753,6 +1849,7 @@ export function toEntityModel(input: {
       liked: false,
       canLike: false,
       items: [],
+      rails: [],
       hasMore: false,
       loadingMore: false,
       message: errorText(error),
@@ -1767,6 +1864,7 @@ export function toEntityModel(input: {
     input.recordings ?? [],
   );
   const playingKey = refKey(input.playingRef);
+  const entityLikes = likedEntityIds(input.likes);
   const liked =
     entityId !== null &&
     input.likes.some(
@@ -1794,6 +1892,16 @@ export function toEntityModel(input: {
         playingKey !== null &&
         group.some((m) => refKey(m.sourceRef) === playingKey),
     })),
+    // The page's own entity never recurs as a related card.
+    rails: RELATED_RAIL_ORDER.map((group) => ({
+      key: group,
+      title: t(`entity.rail.${group}`),
+      cards: dedupeEntitiesByRef(page.related, page.entity.sourceRef)
+        .filter((entity) => (entity.group ?? 'related') === group)
+        .map((entity) =>
+          toEntityCard(entity, input.entitySourceRefs, entityLikes),
+        ),
+    })).filter((rail) => rail.cards.length > 0),
     hasMore: page.continuation !== null,
     loadingMore: input.loadingMore ?? false,
     // A refresh error while content stays surfaces as a flagged note.
@@ -1893,6 +2001,39 @@ export function dedupeRecordings(
     }
   }
   return kept;
+}
+
+/** 'provider:kind:id' — identity key for entity refs, matching
+    `entityRefKey` in the app shells' helpers (kept here so models
+    and shells share one shape). */
+export const entityRefKey = (ref: EntityRef): string =>
+  `${ref.provider}:${ref.kind}:${ref.id}`;
+
+/** Dedupe a provider's entity list by ref — rails repeat a page's
+    own entity (the artist whose page lists its own albums would
+    otherwise also render the artist card). */
+export function dedupeEntitiesByRef(
+  entities: readonly EntityMetadata[],
+  exclude?: EntityRef | null,
+): readonly EntityMetadata[] {
+  const seen = new Set<string>();
+  const out: EntityMetadata[] = [];
+  for (const entity of entities) {
+    const key = entityRefKey(entity.sourceRef);
+    if (seen.has(key)) {
+      continue;
+    }
+    if (
+      exclude !== undefined &&
+      exclude !== null &&
+      key === entityRefKey(exclude)
+    ) {
+      continue;
+    }
+    seen.add(key);
+    out.push(entity);
+  }
+  return out;
 }
 
 export function toRailCard(recording: Recording): RailCardModel {

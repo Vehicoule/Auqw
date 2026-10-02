@@ -629,6 +629,9 @@ const searchState = (
   filter: 'all',
   results: [],
   hero: null,
+  rails: [],
+  hasMore: false,
+  loadingMore: false,
   playItems: [],
   providerId: 'youtube-music',
   message: null,
@@ -650,6 +653,7 @@ export const fixtureSearchStates: readonly SearchStateModel[] = [
         return null;
       }
       return {
+        type: 'track',
         row: toSearchRowModel(meta, 0),
         metaLabel: [
           'song',

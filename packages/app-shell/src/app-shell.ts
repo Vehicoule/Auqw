@@ -40,6 +40,7 @@ import type {
   QueueOrigin,
   Recording,
   Result,
+  SearchKind,
   SearchState,
   Settings,
   SourceRef,
@@ -53,6 +54,7 @@ import {
   THEME_ORDER,
   attemptLabel,
   dedupeRecordings,
+  entityIdForRef,
   downloadChipsByRecording,
   downloadLedgerCount,
   entityRefKey,
@@ -62,6 +64,7 @@ import {
   providerPickerModel,
   reportResult,
   resolveLocale,
+  searchKindsFor,
   setLocale,
   setToastSink,
   skipPeekFor,
@@ -94,6 +97,7 @@ import type {
   CorrectionsFilter,
   DiagnosticsModel,
   DownloadChip,
+  EntityCardModel,
   EntityFetch,
   LyricsFetch,
   LyricsModel,
@@ -976,8 +980,14 @@ export function useAppShell<E extends { readonly type: string } = never>(
     suggest.current = { source: null, seq: suggest.current.seq + 1 };
   }, []);
 
+  // The scope the committed page was fetched under — the 'library'
+  // chip narrows locally and only re-queries when the page itself is
+  // kinds-scoped (its missing kinds would hide library matches).
+  const committedKinds = useRef<readonly SearchKind[] | undefined>(
+    undefined,
+  );
   const runSearch = useCallback(
-    (q: string) => {
+    (q: string, scope: SearchFilter = searchFilter) => {
       // The platform gets the first move on commit (mobile dismisses
       // the IME).
       ports.onSearchCommit?.();
@@ -988,13 +998,22 @@ export function useAppShell<E extends { readonly type: string } = never>(
         search?.cancel();
         return;
       }
+      const kinds = searchKindsFor(scope);
+      committedKinds.current = kinds;
       void search?.search({
         query: trimmed,
         limit: SEARCH_LIMIT,
         storefront: state.settings.storefront,
+        kinds,
       });
     },
-    [search, state.settings.storefront, ports.onSearchCommit, cancelSuggest],
+    [
+      search,
+      state.settings.storefront,
+      ports.onSearchCommit,
+      cancelSuggest,
+      searchFilter,
+    ],
   );
 
   const recordRecentSearch = useCallback(
@@ -1053,6 +1072,45 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const retrySearch = useCallback(() => {
     runSearch(committedQuery);
   }, [runSearch, committedQuery]);
+
+  const onSearchFilterPress = useCallback(
+    (key: SearchFilter) => {
+      setSearchFilter(key);
+      if (committedQuery === '') {
+        return;
+      }
+      // An unscoped page under an unscoped chip ('all', 'library')
+      // needs no refetch — 'library' narrows locally, 'all' already
+      // shows it. Every other transition re-queries at the chip's
+      // scope so the page fills with a real limit of that kind.
+      if (
+        searchKindsFor(key) === undefined &&
+        committedKinds.current === undefined
+      ) {
+        return;
+      }
+      runSearch(committedQuery, key);
+    },
+    [committedQuery, runSearch],
+  );
+
+  const [searchLoadingMore, setSearchLoadingMore] = useState(false);
+  // The busy flag ends when the paged request settles — the state
+  // object republishes on settle (appends hold 'content' throughout,
+  // so the flag keys off the publish, not a 'loading' visit).
+  useEffect(() => {
+    if (searchState.type !== 'loading') {
+      setSearchLoadingMore(false);
+    }
+  }, [searchState]);
+  const onSearchLoadMore = useCallback(() => {
+    setSearchLoadingMore(true);
+    void search?.searchMore({
+      limit: SEARCH_LIMIT,
+      storefront: state.settings.storefront,
+      kinds: searchKindsFor(searchFilter),
+    });
+  }, [search, state.settings.storefront, searchFilter]);
   // Keystrokes debounce into `catalog.suggest` completions — only a
   // commit (Enter or a row tap) runs catalog.search.
   useEffect(() => {
@@ -1105,6 +1163,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
       searchState.page.items.forEach((meta, index) => {
         map.set(toSearchRowModel(meta, index).key, meta);
       });
+      // A declared top hit rides its own -1 key — it may not be a
+      // member of the items listing at all.
+      const top = searchState.page.topHit;
+      if (top?.type === 'track') {
+        map.set(toSearchRowModel(top.item, -1).key, top.item);
+      }
       const head = searchState.page.items.slice(0, 9);
       session.prewarm({
         sourceRefs: head.map((meta) => meta.sourceRef),
@@ -1768,6 +1832,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
       state.playlistEntries,
       state.recordings,
       searchFilter,
+      state.likes,
+      state.entitySourceRefs,
+      searchLoadingMore,
     );
     if (localResults.length === 0 || base.phase === 'idle') {
       return base;
@@ -1780,6 +1847,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       first === undefined
         ? base.hero
         : {
+            type: 'track' as const,
             row: first,
             metaLabel: [first.note, first.artist, first.album]
               .filter((part): part is string => part !== null && part !== '')
@@ -1796,9 +1864,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
     searchState,
     localResults,
     searchFilter,
+    searchLoadingMore,
     playingRef,
     state.playlistEntries,
     state.recordings,
+    state.likes,
+    state.entitySourceRefs,
     localeTick,
   ]);
 
@@ -3058,6 +3129,19 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [overlay, pushOverlay, loadEntityPage],
   );
 
+  const onEntityCardLike = useCallback(
+    (card: EntityCardModel) => {
+      const entityId = entityIdForRef(state.entitySourceRefs, card.ref);
+      if (entityId === null) {
+        return;
+      }
+      void session
+        .toggleEntityLike(card.kind, entityId)
+        .then(reporter('action.toggleLike'));
+    },
+    [state.entitySourceRefs, session],
+  );
+
   // Back/forward walk the recorded log. A restore re-applies the
   // location wholesale: tab switch, stack cleared, recorded routes
   // re-pushed — and each entity route gets a fresh loadEntityPage, so a
@@ -4004,6 +4088,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
     setQuery,
     searchFilter,
     setSearchFilter,
+    onSearchFilterPress,
+    onSearchLoadMore,
+    onEntityCardLike,
     searchState,
     submitSearch,
     retrySearch,

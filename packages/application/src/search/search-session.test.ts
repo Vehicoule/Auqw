@@ -500,6 +500,87 @@ async function nearMaxCache(): Promise<void> {
   }
 }
 
+async function searchMore(): Promise<void> {
+  const { provider, session } = harness();
+
+  // searchMore is a no-op until a content page with a token exists.
+  const noop = await session.searchMore({ limit: 5, storefront: 'US' });
+  assertEqual(noop.type, 'idle');
+  assertEqual(provider.calls.length, 0);
+
+  const p1 = session.search(INPUT);
+  provider.settleSearch(
+    ok({
+      ...page(['a', 'b']),
+      topHit: { type: 'track', item: item('a') },
+      continuation: 'tok-2',
+    }),
+  );
+  const first = await p1;
+  assertEqual(first.type, 'content');
+
+  // The append must not blank the page to 'loading' — the base stays
+  // published while the next page flies.
+  const seen: SearchState[] = [];
+  session.subscribe((s) => {
+    seen.push(s);
+  });
+  const more = session.searchMore({ limit: 5, storefront: 'US' });
+  assertEqual(session.snapshot().type, 'content', 'append keeps content');
+  assertEqual(provider.calls.length, 2);
+  const call = provider.calls[1];
+  if (call?.method === 'search') {
+    const input = call.input as { continuation?: string };
+    assertEqual(input.continuation, 'tok-2');
+  }
+  // 'b' repeats on page two — the merge dedupes by ref, keeps the
+  // base's top hit, and takes the fresh continuation.
+  provider.settleSearch(ok({ ...page(['b', 'c']), continuation: null }));
+  const merged = await more;
+  assertEqual(merged.type, 'content');
+  if (merged.type === 'content') {
+    assertEqual(
+      merged.page.items.map((m) => m.title).join(','),
+      'a,b,c',
+      'merged page appends unseen rows only',
+    );
+    assertEqual(merged.page.continuation, null, 'fresh token replaces');
+    assertEqual(merged.page.topHit?.type, 'track', 'base top hit stands');
+  }
+  assert(
+    !seen.some((s) => s.type === 'loading'),
+    'an append never publishes loading',
+  );
+
+  // The rail is exhausted — a further searchMore is a no-op.
+  const callsBefore = provider.calls.length;
+  await session.searchMore({ limit: 5, storefront: 'US' });
+  assertEqual(provider.calls.length, callsBefore);
+}
+
+async function searchMoreFailure(): Promise<void> {
+  const { provider, clock, session } = harness();
+  const p1 = session.search(INPUT);
+  provider.settleSearch(ok({ ...page(['a']), continuation: 'tok-2' }));
+  await p1;
+
+  const more = session.searchMore({ limit: 5, storefront: 'US' });
+  provider.settleSearch({ ok: false, error: appError('transient', 'down') });
+  await flush();
+  clock.advance(400);
+  await flush();
+  provider.settleSearch({ ok: false, error: appError('transient', 'down') });
+  const state = await more;
+  // A failed append keeps the base page with the verdict attached —
+  // it never drops to the error screen.
+  assertEqual(state.type, 'content');
+  if (state.type === 'content') {
+    assertEqual(state.page.items[0]?.title, 'a');
+    assertEqual(state.refreshError?.kind, 'transient');
+    assertEqual(state.page.continuation, 'tok-2', 'retry still possible');
+  }
+}
+
 async function refreshError(): Promise<void> {
   const { provider, clock, session } = harness();
   const p1 = session.search(INPUT);
@@ -539,4 +620,6 @@ export async function run(): Promise<void> {
   await optionsAndCancelEdges();
   await refreshError();
   await nearMaxCache();
+  await searchMore();
+  await searchMoreFailure();
 }

@@ -5,10 +5,12 @@ import {
   IconButton,
   Pressable,
   SkeletonRows,
+  Spinner,
   Text,
 } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { TrackRow, indexAdapter, useTrackList } from './track-row.tsx';
+import { EntityRail } from './entity-rail.tsx';
 import {
   EmptyState,
   ErrorState,
@@ -116,53 +118,110 @@ export function SearchScreen({
             <Text variant="heading" color="bright" className="uw-search__band-title">
               {view.topRow.topResultTitle}
             </Text>
-            <div className="uw-topres" onMouseEnter={view.topRow.hero.onIntent}>
-              <Artwork
-                url={view.topRow.hero.row.artworkUrl}
-                size={96}
-                cornerRadius={10}
-                dimmed={view.topRow.hero.row.state !== 'available'}
-              />
-              <span className="uw-topres__text">
-                <Text variant="title" color="bright" numberOfLines={2}>
-                  {view.topRow.hero.row.title}
-                </Text>
-                <Text variant="metadata" color="secondary" numberOfLines={1}>
-                  {view.topRow.hero.metaLabel}
-                </Text>
-              </span>
-              <IconButton
-                icon="play"
-                size={40}
-                iconSize={18}
-                className="uw-topres__play"
-                ariaLabel={view.topRow.hero.a11yLabel}
-                onPress={view.topRow.hero.onPress}
-              />
-            </div>
-          </div>
-          <div className="uw-search__songs">
-            <Text variant="heading" color="bright" className="uw-search__band-title">
-              {view.topRow.songsTitle}
-            </Text>
-            <div role="list" aria-label={view.topRow.songsA11yLabel}>
-              {view.topRow.songs.map((row, index) => (
-                <TrackRow
-                  key={row.row.key}
-                  row={row.row}
-                  index={`${index + 1}`}
-                  album={row.row.album}
-                  onPress={row.onPress}
-                  onIntent={row.onIntent}
-                  onToggleLike={row.onToggleLike}
-                  onAddToPlaylist={row.onAddToPlaylist}
-                  onContext={row.onContext}
+            {view.topRow.hero.type === 'entity' ? (
+              <div className="uw-topres">
+                <Pressable
+                  onPress={view.topRow.hero.onPress}
+                  ariaLabel={view.topRow.hero.a11yLabel}
+                  className="uw-topres__open"
+                >
+                  <Artwork
+                    url={view.topRow.hero.card.artworkUrl}
+                    size={96}
+                    cornerRadius={10}
+                  />
+                  <span className="uw-topres__text">
+                    <Text variant="title" color="bright" numberOfLines={2}>
+                      {view.topRow.hero.card.title}
+                    </Text>
+                    <Text variant="metadata" color="secondary" numberOfLines={1}>
+                      {view.topRow.hero.metaLabel}
+                    </Text>
+                  </span>
+                </Pressable>
+                {view.topRow.hero.onToggleLike !== undefined && (
+                  <IconButton
+                    icon={
+                      view.topRow.hero.card.liked
+                        ? 'heart-filled'
+                        : 'heart'
+                    }
+                    size={34}
+                    iconSize={16}
+                    color={
+                      view.topRow.hero.card.liked
+                        ? 'var(--liked)'
+                        : undefined
+                    }
+                    ariaLabel={view.topRow.hero.likeA11yLabel}
+                    onPress={view.topRow.hero.onToggleLike}
+                  />
+                )}
+                <IconButton
+                  icon="chevron-right"
+                  size={34}
+                  iconSize={16}
+                  ariaLabel={view.topRow.hero.a11yLabel}
+                  onPress={view.topRow.hero.onPress}
                 />
-              ))}
-            </div>
+              </div>
+            ) : (
+              <div
+                className="uw-topres"
+                onMouseEnter={view.topRow.hero.onIntent}
+              >
+                <Artwork
+                  url={view.topRow.hero.row.artworkUrl}
+                  size={96}
+                  cornerRadius={10}
+                  dimmed={view.topRow.hero.row.state !== 'available'}
+                />
+                <span className="uw-topres__text">
+                  <Text variant="title" color="bright" numberOfLines={2}>
+                    {view.topRow.hero.row.title}
+                  </Text>
+                  <Text variant="metadata" color="secondary" numberOfLines={1}>
+                    {view.topRow.hero.metaLabel}
+                  </Text>
+                </span>
+                <IconButton
+                  icon="play"
+                  size={40}
+                  iconSize={18}
+                  className="uw-topres__play"
+                  ariaLabel={view.topRow.hero.a11yLabel}
+                  onPress={view.topRow.hero.onPress}
+                />
+              </div>
+            )}
           </div>
+          {view.topRow.songs.length > 0 && (
+            <div className="uw-search__songs">
+              <Text variant="heading" color="bright" className="uw-search__band-title">
+                {view.topRow.songsTitle}
+              </Text>
+              <div role="list" aria-label={view.topRow.songsA11yLabel}>
+                {view.topRow.songs.map((row, index) => (
+                  <TrackRow
+                    key={row.row.key}
+                    row={row.row}
+                    index={`${index + 1}`}
+                    album={row.row.album}
+                    onPress={row.onPress}
+                    onIntent={row.onIntent}
+                    onToggleLike={row.onToggleLike}
+                    onAddToPlaylist={row.onAddToPlaylist}
+                    onContext={row.onContext}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
+      {view.rails.map((rail) => (
+        <EntityRail key={rail.key} rail={rail} />
+      ))}
       {view.resultsHead !== null && (
         <div className="uw-search__results-head">
           <Text variant="heading" color="bright">
@@ -265,6 +324,26 @@ export function SearchScreen({
             />
           ))}
         </div>
+      )}
+      {view.loadMore !== null && (
+        <Pressable
+          onPress={view.loadMore.onPress}
+          ariaLabel={view.loadMore.a11yLabel}
+          className="uw-load-more"
+        >
+          {view.loadMore.busy ? (
+            <Spinner size={13} />
+          ) : (
+            <Icon
+              name="chevron-down"
+              size={13}
+              color="var(--text-secondary)"
+            />
+          )}
+          <Text variant="metadata" color="secondary">
+            {view.loadMore.label}
+          </Text>
+        </Pressable>
       )}
     </div>
   );
