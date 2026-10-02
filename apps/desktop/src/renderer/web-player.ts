@@ -1003,8 +1003,10 @@ export function createWebPlayerPort(deps: {
   const END_INTERCEPT_WINDOW_MS = 1_500;
   const END_INTERCEPT_EPS_MS = 80;
   let endCheckTimer: ReturnType<typeof setTimeout> | null = null;
+  let endCheckDeadlineMs = Number.POSITIVE_INFINITY;
   /** The handle whose end the intercept already fed — a real `ended`
-   * landing for it anyway must not emit a second end. */
+   * landing for it anyway must not emit a second end, and the
+   * intercept's own pause must not pause the queue mid-advance. */
   let endSynthesizedFor: string | null = null;
 
   function checkEndIntercept(): void {
@@ -1027,13 +1029,22 @@ export function createWebPlayerPort(deps: {
       advanceQueue('ended');
       return;
     }
-    if (endCheckTimer === null) {
+    // A tighter deadline replaces an armed check — a track switch or
+    // seek landing inside the window must not wait on the old one.
+    const delay = Math.max(60, remaining - END_INTERCEPT_EPS_MS);
+    const deadline = now() + delay;
+    if (deadline < endCheckDeadlineMs) {
+      if (endCheckTimer !== null) {
+        clearTimeout(endCheckTimer);
+      }
+      endCheckDeadlineMs = deadline;
       // A timer landing early (background slack) re-checks and
       // tightens itself; the ≥60 ms floor keeps a stalled tail cheap.
       endCheckTimer = setTimeout(() => {
         endCheckTimer = null;
+        endCheckDeadlineMs = Number.POSITIVE_INFINITY;
         checkEndIntercept();
-      }, Math.max(60, remaining - END_INTERCEPT_EPS_MS));
+      }, delay);
     }
   }
 
@@ -1044,6 +1055,11 @@ export function createWebPlayerPort(deps: {
   audio.addEventListener('waiting', () => status('buffering'));
   audio.addEventListener('loadedmetadata', () => status('ready'));
   audio.addEventListener('pause', () => {
+    // The intercept's own pause is spent — its 'ended' feed already
+    // told the session, and echoing a pause would stall the advance.
+    if (current !== null && current.handle === endSynthesizedFor) {
+      return;
+    }
     if (audio.paused && !audio.ended) {
       status('paused');
     }
@@ -1051,6 +1067,7 @@ export function createWebPlayerPort(deps: {
   audio.addEventListener('seeked', () => {
     activeMse?.source.notePosition(posMs());
     status(audio.paused ? 'paused' : 'playing');
+    checkEndIntercept();
   });
   audio.addEventListener('timeupdate', () => {
     activeMse?.source.notePosition(posMs());
@@ -1121,6 +1138,11 @@ export function createWebPlayerPort(deps: {
     }
     mediaActionsInstalled = true;
     mediaSession.setActionHandler('play', () => {
+      // An intercepted park left the element ε short of its end — an
+      // OS play replays the row, not the final sliver.
+      if (current !== null && current.handle === endSynthesizedFor) {
+        audio.currentTime = 0;
+      }
       void audio
         .play()
         .then(() => {
