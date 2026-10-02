@@ -638,3 +638,18 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
 - Pulse/skeleton verification without a11y: crop the row area and
   measure luminance across frames — oscillating = animation running,
   flat = reduce-motion static.
+
+## Toast + clipboard triggers (post-#277)
+
+- Deterministic in-sheet toast: settings → storefront field → enter an
+  invalid code ('zz9') → save — `toast.storefrontCode` fires while the
+  sheet stays open. In-sheet toasts render in-flow BELOW the sheet's
+  rows (sheet grows to fit); root/pushed copies float at
+  `insets.bottom + 88`.
+- The emulator's primary clip is STICKY across `adb reboot` (persists
+  to disk) and selection-toolbar Cut/Copy taps do not reliably update
+  it — the paste-preview chip reads the CURRENT clip, so
+  'clipboard has no delta' toast paths may stay unreachable via UI;
+  report them untested rather than faked.
+- Pushed screens' back chevron sits ~y180 device-px (not y57 — that's
+  the status bar).
