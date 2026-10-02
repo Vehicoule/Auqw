@@ -472,16 +472,17 @@ impl StreamRegistry {
                         eof: true,
                     });
                 }
-                // Bare refusal: ambiguous between real EOF and a dead
-                // signed URL, and the probe never re-mints to
-                // disambiguate — it confirms only what the known total
-                // already proves; otherwise the position is simply
-                // unprobed (`eof: false` like an unfetched hole).
-                let proven = matches!(session.effective_total()?, Some(t) if position >= t);
+                // Bare refusal: a `416` with no `Content-Range` answers
+                // `eof: true` — the wire's own verdict, not something a
+                // hint or a best-known total has to prove first. Only
+                // the declared-total arm above pins a ceiling concrete
+                // enough to latch (`mark_eof_below`); the probe never
+                // re-mints to disambiguate a dead signed URL, so this
+                // reports the wire's verdict as given.
                 Ok(ProbeRead {
                     bytes: Vec::new(),
                     total: session.effective_total()?,
-                    eof: proven,
+                    eof: true,
                 })
             }
             FetchOutcome::Status(429, _, retry_after_ms) => {
@@ -1015,6 +1016,51 @@ mod tests {
         let (reg, h) = probed(cfg, Vec::new()).await;
         let read = reg
             .probe(&h, 0, 8, false)
+            .await
+            .unwrap_or_else(|e| panic!("probe: {e}"));
+        assert!(read.bytes.is_empty() && !read.eof);
+    }
+
+    /// A bare `416` — no `Content-Range` — answers `eof: true` on its
+    /// own, even where the best-known total puts the position inside
+    /// the file: the amendment's wire rule, no `proven` ladder.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_bare_416_is_eof() {
+        let d = TestDir::new("probe416");
+        let mut cfg = test_config(&d);
+        cfg.head_bytes = 0;
+        let (reg, h) = probed(
+            cfg,
+            vec![Step::Reply(FetchResponse {
+                status: 416,
+                content_range: None,
+                retry_after_ms: None,
+                body: stream_body(vec![]),
+            })],
+        )
+        .await;
+        // Position 0 sits well inside the hinted 1024 — the refusal
+        // still reports eof rather than hint-driven `proven: false`.
+        let read = reg
+            .probe(&h, 0, 8, true)
+            .await
+            .unwrap_or_else(|e| panic!("probe: {e}"));
+        assert!(read.bytes.is_empty() && read.eof);
+    }
+
+    /// `peek`'s EOF verdict is wire-total only: an unfetched hole past
+    /// the resolve-time hint reports as unprobed (`eof: false`), not
+    /// ended by a hint that over-reported the real resource.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn probe_past_hint_is_hole_not_eof() {
+        let d = TestDir::new("probehint");
+        let mut cfg = test_config(&d);
+        cfg.head_bytes = 0;
+        let (reg, h) = probed(cfg, Vec::new()).await;
+        // The source hints 1024; nothing is committed and no wire
+        // total exists — 2048 is an unprobed hole, not EOF.
+        let read = reg
+            .probe(&h, 2048, 8, false)
             .await
             .unwrap_or_else(|e| panic!("probe: {e}"));
         assert!(read.bytes.is_empty() && !read.eof);

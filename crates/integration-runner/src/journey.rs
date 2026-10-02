@@ -242,6 +242,7 @@ impl KeyValueStore for NullKv {
         _plugin_id: &str,
         _writes: std::collections::BTreeMap<String, Option<Vec<u8>>>,
         _admit: &(dyn Fn() -> bool + Send + Sync),
+        _secrets: &[String],
     ) -> Result<(), auqw_plugin_host::KvError> {
         Ok(())
     }

@@ -447,15 +447,16 @@ async fn retry_or_stall(
     })
 }
 
-/// Whether a `416` proves end-of-stream: the offset is at/past a known
-/// total, or the same request already failed `416` once across a
-/// re-mint — a second refusal means the resource ends below `offset`.
+/// Whether a `416` proves end-of-stream: the offset is at/past the
+/// wire `Content-Range` total, or the same request already failed
+/// `416` once across a re-mint — a second refusal means the resource
+/// ends below `offset`. The resolve-time hint is never EOF authority.
 fn eof_confirmed(session: &Arc<SessionInner>, offset: u64, retried: bool) -> bool {
     if retried {
         return true;
     }
     session
-        .effective_total()
+        .wire_total()
         .map(|t| t.is_some_and(|t| offset >= t))
         .unwrap_or(false)
 }
@@ -1815,6 +1816,72 @@ mod tests {
             "drained demand still preempted the fill"
         );
         assert!(!s.is_terminal());
+        stop_pump(&s, task).await;
+    }
+
+    /// §3.7(b): a hint that under-reports the wire total must not cap
+    /// the stream — a read past the hinted end fetches and serves
+    /// normally, and only the wire `Content-Range` total proves EOF.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn under_reported_hint_never_ends_the_read() {
+        let d = TestDir::new("under-eof");
+        let mut cfg = config(&d);
+        // Park speculative fill — the demand leg alone drives the
+        // fetch, so no earlier request can land a wire total first.
+        cfg.head_bytes = 0;
+        let mut src = source();
+        // The hint says 512; the wire later proves 2048.
+        src.content_length = Some(512);
+        let handle = format!("t-{}", unique());
+        let s = SessionInner::new(handle, src, remint_ok(), cfg, PoolSignals::new())
+            .unwrap_or_else(|e| panic!("session: {e}"));
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(resp(
+            206, 600, 128, 2048,
+        ))]));
+        let task = spawn_pump(&s, fetch);
+        // 600 is past the hinted end but inside the real resource —
+        // a hard EOF here would end playback early.
+        let bytes = s
+            .read(600, 64)
+            .unwrap_or_else(|e| panic!("read past hint: {e}"));
+        assert_eq!(bytes.len(), 64);
+        // And the wire total remains the real EOF authority.
+        let end = s
+            .read(2048, 64)
+            .unwrap_or_else(|e| panic!("read at wire end: {e}"));
+        assert!(end.is_empty());
+        stop_pump(&s, task).await;
+    }
+
+    /// §3.7: coverage complete under the hint with no wire total is
+    /// not a finished file — the pump parks rather than stops, so
+    /// demand parked past the hint still earns its fetch instead of
+    /// stranding on a stopped pump.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn demand_past_hint_survives_a_hint_complete_store() {
+        let d = TestDir::new("hint-complete");
+        let mut cfg = config(&d);
+        cfg.head_bytes = 0;
+        let mut src = source();
+        src.content_length = Some(1024);
+        let handle = format!("t-{}", unique());
+        let s = SessionInner::new(handle, src, remint_ok(), cfg, PoolSignals::new())
+            .unwrap_or_else(|e| panic!("session: {e}"));
+        // Sidecar-resumed shape: every hinted byte committed, no wire
+        // total ever latched.
+        s.store
+            .lock()
+            .unwrap_or_else(|e| panic!("store lock: {e:?}"))
+            .insert(0, &vec![9u8; 1024])
+            .unwrap_or_else(|e| panic!("insert: {e}"));
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(resp(
+            206, 2048, 128, 4096,
+        ))]));
+        let task = spawn_pump(&s, fetch);
+        let got = s
+            .read(2048, 64)
+            .unwrap_or_else(|e| panic!("read past hint: {e}"));
+        assert_eq!(got.len(), 64);
         stop_pump(&s, task).await;
     }
 

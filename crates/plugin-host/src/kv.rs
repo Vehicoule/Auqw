@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
 
@@ -33,7 +33,8 @@ pub trait KeyValueStore: Send + Sync {
     /// Atomically apply a staged patch to the current committed
     /// namespace: `Some(bytes)` sets, `None` deletes. Disjoint writes
     /// staged by concurrent invocations both survive; last committer
-    /// wins only for the same key.
+    /// wins only for the same key. No redaction set — callers outside
+    /// an invocation have no collected secrets to mask.
     ///
     /// # Errors
     /// [`KvError::TooLarge`] when the resulting namespace would violate
@@ -44,14 +45,23 @@ pub trait KeyValueStore: Send + Sync {
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
     ) -> Result<(), KvError> {
-        self.commit_admitting(plugin_id, writes, &|| true)
+        self.commit_admitting(plugin_id, writes, &|| true, &[])
     }
 
     /// `commit` gated by `admit`, evaluated inside the store's write
-    /// serialization immediately before publication — admission and
-    /// publish are one critical section, so a precondition that flips
-    /// concurrently (e.g. an invocation cancel) cannot lose to a
-    /// commit that already left the gate.
+    /// serialization — admission and publish are one critical
+    /// section, so a precondition that flips concurrently (e.g. an
+    /// invocation cancel) cannot lose to a commit that already left
+    /// the gate. `admit` is a *predicate*, not a one-shot permit:
+    /// implementations may consult it zero or more times per commit
+    /// (before staging I/O and again at the publication boundary), so
+    /// it must be a cheap, repeatable, monotonic read of a condition
+    /// like a cancel token or a deadline — a stateful or consuming
+    /// callback is a caller bug. `secrets` is the invocation's
+    /// collected token material: a guest that names a key after a
+    /// secret must not write it back out in a cap-violation message,
+    /// so the message is redacted with the same set as every other
+    /// guest-controlled surface.
     ///
     /// # Errors
     /// [`KvError::Rejected`] when `admit` declines — nothing is
@@ -61,6 +71,7 @@ pub trait KeyValueStore: Send + Sync {
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
         admit: &(dyn Fn() -> bool + Send + Sync),
+        secrets: &[String],
     ) -> Result<(), KvError>;
 }
 
@@ -70,20 +81,22 @@ type StoreMap = BTreeMap<String, BTreeMap<String, Vec<u8>>>;
 /// The cap violation `ns` commits, if any — a detail message the
 /// caller wraps in the typed error that fits its path. The store is
 /// the final authority on caps: invocation-side checks are only early
-/// feedback.
-fn caps_violation(ns: &BTreeMap<String, Vec<u8>>) -> Option<String> {
+/// feedback. Key names embed in the message — they are
+/// guest-controlled text redacted with the same secrets set as every
+/// other guest surface (empty on paths with no invocation context).
+fn caps_violation(ns: &BTreeMap<String, Vec<u8>>, secrets: &[String]) -> Option<String> {
     let mut total = 0usize;
     for (key, value) in ns {
         if key.is_empty() || key.len() > MAX_KV_KEY_BYTES {
             return Some(format!(
                 "key {:?} violates the 128-byte cap",
-                redact_text(key, &[])
+                redact_text(key, secrets)
             ));
         }
         if value.len() > MAX_KV_VALUE_BYTES {
             return Some(format!(
                 "key {:?} value exceeds 64 KiB",
-                redact_text(key, &[])
+                redact_text(key, secrets)
             ));
         }
         total += key.len() + value.len();
@@ -145,6 +158,7 @@ impl KeyValueStore for MemoryKeyValueStore {
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
         admit: &(dyn Fn() -> bool + Send + Sync),
+        secrets: &[String],
     ) -> Result<(), KvError> {
         if writes.is_empty() {
             return Ok(());
@@ -152,7 +166,7 @@ impl KeyValueStore for MemoryKeyValueStore {
         let mut maps = self.lock()?;
         let mut ns = maps.get(plugin_id).cloned().unwrap_or_default();
         apply_patch(&mut ns, writes);
-        if let Some(msg) = caps_violation(&ns) {
+        if let Some(msg) = caps_violation(&ns, secrets) {
             return Err(KvError::TooLarge(msg));
         }
         if !admit() {
@@ -220,7 +234,9 @@ impl FileKeyValueStore {
                 })?;
                 values.insert(key, value);
             }
-            if let Some(msg) = caps_violation(&values) {
+            // The load path has no invocation context — no collected
+            // secrets exist to redact against.
+            if let Some(msg) = caps_violation(&values, &[]) {
                 return Err(KvError::Corrupt(format!(
                     "{}: {plugin_id}: {msg}",
                     self.path.display()
@@ -231,7 +247,14 @@ impl FileKeyValueStore {
         Ok(out)
     }
 
-    fn write_all(&self, map: &StoreMap) -> Result<(), KvError> {
+    /// Encode `map` into a unique sibling tmp and fsync it — the
+    /// publishable state for the next rename. A unique tmp per write:
+    /// two store instances on one path must not clobber each other's
+    /// staging file (they'd still last-writer-wins at rename — a
+    /// documented one-store-per-path assumption — but the committed
+    /// file stays whole). The caller removes the tmp if the commit is
+    /// declined; a failed staging removes it itself.
+    fn stage_all(&self, map: &StoreMap) -> Result<PathBuf, KvError> {
         let encoded: BTreeMap<String, BTreeMap<String, String>> = map
             .iter()
             .map(|(plugin_id, ns)| {
@@ -242,10 +265,6 @@ impl FileKeyValueStore {
             })
             .collect();
         let json = serde_json::to_vec(&encoded).map_err(|e| KvError::Io(format!("encode: {e}")))?;
-        // A unique sibling tmp per write: two store instances on one
-        // path must not clobber each other's staging file (they'd still
-        // last-writer-wins at rename — a documented one-store-per-path
-        // assumption — but the committed file stays whole).
         static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut tmp_name = self.path.as_os_str().to_os_string();
         tmp_name.push(format!(
@@ -254,27 +273,29 @@ impl FileKeyValueStore {
             TMP_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         let tmp = PathBuf::from(tmp_name);
-        // Unique per write means a failed commit leaves its own debris —
-        // best-effort remove the staging file on any error before the
-        // rename lands.
         let staged = (|| -> Result<(), KvError> {
-            {
-                let mut file = std::fs::File::create(&tmp)
-                    .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
-                file.write_all(&json)
-                    .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
-                file.sync_all()
-                    .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
-            }
-            std::fs::rename(&tmp, &self.path)
-                .map_err(|e| KvError::Io(format!("{}: {e}", self.path.display())))
+            let mut file = std::fs::File::create(&tmp)
+                .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+            file.write_all(&json)
+                .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+            file.sync_all()
+                .map_err(|e| KvError::Io(format!("{}: {e}", tmp.display())))?;
+            Ok(())
         })();
         if staged.is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
-        staged?;
-        // The rename's directory entry needs its own sync — without it
-        // a crash could still lose the committed file.
+        staged.map(|()| tmp)
+    }
+
+    /// Rename a staged tmp over the store path, then fsync the
+    /// directory entry — the rename is the publication boundary, and
+    /// the dir sync keeps a crash from losing the committed file.
+    fn commit_staged(&self, tmp: &Path) -> Result<(), KvError> {
+        if let Err(e) = std::fs::rename(tmp, &self.path) {
+            let _ = std::fs::remove_file(tmp);
+            return Err(KvError::Io(format!("{}: {e}", self.path.display())));
+        }
         if let Some(parent) = self.path.parent() {
             let dir = std::fs::File::open(parent)
                 .map_err(|e| KvError::Io(format!("{}: {e}", parent.display())))?;
@@ -296,6 +317,7 @@ impl KeyValueStore for FileKeyValueStore {
         plugin_id: &str,
         writes: BTreeMap<String, Option<Vec<u8>>>,
         admit: &(dyn Fn() -> bool + Send + Sync),
+        secrets: &[String],
     ) -> Result<(), KvError> {
         if writes.is_empty() {
             return Ok(());
@@ -304,22 +326,77 @@ impl KeyValueStore for FileKeyValueStore {
         let mut all = self.read_all()?;
         let mut ns = all.get(plugin_id).cloned().unwrap_or_default();
         apply_patch(&mut ns, writes);
-        if let Some(msg) = caps_violation(&ns) {
+        if let Some(msg) = caps_violation(&ns, secrets) {
             return Err(KvError::TooLarge(msg));
-        }
-        // The gate runs under the write lock on the doorstep of the
-        // rename — a cancel that lands after this point has already
-        // won or lost atomically, never mid-publication.
-        if !admit() {
-            return Err(KvError::Rejected(format!(
-                "{plugin_id}: admission declined"
-            )));
         }
         if ns.is_empty() {
             all.remove(plugin_id);
         } else {
             all.insert(plugin_id.to_string(), ns);
         }
-        self.write_all(&all)
+        // A gate already closed is answered before any staging I/O —
+        // `admit` is a repeatable monotonic predicate (see the trait
+        // contract), so the caller's rejection outranks both the
+        // staged bytes and a backend error on a commit it discarded,
+        // and later KV operations aren't parked behind a doomed
+        // write+fsync.
+        if !admit() {
+            return Err(KvError::Rejected(format!(
+                "{plugin_id}: admission declined"
+            )));
+        }
+        // The same predicate is consulted again at the publication
+        // boundary — the tmp write + sync is the slow leg and the
+        // rename is the commit point, so a cancel or deadline that
+        // lands while bytes were being staged still discards them
+        // instead of publishing past a bound the caller already
+        // reported. A staging failure consults the gate too: a closed
+        // gate owns the verdict (Rejected) over the backend's error.
+        let tmp = match self.stage_all(&all) {
+            Ok(tmp) => tmp,
+            Err(e) => {
+                return if admit() {
+                    Err(e)
+                } else {
+                    Err(KvError::Rejected(format!(
+                        "{plugin_id}: admission declined"
+                    )))
+                };
+            }
+        };
+        if !admit() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(KvError::Rejected(format!(
+                "{plugin_id}: admission declined"
+            )));
+        }
+        self.commit_staged(&tmp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cap-violating key is quoted in the `TooLarge` message — guest
+    /// token material inside it must be masked by the collected set,
+    /// not echoed verbatim (deferred-appendix F-6).
+    #[test]
+    fn caps_violation_masks_collected_secrets() {
+        let kv = MemoryKeyValueStore::new();
+        let secret = "tok-secret-value-9".to_string();
+        let key = format!("{secret}{}", "k".repeat(200));
+        let writes = BTreeMap::from([(key, Some(b"v".to_vec()))]);
+        let e = match kv.commit_admitting("p", writes, &|| true, std::slice::from_ref(&secret)) {
+            Err(e) => e,
+            Ok(()) => panic!("expected TooLarge, got Ok"),
+        };
+        match e {
+            KvError::TooLarge(m) => {
+                assert!(!m.contains(&secret), "{m}");
+                assert!(m.contains("***"), "{m}");
+            }
+            e => panic!("expected TooLarge, got {e:?}"),
+        }
     }
 }

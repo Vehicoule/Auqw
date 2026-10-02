@@ -6,13 +6,14 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use auqw_plugin_host::{
-    invoke, load, Budgets, FileKeyValueStore, HostClock, HostServices, HttpClient, HttpError,
-    HttpErrorKind, HttpRequest, HttpResponse, Invocation, InvokeError, KeyValueStore, KvError,
-    Manifest, MemoryKeyValueStore,
+    invoke, load, BudgetDimension, Budgets, FileKeyValueStore, HostClock, HostServices, HttpClient,
+    HttpError, HttpErrorKind, HttpRequest, HttpResponse, Invocation, InvokeError, KeyValueStore,
+    KvError, Manifest, MemoryKeyValueStore,
 };
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -753,6 +754,33 @@ async fn no_write_done_does_not_touch_store() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The admission gate runs after staging, on the doorstep of the
+/// rename: a declined commit publishes nothing and removes its tmp
+/// file — a caller that already reported a deadline leaves neither
+/// committed bytes nor debris behind.
+#[test]
+fn declined_admission_leaves_no_tmp_debris() {
+    let dir = std::env::temp_dir().join(format!("auqw-kv-decline-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    ok(std::fs::create_dir_all(&dir).map_err(|e| format!("{e:?}")));
+    let path = dir.join("plugin-kv.json");
+    let kv = ok(FileKeyValueStore::new(&path));
+    let writes = BTreeMap::from([("k".to_string(), Some(b"v".to_vec()))]);
+    match kv.commit_admitting("test-plugin", writes, &|| false, &[]) {
+        Err(KvError::Rejected(_)) => {}
+        Err(e) => panic!("expected Rejected, got {e:?}"),
+        Ok(()) => panic!("expected Rejected, got Ok"),
+    }
+    assert!(!path.exists());
+    let debris: Vec<_> = ok(std::fs::read_dir(&dir).map_err(|e| format!("{e:?}")))
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name())
+        .filter(|n| n.to_string_lossy().contains(".tmp."))
+        .collect();
+    assert!(debris.is_empty(), "{debris:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An on-disk namespace over the committed cap is corruption — the
 /// store refuses it at open instead of serving it to a guest.
 #[test]
@@ -775,4 +803,78 @@ fn over_cap_on_disk_namespace_is_corrupt() {
         Ok(_) => panic!("expected Corrupt, got store"),
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A KV backend wedged in the commit window must not hold the
+/// invocation past its deadline — the commit leg races the same bound
+/// the guest entries do, mapped to the same typed error. The gate
+/// releases the worker once `invoke` has reported, so the detached
+/// leg never leaks a thread past teardown.
+struct GatedCommitKv {
+    release: Arc<AtomicBool>,
+}
+
+impl KeyValueStore for GatedCommitKv {
+    fn snapshot(&self, _plugin_id: &str) -> Result<BTreeMap<String, Vec<u8>>, KvError> {
+        Ok(BTreeMap::new())
+    }
+
+    fn commit_admitting(
+        &self,
+        _plugin_id: &str,
+        _writes: BTreeMap<String, Option<Vec<u8>>>,
+        _admit: &(dyn Fn() -> bool + Send + Sync),
+        _secrets: &[String],
+    ) -> Result<(), KvError> {
+        while !self.release.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn deadline_caps_kv_commit_leg() {
+    let release = Arc::new(AtomicBool::new(false));
+    let kv: Arc<dyn KeyValueStore> = Arc::new(GatedCommitKv {
+        release: Arc::clone(&release),
+    });
+    let http = CannedHttp {
+        status: 200,
+        body: vec![],
+    };
+    let clock = FixedClock(0);
+    let budgets = Budgets {
+        deadline: Duration::from_millis(50),
+        ..Budgets::default()
+    };
+    let plugin = ok(load(
+        SCENARIO_WASM,
+        manifest_for(SCENARIO_WASM, &["kv"]),
+        &budgets,
+    ));
+    let started = std::time::Instant::now();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        json!({"scenario": "kv_commit", "key": "k", "value": "v1"}),
+        &budgets,
+        CancellationToken::new(),
+        services(&http, kv.clone(), &clock),
+    )
+    .await;
+    release.store(true, Ordering::Relaxed);
+    assert!(
+        matches!(
+            err(result),
+            InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Deadline
+            }
+        ),
+        "expected deadline cap on the commit leg"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "wedged commit outlived the deadline"
+    );
 }

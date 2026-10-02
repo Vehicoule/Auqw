@@ -2,16 +2,17 @@
 //! cancellation. Synthetic guests are hand-written WAT; `spin.wasm` /
 //! `echo.wasm` are the checked-in Rust conformance artifacts.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use auqw_plugin_host::{
     invoke, load, ArtifactRef, BudgetDimension, Budgets, HostServices, HttpClient, HttpError,
-    HttpErrorKind, HttpRequest, HttpResponse, Invocation, InvokeError, LoadError, Manifest,
-    ManifestError, MemoryKeyValueStore, SystemClock,
+    HttpErrorKind, HttpRequest, HttpResponse, Invocation, InvokeError, KeyValueStore, KvError,
+    LoadError, Manifest, ManifestError, MemoryKeyValueStore, SystemClock,
 };
 use serde_json::Value;
 use sha2::Digest;
@@ -283,6 +284,37 @@ fn busy_wat(busy_in: &str) -> String {
         if busy_in == "handle" { busy } else { "" },
         (2048u64 << 32) | raw.len() as u64,
         raw.replace('"', "\\\""),
+    )
+}
+
+/// Guest emitting `first` from `handle` #1; on later calls it checks
+/// byte 2 of the step input — `serde_json` sorts reply keys, so 'e'
+/// means `{"error":…,"type":"host_error"}` ('b' would be
+/// `{"body_base64":…,"type":"http_response"}`) — and answers
+/// `on_error`, else `ok`.
+fn probe_reply_wat(first: &str, on_error: &str, ok: &str) -> String {
+    format!(
+        "(module\n  (memory (export \"memory\") 1)\n  \
+         (global $n (mut i32) (i32.const 0))\n  \
+         (func (export \"alloc\") (param i32) (result i32) (i32.const 1024))\n  \
+         (func (export \"handle\") (param i32 i32) (result i64)\n    \
+         (global.set $n (i32.add (global.get $n) (i32.const 1)))\n    \
+         (select\n      \
+         (i64.const {})\n      \
+         (select\n        \
+         (i64.const {})\n        \
+         (i64.const {})\n        \
+         (i32.eq (i32.load8_u offset=2 (local.get 0)) (i32.const 101)))\n      \
+         (i32.le_u (global.get $n) (i32.const 1))))\n  \
+         (data (i32.const 16384) \"{}\")\n  \
+         (data (i32.const 49152) \"{}\")\n  \
+         (data (i32.const 57344) \"{}\"))",
+        (16384u64 << 32) | first.len() as u64,
+        (49152u64 << 32) | on_error.len() as u64,
+        (57344u64 << 32) | ok.len() as u64,
+        first.replace('"', "\\\""),
+        on_error.replace('"', "\\\""),
+        ok.replace('"', "\\\""),
     )
 }
 
@@ -1052,6 +1084,97 @@ async fn done_url_within_allowlist_passes() {
     assert_eq!(ok(result)["url"], "https://cdn.example.net/stream");
 }
 
+/// `artworkRef.url` values nested in a result are fetch targets the
+/// renderer will open — the allowlist covers every URL the result
+/// carries across, not just the top-level `result.url`.
+#[tokio::test]
+async fn done_nested_artwork_url_outside_allowlist_is_rejected() {
+    for result in [
+        // catalogArtworkResult: items are artwork refs directly.
+        r#"{"items":[{"url":"https://evil.example.net/a.png","width":1,"height":1}]}"#,
+        // trackMetadata: an item's artwork array of refs.
+        r#"{"items":[{"artwork":[{"url":"https://evil.example.net/a.png","width":1,"height":1}]}]}"#,
+        // catalogEntityResult: entityMetadata.artwork.
+        r#"{"entity":{"artwork":[{"url":"https://evil.example.net/a.png","width":1,"height":1}]}}"#,
+    ] {
+        let wasm = ok(wat::parse_str(done_wat(result)));
+        let plugin = ok(load(
+            &wasm,
+            manifest_for(&wasm, &["network:example.com"]),
+            &default_budgets(),
+        ));
+        let (http, _calls) = CannedHttp::new();
+        let Invocation { result: r, .. } = invoke(
+            &plugin,
+            "playback.resolve",
+            serde_json::json!({}),
+            &default_budgets(),
+            CancellationToken::new(),
+            svc(&http, None),
+        )
+        .await;
+        assert!(
+            matches!(err(r), InvokeError::InvalidMessage(_)),
+            "result {result} must be rejected"
+        );
+    }
+}
+
+/// Nested artwork refs inside the manifest's permissions pass
+/// through untouched.
+#[tokio::test]
+async fn done_nested_artwork_url_within_allowlist_passes() {
+    let wasm = ok(wat::parse_str(done_wat(
+        r#"{"items":[{"artwork":[{"url":"https://cdn.example.net/a.png","width":1,"height":1}]}]}"#,
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:*.example.net"]),
+        &default_budgets(),
+    ));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert_eq!(
+        ok(result)["items"][0]["artwork"][0]["url"],
+        "https://cdn.example.net/a.png"
+    );
+}
+
+/// A header literally named `url` is request-header material, not a
+/// fetch target — `result.headers` carries name/value pairs the
+/// renderer attaches to the stream request, so that subtree is not
+/// walked.
+#[tokio::test]
+async fn done_headers_url_is_request_material_not_a_target() {
+    let wasm = ok(wat::parse_str(done_wat(
+        r#"{"url":"https://cdn.example.net/stream","headers":{"url":"X-Custom"}}"#,
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:*.example.net"]),
+        &default_budgets(),
+    ));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert!(ok(result)["url"].is_string());
+}
+
 // ---------- HTTP client redirect policy ----------
 
 /// The host HTTP client never follows redirects: a 3xx from an
@@ -1535,6 +1658,79 @@ async fn deadline_crossed_during_entry_wins() {
             }
         ),
         "expected deadline budget error"
+    );
+}
+
+/// A KV backend wedged on the snapshot read must not hold the
+/// invocation past its deadline — the blocking leg races the same
+/// bound the guest entries do. The gate releases the worker once
+/// `invoke` has reported, so the detached leg never leaks a thread.
+struct GatedSnapshotKv {
+    release: Arc<AtomicBool>,
+}
+
+impl KeyValueStore for GatedSnapshotKv {
+    fn snapshot(&self, _plugin_id: &str) -> Result<BTreeMap<String, Vec<u8>>, KvError> {
+        while !self.release.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(BTreeMap::new())
+    }
+
+    fn commit_admitting(
+        &self,
+        _plugin_id: &str,
+        _writes: BTreeMap<String, Option<Vec<u8>>>,
+        _admit: &(dyn Fn() -> bool + Send + Sync),
+        _secrets: &[String],
+    ) -> Result<(), KvError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn deadline_caps_kv_snapshot_leg() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    let mut budgets = default_budgets();
+    budgets.deadline = Duration::from_millis(50);
+    let plugin = ok(load(
+        &wasm,
+        manifest_for_abi(&wasm, "0.2.0", &["kv"]),
+        &budgets,
+    ));
+    let release = Arc::new(AtomicBool::new(false));
+    let kv: Arc<dyn KeyValueStore> = Arc::new(GatedSnapshotKv {
+        release: Arc::clone(&release),
+    });
+    let (http, _calls) = CannedHttp::new();
+    let started = Instant::now();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        HostServices {
+            http: &http,
+            kv,
+            clock: &CLOCK,
+            pot_provider: None,
+        },
+    )
+    .await;
+    release.store(true, Ordering::Relaxed);
+    assert!(
+        matches!(
+            err(result),
+            InvokeError::BudgetExceeded {
+                dimension: BudgetDimension::Deadline
+            }
+        ),
+        "expected deadline cap on the snapshot leg"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "wedged snapshot outlived the deadline"
     );
 }
 
@@ -2026,6 +2222,76 @@ async fn access_token_is_masked_in_guest_log() {
     let entry = &attempt.guest_log[0];
     assert!(!entry.message.contains("tok-secret-value-9"), "{entry:?}");
     assert!(entry.message.contains("***"));
+}
+
+/// Answers every request with a canned provider body — shaped pot
+/// responses for the secret-collection tests.
+struct JsonBodyHttp(Vec<u8>);
+
+impl HttpClient for JsonBodyHttp {
+    fn send(
+        &self,
+        _req: HttpRequest,
+        _timeout: Duration,
+        _cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + '_>> {
+        let body = self.0.clone();
+        Box::pin(async move {
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body,
+            })
+        })
+    }
+}
+
+/// A provider body declaring more secrets than the collection cap is
+/// refused outright — the guest sees a `host_error`, never the body,
+/// so leaves the cap dropped can never be echoed raw. Strings that
+/// did land in the set still mask.
+#[tokio::test]
+async fn pot_response_over_secret_cap_is_refused() {
+    // Ask for a pot token, then branch on the reply: a `host_error`
+    // (byte 10 'o') means the body was refused — fail with a message
+    // quoting a collected secret; anything else says `done`.
+    let wasm = ok(wat::parse_str(probe_reply_wat(
+        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"pot_token\",\"payload\":{\"content_binding\":\"v\"}}",
+        "{\"type\":\"fail\",\"error\":{\"kind\":\"transient\",\"message\":\"refused, saw tok-collected-9\"}}",
+        "{\"type\":\"done\",\"result\":{}}",
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for_abi(&wasm, "0.2.0", &["pot-provider"]),
+        &default_budgets(),
+    ));
+    // `poToken` sorts before `zz` in the response's key order, so the
+    // token lands in the collection before the pad array overflows
+    // the 256-entry cap.
+    let pad: Vec<String> = (0..300).map(|i| format!("pad-{i}")).collect();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "poToken": "tok-collected-9",
+        "zz": pad,
+    }))
+    .unwrap_or_else(|e| panic!("json: {e}"));
+    let http = JsonBodyHttp(body);
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, Some("https://pot.provider")),
+    )
+    .await;
+    match err(result) {
+        InvokeError::GuestFail { kind, message } => {
+            assert_eq!(kind, "transient", "{kind}");
+            assert!(!message.contains("tok-collected-9"), "{message}");
+            assert!(message.contains("***"), "{message}");
+        }
+        e => panic!("expected GuestFail (host_error seen), got {e:?}"),
+    }
 }
 
 /// The same masking applies to a guest `fail` message.
