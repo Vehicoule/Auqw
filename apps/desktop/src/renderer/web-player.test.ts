@@ -1009,6 +1009,114 @@ export async function run(): Promise<void> {
     );
   }
 
+  // The tail end is intercepted before the element's `ended` — the
+  // same 'ended' status + null-target transition feed the session
+  // while the element stays paused-alive, a stale `ended` for the
+  // already-fed end can't double-advance, the intercept's own pause
+  // never echoes, and an OS play replays the row from zero.
+  {
+    const stream = fakeStream();
+    const audio = fakeAudio();
+    const ms = fakeMediaSession();
+    const player = createWebPlayerPort({ stream, audio, mediaSession: ms });
+    const events = collect(player);
+    await player.setQueueProjection(
+      twoItemProjection({
+        order: [0],
+        items: [
+          {
+            occurrenceId: 'occ-1',
+            provider: 'deezer',
+            sourceRef: 't1',
+            title: 'one',
+            artist: null,
+            artworkUrl: null,
+          },
+        ],
+      }),
+    );
+    await player.play({ handle: 'h-1', identity });
+    // ~50 ms short of the 60 s duration — inside the intercept's ε.
+    audio.currentTime = 59.95;
+    audio.fire('timeupdate');
+    await settle();
+    assert(audio.paused, 'the intercept pauses short of ended');
+    assert(!audio.ended, 'the element never reaches ended');
+    const statuses = events.filter(
+      (e) => e.type === 'status' && e.state === 'ended',
+    );
+    assertEqual(statuses.length, 1, 'the synthesized end is reported');
+    assertEqual(
+      events.filter((e) => e.type === 'status' && e.state === 'paused')
+        .length,
+      0,
+      'the intercept pause is not re-reported',
+    );
+    const transition = events.find((e) => e.type === 'queue-transition');
+    assert(
+      transition !== undefined &&
+        transition.type === 'queue-transition' &&
+        transition.toOccurrenceId === null,
+      'the intercepted end emits the tail transition',
+    );
+    // A real `ended` arriving anyway is spent — no second advance.
+    audio.fire('ended');
+    assertEqual(
+      events.filter((e) => e.type === 'queue-transition').length,
+      1,
+      'a late element ended cannot double-advance',
+    );
+    assertEqual(
+      events.filter((e) => e.type === 'status' && e.state === 'ended')
+        .length,
+      1,
+      'the spent end emits no second status',
+    );
+    // An OS play on the parked card replays the row from zero — the
+    // element was left ε short of its end, not at a resumable spot.
+    ms.actions.get('play')?.();
+    assertEqual(audio.currentTime, 0);
+    assert(!audio.paused, 'the OS play resumes the element');
+  }
+
+  // A tighter end deadline replaces an armed check — a seek or track
+  // switch landing inside the window must not wait on the stale timer.
+  {
+    const stream = fakeStream();
+    const { player, audio, events } = rig(stream);
+    await player.setQueueProjection(
+      twoItemProjection({
+        order: [0],
+        items: [
+          {
+            occurrenceId: 'occ-1',
+            provider: 'deezer',
+            sourceRef: 't1',
+            title: 'one',
+            artist: null,
+            artworkUrl: null,
+          },
+        ],
+      }),
+    );
+    await player.play({ handle: 'h-1', identity });
+    // Arm a ~940 ms check, then land closer — the re-armed deadline
+    // must intercept even though the stale timer has not fired.
+    audio.currentTime = 59.0;
+    audio.fire('timeupdate');
+    audio.currentTime = 59.5;
+    audio.fire('timeupdate');
+    audio.currentTime = 59.96;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert(audio.paused, 'the re-armed check intercepts on time');
+    assertEqual(
+      events.filter((e) => e.type === 'status' && e.state === 'ended')
+        .length,
+      1,
+      'the re-armed intercept feeds the end once',
+    );
+  }
+
   // A failed successor attach surfaces as a failed status — never an
   // illegal transition the session must reject.
   {

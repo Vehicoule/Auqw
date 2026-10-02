@@ -50,6 +50,7 @@ import type { StorageBatch } from '../ports/storage.ts';
 import { QueueEngine } from '../queue/queue-engine.ts';
 import type { QueueSnapshot } from '../queue/queue-engine.ts';
 import type { RadioTailRecord } from '../queue/radio-tail.ts';
+import { remainingAfterCurrent } from '../queue/radio-tail.ts';
 import { Serializer } from './serializer.ts';
 import type { Ready, SessionHostCore } from './ready.ts';
 import type { SessionPlayback } from './session.ts';
@@ -273,6 +274,15 @@ type ActiveAttempt = {
   endedHandled: boolean;
   /** True on the single in-budget re-attempt after a retryable failure. */
   autoRetried?: boolean;
+  /**
+   * The listen cycle the finished play accounted under — set on an
+   * attempt parked by a natural tail end. The status leg bumps the
+   * cycle when it parks; the matching transition then records the
+   * finish against this pre-bump key so one listen can't mint two
+   * play events under adjacent cycles. Cleared when the parked
+   * attempt goes live again.
+   */
+  endedCycleAtPark?: number;
   /** Next-best hops this intent already spent on dead refs. */
   alternatesUsed: number;
   /**
@@ -769,12 +779,13 @@ export class PlaybackEngine {
     recordingId: string,
     listenedMs: number,
     durationMs: number | null,
+    cycleOverride?: number,
   ): Promise<void> {
     const r = this.#host.ready();
     if (r === null) {
       return;
     }
-    const cycle = r.listenCycles[occurrenceId] ?? 0;
+    const cycle = cycleOverride ?? r.listenCycles[occurrenceId] ?? 0;
     const dedupeId = playDedupeId(occurrenceId, cycle);
     if (
       !isSafeNonNegative(listenedMs) ||
@@ -2276,6 +2287,11 @@ export class PlaybackEngine {
         prior.identity.attemptId === attempt.identity.attemptId
         ? prior.durationMs
         : undefined);
+    if (state !== 'paused') {
+      // A parked attempt that went live again accounts its next end
+      // under the bumped cycle like any fresh listen.
+      delete attempt.endedCycleAtPark;
+    }
     r.playback = {
       type: state,
       recordingId: attempt.recordingId,
@@ -2287,6 +2303,45 @@ export class PlaybackEngine {
       ...(carried === undefined ? {} : { durationMs: carried }),
     };
     this.#host.publish();
+  }
+
+  /**
+   * Park a naturally-ended attempt instead of releasing it: the row
+   * keeps its live element so an OS-side play replays in place (its
+   * own 'ended' is spent — `endedHandled` bars a double-advance),
+   * the intent budgets start fresh, and the bumped listen cycle lets
+   * the replay count like a repeat=one loop.
+   */
+  #parkEndedAttempt(
+    r: Ready,
+    from: ActiveAttempt,
+    freshCycle = true,
+  ): void {
+    const attempt: ActiveAttempt = {
+      identity: from.identity,
+      recordingId: from.recordingId,
+      occurrenceId: from.occurrenceId,
+      ...(from.ref === undefined ? {} : { ref: from.ref }),
+      source: new CancellationSource(),
+      deadlineMs: this.#host.deadline(),
+      ...(from.handle === undefined ? {} : { handle: from.handle }),
+      preparedHandled: true,
+      endedHandled: true,
+      // The finish accounts under the cycle live when it ended — the
+      // pre-bump key the matching transition dedupes against. A
+      // re-park after a status-side park carries that key forward.
+      endedCycleAtPark:
+        from.endedCycleAtPark ?? r.listenCycles[from.occurrenceId] ?? 0,
+      listenedMsAccum: 0,
+      lastStatusPositionMs: 0,
+      preparesUsed: 0,
+      alternatesUsed: 0,
+    };
+    this.#active = attempt;
+    if (freshCycle) {
+      bumpListenCycle(r, attempt.occurrenceId);
+    }
+    this.#setPlaybackFromStatus(attempt, 'paused');
   }
 
   // ---- player events ------------------------------------------------
@@ -2411,6 +2466,44 @@ export class PlaybackEngine {
         return;
       }
       active.endedHandled = true;
+      const before = r.queue.snapshot();
+      const beforeMarks = r.queue.unplayableIds;
+      const dealt = this.#host.dealtOrder(r);
+      // The port emits its own 'ended' status before the matching
+      // queue-transition — releasing the handle here would kill the
+      // OS surface before the transition can park the row. Mirror
+      // the transition park directly: an unseeded tail end keeps the
+      // live element and pauses the row at position 0.
+      if (
+        active.handle !== undefined &&
+        (r.radio === null || r.radio.status !== 'growing') &&
+        r.repeat === 'off' &&
+        before.currentOccurrenceId === active.occurrenceId &&
+        remainingAfterCurrent(before, dealt ?? undefined) === 0
+      ) {
+        active.source.cancel();
+        active.timer?.cancel();
+        this.#active = null;
+        try {
+          r.queue.select(active.occurrenceId, false);
+        } catch {
+          return;
+        }
+        const parked = await this.#host.persistQueue(r, before, beforeMarks);
+        this.#host.derived();
+        if (parked.ok && this.#active === null) {
+          this.#parkEndedAttempt(r, active);
+        } else {
+          // Rolled back or superseded — drop the kept handle and go
+          // idle, the same honesty the failed-advance path reports.
+          if (active.handle !== undefined) {
+            await this.#releaseHandle(active.handle, event.identity);
+          }
+          r.playback = { type: 'idle' };
+          this.#host.publish();
+        }
+        return;
+      }
       if (active.handle !== undefined) {
         await this.#releaseHandle(active.handle, event.identity);
       }
@@ -2420,9 +2513,6 @@ export class PlaybackEngine {
       active.source.cancel();
       active.timer?.cancel();
       this.#active = null;
-      const before = r.queue.snapshot();
-      const beforeMarks = r.queue.unplayableIds;
-      const dealt = this.#host.dealtOrder(r);
       try {
         // repeat=one replays the cursor item; repeat=all wraps a tail
         // end back to the head — the same rules the service follows.
@@ -2519,6 +2609,12 @@ export class PlaybackEngine {
         ? 'buffering'
         : event.state;
     if (mapped === 'buffering' || mapped === 'playing' || mapped === 'paused') {
+      if (mapped === 'playing') {
+        // A parked attempt going live spends its parked marker — the
+        // finish it recorded already deduped its matching transition;
+        // the next end must count under a fresh cycle.
+        delete active.endedCycleAtPark;
+      }
       const prev = r.playback;
       r.playback = {
         type: mapped,
@@ -3045,6 +3141,13 @@ export class PlaybackEngine {
           from.recordingId,
           rec?.durationMs ?? r.queue.snapshot().positionMs,
           rec?.durationMs ?? null,
+          // A status-side park already accounted this finish under
+          // the pre-bump cycle — record against that key so the
+          // bump can't mint a second play for one listen.
+          this.#active !== null &&
+            this.#active.occurrenceId === event.fromOccurrenceId
+            ? this.#active.endedCycleAtPark
+            : undefined,
         );
       }
     }
@@ -3053,10 +3156,34 @@ export class PlaybackEngine {
       bumpListenCycle(r, toId);
     }
     const wasPlaying = r.queue.snapshot().mode === 'playing';
+    // The drain authorization belongs to the tail armed at reconcile
+    // time — a reseed during the write below swaps in a fresh record
+    // whose own flag already reflects its queue state.
+    const radioAtTransition = r.radio;
+    // A natural end with no tail still chasing the drain parks the
+    // ended row instead: the queue pauses at position 0 rather than
+    // stopping, so an OS-side play reconciles into a real replay on
+    // the live element instead of landing on a cleared surface. An
+    // 'ended'/'failed' record lingers but can no longer append — it
+    // does not count as a chase.
+    const parkedTail =
+      toId === null &&
+      event.reason === 'ended' &&
+      (radioAtTransition === null || radioAtTransition.status !== 'growing')
+        ? event.fromOccurrenceId
+        : null;
+    const retainTail = parkedTail !== null;
+    if (event.reason === 'remote-stop') {
+      // Session-stop semantics: drop the armed tail before the write
+      // below, so a page landing during it finds `r.radio` empty — a
+      // deliberate stop must not grow the queue it just stopped.
+      this.#host.disarmRadio(r);
+    }
     try {
-      // A null target means the cursor ran off the end: stopped.
+      // A null target means the cursor ran off the end: stopped —
+      // unless the tail parks the ended row (retainTail above).
       r.queue.reconcileNativeCurrent(
-        toId,
+        parkedTail ?? toId,
         toId === null ? 0 : event.positionMs,
         toId !== null,
       );
@@ -3064,18 +3191,8 @@ export class PlaybackEngine {
       this.#host.logWarn('queue transition rejected');
       return;
     }
-    marker.currentOccurrenceId = toId;
+    marker.currentOccurrenceId = parkedTail ?? toId;
     marker.reconciledQueueRev = r.queue.snapshot().revision;
-    // The drain authorization belongs to the tail armed at reconcile
-    // time — a reseed during the write below swaps in a fresh record
-    // whose own flag already reflects its queue state.
-    const radioAtTransition = r.radio;
-    if (event.reason === 'remote-stop') {
-      // Session-stop semantics: drop the armed tail before the write
-      // below, so a page landing during it finds `r.radio` empty — a
-      // deliberate stop must not grow the queue it just stopped.
-      this.#host.disarmRadio(r);
-    }
     // Adopt the service-reported attempt, superseding the current one.
     const prev = this.#active;
     this.#active = null;
@@ -3083,7 +3200,20 @@ export class PlaybackEngine {
       prev.source.cancel();
       prev.timer?.cancel();
     }
-    if (event.identity !== null && event.handle !== null && toId !== null) {
+    // Park the ended attempt rather than releasing it: the row
+    // replays in place on a remote play — same contract as the
+    // status-side park below (#handleStatus 'ended' fallback).
+    const parked =
+      parkedTail !== null && prev !== null && prev.handle !== undefined;
+    if (parked && prev !== null) {
+      // A status-side park already bumped the cycle — refresh the
+      // parked shape without minting a second one.
+      this.#parkEndedAttempt(r, prev, prev.endedCycleAtPark === undefined);
+    } else if (
+      event.identity !== null &&
+      event.handle !== null &&
+      toId !== null
+    ) {
       const snap2 = r.queue.snapshot();
       const occurrence = snap2.occurrences.find(
         (o) => o.occurrenceId === toId,
@@ -3169,8 +3299,13 @@ export class PlaybackEngine {
       prev.source.cancel();
       prev.timer?.cancel();
       // The service may reuse the same handle for the new cursor
-      // position — releasing it would kill the live stream.
-      if (prev.handle !== undefined && prev.handle !== event.handle) {
+      // position — releasing it would kill the live stream. A parked
+      // tail keeps it too: the retained attempt replays in place.
+      if (
+        prev.handle !== undefined &&
+        prev.handle !== event.handle &&
+        !parked
+      ) {
         await this.#releaseHandle(prev.handle, prev.identity);
       }
       if (prev.requestId !== undefined && !prev.preparedHandled) {
@@ -3186,8 +3321,10 @@ export class PlaybackEngine {
       // it. The flag marks only when the drain committed — a failed
       // write must not authorize a later paused drain to resume. An
       // explicit remote-stop is no drain: the user stopped on purpose.
+      // A parked tail is none either — the queue never drained.
       const rec = radioAtTransition;
-      const drain = toId === null && event.reason !== 'remote-stop';
+      const drain =
+        toId === null && event.reason !== 'remote-stop' && !retainTail;
       if (rec !== null && r.radio === rec && rec.status === 'growing') {
         rec.resumeOnDrain =
           drain && wasPlaying && queueWritten.ok;

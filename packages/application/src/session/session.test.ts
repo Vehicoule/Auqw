@@ -43,6 +43,7 @@ import {
 } from '../sync/sync-engine.ts';
 import { utf8ByteLength } from '../utf8.ts';
 import {
+  ALL_CAPABILITIES,
   FakeClock,
   FakeLog,
   FakePlayer,
@@ -4208,6 +4209,9 @@ async function transitionReconcile(): Promise<void> {
   );
   await pump();
   currentIs('oB', 'remote-next adopted');
+  // This tail IS seedable (ytm refs) — the radio armed on landing,
+  // so the natural end drains to stopped rather than parking paused
+  // (unseedable tails park: see naturalEndParksTail).
   r.player.emit(
     transitionEvent(r, {
       from: 'oB',
@@ -4288,6 +4292,256 @@ async function remoteStopReconcile(): Promise<void> {
     (c) => (c.input as { handle: string }).handle,
   );
   assert(released.includes('h-oA'), 'live handle released');
+}
+
+async function naturalEndParksTail(): Promise<void> {
+  // A natural end with nothing chasing the drain parks the ended row
+  // instead of stopping: the queue pauses at position 0, the live
+  // handle is kept, and a service-side play reconciles into a real
+  // replay — recorded as a fresh listen like a repeat=one loop. The
+  // tail is unseedable — its provider declares no radio.seed — so
+  // ending here is a genuine queue end, and it attaches locally.
+  const localMap = new Map([['rB', '/l/b.mp3']]);
+  const noradio = new FakeProvider(
+    'noradio',
+    ALL_CAPABILITIES.filter((c) => c !== 'radio.seed'),
+  );
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        // The 20 s clip crosses its count threshold inside a few
+        // ticks, so the status leg's own play accounting actually
+        // runs — needed to prove the finish isn't counted twice
+        // when the transition lands after a status-side park.
+        { ...recording('rB', [ref('noradio', 'n1')]), durationMs: 20_000 },
+      ],
+      queue: {
+        revision: 2,
+        occurrences: [
+          occurrence('oA', 'rA', ref('youtube-music', 'yA')),
+          occurrence('oB', 'rB'),
+        ],
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [noradio],
+    localMap,
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  // Make the tail's own projection install fail: the 'ended' status
+  // leg's installed-marker early-return then misses, so the fallback
+  // must park the row itself before the transition arrives — the
+  // emission order real ports actually produce.
+  r.player.failNextProjection(appError('transient', 'projection down'));
+  const next = r.session.next();
+  await pump();
+  await emitPrepared(r, 'h-oB');
+  assert((await next).ok, 'next to the local tail failed');
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oB', 'tail playing');
+  assertEqual(readyOf(r).radio, null, 'unseedable tail never arms');
+  const playsBefore = readyOf(r).playHistory.length;
+  // The element ran out at the tail — real ports emit the 'ended'
+  // status BEFORE the queue-transition; the park must survive both.
+  const live = readyOf(r).playback;
+  assert('identity' in live, 'playing before the end');
+  // Accepted 2.5 s ticks to 12.5 s — past the 20 s clip's 10 s
+  // count threshold (the first tick only sets the delta baseline) —
+  // the status leg records the finished listen itself.
+  for (const positionMs of [2_500, 5_000, 7_500, 10_000, 12_500]) {
+    r.player.emit(statusEvent(live.identity, 'h-oB', 'playing', positionMs));
+    await pump();
+  }
+  r.player.emit(statusEvent(live.identity, 'h-oB', 'ended', 20_000));
+  await pump();
+  // The failed projection leaves no installed marker to defer to —
+  // the status leg parks the row itself rather than releasing.
+  assertEqual(
+    readyOf(r).queue.mode,
+    'paused',
+    'failed projection: the status leg parks the tail itself',
+  );
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oB',
+      to: null,
+      reason: 'ended',
+      positionMs: 20_000,
+      identity: null,
+      handle: null,
+    }),
+  );
+  await pump();
+  const parked = readyOf(r);
+  assertEqual(parked.queue.mode, 'paused', 'natural end parks, not stops');
+  assertEqual(parked.queue.currentOccurrenceId, 'oB', 'cursor retained');
+  assertEqual(parked.queue.positionMs, 0, 'parked at replay position');
+  assertEqual(
+    parked.playHistory.length,
+    playsBefore + 1,
+    'the finished listen counted once across status + transition',
+  );
+  assert(
+    parked.playback.type === 'paused',
+    'parked playback reports paused',
+  );
+  assertEqual(parked.playback.handle, 'h-oB', 'the live handle is kept');
+  const released = calls(r, 'release').map(
+    (c) => (c.input as { handle: string }).handle,
+  );
+  assert(!released.includes('h-oB'), 'parked handle must not release');
+  // An OS-side play replays the element in place — the remote-mode
+  // reconcile ticks the parked queue back to playing.
+  r.player.emit(
+    statusEvent(parked.playback.identity, 'h-oB', 'playing', 250),
+  );
+  await pump();
+  const replaying = readyOf(r);
+  assertEqual(replaying.queue.mode, 'playing', 'remote play resumes');
+  assertEqual(replaying.queue.currentOccurrenceId, 'oB');
+  assertEqual(calls(r, 'prepare').length, 2, 'replay reuses the handle');
+  // The replay ends too: same status-then-transition order — parked
+  // again, counted as a second listen.
+  const replayId =
+    'identity' in replaying.playback ? replaying.playback.identity : live.identity;
+  for (const positionMs of [2_500, 5_000, 7_500, 10_000, 12_500]) {
+    r.player.emit(statusEvent(replayId, 'h-oB', 'playing', positionMs));
+    await pump();
+  }
+  r.player.emit(statusEvent(replayId, 'h-oB', 'ended', 20_000));
+  await pump();
+  // The parked projection installed cleanly: an installed marker
+  // defers the advance to the service's transition — the queue is
+  // still playing until it lands.
+  assertEqual(
+    readyOf(r).queue.mode,
+    'playing',
+    'installed marker: status defers to the transition',
+  );
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oB',
+      to: null,
+      reason: 'ended',
+      positionMs: 20_000,
+      identity: null,
+      handle: null,
+    }),
+  );
+  await pump();
+  const parkedAgain = readyOf(r);
+  assertEqual(parkedAgain.queue.mode, 'paused', 'still parked');
+  assertEqual(parkedAgain.queue.currentOccurrenceId, 'oB');
+  assertEqual(
+    parkedAgain.playHistory.length,
+    playsBefore + 2,
+    'the replay counted as a fresh listen',
+  );
+  // One more replay + end: every fresh listen mints its own play — a
+  // parked marker that survived the resume would pin later ends to
+  // an already-recorded cycle key and lose them.
+  const parkedId =
+    'identity' in parkedAgain.playback
+      ? parkedAgain.playback.identity
+      : replayId;
+  r.player.emit(statusEvent(parkedId, 'h-oB', 'playing', 250));
+  await pump();
+  const third = readyOf(r);
+  const thirdId =
+    'identity' in third.playback ? third.playback.identity : replayId;
+  for (const positionMs of [2_500, 5_000, 7_500, 10_000, 12_500]) {
+    r.player.emit(statusEvent(thirdId, 'h-oB', 'playing', positionMs));
+    await pump();
+  }
+  r.player.emit(statusEvent(thirdId, 'h-oB', 'ended', 20_000));
+  await pump();
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oB',
+      to: null,
+      reason: 'ended',
+      positionMs: 20_000,
+      identity: null,
+      handle: null,
+    }),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).playHistory.length,
+    playsBefore + 3,
+    'each replay counted as its own listen',
+  );
+}
+
+async function radioExhaustedTailParks(): Promise<void> {
+  // A radio tail that exhausted (or failed) leaves a non-null record
+  // that can no longer append — its last natural end is a genuine
+  // queue end and parks like an unseeded tail, not a drain.
+  const r = rig(
+    persisted({
+      recordings: [recording('rA', [ref('youtube-music', 'yA')])],
+      queue: {
+        revision: 2,
+        occurrences: [occurrence('oA', 'rA', ref('youtube-music', 'yA'))],
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const radio = r.session.startRadio(ref('youtube-music', 'yA'));
+  await pump();
+  assert(
+    r.ytm.settleRadio(
+      ok({
+        candidates: [
+          meta('youtube-music', 'yR1', 'R1', 'Artist', 20_000),
+        ],
+        continuation: null,
+      }),
+    ),
+    'radio seed pending',
+  );
+  assert((await radio).ok, 'startRadio failed');
+  await pump();
+  const grown = readyOf(r);
+  assertEqual(grown.queue.occurrences.length, 2, 'the tail grew');
+  const tailId = grown.queue.occurrences[1]?.occurrenceId;
+  assert(tailId !== undefined, 'tail-minted occurrence exists');
+  assert(grown.radio !== null, 'the exhausted tail record lingers');
+  await playThrough(r, 'oA');
+  const next = r.session.next();
+  await pump();
+  await emitPrepared(r, 'h-tail');
+  assert((await next).ok, 'next to the tail item failed');
+  assertEqual(readyOf(r).queue.currentOccurrenceId, tailId);
+  const live = readyOf(r).playback;
+  assert('identity' in live, 'playing the minted tail');
+  r.player.emit(statusEvent(live.identity, 'h-tail', 'ended', 20_000));
+  await pump();
+  r.player.emit(
+    transitionEvent(r, {
+      from: tailId,
+      to: null,
+      reason: 'ended',
+      positionMs: 20_000,
+      identity: null,
+      handle: null,
+    }),
+  );
+  await pump();
+  const parked = readyOf(r);
+  assertEqual(parked.queue.mode, 'paused', 'exhausted tail parks');
+  assertEqual(parked.queue.currentOccurrenceId, tailId);
+  assertEqual(parked.queue.positionMs, 0, 'parked at replay position');
+  const released = calls(r, 'release').map(
+    (c) => (c.input as { handle: string }).handle,
+  );
+  assert(!released.includes('h-tail'), 'parked handle must not release');
 }
 
 async function remotePausePlay(): Promise<void> {
@@ -7382,6 +7636,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['transitionAdoptsExecutedRef', transitionAdoptsExecutedRef],
   ['transitionReconcile', transitionReconcile],
   ['remoteStopReconcile', remoteStopReconcile],
+  ['naturalEndParksTail', naturalEndParksTail],
+  ['radioExhaustedTailParks', radioExhaustedTailParks],
   ['remotePausePlay', remotePausePlay],
   ['statusJoinAcrossQueueEdits', statusJoinAcrossQueueEdits],
   ['successorMapping', successorMapping],

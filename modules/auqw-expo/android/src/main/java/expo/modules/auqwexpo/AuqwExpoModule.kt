@@ -1604,9 +1604,19 @@ class AuqwExpoModule : Module() {
       return
     }
     if (next == null) {
-      // Ran off the tail: a null-target transition is the legal stop.
+      // Ran off the tail: a null-target transition is the legal
+      // stop. A natural end parks the attachment instead — rewound
+      // and paused, so the notification keeps a working Play for an
+      // OS-side replay when the session retains the row (no armed
+      // radio tail). If the session drains instead, the release that
+      // follows detaches the parked player for real.
       val endPosition = p.currentPosition.coerceAtLeast(0).toDouble()
-      detachPlayer(p)
+      if (reason == "ended") {
+        p.seekTo(0)
+        p.pause()
+      } else {
+        detachPlayer(p)
+      }
       emitTransition(proj, from, null, reason, endPosition, null, null)
       return
     }

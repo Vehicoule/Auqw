@@ -29,13 +29,17 @@ those merge, this skill has nothing to run against.
   it mid-run. Run the kill as its own command, or use a self-immunizing
   pattern like `"[d]ist/electron"`.
 - Launch on the visible desktop, in a pollable shell:
-  `cd apps/desktop && env DISPLAY=:0 AUQW_NODE_BINDINGS=/abs/path/libauqw_node_bindings.so <repo>/node_modules/electron/dist/electron .`
-  (electron lives at the repo-root node_modules).
-- `AUQW_NODE_BINDINGS` matters: `AUQW_REPO_ROOT` only points at the launch
-  checkout's `target/debug`, which may lack the artifact — pass the absolute
-  path of a real `libauqw_node_bindings.so` (cargo debug build). The host
-  stages it to `userData/node-bindings/auqw_node_bindings.node` before
-  `require()`. Missing/broken → `host:plugins: unavailable` in diagnostics.
+  `cd apps/desktop && env DISPLAY=:0 <repo>/node_modules/electron/dist/electron .`
+  (electron lives at the repo-root node_modules). The default resolves
+  `target/debug/libauqw_node_bindings.so` under the launch checkout — when
+  that artifact is missing, pass a real one explicitly:
+  `env DISPLAY=:0 AUQW_NODE_BINDINGS=/abs/path/libauqw_node_bindings.so ...`
+- `AUQW_NODE_BINDINGS` only matters when the default can't resolve:
+  `AUQW_REPO_ROOT` points at the launch checkout's `target/debug`, which
+  may lack the artifact — pass the absolute path of a real
+  `libauqw_node_bindings.so` (cargo debug build). The host stages it to
+  `userData/node-bindings/auqw_node_bindings.node` before `require()`.
+  Missing/broken → `host:plugins: unavailable` in diagnostics.
 - `AUQW_DEV_GATE` needs no setup: main sets it to `'1'` whenever
   `app.isPackaged` is false (`src/main/index.ts` `utilityEnv`). Utility env
   is filtered to `AUQW_*` + platform vars — parent credentials never reach it.
@@ -209,17 +213,19 @@ while hidden).
 - `AUQW_DEV_HARNESS=1` in the launch env selects the dev-gate harness
   (`index.html`, the UI documented above); without it the window loads the
   product UI (`app.html`) — a different surface (search/home/settings).
-- Plugins do NOT load in dev mode unless you pass
-  `AUQW_PLUGIN_DIR=/abs/path/to/apps/desktop/plugins` — main only defaults it
-  for packaged builds. Without it `#provider` stays empty and the provider
-  path logs `prepare failed — no plugins loaded`.
+- Dev mode defaults `AUQW_PLUGIN_DIR` to `apps/desktop/plugins`
+  (`utilityEnv` in `src/main/index.ts`) — plugins fail to load when that
+  dir is EMPTY, the var points elsewhere, or the staged pairs are
+  incomplete/malformed (`loadPluginDir` skips them): `#provider` stays
+  empty and the provider path logs `prepare failed — no plugins loaded`.
+  Pass the var only to point at a different set.
 - The PRODUCT UI is stricter: `src/renderer/controller.ts` throws
   `'no plugin providers available'` when the plugin dir is empty → boot dies
   at `[ui] boot failed: internal` and nothing interactive ever renders.
   Stage providers first — from the REPO ROOT (the script and
   `providers.lock.json` are root-level):
   `node tooling/sync-plugins.mjs apps/desktop/plugins`
-  then `cd apps/desktop && export AUQW_PLUGIN_DIR=$PWD/plugins`.
+  (which is the dev-mode default — no env var needed on this checkout).
   itunes/deezer/youtube-music/lyrics-lrclib all stage cleanly with outbound
   HTTPS.
 - youtube-music `playback.resolve` takes an 11-char video ID as `source_ref`
@@ -609,3 +615,34 @@ None — the napi artifact is a local cargo build output.
   (opacity/transform) via repeated `Runtime.evaluate` at ~45ms intervals
   — changing values = animation running; sample in wall time since rAF
   may be throttled.
+
+## Engine internals + media-session OS surface (MPRIS) probes
+
+- The built bundle (`apps/desktop/dist/renderer/app.js`) is UNMINIFIED —
+  surgical `console.warn('parkdbg', ...)` probes straight into the dist
+  file (engine gates, publishMetadata, clearOsSurface stacks) are the
+  fastest way to trace engine internals on a shared worktree: no source
+  edits, wiped by the next rebuild (`pnpm --filter desktop build`).
+- Chromium deactivates `navigator.mediaSession` AT the element's `ended`
+  event: the bus reads `Stopped` + `mpris:length=0` + `CanPlay=false`,
+  `playerctl play` is refused, and neither `playbackState` writes,
+  metadata republishes, nor rewinding `currentTime` revives it — only a
+  real `play()` call resurrects the card. Since the queue-end keep-alive
+  work, the web port intercepts ~80 ms short of the real end instead, so
+  `ended` never fires: a parked card reads `Paused` + `CanPlay=true`
+  with position ≈ duration−80 ms while the queue row reads 0 — expected,
+  not a bug (the element rewinds on the OS `play` press).
+- On a checkout that already has the built binding, launch needs no
+  `AUQW_NODE_BINDINGS` — the default resolves
+  `target/debug/libauqw_node_bindings.so`; a wrong explicit value is the
+  common cause of "couldn't start". Pass it only when the checkout lacks
+  the built piece (see Launch). `AUQW_PLUGIN_DIR`'s dev-mode default covers
+  this checkout's staged set (see the provider/plugin-path notes).
+- mp3 fixtures are `doc_id`-bound by PATH: fingerprint/size are
+  scan-time fields and play does not re-verify, so a same-path file with
+  different audio still plays under the fixture's doc.
+- `/tmp` wipes between sessions — keep fixtures and launch scripts
+  re-createable from scratch (seeded local dirs, feed configs).
+- `playerctl position N` absolute-seek compresses long tracks for
+  end-of-track tests — seek near the tail instead of waiting out the
+  duration.
