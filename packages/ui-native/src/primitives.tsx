@@ -720,7 +720,8 @@ export type IconName =
   | 'radio'
   | 'check'
   | 'refresh'
-  | 'menu';
+  | 'menu'
+  | 'ellipsis';
 
 type GlyphShape =
   | { readonly kind: 'path'; readonly d: string }
@@ -892,6 +893,10 @@ const GLYPHS: Record<IconName, Glyph> = {
   menu: {
     filled: false,
     shapes: [p('M4 7h16M4 12h16M4 17h16')],
+  },
+  ellipsis: {
+    filled: false,
+    shapes: [p('M5 12h.01M12 12h.01M19 12h.01')],
   },
 };
 

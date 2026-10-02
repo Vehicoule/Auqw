@@ -485,6 +485,10 @@ const GLYPHS = {
     filled: false,
     shapes: [p('M4 7h16M4 12h16M4 17h16')],
   },
+  ellipsis: {
+    filled: false,
+    shapes: [p('M5 12h.01M12 12h.01M19 12h.01')],
+  },
   monitor: {
     filled: false,
     shapes: [rr(3, 5, 18, 12, 1.5), p('M9 21h6m-3-4v4')],

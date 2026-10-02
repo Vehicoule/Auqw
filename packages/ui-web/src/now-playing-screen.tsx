@@ -647,7 +647,7 @@ export function NowPlayingScreen({
           close's home; the stage toggle only hides the column). */}
       {onTrackMenu !== undefined && (
         <IconButton
-          icon="menu"
+          icon="ellipsis"
           size={32}
           iconSize={14}
           color="var(--text-secondary)"

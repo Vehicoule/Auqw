@@ -1684,7 +1684,7 @@ export function StageSheet({
           <View style={{ width: 36, alignItems: 'flex-end' }}>
             {onTrackMenu !== undefined && (
               <IconButton
-                icon="menu"
+                icon="ellipsis"
                 size={32}
                 iconSize={15}
                 color={colors.textSecondary}
