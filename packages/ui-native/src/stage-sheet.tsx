@@ -823,13 +823,20 @@ export function StageSheet({
   // All three panes stay mounted — display:none keeps scroll position
   // and fetched state, so a mode switch never remounts a list. The
   // a11y pair keeps a hidden pane unreachable to screen readers.
+  // collapsable=false keeps each pane permanently concrete: the a11y
+  // pair + display:none only form a stacking context while hidden, so
+  // without it every mode switch flattens/unflattens the pane and the
+  // mounting differ re-parents all its children — a remove can then
+  // hit the pane before its view exists and crash the surface.
   const paneProps = (
     m: StageMode,
   ): {
+    readonly collapsable: false;
     readonly accessibilityElementsHidden: boolean;
     readonly importantForAccessibility: 'auto' | 'no-hide-descendants';
     readonly style: StyleProp<ViewStyle>;
   } => ({
+    collapsable: false,
     accessibilityElementsHidden: activeMode !== m,
     importantForAccessibility:
       activeMode === m ? 'auto' : 'no-hide-descendants',
