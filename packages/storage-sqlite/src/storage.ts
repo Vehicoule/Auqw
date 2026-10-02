@@ -1240,7 +1240,9 @@ function decodeState(
   const artworkUrls = new Set<string>();
   const artworkCache: ArtworkCacheEntry[] = [];
   for (const row of rows.artworkCache) {
-    const entry = keep('artwork_cache', keyOf(row['url']), (t) => {
+    // Key on file_path, never url — a signed URL's query params must
+    // not reach the drop report.
+    const entry = keep('artwork_cache', keyOf(row['file_path']), (t) => {
       const candidate: ArtworkCacheEntry = {
         url: t.reqStr(row['url']),
         filePath: t.reqStr(row['file_path']),
