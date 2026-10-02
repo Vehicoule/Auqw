@@ -2476,7 +2476,7 @@ export class PlaybackEngine {
       // live element and pauses the row at position 0.
       if (
         active.handle !== undefined &&
-        r.radio === null &&
+        (r.radio === null || r.radio.status !== 'growing') &&
         r.repeat === 'off' &&
         before.currentOccurrenceId === active.occurrenceId &&
         remainingAfterCurrent(before, dealt ?? undefined) === 0
@@ -3160,14 +3160,16 @@ export class PlaybackEngine {
     // time — a reseed during the write below swaps in a fresh record
     // whose own flag already reflects its queue state.
     const radioAtTransition = r.radio;
-    // A natural end with no tail chasing the drain parks the ended
-    // row instead: the queue pauses at position 0 rather than
+    // A natural end with no tail still chasing the drain parks the
+    // ended row instead: the queue pauses at position 0 rather than
     // stopping, so an OS-side play reconciles into a real replay on
-    // the live element instead of landing on a cleared surface.
+    // the live element instead of landing on a cleared surface. An
+    // 'ended'/'failed' record lingers but can no longer append — it
+    // does not count as a chase.
     const parkedTail =
       toId === null &&
       event.reason === 'ended' &&
-      radioAtTransition === null
+      (radioAtTransition === null || radioAtTransition.status !== 'growing')
         ? event.fromOccurrenceId
         : null;
     const retainTail = parkedTail !== null;

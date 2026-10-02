@@ -4476,6 +4476,74 @@ async function naturalEndParksTail(): Promise<void> {
   );
 }
 
+async function radioExhaustedTailParks(): Promise<void> {
+  // A radio tail that exhausted (or failed) leaves a non-null record
+  // that can no longer append — its last natural end is a genuine
+  // queue end and parks like an unseeded tail, not a drain.
+  const r = rig(
+    persisted({
+      recordings: [recording('rA', [ref('youtube-music', 'yA')])],
+      queue: {
+        revision: 2,
+        occurrences: [occurrence('oA', 'rA', ref('youtube-music', 'yA'))],
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const radio = r.session.startRadio(ref('youtube-music', 'yA'));
+  await pump();
+  assert(
+    r.ytm.settleRadio(
+      ok({
+        candidates: [
+          meta('youtube-music', 'yR1', 'R1', 'Artist', 20_000),
+        ],
+        continuation: null,
+      }),
+    ),
+    'radio seed pending',
+  );
+  assert((await radio).ok, 'startRadio failed');
+  await pump();
+  const grown = readyOf(r);
+  assertEqual(grown.queue.occurrences.length, 2, 'the tail grew');
+  const tailId = grown.queue.occurrences[1]?.occurrenceId;
+  assert(tailId !== undefined, 'tail-minted occurrence exists');
+  assert(grown.radio !== null, 'the exhausted tail record lingers');
+  await playThrough(r, 'oA');
+  const next = r.session.next();
+  await pump();
+  await emitPrepared(r, 'h-tail');
+  assert((await next).ok, 'next to the tail item failed');
+  assertEqual(readyOf(r).queue.currentOccurrenceId, tailId);
+  const live = readyOf(r).playback;
+  assert('identity' in live, 'playing the minted tail');
+  r.player.emit(statusEvent(live.identity, 'h-tail', 'ended', 20_000));
+  await pump();
+  r.player.emit(
+    transitionEvent(r, {
+      from: tailId,
+      to: null,
+      reason: 'ended',
+      positionMs: 20_000,
+      identity: null,
+      handle: null,
+    }),
+  );
+  await pump();
+  const parked = readyOf(r);
+  assertEqual(parked.queue.mode, 'paused', 'exhausted tail parks');
+  assertEqual(parked.queue.currentOccurrenceId, tailId);
+  assertEqual(parked.queue.positionMs, 0, 'parked at replay position');
+  const released = calls(r, 'release').map(
+    (c) => (c.input as { handle: string }).handle,
+  );
+  assert(!released.includes('h-tail'), 'parked handle must not release');
+}
+
 async function remotePausePlay(): Promise<void> {
   const r = rig(
     persisted({
@@ -7456,6 +7524,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['transitionReconcile', transitionReconcile],
   ['remoteStopReconcile', remoteStopReconcile],
   ['naturalEndParksTail', naturalEndParksTail],
+  ['radioExhaustedTailParks', radioExhaustedTailParks],
   ['remotePausePlay', remotePausePlay],
   ['statusJoinAcrossQueueEdits', statusJoinAcrossQueueEdits],
   ['successorMapping', successorMapping],
