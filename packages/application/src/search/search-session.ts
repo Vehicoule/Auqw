@@ -7,7 +7,8 @@ import { retryBounded } from '../retry.ts';
 import { saturatingAdd } from '../session/util.ts';
 import type { IdPort } from '../ports/runtime.ts';
 import type { ClockPort } from '../ports/clock.ts';
-import type { ProviderPort, SearchPage } from '../ports/provider.ts';
+import { searchPageHasContent } from '../ports/provider.ts';
+import type { ProviderPort, SearchKind, SearchPage } from '../ports/provider.ts';
 
 export type SearchState =
   | { readonly type: 'idle'; readonly revision: number }
@@ -121,6 +122,10 @@ export class SearchSession {
     query: string;
     limit: number;
     storefront: string | null;
+    /** Result kinds to serve; absent asks for everything. */
+    kinds?: readonly SearchKind[] | undefined;
+    /** Next-page token from a prior result; absent fetches page one. */
+    continuation?: string | undefined;
   }): Promise<SearchState> {
     const query = input.query.trim();
     if (query.length === 0) {
@@ -128,11 +133,29 @@ export class SearchSession {
       return Promise.resolve(this.#state);
     }
 
+    // `kinds` is a set: normalize before it keys the cache or reaches
+    // the wire so ['album','artist'] and ['artist','album'] coalesce.
+    const kinds =
+      input.kinds === undefined
+        ? undefined
+        : [...new Set(input.kinds)].sort();
+    // An empty set asks for nothing the absent key doesn't — the wire
+    // never emits it, so it keys the cache identically.
+    const filter = kinds === undefined || kinds.length === 0 ? undefined : kinds;
+    const continuation =
+      input.continuation === undefined || input.continuation.length === 0
+        ? undefined
+        : input.continuation;
+
     const key = JSON.stringify([
       this.#provider.id,
       query,
       input.limit,
       input.storefront,
+      filter ?? null,
+      // Page tokens key their own entry — a next page never collides
+      // with the cached first page it continues.
+      continuation ?? null,
     ]);
 
     // Coalesce only when the in-flight record is the current one and
@@ -174,10 +197,9 @@ export class SearchSession {
       this.#cache.delete(key);
       this.#cache.set(key, cached);
       const revision = this.#state.revision + 1;
-      const state: SearchState =
-        cached.page.items.length === 0
-          ? { type: 'empty', revision, query }
-          : { type: 'content', revision, query, page: cached.page };
+      const state: SearchState = searchPageHasContent(cached.page)
+        ? { type: 'content', revision, query, page: cached.page }
+        : { type: 'empty', revision, query };
       this.#publish(state);
       return Promise.resolve(state);
     }
@@ -194,7 +216,19 @@ export class SearchSession {
     };
 
     const record: Inflight = { source, promise: Promise.resolve(this.#state) };
-    record.promise = this.#run(key, query, input, context, revision, record);
+    record.promise = this.#run(
+      key,
+      query,
+      {
+        limit: input.limit,
+        storefront: input.storefront,
+        kinds: filter,
+        continuation,
+      },
+      context,
+      revision,
+      record,
+    );
     this.#inflight.set(key, record);
     return record.promise;
   }
@@ -202,7 +236,12 @@ export class SearchSession {
   async #run(
     key: string,
     query: string,
-    input: { limit: number; storefront: string | null },
+    input: {
+      limit: number;
+      storefront: string | null;
+      kinds?: readonly SearchKind[] | undefined;
+      continuation?: string | undefined;
+    },
     context: OperationContext,
     revision: number,
     record: Inflight,
@@ -219,7 +258,13 @@ export class SearchSession {
         call: async (signal) => {
           try {
             return await this.#provider.search(
-              { query, limit: input.limit, storefront: input.storefront },
+              {
+                query,
+                limit: input.limit,
+                storefront: input.storefront,
+                kinds: input.kinds,
+                continuation: input.continuation,
+              },
               {
                 requestId: this.#ids.next('search'),
                 deadlineMs: context.deadlineMs,
@@ -262,10 +307,9 @@ export class SearchSession {
         }
         this.#cache.delete(oldest.value);
       }
-      const state: SearchState =
-        page.items.length === 0
-          ? { type: 'empty', revision, query }
-          : { type: 'content', revision, query, page };
+      const state: SearchState = searchPageHasContent(page)
+        ? { type: 'content', revision, query, page }
+        : { type: 'empty', revision, query };
       this.#publish(state);
       return state;
     }
@@ -275,7 +319,7 @@ export class SearchSession {
     // still settles the search — it flows through the stale-cache and
     // error paths like any other failure rather than leaving 'loading'.
     const stale = this.#cache.get(key);
-    if (stale !== undefined && stale.page.items.length > 0) {
+    if (stale !== undefined && searchPageHasContent(stale.page)) {
       const state: SearchState = {
         type: 'content',
         revision,

@@ -54,8 +54,10 @@ const ENTITY_PAGE: EntityPage = {
     title: 'Album',
     subtitle: null,
     artwork: [],
+    group: null,
   },
   items: [],
+  related: [],
   continuation: null,
   complete: true,
 };

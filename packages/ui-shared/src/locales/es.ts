@@ -185,6 +185,7 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'library.emptyHint': 'las playlists y álbumes que te gusten llegan aquí',
   'library.card.album': 'álbum · {artist}',
   'library.card.artist': 'artista',
+  'library.card.playlist': 'playlist · {curator}',
 
   // ---- collections --------------------------------------------------------
   'collection.liked': 'me gusta',

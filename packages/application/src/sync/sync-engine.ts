@@ -715,7 +715,7 @@ const isProvenance = (value: unknown): boolean =>
   value === 'provider' || value === 'local';
 
 const isEntityKindValue = (value: unknown): value is EntityKind =>
-  value === 'album' || value === 'artist';
+  value === 'album' || value === 'artist' || value === 'playlist';
 
 const isStorefrontValue = (value: unknown): boolean =>
   value === null ||

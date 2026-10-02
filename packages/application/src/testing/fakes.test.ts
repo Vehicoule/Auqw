@@ -278,10 +278,10 @@ async function providerTests(): Promise<void> {
     ctx(),
   );
   assertEqual(provider2.pendingCount('search'), 2);
-  provider2.settleSearchAt(1, ok({ items: [], storefront: null }));
+  provider2.settleSearchAt(1, ok({ items: [], entities: [], topHit: null, continuation: null, storefront: null }));
   const second = await p2;
   assert(second.ok);
-  provider2.settleSearchAt(0, ok({ items: [], storefront: null }));
+  provider2.settleSearchAt(0, ok({ items: [], entities: [], topHit: null, continuation: null, storefront: null }));
   await p1;
   assertEqual(provider2.pendingCount('search'), 0);
 
@@ -303,8 +303,10 @@ async function providerTests(): Promise<void> {
         title: 'Album',
         subtitle: null,
         artwork: [],
+        group: null,
       },
       items: [],
+      related: [],
       continuation: null,
       complete: true,
     }),

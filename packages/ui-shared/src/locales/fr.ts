@@ -184,6 +184,7 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'library.emptyHint': 'les playlists et albums aimés arrivent ici',
   'library.card.album': 'album · {artist}',
   'library.card.artist': 'artiste',
+  'library.card.playlist': 'playlist · {curator}',
 
   // ---- collections --------------------------------------------------------
   'collection.liked': 'aimés',

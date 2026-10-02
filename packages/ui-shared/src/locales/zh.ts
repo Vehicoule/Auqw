@@ -178,6 +178,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'library.emptyHint': '歌单和喜欢的专辑会出现在这里',
   'library.card.album': '专辑 · {artist}',
   'library.card.artist': '艺人',
+  'library.card.playlist': '歌单 · {curator}',
 
   // ---- collections --------------------------------------------------------
   'collection.liked': '喜欢',

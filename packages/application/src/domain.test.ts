@@ -53,7 +53,11 @@ const META: TrackMetadata = {
 
 export function run(): void {
   assert(isSourceRef(REF));
-  assert(!isSourceRef({ ...REF, kind: 'playlist' }));
+  // 'playlist' joined the union — a playlist ref is a source ref and
+  // an entity ref, never a track ref.
+  assert(isSourceRef({ ...REF, kind: 'playlist' }));
+  assert(isEntityRef({ ...REF, kind: 'playlist' }));
+  assert(!isTrackRef({ ...REF, kind: 'playlist' }));
   assert(!isSourceRef({ ...REF, id: '' }));
   assert(!isSourceRef({ ...REF, extra: 1 }));
   assert(!isSourceRef('dQw4w9WgXcQ'));

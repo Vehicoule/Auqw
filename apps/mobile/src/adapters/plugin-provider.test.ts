@@ -205,6 +205,9 @@ async function payloadShapes(): Promise<void> {
   assert(searchResult.ok, 'search ok');
   assertDeepEqual(searchResult.value, {
     items: [DOMAIN_TRACK],
+    entities: [],
+    topHit: null,
+    continuation: null,
     storefront: 'US',
   });
 
@@ -344,9 +347,9 @@ async function concurrentCorrelation(): Promise<void> {
   host.succeed('req-2', { items: [], storefront: 'FR' });
   const [ra, rb, rc] = await Promise.all([a, b, c]);
   assert(ra.ok && rb.ok && rc.ok);
-  assertDeepEqual(ra.value, { items: [DOMAIN_TRACK], storefront: 'US' });
-  assertDeepEqual(rb.value, { items: [], storefront: 'FR' });
-  assertDeepEqual(rc.value, { items: [], storefront: 'DE' });
+  assertDeepEqual(ra.value, { items: [DOMAIN_TRACK], entities: [], topHit: null, continuation: null, storefront: 'US' });
+  assertDeepEqual(rb.value, { items: [], entities: [], topHit: null, continuation: null, storefront: 'FR' });
+  assertDeepEqual(rc.value, { items: [], entities: [], topHit: null, continuation: null, storefront: 'DE' });
 }
 
 // 3. Malformed resultJson and wrong shapes are invalid-response.
@@ -451,7 +454,7 @@ async function cancellation(): Promise<void> {
   host.succeed('req-2', { items: [], storefront: 'US' });
   const after = await next;
   assert(after.ok, 'next call resolves');
-  assertDeepEqual(after.value, { items: [], storefront: 'US' });
+  assertDeepEqual(after.value, { items: [], entities: [], topHit: null, continuation: null, storefront: 'US' });
 }
 
 // 6. An already-cancelled signal never reaches the host.
@@ -499,7 +502,7 @@ async function earlyOutcome(): Promise<void> {
   host.succeed('req-1', { items: [WIRE_TRACK], storefront: 'US' });
   const result = await call;
   assert(result.ok, 'early outcome consumed');
-  assertDeepEqual(result.value, { items: [DOMAIN_TRACK], storefront: 'US' });
+  assertDeepEqual(result.value, { items: [DOMAIN_TRACK], entities: [], topHit: null, continuation: null, storefront: 'US' });
 }
 
 // A context deadline caps the whole request: an already-elapsed
@@ -627,8 +630,10 @@ async function entityOp(): Promise<void> {
       artwork: [
         { url: 'https://art.example/a.png', width: 500, height: 500 },
       ],
+      group: null,
     },
     items: [DOMAIN_TRACK],
+    related: [],
     continuation: 'next-1',
     complete: false,
   });

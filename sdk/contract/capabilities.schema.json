@@ -22,7 +22,8 @@
           "enum": [
             "track",
             "album",
-            "artist"
+            "artist",
+            "playlist"
           ]
         },
         "id": {
@@ -49,7 +50,8 @@
         "kind": {
           "enum": [
             "album",
-            "artist"
+            "artist",
+            "playlist"
           ]
         },
         "id": {
@@ -214,7 +216,8 @@
         "kind": {
           "enum": [
             "album",
-            "artist"
+            "artist",
+            "playlist"
           ]
         },
         "title": {
@@ -235,6 +238,16 @@
             "$ref": "#/$defs/artworkRef"
           },
           "maxItems": 8
+        },
+        "group": {
+          "enum": [
+            "discography",
+            "related",
+            "featured",
+            "appears-on",
+            null
+          ],
+          "description": "Section tag on `related[]` entries — which upstream shelf the entity came from; null/absent elsewhere."
         }
       }
     },
@@ -320,6 +333,26 @@
             "null"
           ],
           "pattern": "^[A-Za-z]{2}$"
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "track",
+              "album",
+              "artist",
+              "playlist"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "description": "Scopes the query to these result kinds; absent asks for everything the provider serves."
+        },
+        "continuation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Next-page token from a prior result; rides with the same query/kinds."
         }
       }
     },
@@ -336,6 +369,60 @@
           "items": {
             "$ref": "#/$defs/trackMetadata"
           }
+        },
+        "entities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/entityMetadata"
+          },
+          "maxItems": 200
+        },
+        "top_hit": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "type",
+                "item"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "const": "track"
+                },
+                "item": {
+                  "$ref": "#/$defs/trackMetadata"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "type",
+                "item"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "const": "entity"
+                },
+                "item": {
+                  "$ref": "#/$defs/entityMetadata"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The provider's single best hit; tagged because source_ref.kind alone is ambiguous between track and entity rows."
+        },
+        "continuation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
         },
         "storefront": {
           "type": [
@@ -452,6 +539,13 @@
             "null"
           ],
           "minLength": 1
+        },
+        "related": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/entityMetadata"
+          },
+          "maxItems": 200
         },
         "complete": {
           "type": "boolean"

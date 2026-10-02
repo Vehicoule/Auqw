@@ -108,9 +108,9 @@ the contract; the table is orientation only.
 | `lyrics.synced` | `lyricsSyncedPayload` | `lyricsSyncedResult` |
 | `radio.seed` | `radioSeedPayload` | `radioSeedResult` |
 
-Shared types: `sourceRef` (`{provider, kind:"track"|"album"|"artist",
-id}`), `entityRef` (a `sourceRef` whose kind is `album` or `artist`),
-`artworkRef`, `trackMetadata`, `recordingQuery`. Plugins return raw
+Shared types: `sourceRef` (`{provider, kind:"track"|"album"|"artist"|"playlist",
+id}`), `entityRef` (a `sourceRef` whose kind is `album`, `artist`, or
+`playlist`), `artworkRef`, `trackMetadata`, `recordingQuery`. Plugins return raw
 provider metadata as `trackMetadata` — deriving version labels
 ("(Live)", "(Remastered)", …) and candidate scoring is the
 application's job, not the plugin's. `playback.resolve` also accepts a
@@ -138,6 +138,25 @@ text completions in upstream order, not result pages. It carries no
 `access_token` (not a session-trust capability) and no settings slot —
 the application routes it over declaring providers automatically so
 the typing surface is independent of the configured catalog provider.
+
+**Typed discovery extension.** `catalog.search` also serves the
+artist/album/playlist axis: the payload may scope a query with
+`kinds` (a subset of `track|album|artist|playlist`; absent means
+everything the provider serves) and page it with `continuation`; the
+result may carry `entities` (entity hits in provider order),
+`top_hit` — the provider's single best hit, tagged
+`{type:'track'|'entity', item}` because `source_ref.kind:'album'` is
+ambiguous between a track row and an entity row — and `continuation`
+(null = no next page). `catalog.entity` results may carry `related`: related
+entities in provider order (an artist's albums, similar artists,
+appears-on playlists), each optionally tagged with a `group`
+(`'discography'|'related'|'featured'|'appears-on'`) so hosts can
+label sections without per-provider shape knowledge. `'playlist'`
+joins the ref/metadata kind enums everywhere: provider-curated
+playlists and mixes are first-class entities — own page, own
+artwork, likeable like an album. All new fields are optional: a
+provider emits only what it serves, and undeclared fields simply
+aren't produced.
 
 ## ErrorKind
 

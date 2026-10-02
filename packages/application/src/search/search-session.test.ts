@@ -26,7 +26,13 @@ function item(title: string): TrackMetadata {
 }
 
 function page(titles: readonly string[]): SearchPage {
-  return { items: titles.map(item), storefront: 'US' };
+  return {
+    items: titles.map(item),
+    entities: [],
+    topHit: null,
+    continuation: null,
+    storefront: 'US',
+  };
 }
 
 function harness() {

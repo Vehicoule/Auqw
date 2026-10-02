@@ -1,13 +1,13 @@
 import { extractVersionLabels } from './matching/matching-engine.ts';
 import type { QueueSnapshot } from './queue/queue-engine.ts';
 
-export type EntityKind = 'album' | 'artist';
+export type EntityKind = 'album' | 'artist' | 'playlist';
 
 type SourceRefKind = 'track' | EntityKind;
 
 export type SourceRef = { provider: string; kind: SourceRefKind; id: string };
 
-/** Provider reference to a non-track entity (album or artist page). */
+/** Provider reference to a non-track entity (album, artist, or playlist page). */
 export type EntityRef = { provider: string; kind: EntityKind; id: string };
 
 export type ArtworkRef = {
@@ -100,9 +100,10 @@ export function localTrackRef(fileId: string): SourceRef {
 export type LikeEntityKind = 'track' | EntityKind;
 
 /**
- * Polymorphic like target: 'track' ids name a recording, 'album' and
- * 'artist' ids name an entity. The target table is kind-dependent, so
- * referential integrity is enforced by the validators, not the schema.
+ * Polymorphic like target: 'track' ids name a recording; 'album',
+ * 'artist', and 'playlist' ids name an entity. The target table is
+ * kind-dependent, so referential integrity is enforced by the
+ * validators, not the schema.
  */
 export type Like = {
   entityKind: LikeEntityKind;
@@ -183,8 +184,17 @@ const VERSION_LABELS: ReadonlySet<string> = new Set([
 const MAPPING_STATUSES: ReadonlySet<string> = new Set([
   'automatic', 'user-confirmed', 'rejected',
 ]);
-const SOURCE_REF_KINDS: ReadonlySet<string> = new Set(['track', 'album', 'artist']);
-const ENTITY_KINDS: ReadonlySet<string> = new Set(['album', 'artist']);
+const SOURCE_REF_KINDS: ReadonlySet<string> = new Set([
+  'track',
+  'album',
+  'artist',
+  'playlist',
+]);
+const ENTITY_KINDS: ReadonlySet<string> = new Set([
+  'album',
+  'artist',
+  'playlist',
+]);
 
 const QUEUE_ORIGIN_COLLECTIONS: ReadonlySet<string> = new Set([
   'liked',

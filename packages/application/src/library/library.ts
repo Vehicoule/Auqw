@@ -239,7 +239,7 @@ function pushInto<K, V>(map: Map<K, V[]>, key: K, value: V): void {
 }
 
 function isEntityKind(value: unknown): value is EntityKind {
-  return value === 'album' || value === 'artist';
+  return value === 'album' || value === 'artist' || value === 'playlist';
 }
 
 function isBoundedText(value: unknown, max: number): value is string | null {

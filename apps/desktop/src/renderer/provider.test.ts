@@ -206,6 +206,9 @@ async function payloadShapes(): Promise<void> {
   assert(searchResult.ok);
   assertDeepEqual(searchResult.value, {
     items: [DOMAIN_TRACK],
+    entities: [],
+    topHit: null,
+    continuation: null,
     storefront: 'US',
   });
 

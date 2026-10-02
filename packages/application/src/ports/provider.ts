@@ -47,10 +47,51 @@ export function isProviderCapability(
   return typeof value === 'string' && PROVIDER_CAPABILITIES.has(value);
 }
 
+/** The result kinds a `catalog.search` may be scoped to (`kinds` payload). */
+export type SearchKind = 'track' | EntityKind;
+
+/**
+ * The upstream shelf a `related[]` entry came from — providers tag
+ * it, hosts render a localized section per group in provider order.
+ */
+export type RelatedGroup = 'discography' | 'related' | 'featured' | 'appears-on';
+
+const RELATED_GROUPS: ReadonlySet<string> = new Set([
+  'discography',
+  'related',
+  'featured',
+  'appears-on',
+]);
+
+export function isRelatedGroup(value: unknown): value is RelatedGroup {
+  return typeof value === 'string' && RELATED_GROUPS.has(value);
+}
+
+/**
+ * The provider's single best hit. Tagged because `sourceRef.kind`
+ * alone is ambiguous between a track row and an entity row.
+ */
+export type SearchTopHit =
+  | { readonly type: 'track'; readonly item: TrackMetadata }
+  | { readonly type: 'entity'; readonly item: EntityMetadata };
+
 export type SearchPage = {
   readonly items: readonly TrackMetadata[];
+  /** Typed entity hits (artist/album/playlist rows); `[]` when none. */
+  readonly entities: readonly EntityMetadata[];
+  /** The provider's top hit — the hero row; null when undeclared. */
+  readonly topHit: SearchTopHit | null;
+  /** Next-page token; null is the honest end-of-continuation signal. */
+  readonly continuation: string | null;
   readonly storefront: string | null;
 };
+
+/** Whether the page carries anything renderable — tracks, entities, or a top hit. */
+export function searchPageHasContent(page: SearchPage): boolean {
+  return (
+    page.items.length > 0 || page.entities.length > 0 || page.topHit !== null
+  );
+}
 
 export type RecordingQuery = {
   readonly title: string;
@@ -91,6 +132,11 @@ export type EntityMetadata = {
   readonly title: string;
   readonly subtitle: string | null;
   readonly artwork: readonly ArtworkRef[];
+  /**
+   * The upstream shelf a `related[]` entry came from; null on
+   * page-header entities and search entities.
+   */
+  readonly group: RelatedGroup | null;
 };
 
 /**
@@ -103,6 +149,8 @@ export type EntityMetadata = {
 export type EntityPage = {
   readonly entity: EntityMetadata;
   readonly items: readonly TrackMetadata[];
+  /** Related entities (discography, similar artists, appears-on); `[]` when none. */
+  readonly related: readonly EntityMetadata[];
   readonly continuation: string | null;
   readonly complete: boolean;
 };
@@ -197,7 +245,15 @@ export interface ProviderPort {
    */
   readonly version: string | null;
   search(
-    input: { query: string; limit: number; storefront: string | null },
+    input: {
+      query: string;
+      limit: number;
+      storefront: string | null;
+      /** Result kinds to serve; absent asks for everything. */
+      kinds?: readonly SearchKind[] | undefined;
+      /** Next-page token from a prior result; absent fetches page one. */
+      continuation?: string | undefined;
+    },
     context: OperationContext,
   ): Promise<Result<SearchPage>>;
   candidates(

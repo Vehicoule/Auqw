@@ -720,8 +720,10 @@ export const fixtureEntityPage: EntityPage = {
     title: 'Deadbeat',
     subtitle: 'Tame Impala',
     artwork: [{ url: art('dracula'), width: 300, height: 300 }],
+    group: null,
   },
   items: fixtureEntityItems,
+  related: [],
   continuation: null,
   complete: true,
 };
@@ -758,8 +760,10 @@ export const fixtureEntityPagePartial: EntityPage = {
     title: 'Portishead',
     subtitle: '15 albums',
     artwork: [{ url: art('roads'), width: 300, height: 300 }],
+    group: null,
   },
   items: fixtureEntityItemsPartial,
+  related: [],
   continuation: 'opaque-next-page-token',
   complete: false,
 };

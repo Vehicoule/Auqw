@@ -242,7 +242,9 @@ async function scenarioSearch() {
   await pump();
   clock.advance(500);
   await pump();
-  provider.settleSearch(ok({ items: [], storefront: 'US' }));
+  provider.settleSearch(
+    ok({ items: [], entities: [], topHit: null, continuation: null, storefront: 'US' }),
+  );
   const state = await pending;
   return {
     scenario: 'search.transient-then-ok',

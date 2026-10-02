@@ -1532,7 +1532,11 @@ export function toLibraryModel(input: {
       subtitle:
         entity.kind === 'album'
           ? t('library.card.album', { artist: entity.artistName ?? '—' })
-          : t('library.card.artist'),
+          : entity.kind === 'playlist'
+            ? t('library.card.playlist', {
+                curator: entity.artistName ?? '—',
+              })
+            : t('library.card.artist'),
       count: null,
       artworkUrl: pickArtworkUrl(entity.artwork),
       sortMs: entity.createdMs,

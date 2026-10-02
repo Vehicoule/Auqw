@@ -2243,7 +2243,9 @@ export class Session {
           entityId,
           kind: entity.kind,
           title: entity.title,
-          artistName: entity.kind === 'album' ? entity.subtitle : null,
+          // The subtitle carries the credit line: an album's artist,
+          // a playlist's curator. An artist is its own credit.
+          artistName: entity.kind === 'artist' ? null : entity.subtitle,
           artwork: entity.artwork,
           createdMs: now,
         },

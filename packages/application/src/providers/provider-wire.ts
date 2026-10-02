@@ -18,7 +18,7 @@ import type {
 } from '../domain.ts';
 import { appError, cancelledError, err, ok } from '../errors.ts';
 import type { AppError, ErrorKind, Result } from '../errors.ts';
-import { isProviderCapability } from '../ports/provider.ts';
+import { isProviderCapability, isRelatedGroup } from '../ports/provider.ts';
 import type {
   EntityMetadata,
   EntityPage,
@@ -32,6 +32,7 @@ import type {
   RadioPage,
   RecordingQuery,
   SearchPage,
+  SearchTopHit,
 } from '../ports/provider.ts';
 
 /**
@@ -266,15 +267,39 @@ function toTrackList(value: unknown): readonly TrackMetadata[] | null {
 function toSearchPage(value: unknown): SearchPage | null {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ['items', 'storefront']) ||
+    !hasKeys(
+      value,
+      ['items', 'storefront'],
+      ['entities', 'top_hit', 'continuation'],
+    ) ||
     !isStorefront(value['storefront'])
   ) {
     return null;
   }
   const items = tracksField(value);
-  return items === null
-    ? null
-    : { items, storefront: value['storefront'] };
+  // Absent decodes to [] — an explicit null or non-array poisons the
+  // page exactly like a malformed row does `items`.
+  const entities =
+    value['entities'] === undefined
+      ? []
+      : toEntityItems(value['entities']);
+  const topHit = toTopHit(value['top_hit']);
+  const continuation = value['continuation'] ?? null;
+  if (
+    items === null ||
+    entities === null ||
+    topHit === undefined ||
+    !isOptWireString(continuation)
+  ) {
+    return null;
+  }
+  return {
+    items,
+    entities,
+    topHit,
+    continuation,
+    storefront: value['storefront'],
+  };
 }
 
 /**
@@ -429,7 +454,11 @@ function toPlayableResource(value: unknown): PlayableResource | null {
 function toEntityMetadata(value: unknown): EntityMetadata | null {
   if (
     !isRecord(value) ||
-    !hasKeys(value, ['source_ref', 'kind', 'title', 'artwork'], ['subtitle'])
+    !hasKeys(
+      value,
+      ['source_ref', 'kind', 'title', 'artwork'],
+      ['subtitle', 'group'],
+    )
   ) {
     return null;
   }
@@ -442,12 +471,14 @@ function toEntityMetadata(value: unknown): EntityMetadata | null {
   const title = value['title'];
   const subtitle = value['subtitle'] ?? null;
   const artwork = value['artwork'];
+  const group = value['group'] ?? null;
   if (
     !isString(title, 512) ||
     !isOptWireString(subtitle) ||
     !Array.isArray(artwork) ||
     artwork.length > 8 ||
-    !artwork.every(isRemoteArtworkRef)
+    !artwork.every(isRemoteArtworkRef) ||
+    !(group === null || isRelatedGroup(group))
   ) {
     return null;
   }
@@ -457,14 +488,58 @@ function toEntityMetadata(value: unknown): EntityMetadata | null {
     title,
     subtitle,
     artwork,
+    group,
   };
+}
+
+/**
+ * `entities`/`related` field decode: every entry must be a well-formed
+ * entityMetadata — a malformed one poisons the page exactly like a
+ * malformed track row does `items`.
+ */
+function toEntityItems(value: unknown): EntityMetadata[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const out: EntityMetadata[] = [];
+  for (const item of value) {
+    const entity = toEntityMetadata(item);
+    if (entity === null) {
+      return null;
+    }
+    out.push(entity);
+  }
+  return out;
+}
+
+/** Wire `top_hit` → domain `SearchTopHit`; the tag discriminates. */
+function toTopHit(value: unknown): SearchTopHit | null | undefined {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (!isRecord(value) || !hasExactKeys(value, ['type', 'item'])) {
+    return undefined;
+  }
+  if (value['type'] === 'track') {
+    const item = toTrackMetadata(value['item']);
+    return item === null ? undefined : { type: 'track', item };
+  }
+  if (value['type'] === 'entity') {
+    const item = toEntityMetadata(value['item']);
+    return item === null ? undefined : { type: 'entity', item };
+  }
+  return undefined;
 }
 
 /** Wire `catalogEntityResult` → domain `EntityPage`. */
 function toEntityPage(value: unknown): EntityPage | null {
   if (
     !isRecord(value) ||
-    !hasKeys(value, ['entity', 'items', 'complete'], ['continuation'])
+    !hasKeys(
+      value,
+      ['entity', 'items', 'complete'],
+      ['continuation', 'related'],
+    )
   ) {
     return null;
   }
@@ -473,7 +548,11 @@ function toEntityPage(value: unknown): EntityPage | null {
     return null;
   }
   const tracks = tracksField(value);
-  if (tracks === null) {
+  const related =
+    value['related'] === undefined
+      ? []
+      : toEntityItems(value['related']);
+  if (tracks === null || related === null) {
     return null;
   }
   const continuation = value['continuation'] ?? null;
@@ -483,6 +562,7 @@ function toEntityPage(value: unknown): EntityPage | null {
   return {
     entity,
     items: tracks,
+    related,
     continuation,
     complete: value['complete'],
   };
@@ -741,6 +821,15 @@ export function createProviderWirePort(
           query: input.query,
           limit: input.limit,
           storefront: input.storefront,
+          // Optional fields stay absent when unset — guests enforce
+          // exact key sets, and an empty kinds set has no meaning.
+          ...(input.kinds !== undefined && input.kinds.length > 0
+            ? { kinds: [...input.kinds] }
+            : {}),
+          ...(input.continuation !== undefined &&
+          input.continuation.length > 0
+            ? { continuation: input.continuation }
+            : {}),
         },
         context,
         toSearchPage,
