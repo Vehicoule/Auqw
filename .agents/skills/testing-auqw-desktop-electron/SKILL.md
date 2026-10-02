@@ -621,6 +621,20 @@ None — the napi artifact is a local cargo build output.
   event: the bus reads `Stopped` + `mpris:length=0` + `CanPlay=false`,
   `playerctl play` is refused, and neither `playbackState` writes,
   metadata republishes, nor rewinding `currentTime` revives it — only a
-  real `play()` call resurrects the card. A parked/retained element past
-  `ended` therefore cannot accept OS-side play presses; in-app replay
-  still works.
+  real `play()` call resurrects the card. Since the queue-end keep-alive
+  work, the web port intercepts ~80 ms short of the real end instead, so
+  `ended` never fires: a parked card reads `Paused` + `CanPlay=true`
+  with position ≈ duration−80 ms while the queue row reads 0 — expected,
+  not a bug (the element rewinds on the OS `play` press).
+- The desktop launch script needs NO `AUQW_*` env vars — defaults
+  already resolve `apps/desktop/plugins` and
+  `target/debug/libauqw_node_bindings.so`; setting wrong values is the
+  common cause of "couldn't start".
+- mp3 fixtures are `doc_id`-bound by PATH: fingerprint/size are
+  scan-time fields and play does not re-verify, so a same-path file with
+  different audio still plays under the fixture's doc.
+- `/tmp` wipes between sessions — keep fixtures and launch scripts
+  re-createable from scratch (seeded local dirs, feed configs).
+- `playerctl position N` absolute-seek compresses long tracks for
+  end-of-track tests — seek near the tail instead of waiting out the
+  duration.
