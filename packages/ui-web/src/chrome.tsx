@@ -6,7 +6,7 @@ import { globalKeyAction } from './keyboard.ts';
 import { WorldSearch } from './search-field.tsx';
 import type { WorldSearchProps } from './search-field.tsx';
 import { useOverlayDismiss } from './stack.tsx';
-import { t } from '@auqw/ui-shared';
+import { scaledArtworkUrl, t } from '@auqw/ui-shared';
 import type { NavItemModel } from '@auqw/ui-shared';
 
 /**
@@ -169,6 +169,14 @@ export type DesktopChromeProps = {
    */
   readonly updateEntry?: ReactNode;
   /**
+   * Current-track artwork for the window bleed — when set, a heavily
+   * blurred copy fills the shell behind the stage + world card and
+   * the stage's art dissolves under the card's left edge (one static
+   * blur layer, re-rendered only on artwork change). Null = the flat
+   * canvas treatment.
+   */
+  readonly backdropArtwork?: string | null | undefined;
+  /**
    * The one search field — a compact pill in the bar's end cluster that
    * collapses to its loupe while the world body is scrolled. Tab bodies
    * carry no second field.
@@ -193,6 +201,7 @@ export function DesktopChrome({
   nav,
   updateEntry,
   search,
+  backdropArtwork,
   children,
 }: DesktopChromeProps) {
   const [internalOpen, setInternalOpen] = useState(true);
@@ -281,8 +290,57 @@ export function DesktopChrome({
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [onFocusSearch]);
+  // The bleed retries the original URL when a CDN size variant fails
+  // to load — and drops the whole layer (data-bleed off, so the stage
+  // re-solidifies) when the source itself can't load. The failure
+  // state is keyed by its artwork URL and the live src is derived
+  // during render, so a track change never paints the old bleed — and
+  // a recorded failure only applies to the current uninterrupted visit:
+  // leaving an artwork and returning re-requests it fresh.
+  const [bleed, setBleed] = useState<{
+    readonly url: string;
+    readonly src: string | null;
+  } | null>(null);
+  const lastArtwork = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    lastArtwork.current = backdropArtwork;
+  }, [backdropArtwork]);
+  const bleedSrc =
+    bleed !== null &&
+    bleed.url === backdropArtwork &&
+    lastArtwork.current === backdropArtwork
+      ? bleed.src
+      : backdropArtwork != null
+        ? scaledArtworkUrl(backdropArtwork, 512)
+        : null;
   return (
-    <div className="uw-chrome" data-stage={open ? 'open' : 'closed'}>
+    <div
+      className="uw-chrome"
+      data-stage={open ? 'open' : 'closed'}
+      data-bleed={
+        backdropArtwork != null && bleedSrc != null ? 'art' : undefined
+      }
+    >
+      {backdropArtwork != null && bleedSrc != null && (
+        <>
+          {/* The window bleed — a scaled-down copy behind everything,
+              blurred once per artwork change (no live filter). 512px
+              is plenty at 72px of blur. */}
+          <img
+            className="uw-winbg"
+            src={bleedSrc}
+            alt=""
+            aria-hidden="true"
+            onError={() =>
+              setBleed({
+                url: backdropArtwork,
+                src: bleedSrc === backdropArtwork ? null : backdropArtwork,
+              })
+            }
+          />
+          <div className="uw-wintint" aria-hidden="true" />
+        </>
+      )}
       <aside className="uw-stage-col">
         {/* Invisible drag grip — only rendered at the <860px overlay
             breakpoint, where the floating column covers the toolbar

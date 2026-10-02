@@ -2955,6 +2955,87 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* The world is a floating card inset from the shell — the art
+     bleed frames it; the card edge is what the stage art dissolves
+     under. */
+  position: relative;
+  margin: var(--spacing-sm);
+  margin-left: 0;
+  border-radius: var(--radius-float);
+  background: var(--canvas);
+  border: var(--stroke-hairline) solid var(--hairline);
+  overflow: hidden;
+}
+
+/* Window art bleed — while a track has artwork, a scaled-down copy
+   fills the shell behind stage + world: blurred once per artwork
+   change (a static layer, no live filter) with a tint veil so it
+   reads as ambient color, not a second picture. The stage column
+   goes transparent so the same blur flows around the player art.
+   (The 90px overhang, 72px blur, and 1.15 scale are effect constants,
+   not layout tokens — they exist so the blurred edges never peek.) */
+.uw-winbg {
+  position: absolute;
+  inset: -90px;
+  width: calc(100% + 180px);
+  height: calc(100% + 180px);
+  object-fit: cover;
+  filter: blur(72px) saturate(1.4);
+  transform: scale(1.15);
+  pointer-events: none;
+}
+.uw-wintint {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--canvas) 52%, transparent);
+  pointer-events: none;
+}
+.ui-web.t-oled .uw-wintint {
+  background: color-mix(in srgb, var(--canvas) 74%, transparent);
+}
+.uw-chrome[data-bleed='art'] .uw-stage-col {
+  background: transparent;
+  border-right-color: transparent;
+}
+.uw-chrome[data-bleed='art'] .uw-stage--immersive {
+  background: transparent;
+}
+/* The crisp art fades out approaching the world card's edge — the
+   last 44px of the column dissolves into the blurred copy. */
+.uw-chrome[data-bleed='art'] .uw-stage__backdrop {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    var(--text-bright) calc(100% - 44px),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    var(--text-bright) calc(100% - 44px),
+    transparent
+  );
+}
+/* Past the overlay breakpoint the card overlaps the column's
+   trailing 24px; the stage's content insets so nothing rides under
+   the card. The overlap exists only while a stage does — closed-stage
+   bleed leaves the card's margin alone. */
+@container (min-width: 861px) {
+  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-world {
+    margin-left: -24px;
+  }
+  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-stage {
+    padding-right: calc(var(--spacing-xl) + 24px);
+  }
+  /* Padding can't move the stage's absolute right-edge controls —
+     stop + the track menu inset past the card overlap too. */
+  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-stage__stop {
+    right: calc(var(--spacing-sm) + 24px);
+  }
+  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-stage__menu {
+    right: calc(var(--spacing-sm) + 40px + 24px);
+  }
+  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-stage__segment {
+    right: calc(var(--spacing-xl) + 24px);
+  }
 }
 
 .uw-world-bar {
