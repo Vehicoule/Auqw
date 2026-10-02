@@ -6,6 +6,7 @@ import {
   fromUnknown,
   isBotCheckWall,
   isPermanentFailure,
+  isStreamsCappedTransient,
   ok,
 } from '../errors.ts';
 import type {
@@ -2069,10 +2070,15 @@ export class PlaybackEngine {
     // verdict is per-request stochastic, so an alternate's resolve
     // draws a fresh ladder — the last escalation path when the
     // guest's own passes (bare, attested, second edge) all walled.
+    // A capped mint rides the same rationale — every rung's URL
+    // probe refused on this serving edge, so a different video's
+    // mints are the next draw.
     if (
       ref === undefined ||
       ref.provider === LOCAL_PROVIDER ||
-      !(REF_SCOPED_REFUSAL_KINDS.has(error.kind) || isBotCheckWall(error)) ||
+      !(REF_SCOPED_REFUSAL_KINDS.has(error.kind) ||
+        isBotCheckWall(error) ||
+        isStreamsCappedTransient(error)) ||
       attempt.alternatesUsed >= ALTERNATE_REF_BUDGET ||
       this.#host.disposed() ||
       this.#isStale(attempt)

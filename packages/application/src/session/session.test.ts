@@ -5992,6 +5992,78 @@ async function deadRefHopsToAlternate(): Promise<void> {
   );
 }
 
+/** A capped-mint wall (`transient` + 'streams-capped' detail) keeps
+ *  its auto-retry — a same-ref redraw mints fresh URLs — then hops
+ *  to the next-best alternate when the retry also caps, never
+ *  surfacing failure on the row. */
+async function streamsCappedTransientHopsToAlternate(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('o1');
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  const capped = appError(
+    'transient',
+    'guest failure (transient): transient: streams-capped',
+  );
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-p1',
+    identity,
+    outcome: { type: 'failed', error: capped, attempt: TRACE },
+  });
+  await pump();
+  // Mint weather is retryable: the 400 ms re-prepare arms on the
+  // same ref — a redrawn ladder mints fresh URLs.
+  r.clock.advance(400);
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 2, 'same-ref retry re-prepares');
+  const retryIdentity = lastPrepareIdentity(r);
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-p2',
+    identity: retryIdentity,
+    outcome: { type: 'failed', error: capped, attempt: TRACE },
+  });
+  await pump();
+  // The redraw capped too — now the refusal is ref-scoped and the
+  // intent spends its next-best hop on a different video's mints.
+  assertEqual(readyOf(r).playback.type, 'preparing');
+  assertEqual(r.ytm.pendingCount('candidates'), 1, 'hop resolves alternates');
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'y2', 'Song r1', 'Artist', 300_000)]),
+  );
+  await pump();
+  assertEqual(calls(r, 'prepare').length, 3, 'alternate re-prepares');
+  const altInput = calls(r, 'prepare').at(-1)?.input as
+    | { sourceRef?: string }
+    | undefined;
+  assertEqual(altInput?.sourceRef, 'y2', 'alternate video prepared');
+  const altIdentity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(altIdentity, 'h-alt'));
+  await pump();
+  // Three prepare deferreds queue behind the retry + hop — the
+  // superseded p1, the retry's own request, and the alternate's.
+  assert(r.player.settlePrepare(ok('req-sup1')), 'superseded p1 frees');
+  assert(r.player.settlePrepare(ok('req-sup2')), 'retry call frees');
+  assert(r.player.settlePrepare(ok('req-alt')), 'alternate request id lands');
+  const res = await playing;
+  assert(res.ok, 'recovered tap resolves with the chain outcome');
+  await pump();
+  assertEqual(readyOf(r).playback.type, 'buffering');
+}
+
 /** A re-match that only offers the dead ref fails with the ORIGINAL
  *  refusal verdict — the veto proves the same video can't replay. */
 async function deadRefMatchSkipsVeto(): Promise<void> {
@@ -7833,6 +7905,10 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['permanentFailureSkipsForward', permanentFailureSkipsForward],
   ['botCheckWallPolicy', botCheckWallPolicy],
   ['deadRefHopsToAlternate', deadRefHopsToAlternate],
+  [
+    'streamsCappedTransientHopsToAlternate',
+    streamsCappedTransientHopsToAlternate,
+  ],
   ['deadRefMatchSkipsVeto', deadRefMatchSkipsVeto],
   ['pauseDuringRetryBackoff', pauseDuringRetryBackoff],
   ['releaseRetry', releaseRetry],
