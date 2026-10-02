@@ -991,7 +991,56 @@ export function createWebPlayerPort(deps: {
       .catch(() => undefined);
   }
 
-  audio.addEventListener('playing', () => status('playing'));
+  /** Chromium kills the OS media session the instant the element ends
+   * — a parked tail's card would stay dead to OS play presses no
+   * matter what gets published after (`playbackState`/metadata writes
+   * and rewinds don't revive it). The port intercepts ~ε before the
+   * real end instead: pause keeps the element short of `ended` (the
+   * card stays live-paused) while the same 'ended' status +
+   * transition feed the session. `timeupdate` arms a self-correcting
+   * timer; a window missed to background timer slack degrades to the
+   * real `ended` — the old surface kill, never a wrong state. */
+  const END_INTERCEPT_WINDOW_MS = 1_500;
+  const END_INTERCEPT_EPS_MS = 80;
+  let endCheckTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The handle whose end the intercept already fed — a real `ended`
+   * landing for it anyway must not emit a second end. */
+  let endSynthesizedFor: string | null = null;
+
+  function checkEndIntercept(): void {
+    const owner = current;
+    if (owner === null || audio.paused || audio.ended) {
+      return;
+    }
+    const duration = durMs();
+    if (duration === undefined) {
+      return;
+    }
+    const remaining = duration - posMs();
+    if (remaining > END_INTERCEPT_WINDOW_MS) {
+      return;
+    }
+    if (remaining <= END_INTERCEPT_EPS_MS) {
+      endSynthesizedFor = owner.handle;
+      audio.pause();
+      status('ended');
+      advanceQueue('ended');
+      return;
+    }
+    if (endCheckTimer === null) {
+      // A timer landing early (background slack) re-checks and
+      // tightens itself; the ≥60 ms floor keeps a stalled tail cheap.
+      endCheckTimer = setTimeout(() => {
+        endCheckTimer = null;
+        checkEndIntercept();
+      }, Math.max(60, remaining - END_INTERCEPT_EPS_MS));
+    }
+  }
+
+  audio.addEventListener('playing', () => {
+    endSynthesizedFor = null;
+    status('playing');
+  });
   audio.addEventListener('waiting', () => status('buffering'));
   audio.addEventListener('loadedmetadata', () => status('ready'));
   audio.addEventListener('pause', () => {
@@ -1008,8 +1057,14 @@ export function createWebPlayerPort(deps: {
     if (!audio.paused) {
       status('playing');
     }
+    checkEndIntercept();
   });
   audio.addEventListener('ended', () => {
+    // An intercepted end already fed the session — its element event
+    // is spent, and emitting again would double-advance the queue.
+    if (current !== null && current.handle === endSynthesizedFor) {
+      return;
+    }
     status('ended');
     advanceQueue('ended');
   });

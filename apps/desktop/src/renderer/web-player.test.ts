@@ -1009,6 +1009,61 @@ export async function run(): Promise<void> {
     );
   }
 
+  // The tail end is intercepted before the element's `ended` — the
+  // same 'ended' status + null-target transition feed the session
+  // while the element stays paused-alive, and a stale `ended` for the
+  // already-fed end can't double-advance.
+  {
+    const stream = fakeStream();
+    const { player, audio, events } = rig(stream);
+    await player.setQueueProjection(
+      twoItemProjection({
+        order: [0],
+        items: [
+          {
+            occurrenceId: 'occ-1',
+            provider: 'deezer',
+            sourceRef: 't1',
+            title: 'one',
+            artist: null,
+            artworkUrl: null,
+          },
+        ],
+      }),
+    );
+    await player.play({ handle: 'h-1', identity });
+    // ~50 ms short of the 60 s duration — inside the intercept's ε.
+    audio.currentTime = 59.95;
+    audio.fire('timeupdate');
+    await settle();
+    assert(audio.paused, 'the intercept pauses short of ended');
+    assert(!audio.ended, 'the element never reaches ended');
+    const statuses = events.filter(
+      (e) => e.type === 'status' && e.state === 'ended',
+    );
+    assertEqual(statuses.length, 1, 'the synthesized end is reported');
+    const transition = events.find((e) => e.type === 'queue-transition');
+    assert(
+      transition !== undefined &&
+        transition.type === 'queue-transition' &&
+        transition.toOccurrenceId === null,
+      'the intercepted end emits the tail transition',
+    );
+    // A real `ended` arriving anyway is spent — no second advance.
+    audio.fire('ended');
+    assertEqual(
+      events.filter((e) => e.type === 'queue-transition').length,
+      1,
+      'a late element ended cannot double-advance',
+    );
+    assertEqual(
+      events.filter((e) => e.type === 'status' && e.state === 'ended')
+        .length,
+      1,
+      'the spent end emits no second status',
+    );
+  }
+
   // A failed successor attach surfaces as a failed status — never an
   // illegal transition the session must reject.
   {
