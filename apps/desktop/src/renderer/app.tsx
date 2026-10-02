@@ -1445,6 +1445,7 @@ function Main({
               focusSignal: searchFocusTick,
               onNavigateToSearch: tab === 'explore' ? undefined : focusSearch,
             }}
+            backdropArtwork={player?.artworkUrl ?? null}
             updateEntry={
               <span style={{ position: 'relative', display: 'inline-flex' }}>
                 <IconButton

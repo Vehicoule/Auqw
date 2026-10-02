@@ -6,7 +6,7 @@ import { globalKeyAction } from './keyboard.ts';
 import { WorldSearch } from './search-field.tsx';
 import type { WorldSearchProps } from './search-field.tsx';
 import { useOverlayDismiss } from './stack.tsx';
-import { t } from '@auqw/ui-shared';
+import { scaledArtworkUrl, t } from '@auqw/ui-shared';
 import type { NavItemModel } from '@auqw/ui-shared';
 
 /**
@@ -150,6 +150,14 @@ export type DesktopChromeProps = {
    */
   readonly updateEntry?: ReactNode;
   /**
+   * Current-track artwork for the window bleed — when set, a heavily
+   * blurred copy fills the shell behind the stage + world card and
+   * the stage's art dissolves under the card's left edge (one static
+   * blur layer, re-rendered only on artwork change). Null = the flat
+   * canvas treatment.
+   */
+  readonly backdropArtwork?: string | null | undefined;
+  /**
    * The one search field — a compact pill in the bar's end cluster that
    * collapses to its loupe while the world body is scrolled. Tab bodies
    * carry no second field.
@@ -173,6 +181,7 @@ export function DesktopChrome({
   onOpenSettings,
   updateEntry,
   search,
+  backdropArtwork,
   children,
 }: DesktopChromeProps) {
   const [internalOpen, setInternalOpen] = useState(true);
@@ -261,7 +270,25 @@ export function DesktopChrome({
     return () => document.removeEventListener('keydown', onKey);
   }, [onFocusSearch]);
   return (
-    <div className="uw-chrome" data-stage={open ? 'open' : 'closed'}>
+    <div
+      className="uw-chrome"
+      data-stage={open ? 'open' : 'closed'}
+      data-bleed={backdropArtwork != null ? 'art' : undefined}
+    >
+      {backdropArtwork != null && (
+        <>
+          {/* The window bleed — a scaled-down copy behind everything,
+              blurred once per artwork change (no live filter). 512px
+              is plenty at 72px of blur. */}
+          <img
+            className="uw-winbg"
+            src={scaledArtworkUrl(backdropArtwork, 512)}
+            alt=""
+            aria-hidden="true"
+          />
+          <div className="uw-wintint" aria-hidden="true" />
+        </>
+      )}
       <aside className="uw-stage-col">
         {/* Invisible drag grip — only rendered at the <860px overlay
             breakpoint, where the floating column covers the toolbar
