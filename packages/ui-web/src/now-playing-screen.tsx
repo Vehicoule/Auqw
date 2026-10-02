@@ -71,7 +71,9 @@ export type TransportProps = {
 };
 
 // Transport buttons come in two builds — 44/18 'side' flanks and
-// 44/20 'main' prev/next — over the shared IconButton.
+// 44/20 'main' prev/next — over the shared IconButton. The box size
+// lives on the classes (not the size prop) so the narrow-stage
+// container query in styles.css can shrink them below the floor.
 function TBtn({
   main = false,
   ...props
@@ -81,7 +83,6 @@ function TBtn({
   return (
     <IconButton
       {...props}
-      size={44}
       iconSize={main ? 20 : 18}
       className={`uw-transport__${main ? 'main' : 'side'}`}
     />

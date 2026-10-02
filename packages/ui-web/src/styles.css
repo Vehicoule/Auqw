@@ -2200,6 +2200,8 @@
   max-width: 640px;
   width: 100%;
   margin: 0 auto;
+  /* the narrow-stage transport query below measures this width */
+  container-type: inline-size;
 }
 
 /* Player mode's cluster is pinned, not scrolled — it keeps the clear
@@ -2636,6 +2638,36 @@
   height: 64px;
   border-radius: 30%;
   background: var(--accent);
+}
+
+/* Boxes live on the classes so the narrow-stage query can shrink
+   them — IconButton's `size` prop is an inline style CSS can't beat. */
+.uw-transport__side,
+.uw-transport__main {
+  width: 44px;
+  height: 44px;
+}
+
+/* Below ~360px (the 280px stage floor, and the <860px overlay which
+   can go narrower than the floor) the full-size row doesn't fit —
+   trade footprint for reach: every button keeps a pointer-fair box
+   instead of letting flex crush them unevenly. */
+@container (max-width: 360px) {
+  .uw-transport {
+    gap: var(--spacing-xxs);
+    padding: 0;
+  }
+
+  .uw-transport__play {
+    width: 56px;
+    height: 56px;
+  }
+
+  .uw-transport__side,
+  .uw-transport__main {
+    width: 36px;
+    height: 36px;
+  }
 }
 
 .uw-transport__play:hover:not(:disabled) {
