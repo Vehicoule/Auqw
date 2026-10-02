@@ -2863,7 +2863,7 @@ export class Session {
       return persisted;
     }
     this.#derived();
-    return this.#playback.startAttempt(current);
+    return this.#playback.startAttempt(current, { freshSources: true });
   }
 
   async removeOccurrence(id: string): Promise<Result<void>> {

@@ -126,8 +126,9 @@ export function appError(
  * to the message, so the legacy detail survives as the LAST
  * `:`-separated segment (`"guest failure (transient): transient:
  * bot-check"`). Both shapes are the same verdict: per-IP/per-visitor
- * provider truth, not weather — retry policies treat it as terminal
- * and the row stays unmarked.
+ * provider truth, not weather — in-invocation retries spend no calls
+ * on it and the row stays unmarked; the attempt's alternate-ref hop
+ * still treats it as worth one fresh ladder on a different video.
  */
 export function isBotCheckWall(error: AppError): boolean {
   return (
