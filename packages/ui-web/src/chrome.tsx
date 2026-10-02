@@ -28,6 +28,14 @@ const NAV_ICONS: Record<string, IconName> = {
   settings: 'settings',
 };
 
+/** Filled variants read on the active tab — same pair the native dock swaps. */
+const NAV_ICONS_ACTIVE: Record<string, IconName> = {
+  home: 'home-filled',
+  explore: 'compass-filled',
+  library: 'library-filled',
+  settings: 'settings-filled',
+};
+
 /**
  * Centered page switcher — the same segmented-pill construction as
  * the stage's mode segment (accentSoft tonal fill, accent glyph +
@@ -48,7 +56,13 @@ function WorldTabs({
         {tabs.map((item) => (
           <SegmentItem
             key={item.key}
-            icon={NAV_ICONS[item.key] ?? 'note'}
+            icon={
+              (item.key === activeKey
+                ? NAV_ICONS_ACTIVE[item.key]
+                : undefined) ??
+              NAV_ICONS[item.key] ??
+              'note'
+            }
             label={item.label}
             active={item.key === activeKey}
             onPress={() => onSelect(item.key)}
