@@ -585,6 +585,10 @@ async function initFixupPersistRetries(): Promise<void> {
     'requested',
     'fixup committed on the retry',
   );
+  assert(
+    r.manager.recordFor('rec-p') !== null,
+    'demoted row published',
+  );
   assert(!r.manager.unavailable(), 'verified init clears unavailable');
 }
 
