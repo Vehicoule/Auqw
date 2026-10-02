@@ -2240,6 +2240,8 @@ function updateRowValue(
       return t('update.value.restart');
     case 'applied':
       return t('update.value.applied');
+    case 'needs-permission':
+      return t('update.value.needsPermission');
     case 'failed':
       return t('update.value.applyFailed');
     case 'idle':
@@ -2351,6 +2353,15 @@ export function toUpdateBanner(
     case 'applied':
       // The installer / file manager owns the story now.
       return null;
+    case 'needs-permission':
+      // The OS gated the install — the verified stage is kept, so a
+      // retry refires the handoff rather than a re-download.
+      return {
+        version,
+        label: t('update.banner.needsPermission'),
+        actionLabel: t('update.action.retry'),
+        cancelable: false,
+      };
     case 'failed':
       if (version === dismissedVersion) {
         return null;
@@ -2502,6 +2513,21 @@ export function toUpdateCard(
             progress: null,
             chip: 'stored',
             actionLabel: t('update.action.reopen'),
+            cancelable: false,
+            dismissible: true,
+          };
+    case 'needs-permission':
+      // The OS gated the install — the verified stage is kept, so a
+      // retry refires the handoff rather than a re-download.
+      return dismissed
+        ? null
+        : {
+            version,
+            title: t('update.card.needsPermission'),
+            detail: t('update.card.needsPermissionDetail'),
+            progress: null,
+            chip: 'failed',
+            actionLabel: t('update.action.retry'),
             cancelable: false,
             dismissible: true,
           };

@@ -198,6 +198,17 @@ export type TagReaderEntry = {
 
 export type TagReaderFingerprint = { docId: string; fingerprint: string };
 
+/**
+ * One granted tree's enumeration payload. `failedTrees` names
+ * subtrees by root docId the provider could not list — 'could not
+ * list' is unknown, never 'empty': the engine keeps prior rows under
+ * them instead of stripping them as vanished.
+ */
+export type TagReaderListing = {
+  entries: readonly TagReaderEntry[];
+  failedTrees: readonly string[];
+};
+
 export type TagReaderTags = {
   docId: string;
   title: string | null;
@@ -260,7 +271,7 @@ declare class AuqwExpoNative extends NativeModule<AuqwExpoEvents> {
   tagPickFolder(): Promise<{ treeUri: string; label: string }>;
   tagEnumerate(
     treeUri: string,
-  ): Promise<readonly TagReaderEntry[]>;
+  ): Promise<TagReaderListing>;
   tagFingerprint(
     treeUri: string,
     docIds: readonly string[],
@@ -538,7 +549,7 @@ export function tagPickFolder(): Promise<{ treeUri: string; label: string }> {
   return native.tagPickFolder();
 }
 
-export function tagEnumerate(treeUri: string): Promise<readonly TagReaderEntry[]> {
+export function tagEnumerate(treeUri: string): Promise<TagReaderListing> {
   return native.tagEnumerate(treeUri);
 }
 

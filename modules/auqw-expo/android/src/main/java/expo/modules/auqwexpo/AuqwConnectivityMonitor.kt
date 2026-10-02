@@ -16,8 +16,11 @@ import android.net.NetworkCapabilities
  * (wifi → cell) never inherits the old network's validation.
  *
  * metered: active network lacks NET_CAPABILITY_NOT_METERED (cellular,
- * data-saver). When offline, metered reports false — it is best-
- * effort and callers must not infer policy from it.
+ * data-saver). It is read independently of `online` whenever a
+ * network is attached — a present-but-unvalidated network still
+ * reports its meteredness; it reads false only with no active
+ * network (or no INTERNET capability). Best-effort while offline —
+ * callers must not infer a policy from it.
  *
  * Registered lazily on first JS observer; unregistered when the last
  * one leaves, so a cold app start pays no callback cost.

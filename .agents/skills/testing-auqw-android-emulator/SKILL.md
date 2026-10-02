@@ -675,3 +675,65 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   radioSeed-capable provider — youtube-music-first rows work
   directly; a deezer-first row needs a youtube-music PIN
   (`selectedRef`) to expose it.
+
+## Update-apply seam + SAF picker (post-#299)
+
+- The update check hits `api.github.com` unauthenticated — this box's
+  shared egress burns the 60/hr limit, so the app's own check fails
+  `transient`. Use the env seam:
+  `EXPO_PUBLIC_UPDATE_RELEASES_URL=http://localhost:8088/releases.json`
+  exported when starting Metro (inlined at bundle time), plus
+  `adb reverse tcp:8088 tcp:8088` and a `python3 -m http.server`
+  serving `gh api 'repos/Vehicoule/Auqw/releases?per_page=3'` verbatim
+  — real asset URLs keep download+SHA256SUMS honest (fetchText has no
+  allowlist; the APK download port enforces the releases/download/
+  prefix itself). The loopback-only networkSecurityConfig is a
+  RELEASE-manifest overlay (with-loopback-cleartext.cjs): debug builds
+  keep the debug manifest's broad cleartext flag, so `10.0.2.2` works
+  there too — serve via adb reverse + localhost anyway so the recipe
+  holds on both build types.
+- APK asset ABI comes from the asset NAME (`…-android-<abi>.apk`);
+  x86_64 emulator abilist is `x86_64,arm64-v8a` (ARM translation), so
+  arm64-only splits still resolve 'install' on this AVD.
+- Unknown-sources gate is appops-driven:
+  `adb shell appops set com.vehicoule.auqw REQUEST_INSTALL_PACKAGES deny|allow`
+  (`appops get` reads it). A fresh install defaults deny → first apply
+  lands needs-permission naturally; installApk opens
+  `Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES` — the real grant path
+  is toggling 'Allow from this source' on that page.
+- needs-permission parked state: card shows `install needs
+  permission`/`allow installs from this app, then retry`/warn
+  chip/`retry`; settings row `needs install permission — tap to
+  retry`. `retry` while still denied refires installApk INSTANTLY on
+  the retained stage — no download progress is the no-re-download
+  proof. Staged APK: `run-as com.vehicoule.auqw ls -la
+  cache/auqw-update/` vs the release asset's `size`.
+- Do NOT confirm the OS install sheet on a debug build: the release
+  APK is release-signed → update fails signature-match
+  (environmental). 'applied' is proven the moment the
+  PackageInstaller sheet appears.
+- SAF picker on API 36: `auqw://open?tab=settings` → LOCAL FILES →
+  'add local folder' drives ACTION_OPEN_DOCUMENT_TREE; DocumentsUI
+  root is a folder TILE GRID — tap tile → tap subfolder → 'USE THIS
+  FOLDER' (~y2274) → consent 'Allow …?' → ALLOW. Scan evidence:
+  `local: scan <sourceId> entries=N added=N removed=N unreadable=N
+  unlisted=N` in ReactNativeJS logcat; `auqw://local-list` prints
+  per-source files=/recordings=.
+- `local.recordings()` filters `provenance === 'local'` — a vanished
+  FILE drops its file row but the recording persists (owned data), so
+  recordings > files after a rescan-removal is expected, not a bug.
+- No stock way to force an unlistable SAF subtree (sdcardfs ignores
+  chmod) — the `failedTrees` keep-rows leg stays static-evidence on
+  device; verify `unlisted=` counter presence in scan lines instead.
+- Pre-existing dev-mode LogBox (PR #289, not PR-specific):
+  `subscribeAppActive` fires its listener inside
+  `AppState.addEventListener('change')` — returning from ANY OS
+  surface can throw 'Maximum update depth exceeded' as a dismissable
+  overlay; app state survives. Verify App.tsx blame before
+  attributing.
+- Fresh checkout needs, in order: `pnpm install --frozen-lockfile`,
+  `pnpm sync-plugins`, `rustup target add x86_64-linux-android` +
+  `tooling/build-android-bindings.sh` when
+  `modules/auqw-expo/android/src/main/jniLibs/<abi>/libauqw_mobile_bindings.so`
+  is absent, then `(cd apps/mobile && pnpm exec expo prebuild
+  --platform android --no-install)` only when `android/` is missing.

@@ -54,55 +54,84 @@ object AuqwTagReader {
   }
 
   /**
-   * Depth-first walk of the tree. Yields entries for files whose mime
-   * is audio/<subtype> (or unknown-but-audio-looking); directories recurse.
+   * Depth-first walk of the tree. Returns {entries, failedTrees}:
+   * entries for files whose mime is audio/<subtype> (or unknown-but-
+   * audio-looking); directories recurse. A subtree the provider can't
+   * list (null cursor, refusal, mid-iteration failure) lands in
+   * failedTrees by root docId — 'could not list' is unknown, never
+   * 'empty', so the engine keeps prior rows under it instead of
+   * reading them as vanished. Only a root SecurityException fails the
+   * call typed: the whole tree grant is gone, not one subtree.
    */
-  fun enumerate(ctx: Context, treeUri: Uri): List<Map<String, Any?>> {
+  fun enumerate(ctx: Context, treeUri: Uri): Map<String, Any?> {
     val out = mutableListOf<Map<String, Any?>>()
+    val failedTrees = mutableListOf<String>()
+    val rootId = DocumentsContract.getTreeDocumentId(treeUri)
     val stack = ArrayDeque<String>()
-    stack.add(DocumentsContract.getTreeDocumentId(treeUri))
+    stack.add(rootId)
     while (stack.isNotEmpty()) {
       val parentId = stack.removeLast()
       val children = DocumentsContract.buildChildDocumentsUriUsingTree(
         treeUri, parentId
       )
-      val cursor = ctx.contentResolver.query(
-        children,
-        arrayOf(
-          DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-          DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-          DocumentsContract.Document.COLUMN_SIZE,
-          DocumentsContract.Document.COLUMN_MIME_TYPE,
-          DocumentsContract.Document.COLUMN_LAST_MODIFIED
-        ),
-        null, null, null
-      ) ?: continue
-      cursor.use {
-        while (it.moveToNext()) {
-          val docId = it.getString(0) ?: continue
-          val name = it.getString(1) ?: continue
-          val size = if (it.isNull(2)) 0L else it.getLong(2)
-          val mime = it.getString(3) ?: ""
-          // Providers can legally report no stamp — null keeps the
-          // scan's fingerprint fallback honest for them.
-          val modifiedMs = if (it.isNull(4)) null else it.getLong(4)
-          if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-            stack.add(docId)
-          } else if (mime.startsWith("audio/") || looksAudio(name)) {
-            out.add(
-              mapOf(
-                "docId" to docId,
-                "name" to name,
-                "size" to size.toDouble(),
-                "mime" to mime,
-                "modifiedMs" to modifiedMs?.toDouble()
+      val cursor = try {
+        ctx.contentResolver.query(
+          children,
+          arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_SIZE,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+            DocumentsContract.Document.COLUMN_LAST_MODIFIED
+          ),
+          null, null, null
+        )
+      } catch (e: SecurityException) {
+        if (parentId == rootId) {
+          throw e
+        }
+        failedTrees.add(parentId)
+        continue
+      } catch (e: RuntimeException) {
+        failedTrees.add(parentId)
+        continue
+      }
+      if (cursor == null) {
+        failedTrees.add(parentId)
+        continue
+      }
+      try {
+        cursor.use {
+          while (it.moveToNext()) {
+            val docId = it.getString(0) ?: continue
+            val name = it.getString(1) ?: continue
+            val size = if (it.isNull(2)) 0L else it.getLong(2)
+            val mime = it.getString(3) ?: ""
+            // Providers can legally report no stamp — null keeps the
+            // scan's fingerprint fallback honest for them.
+            val modifiedMs = if (it.isNull(4)) null else it.getLong(4)
+            if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+              stack.add(docId)
+            } else if (mime.startsWith("audio/") || looksAudio(name)) {
+              out.add(
+                mapOf(
+                  "docId" to docId,
+                  "name" to name,
+                  "size" to size.toDouble(),
+                  "mime" to mime,
+                  "modifiedMs" to modifiedMs?.toDouble()
+                )
               )
-            )
+            }
           }
         }
+      } catch (e: RuntimeException) {
+        // A mid-iteration failure leaves the subtree partially read —
+        // mark it so the unlisted region reads as unknown.
+        failedTrees.add(parentId)
       }
     }
-    return out
+    return mapOf("entries" to out, "failedTrees" to failedTrees)
   }
 
   private fun looksAudio(name: String): Boolean {

@@ -1560,6 +1560,10 @@ const isUpdateApplyPayload = v.union(
   }),
   v.object({ state: v.literal('applied'), version: v.boundedString(64) }),
   v.object({
+    state: v.literal('needs-permission'),
+    version: v.boundedString(64),
+  }),
+  v.object({
     state: v.literal('failed'),
     version: v.boundedString(64),
     error: isUpdateErrorPayload,

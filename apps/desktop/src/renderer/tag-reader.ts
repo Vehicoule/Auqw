@@ -105,12 +105,16 @@ export function createDesktopTagReader(api: AuqwApi): TagReaderPort {
         return cancelled;
       }
       // Read-only: a cancel settles the caller early; the parked
-      // utility enumeration's result is simply dropped.
+      // utility enumeration's result is simply dropped. The utility
+      // walk fails typed on any unlistable dir, so its unlisted
+      // region is always empty.
       const res = await settleIpc(
         api.tagread.enumerate({ treeUri }),
         signal,
       );
-      return res.ok ? ok(res.value.entries) : res;
+      return res.ok
+        ? ok({ entries: res.value.entries, failedTrees: [] })
+        : res;
     },
 
     fingerprint(treeUri, docIds, signal) {

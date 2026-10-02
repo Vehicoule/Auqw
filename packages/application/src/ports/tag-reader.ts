@@ -47,6 +47,18 @@ export type LocalTags = {
 };
 
 /**
+ * One granted tree's listing. `entries` is every candidate row the
+ * walk produced; `failedTrees` names subtrees by root docId that the
+ * provider could not list — 'could not list' is UNKNOWN, never
+ * 'empty': the engine keeps prior rows under them rather than
+ * stripping them as vanished.
+ */
+export type LocalTreeListing = {
+  readonly entries: readonly LocalEntry[];
+  readonly failedTrees: readonly string[];
+};
+
+/**
  * Local-files read port (slice 3): folder picking, tree enumeration,
  * fingerprinting, and tag reads. The Kotlin implementation lives in
  * auqw-expo (DocumentsContract + MediaMetadataRetriever + pread) — no
@@ -66,14 +78,16 @@ export interface TagReaderPort {
    * List candidate media files inside the granted tree.
    * `permission-denied` when the grant is gone (row stays, honest).
    * The listing is authoritative — the engine diffs it against the
-   * index, so an adapter must fail typed on any unreadable entry
-   * rather than return a partial scan that reads as deletion. Only
-   * entries that vanished mid-scan may be omitted.
+   * index, so a subtree the provider can't list must be named in
+   * `failedTrees` (its rows read as unknown, never vanished), and an
+   * adapter must fail typed on any unreadable entry rather than
+   * return a partial scan that reads as deletion. Only entries that
+   * vanished mid-scan may be omitted.
    */
   enumerate(
     treeUri: string,
     signal: CancellationSignal,
-  ): Promise<Result<readonly LocalEntry[]>>;
+  ): Promise<Result<LocalTreeListing>>;
   /**
    * Fingerprint a batch of documents: head+tail content sample + size.
    * Results arrive in request order — a failed entry yields null at

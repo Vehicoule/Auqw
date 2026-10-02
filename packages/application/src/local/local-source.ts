@@ -24,6 +24,8 @@ type ScanReport = {
   readonly removed: number;
   /** Entries whose fingerprint read failed — row kept, not fatal. */
   readonly unreadable: number;
+  /** Rows kept because their subtree couldn't be listed — 'unknown'. */
+  readonly unlisted: number;
 };
 
 type LocalFileSourceDeps = {
@@ -82,7 +84,9 @@ function fileIdFor(
  * Scan is incremental: docId+size match skips fingerprinting; a moved
  * file (same fingerprint, new docId) keeps its `fileId`; a vanished
  * docId drops its row and strips the recording's `local` sourceRef —
- * the recording itself persists as owned data.
+ * the recording itself persists as owned data. A subtree the provider
+ * can't list reports 'unknown' through `failedTrees` — its rows and
+ * refs survive; only docIds under listed trees may vanish.
  */
 export class LocalFileSource {
   readonly #storage: StoragePort;
@@ -395,10 +399,26 @@ export class LocalFileSource {
     if (!listed.ok) {
       return err(listed.error);
     }
-    const entries = listed.value;
+    const { entries, failedTrees } = listed.value;
     const entryByDoc = new Map(entries.map((e) => [e.docId, e] as const));
     const prior = this.#files.filter((f) => f.sourceId === sourceId);
     const byDocId = new Map(prior.map((f) => [f.docId, f] as const));
+
+    // 'Could not list' is unknown, never 'empty': a subtree marker
+    // can only be attributed to rows when docIds are path-scoped to
+    // their tree — SAF's file-system provider (externalstorage)
+    // gives `volume:root/dir/file` ids where a child is
+    // `parent + '/' + name`. Every other authority's ids are opaque
+    // and a '/' in them is not ancestry, so while ANY subtree failed
+    // no unenumerated row of an opaque provider may read as vanished.
+    const pathScopedIds = source.treeUri.startsWith(
+      'content://com.android.externalstorage.documents/',
+    );
+    const underFailedTree = (docId: string): boolean =>
+      failedTrees.some((t) => docId === t || docId.startsWith(`${t}/`));
+    const provablyVanished = (f: LocalFile): boolean =>
+      failedTrees.length === 0 ||
+      (pathScopedIds && !underFailedTree(f.docId));
 
     // Fingerprint only entries a prior row can't account for. Size
     // alone can't detect an in-place replacement of identical length
@@ -439,13 +459,14 @@ export class LocalFileSource {
 
     // Move detection matches prior rows by fingerprint; a queue per
     // fingerprint so identical-bytes duplicates each claim their own
-    // row instead of racing one. Only rows whose docId vanished are
+    // row instead of racing one. Only PROVABLY vanished rows are
     // claimable: a still-enumerated docId's row is owned by that
-    // entry's own keep/replace path — letting a moved duplicate take
-    // it would push the same fileId twice and fail the commit.
+    // entry's own keep/replace path, and a row under a failed subtree
+    // may still exist — a listed lookalike taking it would erase the
+    // unlisted location's row (the copy earns its own fileId).
     const rowsByFp = new Map<string, LocalFile[]>();
     for (const f of prior) {
-      if (entryByDoc.has(f.docId)) {
+      if (entryByDoc.has(f.docId) || !provablyVanished(f)) {
         continue;
       }
       const queue = rowsByFp.get(f.fingerprint);
@@ -465,7 +486,12 @@ export class LocalFileSource {
     const scanned: LocalFile[] = [];
     // fileIds claimed this scan — a second copy of identical bytes
     // disambiguates by docId so the commit's PK uniqueness holds.
-    const claimed = new Set<string>();
+    // Rows a failed listing can't prove vanished still OWN their
+    // fileIds — a same-fingerprint entry at a new docId must mint a
+    // distinct id rather than colliding with the unlisted row.
+    const claimed = new Set<string>(
+      prior.filter((f) => !provablyVanished(f)).map((f) => f.fileId),
+    );
     let added = 0;
     let updated = 0;
 
@@ -654,7 +680,28 @@ export class LocalFileSource {
     // drop the rows, strip the dead `provider:'local'` refs. The
     // recording persists as owned data.
     const live = new Set(scanned.map((f) => f.fileId));
-    const vanished = prior.filter((f) => !live.has(f.fileId));
+    // A docId that WAS enumerated follows its entry's own outcome —
+    // a partially-failed tree can still yield real rows, and a
+    // replaced one must not be kept twice. Only an UNENUMERATED docId
+    // needs the failed-tree attribution to decide vanish vs unknown.
+    const vanished = prior.filter(
+      (f) =>
+        !live.has(f.fileId) &&
+        (entryByDoc.has(f.docId) || provablyVanished(f)),
+    );
+    // The unknown complement — never listed and never proven gone —
+    // re-commits verbatim, keeping its row and `local` refs.
+    let retained = 0;
+    for (const f of prior) {
+      if (
+        !live.has(f.fileId) &&
+        !entryByDoc.has(f.docId) &&
+        !provablyVanished(f)
+      ) {
+        scanned.push(f);
+        retained += 1;
+      }
+    }
 
     const nextSource: LocalSource = {
       ...source,
@@ -750,7 +797,7 @@ export class LocalFileSource {
     }
     void this.#log.write({
       level: 'info',
-      message: `local: scan ${sourceId} entries=${entries.length} added=${added} removed=${vanished.length} unreadable=${unreadableDocs.size}`,
+      message: `local: scan ${sourceId} entries=${entries.length} added=${added} removed=${vanished.length} unreadable=${unreadableDocs.size} unlisted=${retained}`,
       atMs: this.#clock.nowMs(),
     });
     return ok({
@@ -759,6 +806,7 @@ export class LocalFileSource {
       updated,
       removed: vanished.length,
       unreadable: unreadableDocs.size,
+      unlisted: retained,
     });
   }
 }

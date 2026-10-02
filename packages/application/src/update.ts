@@ -402,8 +402,11 @@ export type UpdateStatus =
  * install mechanic). 'ready-to-restart' is the terminal pre-quit
  * state for formats that self-apply on relaunch (AppImage);
  * 'applied' means an OS surface took over (APK sheet, NSIS
- * installer, Finder-revealed dmg); 'failed' is retryable by the
- * same affordance that started it.
+ * installer, Finder-revealed dmg); 'needs-permission' means the OS
+ * gated the install (Android's unknown-sources switch) — the
+ * verified stage is retained so `reapply` refires the handoff
+ * without a re-download; 'failed' is retryable by the same
+ * affordance that started it.
  */
 export type UpdateApplyStatus =
   | { readonly state: 'idle' }
@@ -418,6 +421,7 @@ export type UpdateApplyStatus =
   | { readonly state: 'applying'; readonly version: string }
   | { readonly state: 'ready-to-restart'; readonly version: string }
   | { readonly state: 'applied'; readonly version: string }
+  | { readonly state: 'needs-permission'; readonly version: string }
   | {
       readonly state: 'failed';
       readonly version: string;
@@ -461,8 +465,8 @@ export interface UpdateService {
    */
   apply(): void;
   /** Re-fire the install handoff on the staged artifact — only
-      meaningful after 'applied' (the OS sheet owned the outcome).
-      No-op otherwise. */
+      meaningful after 'applied' (the OS sheet owned the outcome) or
+      'needs-permission' (the gate kept the stage). No-op otherwise. */
   reapply(): void;
   /** Abort an in-flight apply — back to 'idle'; no-op otherwise. */
   cancelApply(): void;
@@ -673,9 +677,11 @@ export interface UpdateApplier {
   cancel(): void;
   /** Re-fire the platform's install surface on the already-verified
       staged file — 'applied' means an OS sheet owned the outcome and
-      it may never have landed (cancelled sheet, failed install), so
-      the affordance re-offers the handoff without re-downloading.
-      No-op unless the current state is 'applied'. */
+      it may never have landed (cancelled sheet, failed install), and
+      'needs-permission' means the OS gated the install with the stage
+      retained — so the affordance re-offers the handoff without
+      re-downloading. No-op unless the current state is 'applied' or
+      'needs-permission'. */
   reapply(): void;
 }
 
@@ -710,6 +716,18 @@ function isAbort(thrown: unknown): boolean {
   );
 }
 
+/** 'permission-denied' specifically — the OS gated the install leg
+    (Android's unknown-sources switch): not a failed download, so the
+    verified stage stays staged for a `reapply` refire. */
+function isPermissionDenied(thrown: unknown): boolean {
+  return (
+    thrown !== null &&
+    typeof thrown === 'object' &&
+    'kind' in thrown &&
+    (thrown as { kind: unknown }).kind === 'permission-denied'
+  );
+}
+
 /**
  * download → verify → apply, as a published state machine. The
  * checksum file is fetched FIRST — a release that can't prove the
@@ -733,11 +751,12 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
   // deletes its own leftover but never a successor's download, even
   // when successive releases stage under different names.
   const claims = new Map<string, number>();
-  // The 'applied' run's verified stage — retained so `reapply` can
-  // re-fire the platform's install surface without another download
-  // when the OS surface's outcome never landed. Bound to the run's
+  // A verified stage retained for `reapply` — kept on 'applied' (the
+  // OS surface owned the outcome and it may never have landed) and
+  // on 'needs-permission' (the OS gated the install) so the
+  // handoff refires without another download. Bound to the run's
   // version: a newer checked release owns its own run instead.
-  let appliedRun: {
+  let retainedRun: {
     readonly path: string;
     readonly artifact: UpdateArtifact;
     readonly version: string;
@@ -779,6 +798,10 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
     // apply throw, or a cancel between stages): an unconsumed
     // artifact never stays behind.
     let path: string | null = null;
+    // Set once the verified stage reaches the install leg — a
+    // 'permission-denied' throw is only a stage-keeper from there;
+    // earlier legs must still sweep their own file.
+    let applyLaunched = false;
     // A stale run still drops its OWN staged file — a cancel mid-
     // verify must not strand a download — but never the path a
     // newer run just claimed (claims marks each path's claimant).
@@ -843,6 +866,7 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
         );
       }
       publishIfCurrent({ state: 'applying', version });
+      applyLaunched = true;
       const outcome = await ports.apply(path, artifact);
       if (stale()) {
         dropOwned();
@@ -853,7 +877,7 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       // responsibility now, not the sweep's.
       claims.delete(path);
       if (outcome === 'installed') {
-        appliedRun = { path, artifact, version };
+        retainedRun = { path, artifact, version };
       }
       path = null;
       publishIfCurrent(
@@ -862,6 +886,23 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
           : { state: 'applied', version },
       );
     } catch (thrown) {
+      // A permission-gated install is not a failed run: the verified
+      // stage is retained (like the 'applied' retention) so `reapply`
+      // refires the install surface on it instead of re-downloading.
+      // Only the apply leg may park a stage — an earlier-leg throw
+      // still sweeps its own file.
+      if (
+        gen === generation &&
+        applyLaunched &&
+        path !== null &&
+        isPermissionDenied(thrown)
+      ) {
+        claims.delete(path);
+        retainedRun = { path, artifact, version };
+        path = null;
+        publish({ state: 'needs-permission', version });
+        return;
+      }
       // Cleanup before the generation gate: a stale run's own
       // leftover still goes (cancel-then-retry leaves no partial),
       // but a successor's claimed path is untouched.
@@ -895,21 +936,24 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
         running ||
         live() ||
         state.state === 'ready-to-restart' ||
-        // 'applied' guards the SAME version's staged run — a begin for
-        // a different release is the supersede path, not a re-tap.
-        (state.state === 'applied' && state.version === target.version)
+        // 'applied'/'needs-permission' guard the SAME version's staged
+        // run — a begin for a different release is the supersede path,
+        // not a re-tap (reapply owns the same-version affordance).
+        (state.state === 'applied' && state.version === target.version) ||
+        (state.state === 'needs-permission' &&
+          state.version === target.version)
       ) {
         return;
       }
       running = true;
       generation += 1;
-      // A retained stage belongs to the applied release — a begin for
-      // another version reclaims that file rather than leaving the
-      // ~55 MB stranded.
-      if (appliedRun !== null && appliedRun.version !== target.version) {
-        void ports.remove(appliedRun.path).catch(() => undefined);
+      // A retained stage belongs to its release — a begin for another
+      // version reclaims that file rather than leaving the ~55 MB
+      // stranded.
+      if (retainedRun !== null && retainedRun.version !== target.version) {
+        void ports.remove(retainedRun.path).catch(() => undefined);
       }
-      appliedRun = null;
+      retainedRun = null;
       const gen = generation;
       controller = new AbortController();
       const signal = controller.signal;
@@ -920,8 +964,8 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
     reapply() {
       if (
         running ||
-        state.state !== 'applied' ||
-        appliedRun === null
+        retainedRun === null ||
+        (state.state !== 'applied' && state.state !== 'needs-permission')
       ) {
         return;
       }
@@ -929,7 +973,7 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       generation += 1;
       const gen = generation;
       const version = state.version;
-      const { path: staged, artifact } = appliedRun;
+      const { path: staged, artifact } = retainedRun;
       const publishIfCurrent = (next: UpdateApplyStatus): void => {
         if (gen === generation) {
           publish(next);
@@ -954,10 +998,16 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
           if (gen !== generation) {
             return;
           }
+          // Still gated — the stage stays retained for the next
+          // attempt; nothing re-downloads.
+          if (isPermissionDenied(thrown)) {
+            publish({ state: 'needs-permission', version });
+            return;
+          }
           // The staged file may be gone (a later release's sweep) or
           // the surface refused again — a failure hands retry back
           // to the full pipeline, so the retained stage drops.
-          appliedRun = null;
+          retainedRun = null;
           if (isAbort(thrown)) {
             publish({ state: 'idle' });
           } else {

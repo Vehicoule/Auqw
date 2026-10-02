@@ -826,4 +826,101 @@ export async function run(): Promise<void> {
     );
     assertEqual(calls.applies, 1);
   }
+
+  // a permission-gated install is not a failed run: the verified
+  // stage stays staged, the state parks as 'needs-permission', and
+  // reapply refires the install leg on the retained file — no
+  // re-download
+  {
+    let gated = true;
+    const { calls, ports } = fakePorts();
+    const applier = createUpdateApplier({
+      ...ports,
+      apply: () => {
+        calls.applies += 1;
+        return gated
+          ? Promise.reject(appError('permission-denied', 'unknown-sources'))
+          : Promise.resolve('installed' as const);
+      },
+    });
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'needs-permission');
+    assertDeepEqual(
+      calls.removed,
+      [],
+      'a permission gate keeps the verified stage',
+    );
+    // A same-version begin must not re-download over the kept stage —
+    // reapply owns that affordance too.
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(calls.downloads, 1, 'no re-download while gated');
+    gated = false;
+    applier.reapply();
+    assertEqual(applier.snapshot().state, 'applying');
+    await settle();
+    assertEqual(applier.snapshot().state, 'applied');
+    assertEqual(calls.applies, 2, 'reapply refires the install port');
+    assertEqual(calls.downloads, 1, 'reapply ran on the retained stage');
+  }
+
+  // a still-gated reapply reparks 'needs-permission' — the stage
+  // stays for the next attempt rather than reading as failed
+  {
+    const { calls, ports } = fakePorts();
+    const applier = createUpdateApplier({
+      ...ports,
+      apply: () => {
+        calls.applies += 1;
+        return Promise.reject(
+          appError('permission-denied', 'unknown-sources'),
+        );
+      },
+    });
+    applier.begin(APK_TARGET);
+    await settle();
+    applier.reapply();
+    await settle();
+    assertEqual(applier.snapshot().state, 'needs-permission');
+    assertEqual(calls.applies, 2, 'the handoff refired');
+    assertDeepEqual(calls.removed, [], 'stage still retained');
+  }
+
+  // a permission-gated supersede behaves like 'applied': begin for a
+  // newer release reclaims the retained stage and runs fresh
+  {
+    const NEWER_NAME = 'b.apk';
+    const { calls, ports } = fakePorts({
+      sumsBody: `${GOOD_HEX}  ${APK_NAME}\n${GOOD_HEX}  ${NEWER_NAME}\n`,
+    });
+    let gated = true;
+    const applier = createUpdateApplier({
+      ...ports,
+      apply: () => {
+        calls.applies += 1;
+        return gated
+          ? Promise.reject(appError('permission-denied', 'unknown-sources'))
+          : Promise.resolve('installed' as const);
+      },
+    });
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'needs-permission');
+    gated = false;
+    applier.begin({
+      ...APK_TARGET,
+      version: '0.0.1-alpha.19',
+      artifact: { ...APK_TARGET.artifact, name: NEWER_NAME },
+    });
+    await settle();
+    const snap = applier.snapshot();
+    assertEqual(snap.state, 'applied');
+    assertEqual(calls.downloads, 2, 'a newer release runs its own pipeline');
+    assertDeepEqual(
+      calls.removed,
+      [`/stage/${APK_NAME}`],
+      'the gated release stage is reclaimed by the newer run',
+    );
+  }
 }
