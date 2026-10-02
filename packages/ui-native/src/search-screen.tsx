@@ -139,54 +139,31 @@ export function SearchScreen({
     onFilterPress,
   });
   const navPad = useContext(NavFootprintContext);
-  // Chips + results head scroll with the rows — pinned siblings each
-  // juggling the top inset clipped under the floating field.
-  const resultHeader = (
-    <>
-      {view.filters !== null && (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          accessibilityLabel={view.filters.a11yLabel}
-          style={{ flexGrow: 0 }}
-          contentContainerStyle={{
-            gap: theme.spacing.xs,
-            paddingHorizontal: theme.spacing.sm,
-            paddingBottom: theme.spacing.sm,
-          }}
+  // Chips stay pinned above the list (the explore contract); the
+  // heading rides inside it. The pinned row carries the inset on its
+  // wrapper — padding inside the horizontal scroller was what clipped
+  // the chips under the floating field on device.
+  const resultHeader =
+    view.resultsHead === null ? null : (
+      <View
+        style={{
+          alignItems: 'flex-start',
+          paddingHorizontal: theme.spacing.sm,
+          marginBottom: theme.spacing.sm,
+        }}
+      >
+        <Text variant="heading" color="bright">
+          {view.resultsHead.title}
+        </Text>
+        <Text
+          variant="metadata"
+          color="secondary"
+          style={{ marginTop: theme.spacing.xxs }}
         >
-          {view.filters.chips.map((chip) => (
-            <FilterChip
-              key={chip.key}
-              label={chip.label}
-              active={chip.active}
-              onPress={chip.onPress}
-            />
-          ))}
-        </ScrollView>
-      )}
-      {view.resultsHead !== null && (
-        <View
-          style={{
-            alignItems: 'flex-start',
-            paddingHorizontal: theme.spacing.sm,
-            marginBottom: theme.spacing.sm,
-          }}
-        >
-          <Text variant="heading" color="bright">
-            {view.resultsHead.title}
-          </Text>
-          <Text
-            variant="metadata"
-            color="secondary"
-            style={{ marginTop: theme.spacing.xxs }}
-          >
-            {view.resultsHead.metaLabel}
-          </Text>
-        </View>
-      )}
-    </>
-  );
+          {view.resultsHead.metaLabel}
+        </Text>
+      </View>
+    );
   return (
     <View
       style={{
@@ -239,17 +216,40 @@ export function SearchScreen({
           ))}
         </ScrollView>
       )}
-      {view.results === null &&
-        (view.filters !== null || view.resultsHead !== null) && (
-          <View
-            style={{
-              paddingTop: topInset,
-              paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
+      {view.filters !== null && (
+        <View style={{ paddingTop: topInset }}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            accessibilityLabel={view.filters.a11yLabel}
+            style={{ flexGrow: 0 }}
+            contentContainerStyle={{
+              gap: theme.spacing.xs,
+              paddingHorizontal: theme.spacing.screen,
+              paddingBottom: theme.spacing.sm,
             }}
           >
-            {resultHeader}
-          </View>
-        )}
+            {view.filters.chips.map((chip) => (
+              <FilterChip
+                key={chip.key}
+                label={chip.label}
+                active={chip.active}
+                onPress={chip.onPress}
+              />
+            ))}
+          </ScrollView>
+        </View>
+      )}
+      {view.results === null && view.resultsHead !== null && (
+        <View
+          style={{
+            paddingTop: view.filters !== null ? 0 : topInset,
+            paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
+          }}
+        >
+          {resultHeader}
+        </View>
+      )}
       {view.idle !== null &&
         (view.idle.kind === 'recents' ? (
           <View style={{ paddingTop: topInset }}>
@@ -302,7 +302,8 @@ export function SearchScreen({
           scrollEnabled={scrollEnabled}
           ListHeaderComponent={resultHeader}
           contentContainerStyle={{
-            paddingTop: topInset,
+            // The pinned chips row owns the inset when present.
+            paddingTop: view.filters !== null ? 0 : topInset,
             paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
             // Clears the floating miniplayer's strip.
             paddingBottom:

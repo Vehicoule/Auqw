@@ -2568,6 +2568,9 @@ function Main({
             onSelect={selectTab}
             renderTab={renderTabScreen}
             onTabBarHeight={reportStageCollapsed}
+            // The expanded sheet is the presented surface — the dock
+            // hides behind it rather than lingering as a second row.
+            tabBarHidden={expanded}
           />
           {/* The one search field — floats top-right over every tab
               (the panes own no second input); renders before the
