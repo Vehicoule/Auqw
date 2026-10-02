@@ -329,21 +329,27 @@ impl KeyValueStore for FileKeyValueStore {
         } else {
             all.insert(plugin_id.to_string(), ns);
         }
-        // A declining gate short-circuits before any staging I/O —
-        // the caller's rejection outranks backend errors on a commit
-        // it already discarded.
-        if !admit() {
-            return Err(KvError::Rejected(format!(
-                "{plugin_id}: admission declined"
-            )));
-        }
-        // The gate runs a second time after staging, on the doorstep
-        // of the rename — the tmp write + sync is the slow leg and
-        // the rename is the publication boundary, so a cancel or
-        // deadline that lands while bytes were being staged still
-        // discards them instead of publishing past a bound the caller
-        // already reported.
-        let tmp = self.stage_all(&all)?;
+        // The gate runs exactly once per commit — `admit` is not
+        // promised pure or monotonic, so it is consulted on only one
+        // path: on a staging failure (a closed gate owns the verdict
+        // — Rejected, not the backend's error — on a commit the caller
+        // already discarded), or on the doorstep of the rename. The
+        // rename is the publication boundary and staging is the slow
+        // leg, so a cancel or deadline landing mid-staging still
+        // discards the staged bytes instead of publishing past a
+        // bound the caller already reported.
+        let tmp = match self.stage_all(&all) {
+            Ok(tmp) => tmp,
+            Err(e) => {
+                return if admit() {
+                    Err(e)
+                } else {
+                    Err(KvError::Rejected(format!(
+                        "{plugin_id}: admission declined"
+                    )))
+                };
+            }
+        };
         if !admit() {
             let _ = std::fs::remove_file(&tmp);
             return Err(KvError::Rejected(format!(
