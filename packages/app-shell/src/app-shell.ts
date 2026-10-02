@@ -1703,9 +1703,20 @@ export function useAppShell<E extends { readonly type: string } = never>(
   ]);
 
   const homeModel = useMemo(
-    () =>
-      toHomeModel({
-        recordings: state.recordings,
+    () => {
+      // Same local-catalog shadowing as the library model so the
+      // shared collection tiles count identically on both surfaces.
+      const local = controller.local();
+      let recordings = state.recordings;
+      if (ports.localCatalog === true && local !== null) {
+        const byId = new Map(recordings.map((r) => [r.id, r]));
+        for (const r of local.recordings()) {
+          byId.set(r.id, r);
+        }
+        recordings = [...byId.values()];
+      }
+      return toHomeModel({
+        recordings,
         likes: state.likes,
         playHistory: state.playHistory,
         playback: state.playback,
@@ -1716,13 +1727,21 @@ export function useAppShell<E extends { readonly type: string } = never>(
           state.likes.length === 0
             ? t('home.subline.empty')
             : t('home.subline.likes', { count: state.likes.length }),
-      }),
+        playCounts: state.playCounts,
+        downloads,
+      });
+    },
     [
       state.recordings,
       state.likes,
       state.playHistory,
+      state.playCounts,
       state.playback,
       searchState,
+      downloads,
+      controller,
+      ports.localCatalog,
+      localTick,
       localeTick,
     ],
   );

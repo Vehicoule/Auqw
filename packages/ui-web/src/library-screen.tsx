@@ -2,11 +2,11 @@ import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import { TrackRow, indexAdapter, useTrackList } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import { NameField } from './sheets.tsx';
+import { CollectionTile } from './collection-screen.tsx';
 import type { LibraryModel } from '@auqw/ui-shared';
 import {
   useLibraryScreenController,
   type LibraryCardView,
-  type LibraryCollectionView,
   type LibraryScreenHandlers,
 } from '@auqw/ui-shared/controllers';
 
@@ -14,57 +14,6 @@ export type LibraryScreenProps = LibraryScreenHandlers & {
   readonly model: LibraryModel;
   readonly scrollEnabled?: boolean | undefined;
 };
-
-function CollectionTile({ view }: { readonly view: LibraryCollectionView }) {
-  const { tile } = view;
-  return (
-    <>
-      <Pressable
-        onPress={view.enabled ? view.onOpen : undefined}
-        disabled={!view.enabled}
-        ariaLabel={view.a11yLabel}
-        className={`uw-collection${view.enabled ? '' : ' uw-off'}${view.onPlay !== undefined ? ' uw-collection--playable' : ''}`}
-        data-enabled={view.enabled ? 'true' : 'false'}
-      >
-        <span className="uw-collection__icon">
-          <Icon
-            name={view.icon}
-            size={20}
-            color={view.enabled ? 'var(--accent)' : 'var(--text-secondary)'}
-          />
-        </span>
-        <Text
-          variant="title"
-          color={view.enabled ? 'bright' : 'primary'}
-          numberOfLines={1}
-          className="uw-collection__label"
-        >
-          {tile.label}
-        </Text>
-        <Text
-          variant="body"
-          color="secondary"
-          numberOfLines={1}
-          className="uw-collection__count"
-        >
-          {view.countLabel}
-        </Text>
-      </Pressable>
-      {/* The tile's own play affordance — a sibling, not a child: the
-          tile is a <button> and nested buttons aren't valid HTML. */}
-      {view.onPlay !== undefined && (
-        <button
-          type="button"
-          className="uw-collection__play"
-          aria-label={view.playA11yLabel}
-          onClick={view.onPlay}
-        >
-          <Icon name="play" size={12} color="var(--accent)" />
-        </button>
-      )}
-    </>
-  );
-}
 
 function ToggleChip({
   label,

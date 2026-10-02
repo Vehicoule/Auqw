@@ -16,6 +16,7 @@ import { formatClock, formatLongDuration } from './view-models.ts';
 import type {
   ArtistRailModel,
   CollectionKey,
+  CollectionTileModel,
   CorrectionsFilter,
   CorrectionsModel,
   DownloadChip,
@@ -643,6 +644,35 @@ const LIBRARY_KIND_FILTERS: readonly {
   { key: 'artist', label: 'library.filter.artists' },
 ];
 
+/**
+ * Maps the shared collection tiles to pressable views — one binding
+ * rule for home and library so a tile behaves identically on either
+ * surface. The play affordance exists only while there's something
+ * to play.
+ */
+export function collectionTileViews(
+  collections: readonly CollectionTileModel[],
+  onOpenCollection: MaybeFn<[key: CollectionKey]>,
+  onPlayCollection: MaybeFn<[key: CollectionKey]>,
+): readonly LibraryCollectionView[] {
+  return collections.map((tile) => ({
+    tile,
+    icon: LIBRARY_COLLECTION_ICONS[tile.key],
+    enabled: tile.enabled,
+    a11yLabel: t('library.tileA11y', {
+      label: tile.label,
+      count: tile.count,
+    }),
+    countLabel: tile.note ?? t('common.trackCount', { count: tile.count }),
+    onOpen: bind(onOpenCollection, tile.key),
+    onPlay:
+      tile.enabled && tile.count > 0 && onPlayCollection !== undefined
+        ? bind(onPlayCollection, tile.key)
+        : undefined,
+    playA11yLabel: t('collection.playAllA11y', { title: tile.label }),
+  }));
+}
+
 export type LibraryCollectionView = {
   readonly tile: LibraryModel['collections'][number];
   readonly icon: SharedIconName;
@@ -795,25 +825,11 @@ export function libraryScreenView(
 ): LibraryScreenView {
   return {
     title: t('nav.library'),
-    collections: model.collections.map((tile) => ({
-      tile,
-      icon: LIBRARY_COLLECTION_ICONS[tile.key],
-      enabled: tile.enabled,
-      a11yLabel: t('library.tileA11y', {
-        label: tile.label,
-        count: tile.count,
-      }),
-      countLabel: tile.note ?? t('common.trackCount', { count: tile.count }),
-      onOpen: bind(onOpenCollection, tile.key),
-      // An empty collection opens its empty state — a play button
-      // there would queue nothing, so the affordance only exists
-      // while there's something to play.
-      onPlay:
-        tile.enabled && tile.count > 0 && onPlayCollection !== undefined
-          ? bind(onPlayCollection, tile.key)
-          : undefined,
-      playA11yLabel: t('collection.playAllA11y', { title: tile.label }),
-    })),
+    collections: collectionTileViews(
+      model.collections,
+      onOpenCollection,
+      onPlayCollection,
+    ),
     headingLabel: t('library.heading'),
     sortChip: {
       label: t(`library.sort.${sort}`),

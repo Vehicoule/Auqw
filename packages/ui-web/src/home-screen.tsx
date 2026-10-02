@@ -1,14 +1,18 @@
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import { bindTo } from './track-row.tsx';
 import { progressOf } from './progress.tsx';
+import { CollectionTile } from './collection-screen.tsx';
 import { formatClock, t } from '@auqw/ui-shared';
-import type { HomeModel, RailCardModel, ResumeModel } from '@auqw/ui-shared';
+import { collectionTileViews } from '@auqw/ui-shared/controllers';
+import type { CollectionKey, HomeModel, RailCardModel, ResumeModel } from '@auqw/ui-shared';
 
 export type HomeScreenProps = {
   readonly model: HomeModel;
   readonly scrollEnabled?: boolean | undefined;
   readonly onPressCard?: ((card: RailCardModel) => void) | undefined;
   readonly onPressSeeAll?: ((section: 'recents' | 'played' | 'suggestions') => void) | undefined;
+  readonly onOpenCollection?: ((key: CollectionKey) => void) | undefined;
+  readonly onPlayCollection?: ((key: CollectionKey) => void) | undefined;
   readonly onResume?: (() => void) | undefined;
 };
 
@@ -140,8 +144,15 @@ export function HomeScreen({
   scrollEnabled = true,
   onPressCard,
   onPressSeeAll,
+  onOpenCollection,
+  onPlayCollection,
   onResume,
 }: HomeScreenProps) {
+  const tiles = collectionTileViews(
+    model.collections,
+    onOpenCollection,
+    onPlayCollection,
+  );
   return (
     <div
       className="uw-screen uw-home"
@@ -158,6 +169,17 @@ export function HomeScreen({
       {model.resume !== null && (
         <ResumeCard resume={model.resume} onResume={onResume} />
       )}
+      <div className="uw-collections uw-home__tiles" role="list">
+        {tiles.map((tile) => (
+          <div
+            key={tile.tile.key}
+            role="listitem"
+            className="uw-collections__cell"
+          >
+            <CollectionTile view={tile} />
+          </div>
+        ))}
+      </div>
       {model.played.length > 0 && (
         <Rail
           title={t('home.played.title')}

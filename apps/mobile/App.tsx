@@ -2272,12 +2272,27 @@ function Main({
         model={homeModel}
         topInset={topInset}
         onPressCard={onHomeCardPress}
+        onOpenCollection={(key) =>
+          pushOverlay({ type: 'collection', key })
+        }
+        onPlayCollection={(key) =>
+          playCollectionRows(key, libraryModel.collectionRows[key])
+        }
         onResume={() =>
           void session.resume().then((r) => reportPlay('action.resume', r))
         }
       />
     ),
-    [homeModel, topInset, onHomeCardPress, session, reportPlay],
+    [
+      homeModel,
+      topInset,
+      onHomeCardPress,
+      session,
+      reportPlay,
+      pushOverlay,
+      playCollectionRows,
+      libraryModel,
+    ],
   );
   if (galleryActive) {
     return (
