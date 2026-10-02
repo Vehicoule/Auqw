@@ -124,6 +124,8 @@ export class SearchSession {
     storefront: string | null;
     /** Result kinds to serve; absent asks for everything. */
     kinds?: readonly SearchKind[] | undefined;
+    /** Next-page token from a prior result; absent fetches page one. */
+    continuation?: string | undefined;
   }): Promise<SearchState> {
     const query = input.query.trim();
     if (query.length === 0) {
@@ -137,13 +139,23 @@ export class SearchSession {
       input.kinds === undefined
         ? undefined
         : [...new Set(input.kinds)].sort();
+    // An empty set asks for nothing the absent key doesn't — the wire
+    // never emits it, so it keys the cache identically.
+    const filter = kinds === undefined || kinds.length === 0 ? undefined : kinds;
+    const continuation =
+      input.continuation === undefined || input.continuation.length === 0
+        ? undefined
+        : input.continuation;
 
     const key = JSON.stringify([
       this.#provider.id,
       query,
       input.limit,
       input.storefront,
-      kinds ?? null,
+      filter ?? null,
+      // Page tokens key their own entry — a next page never collides
+      // with the cached first page it continues.
+      continuation ?? null,
     ]);
 
     // Coalesce only when the in-flight record is the current one and
@@ -207,7 +219,12 @@ export class SearchSession {
     record.promise = this.#run(
       key,
       query,
-      { limit: input.limit, storefront: input.storefront, kinds },
+      {
+        limit: input.limit,
+        storefront: input.storefront,
+        kinds: filter,
+        continuation,
+      },
       context,
       revision,
       record,
@@ -223,6 +240,7 @@ export class SearchSession {
       limit: number;
       storefront: string | null;
       kinds?: readonly SearchKind[] | undefined;
+      continuation?: string | undefined;
     },
     context: OperationContext,
     revision: number,
@@ -245,6 +263,7 @@ export class SearchSession {
                 limit: input.limit,
                 storefront: input.storefront,
                 kinds: input.kinds,
+                continuation: input.continuation,
               },
               {
                 requestId: this.#ids.next('search'),

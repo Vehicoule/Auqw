@@ -177,6 +177,7 @@ export const en = {
   'library.emptyHint': 'playlists and liked albums land here',
   'library.card.album': 'album · {artist}',
   'library.card.artist': 'artist',
+  'library.card.playlist': 'playlist · {curator}',
 
   // ---- collections --------------------------------------------------------
   'collection.liked': 'liked',

@@ -277,7 +277,12 @@ function toSearchPage(value: unknown): SearchPage | null {
     return null;
   }
   const items = tracksField(value);
-  const entities = toEntityItems(value['entities'] ?? []);
+  // Absent decodes to [] — an explicit null or non-array poisons the
+  // page exactly like a malformed row does `items`.
+  const entities =
+    value['entities'] === undefined
+      ? []
+      : toEntityItems(value['entities']);
   const topHit = toTopHit(value['top_hit']);
   const continuation = value['continuation'] ?? null;
   if (
@@ -543,7 +548,10 @@ function toEntityPage(value: unknown): EntityPage | null {
     return null;
   }
   const tracks = tracksField(value);
-  const related = toEntityItems(value['related'] ?? []);
+  const related =
+    value['related'] === undefined
+      ? []
+      : toEntityItems(value['related']);
   if (tracks === null || related === null) {
     return null;
   }
