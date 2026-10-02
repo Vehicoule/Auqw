@@ -589,3 +589,23 @@ None — the napi artifact is a local cargo build output.
   [A,C,B-newest-first]; old behavior shows 4 rows with A at positions 1 & 4.
   Cross-check: `top 50` collection shows per-recording play counts
   (A = "2 plays") proving raw play_history events stay intact.
+
+## CDP input + measurement (post-#274/275)
+
+- `dispatchEvent(new MouseEvent('click'))` may not reach React's
+  synthetic handlers — use CDP `Input.dispatchMouseEvent`
+  (mousePressed/mouseReleased at real coords). `Input.insertText` types
+  into focused inputs; `Input.dispatchKeyEvent` Enter submits.
+- File inputs can't drive the native dialog — `DOM.setFileInputFiles`
+  on the input + dispatch a `change` event; the app's real onChange
+  path consumes the file and runs the full flow.
+- Scoped CSS custom props: `getComputedStyle(el).getPropertyValue('--x')`
+  — documentElement returns "" for vars defined on a subtree.
+- Transient states (skeleton flashes, sub-100ms phases) — instrument a
+  MutationObserver logging mount/attribute changes with timestamps;
+  don't chase screenshots. A slower catalog provider (itunes) widens
+  the window when a visual is needed.
+- CSS-animation proof without video: sample `getComputedStyle(el)` props
+  (opacity/transform) via repeated `Runtime.evaluate` at ~45ms intervals
+  — changing values = animation running; sample in wall time since rAF
+  may be throttled.
