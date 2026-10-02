@@ -1677,13 +1677,14 @@ function Main({
               className="uw-update-card"
               style={{
                 position: 'fixed',
-                // Below the 40px chrome strip, anchored under the end
-                // cluster the update entry lives in — the engaged
-                // surface stays "in place" rather than center-popping,
-                // and the strip's nav/tab controls stay clickable even
+                // Below the chrome strip (titlebar + the world card's
+                // top inset + a gap), anchored under the end cluster
+                // the update entry lives in — the engaged surface
+                // stays "in place" rather than center-popping, and the
+                // strip's nav/tab controls stay clickable even
                 // mid-download (the card isn't dismissible while a run
                 // is live).
-                top: 44,
+                top: 'calc(var(--uw-titlebar-h) + var(--spacing-lg))',
                 right: 8,
                 width: 'min(420px, calc(100vw - 32px))',
                 borderRadius: 'var(--radius-float)',
