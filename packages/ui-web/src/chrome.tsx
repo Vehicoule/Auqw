@@ -188,8 +188,33 @@ export function DesktopChrome({
   const [searchCollapsed, setSearchCollapsed] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
   const lastScrollTop = useRef(0);
+  // When the bar can't fit field + tabs + caption buttons, the end
+  // cluster overflows its grid track and the field would paint over
+  // the tabs. Tight bars keep the field collapsed by default and
+  // expanding renders it as an overlay on top of them instead.
+  const endRef = useRef<HTMLDivElement>(null);
+  const [endTight, setEndTight] = useState(false);
+  const [expandedWhileTight, setExpandedWhileTight] = useState(false);
+  useEffect(() => {
+    const el = endRef.current;
+    if (el === null) {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      setEndTight(el.scrollWidth > el.clientWidth + 1);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    if (endTight) {
+      setExpandedWhileTight(false);
+      setSearchCollapsed(true);
+    }
+  }, [endTight]);
   useEffect(() => {
     if (search?.focusSignal !== undefined) {
+      setExpandedWhileTight(true);
       setSearchCollapsed(false);
     }
   }, [search?.focusSignal]);
@@ -239,16 +264,25 @@ export function DesktopChrome({
             />
           </div>
           <WorldTabs tabs={tabs} activeKey={activeKey} onSelect={onSelect} />
-          <div className="uw-world-bar__end">
+          <div className="uw-world-bar__end" ref={endRef}>
             {search !== undefined && (
               <WorldSearch
                 {...search}
-                collapsed={searchCollapsed}
-                onExpand={() => setSearchCollapsed(false)}
+                collapsed={
+                  searchCollapsed || (endTight && !expandedWhileTight)
+                }
+                overlay={endTight}
+                onExpand={() => {
+                  setExpandedWhileTight(true);
+                  setSearchCollapsed(false);
+                }}
                 onFocusChange={(focused) => {
                   setSearchFocused(focused);
                   if (!focused) {
-                    setSearchCollapsed(lastScrollTop.current > 24);
+                    // Tight bars fold the overlay back down on blur —
+                    // there's no room to leave the field open.
+                    setExpandedWhileTight(false);
+                    setSearchCollapsed(lastScrollTop.current > 24 || endTight);
                   }
                 }}
               />

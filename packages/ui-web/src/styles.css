@@ -2583,6 +2583,8 @@
 .uw-world-bar__end {
   justify-content: flex-end;
   justify-self: end;
+  /* Overlay anchor for the tight-bar search field below. */
+  position: relative;
 }
 
 /* The one search field — compact pill in the bar's end cluster. It
@@ -2611,6 +2613,23 @@
 .uw-wsearch:focus-within {
   border-color: var(--accent);
   background: var(--fg12);
+}
+
+/* Tight bar (field + tabs + caption can't coexist): the expanded
+   field pops out of flow and covers the tabs as transient chrome on
+   its own opaque surface — no text-on-text. Blur/scroll folds it
+   back to the loupe. */
+.uw-wsearch--overlay {
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  translate: 0 -50%;
+  z-index: 2;
+  background: var(--canvas);
+}
+
+.uw-wsearch--overlay:focus-within {
+  background: var(--canvas);
 }
 
 .uw-wsearch > svg {

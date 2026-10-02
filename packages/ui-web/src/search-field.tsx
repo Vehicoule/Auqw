@@ -15,6 +15,9 @@ export type WorldSearchProps = {
    */
   readonly collapsed: boolean;
   readonly onExpand: () => void;
+  /** The bar can't fit the field — the expanded pill renders as an
+      overlay on top of the tabs instead of pushing into them. */
+  readonly overlay?: boolean | undefined;
   /** Bump (the '/' global key) — expands + focuses the input. */
   readonly focusSignal?: number | undefined;
   /** Focused while the search surface isn't active — the app routes. */
@@ -35,6 +38,7 @@ export function WorldSearch({
   live,
   collapsed,
   onExpand,
+  overlay = false,
   focusSignal,
   onNavigateToSearch,
   onFocusChange,
@@ -96,7 +100,7 @@ export function WorldSearch({
     // collapse it before the click lands and swallow the action.
     <div
       ref={rootRef}
-      className="uw-wsearch"
+      className={`uw-wsearch${overlay ? ' uw-wsearch--overlay' : ''}`}
       data-live={live || undefined}
       onFocus={(event) => {
         if (
