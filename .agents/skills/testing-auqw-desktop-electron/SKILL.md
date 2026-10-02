@@ -29,13 +29,17 @@ those merge, this skill has nothing to run against.
   it mid-run. Run the kill as its own command, or use a self-immunizing
   pattern like `"[d]ist/electron"`.
 - Launch on the visible desktop, in a pollable shell:
-  `cd apps/desktop && env DISPLAY=:0 AUQW_NODE_BINDINGS=/abs/path/libauqw_node_bindings.so <repo>/node_modules/electron/dist/electron .`
-  (electron lives at the repo-root node_modules).
-- `AUQW_NODE_BINDINGS` matters: `AUQW_REPO_ROOT` only points at the launch
-  checkout's `target/debug`, which may lack the artifact — pass the absolute
-  path of a real `libauqw_node_bindings.so` (cargo debug build). The host
-  stages it to `userData/node-bindings/auqw_node_bindings.node` before
-  `require()`. Missing/broken → `host:plugins: unavailable` in diagnostics.
+  `cd apps/desktop && env DISPLAY=:0 <repo>/node_modules/electron/dist/electron .`
+  (electron lives at the repo-root node_modules). The default resolves
+  `target/debug/libauqw_node_bindings.so` under the launch checkout — when
+  that artifact is missing, pass a real one explicitly:
+  `env DISPLAY=:0 AUQW_NODE_BINDINGS=/abs/path/libauqw_node_bindings.so ...`
+- `AUQW_NODE_BINDINGS` only matters when the default can't resolve:
+  `AUQW_REPO_ROOT` points at the launch checkout's `target/debug`, which
+  may lack the artifact — pass the absolute path of a real
+  `libauqw_node_bindings.so` (cargo debug build). The host stages it to
+  `userData/node-bindings/auqw_node_bindings.node` before `require()`.
+  Missing/broken → `host:plugins: unavailable` in diagnostics.
 - `AUQW_DEV_GATE` needs no setup: main sets it to `'1'` whenever
   `app.isPackaged` is false (`src/main/index.ts` `utilityEnv`). Utility env
   is filtered to `AUQW_*` + platform vars — parent credentials never reach it.
@@ -626,12 +630,12 @@ None — the napi artifact is a local cargo build output.
   `ended` never fires: a parked card reads `Paused` + `CanPlay=true`
   with position ≈ duration−80 ms while the queue row reads 0 — expected,
   not a bug (the element rewinds on the OS `play` press).
-- On a checkout that already has the artifacts, launch needs NO `AUQW_*`
-  env vars — defaults resolve `apps/desktop/plugins` and
-  `target/debug/libauqw_node_bindings.so`; setting wrong values is the
-  common cause of "couldn't start". Only pass `AUQW_NODE_BINDINGS` /
-  `AUQW_PLUGIN_DIR` when the checkout lacks the built pieces (see
-  Launch).
+- On a checkout that already has the built binding, launch needs no
+  `AUQW_NODE_BINDINGS` — the default resolves
+  `target/debug/libauqw_node_bindings.so`; a wrong explicit value is the
+  common cause of "couldn't start". Pass it only when the checkout lacks
+  the built piece (see Launch). `AUQW_PLUGIN_DIR` still applies per the
+  provider/plugin-path notes (dev mode does not default it).
 - mp3 fixtures are `doc_id`-bound by PATH: fingerprint/size are
   scan-time fields and play does not re-verify, so a same-path file with
   different audio still plays under the fixture's doc.
