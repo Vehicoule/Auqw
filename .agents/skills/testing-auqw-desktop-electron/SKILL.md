@@ -213,17 +213,18 @@ while hidden).
 - `AUQW_DEV_HARNESS=1` in the launch env selects the dev-gate harness
   (`index.html`, the UI documented above); without it the window loads the
   product UI (`app.html`) — a different surface (search/home/settings).
-- Plugins do NOT load in dev mode unless you pass
-  `AUQW_PLUGIN_DIR=/abs/path/to/apps/desktop/plugins` — main only defaults it
-  for packaged builds. Without it `#provider` stays empty and the provider
-  path logs `prepare failed — no plugins loaded`.
+- Dev mode defaults `AUQW_PLUGIN_DIR` to `apps/desktop/plugins`
+  (`utilityEnv` in `src/main/index.ts`) — plugins fail to load only when
+  that dir is EMPTY or the var points elsewhere: `#provider` stays empty
+  and the provider path logs `prepare failed — no plugins loaded`. Pass
+  the var only to point at a different set.
 - The PRODUCT UI is stricter: `src/renderer/controller.ts` throws
   `'no plugin providers available'` when the plugin dir is empty → boot dies
   at `[ui] boot failed: internal` and nothing interactive ever renders.
   Stage providers first — from the REPO ROOT (the script and
   `providers.lock.json` are root-level):
   `node tooling/sync-plugins.mjs apps/desktop/plugins`
-  then `cd apps/desktop && export AUQW_PLUGIN_DIR=$PWD/plugins`.
+  (which is the dev-mode default — no env var needed on this checkout).
   itunes/deezer/youtube-music/lyrics-lrclib all stage cleanly with outbound
   HTTPS.
 - youtube-music `playback.resolve` takes an 11-char video ID as `source_ref`
@@ -634,8 +635,8 @@ None — the napi artifact is a local cargo build output.
   `AUQW_NODE_BINDINGS` — the default resolves
   `target/debug/libauqw_node_bindings.so`; a wrong explicit value is the
   common cause of "couldn't start". Pass it only when the checkout lacks
-  the built piece (see Launch). `AUQW_PLUGIN_DIR` still applies per the
-  provider/plugin-path notes (dev mode does not default it).
+  the built piece (see Launch). `AUQW_PLUGIN_DIR`'s dev-mode default covers
+  this checkout's staged set (see the provider/plugin-path notes).
 - mp3 fixtures are `doc_id`-bound by PATH: fingerprint/size are
   scan-time fields and play does not re-verify, so a same-path file with
   different audio still plays under the fixture's doc.
