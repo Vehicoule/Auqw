@@ -800,8 +800,7 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   validation rejects the persisted state. Cause UNCONFIRMED (writes are
   transactional — a torn write can't produce this; suspect a version/schema
   or write-path bug — worth a real investigation, not just a workaround).
-  `pm clear`
-  com.vehicoule.auqw` is the reliable recovery, then re-grant SAF (`auqw://local-add`
+  `pm clear com.vehicoule.auqw` is the reliable recovery, then re-grant SAF (`auqw://local-add`
   → DocumentsUI `USE THIS FOLDER` → `ALLOW` at `[790,1325][968,1451]`) and reseed
   fixtures. Also seen once: a different wedge where chrome (header+navbar) renders but
   every tab body stays empty and search returns nothing — session never reaches ready;
