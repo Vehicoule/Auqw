@@ -391,10 +391,24 @@ export async function createSessionController(
    * and the download ledger re-inits. After an import the session
    * re-adopts provenance-local rows from the source's snapshot.
    */
-  const rehydrateMedia = async (
+  /**
+   * Rehydrates serialize on a tail: overlapping callers (import
+   * finally, applied-sync, boot) each rebuild in order, so an older
+   * load can never overwrite a newer replacement instance.
+   */
+  let rehydrateTail: Promise<unknown> = Promise.resolve();
+  const doRehydrateMedia = async (
     signal: CancellationSignal,
-    rescanEmptyIndex = false,
+    rescanEmptyIndex: boolean,
   ): Promise<void> => {
+    // Retire BEFORE the load: a scan committing between the snapshot
+    // and the swap would land its files in storage but never in the
+    // new instance's index — drained first, every old commit lands in
+    // the snapshot we actually read. `null` the slot up front so
+    // `local()` never hands out a zombie while we rebuild.
+    const superseded = localSource;
+    localSource = null;
+    await superseded?.retire();
     const loaded = await storage.load({
       requestId: ids.next('media-rehydrate'),
       deadlineMs: clock.nowMs() + 30_000,
@@ -404,10 +418,6 @@ export async function createSessionController(
       warn('media rehydrate skipped: storage load failed');
       return;
     }
-    // A superseded instance's in-flight scan commits straight to
-    // storage — retire it so its stale snapshot can't clobber rows
-    // the swap just wrote.
-    void localSource?.retire();
     localSource = new LocalFileSource(
       { storage, tagReader, ids, clock, log },
       {
@@ -443,6 +453,18 @@ export async function createSessionController(
         }
       });
     }
+  };
+  const rehydrateMedia = (
+    signal: CancellationSignal,
+    rescanEmptyIndex = false,
+  ): Promise<void> => {
+    const run = rehydrateTail.then(() =>
+      doRehydrateMedia(signal, rescanEmptyIndex),
+    );
+    // A throwing run must not poison the tail — the next queued
+    // rehydrate still rebuilds in order.
+    rehydrateTail = run.catch(() => undefined);
+    return run;
   };
   let edged = false;
   const onlineListeners = new Set<(online: boolean) => void>();
@@ -761,8 +783,12 @@ export async function createSessionController(
       }
       // An older import's post-swap rescan can still be in flight —
       // drain it before this swap lands or its commit resurrects
-      // rows the previous import already replaced.
-      await localSource?.retire();
+      // rows the previous import already replaced. `null` the slot so
+      // `local()` never exposes the retired instance during the swap.
+      const superseded = localSource;
+      localSource = null;
+      const hadSource = superseded !== null;
+      await superseded?.retire();
       let importedOk = false;
       try {
         const imported = await session.importLibrary(text);
@@ -786,6 +812,15 @@ export async function createSessionController(
         // manager re-inits off the persisted ledger so it can never
         // sit stopped with a stale row map.
         await rehydrateMedia(signal, importedOk);
+        // A failed import plus a failed load (dead caller signal or a
+        // transient error) must not strand the source slot null while
+        // folder grants persist — retry the rebuild on a fresh signal.
+        if (hadSource && localSource === null) {
+          await rehydrateMedia(
+            new CancellationSource().signal,
+            importedOk,
+          );
+        }
       }
     },
     async dispose() {
