@@ -23,6 +23,7 @@ import {
 } from '@auqw/ui-shared';
 import type { DownloadChip } from '@auqw/ui-shared';
 import type { DownloadButtonView } from '@auqw/ui-shared/controllers';
+import { strokes } from '@auqw/design-tokens';
 
 export type TextVariant =
   | 'display'
@@ -312,7 +313,14 @@ export function Artwork({
 }
 
 type GlyphShape =
-  | { readonly kind: 'path'; readonly d: string }
+  | {
+      readonly kind: 'path';
+      readonly d: string;
+      /** evenodd fill-rule — knockout subpaths (filled variants). */
+      readonly eo?: boolean;
+      /** stays stroked when the glyph itself fills (filled variants). */
+      readonly stroke?: boolean;
+    }
   | { readonly kind: 'circle'; readonly cx: number; readonly cy: number; readonly r: number }
   | {
       readonly kind: 'rect';
@@ -330,6 +338,14 @@ type Glyph = {
 
 function p(d: string): GlyphShape {
   return { kind: 'path', d };
+}
+
+function peo(d: string): GlyphShape {
+  return { kind: 'path', d, eo: true };
+}
+
+function ps(d: string): GlyphShape {
+  return { kind: 'path', d, stroke: true };
 }
 
 function c(cx: number, cy: number, r: number): GlyphShape {
@@ -405,6 +421,13 @@ const GLYPHS = {
       ),
     ],
   },
+  'settings-filled': {
+    filled: true,
+    shapes: [
+      c(12, 12, 4.5),
+      ps('M12 2.5v3m0 13v3M2.5 12h3m13 0h3M5.2 5.2l2.1 2.1m9.4 9.4 2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1'),
+    ],
+  },
   close: { filled: false, shapes: [p('M6 6l12 12M18 6 6 18')] },
   'drag-handle': { filled: false, shapes: [p('M5 9h14M5 15h14')] },
   spinner: { filled: false, shapes: [p('M20 12a8 8 0 1 1-8-8')] },
@@ -428,13 +451,31 @@ const GLYPHS = {
     filled: false,
     shapes: [p('M4 11 12 4l8 7v8h-5v-5H9v5H4z')],
   },
+  'home-filled': {
+    filled: true,
+    shapes: [p('M4 11 12 4l8 7v8h-5v-5H9v5H4z')],
+  },
   compass: {
     filled: false,
     shapes: [c(12, 12, 8), p('m15.5 8.5-2 5-5 2 2-5z')],
   },
+  'compass-filled': {
+    filled: true,
+    shapes: [
+      peo('M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM15.5 8.5l-2 5-5 2 2-5z'),
+    ],
+  },
   library: {
     filled: false,
     shapes: [p('M5 5v14M9.5 5v14M14 6l5 1.2L16 19l-5-1.2z')],
+  },
+  'library-filled': {
+    filled: true,
+    shapes: [
+      rr(4.1, 5, 1.8, 14, 0.4),
+      rr(8.6, 5, 1.8, 14, 0.4),
+      p('M14 6l5 1.2L16 19l-5-1.2z'),
+    ],
   },
   note: {
     filled: false,
@@ -528,10 +569,11 @@ export function Icon({
       className={`uw-icon${className ? ` ${className}` : ''}`}
     >
       {glyph.shapes.map((shape, i) => {
+        const keepStroke = shape.kind === 'path' && shape.stroke === true;
         const paintProps = {
-          stroke: useFill ? 'none' : paint,
-          strokeWidth: strokeWidth ?? 2,
-          fill: useFill ? paint : 'none',
+          stroke: useFill && !keepStroke ? 'none' : paint,
+          strokeWidth: strokeWidth ?? strokes.icon,
+          fill: useFill && !keepStroke ? paint : 'none',
         };
         switch (shape.kind) {
           case 'path':
@@ -540,6 +582,7 @@ export function Icon({
                 key={i}
                 {...paintProps}
                 d={shape.d}
+                fillRule={shape.eo === true ? 'evenodd' : 'nonzero'}
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
@@ -635,7 +678,7 @@ export function Spinner({
         name="spinner"
         size={size}
         color={color ?? 'var(--accent)'}
-        strokeWidth={2.5}
+        strokeWidth={strokes.icon}
       />
     </span>
   );
@@ -831,7 +874,7 @@ export function DownloadIcon({
 }: DownloadIconProps) {
   const phase = downloadIconState(state);
   const paint = color ?? 'currentColor';
-  const sw = strokeWidth ?? 2;
+  const sw = strokeWidth ?? strokes.icon;
   const cls =
     `uw-dlicon uw-dlicon--${phase}` +
     (animated ? '' : ' uw-dlicon--still') +
@@ -957,7 +1000,7 @@ export function StatusMark({
   readonly strokeWidth?: number | undefined;
 }) {
   const paint = color ?? 'var(--accent)';
-  const sw = strokeWidth ?? 2;
+  const sw = strokeWidth ?? strokes.icon;
   return (
     <svg
       width={size}

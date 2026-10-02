@@ -90,7 +90,12 @@ const SIZES = {
   miniPlayer: 52,
   artworkRing: 48,
 };
-const STROKES = { hairline: 1, progress: 2, progressAndroid: 2.5 };
+const STROKES = {
+  hairline: 1,
+  icon: 1.8,
+  progress: 2,
+  progressAndroid: 2.5,
+};
 const FAMILIES = {
   regular: 'Inter_400Regular',
   medium: 'Inter_500Medium',
