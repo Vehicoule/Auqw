@@ -67,6 +67,9 @@ export type TrackRowModel = {
   readonly state: TrackRowState;
   readonly note: string | null;
   readonly download: DownloadChip | null;
+  /** The recording already sits in a user playlist — the add-to-playlist
+        button draws its check instead of the plus. */
+  readonly inPlaylist: boolean;
 };
 
 type PlayerStatus = 'preparing' | 'buffering' | 'playing' | 'paused' | 'failed';
@@ -92,6 +95,7 @@ export type PlayerModel = {
    *  per-track transient state (optimistic scrub holds) on it. */
   readonly occurrenceId: string | null;
   readonly liked: boolean;
+  readonly inPlaylist: boolean;
   readonly canPrevious: boolean;
   readonly canNext: boolean;
   readonly errorMessage: string | null;
@@ -769,6 +773,7 @@ function albumLabel(recording: Recording): string | null {
 type TrackRowOptions = {
   readonly key?: string;
   readonly liked?: boolean;
+  readonly inPlaylist?: boolean;
   readonly playing?: boolean;
   readonly state?: TrackRowState;
   readonly note?: string | null;
@@ -790,6 +795,7 @@ export function toTrackRowModel(
     durationMs: recording.durationMs,
     artworkUrl: pickArtworkUrl(recording.artwork),
     liked: options.liked ?? false,
+    inPlaylist: options.inPlaylist ?? false,
     playing: options.playing ?? false,
     state: options.state ?? 'available',
     note: options.note ?? null,
@@ -801,6 +807,7 @@ export function toSearchRowModel(
   metadata: TrackMetadata,
   index: number,
   playingRef?: SourceRef | null,
+  inPlaylist = false,
 ): TrackRowModel {
   return {
     key: `${metadata.sourceRef.provider}:${metadata.sourceRef.id}:${index}`,
@@ -821,12 +828,14 @@ export function toSearchRowModel(
     state: 'available',
     note: null,
     download: null,
+    inPlaylist,
   };
 }
 
 /** The row for a recording that isn't in the library — honest unknown. */
 function missingRecordingRow(key: string, playing: boolean): TrackRowModel {
   return {
+    inPlaylist: false,
     key,
     title: t('track.unknown'),
     versionLabel: null,
@@ -846,6 +855,7 @@ type PlayerModelInput = {
   readonly queue: QueueSnapshot;
   readonly recordings: readonly Recording[];
   readonly likes: readonly Like[];
+  readonly playlistEntries?: readonly PlaylistEntry[];
   readonly repeat: RepeatMode;
   /** The dealt play order under shuffle (occurrence ids); canonical when null. */
   readonly shuffleOrder: readonly string[] | null;
@@ -874,6 +884,42 @@ function likedIds(likes: readonly Like[]): ReadonlySet<string> {
       .filter((like) => like.entityKind === 'track')
       .map((like) => like.targetId),
   );
+}
+
+/** Recordings that already sit in any playlist — the addpl check. */
+function playlistRecordingIds(
+  entries: readonly PlaylistEntry[],
+): ReadonlySet<string> {
+  return new Set(entries.map((entry) => entry.recordingId));
+}
+
+/** SourceRef identity shared by catalog rows and stored selected_refs. */
+export function refKey(ref: SourceRef | null | undefined): string | null {
+  return ref === null || ref === undefined
+    ? null
+    : `${ref.provider}:${ref.kind}:${ref.id}`;
+}
+
+/** Remote tracks parked in playlists — catalog rows test membership
+    on this set. Entries carry the identity two ways: a parked
+    `selectedRef` for tracks added straight from a provider, and a
+    `recordingId` whose recording's own `sourceRefs` mark the catalog
+    tracks it materialized — a saved catalog track tests positive on
+    either identity. */
+export function playlistSourceRefs(
+  entries: readonly PlaylistEntry[],
+  recordings: readonly Recording[],
+): ReadonlySet<string> {
+  const byId = indexById(recordings);
+  const refs = new Set<string>();
+  for (const entry of entries) {
+    const key = refKey(entry.selectedRef);
+    if (key !== null) refs.add(key);
+    for (const ref of byId.get(entry.recordingId)?.sourceRefs ?? []) {
+      refs.add(`${ref.provider}:${ref.kind}:${ref.id}`);
+    }
+  }
+  return refs;
 }
 
 /** recordingId → occurrence count — duplicates keep row identity. */
@@ -950,6 +996,7 @@ const PLAYER_ERROR_SILENT: ReadonlySet<ErrorKind> = new Set([
 export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
   const { playback, queue, recordings, likes, repeat, shuffleOrder } =
     input;
+  const inPlaylist = playlistRecordingIds(input.playlistEntries ?? []);
   if (playback.type === 'idle') {
     return null;
   }
@@ -980,6 +1027,7 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
       // consumers downscale the same cached file.
       recording === undefined ? null : pickArtworkUrl(recording.artwork, 512),
     liked: recordingId !== null && liked.has(recordingId),
+    inPlaylist: recordingId !== null && inPlaylist.has(recordingId),
     canPrevious: currentIndex > 0 || (wraps && currentIndex === 0),
     canNext:
       currentIndex >= 0 && (currentIndex < walk.length - 1 || wraps),
@@ -1030,6 +1078,7 @@ type QueueModelInput = {
   readonly queue: QueueSnapshot;
   readonly recordings: readonly Recording[];
   readonly likes?: readonly Like[];
+  readonly playlistEntries?: readonly PlaylistEntry[];
   readonly unavailableRecordingIds?: ReadonlySet<string> | undefined;
   /**
    * Occurrences whose playback attempt failed — marked 'error' so the
@@ -1052,6 +1101,7 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
   const { queue, recordings } = input;
   const byId = indexById(recordings);
   const liked = likedIds(input.likes ?? []);
+  const inPlaylist = playlistRecordingIds(input.playlistEntries ?? []);
   const unavailable = input.unavailableRecordingIds ?? new Set<string>();
   const currentIndex = queue.occurrences.findIndex(
     (o) => o.occurrenceId === queue.currentOccurrenceId,
@@ -1105,6 +1155,7 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
           : toTrackRowModel(recording, {
               key: occurrence.occurrenceId,
               liked: liked.has(recording.id),
+              inPlaylist: inPlaylist.has(recording.id),
               playing: current && queue.mode === 'playing',
               state: isFailed
                 ? 'error'
@@ -1274,6 +1325,7 @@ export function toLibraryModel(input: {
 }): LibraryModel {
   const byId = indexById(input.recordings);
   const liked = likedIds(input.likes);
+  const inPlaylist = playlistRecordingIds(input.playlistEntries);
   const collectionRow = (
     key: string,
     recording: Recording,
@@ -1286,6 +1338,7 @@ export function toLibraryModel(input: {
     row: toTrackRowModel(recording, {
       key,
       liked: liked.has(recording.id),
+      inPlaylist: inPlaylist.has(recording.id),
       ...extra,
     }),
   });
@@ -1296,7 +1349,12 @@ export function toLibraryModel(input: {
       const recording = byId.get(like.targetId);
       return recording === undefined
         ? []
-        : [toTrackRowModel(recording, { liked: liked.has(recording.id) })];
+        : [
+            toTrackRowModel(recording, {
+              liked: liked.has(recording.id),
+              inPlaylist: inPlaylist.has(recording.id),
+            }),
+          ];
     });
 
   // Top 50: durable play-count ranking (count desc, recency, id) via
@@ -1538,6 +1596,7 @@ export function toPlaylistModel(input: {
   }
   const byId = indexById(input.recordings);
   const liked = likedIds(input.likes);
+  const inPlaylist = playlistRecordingIds(input.playlistEntries);
   const entries = input.playlistEntries
     .filter((entry) => entry.playlistId === playlist.playlistId)
     .sort((a, b) => a.position - b.position);
@@ -1551,6 +1610,7 @@ export function toPlaylistModel(input: {
         : toTrackRowModel(recording, {
           key: entry.entryId,
           liked: liked.has(recording.id),
+          inPlaylist: inPlaylist.has(recording.id),
         });
     return {
       entryId: entry.entryId,
@@ -1573,6 +1633,9 @@ export function toEntityModel(input: {
   readonly page: EntityPage | null;
   readonly error: AppError | null;
   readonly likes: readonly Like[];
+  readonly playlistEntries?: readonly PlaylistEntry[];
+  /** Library recordings — joins playlist entries to catalog refs. */
+  readonly recordings?: readonly Recording[];
   readonly entitySourceRefs: readonly EntitySourceRef[];
   readonly loadingMore?: boolean | undefined;
   readonly playingRef?: SourceRef | null | undefined;
@@ -1598,6 +1661,10 @@ export function toEntityModel(input: {
     input.entitySourceRefs,
     page.entity.sourceRef,
   );
+  const inPlaylist = playlistSourceRefs(
+    input.playlistEntries ?? [],
+    input.recordings ?? [],
+  );
   const liked =
     entityId !== null &&
     input.likes.some(
@@ -1615,7 +1682,12 @@ export function toEntityModel(input: {
     liked,
     canLike: entityId !== null,
     items: page.items.map((meta, index) =>
-      toSearchRowModel(meta, index, input.playingRef),
+      toSearchRowModel(
+        meta,
+        index,
+        input.playingRef,
+        inPlaylist.has(refKey(meta.sourceRef) ?? ''),
+      ),
     ),
     hasMore: page.continuation !== null,
     loadingMore: input.loadingMore ?? false,

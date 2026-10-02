@@ -502,6 +502,7 @@ function GalleryBody({
               state: 'available',
               note: null,
               download: null,
+              inPlaylist: false,
             }}
             reorderControls="buttons"
             onMoveUp={noop}
