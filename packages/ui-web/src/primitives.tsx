@@ -750,11 +750,14 @@ export function Skeleton({
 /** Row-shaped skeletons standing in for a list that is still loading. */
 export function SkeletonRows({
   count = 6,
+  label,
 }: {
   readonly count?: number | undefined;
+  /** Accessible announcement; keep it specific (e.g. the running query). */
+  readonly label?: string | undefined;
 }) {
   return (
-    <div className="uw-skelrows" role="status" aria-label={t('state.loading')}>
+    <div className="uw-skelrows" role="status" aria-label={label ?? t('state.loading')}>
       {Array.from({ length: count }, (_, i) => (
         <div className="uw-skelrow" key={i}>
           <Skeleton width={40} height={40} />

@@ -118,9 +118,11 @@ function ImportBody({
     return null;
   }
   const { footer } = body;
-  // The body exists only after a file was picked: pick is always done;
-  // review is current until apply lands, then every step closes.
-  const current = footer.kind === 'done' ? 3 : 1;
+  // The body exists only after a file was picked: pick is always done.
+  // Review stays current through preview/reading, apply takes over while
+  // the replacement runs (and when it errors), done closes every step.
+  const current =
+    body.phase === 'done' ? 3 : body.phase === 'applying' || body.phase === 'error' ? 2 : 1;
   const steps = [
     t('transfer.stepPick'),
     t('transfer.stepReview'),

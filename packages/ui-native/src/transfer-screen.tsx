@@ -134,11 +134,13 @@ function TransferRow({ view }: { readonly view: TransferRowView }) {
   );
 }
 
-function ImportSteps({ footer }: { readonly footer: TransferImportView['footer'] }) {
+function ImportSteps({ phase }: { readonly phase: TransferImportView['phase'] }) {
   const theme = useTheme();
-  // The body exists only after a file was picked: pick is always done;
-  // review is current until apply lands, then every step closes.
-  const current = footer.kind === 'done' ? 3 : 1;
+  // The body exists only after a file was picked: pick is always done.
+  // Review stays current through preview/reading, apply takes over while
+  // the replacement runs (and when it errors), done closes every step.
+  const current =
+    phase === 'done' ? 3 : phase === 'applying' || phase === 'error' ? 2 : 1;
   const steps = [
     t('transfer.stepPick'),
     t('transfer.stepReview'),
@@ -222,7 +224,7 @@ function ImportBody({
         borderColor: theme.colors.hairline,
       }}
     >
-      <ImportSteps footer={footer} />
+      <ImportSteps phase={body.phase} />
       <Text variant="body" color="bright">
         {body.title}
       </Text>

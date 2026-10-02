@@ -113,7 +113,16 @@ export function SearchScreen({
             icon={view.idle.icon}
           />
         ))}
-      {view.status?.kind === 'loading' && <SkeletonRows count={8} />}
+      {view.status?.kind === 'loading' && (
+        <SkeletonRows
+          count={8}
+          label={
+            view.status.hint
+              ? `${view.status.title} · ${view.status.hint}`
+              : view.status.title
+          }
+        />
+      )}
       {view.status?.kind === 'empty' && (
         <EmptyState
           title={view.status.title}

@@ -87,7 +87,7 @@ export function EntityScreen({
           />
         </View>
         {view.kind === 'loading' ? (
-          <SkeletonRows count={8} />
+          <SkeletonRows count={8} label={view.title} />
         ) : (
           <StateFor view={view} />
         )}

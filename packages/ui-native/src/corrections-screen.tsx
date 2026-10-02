@@ -98,7 +98,7 @@ export function CorrectionsScreen({
         ))}
       </View>
       {view.body.kind === 'loading' ? (
-        <SkeletonRows count={8} />
+        <SkeletonRows count={8} label={view.body.title} />
       ) : view.body.kind !== 'rows' ? (
         <StateFor view={view.body} />
       ) : (

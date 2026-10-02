@@ -85,7 +85,7 @@ export function EntityScreen({
     return (
       <div className="uw-screen uw-entity">
         <BackRow a11yLabel={view.backA11yLabel} onBack={onBack} />
-        <SkeletonRows count={8} />
+        <SkeletonRows count={8} label={view.title} />
       </div>
     );
   }

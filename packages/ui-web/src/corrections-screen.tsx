@@ -66,7 +66,7 @@ export function CorrectionsScreen({
         ))}
       </div>
       {view.body.kind === 'loading' ? (
-        <SkeletonRows count={8} />
+        <SkeletonRows count={8} label={view.body.title} />
       ) : view.body.kind === 'error' ? (
         <ErrorState
           title={view.body.title}

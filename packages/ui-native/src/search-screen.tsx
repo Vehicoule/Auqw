@@ -207,7 +207,15 @@ export function SearchScreen({
         ))}
       {view.status !== null &&
         (view.status.kind === 'loading' ? (
-          <SkeletonRows count={8} />
+          <SkeletonRows
+            count={8}
+            label={
+              view.status.hint
+                ? `${view.status.title} · ${view.status.hint}`
+                : view.status.title
+            }
+            style={{ paddingTop: topInset }}
+          />
         ) : (
           <StateFor view={view.status} />
         ))}

@@ -1266,20 +1266,28 @@ export function Skeleton({
 /** Row-shaped skeletons standing in for a list that is still loading. */
 export function SkeletonRows({
   count = 6,
+  label,
+  style,
 }: {
   readonly count?: number | undefined;
+  /** Accessible announcement; keep it specific (e.g. the running query). */
+  readonly label?: string | undefined;
+  readonly style?: StyleProp<ViewStyle> | undefined;
 }) {
   const theme = useTheme();
   return (
     <View
-      accessibilityLabel={t('state.loading')}
+      accessibilityLabel={label ?? t('state.loading')}
       accessible
-      style={{
-        flex: 1,
-        paddingHorizontal: theme.spacing.sm,
-        paddingTop: theme.spacing.sm,
-        gap: theme.spacing.md,
-      }}
+      style={[
+        {
+          flex: 1,
+          paddingHorizontal: theme.spacing.sm,
+          paddingTop: theme.spacing.sm,
+          gap: theme.spacing.md,
+        },
+        style,
+      ]}
     >
       {Array.from({ length: count }, (_, i) => (
         <View
