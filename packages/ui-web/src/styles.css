@@ -3093,7 +3093,7 @@
      under that same edge. */
   position: relative;
   margin: 0 0 0 var(--spacing-sm);
-  border-radius: var(--radius-float) 0 0 var(--radius-float);
+  border-radius: var(--radius-pane) 0 0 var(--radius-pane);
   background: var(--canvas);
   border: 0;
   border-left: var(--stroke-hairline) solid var(--hairline);

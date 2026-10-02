@@ -92,6 +92,7 @@ export const radius = {
   control: 8,
   card: 12,
   float: 16,
+  pane: 32,
   thumb: 5,
   pill: 999,
 } as const;
