@@ -19,8 +19,9 @@ export type WorldSearchProps = {
   readonly focusSignal?: number | undefined;
   /** Focused while the search surface isn't active — the app routes. */
   readonly onNavigateToSearch?: (() => void) | undefined;
-  /** Reports focus so the chrome can hold the field open against
-      scroll-collapse while it's being typed in. */
+  /** Reports focus entering/leaving the whole widget (input AND its
+      buttons) so the chrome can hold the field open against
+      scroll-collapse while it's being used. */
   readonly onFocusChange?: ((focused: boolean) => void) | undefined;
 };
 
@@ -72,7 +73,30 @@ export function WorldSearch({
     );
   }
   return (
-    <div className="uw-wsearch" data-live={live || undefined}>
+    // Focus is tracked on the widget, not the input: clicking clear/
+    // cancel moves focus inside the field — an input-level blur would
+    // collapse it before the click lands and swallow the action.
+    <div
+      className="uw-wsearch"
+      data-live={live || undefined}
+      onFocus={(event) => {
+        if (
+          event.relatedTarget === null ||
+          !event.currentTarget.contains(event.relatedTarget as Node)
+        ) {
+          onFocusChange?.(true);
+          onNavigateToSearch?.();
+        }
+      }}
+      onBlur={(event) => {
+        if (
+          event.relatedTarget === null ||
+          !event.currentTarget.contains(event.relatedTarget as Node)
+        ) {
+          onFocusChange?.(false);
+        }
+      }}
+    >
       <Icon name="search" size={14} />
       <input
         ref={inputRef}
@@ -81,11 +105,6 @@ export function WorldSearch({
         readOnly={field.readOnly}
         placeholder={field.label}
         aria-label={field.label}
-        onFocus={() => {
-          onFocusChange?.(true);
-          onNavigateToSearch?.();
-        }}
-        onBlur={() => onFocusChange?.(false)}
         onChange={(event) => field.onChange?.(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === 'Enter') {
