@@ -509,6 +509,60 @@ function adversarialTests(): void {
       false,
       'a different artist holds the rows apart',
     );
+    // A version-conflicting listing is a different recording, not a
+    // listing of this one — the merge must not flatten 'Song (Live)'
+    // into 'Song'.
+    assertEqual(
+      sameSongIdentity(
+        { title: 'Song', artist: 'Artist', durationMs: 200_000 },
+        { title: 'Song (Live)', artist: 'Artist', durationMs: 200_000 },
+      ),
+      false,
+      'a live cut is not the studio recording',
+    );
+    assertEqual(
+      sameSongIdentity(
+        { title: 'Song', artist: 'Artist', durationMs: 200_000, explicit: true },
+        { title: 'Song', artist: 'Artist', durationMs: 200_000, explicit: false },
+      ),
+      false,
+      'clean and explicit cuts are different recordings',
+    );
+    assertEqual(
+      sameSongIdentity(
+        { title: 'Song', artist: 'Artist', durationMs: 200_000, explicit: true },
+        { title: 'Song', artist: 'Artist', durationMs: 200_000 },
+      ),
+      true,
+      'an unreported rating does not veto',
+    );
+  }
+
+  // 9i. The collapse judges only the near-tie window — an unrelated
+  // distant group cannot veto the identical top listings.
+  {
+    const rTopic = ref();
+    const out = MatchingEngine.match(
+      recording({ title: 'Sunset', artist: 'Artist', durationMs: 200_000 }),
+      [
+        candidate({
+          title: 'Sunset - Topic',
+          artist: 'Artist',
+          durationMs: 200_000,
+          sourceRef: rTopic,
+        }),
+        candidate({ title: 'Sunset', artist: 'Artist', durationMs: 200_300 }),
+        // A different song far enough below to stay out of the review —
+        // pre-fix it still vetoed the collapse.
+        candidate({
+          title: 'Sunsets',
+          artist: 'Artist',
+          durationMs: 240_000,
+        }),
+      ],
+    );
+    assert(out.type === 'matched', `9i: ${out.type}`);
+    assertEqual(out.candidate.sourceRef, rTopic);
   }
 
   // 10. Hard label mismatch rejects even an exact-ISRC candidate.

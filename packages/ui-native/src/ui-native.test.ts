@@ -1269,6 +1269,41 @@ function testListingDedupe(): void {
     2,
     'same-name rows by different artists stay distinct',
   );
+  // A distinct version keeps its own row — 'Roads (Live)' is not a
+  // look-alike of 'Roads'.
+  const searchVersions = toSearchModel(
+    {
+      type: 'content',
+      revision: 3,
+      query: 'roads',
+      page: {
+        items: [meta('ytm-g', 'Roads'), meta('ytm-h', 'Roads (Live)')],
+        storefront: null,
+      },
+    },
+    null,
+  );
+  assertEqual(
+    searchVersions.results.length,
+    2,
+    'a live cut keeps its own row next to the studio take',
+  );
+  // A hidden look-alike's ref still lights the kept row — playing a
+  // deduped member marks the surviving row as playing.
+  const searchPlaying = toSearchModel(
+    {
+      type: 'content',
+      revision: 4,
+      query: 'roads',
+      page: { items, storefront: null },
+    },
+    { provider: 'youtube-music', kind: 'track', id: 'ytm-b' },
+  );
+  assertEqual(
+    searchPlaying.results[0]?.playing,
+    true,
+    "the hidden member's ref marks the kept row playing",
+  );
 }
 
 function sheetOf(kind: LyricsSheet['kind']): LyricsSheet {

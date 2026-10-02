@@ -454,7 +454,7 @@ function upsertRecordingIn(
   const updated: Recording = {
     ...merged,
     title,
-    ...(title === existing.title
+    ...(byContent !== undefined && title === existing.title
       ? { explicit: existing.explicit, versionLabels: existing.versionLabels }
       : {}),
     sourceRefs: hasRef

@@ -327,10 +327,45 @@ export type IdentityFields = {
   readonly artist: string | null;
   readonly durationMs: number | null;
   readonly isrc?: string | null;
+  readonly explicit?: boolean | null;
+  readonly versionLabels?: readonly VersionLabel[];
 };
 
 const SAME_SONG_ARTIST_SIM = 0.85;
 const SAME_SONG_DURATION_MS = 2500;
+
+/**
+ * True only on hard label incompatibilities — a version-axis mismatch
+ * (live vs studio, remix vs album cut) or a clean/explicit conflict.
+ * The verdict `sameSongIdentity` and the matcher's `hardConflict`
+ * share it so 'the same recording' means the same thing on every
+ * path that collapses listings.
+ */
+function versionLabelsConflict(
+  a: ReadonlySet<VersionLabel>,
+  b: ReadonlySet<VersionLabel>,
+): boolean {
+  for (const axis of HARD_AXES) {
+    if (a.has(axis) !== b.has(axis)) {
+      return true;
+    }
+  }
+  const cleanOrExplicit = (labels: ReadonlySet<VersionLabel>) =>
+    labels.has('explicit')
+      ? 'explicit'
+      : labels.has('clean')
+        ? 'clean'
+        : null;
+  const aCE = cleanOrExplicit(a);
+  const bCE = cleanOrExplicit(b);
+  return aCE !== null && bCE !== null && aCE !== bCE;
+}
+
+function identityLabels(f: IdentityFields): ReadonlySet<VersionLabel> {
+  return new Set(
+    f.versionLabels ?? extractVersionLabels(f.title, f.explicit ?? null),
+  );
+}
 
 /**
  * Whether two records describe the same recording of a song — the
@@ -348,6 +383,8 @@ const SAME_SONG_DURATION_MS = 2500;
  * plus at least one corroborating axis — a similar artist credit or
  * a duration inside ~2.5 s. Title alone never merges: two artists'
  * 'Intro' rows are different songs the metadata cannot tell apart.
+ * Neither do version-conflicting rows: 'Song (Live)' is a different
+ * recording from 'Song', not a listing of it.
  */
 export function sameSongIdentity(a: IdentityFields, b: IdentityFields): boolean {
   const isrcA = a.isrc?.trim().toLowerCase();
@@ -356,6 +393,9 @@ export function sameSongIdentity(a: IdentityFields, b: IdentityFields): boolean 
     return isrcA === isrcB;
   }
   if (analyzeTitle(a.title).base !== analyzeTitle(b.title).base) {
+    return false;
+  }
+  if (versionLabelsConflict(identityLabels(a), identityLabels(b))) {
     return false;
   }
   const artistKnown = a.artist !== null && b.artist !== null;
@@ -383,7 +423,8 @@ export function sameSongIdentity(a: IdentityFields, b: IdentityFields): boolean 
  * analyzed base: identical listings collapse, and so do listings
  * whose only difference is version furniture ('(Official Video)',
  * '- Topic', feat suffixes) — the difference a user can't act on.
- * Distinct durations and artists still hold rows apart.
+ * Version labels stay in the key so a live cut or a remix keeps its
+ * own row; distinct durations and artists still hold rows apart.
  */
 export function displayIdentityKey(candidate: {
   readonly provider: string;
@@ -391,9 +432,11 @@ export function displayIdentityKey(candidate: {
   readonly artist: string | null;
   readonly durationMs: number | null;
 }): string {
+  const analyzed = analyzeTitle(candidate.title);
   return [
     candidate.provider,
-    analyzeTitle(candidate.title).base,
+    analyzed.base,
+    [...analyzed.labels].sort().join(','),
     normalizeFree(candidate.artist ?? ''),
     candidate.durationMs === null || !Number.isFinite(candidate.durationMs)
       ? ''
@@ -499,6 +542,7 @@ export class MatchingEngine {
       if (
         distinct
           .slice(1)
+          .filter((s) => top.evidence.score - s.evidence.score < 7)
           .every((s) => sameSongIdentity(top.candidate, s.candidate))
       ) {
         return {

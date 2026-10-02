@@ -1675,6 +1675,7 @@ export function toEntityModel(input: {
     input.playlistEntries ?? [],
     input.recordings ?? [],
   );
+  const playingKey = refKey(input.playingRef);
   const liked =
     entityId !== null &&
     input.likes.some(
@@ -1691,14 +1692,17 @@ export function toEntityModel(input: {
     complete: page.complete,
     liked,
     canLike: entityId !== null,
-    items: dedupeTrackListings(page.items).map(({ meta, index }) =>
-      toSearchRowModel(
+    items: dedupeTrackListings(page.items).map(({ meta, index, group }) => ({
+      ...toSearchRowModel(
         meta,
         index,
-        input.playingRef,
-        inPlaylist.has(refKey(meta.sourceRef) ?? ''),
+        null,
+        group.some((m) => inPlaylist.has(refKey(m.sourceRef) ?? '')),
       ),
-    ),
+      playing:
+        playingKey !== null &&
+        group.some((m) => refKey(m.sourceRef) === playingKey),
+    })),
     hasMore: page.continuation !== null,
     loadingMore: input.loadingMore ?? false,
     // A refresh error while content stays surfaces as a flagged note.
@@ -1715,9 +1719,23 @@ export function toEntityModel(input: {
  */
 export function dedupeTrackListings(
   items: readonly TrackMetadata[],
-): readonly { meta: TrackMetadata; index: number }[] {
-  const seen = new Set<string>();
-  const kept: { meta: TrackMetadata; index: number }[] = [];
+): readonly {
+  meta: TrackMetadata;
+  index: number;
+  /** Every listing sharing the kept row's display identity — callers
+      propagate indicators (playing, playlist membership) across it so a
+      hidden duplicate's ref still lights the visible row. */
+  group: readonly TrackMetadata[];
+}[] {
+  const groups = new Map<
+    string,
+    { meta: TrackMetadata; index: number; group: TrackMetadata[] }
+  >();
+  const kept: {
+    meta: TrackMetadata;
+    index: number;
+    group: readonly TrackMetadata[];
+  }[] = [];
   items.forEach((meta, index) => {
     const key = displayIdentityKey({
       provider: meta.sourceRef.provider,
@@ -1725,9 +1743,13 @@ export function dedupeTrackListings(
       artist: meta.artist,
       durationMs: meta.durationMs,
     });
-    if (!seen.has(key)) {
-      seen.add(key);
-      kept.push({ meta, index });
+    const existing = groups.get(key);
+    if (existing === undefined) {
+      const entry = { meta, index, group: [meta] };
+      groups.set(key, entry);
+      kept.push(entry);
+    } else {
+      existing.group.push(meta);
     }
   });
   return kept;
