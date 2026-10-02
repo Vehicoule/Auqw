@@ -292,6 +292,7 @@
 .ui-web:not([data-reduced-motion='true']) .uw-pressable,
 .ui-web:not([data-reduced-motion='true']) .uw-back,
 .ui-web:not([data-reduced-motion='true']) .uw-sheet-panel__close,
+.ui-web:not([data-reduced-motion='true']) .uw-tcard,
 .ui-web:not([data-reduced-motion='true']) .uw-namefield__action,
 .ui-web:not([data-reduced-motion='true']) .uw-mini,
 .ui-web:not([data-reduced-motion='true']) .uw-mini__play,
@@ -311,6 +312,7 @@
 /* Press feedback is limited to button-style targets — a scale on a
    full-width row reads as a glitch. */
 .uw-icon-btn:active:not(:disabled),
+.uw-tcard:active:not(:disabled),
 .uw-chip:active:not(:disabled),
 .uw-headbtn:active:not(:disabled),
 .uw-pill:active:not(:disabled),
@@ -2243,6 +2245,88 @@
 
 .uw-sheet-row--dashed:hover:not(:disabled) {
   border-color: var(--fg40);
+}
+
+/* Theme-picker preview cards — each card previews the option's own
+   palette inside a mini-window, so pick is visual. The selection ring
+   is an outline (not a shadow — depth stays the canvas ramp's job). */
+.uw-theme-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: var(--spacing-sm);
+  padding: 0 var(--spacing-sm) var(--spacing-sm);
+}
+
+.uw-tcard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm);
+  border: var(--stroke-hairline) solid var(--hairline);
+  border-radius: var(--radius-float);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.uw-tcard[aria-pressed='true'] {
+  border-color: var(--accent);
+  outline: var(--stroke-hairline) solid var(--accent);
+  outline-offset: calc(-1 * var(--stroke-hairline));
+}
+
+.uw-tcard__pv {
+  display: flex;
+  height: 56px;
+  border-radius: var(--radius-control);
+  border: var(--stroke-hairline) solid var(--hairline);
+  overflow: hidden;
+}
+
+.uw-tcard__art {
+  width: 34%;
+}
+
+.uw-tcard__panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  margin: var(--spacing-xs);
+  padding: var(--spacing-xs);
+  border-radius: var(--radius-control);
+  border: var(--stroke-hairline) solid var(--hairline);
+}
+
+.uw-tcard__bar {
+  height: 4px;
+  border-radius: 2px;
+}
+
+.uw-tcard__bar--dim {
+  opacity: 0.35;
+}
+
+.uw-tcard__swatch {
+  width: 10px;
+  height: 10px;
+  margin-top: 2px;
+  border-radius: var(--radius-control);
+}
+
+.uw-tcard__nm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-xs);
+}
+
+.uw-tcard__text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .uw-auth-code {

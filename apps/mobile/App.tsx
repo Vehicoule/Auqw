@@ -105,6 +105,7 @@ import {
   StatusBarFade,
   SyncScreen,
   Text,
+  ThemePickerSheet,
   ThemeProvider,
   TransferScreen,
   UpdateCard,
@@ -134,7 +135,7 @@ import {
   navItems,
   qualityOptions,
   reportResult,
-  themeOptions,
+  themeCardViews,
   toAuthSheetModel,
 } from '@auqw/ui-shared';
 import { useSearchScreenController } from '@auqw/ui-shared/controllers';
@@ -566,6 +567,10 @@ function Main({
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const { session } = controller;
+  // The OS light/dark read drives the 'system'/'adaptive' theme-card
+  // previews — the resolved theme.scheme can't see the OS value once a
+  // scheme is forced.
+  const osScheme = useColorScheme() === 'dark' ? 'dark' : 'light';
   // Shared 0..1 morph progress between the mini-player pill and the
   // stage sheet — drags write it directly so the sheet tracks the
   // finger; `expanded` only flips once a gesture commits.
@@ -1046,6 +1051,13 @@ function Main({
     onOpenCard,
     onCreatePlaylist,
   } = shell;
+
+  // The tonal source powers the adaptive card's real palette — live
+  // while adaptive is picked (the provider's own read) and while the
+  // theme sheet is open so the preview matches what picking applies.
+  const themeSource = useAdaptiveSource(
+    state.settings.theme === 'adaptive' || themePickerOpen,
+  );
 
   // A swipe-dismissed sheet parks `stageGone` at 1 until the held
   // mount releases; a player taking over inside that window must not
@@ -2795,9 +2807,9 @@ function Main({
             stackKey="sheet-theme"
             onDismissed={closeThemePicker}
           >
-            <ProviderPickerSheet
+            <ThemePickerSheet
               title={t('settings.theme')}
-              options={themeOptions()}
+              cards={themeCardViews(osScheme, themeSource)}
               selectedKey={state.settings.theme}
               onPick={onPickTheme}
               onDismiss={closeThemePicker}

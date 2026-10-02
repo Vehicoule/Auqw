@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { AuthSheetModel, PairingModel } from '@auqw/ui-shared';
 import { t } from '@auqw/ui-shared';
-import type { ProviderPickerOption } from '@auqw/ui-shared';
+import type {
+  ProviderPickerOption,
+  ThemeCardView,
+} from '@auqw/ui-shared';
 import {
   Artwork,
   DiagPressRow,
@@ -437,6 +440,99 @@ export function ProviderPickerSheet({
           );
         })
       )}
+    </SheetScaffold>
+  );
+}
+
+/**
+ * Theme choices as preview cards — each option renders a mini-window in
+ * that scheme's own palette (art strip · panel · accent swatch) so the
+ * pick is visual, not a name list. Selected card reads an accent ring +
+ * check; 'system'/'adaptive' preview under the live system scheme since
+ * the OS resolves both.
+ */
+export function ThemePickerSheet({
+  title = t('settings.theme'),
+  cards,
+  selectedKey,
+  onPick,
+  onDismiss,
+}: {
+  readonly title?: string | undefined;
+  readonly cards: readonly ThemeCardView[];
+  readonly selectedKey: string | null;
+  readonly onPick?: ((key: string) => void) | undefined;
+  readonly onDismiss?: (() => void) | undefined;
+}) {
+  return (
+    <SheetScaffold title={title} onDismiss={onDismiss}>
+      <div className="uw-theme-cards">
+        {cards.map((card) => {
+          const selected = card.key === selectedKey;
+          return (
+            <button
+              key={card.key}
+              type="button"
+              className="uw-tcard"
+              aria-pressed={selected}
+              aria-label={card.label}
+              onClick={bindTo(onPick, card.key)}
+            >
+              <span
+                className="uw-tcard__pv"
+                style={{
+                  background: card.palette.canvas,
+                  borderColor: card.palette.hairline,
+                }}
+              >
+                <span
+                  className="uw-tcard__art"
+                  style={{ background: card.palette.deep }}
+                />
+                <span
+                  className="uw-tcard__panel"
+                  style={{
+                    background: card.palette.raised,
+                    borderColor: card.palette.hairline,
+                  }}
+                >
+                  <span
+                    className="uw-tcard__bar"
+                    style={{ background: card.palette.text, width: '60%' }}
+                  />
+                  <span
+                    className="uw-tcard__bar uw-tcard__bar--dim"
+                    style={{ background: card.palette.text, width: '80%' }}
+                  />
+                  <span
+                    className="uw-tcard__swatch"
+                    style={{ background: card.palette.accent }}
+                  />
+                </span>
+              </span>
+              <span className="uw-tcard__nm">
+                <span className="uw-tcard__text">
+                  <Text
+                    variant="metadata"
+                    color={selected ? 'accent' : 'primary'}
+                    numberOfLines={1}
+                  >
+                    {card.label}
+                  </Text>
+                  {card.detail != null && (
+                    <Text variant="metadata" color="secondary" numberOfLines={1}>
+                      {card.detail}
+                    </Text>
+                  )}
+                </span>
+                {selected && (
+                  <StatusMark kind="check" size={12} color="var(--accent)" />
+                )}
+              </span>
+            </button>
+          );
+        })}
+      </div>
     </SheetScaffold>
   );
 }

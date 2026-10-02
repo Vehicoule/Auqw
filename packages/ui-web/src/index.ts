@@ -48,6 +48,7 @@ export {
   ProviderPickerSheet,
   RowActionsSheet,
   Sheet,
+  ThemePickerSheet,
   ValueFieldSheet,
 } from './sheets.tsx';
 export { QueueScreen } from './queue-screen.tsx';

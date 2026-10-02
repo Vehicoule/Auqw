@@ -107,6 +107,7 @@ export {
     NameField,
     ProviderPickerSheet,
     RowActionsSheet,
+    ThemePickerSheet,
     ValueFieldSheet,
 } from './sheets.tsx';
 export type {
