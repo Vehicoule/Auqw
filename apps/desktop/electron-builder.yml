@@ -11,8 +11,8 @@ directories:
 # sidecars are excluded as well: they embed sourcesContent, so a
 # shipped map is the whole TS tree inside app.asar. dist/ keeps its
 # maps so `pnpm dev` stack traces stay useful; a packaged crash log
-# falls back to the unminified bundle lines — the accepted tradeoff
-# for a source-free artifact.
+# falls back to the minified bundle frames (keepNames preserves the
+# function names) — the accepted tradeoff for a source-free artifact.
 files:
   - "dist/**/*"
   - "!dist/**/*.map"
