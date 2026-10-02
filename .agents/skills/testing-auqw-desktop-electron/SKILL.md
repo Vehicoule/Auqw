@@ -19,7 +19,8 @@ those merge, this skill has nothing to run against.
   different branch overwrites `apps/desktop/dist` — always rebuild after
   switching, or test on the branch the dist was built from.
 - If `node_modules/electron/dist/electron` is missing (Electron 44 ships no
-  binary in the npm tarball): `cd node_modules/electron && node install.js`.
+  binary in the npm tarball — and `pnpm build` can wipe an installed one):
+  `cd node_modules/electron && node install.js`.
   Warm `~/.cache/electron/*.zip` makes it instant; cold it downloads ~230 MB.
 - Kill stale instances first or the single-instance lock silently quits the
   new one: `pgrep -f "dist/electron \." | xargs -r kill` (the npm wrapper PID
@@ -228,6 +229,23 @@ while hidden).
   (which is the dev-mode default — no env var needed on this checkout).
   itunes/deezer/youtube-music/lyrics-lrclib all stage cleanly with outbound
   HTTPS.
+- Packaged-parity staging: `node tooling/sync-plugins.mjs apps/desktop/plugins
+  --release` is what `pnpm run dist` invokes — verifies the ed25519 signature
+  + provenance on `release:` sources and fails closed on `local-build:`.
+  Expected output: one `synced <id> <ver> sha256:<12hex>…` line per lock
+  plugin and NO `synced spin` line (a positional out dir suppresses the
+  conformance guest; `--conformance` re-adds it). `--check`/`--verify`
+  verify only and take no out dir; unknown flags throw `unknown flag`.
+  Re-sync over an existing out dir goes through the atomic
+  stage→hold→publish swap — afterwards `apps/desktop/` must show no
+  `.sync-stage-*` / `.sync-hold-*` residue.
+- In-UI load proof: the `host:plugins` console line is dev-harness only.
+  The product-UI signal is settings → diagnostics → providers row, which
+  lists loaded providerIds (e.g. `deezer, itunes, lyrics-lrclib,
+  youtube-music`) with `last failure: none` — settings via the hamburger
+  (≡) in the world toolbar → `settings` row. A broken/empty staged dir
+  throws `no plugin providers available` at boot; an empty provider slot
+  shows `sheets.noProvider` in the picker sheet.
 - youtube-music `playback.resolve` takes an 11-char video ID as `source_ref`
   (e.g. `kJQP7kiw5Fk`), not a URL.
 - `sync-plugins.mjs` can fail `ENOENT … releases/<id>/<version>` when the
