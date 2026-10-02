@@ -1423,9 +1423,15 @@ const tap = (s: string) => {
     fixtureRadioModels[1],
     () => tap('start'),
     () => tap('stop'),
+    'a-much-longer-provider-id',
   );
   assert(armedRadio?.armed === true);
   assert(armedRadio.statusText.length > 0);
+  assertEqual(
+    armedRadio.ghostText,
+    armedRadio.statusText,
+    'armed ghost ignores a prospective longer provider',
+  );
   const failedRadio = radioRowView(
     fixtureRadioModels[4],
     () => tap('start'),

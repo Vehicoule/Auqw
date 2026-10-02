@@ -1735,9 +1735,14 @@ export function radioRowView(
   const startLabel = t('stage.radio.start');
   // The armed label the chip can grow into for the seed's own provider —
   // 'growing' is the longest status word and fetching appends its suffix,
-  // so this upper-bounds the label before the tail exists.
+  // so this upper-bounds the label before the tail exists. It only counts
+  // while unarmed: an armed tail keeps its seed's provider, and the
+  // prospective estimate would resize the pill under an unchanged label
+  // when the queue moves to a longer-named provider.
   const armedEstimate =
-    seedProvider === null || seedProvider === undefined
+    radio.armed ||
+    seedProvider === null ||
+    seedProvider === undefined
       ? ''
       : `${t('radio.label', { status: t('radio.status.growing') })}${
           t('stage.radio.fetchingSuffix')
