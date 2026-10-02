@@ -3106,14 +3106,11 @@
 }
 
 .uw-chrome[data-bleed='art'] .uw-world {
-  /* A right pane, not a floating island: flush to the window's
-     top/right/bottom so the bleed shows only along the stage seam —
-     the rounded inset edge the stage art dissolves under. The flush
-     top-right also leaves the OS window controls on a square corner. */
-  margin: 0 0 0 var(--spacing-sm);
-  border-radius: var(--radius-float) 0 0 var(--radius-float);
-  border: 0;
-  border-left: var(--stroke-hairline) solid var(--hairline);
+  /* The art bleed frames the card on all four sides; its edge is what
+     the stage art dissolves under. */
+  margin: var(--spacing-sm);
+  border-radius: var(--radius-float);
+  border: var(--stroke-hairline) solid var(--hairline);
 }
 
 /* Window art bleed — while a track has artwork, a scaled-down copy

@@ -696,7 +696,6 @@ function Main({
   const ports = useMemo<AppShellPorts<Overlay>>(
     () => ({
       subscribeOnline: controller.subscribeOnline,
-      localCatalog: true,
       // Foreground edges drive the shell's appActive gate — a hidden
       // window's lyrics clock stops ticking (Chromium throttles the
       // timer anyway; this skips the reconciler work it would wake).
