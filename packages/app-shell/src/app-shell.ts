@@ -274,11 +274,26 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   // ---- position channel ------------------------------------------
   // Position ticks ride the session's light channel — position-only
-  // ticks skip the state publish, so the read subscribes here.
-  const positionMs = useSyncExternalStore(
-    useCallback((l: () => void) => session.subscribePosition(l), [session]),
-    () => session.positionMs(),
-  );
+  // ticks skip the state publish, so the read subscribes here. A plain
+  // state read, not useSyncExternalStore: engine ticks land every
+  // ~250ms–1s, and a tick arriving mid-render marks the store mutated —
+  // React heals by re-rendering synchronously, the next tick lands
+  // mid-pass again, and on a big tree the retries hit the nested-update
+  // cap ("Maximum update depth exceeded" thrown inside the position
+  // listener). A subscription queues one normal update per tick; ticks
+  // during a render just batch into the following one.
+  const [positionMs, setPositionMs] = useState(() => session.positionMs());
+  useEffect(() => {
+    // Subscribe before re-reading: a tick between the render-time
+    // initial state and this effect would otherwise be lost for good —
+    // subscribePosition never replays the current value, and the
+    // overlay would stamp the stale number over every fresh publish.
+    // The read always lands at least as fresh as any listener fire it
+    // follows, since both run inside this same synchronous block.
+    const unsubscribe = session.subscribePosition(setPositionMs);
+    setPositionMs(session.positionMs());
+    return unsubscribe;
+  }, [session]);
 
   // ---- shell chrome state ----------------------------------------
   const [tab, setTab] = useState('home');
