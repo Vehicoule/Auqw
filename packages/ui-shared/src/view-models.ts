@@ -1746,9 +1746,12 @@ export function dedupeTrackListings(
     });
     const groups = groupsByKey.get(key);
     // Same display key alone doesn't make one song — the identity
-    // verdict does (different ISRCs veto even look-alike rows), so a
-    // distinct recording keeps its own row and its own indicators.
-    const host = groups?.find((g) => sameSongIdentity(g.meta, meta));
+    // verdict does, against EVERY member: an uncoded listing can
+    // absorb coded ones whose ISRCs conflict, so checking only the
+    // representative would merge distinct recordings into one row.
+    const host = groups?.find((g) =>
+      g.group.every((m) => sameSongIdentity(m, meta)),
+    );
     if (host !== undefined) {
       host.group.push(meta);
     } else {

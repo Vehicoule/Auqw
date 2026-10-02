@@ -1313,6 +1313,31 @@ function testListingDedupe(): void {
   );
   assertEqual(searchIsrcs.results[0]?.key, 'youtube-music:ytm-i:0');
   assertEqual(searchIsrcs.results[1]?.key, 'youtube-music:ytm-j:1');
+  // Identity isn't transitive — an uncoded first listing must not
+  // absorb two coded listings whose ISRCs conflict.
+  const searchUncoded = toSearchModel(
+    {
+      type: 'content',
+      revision: 6,
+      query: 'roads',
+      page: {
+        items: [
+          meta('ytm-l', 'Roads'),
+          { ...meta('ytm-m', 'Roads'), isrc: 'GBAAA0000001' },
+          { ...meta('ytm-n', 'Roads'), isrc: 'GBAAA0000002' },
+        ],
+        storefront: null,
+      },
+    },
+    null,
+  );
+  assertEqual(
+    searchUncoded.results.length,
+    2,
+    'an uncoded row absorbs one coded twin, never two conflicting ones',
+  );
+  assertEqual(searchUncoded.results[0]?.key, 'youtube-music:ytm-l:0');
+  assertEqual(searchUncoded.results[1]?.key, 'youtube-music:ytm-n:2');
   // A hidden look-alike's ref still lights the kept row — playing a
   // deduped member marks the surviving row as playing.
   const searchPlaying = toSearchModel(

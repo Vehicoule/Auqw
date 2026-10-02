@@ -565,6 +565,34 @@ function adversarialTests(): void {
     assertEqual(out.candidate.sourceRef, rTopic);
   }
 
+  // 9j. Identity isn't transitive — an uncoded top matches two coded
+  // members whose ISRCs conflict, and the clique check keeps them
+  // parked as the distinct recordings they are.
+  {
+    const out = MatchingEngine.match(
+      recording({ title: 'Song', artist: 'Artist', durationMs: 200_000 }),
+      [
+        candidate({ title: 'Song', artist: 'Artist', durationMs: 200_000 }),
+        candidate({
+          title: 'Song',
+          artist: 'Artist',
+          durationMs: 200_000,
+          isrc: 'USAA1000001',
+          sourceRef: { provider: 'itunes', kind: 'track', id: 'it-aaa' },
+        }),
+        candidate({
+          title: 'Song',
+          artist: 'Artist',
+          durationMs: 200_100,
+          isrc: 'USAA1000002',
+          sourceRef: { provider: 'deezer', kind: 'track', id: 'dz-bbb' },
+        }),
+      ],
+    );
+    assert(out.type === 'ambiguous', `9j: ${out.type}`);
+    assertEqual(out.candidates.length, 3);
+  }
+
   // 10. Hard label mismatch rejects even an exact-ISRC candidate.
   {
     const out = MatchingEngine.match(

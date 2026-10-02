@@ -538,12 +538,20 @@ export class MatchingEngine {
       // A near-tie made only of same-song listings is one choice
       // wearing several provider ids — the album audio, the topic
       // upload, the video. Parking it for the user asks a question
-      // the rows cannot answer, so the best-scored member wins.
+      // the rows cannot answer, so the best-scored member wins. The
+      // window must be a clique — identity isn't transitive (an
+      // uncoded listing matches two coded ones whose ISRCs conflict),
+      // so members check each other, not only the top.
+      const window = distinct
+        .slice(1)
+        .filter((s) => top.evidence.score - s.evidence.score < 7);
       if (
-        distinct
-          .slice(1)
-          .filter((s) => top.evidence.score - s.evidence.score < 7)
-          .every((s) => sameSongIdentity(top.candidate, s.candidate))
+        window.every((s) => sameSongIdentity(top.candidate, s.candidate)) &&
+        window.every((s, i) =>
+          window
+            .slice(i + 1)
+            .every((t) => sameSongIdentity(s.candidate, t.candidate)),
+        )
       ) {
         return {
           type: 'matched',
