@@ -20,8 +20,18 @@ const NAV_ICONS: Record<string, IconName> = {
   settings: 'settings',
 };
 
-function iconFor(key: string): IconName {
-  return NAV_ICONS[key] ?? 'note';
+/** Filled variants read on the active tab — same swap the M3 dock's PNG pair does. */
+const NAV_ICONS_ACTIVE: Record<string, IconName> = {
+  home: 'home-filled',
+  explore: 'compass-filled',
+  library: 'library-filled',
+  settings: 'settings-filled',
+};
+
+function iconFor(key: string, active: boolean): IconName {
+  return (
+    (active ? NAV_ICONS_ACTIVE[key] : undefined) ?? NAV_ICONS[key] ?? 'note'
+  );
 }
 
 /** Tab glyph with a subtle activation lift — one worklet transform;
@@ -108,7 +118,7 @@ export function AndroidNavbar({
                 }}
               >
                 <NavIcon
-                  name={iconFor(item.key)}
+                  name={iconFor(item.key, active)}
                   active={active}
                   color={
                     active ? theme.colors.accent : theme.colors.textSecondary
@@ -199,7 +209,7 @@ export function IosGlassNavbar({
                   }}
                 >
                   <NavIcon
-                    name={iconFor(item.key)}
+                    name={iconFor(item.key, active)}
                     active={active}
                     color={
                       active ? theme.colors.accent : theme.colors.textSecondary
