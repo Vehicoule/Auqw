@@ -207,7 +207,7 @@ export function IconButton({
   color,
   disabled = false,
   active = false,
-  filled = false,
+  filled,
   className,
 }: IconButtonProps) {
   const off = disabled || onPress === undefined;
@@ -223,7 +223,7 @@ export function IconButton({
       style={size === undefined ? undefined : { width: size, height: size }}
     >
       {icon === 'heart' || icon === 'heart-filled' ? (
-        <HeartIcon filled={icon === 'heart-filled' || filled} size={iconSize} color={color} />
+        <HeartIcon filled={icon === 'heart-filled' || filled === true} size={iconSize} color={color} />
       ) : (
         <Icon name={icon} size={iconSize} color={color} filled={filled} />
       )}

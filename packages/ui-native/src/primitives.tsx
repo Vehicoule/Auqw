@@ -422,7 +422,7 @@ export function IconButton({
   color,
   disabled = false,
   active = false,
-  filled = false,
+  filled,
   hitSlop,
   style,
 }: IconButtonProps) {
@@ -439,7 +439,7 @@ export function IconButton({
     >
       {icon === 'heart' || icon === 'heart-filled' ? (
         <HeartIcon
-          filled={icon === 'heart-filled' || filled}
+          filled={icon === 'heart-filled' || filled === true}
           size={iconSize}
           color={color ?? theme.colors.textSecondary}
         />
@@ -1152,7 +1152,7 @@ export function Spinner({
         name="spinner"
         size={size}
         color={color ?? theme.colors.accent}
-        strokeWidth={theme.strokes.progressAndroid}
+        strokeWidth={theme.strokes.icon}
       />
     </Animated.View>
   );
