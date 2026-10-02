@@ -108,7 +108,7 @@ export function AndroidNavbar({
                 style={{
                   minWidth: 56,
                   height: 30,
-                  borderRadius: theme.radius.pill,
+                  borderRadius: theme.radius.control,
                   paddingHorizontal: theme.spacing.screen,
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -157,7 +157,7 @@ export function IosGlassNavbar({
         style={{
           marginHorizontal: theme.spacing.screen,
           marginBottom: theme.spacing.sm,
-          borderRadius: 24,
+          borderRadius: theme.radius.float,
           borderWidth: theme.strokes.hairline,
           borderColor: theme.colors.hairline,
           backgroundColor: theme.colors.glass,
@@ -199,7 +199,7 @@ export function IosGlassNavbar({
                   style={{
                     minWidth: 44,
                     height: 26,
-                    borderRadius: theme.radius.pill,
+                    borderRadius: theme.radius.control,
                     paddingHorizontal: 10,
                     alignItems: 'center',
                     justifyContent: 'center',
