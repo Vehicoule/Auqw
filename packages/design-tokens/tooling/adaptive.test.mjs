@@ -257,8 +257,8 @@ const TEXT_ROLES = [
 // ---------- schemeCssVars ----------
 {
   const vars = schemeCssVars(schemes.dark);
-  check('css vars are kebab-cased', vars['--text-primary'] === '#e6e1d8');
-  check('css vars cover canvas', vars['--canvas'] === '#161512');
+  check('css vars are kebab-cased', vars['--text-primary'] === '#ececf0');
+  check('css vars cover canvas', vars['--canvas'] === '#242424');
   check(
     'css vars cover every role',
     Object.keys(vars).length === Object.keys(schemes.dark).length,
