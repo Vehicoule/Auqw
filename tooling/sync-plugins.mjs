@@ -39,6 +39,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -215,8 +216,11 @@ const loadPluginArtifacts = (plugin, lock, { releaseOnly = false } = {}) => {
     if (releaseOnly) {
       throw new Error(`${plugin.id}: local-build: sources are refused under --release`);
     }
+    // realpathSync canonicalizes BEFORE the containment check — a
+    // lexical relative() pass accepts an in-repo symlink that points
+    // outside the repo, and readFileSync would happily follow it.
     const wasmPath = assertInsideRepo(
-      resolveSourcePath(source.slice('local-build:'.length)),
+      realpathSync(resolveSourcePath(source.slice('local-build:'.length))),
       'local-build source',
       source,
     );
@@ -225,7 +229,7 @@ const loadPluginArtifacts = (plugin, lock, { releaseOnly = false } = {}) => {
       throw new Error(`${plugin.id}: digest mismatch lock=${plugin.digest} actual=${sha256(wasm)}`);
     }
     const manifestPath = assertInsideRepo(
-      resolve(dirname(wasmPath), '../manifest.json'),
+      realpathSync(resolve(dirname(wasmPath), '../manifest.json')),
       'local-build manifest',
       source,
     );
