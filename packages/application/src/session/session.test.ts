@@ -5476,13 +5476,15 @@ async function deadRefHopsToAlternate(): Promise<void> {
   const altIdentity = lastPrepareIdentity(r);
   r.player.emit(preparedEvent(altIdentity, 'h-alt'));
   await pump();
-  assert(r.player.settlePrepare(ok('req-alt')), 'alt prepare pending');
+  // Two prepare deferreds queue behind the hop — the superseded p1
+  // and the alternate's own request; both settle FIFO before the
+  // intent reports the chain's verdict.
+  assert(r.player.settlePrepare(ok('req-alt')), 'superseded call frees');
+  assert(r.player.settlePrepare(ok('req-alt2')), 'alternate request id lands');
   const res = await playing;
-  // The tap's own attempt reports its sealed verdict — the intent's
-  // recovery on the alternate lives in the published playback record.
-  assert(!res.ok, 'first attempt resolves with its sealed refusal');
-  assertEqual(res.error.kind, 'unavailable');
-  assert(r.player.settlePrepare(ok('req-alt2')), 'alt call settles');
+  // The chain's outcome is the intent's verdict — a tap that
+  // recovered on an alternate reports ok, never a false refusal.
+  assert(res.ok, 'recovered tap resolves with the chain outcome');
   await pump();
   assertEqual(readyOf(r).playback.type, 'buffering');
   const rec = readyOf(r).recordings.find((x) => x.id === 'r1');

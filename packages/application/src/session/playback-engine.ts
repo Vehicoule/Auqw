@@ -281,6 +281,22 @@ type ActiveAttempt = {
    * 'no-result' the last re-match happened to land on.
    */
   originError?: AppError;
+  /**
+   * The verdict a hop chain produced while this frame awaited its
+   * own failure teardown — set inside `#failAttempt`, surfaced by
+   * `#report`: the intent's promise resolves with the chain's
+   * outcome, not the refusal that opened it.
+   */
+  chainOutcome?: Result<void>;
+  /**
+   * The in-flight recovery chain — a hop's `startAttempt` or a
+   * weather retry's `#retryAfter` — assigned before the source
+   * cancel so a frame waking on the cancel can `#report`-await the
+   * chain's verdict instead of reporting its own interrupted
+   * refusal. Awaited only; the verdict itself lands on
+   * `chainOutcome`.
+   */
+  chain?: Promise<unknown>;
   terminalError?: AppError;
   timer?: CancellationSource;
   /** Last accepted status position — deltas feed `listenedMs`. */
@@ -1333,9 +1349,12 @@ export class PlaybackEngine {
     // stream attach — both spend the network it doesn't have.
     const online = this.#host.isOnline();
     if (!online && (ref === null || ref.provider !== LOCAL_PROVIDER)) {
-      return this.#failWith(
+      return this.#report(
         attempt,
-        appError('unavailable', 'offline — no local bytes for this recording'),
+        await this.#failWith(
+          attempt,
+          appError('unavailable', 'offline — no local bytes for this recording'),
+        ),
       );
     }
     if (ref === null) {
@@ -1346,14 +1365,17 @@ export class PlaybackEngine {
         deadlineMs,
       );
       if (!resolved.ok) {
-        return resolved;
+        return this.#report(attempt, resolved);
       }
       ref = resolved.value;
     }
     if (ref === null) {
-      return this.#failWith(
+      return this.#report(
         attempt,
-        appError('no-result', 'no playable source for recording'),
+        await this.#failWith(
+          attempt,
+          appError('no-result', 'no playable source for recording'),
+        ),
       );
     }
     // The pick is final here — consumers read `playback.ref` to mark
@@ -1373,7 +1395,10 @@ export class PlaybackEngine {
     // attempt was still resolving can seed the real version.
     this.#host.maybeArmRadio();
     if (this.#isStale(attempt) || attempt.source.signal.cancelled) {
-      return err(sealedOrSuperseded(attempt.terminalError));
+      return this.#report(
+        attempt,
+        err(sealedOrSuperseded(attempt.terminalError)),
+      );
     }
 
     // A provider:'local' pick bypasses the plugin router — the adapter
@@ -1384,7 +1409,7 @@ export class PlaybackEngine {
         selectionFromSettings(r.settings),
       );
       if (!routed.ok) {
-        return this.#failWith(attempt, routed.error);
+        return this.#report(attempt, await this.#failWith(attempt, routed.error));
       }
     }
     // A warm session issued for this exact ref may still be live in
@@ -1450,17 +1475,26 @@ export class PlaybackEngine {
           this.#host.publish();
         }
         if (this.#isStale(attempt) || attempt.source.signal.cancelled) {
-          return err(sealedOrSuperseded(attempt.terminalError));
+          return this.#report(
+            attempt,
+            err(sealedOrSuperseded(attempt.terminalError)),
+          );
         }
-        return this.#adoptPrepared(attempt, stream, warm.attempt, true);
+        return this.#report(
+          attempt,
+          await this.#adoptPrepared(attempt, stream, warm.attempt, true),
+        );
       }
     }
     // A spent intent budget fails outright — the maxAttempts floor
     // would otherwise grant one more call per hop.
     if (attempt.preparesUsed >= PREPARE_CALL_BUDGET) {
-      return this.#failWith(
+      return this.#report(
         attempt,
-        appError('budget-exceeded', 'prepare call budget exhausted'),
+        await this.#failWith(
+          attempt,
+          appError('budget-exceeded', 'prepare call budget exhausted'),
+        ),
       );
     }
     const prepared = await retryBounded({
@@ -1491,17 +1525,26 @@ export class PlaybackEngine {
       },
     });
     if (this.#isStale(attempt)) {
-      return err(sealedOrSuperseded(attempt.terminalError));
+      return this.#report(
+        attempt,
+        err(sealedOrSuperseded(attempt.terminalError)),
+      );
     }
     if (!prepared.ok) {
       // terminalError is set before a retry handoff or supersede
       // cancels the source — the early wake is bookkeeping, not a
       // fresh failure to publish. A bare deadline-cancelled call has
       // no seal: its own verdict stands.
-      return this.#failUnlessSealed(attempt, prepared);
+      return this.#report(
+        attempt,
+        await this.#failUnlessSealed(attempt, prepared),
+      );
     }
     if (attempt.source.signal.cancelled) {
-      return err(sealedOrSuperseded(attempt.terminalError));
+      return this.#report(
+        attempt,
+        err(sealedOrSuperseded(attempt.terminalError)),
+      );
     }
     attempt.requestId = prepared.value;
     const ready2 = this.#host.ready();
@@ -1520,7 +1563,7 @@ export class PlaybackEngine {
     if (!attempt.preparedHandled) {
       this.#armPrepareTimeout(attempt);
     }
-    return ok(undefined);
+    return this.#report(attempt, ok(undefined));
   }
 
   async #resolveViaCandidates(
@@ -1543,12 +1586,14 @@ export class PlaybackEngine {
     const provider = routed.value;
     const query = recordingQuery(recording);
     // An alternate hop re-matches the search the dead ref came from —
-    // the pool is keyed on the occurrence so a fresh intent never
-    // inherits a stale list.
+    // the pool reads only inside a hop chain (`alternatesUsed > 0`):
+    // a fresh intent always asks the provider again, so a catalog
+    // that gained candidates since the refusal is re-seen.
     let candidates: readonly MatchCandidate[];
     const pool = this.#matchPool;
     if (
       pool !== null &&
+      attempt.alternatesUsed > 0 &&
       pool.occurrenceId === attempt.occurrenceId &&
       pool.provider === provider.id
     ) {
@@ -1856,6 +1901,17 @@ export class PlaybackEngine {
     }
     attempt.autoRetried = true;
     attempt.terminalError ??= error;
+    // Arm the retry chain BEFORE cancelling this source — a frame
+    // freed by the cancel must see `chain` and report the retry's
+    // verdict instead of the hiccup that triggered it. The timer is
+    // built here so the chain captures it; the leftover prepare
+    // timeout is cancelled first so it can't fire a duplicate
+    // failure mid-backoff.
+    attempt.timer?.cancel();
+    const timer = new CancellationSource();
+    attempt.timer = timer;
+    const chain = this.#retryAfter(attempt, timer, wait);
+    attempt.chain = chain;
     // Kill the attempt's own source now: a still-pending prepare or
     // resolve unwinds at its cancelled checkpoints with the real
     // verdict instead of racing the retry.
@@ -1892,17 +1948,12 @@ export class PlaybackEngine {
       delete attempt.handle;
       await this.#releaseHandle(handle, attempt.identity);
     }
-    // The backoff rides attempt.timer — startAttempt's supersede
-    // (new play intent, teardown) cancels it and kills the retry.
-    // A leftover timer (e.g. the armed prepare timeout) is cancelled
-    // first so it can't fire a duplicate failure mid-backoff.
-    attempt.timer?.cancel();
-    const timer = new CancellationSource();
-    attempt.timer = timer;
     // Backoff and the re-attempt run as owned work, not on the event
     // tail — a re-prepare that blocks must not stall every player
-    // event queued behind it.
-    this.#host.own(this.#retryAfter(attempt, timer, wait));
+    // event queued behind it. The chain's sleep rides attempt.timer —
+    // startAttempt's supersede (new play intent, teardown) cancels it
+    // and kills the retry.
+    this.#host.own(chain);
   }
 
   async #retryAfter(
@@ -1930,12 +1981,12 @@ export class PlaybackEngine {
       // state it published alone.
       return;
     }
-    // A returned err is already published by #failAttempt inside
-    // startAttempt — the Result is for the original caller chain
-    // that no longer exists here. Validated listening time carries
-    // across the retry so a mid-play failure doesn't zero the play
-    // threshold's progress.
-    await this.startAttempt(attempt.occurrenceId, {
+    // The re-attempt's verdict is the intent's — a frame freed by
+    // the weather retry's source cancel reports it through #report:
+    // a recovered retry resolves ok, a failed one its own verdict.
+    // Validated listening time carries across the retry so a
+    // mid-play failure doesn't zero the play threshold's progress.
+    attempt.chainOutcome = await this.startAttempt(attempt.occurrenceId, {
       deadlineMs: attempt.deadlineMs,
       listenedMsAccum: attempt.listenedMsAccum,
       preparesUsed: attempt.preparesUsed,
@@ -2016,8 +2067,21 @@ export class PlaybackEngine {
     }
     this.#markSourceRefDead(ref);
     attempt.terminalError ??= error;
-    // Kill the attempt's own work first — same contract as the
-    // weather retry: pending calls unwind instead of racing the hop.
+    // Arm the chain BEFORE cancelling this source: a frame waking on
+    // the cancel must already see `chain` and await the verdict —
+    // otherwise it would report the interrupted refusal while the
+    // alternate recovers underneath it.
+    const chain = this.startAttempt(attempt.occurrenceId, {
+      deadlineMs: attempt.deadlineMs,
+      listenedMsAccum: attempt.listenedMsAccum,
+      preparesUsed: 0,
+      alternatesUsed: attempt.alternatesUsed + 1,
+      autoRetried: false,
+      originError: attempt.originError ?? error,
+    });
+    attempt.chain = chain;
+    // Kill the attempt's own work — same contract as the weather
+    // retry: pending calls unwind instead of racing the hop.
     attempt.source.cancel();
     const ready = this.#host.ready();
     if (
@@ -2045,14 +2109,13 @@ export class PlaybackEngine {
       await this.#releaseHandle(handle, attempt.identity);
     }
     attempt.timer?.cancel();
-    await this.startAttempt(attempt.occurrenceId, {
-      deadlineMs: attempt.deadlineMs,
-      listenedMsAccum: attempt.listenedMsAccum,
-      preparesUsed: 0,
-      alternatesUsed: attempt.alternatesUsed + 1,
-      autoRetried: false,
-      originError: attempt.originError ?? error,
-    });
+    const outcome = await chain;
+    // The chain's verdict becomes the intent's: a recovery reports
+    // ok; an exhausted chain names the refusal that started it — the
+    // last alternate's own error names nothing the user acted on.
+    attempt.chainOutcome = outcome.ok
+      ? ok(undefined)
+      : err(attempt.originError ?? error);
     return true;
   }
 
@@ -2062,7 +2125,9 @@ export class PlaybackEngine {
   ): Promise<void> {
     // The last thing a dying attempt tries: when the verdict is
     // video-scoped, spend the intent's remaining deadline on the
-    // next-best candidate instead of marking the row.
+    // next-best candidate instead of marking the row. A hop stores
+    // the chain's outcome on this attempt — the frame's own returns
+    // surface it through `#report`.
     if (await this.#hopToAlternateRef(attempt, error)) {
       return;
     }
@@ -2108,6 +2173,24 @@ export class PlaybackEngine {
     this.#host.publish();
     await this.#host.persistQueue(r, before, beforeMarks);
     this.#host.derived();
+  }
+
+  /**
+   * The result a `startAttempt` frame reports: a hop chain's outcome
+   * outranks the frame's local verdict — a recovered tap resolves ok
+   * while the shell shows no error; an exhausted chain still reports
+   * the refusal that started it. A live chain is awaited: frames
+   * freed by its source cancel report what the chain lands.
+   */
+  async #report(
+    attempt: ActiveAttempt,
+    result: Result<void>,
+  ): Promise<Result<void>> {
+    if (attempt.chain === undefined) {
+      return result;
+    }
+    await attempt.chain;
+    return attempt.chainOutcome ?? result;
   }
 
   /** Fail the attempt, propagating the verdict as the result. */
