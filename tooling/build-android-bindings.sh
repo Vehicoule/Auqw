@@ -19,7 +19,12 @@ IFS=',' read -ra ABIS <<< "${AUQW_ANDROID_ABIS:-arm64-v8a,x86_64}"
 TARGETS=()
 for abi in "${ABIS[@]}"; do TARGETS+=(-t "$abi"); done
 
-cargo ndk "${TARGETS[@]}" -o "$JNILIBS" build --locked -p auqw-mobile-bindings --release
+# uniffi-bindgen reads the UniFFI metadata out of .symtab, which the
+# workspace release profile strips — relax it for this one build. AGP's
+# stripReleaseDebugSymbols re-strips at APK packaging, so the shipped
+# .so still loses the symbols.
+cargo ndk "${TARGETS[@]}" -o "$JNILIBS" build --locked -p auqw-mobile-bindings --release \
+  --config 'profile.release.strip="debuginfo"'
 
 cargo run --locked -p auqw-mobile-bindings --bin uniffi-bindgen -- generate \
   --library "$JNILIBS/${ABIS[0]}/libauqw_mobile_bindings.so" \
