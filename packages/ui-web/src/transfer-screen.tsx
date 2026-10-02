@@ -7,6 +7,7 @@ import {
   Text,
 } from './primitives.tsx';
 import { ErrorState } from './states.tsx';
+import { t } from '@auqw/ui-shared';
 import type { TransferModel } from '@auqw/ui-shared';
 import {
   useTransferScreenController,
@@ -117,8 +118,34 @@ function ImportBody({
     return null;
   }
   const { footer } = body;
+  // The body exists only after a file was picked: pick is always done;
+  // review is current until apply lands, then every step closes.
+  const current = footer.kind === 'done' ? 3 : 1;
+  const steps = [
+    t('transfer.stepPick'),
+    t('transfer.stepReview'),
+    t('transfer.stepApply'),
+  ];
   return (
     <div className="uw-import-preview" data-phase={body.phase}>
+      <ol className="uw-isteps" aria-hidden="true">
+        {steps.map((label, i) => (
+          <li
+            key={label}
+            className="uw-isteps__step"
+            data-state={i < current ? 'done' : i === current ? 'current' : 'todo'}
+          >
+            {i < current ? (
+              <StatusMark kind="check" size={10} color="var(--accent)" />
+            ) : (
+              <span className="uw-isteps__dot" />
+            )}
+            <Text variant="label" color={i === current ? 'accent' : i < current ? 'primary' : 'secondary'}>
+              {label}
+            </Text>
+          </li>
+        ))}
+      </ol>
       <Text variant="body" color="bright">
         {body.title}
       </Text>

@@ -318,6 +318,9 @@ export const es: Readonly<Record<MessageId, Message>> = {
   'transfer.startOver': 'empezar de nuevo',
   'transfer.apply': 'reemplazar la biblioteca',
   'transfer.applying': 'reemplazando…',
+  'transfer.stepPick': 'elegir archivo',
+  'transfer.stepReview': 'revisar',
+  'transfer.stepApply': 'aplicar',
   'transfer.replaceWarn':
     'borra la biblioteca, las descargas, la cola, el historial y los ajustes de este dispositivo — una exportación conserva la biblioteca, no las descargas ni la cola',
   'transfer.cancelA11y': 'cancelar la importación',

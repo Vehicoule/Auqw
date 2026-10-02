@@ -66,6 +66,7 @@ import {
   WARN_MINI_DOT,
   WARN_MINI_LINE_LENGTH,
   WARN_MINI_LINE_PATH,
+  t,
 } from '@auqw/ui-shared';
 import type { DownloadChip } from '@auqw/ui-shared';
 import type { DownloadButtonView } from '@auqw/ui-shared/controllers';
@@ -1215,6 +1216,89 @@ export function Spinner({
         strokeWidth={theme.strokes.icon}
       />
     </Animated.View>
+  );
+}
+
+/** A pulsing placeholder block — the loading skeleton's atom. */
+export function Skeleton({
+  width,
+  height,
+  radius,
+  style,
+}: {
+  readonly width: number | `${number}%`;
+  readonly height: number;
+  readonly radius?: number | undefined;
+  readonly style?: StyleProp<ViewStyle> | undefined;
+}) {
+  const theme = useTheme();
+  const pulse = useSharedValue(0.45);
+  useEffect(() => {
+    if (theme.reducedMotion) {
+      pulse.value = 0.7;
+      return undefined;
+    }
+    pulse.value = withRepeat(
+      withTiming(1, { duration: theme.motion.state * 3 }),
+      -1,
+      true,
+    );
+    return () => cancelAnimation(pulse);
+  }, [pulse, theme.reducedMotion, theme.motion.state]);
+  const animatedStyle = useAnimatedStyle(() => ({ opacity: pulse.value }));
+  return (
+    <Animated.View
+      accessible={false}
+      style={[
+        {
+          width,
+          height,
+          borderRadius: radius ?? theme.radius.control,
+          backgroundColor: theme.colors.fg08,
+        },
+        animatedStyle,
+        style,
+      ]}
+    />
+  );
+}
+
+/** Row-shaped skeletons standing in for a list that is still loading. */
+export function SkeletonRows({
+  count = 6,
+}: {
+  readonly count?: number | undefined;
+}) {
+  const theme = useTheme();
+  return (
+    <View
+      accessibilityLabel={t('state.loading')}
+      accessible
+      style={{
+        flex: 1,
+        paddingHorizontal: theme.spacing.sm,
+        paddingTop: theme.spacing.sm,
+        gap: theme.spacing.md,
+      }}
+    >
+      {Array.from({ length: count }, (_, i) => (
+        <View
+          key={i}
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: theme.spacing.sm,
+            minHeight: theme.sizes.trackRow,
+          }}
+        >
+          <Skeleton width={40} height={40} />
+          <View style={{ flex: 1, gap: theme.spacing.xs }}>
+            <Skeleton height={13} width="62%" radius={theme.radius.thumb} />
+            <Skeleton height={11} width="38%" radius={theme.radius.thumb} />
+          </View>
+        </View>
+      ))}
+    </View>
   );
 }
 

@@ -9,6 +9,7 @@ import {
   EqBars,
   Icon,
   Pressable,
+  SkeletonRows,
   Spinner,
   StatusMark,
   Text,
@@ -566,6 +567,10 @@ function GalleryBody({
               {state}
             </View>
           ))}
+        </View>
+        <Caption>skeleton rows — list loading</Caption>
+        <View style={{ height: 240 }}>
+          <SkeletonRows count={4} />
         </View>
       </Section>
 

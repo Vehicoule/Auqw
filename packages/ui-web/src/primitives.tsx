@@ -12,6 +12,7 @@ import {
   quadPath,
   REFRESH_PATH,
   scaledArtworkUrl,
+  t,
   WARN_DRAW_DETAIL_PATH,
   WARN_DRAW_DOT,
   WARN_DRAW_TRIANGLE_PATH,
@@ -717,6 +718,53 @@ export function Spinner({
         strokeWidth={strokes.icon}
       />
     </span>
+  );
+}
+
+/** A pulsing placeholder block — the loading skeleton's atom. */
+export function Skeleton({
+  width,
+  height,
+  radius,
+  style,
+}: {
+  readonly width: number | string;
+  readonly height: number;
+  readonly radius?: number | string | undefined;
+  readonly style?: CSSProperties | undefined;
+}) {
+  return (
+    <span
+      className="uw-skeleton"
+      style={{
+        width,
+        height,
+        borderRadius: radius ?? 'var(--radius-control)',
+        ...style,
+      }}
+      aria-hidden="true"
+    />
+  );
+}
+
+/** Row-shaped skeletons standing in for a list that is still loading. */
+export function SkeletonRows({
+  count = 6,
+}: {
+  readonly count?: number | undefined;
+}) {
+  return (
+    <div className="uw-skelrows" role="status" aria-label={t('state.loading')}>
+      {Array.from({ length: count }, (_, i) => (
+        <div className="uw-skelrow" key={i}>
+          <Skeleton width={40} height={40} />
+          <span className="uw-skelrow__lines">
+            <Skeleton height={13} width="62%" radius="var(--radius-thumb)" />
+            <Skeleton height={11} width="38%" radius="var(--radius-thumb)" />
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }
 

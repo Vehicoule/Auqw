@@ -302,6 +302,9 @@ export const en = {
   'transfer.startOver': 'start over',
   'transfer.apply': 'replace library',
   'transfer.applying': 'replacing…',
+  'transfer.stepPick': 'pick a file',
+  'transfer.stepReview': 'review',
+  'transfer.stepApply': 'apply',
   'transfer.replaceWarn':
     'erases this device\'s library, downloads, queue, history and settings — an export preserves the library, not downloads or the queue',
   'transfer.cancelA11y': 'cancel import',

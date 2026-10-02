@@ -1,6 +1,13 @@
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { BackRow, Icon, PillButton, Pressable, Text } from './primitives.tsx';
+import {
+  BackRow,
+  Icon,
+  PillButton,
+  Pressable,
+  SkeletonRows,
+  Text,
+} from './primitives.tsx';
 import { StateFor } from './states.tsx';
 import type { CorrectionsModel } from '@auqw/ui-shared';
 import {
@@ -90,7 +97,9 @@ export function CorrectionsScreen({
           </Pressable>
         ))}
       </View>
-      {view.body.kind !== 'rows' ? (
+      {view.body.kind === 'loading' ? (
+        <SkeletonRows count={8} />
+      ) : view.body.kind !== 'rows' ? (
         <StateFor view={view.body} />
       ) : (
         <ScrollView

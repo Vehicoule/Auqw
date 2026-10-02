@@ -1,10 +1,15 @@
-import { CapsLabel, Icon, Pressable, Text } from './primitives.tsx';
+import {
+  CapsLabel,
+  Icon,
+  Pressable,
+  SkeletonRows,
+  Text,
+} from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { TrackRow, indexAdapter, useTrackList } from './track-row.tsx';
 import {
   EmptyState,
   ErrorState,
-  LoadingState,
   UnavailableState,
 } from './states.tsx';
 import type { SearchStateModel } from '@auqw/ui-shared';
@@ -108,9 +113,7 @@ export function SearchScreen({
             icon={view.idle.icon}
           />
         ))}
-      {view.status?.kind === 'loading' && (
-        <LoadingState title={view.status.title} hint={view.status.hint} />
-      )}
+      {view.status?.kind === 'loading' && <SkeletonRows count={8} />}
       {view.status?.kind === 'empty' && (
         <EmptyState
           title={view.status.title}

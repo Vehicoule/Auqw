@@ -314,6 +314,9 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'transfer.startOver': 'von vorn beginnen',
   'transfer.apply': 'bibliothek ersetzen',
   'transfer.applying': 'wird ersetzt…',
+  'transfer.stepPick': 'datei wählen',
+  'transfer.stepReview': 'prüfen',
+  'transfer.stepApply': 'übernehmen',
   'transfer.replaceWarn':
     'löscht bibliothek, downloads, warteschlange, verlauf und einstellungen auf diesem gerät — ein export sichert die bibliothek, nicht downloads oder warteschlange',
   'transfer.cancelA11y': 'import abbrechen',

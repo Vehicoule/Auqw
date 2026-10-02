@@ -1,6 +1,6 @@
 import { FlatList, ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Icon, Pressable, Text } from './primitives.tsx';
+import { Icon, Pressable, SkeletonRows, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState, StateFor } from './states.tsx';
@@ -205,7 +205,12 @@ export function SearchScreen({
             icon={view.idle.icon}
           />
         ))}
-      {view.status !== null && <StateFor view={view.status} />}
+      {view.status !== null &&
+        (view.status.kind === 'loading' ? (
+          <SkeletonRows count={8} />
+        ) : (
+          <StateFor view={view.status} />
+        ))}
       {view.results !== null && (
         <FlatList
           data={view.results.rows}
