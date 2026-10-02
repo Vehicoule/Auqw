@@ -1558,14 +1558,17 @@ function testUnsyncedWrites(): void {
     'a field the record lacks re-emits',
   );
 
-  // 'sum'/'max' policies: only a LARGER local value re-emits — a
-  // smaller assertion would stamp a zero component anyway.
-  const smallerCount = syncedMap(allWrites);
-  smallerCount.get(`playCount\u001fr-1`)!['count'] = 9;
-  assertEqual(
-    unsyncedWrites(input, smallerCount).length,
-    0,
-    'remote-ahead sum stays delivered',
+  // 'sum' delivery can't be proven inside the merged total — remote
+  // coverage above ours hides a lost increment, so only an exact
+  // match suppresses; 'max' still suppresses provably-dead writes.
+  const remoteAhead = syncedMap(allWrites);
+  remoteAhead.get(`playCount\u001fr-1`)!['count'] = 9;
+  assert(
+    unsyncedWrites(input, remoteAhead).some(
+      (w) =>
+        w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'remote-ahead sum re-emits — component presence is unprovable',
   );
   const largerCount = syncedMap(allWrites);
   largerCount.get(`playCount\u001fr-1`)!['count'] = 2;

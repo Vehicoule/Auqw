@@ -4,7 +4,7 @@ import type {
   OperationContext,
 } from '../cancellation.ts';
 import { appError, cancelledError, err, ok } from '../errors.ts';
-import type { Result } from '../errors.ts';
+import type { AppError, Result } from '../errors.ts';
 import type {
   DownloadProgress,
   DownloadRecord,
@@ -60,6 +60,10 @@ const BAND_EXPLICIT = 2;
 
 const MAX_ACTIVE = 1;
 const RESOLVE_DEADLINE_MS = 30_000;
+/** Bounded boot-stage retries: the integrity pass rides the transfer
+ *  port, whose failures at startup are mostly transient IO. */
+const INIT_ATTEMPTS = 3;
+const INIT_BACKOFF_MS = 250;
 /** Persist the resume offset every N committed bytes, not per chunk. */
 const OFFSET_CHECKPOINT_BYTES = 4 * 1024 * 1024;
 
@@ -113,12 +117,23 @@ export class DownloadManager {
   /** Serializes ledger writes — commits carry the full section. */
   #persistTail: Promise<Result<void>> = Promise.resolve(ok(undefined));
   #unsubConnectivity: (() => void) | null = null;
+  /** Set when init() exhausts its retries: the published ledger is
+   *  broken, not empty — lets consumers tell "no downloads" apart
+   *  from "init could not verify what's on disk". */
+  #unavailable = false;
 
   constructor(deps: DownloadManagerDeps) {
     this.#deps = deps;
   }
 
   // ---- lifecycle ---------------------------------------------------
+
+  /** True after init() fails its bounded retries — the empty ledger is
+   *  a broken one, not "no downloads". Cleared on the next verified
+   *  init. */
+  unavailable(): boolean {
+    return this.#unavailable;
+  }
 
   /**
    * Startup integrity over the loaded ledger: sweep `.part` files
@@ -154,78 +169,44 @@ export class DownloadManager {
       return result;
     };
 
-    // Keep .part files for rows that own resumable bytes — including
-    // failed_with_retry, whose explicit retry resumes the prefix.
-    const resumable = new Set<DownloadState>([
-      'requested',
-      'transferring',
-      'failed_with_retry',
-    ]);
-    const keep = [...staged.values()]
-      .filter((row) => resumable.has(row.state))
-      .map((row) => `${row.filePath}.part`);
-    const swept = await this.#deps.transfer.sweepPartials(keep, signal);
-    if (!swept.ok) {
-      return failed(swept);
-    }
-    if (swept.value > 0) {
-      this.#log('info', `downloads: swept ${swept.value} stale .part files`);
-    }
-
-    let dirty = false;
-    for (const row of [...staged.values()]) {
-      if (signal.cancelled) {
-        return failed(err(cancelledError()));
-      }
-      if (row.state === 'available') {
-        const st = await this.#deps.transfer.stat(row.filePath, signal);
-        if (!st.ok) {
-          return failed(st);
-        }
-        // Vanished file — or a size the ledger never recorded
-        // (truncated/replaced media must not play as offline content).
-        // bytes:null means the adapter can't read the size — keep the
-        // row: existence is the only honest signal there.
-        if (
-          !st.value.exists ||
-          (st.value.bytes !== null && st.value.bytes !== row.bytes)
-        ) {
-          const removed = await this.#deps.transfer.removeFile(
-            row.filePath,
-            signal,
-          );
-          if (!removed.ok) {
-            return failed(removed);
-          }
-          staged.delete(row.downloadId);
-          dirty = true;
-          this.#log(
-            'warn',
-            `downloads: ${row.downloadId} file ${st.value.exists ? 'size-mismatch' : 'vanished'} — degrading to streaming`,
-          );
-        }
-      } else if (row.state === 'removing') {
-        const removed = await this.#deps.transfer.removeFile(
-          row.filePath,
+    // The volatile half — partial sweep, per-row stat/remove, fixup
+    // persist — all ride the transfer port, where a boot-time IO
+    // failure is usually transient. Retry the stage a bounded number
+    // of times before reporting the ledger unavailable; non-retryable
+    // kinds (cancelled, validation) pass straight through.
+    let attemptErr: AppError | null = null;
+    for (let attempt = 0; ; attempt++) {
+      if (attempt > 0) {
+        const slept = await this.#deps.clock.sleep(
+          INIT_BACKOFF_MS * (1 << (attempt - 1)),
           signal,
         );
-        if (!removed.ok) {
-          return failed(removed);
+        if (!slept.ok) {
+          attemptErr = slept.error;
+          break;
         }
-        staged.delete(row.downloadId);
-        dirty = true;
-      } else if (row.state === 'transferring') {
-        // Interrupted mid-transfer — resume from the durable offset.
-        staged.set(row.downloadId, { ...row, state: 'requested' });
-        dirty = true;
       }
-    }
-    if (dirty) {
-      const persisted = await this.#persist([...staged.values()]);
-      if (!persisted.ok) {
-        return failed(persisted);
+      const verified = await this.#verifyStaged(staged, signal);
+      if (verified.ok) {
+        attemptErr = null;
+        break;
       }
+      if (!verified.error.retryable || attempt === INIT_ATTEMPTS - 1) {
+        attemptErr = verified.error;
+        break;
+      }
+      attemptErr = verified.error;
+      this.#log(
+        'warn',
+        `downloads: init attempt ${attempt + 1} failed (${verified.error.kind}) — retrying`,
+      );
     }
+    if (attemptErr !== null) {
+      this.#unavailable = true;
+      return failed(err(attemptErr));
+    }
+    this.#unavailable = false;
+
     // Verified — publish the staged ledger, then emit so subscribers
     // re-read it. A re-init can DROP rows (post-import wipe, integrity
     // sweep): without an emit the UI keeps showing wiped downloads
@@ -275,6 +256,96 @@ export class DownloadManager {
       );
     }
     void this.#pump();
+    return ok(undefined);
+  }
+
+  /**
+   * One integrity pass over the staged rows: sweep `.part` files with
+   * no owning row, drop `available` rows whose file vanished or whose
+   * size stopped matching the ledger, finish `removing` rows, demote
+   * interrupted `transferring` rows to `requested`, and persist the
+   * fixups. Mutates `staged` in place — a retry re-runs only the
+   * checks the failed attempt never reached.
+   */
+  async #verifyStaged(
+    staged: Map<string, DownloadRecord>,
+    signal: CancellationSignal,
+  ): Promise<Result<void>> {
+    // Keep .part files for rows that own resumable bytes — including
+    // failed_with_retry, whose explicit retry resumes the prefix.
+    const resumable = new Set<DownloadState>([
+      'requested',
+      'transferring',
+      'failed_with_retry',
+    ]);
+    const keep = [...staged.values()]
+      .filter((row) => resumable.has(row.state))
+      .map((row) => `${row.filePath}.part`);
+    const swept = await this.#deps.transfer.sweepPartials(keep, signal);
+    if (!swept.ok) {
+      return err(swept.error);
+    }
+    if (swept.value > 0) {
+      this.#log(
+        'info',
+        `downloads: swept ${swept.value} stale .part files`,
+      );
+    }
+
+    let dirty = false;
+    for (const row of [...staged.values()]) {
+      if (signal.cancelled) {
+        return err(cancelledError());
+      }
+      if (row.state === 'available') {
+        const st = await this.#deps.transfer.stat(row.filePath, signal);
+        if (!st.ok) {
+          return err(st.error);
+        }
+        // Vanished file — or a size the ledger never recorded
+        // (truncated/replaced media must not play as offline content).
+        // bytes:null means the adapter can't read the size — keep the
+        // row: existence is the only honest signal there.
+        if (
+          !st.value.exists ||
+          (st.value.bytes !== null && st.value.bytes !== row.bytes)
+        ) {
+          const removed = await this.#deps.transfer.removeFile(
+            row.filePath,
+            signal,
+          );
+          if (!removed.ok) {
+            return removed;
+          }
+          staged.delete(row.downloadId);
+          dirty = true;
+          this.#log(
+            'warn',
+            `downloads: ${row.downloadId} file ${st.value.exists ? 'size-mismatch' : 'vanished'} — degrading to streaming`,
+          );
+        }
+      } else if (row.state === 'removing') {
+        const removed = await this.#deps.transfer.removeFile(
+          row.filePath,
+          signal,
+        );
+        if (!removed.ok) {
+          return removed;
+        }
+        staged.delete(row.downloadId);
+        dirty = true;
+      } else if (row.state === 'transferring') {
+        // Interrupted mid-transfer — resume from the durable offset.
+        staged.set(row.downloadId, { ...row, state: 'requested' });
+        dirty = true;
+      }
+    }
+    if (dirty) {
+      const persisted = await this.#persist([...staged.values()]);
+      if (!persisted.ok) {
+        return persisted;
+      }
+    }
     return ok(undefined);
   }
 
@@ -966,6 +1037,10 @@ export class DownloadManager {
           if (!reset.ok) {
             return;
           }
+          // The checkpoint watermark must reset with the offset —
+          // otherwise `committed - last` stays negative and no
+          // mid-transfer checkpoint ever persists on the retry.
+          this.#persistedOffset.set(live.downloadId, 0);
           live = reset.value;
           continue;
         }
@@ -994,10 +1069,11 @@ export class DownloadManager {
       );
       if (!finalized.ok) {
         // The bytes landed (finalize renamed the .part) but the ledger
-        // write failed — surface the failure honestly instead of
-        // logging success over a stranded 'transferring' row. The row
-        // stays resumable at its last durable offset; next init's
+        // write failed — reclaim the finished file so it can't sit
+        // orphaned next to a row that will re-download into `.part`,
+        // then surface the failure honestly. The next attempt's
         // begin-mismatch path restarts it from 0.
+        await this.#deps.transfer.removeFile(after.filePath, signal);
         await this.#fail(
           after,
           finalized.error.kind,

@@ -372,36 +372,34 @@ function adversarialTests(): void {
     assert(drift.type === 'matched', `9c-drift: ${drift.type}`);
   }
 
-  // 9d. The five-group cap admits new groups, never drops a member of
-  // an admitted one: a duplicate arriving after the cap still parks,
-  // so a reject vetoes it too (unparked duplicates stay playable).
-  // Distinct durations keep every group a genuinely different choice —
-  // same-song listings would collapse before the cap matters.
+  // 9d. Every in-window member parks regardless of display-group
+  // count: a variant crowded out of a visible cap would escape the
+  // reject's veto and auto-match on the next attempt. Distinct
+  // durations keep every group a genuinely different choice —
+  // same-song listings would collapse before the window matters.
   {
     const out = MatchingEngine.match(
       recording({ title: 'Same', artist: 'Artist' }),
       [
-        // Five distinct display groups fill the cap...
         candidate({ title: 'Same', artist: 'Artist', durationMs: 200_000, sourceRef: { provider: 'p1', kind: 'track', id: 'p1-a' } }),
         candidate({ title: 'Same', artist: 'Artist', durationMs: 300_000, sourceRef: { provider: 'p2', kind: 'track', id: 'p2' } }),
         candidate({ title: 'Same', artist: 'Artist', durationMs: 400_000, sourceRef: { provider: 'p3', kind: 'track', id: 'p3' } }),
         candidate({ title: 'Same', artist: 'Artist', durationMs: 500_000, sourceRef: { provider: 'p4', kind: 'track', id: 'p4' } }),
         candidate({ title: 'Same', artist: 'Artist', durationMs: 600_000, sourceRef: { provider: 'p5', kind: 'track', id: 'p5' } }),
-        // ...a sixth group is skipped...
+        // A sixth distinct variant parks too — the veto covers it.
         candidate({ title: 'Same', artist: 'Artist', durationMs: 700_000, sourceRef: { provider: 'p6', kind: 'track', id: 'p6' } }),
-        // ...but a late member of the first group still parks.
         candidate({ title: 'Same', artist: 'Artist', durationMs: 200_500, sourceRef: { provider: 'p1', kind: 'track', id: 'p1-b' } }),
       ],
     );
     assert(out.type === 'ambiguous', `9d: ${out.type}`);
-    assertEqual(out.candidates.length, 6);
+    assertEqual(out.candidates.length, 7);
     assert(
       out.candidates.some((c) => c.candidate.sourceRef.id === 'p1-b'),
-      'late member of an admitted group must park',
+      'late member of an earlier group still parks',
     );
     assert(
-      !out.candidates.some((c) => c.candidate.sourceRef.id === 'p6'),
-      'sixth display group stays out',
+      out.candidates.some((c) => c.candidate.sourceRef.id === 'p6'),
+      'a sixth distinct variant parks so the veto covers it',
     );
   }
 
