@@ -235,6 +235,10 @@ export type EntityFetch = {
   readonly error: AppError | null;
   readonly loading: boolean;
   readonly loadingMore: boolean;
+  /** Request epoch — a response applies only while the entry's token
+      matches the one the request minted; superseded loads and clears
+      can't land stale content on a newer fetch of the same ref. */
+  readonly req: number;
 };
 
 export type LyricsFetch = {

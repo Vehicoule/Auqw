@@ -144,6 +144,25 @@ export type DesktopChromeProps = {
   readonly onFocusSearch?: (() => void) | undefined;
   readonly onOpenSettings?: (() => void) | undefined;
   /**
+   * Browser-style back/forward chevrons at the left of the bar — each
+   * direction carries its own enabled flag; an unavailable direction
+   * stays rendered but dims, so the pair never shifts the tabs.
+   */
+  readonly nav?:
+    | {
+        readonly back: {
+          readonly canGo: boolean;
+          readonly onPress: () => void;
+          readonly label: string;
+        };
+        readonly forward: {
+          readonly canGo: boolean;
+          readonly onPress: () => void;
+          readonly label: string;
+        };
+      }
+    | undefined;
+  /**
    * Extra affordances in the bar's end cluster, rendered left of the
    * primary menu — e.g. the quiet update entry (its badge carries the
    * state; nothing here may pop a surface uninvited).
@@ -171,6 +190,7 @@ export function DesktopChrome({
   onStageOpenChange,
   onFocusSearch,
   onOpenSettings,
+  nav,
   updateEntry,
   search,
   children,
@@ -193,7 +213,8 @@ export function DesktopChrome({
   // expand → overflow → collapse → fits → repeat), so derive it from
   // stable geometry — the bar's content box, the tabs' width, and the
   // end cluster's non-field siblings. Each outer grid track gets half
-  // the space left over from the tabs (floor 68px, per the grid def).
+  // the space left over from the tabs (floor 100px, per the grid def:
+  // the larger side cluster's width).
   const barRef = useRef<HTMLElement | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const [endTight, setEndTight] = useState(false);
@@ -212,7 +233,7 @@ export function DesktopChrome({
         parseFloat(style.paddingLeft) -
         parseFloat(style.paddingRight);
       const trackHalf = Math.max(
-        68,
+        100,
         (content - (tabs === null ? 0 : tabs.clientWidth)) / 2,
       );
       let others = 0;
@@ -282,6 +303,28 @@ export function DesktopChrome({
       <div className="uw-world">
         <header className="uw-world-bar" ref={barRef}>
           <div className="uw-world-bar__start">
+            {nav !== undefined && (
+              <>
+                <IconButton
+                  icon="chevron-left"
+                  size={32}
+                  iconSize={16}
+                  color="var(--text-secondary)"
+                  ariaLabel={nav.back.label}
+                  disabled={!nav.back.canGo}
+                  onPress={nav.back.onPress}
+                />
+                <IconButton
+                  icon="chevron-right"
+                  size={32}
+                  iconSize={16}
+                  color="var(--text-secondary)"
+                  ariaLabel={nav.forward.label}
+                  disabled={!nav.forward.canGo}
+                  onPress={nav.forward.onPress}
+                />
+              </>
+            )}
             <IconButton
               icon="sidebar"
               size={32}
