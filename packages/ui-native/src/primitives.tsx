@@ -422,7 +422,7 @@ export function IconButton({
   color,
   disabled = false,
   active = false,
-  filled = false,
+  filled,
   hitSlop,
   style,
 }: IconButtonProps) {
@@ -439,7 +439,7 @@ export function IconButton({
     >
       {icon === 'heart' || icon === 'heart-filled' ? (
         <HeartIcon
-          filled={icon === 'heart-filled' || filled}
+          filled={icon === 'heart-filled' || filled === true}
           size={iconSize}
           color={color ?? theme.colors.textSecondary}
         />
@@ -514,7 +514,7 @@ export function PillButton({
           gap: theme.spacing.sm,
           paddingHorizontal: theme.spacing.md,
           minHeight,
-          borderRadius: theme.radius.pill,
+          borderRadius: theme.radius.control,
           backgroundColor: bg[tone],
           borderWidth: bordered ? theme.strokes.hairline : 0,
           borderColor: theme.colors.hairline,
@@ -705,8 +705,12 @@ export type IconName =
   | 'list-plus'
   | 'list-remove'
   | 'home'
+  | 'home-filled'
   | 'compass'
+  | 'compass-filled'
   | 'library'
+  | 'library-filled'
+  | 'settings-filled'
   | 'note'
   | 'repeat'
   | 'repeat-one'
@@ -723,7 +727,14 @@ export type IconName =
   | 'menu';
 
 type GlyphShape =
-  | { readonly kind: 'path'; readonly d: string }
+  | {
+      readonly kind: 'path';
+      readonly d: string;
+      /** evenodd fill-rule — knockout subpaths (filled variants). */
+      readonly eo?: boolean;
+      /** stays stroked when the glyph itself fills (filled variants). */
+      readonly stroke?: boolean;
+    }
   | { readonly kind: 'circle'; readonly cx: number; readonly cy: number; readonly r: number }
   | {
     readonly kind: 'rect';
@@ -741,6 +752,14 @@ type Glyph = {
 
 function p(d: string): GlyphShape {
   return { kind: 'path', d };
+}
+
+function peo(d: string): GlyphShape {
+  return { kind: 'path', d, eo: true };
+}
+
+function ps(d: string): GlyphShape {
+  return { kind: 'path', d, stroke: true };
 }
 
 function c(cx: number, cy: number, r: number): GlyphShape {
@@ -813,6 +832,13 @@ const GLYPHS: Record<IconName, Glyph> = {
       ),
     ],
   },
+  'settings-filled': {
+    filled: true,
+    shapes: [
+      c(12, 12, 4.5),
+      ps('M12 2.5v3m0 13v3M2.5 12h3m13 0h3M5.2 5.2l2.1 2.1m9.4 9.4 2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1'),
+    ],
+  },
   close: { filled: false, shapes: [p('M6 6l12 12M18 6 6 18')] },
   'drag-handle': { filled: false, shapes: [p('M5 9h14M5 15h14')] },
   spinner: { filled: false, shapes: [p('M20 12a8 8 0 1 1-8-8')] },
@@ -836,13 +862,31 @@ const GLYPHS: Record<IconName, Glyph> = {
     filled: false,
     shapes: [p('M4 11 12 4l8 7v8h-5v-5H9v5H4z')],
   },
+  'home-filled': {
+    filled: true,
+    shapes: [p('M4 11 12 4l8 7v8h-5v-5H9v5H4z')],
+  },
   compass: {
     filled: false,
     shapes: [c(12, 12, 8), p('m15.5 8.5-2 5-5 2 2-5z')],
   },
+  'compass-filled': {
+    filled: true,
+    shapes: [
+      peo('M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM15.5 8.5l-2 5-5 2 2-5z'),
+    ],
+  },
   library: {
     filled: false,
     shapes: [p('M5 5v14M9.5 5v14M14 6l5 1.2L16 19l-5-1.2z')],
+  },
+  'library-filled': {
+    filled: true,
+    shapes: [
+      rr(4.1, 5, 1.8, 14, 0.4),
+      rr(8.6, 5, 1.8, 14, 0.4),
+      p('M14 6l5 1.2L16 19l-5-1.2z'),
+    ],
   },
   note: {
     filled: false,
@@ -915,7 +959,7 @@ export function Icon({
   const useFill = filled ?? glyph.filled;
   const paint = color ?? theme.colors.textPrimary;
   const stroke = useFill ? 'none' : paint;
-  const strokeW = strokeWidth ?? theme.strokes.progress;
+  const strokeW = strokeWidth ?? theme.strokes.icon;
   const fill = useFill ? paint : 'none';
   return (
     <Svg
@@ -928,16 +972,21 @@ export function Icon({
       {glyph.shapes.map((shape, i) => {
         const common = { stroke, strokeWidth: strokeW, fill };
         switch (shape.kind) {
-          case 'path':
+          case 'path': {
+            const keepStroke = shape.stroke === true;
             return (
               <Path
                 key={i}
                 {...common}
+                stroke={useFill && !keepStroke ? 'none' : paint}
+                fill={useFill && !keepStroke ? fill : 'none'}
+                fillRule={shape.eo === true ? 'evenodd' : 'nonzero'}
                 d={shape.d}
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
             );
+          }
           case 'circle':
             return (
               <Circle
@@ -1103,7 +1152,7 @@ export function Spinner({
         name="spinner"
         size={size}
         color={color ?? theme.colors.accent}
-        strokeWidth={theme.strokes.progressAndroid}
+        strokeWidth={theme.strokes.icon}
       />
     </Animated.View>
   );
@@ -1167,7 +1216,7 @@ export function DownloadIcon({
     return undefined;
   }, [morph, draw, spin, phase, run, theme.motion.state]);
   const paint = color ?? theme.colors.textPrimary;
-  const sw = strokeWidth ?? theme.strokes.progress;
+  const sw = strokeWidth ?? theme.strokes.icon;
   const box = {
     position: 'absolute' as const,
     top: 0,
@@ -1333,7 +1382,7 @@ export function StatusMark({
     return undefined;
   }, [draw, theme.motion.state, theme.reducedMotion]);
   const paint = color ?? theme.colors.accent;
-  const sw = strokeWidth ?? theme.strokes.progress;
+  const sw = strokeWidth ?? theme.strokes.icon;
   const drawProps = useAnimatedProps(() => ({
     strokeDashoffset:
       (kind === 'check' ? CHECK_DRAW_LENGTH : WARN_DRAW_TRIANGLE_LENGTH) *

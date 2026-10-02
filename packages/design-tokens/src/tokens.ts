@@ -90,6 +90,7 @@ export const spacing = {
 export const radius = {
   frame: 0,
   control: 8,
+  card: 12,
   float: 16,
   thumb: 5,
   pill: 999,
@@ -106,6 +107,7 @@ export const sizes = {
 
 export const strokes = {
   hairline: 1,
+  icon: 1.8,
   progress: 2,
   progressAndroid: 2.5,
 } as const;
@@ -117,12 +119,12 @@ export const fontFamilies = {
 } as const;
 
 export const typography = {
-  display: { fontSize: 20, lineHeight: 24, fontFamily: 'Inter_700Bold' },
-  title: { fontSize: 16, lineHeight: 20, fontFamily: 'Inter_700Bold' },
-  heading: { fontSize: 13, lineHeight: 17, fontFamily: 'Inter_700Bold' },
-  body: { fontSize: 12, lineHeight: 17, fontFamily: 'Inter_500Medium' },
-  metadata: { fontSize: 10, lineHeight: 14, fontFamily: 'Inter_400Regular' },
-  label: { fontSize: 10, lineHeight: 14, fontFamily: 'Inter_700Bold', letterSpacing: 1.2 },
+  display: { fontSize: 22, lineHeight: 26, fontFamily: 'Inter_700Bold' },
+  title: { fontSize: 17, lineHeight: 22, fontFamily: 'Inter_700Bold' },
+  heading: { fontSize: 15, lineHeight: 19, fontFamily: 'Inter_700Bold' },
+  body: { fontSize: 14, lineHeight: 19, fontFamily: 'Inter_500Medium' },
+  metadata: { fontSize: 12.5, lineHeight: 17, fontFamily: 'Inter_400Regular' },
+  label: { fontSize: 12.5, lineHeight: 17, fontFamily: 'Inter_700Bold', letterSpacing: 1.2 },
 } as const;
 
 export const motion = {

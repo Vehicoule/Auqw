@@ -20,8 +20,18 @@ const NAV_ICONS: Record<string, IconName> = {
   settings: 'settings',
 };
 
-function iconFor(key: string): IconName {
-  return NAV_ICONS[key] ?? 'note';
+/** Filled variants read on the active tab — same swap the M3 dock's PNG pair does. */
+const NAV_ICONS_ACTIVE: Record<string, IconName> = {
+  home: 'home-filled',
+  explore: 'compass-filled',
+  library: 'library-filled',
+  settings: 'settings-filled',
+};
+
+function iconFor(key: string, active: boolean): IconName {
+  return (
+    (active ? NAV_ICONS_ACTIVE[key] : undefined) ?? NAV_ICONS[key] ?? 'note'
+  );
 }
 
 /** Tab glyph with a subtle activation lift — one worklet transform;
@@ -98,7 +108,7 @@ export function AndroidNavbar({
                 style={{
                   minWidth: 56,
                   height: 30,
-                  borderRadius: theme.radius.pill,
+                  borderRadius: theme.radius.control,
                   paddingHorizontal: theme.spacing.screen,
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -108,7 +118,7 @@ export function AndroidNavbar({
                 }}
               >
                 <NavIcon
-                  name={iconFor(item.key)}
+                  name={iconFor(item.key, active)}
                   active={active}
                   color={
                     active ? theme.colors.accent : theme.colors.textSecondary
@@ -147,7 +157,7 @@ export function IosGlassNavbar({
         style={{
           marginHorizontal: theme.spacing.screen,
           marginBottom: theme.spacing.sm,
-          borderRadius: 24,
+          borderRadius: theme.radius.float,
           borderWidth: theme.strokes.hairline,
           borderColor: theme.colors.hairline,
           backgroundColor: theme.colors.glass,
@@ -189,7 +199,7 @@ export function IosGlassNavbar({
                   style={{
                     minWidth: 44,
                     height: 26,
-                    borderRadius: theme.radius.pill,
+                    borderRadius: theme.radius.control,
                     paddingHorizontal: 10,
                     alignItems: 'center',
                     justifyContent: 'center',
@@ -199,7 +209,7 @@ export function IosGlassNavbar({
                   }}
                 >
                   <NavIcon
-                    name={iconFor(item.key)}
+                    name={iconFor(item.key, active)}
                     active={active}
                     color={
                       active ? theme.colors.accent : theme.colors.textSecondary

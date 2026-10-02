@@ -561,6 +561,7 @@ export const fixturePlayerPlaying: PlayerModel = {
   durationMs: 180_000,
   occurrenceId: 'occ-self-aware',
   liked: true,
+  inPlaylist: false,
   canPrevious: false,
   canNext: true,
   errorMessage: null,

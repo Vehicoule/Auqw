@@ -18,6 +18,8 @@ import type {
   MatchReview,
   ProviderCapability,
   ProviderPort,
+  PlaylistEntry,
+  Recording,
   Result,
   SearchState,
   Settings,
@@ -26,7 +28,12 @@ import type {
 } from '@auqw/application';
 import { t, type MessageId } from './i18n.ts';
 import { errorText } from './error-text.ts';
-import { formatClock, toSearchRowModel } from './view-models.ts';
+import {
+  formatClock,
+  playlistSourceRefs,
+  refKey,
+  toSearchRowModel,
+} from './view-models.ts';
 import type {
   NavItemModel,
   SearchStateModel,
@@ -108,7 +115,10 @@ export type Boot<TController> =
 export function toSearchModel(
   state: SearchState,
   playingRef: SourceRef | null = null,
+  playlistEntries: readonly PlaylistEntry[] = [],
+  recordings: readonly Recording[] = [],
 ): SearchStateModel {
+  const inPlaylist = playlistSourceRefs(playlistEntries, recordings);
   const base = {
     query: state.type === 'idle' ? '' : state.query,
     results: [],
@@ -126,7 +136,12 @@ export function toSearchModel(
         ...base,
         phase: state.page.items.length === 0 ? 'empty' : 'ready',
         results: state.page.items.map((meta, index) =>
-          toSearchRowModel(meta, index, playingRef),
+          toSearchRowModel(
+            meta,
+            index,
+            playingRef,
+            inPlaylist.has(refKey(meta.sourceRef) ?? ''),
+          ),
         ),
         message: errorText(state.refreshError),
       };

@@ -10,6 +10,7 @@ import {
 } from '@auqw/ui-shared';
 import type { WaveformPeak } from '@auqw/ui-shared';
 import { Artwork, Text } from './primitives.tsx';
+import { strokes } from '@auqw/design-tokens';
 import { seekStepMs } from './keyboard.ts';
 import {
   useCallback,
@@ -106,7 +107,7 @@ export function ArtworkRing({
           d={SQUARED_RING_PATH}
           fill="none"
           stroke="var(--accent)"
-          strokeWidth={2}
+          strokeWidth={strokes.progress}
           strokeLinecap="round"
           strokeDasharray={`${ring.dashLength} ${ring.dashLength}`}
           strokeDashoffset={ring.dashOffset}
