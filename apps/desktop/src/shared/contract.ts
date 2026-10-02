@@ -1319,6 +1319,7 @@ const isLocalTagsPayload = v.object({
   album: v.nullable(v.boundedString(MAX_TAG_FIELD)),
   durationMs: v.nullable(v.int()),
   genre: v.nullable(v.boundedString(MAX_TAG_FIELD)),
+  artworkUri: v.nullable(v.boundedString(MAX_DOC_ID)),
 });
 
 type TagreadReadResult = v.Guarded<typeof isTagreadReadResult>;

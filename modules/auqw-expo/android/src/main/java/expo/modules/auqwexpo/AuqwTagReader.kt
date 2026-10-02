@@ -202,11 +202,61 @@ object AuqwTagReader {
         "artist" to meta(MediaMetadataRetriever.METADATA_KEY_ARTIST),
         "album" to meta(MediaMetadataRetriever.METADATA_KEY_ALBUM),
         "durationMs" to duration?.toDouble()?.takeIf { it > 0 },
-        "genre" to meta(MediaMetadataRetriever.METADATA_KEY_GENRE)
+        "genre" to meta(MediaMetadataRetriever.METADATA_KEY_GENRE),
+        "artworkUri" to artworkUri(ctx, retriever.embeddedPicture)
       )
     } finally {
       retriever.release()
     }
+  }
+
+  /**
+   * Embedded cover → the content-addressed art store under
+   * `filesDir/art/`. The bytes' sha256 names the file, so identical
+   * covers across tracks land once and an existing file skips the
+   * write. Original bytes go to disk un-resized — the UI downscales
+   * GPU-side, and filesDir keeps art alive as long as the recordings
+   * table does (a cacheDir reaping would strand artwork permanently:
+   * unchanged docs never re-read tags). `file://` refs render
+   * directly — the artwork LRU cache is https-only and skips them.
+   */
+  private fun artworkUri(ctx: Context, bytes: ByteArray?): String? {
+    if (bytes == null || bytes.isEmpty()) return null
+    val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+    val name = digest.joinToString("") { "%02x".format(it) }
+    val dir = java.io.File(ctx.filesDir, "art")
+    val out = java.io.File(dir, "$name.${artworkExt(bytes)}")
+    if (!out.isFile) {
+      try {
+        dir.mkdirs()
+        out.writeBytes(bytes)
+      } catch (e: Exception) {
+        // Art is best-effort inside the batch — a store failure must
+        // not turn into a per-doc null.
+        Log.w(TAG, "art store write failed: ${e.message}")
+        return null
+      }
+    }
+    return out.toURI().toString()
+  }
+
+  /** Image format sniffed from magic bytes — the retriever's
+   * embeddedPicture carries no mime. */
+  private fun artworkExt(bytes: ByteArray): String = when {
+    bytes.size >= 4 &&
+      bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
+      bytes[2] == 0x4e.toByte() && bytes[3] == 0x47.toByte() -> "png"
+    bytes.size >= 2 &&
+      bytes[0] == 0xff.toByte() && bytes[1] == 0xd8.toByte() -> "jpg"
+    bytes.size >= 12 &&
+      bytes[0] == 'R'.code.toByte() && bytes[1] == 'I'.code.toByte() &&
+      bytes[2] == 'F'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
+      bytes[8] == 'W'.code.toByte() && bytes[9] == 'E'.code.toByte() &&
+      bytes[10] == 'B'.code.toByte() && bytes[11] == 'P'.code.toByte() -> "webp"
+    bytes.size >= 6 &&
+      bytes[0] == 'G'.code.toByte() && bytes[1] == 'I'.code.toByte() &&
+      bytes[2] == 'F'.code.toByte() && bytes[3] == '8'.code.toByte() -> "gif"
+    else -> "img"
   }
 
   /** The playable document URI — resolves through SAF URI math. */

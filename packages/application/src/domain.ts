@@ -334,6 +334,16 @@ export function isPublicHttpsUrl(url: string): boolean {
   );
 }
 
+/**
+ * Artwork url: a public https cover (catalog art) or a `file://` ref
+ * into the platform's content-addressed local-art store (embedded
+ * covers extracted by the tag reader). The `file://` form is
+ * device-local — it never round-trips an export meaningfully.
+ */
+export function isArtworkUrl(url: string): boolean {
+  return isPublicHttpsUrl(url) || url.startsWith('file:///');
+}
+
 export function isArtworkRef(value: unknown): value is ArtworkRef {
   const isDim = (dim: unknown): boolean =>
     dim === null ||
@@ -342,7 +352,7 @@ export function isArtworkRef(value: unknown): value is ArtworkRef {
     isRecord(value) &&
     hasExactKeys(value, ['url', 'width', 'height']) &&
     isString(value['url'], 2048) &&
-    isPublicHttpsUrl(value['url']) &&
+    isArtworkUrl(value['url']) &&
     isDim(value['width']) &&
     isDim(value['height'])
   );

@@ -103,6 +103,10 @@ export class LocalFileSource {
   #uriByRecording: Map<string, string>;
   /** Serializes scans: at most one per source at a time. */
   readonly #scans = new Map<string, Promise<unknown>>();
+  /** fileIds whose tags were read this boot and carried no embedded
+   * cover — the art-backfill leg skips them for the rest of the boot
+   * (next boot retries once more). */
+  readonly #artChecked = new Set<string>();
   /** Serializes every write to the owned sections — a commit merges
    * over live state inside the tail, never over a stale snapshot. */
   #writeTail: Promise<unknown> = Promise.resolve();
@@ -472,6 +476,15 @@ export class LocalFileSource {
     // New-content rows that still need tags before recording upsert.
     const tagDocs: string[] = [];
     const pendingRows: LocalFile[] = [];
+    // Recordings minted before embedded-art extraction carry empty
+    // artwork — an unchanged file whose recording still has no art
+    // rejoins the tag batch once per boot so the fill lands without
+    // touching the file row. `#artChecked` marks the honest-nones so
+    // an artless file doesn't re-read every scan this boot.
+    const artless = new Set(
+      this.#recordings.filter((r) => r.artwork.length === 0).map((r) => r.id),
+    );
+    const artBackfill: LocalFile[] = [];
 
     for (const entry of entries) {
       const known = byDocId.get(entry.docId);
@@ -487,6 +500,12 @@ export class LocalFileSource {
         // moved entry can take it.
         scanned.push(known);
         claimed.add(known.fileId);
+        if (
+          artless.has(known.recordingId) &&
+          !this.#artChecked.has(known.fileId)
+        ) {
+          artBackfill.push(known);
+        }
         continue;
       }
       const fingerprint = fpByDoc.get(entry.docId);
@@ -515,6 +534,12 @@ export class LocalFileSource {
           known.modifiedMs !== entry.modifiedMs
         ) {
           updated += 1;
+        }
+        if (
+          artless.has(refreshed.recordingId) &&
+          !this.#artChecked.has(refreshed.fileId)
+        ) {
+          artBackfill.push(refreshed);
         }
         continue;
       }
@@ -559,10 +584,13 @@ export class LocalFileSource {
       pendingRows.push(row);
     }
 
+    // Backfill docs ride the same batched read behind the fresh
+    // docs — results stay positional, pendingRows first.
+    const allTagDocs = [...tagDocs, ...artBackfill.map((f) => f.docId)];
     const tags =
-      tagDocs.length === 0
+      allTagDocs.length === 0
         ? ok<readonly (LocalTags | null)[]>([])
-        : await this.#tagReader.readTags(source.treeUri, tagDocs, signal);
+        : await this.#tagReader.readTags(source.treeUri, allTagDocs, signal);
     if (!tags.ok) {
       return err(tags.error);
     }
@@ -614,6 +642,10 @@ export class LocalFileSource {
       album: string | null;
       durationMs: number | null;
       genre: string | null;
+      artworkUri: string | null;
+      /** Backfill leg: fill an existing recording's art only — never
+       * mint, never touch sourceRefs or fields. */
+      fillOnly: boolean;
     }[] = [];
 
     for (let i = 0; i < pendingRows.length; i++) {
@@ -638,14 +670,41 @@ export class LocalFileSource {
         album: tag?.album ?? null,
         durationMs: tag?.durationMs ?? null,
         genre: tag?.genre ?? null,
+        artworkUri: tag?.artworkUri ?? null,
       };
-      scanned.push({ ...row, recordingId, ...fields });
+      const { artworkUri, ...rowFields } = fields;
+      scanned.push({ ...row, recordingId, ...rowFields });
       added += 1;
       pendingRecordings.push({
         recordingId,
         fileId: row.fileId,
         fingerprint: row.fingerprint,
         ...fields,
+        fillOnly: false,
+      });
+    }
+
+    // The art backfill leg: re-tag an unchanged file once per boot so
+    // a recording minted before embedded-art extraction picks up its
+    // cover. `fillOnly` = artwork fill in the merge, never a mint.
+    for (let j = 0; j < artBackfill.length; j++) {
+      const row = artBackfill[j]!;
+      const tag = tags.value[tagDocs.length + j] ?? null;
+      if (tag !== null) {
+        this.#artChecked.add(row.fileId);
+      }
+      const entry = entryByDoc.get(row.docId);
+      pendingRecordings.push({
+        recordingId: row.recordingId,
+        fileId: row.fileId,
+        fingerprint: row.fingerprint,
+        title: row.title ?? titleFromName(entry?.name ?? row.docId),
+        artist: row.artist,
+        album: row.album,
+        durationMs: row.durationMs,
+        genre: row.genre,
+        artworkUri: tag?.artworkUri ?? null,
+        fillOnly: true,
       });
     }
 
@@ -680,7 +739,21 @@ export class LocalFileSource {
         const rec = byId.get(p.recordingId);
         const ref = localTrackRef(p.fileId);
         const existing = rec === undefined ? undefined : merged[rec];
+        // Embedded cover extracted with the tags — a local recording's
+        // art tracks its backing file, so a rescan keeps it current;
+        // a provider recording that merely joins a local file fills
+        // the slot only when it holds no catalog art.
+        const freshArt =
+          p.artworkUri === null
+            ? []
+            : [{ url: p.artworkUri, width: null, height: null }];
         if (existing === undefined) {
+          // A backfill leg fills an existing recording only — it must
+          // not resurrect one that was deleted between the scan and
+          // the commit's fresh-read merge.
+          if (p.fillOnly) {
+            continue;
+          }
           upsert({
             id: p.recordingId,
             title: p.title,
@@ -688,7 +761,7 @@ export class LocalFileSource {
             album: p.album,
             durationMs: p.durationMs,
             releaseYear: null,
-            artwork: [],
+            artwork: [...freshArt],
             explicit: null,
             genre: p.genre,
             isrc: null,
@@ -697,30 +770,42 @@ export class LocalFileSource {
             mappings: [],
             provenance: 'local',
           });
-        } else if (
-          !existing.sourceRefs.some(
-            (s) =>
-              s.provider === LOCAL_PROVIDER &&
-              s.kind === 'track' &&
-              s.id === p.fileId,
-          )
-        ) {
-          // Restoring a live ref retires its `fp:` tombstone — the
-          // row's local identity is the file again, not the marker.
-          upsert({
-            ...existing,
-            sourceRefs: [
-              ...existing.sourceRefs.filter(
-                (s) =>
-                  !(
-                    s.provider === LOCAL_PROVIDER &&
-                    s.id === `fp:${p.fingerprint}`
-                  ),
-              ),
-              ref,
-            ],
-          });
+          continue;
         }
+        const refMissing = !existing.sourceRefs.some(
+          (s) =>
+            s.provider === LOCAL_PROVIDER &&
+            s.kind === 'track' &&
+            s.id === p.fileId,
+        );
+        const artDesired =
+          existing.provenance === 'local' || existing.artwork.length === 0
+            ? freshArt
+            : existing.artwork;
+        const artChanged =
+          artDesired.length !== existing.artwork.length ||
+          artDesired.some((a, i) => a.url !== existing.artwork[i]?.url);
+        if (!refMissing && !artChanged) {
+          continue;
+        }
+        // Restoring a live ref retires its `fp:` tombstone — the
+        // row's local identity is the file again, not the marker.
+        upsert({
+          ...existing,
+          artwork: [...artDesired],
+          sourceRefs: refMissing
+            ? [
+                ...existing.sourceRefs.filter(
+                  (s) =>
+                    !(
+                      s.provider === LOCAL_PROVIDER &&
+                      s.id === `fp:${p.fingerprint}`
+                    ),
+                ),
+                ref,
+              ]
+            : existing.sourceRefs,
+        });
       }
       return stripLocalRefs(vanished, merged);
     };

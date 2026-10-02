@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import {
   chmod,
   mkdir,
@@ -86,9 +87,58 @@ function wavFixture(fields: {
   return Buffer.concat([riff, body]);
 }
 
+/**
+ * Minimal ID3v2.3 tag with an APIC frame — self-contained so the
+ * embedded-cover path runs without ffmpeg or a network fixture.
+ */
+function id3Fixture(fields: { title?: string; cover: Buffer }): Buffer {
+  const frame = (id: string, data: Buffer): Buffer => {
+    const head = Buffer.alloc(10);
+    head.write(id, 0, 'latin1');
+    head.writeUInt32BE(data.length, 4);
+    return Buffer.concat([head, data]);
+  };
+  const frames: Buffer[] = [];
+  if (fields.title !== undefined) {
+    frames.push(
+      frame(
+        'TIT2',
+        Buffer.concat([Buffer.from([0]), Buffer.from(fields.title, 'latin1')]),
+      ),
+    );
+  }
+  frames.push(
+    frame(
+      'APIC',
+      Buffer.concat([
+        Buffer.from([0]), // latin1 mime string
+        Buffer.from('image/png', 'latin1'),
+        Buffer.from([0]),
+        Buffer.from([3]), // picture type: Cover (front)
+        Buffer.from([0]), // empty description
+        fields.cover,
+      ]),
+    ),
+  );
+  const body = Buffer.concat(frames);
+  const head = Buffer.alloc(10);
+  head.write('ID3', 0, 'latin1');
+  head.writeUInt16BE(0x0300, 3);
+  head.writeUInt8(0, 5);
+  const size = body.length;
+  head.writeUInt8((size >> 21) & 0x7f, 6);
+  head.writeUInt8((size >> 14) & 0x7f, 7);
+  head.writeUInt8((size >> 7) & 0x7f, 8);
+  head.writeUInt8(size & 0x7f, 9);
+  // Trailing bytes stand in for MPEG frames — the ID3 block carries
+  // everything the test reads.
+  return Buffer.concat([head, body, Buffer.alloc(256, 0xaa)]);
+}
+
 export async function run(): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), 'auqw-tags-'));
   const music = join(root, 'music');
+  const userData = join(root, 'ud');
   const dbPath = join(root, 'auqw.db');
   const db = new DatabaseSync(dbPath);
   for (const migration of MIGRATIONS) {
@@ -247,6 +297,62 @@ export async function run(): Promise<void> {
       'missing doc reads null',
     );
 
+    // Embedded cover: the APIC bytes land content-addressed under
+    // userData/art and the tag row carries the file:// ref. A second
+    // track with the same cover shares the store file.
+    const cover = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+      Buffer.alloc(60, 7),
+    ]);
+    process.env['AUQW_USER_DATA'] = userData;
+    await writeFile(
+      join(music, 'covered.mp3'),
+      id3Fixture({ title: 'Cover Tune', cover }),
+    );
+    await writeFile(
+      join(music, 'covered2.mp3'),
+      id3Fixture({ title: 'Twin', cover }),
+    );
+    const artRead = await call(CHANNELS.tagreadRead, {
+      treeUri: dirTreeUri(music),
+      docIds: ['covered.mp3', 'covered2.mp3'],
+    });
+    assert(artRead.ok, 'art read resolves');
+    const artTags = (artRead.result as {
+      tags: ({ artworkUri: string | null } | null)[];
+    }).tags;
+    const uri = artTags[0]?.artworkUri;
+    assert(uri !== null && uri !== undefined, 'cover minted a file:// ref');
+    const expectedName = `${createHash('sha256').update(cover).digest('hex')}.png`;
+    assert(
+      uri.endsWith(`/art/${expectedName}`),
+      `art store names by content, got ${uri}`,
+    );
+    const artPath = join(userData, 'art', expectedName);
+    assert(
+      statSync(artPath).size === cover.length,
+      'original bytes land under userData/art',
+    );
+    assertEqual(
+      artTags[1]?.artworkUri,
+      uri,
+      'identical covers share the store file',
+    );
+    // A wav without a cover answers null, never an error.
+    const noArt = await call(CHANNELS.tagreadRead, {
+      treeUri: dirTreeUri(music),
+      docIds: ['renamed.wav'],
+    });
+    assert(
+      noArt.ok &&
+        (
+          noArt.result as {
+            tags: ({ artworkUri: string | null } | null)[];
+          }
+        ).tags[0]?.artworkUri === null,
+      'coverless file reads null art',
+    );
+
     // The batch bound is enforced at the seam.
     const overBatch = await call(CHANNELS.tagreadFingerprint, {
       treeUri: dirTreeUri(music),
@@ -372,6 +478,7 @@ export async function run(): Promise<void> {
       );
     }
   } finally {
+    delete process.env['AUQW_USER_DATA'];
     service.close();
     db.close();
     rmSync(root, { recursive: true, force: true });

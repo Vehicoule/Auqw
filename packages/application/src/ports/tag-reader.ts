@@ -44,6 +44,14 @@ export type LocalTags = {
   album: string | null;
   durationMs: number | null;
   genre: string | null;
+  /**
+   * Embedded cover extracted during the same batched read — a
+   * `file://` URI into the platform's content-addressed art store
+   * (`filesDir/art/` on Android, `userData/art/` on desktop), or null
+   * when the file carries no picture or extraction failed. Extraction
+   * is best-effort inside the tag batch: it never fails the entry.
+   */
+  artworkUri: string | null;
 };
 
 /**
