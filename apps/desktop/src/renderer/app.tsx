@@ -100,6 +100,7 @@ import {
   themeOptions,
   toAuthSheetModel,
 } from '@auqw/ui-shared';
+import { useSearchScreenController } from '@auqw/ui-shared/controllers';
 import type { Boot, OverlayEntry } from '@auqw/ui-shared';
 import type {
   SyncDeviceInfo,
@@ -1128,8 +1129,6 @@ function Main({
         onRecentPress={applySearchText}
         suggestions={suggestions}
         onSuggestionPress={applySearchText}
-        autoFocus
-        focusSignal={searchFocusTick}
       />
     ),
     [
@@ -1146,7 +1145,6 @@ function Main({
       searchRecents,
       applySearchText,
       suggestions,
-      searchFocusTick,
     ],
   );
   const libraryEl = useMemo(
@@ -1219,6 +1217,16 @@ function Main({
       onImportDelta,
     ],
   );
+  // The toolbar's compact field shares the explore pane's field view —
+  // same draft text, same submit/cancel, one query.
+  const toolbarFieldView = useSearchScreenController({
+    state: searchModel,
+    query,
+    onQueryChange: setQuery,
+    onSubmit: submitSearch,
+    onCancel: cancelSearch,
+  }).field;
+
   const renderTabScreen = (key: string) => {
     switch (key) {
       case 'explore':
@@ -1411,6 +1419,15 @@ function Main({
             onSelect={selectTab}
             onOpenSettings={() => selectTab('settings')}
             onFocusSearch={focusSearch}
+            search={{
+              // The toolbar field IS the one search box — the explore
+              // pane keeps recents + results but carries no second
+              // input (design.md's single-search rule).
+              field: toolbarFieldView,
+              live: query !== '',
+              focusSignal: searchFocusTick,
+              onNavigateToSearch: tab === 'explore' ? undefined : focusSearch,
+            }}
             updateEntry={
               <span style={{ position: 'relative', display: 'inline-flex' }}>
                 <IconButton

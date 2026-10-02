@@ -1,5 +1,4 @@
-import { useEffect, useRef } from 'react';
-import { CapsLabel, Icon, Pressable, Spinner, Text } from './primitives.tsx';
+import { CapsLabel, Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { TrackRow, indexAdapter, useTrackList } from './track-row.tsx';
 import {
@@ -54,34 +53,13 @@ export type SearchScreenProps = SearchScreenHandlers & {
    * from an older search never impersonate matches for the draft.
    */
   readonly suggestions?: readonly string[] | undefined;
-  /**
-   * Focus the input — passes through to the DOM autofocus attribute
-   * on a visible mount, marks the input `[data-autofocus]` so a
-   * keep-alive host (WorldPanes) can re-focus it on reveal, and
-   * re-focuses whenever `focusSignal` bumps.
-   */
-  readonly autoFocus?: boolean | undefined;
-  /**
-   * Bump to re-focus the input without a remount — the '/' global
-   * shortcut refocuses even when the tab never left (the old
-   * `key={searchFocusTick}` remount cost a full screen re-inflation).
-   */
-  readonly focusSignal?: number | undefined;
 };
 
 export function SearchScreen({
   scrollEnabled = true,
-  autoFocus = false,
-  focusSignal,
   ...input
 }: SearchScreenProps) {
   const view = useSearchScreenController(input);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  useEffect(() => {
-    if (autoFocus) {
-      inputRef.current?.focus();
-    }
-  }, [autoFocus, focusSignal]);
   const list = useTrackList({
     count: input.state.results.length,
     onActivate: indexAdapter(input.state.results, input.onResultPress),
@@ -92,57 +70,6 @@ export function SearchScreen({
       className="uw-screen uw-search"
       data-scroll={scrollEnabled ? 'true' : 'false'}
     >
-      <div className="uw-search__field">
-        <Icon name="search" size={14} color="var(--text-secondary)" />
-        <input
-          ref={inputRef}
-          type="search"
-          className="uw-search__input"
-          aria-label={view.field.label}
-          placeholder={view.field.label}
-          autoComplete="off"
-          spellCheck={false}
-          autoFocus={autoFocus}
-          data-autofocus={autoFocus ? '' : undefined}
-          value={view.field.value}
-          onChange={
-            view.field.onChange === undefined
-              ? undefined
-              : (event) => view.field.onChange?.(event.currentTarget.value)
-          }
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              view.field.onSubmit?.();
-            }
-          }}
-          readOnly={view.field.readOnly}
-        />
-        {view.field.loading && (
-          <>
-            <Spinner size={14} />
-            {view.field.cancel !== null && (
-              <Pressable
-                onPress={view.field.cancel.onPress}
-                ariaLabel={view.field.cancel.a11yLabel}
-                className="uw-search__cancel"
-              >
-                <Text variant="metadata" color="accent">
-                  {view.field.cancel.label}
-                </Text>
-              </Pressable>
-            )}
-          </>
-        )}
-        {view.field.clear !== null && (
-          <Pressable
-            onPress={view.field.clear.onPress}
-            ariaLabel={view.field.clear.a11yLabel}
-            className="uw-search__clear"
-          >
-            <Icon name="close" size={12} color="var(--text-secondary)" />
-          </Pressable>
-        )}
-      </div>
       {view.suggestions !== null && (
         <div role="list" aria-label={view.suggestions.a11yLabel}>
           <CapsLabel className="uw-search__recents-label">

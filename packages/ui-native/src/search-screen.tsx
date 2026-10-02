@@ -1,6 +1,6 @@
-import { FlatList, ScrollView, TextInput, View } from 'react-native';
+import { FlatList, ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Icon, Pressable, Spinner, Text } from './primitives.tsx';
+import { Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState, StateFor } from './states.tsx';
@@ -108,77 +108,18 @@ export function SearchScreen({
         backgroundColor: theme.colors.canvas,
       }}
     >
-      {/* Edge-to-edge: the inset lives inside each scroller's content
+      {/* The one search field is the floating loupe (SearchFab) —
+          the screen keeps recents, completions, and results only.
+          Edge-to-edge: the inset lives inside each scroller's content
           so rows glide under the status-bar fade; pinned blocks carry
-          it as plain padding (the field's top margin below). */}
-      <View
-        style={{
-          marginHorizontal: theme.spacing.screen,
-          marginTop: topInset,
-          marginBottom: theme.spacing.sm,
-          backgroundColor: theme.colors.fg08,
-          borderRadius: theme.radius.pill,
-          paddingHorizontal: theme.spacing.md,
-          minHeight: theme.sizes.touch,
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: theme.spacing.sm,
-        }}
-      >
-        <Icon name="search" size={14} color={theme.colors.textSecondary} />
-        <TextInput
-          value={view.field.value}
-          onChangeText={view.field.onChange}
-          onSubmitEditing={view.field.onSubmit}
-          placeholder={view.field.label}
-          placeholderTextColor={theme.colors.textSecondary}
-          autoCapitalize="none"
-          autoCorrect={false}
-          returnKeyType="search"
-          accessibilityLabel={view.field.label}
-          style={[
-            theme.typography.body,
-            {
-              flex: 1,
-              color: theme.colors.textPrimary,
-              paddingVertical: theme.spacing.sm,
-            },
-          ]}
-        />
-        {view.field.loading && (
-          <>
-            <Spinner size={14} />
-            {view.field.cancel !== null && (
-              <Pressable
-                compact
-                onPress={view.field.cancel.onPress}
-                accessibilityLabel={view.field.cancel.a11yLabel}
-                style={{ paddingHorizontal: theme.spacing.xs }}
-              >
-                <Text variant="metadata" color="accent">
-                  {view.field.cancel.label}
-                </Text>
-              </Pressable>
-            )}
-          </>
-        )}
-        {view.field.clear !== null && (
-          <Pressable
-            compact
-            onPress={view.field.clear.onPress}
-            accessibilityLabel={view.field.clear.a11yLabel}
-            style={{ padding: theme.spacing.xs }}
-          >
-            <Icon name="close" size={12} color={theme.colors.textSecondary} />
-          </Pressable>
-        )}
-      </View>
+          it as plain padding. */}
       {view.suggestions !== null && (
         <ScrollView
           style={{ flex: 1 }}
           scrollEnabled={scrollEnabled}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{
+            paddingTop: topInset,
             // Clears the floating miniplayer's strip.
             paddingBottom:
               theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
@@ -217,6 +158,7 @@ export function SearchScreen({
           style={{
             alignItems: 'flex-start',
             paddingHorizontal: theme.spacing.screen,
+            paddingTop: topInset,
             marginBottom: theme.spacing.sm,
           }}
         >
@@ -234,7 +176,7 @@ export function SearchScreen({
       )}
       {view.idle !== null &&
         (view.idle.kind === 'recents' ? (
-          <View>
+          <View style={{ paddingTop: topInset }}>
             <Text
               variant="label"
               color="secondary"
@@ -270,6 +212,7 @@ export function SearchScreen({
           keyExtractor={(row) => row.row.key}
           scrollEnabled={scrollEnabled}
           contentContainerStyle={{
+            paddingTop: topInset,
             paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
             // Clears the floating miniplayer's strip.
             paddingBottom:

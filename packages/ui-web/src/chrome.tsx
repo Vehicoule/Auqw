@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Icon, IconButton, Pressable, SegmentItem, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { globalKeyAction } from './keyboard.ts';
+import { WorldSearch } from './search-field.tsx';
+import type { WorldSearchProps } from './search-field.tsx';
 import { useOverlayDismiss } from './stack.tsx';
 import { t } from '@auqw/ui-shared';
 import type { NavItemModel } from '@auqw/ui-shared';
@@ -148,6 +150,15 @@ export type DesktopChromeProps = {
    * state; nothing here may pop a surface uninvited).
    */
   readonly updateEntry?: ReactNode;
+  /**
+   * The one search field — a compact pill in the bar's end cluster that
+   * collapses to its loupe while the world body is scrolled. Tab bodies
+   * carry no second field.
+   */
+  readonly search?: Omit<
+    WorldSearchProps,
+    'collapsed' | 'onExpand' | 'onFocusChange'
+  >;
   readonly children: ReactNode;
 };
 
@@ -162,6 +173,7 @@ export function DesktopChrome({
   onFocusSearch,
   onOpenSettings,
   updateEntry,
+  search,
   children,
 }: DesktopChromeProps) {
   const [internalOpen, setInternalOpen] = useState(true);
@@ -170,6 +182,72 @@ export function DesktopChrome({
     setInternalOpen(value);
     onStageOpenChange?.(value);
   };
+  // The toolbar field rides the scroll: it drops to its loupe once the
+  // body moves, and comes back at the top or on demand. It never hides
+  // focus — a focused field stays open regardless of scroll.
+  const [searchCollapsed, setSearchCollapsed] = useState(false);
+  const [searchFocused, setSearchFocused] = useState(false);
+  const lastScrollTop = useRef(0);
+  // When the bar can't fit field + tabs + caption buttons, the field
+  // would paint over the tabs. Tightness must not depend on the
+  // field's current form (measuring its own cluster oscillates:
+  // expand → overflow → collapse → fits → repeat), so derive it from
+  // stable geometry — the bar's content box, the tabs' width, and the
+  // end cluster's non-field siblings. Each outer grid track gets half
+  // the space left over from the tabs (floor 68px, per the grid def).
+  const barRef = useRef<HTMLElement | null>(null);
+  const endRef = useRef<HTMLDivElement>(null);
+  const [endTight, setEndTight] = useState(false);
+  const [expandedWhileTight, setExpandedWhileTight] = useState(false);
+  useEffect(() => {
+    const bar = barRef.current;
+    const end = endRef.current;
+    if (bar === null || end === null) {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      const tabs = bar.querySelector('.uw-tabs');
+      const style = globalThis.getComputedStyle(bar);
+      const content =
+        bar.clientWidth -
+        parseFloat(style.paddingLeft) -
+        parseFloat(style.paddingRight);
+      const trackHalf = Math.max(
+        68,
+        (content - (tabs === null ? 0 : tabs.clientWidth)) / 2,
+      );
+      let others = 0;
+      for (const child of Array.from(end.children)) {
+        if (!child.classList.contains('uw-wsearch')) {
+          others += (child as HTMLElement).offsetWidth;
+        }
+      }
+      // 200 = the expanded field's width (.uw-wsearch) + 8px of slack
+      // so the overlay engages just before the clip edge.
+      setEndTight(trackHalf < others + 208);
+    });
+    observer.observe(bar);
+    observer.observe(end);
+    // The tabs' width is an input to the predicate — locale switches
+    // widen labels without resizing anything observed.
+    const tabs = bar.querySelector('.uw-tabs');
+    if (tabs !== null) {
+      observer.observe(tabs);
+    }
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    if (endTight) {
+      setExpandedWhileTight(false);
+      setSearchCollapsed(true);
+    }
+  }, [endTight]);
+  useEffect(() => {
+    if (search?.focusSignal !== undefined) {
+      setExpandedWhileTight(true);
+      setSearchCollapsed(false);
+    }
+  }, [search?.focusSignal]);
   useEffect(() => {
     if (onFocusSearch === undefined) {
       return;
@@ -203,7 +281,7 @@ export function DesktopChrome({
         />
       )}
       <div className="uw-world">
-        <header className="uw-world-bar">
+        <header className="uw-world-bar" ref={barRef}>
           <div className="uw-world-bar__start">
             <IconButton
               icon="sidebar"
@@ -214,26 +292,56 @@ export function DesktopChrome({
               active={open}
               onPress={() => setOpen(!open)}
             />
-            {onFocusSearch !== undefined && (
-              <IconButton
-                icon="search"
-                size={32}
-                iconSize={14}
-                color="var(--text-secondary)"
-                ariaLabel={t('search.fieldLabel')}
-                onPress={onFocusSearch}
-              />
-            )}
           </div>
           <WorldTabs tabs={tabs} activeKey={activeKey} onSelect={onSelect} />
-          <div className="uw-world-bar__end">
+          <div className="uw-world-bar__end" ref={endRef}>
+            {search !== undefined && (
+              <WorldSearch
+                {...search}
+                collapsed={
+                  searchCollapsed || (endTight && !expandedWhileTight)
+                }
+                overlay={endTight}
+                onExpand={() => {
+                  setExpandedWhileTight(true);
+                  setSearchCollapsed(false);
+                }}
+                onFocusChange={(focused) => {
+                  setSearchFocused(focused);
+                  if (!focused) {
+                    // Tight bars fold the overlay back down on blur —
+                    // there's no room to leave the field open.
+                    setExpandedWhileTight(false);
+                    setSearchCollapsed(lastScrollTop.current > 24 || endTight);
+                  }
+                }}
+              />
+            )}
             {updateEntry}
             {onOpenSettings !== undefined && (
               <WorldMenu onOpenSettings={onOpenSettings} />
             )}
           </div>
         </header>
-        <main className="uw-world__content">{children}</main>
+        <main
+          className="uw-world__content"
+          // Scroll doesn't bubble — capture reaches every pane's own
+          // scroller; the target is whichever element scrolled.
+          onScrollCapture={(event) => {
+            if (search === undefined) {
+              return;
+            }
+            const top = (event.target as HTMLElement).scrollTop;
+            lastScrollTop.current = top;
+            // A focused field stays open — collapsing it would drop
+            // the caret mid-typing; the blur re-applies the scroll.
+            if (!searchFocused) {
+              setSearchCollapsed(top > 24);
+            }
+          }}
+        >
+          {children}
+        </main>
       </div>
     </div>
   );
