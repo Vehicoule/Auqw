@@ -57,15 +57,18 @@
   svg.ic.fill{fill:currentColor;stroke:none}
 
   /* ===== window — no titlebar band; stage runs to the top edge ===== */
-  .win{width:1300px;border:1px solid var(--divider);background:var(--bg);
+  .win{width:1300px;border:1px solid var(--divider);background:var(--bg-deep);
        display:flex;margin-bottom:52px;overflow:hidden}
   .win.t-oled{border-color:#29241e}
   .chrome-mac{border-radius:10px}
   .chrome-win{border-radius:8px}
   .chrome-linux{border-radius:8px}
 
-  /* ----- stage: full-height chromeless column — immersive, artwork-led ----- */
-  .stage{width:38.2%;min-width:280px;flex:none;background:var(--bg-stage);border-right:1px solid var(--divider);
+  /* ----- stage: full-height chromeless column — the shell's sidebar:
+         a translucent stage tone a step grayer than the world canvas,
+         frosted so the bleed mists through (GTK/macOS vibrancy) ----- */
+  .stage{width:38.2%;min-width:280px;flex:none;background:color-mix(in srgb,var(--bg-stage) 84%,transparent);
+         backdrop-filter:blur(24px) saturate(1.4);-webkit-backdrop-filter:blur(24px) saturate(1.4);
          display:flex;flex-direction:column;padding:8px 20px 78px;position:relative}
   /* macOS traffic lights pin over the stage's top-left — no strip of its own */
   .chrome-mac .stage{padding-top:56px}
@@ -131,8 +134,12 @@
   .lyr div:hover{background:var(--fg08);color:var(--fg)}
   .lbar{position:absolute;right:0;top:8%;width:3px;height:38%;background:var(--fg18);border-radius:2px}
 
-  /* ----- world: toolbar is just the first row of the column ----- */
-  .world{flex:1;display:flex;flex-direction:column;min-width:0}
+  /* ----- world: toolbar is just the first row of the column -----
+         the card's rounded left seam is the resting geometry whenever
+         the stage is open — not a state the art bleed earns */
+  .world{flex:1;display:flex;flex-direction:column;min-width:0;
+         margin:0 0 0 8px;border-radius:16px 0 0 16px;
+         border-left:1px solid var(--hair);background:var(--bg)}
   .toolbar{height:56px;flex:none;display:flex;align-items:center;gap:8px;
            padding:0 16px 0 20px;position:relative}
   /* world navigation = the same segmented construction, sized up */
@@ -157,16 +164,18 @@
   /* search = one compact field in the toolbar's right group, always rendered;
      on explore it carries the live query — there is no in-body field */
   .srch{display:flex;align-items:center;gap:8px;height:32px;width:150px;overflow:hidden;flex:none;
-        color:var(--fg-muted);padding:0 8px;border-radius:var(--r-ctl);background:var(--fg08);
-        transition:border-color .15s,color .15s}
+        color:var(--fg-muted);padding:0 8px;border-radius:999px;background:var(--fg08);
+        border:1px solid transparent;transition:border-color .15s,color .15s}
   .srch:hover{color:var(--fg)}
   .srch>.ic{flex:none}
   .srch input{border:none;background:none;color:var(--fg);font:10.5px inherit;outline:none;
               width:100%;opacity:1}
   .srch kbd{font:9.5px inherit;color:var(--fg-muted);border:1px solid var(--hair);
             padding:2px 6px;border-radius:4px;background:var(--bg)}
-  .srch:focus-within{color:var(--fg);box-shadow:0 0 0 3px var(--accent-soft)}
-  .srch.open{color:var(--fg)}
+  /* focus = the comet ring's settled state: the border itself traced
+     accent (the arc's centerline rides the border midline) */
+  .srch:focus-within{color:var(--fg);border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+  .srch.open{color:var(--fg);border-color:var(--accent)}
   /* caption buttons compress the right group — the field narrows before it collapses */
   .chrome-win .srch,.chrome-linux .srch{width:112px}
 
@@ -541,7 +550,7 @@
   </div>
 
   <!-- ================= LIGHT · Windows · library ================= -->
-  <div class="label">Desktop — light · <em>Windows — caption buttons overlay the world</em> · library</div>
+  <div class="label">Desktop — light · <em>Windows — renderer-drawn caption cluster</em> · library</div>
   <div class="win t-light chrome-win">
     <div class="stage immersive t-dark">
       <div class="sheet-art cov-eye"></div><div class="sheet-frost cov-eye"></div><div class="sheet-scrim"></div>
@@ -627,7 +636,7 @@
   </div>
 
   <!-- ================= OLED · Linux · explore · stage=lyrics ================= -->
-  <div class="label">Desktop — oled · <em>Linux — caption buttons overlay the world</em> · explore · stage in lyrics mode</div>
+  <div class="label">Desktop — oled · <em>Linux — renderer-drawn caption cluster</em> · explore · stage in lyrics mode</div>
   <div class="win t-oled chrome-linux">
     <div class="stage">
       <div class="lmeta">
@@ -938,13 +947,17 @@
 </div>
 
 <div class="foot">
-  WCO — <code>titleBarStyle: 'hidden'</code> + <code>titleBarOverlay</code> themed per scheme.
-  The Stage column is chromeless: it runs to the top edge and macOS lights pin over its
-  top-left — no strip of its own. World toolbar = stage toggle · centered
+  Chromeless shell — <code>titleBarStyle: 'hidden'</code>; the caption cluster is drawn by the
+  renderer in the icon family (no OS overlay pixels; macOS keeps its traffic lights over the stage).
+  The Stage column is the shell's sidebar: chromeless, runs to the top edge, macOS lights pin
+  over its top-left — a translucent stage tone a step grayer than the world canvas over a
+  bounded backdrop blur (GTK/macOS vibrancy — the art bleed mists through it). The world card
+  sits flush top/right/bottom with its rounded left seam against the column as the resting
+  geometry — not a state art earns. World toolbar = stage toggle · centered
   segmented nav (squared-with-rounded indicator, sized up) · compact search field + menu at
-  the right edge · (win/linux caption buttons overlay it). Search lives once — the field stays
+  the right edge · caption cluster at the strip's right edge. Search lives once — the field stays
   on every tab and simply carries the query on Explore (see the OLED frame), so there is no
-  second field inside the body.
+  second field inside the body; its accent comet traces the field's own border.
   <br><br>
   library — collections grid (liked · downloads · top 50 · history, play affordance on each) →
   your library (filter chips + sort + grid/list toggle + new-playlist card) → followed artists →
