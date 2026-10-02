@@ -32,3 +32,14 @@ expect_used = "deny"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Release artifacts ship as FFI cdylibs inside the desktop package and
+# the Android AAB — size is the constraint there. thin LTO +
+# codegen-units=1 + strip take ~36% off each .so; panic=abort drops the
+# landing pads the FFI boundary could never unwind across anyway.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+opt-level = "z"
