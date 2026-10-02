@@ -742,7 +742,14 @@ impl SessionInner {
         }
         let store = lock(&self.store)?;
         let total = store.effective_total();
-        if total.is_some_and(|t| store.first_gap(0, t).is_none()) {
+        // "Fully covered" needs wire proof: a store complete under the
+        // hint alone parks rather than stops — demand parked past the
+        // hint still earns a fetch, and only a wire total may declare
+        // the file whole.
+        if store
+            .wire_total()
+            .is_some_and(|t| store.first_gap(0, t).is_none())
+        {
             // A fully-covered file satisfies the head-fill goal even
             // when it is shorter than `head_bytes` — the mark means
             // "everything the prepare policy wanted", not the bound.

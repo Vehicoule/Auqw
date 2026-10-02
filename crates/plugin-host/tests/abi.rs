@@ -287,11 +287,12 @@ fn busy_wat(busy_in: &str) -> String {
     )
 }
 
-/// Guest that emits `first` from its first `handle` and `rest` on
-/// every step after — a two-phase guest driven by a mutable global.
-fn seq_wat(first: &str, rest: &str) -> String {
-    // `alloc` hands the host a fixed 1024 buffer for marshaled replies —
-    // the canned messages live high enough that no reply overwrites them.
+/// Guest emitting `first` from `handle` #1; on later calls it checks
+/// byte 2 of the step input — `serde_json` sorts reply keys, so 'e'
+/// means `{"error":…,"type":"host_error"}` ('b' would be
+/// `{"body_base64":…,"type":"http_response"}`) — and answers
+/// `on_error`, else `ok`.
+fn probe_reply_wat(first: &str, on_error: &str, ok: &str) -> String {
     format!(
         "(module\n  (memory (export \"memory\") 1)\n  \
          (global $n (mut i32) (i32.const 0))\n  \
@@ -300,14 +301,20 @@ fn seq_wat(first: &str, rest: &str) -> String {
          (global.set $n (i32.add (global.get $n) (i32.const 1)))\n    \
          (select\n      \
          (i64.const {})\n      \
-         (i64.const {})\n      \
+         (select\n        \
+         (i64.const {})\n        \
+         (i64.const {})\n        \
+         (i32.eq (i32.load8_u offset=2 (local.get 0)) (i32.const 101)))\n      \
          (i32.le_u (global.get $n) (i32.const 1))))\n  \
          (data (i32.const 16384) \"{}\")\n  \
-         (data (i32.const 49152) \"{}\"))",
+         (data (i32.const 49152) \"{}\")\n  \
+         (data (i32.const 57344) \"{}\"))",
         (16384u64 << 32) | first.len() as u64,
-        (49152u64 << 32) | rest.len() as u64,
+        (49152u64 << 32) | on_error.len() as u64,
+        (57344u64 << 32) | ok.len() as u64,
         first.replace('"', "\\\""),
-        rest.replace('"', "\\\""),
+        on_error.replace('"', "\\\""),
+        ok.replace('"', "\\\""),
     )
 }
 
@@ -2239,27 +2246,28 @@ impl HttpClient for JsonBodyHttp {
     }
 }
 
-/// A provider body declaring more secrets than the collection cap
-/// truncates at the cap — one redaction-path diagnostic records it on
-/// the attempt — while strings that still fit land in the set and
-/// keep masking.
+/// A provider body declaring more secrets than the collection cap is
+/// refused outright — the guest sees a `host_error`, never the body,
+/// so leaves the cap dropped can never be echoed raw. Strings that
+/// did land in the set still mask.
 #[tokio::test]
-async fn pot_secret_collection_is_capped_and_diagnosed() {
-    // Ask for a pot token once, then echo the token back through `log`.
-    let wasm = ok(wat::parse_str(seq_wat(
+async fn pot_response_over_secret_cap_is_refused() {
+    // Ask for a pot token, then branch on the reply: a `host_error`
+    // (byte 10 'o') means the body was refused — fail with a message
+    // quoting a collected secret; anything else says `done`.
+    let wasm = ok(wat::parse_str(probe_reply_wat(
         "{\"type\":\"host_request\",\"id\":1,\"kind\":\"pot_token\",\"payload\":{\"content_binding\":\"v\"}}",
-        "{\"type\":\"host_request\",\"id\":1,\"kind\":\"log\",\"payload\":{\"level\":\"info\",\"message\":\"saw tok-collected-9 ok\"}}",
+        "{\"type\":\"fail\",\"error\":{\"kind\":\"transient\",\"message\":\"refused, saw tok-collected-9\"}}",
+        "{\"type\":\"done\",\"result\":{}}",
     )));
-    let mut budgets = default_budgets();
-    budgets.max_steps = 2;
     let plugin = ok(load(
         &wasm,
         manifest_for_abi(&wasm, "0.2.0", &["pot-provider"]),
-        &budgets,
+        &default_budgets(),
     ));
     // `poToken` sorts before `zz` in the response's key order, so the
-    // token lands first in the collection; the pad array overflows the
-    // 256-entry cap and trips the diagnostic.
+    // token lands in the collection before the pad array overflows
+    // the 256-entry cap.
     let pad: Vec<String> = (0..300).map(|i| format!("pad-{i}")).collect();
     let body = serde_json::to_vec(&serde_json::json!({
         "poToken": "tok-collected-9",
@@ -2267,34 +2275,23 @@ async fn pot_secret_collection_is_capped_and_diagnosed() {
     }))
     .unwrap_or_else(|e| panic!("json: {e}"));
     let http = JsonBodyHttp(body);
-    let Invocation { result, attempt } = invoke(
+    let Invocation { result, .. } = invoke(
         &plugin,
         "playback.resolve",
         serde_json::json!({}),
-        &budgets,
+        &default_budgets(),
         CancellationToken::new(),
         svc(&http, Some("https://pot.provider")),
     )
     .await;
-    // Steps cap ends the loop — assertions land on the attempt.
-    let _ = err(result);
-    let warns: Vec<_> = attempt
-        .guest_log
-        .iter()
-        .filter(|e| e.level == "warn")
-        .collect();
-    assert_eq!(warns.len(), 1, "guest_log: {:?}", attempt.guest_log);
-    assert!(
-        warns[0].message.contains("truncated"),
-        "{}",
-        warns[0].message
-    );
-    // `tok-collected-9` fit inside the cap — the guest's echo of it is
-    // masked, and a `pad-*` leaf that dropped is not asserted on.
-    let entry = &attempt.guest_log[1];
-    assert_eq!(entry.level, "info");
-    assert!(!entry.message.contains("tok-collected-9"), "{entry:?}");
-    assert!(entry.message.contains("***"));
+    match err(result) {
+        InvokeError::GuestFail { kind, message } => {
+            assert_eq!(kind, "transient", "{kind}");
+            assert!(!message.contains("tok-collected-9"), "{message}");
+            assert!(message.contains("***"), "{message}");
+        }
+        e => panic!("expected GuestFail (host_error seen), got {e:?}"),
+    }
 }
 
 /// The same masking applies to a guest `fail` message.

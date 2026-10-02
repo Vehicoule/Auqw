@@ -1853,6 +1853,38 @@ mod tests {
         stop_pump(&s, task).await;
     }
 
+    /// §3.7: coverage complete under the hint with no wire total is
+    /// not a finished file — the pump parks rather than stops, so
+    /// demand parked past the hint still earns its fetch instead of
+    /// stranding on a stopped pump.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn demand_past_hint_survives_a_hint_complete_store() {
+        let d = TestDir::new("hint-complete");
+        let mut cfg = config(&d);
+        cfg.head_bytes = 0;
+        let mut src = source();
+        src.content_length = Some(1024);
+        let handle = format!("t-{}", unique());
+        let s = SessionInner::new(handle, src, remint_ok(), cfg, PoolSignals::new())
+            .unwrap_or_else(|e| panic!("session: {e}"));
+        // Sidecar-resumed shape: every hinted byte committed, no wire
+        // total ever latched.
+        s.store
+            .lock()
+            .unwrap_or_else(|e| panic!("store lock: {e:?}"))
+            .insert(0, &vec![9u8; 1024])
+            .unwrap_or_else(|e| panic!("insert: {e}"));
+        let fetch = Arc::new(ScriptedFetch::new(vec![Step::Reply(resp(
+            206, 2048, 128, 4096,
+        ))]));
+        let task = spawn_pump(&s, fetch);
+        let got = s
+            .read(2048, 64)
+            .unwrap_or_else(|e| panic!("read past hint: {e}"));
+        assert_eq!(got.len(), 64);
+        stop_pump(&s, task).await;
+    }
+
     #[test]
     fn content_range_parsing_is_strict() {
         assert_eq!(

@@ -40,7 +40,8 @@ const LOG_LEVELS: &[&str] = &["debug", "info", "warn", "error"];
 /// provider bodies are a couple of token strings (`{"poToken":
 /// "…"}`), so 256 entries / 64 KiB sits far above the honest shape
 /// while bounding the collection's memory and the O(secrets × text)
-/// `redact_text` loop every guest message pays.
+/// `redact_text` loop every guest message pays. A body that trips the
+/// caps is refused rather than served half-masked.
 const MAX_COLLECTED_SECRETS: usize = 256;
 const MAX_COLLECTED_SECRET_BYTES: usize = 64 * 1024;
 
@@ -1159,19 +1160,19 @@ async fn perform_call(
             // masked rather than leaked.
             if collect_secrets {
                 if let Ok(v) = serde_json::from_slice::<Value>(&resp.body) {
-                    if collect_secret_strings(&v, &mut attempt.secrets)
-                        && attempt.guest_log.len() < MAX_GUEST_LOG_ENTRIES
-                    {
-                        // One redaction-path diagnostic per truncated
-                        // collection: past the cap the response's
-                        // later leaves are not masked, and an operator
-                        // needs to see that on the diagnostics surface.
-                        attempt.guest_log.push(GuestLogEntry {
-                            level: "warn".into(),
-                            message: format!(
-                                "secret collection truncated at {MAX_COLLECTED_SECRETS} entries / {MAX_COLLECTED_SECRET_BYTES} bytes"
-                            ),
-                        });
+                    if collect_secret_strings(&v, &mut attempt.secrets) {
+                        // A body that overflows the redaction caps
+                        // cannot be handed to the guest safely: leaves
+                        // the cap dropped would arrive unmasked, free
+                        // to echo into `log`/`fail`. The `host_error`
+                        // reply is the redaction-path diagnostic — it
+                        // reaches the guest and never spends the
+                        // guest's own log allowance.
+                        return host_error(
+                            id,
+                            "invalid-response",
+                            "provider response exceeds the redaction cap",
+                        );
                     }
                 }
             }
