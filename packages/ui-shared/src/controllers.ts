@@ -109,8 +109,12 @@ export type QueueScreenHandlers = {
   readonly onRemoveItem?: MaybeFn<[occurrenceId: string]>;
   readonly onMoveItem?: MaybeFn<[occurrenceId: string, direction: -1 | 1]>;
   readonly onMoveItemTo?: MaybeFn<[occurrenceId: string, toIndex: number]>;
-  /** Clear-queue intent — drops every row except the current one. */
-  readonly onClearQueue?: MaybeFn;
+  /**
+   * Up-next section Clear — the list passes that section's
+   * occurrence ids; the session batch-removes them (autoplay
+   * suggestions and history are outside the section by contract).
+   */
+  readonly onClearUpcoming?: MaybeFn<[occurrenceIds: readonly string[]]>;
   /** "Playing from …" tap — navigate back to the queue's source surface. */
   readonly onOpenContext?: MaybeFn<[origin: QueueOrigin]>;
 };
@@ -134,35 +138,6 @@ export function queueReorderButton(
     active: reordering,
     a11yLabel: reordering ? t('queue.reorderDone') : t('queue.reorder'),
     onPress: onToggleReorder,
-  };
-}
-
-export type QueueClearButton = ControlView & {
-  readonly icon: 'list-remove';
-  readonly onPress: () => void;
-};
-
-/**
- * The clear-queue toggle — absent when the host never binds a
- * handler, or when nothing could flush: an empty queue, or a lone
- * row that IS the cursor (a drained/cursorless row still clears).
- */
-export function queueClearButton(
-  itemCount: number,
-  hasCurrent: boolean,
-  onClearQueue: MaybeFn,
-): QueueClearButton | null {
-  if (
-    onClearQueue === undefined ||
-    itemCount === 0 ||
-    (itemCount === 1 && hasCurrent)
-  ) {
-    return null;
-  }
-  return {
-    icon: 'list-remove',
-    a11yLabel: t('queue.clear'),
-    onPress: onClearQueue,
   };
 }
 
@@ -221,7 +196,6 @@ export type QueueScreenView = {
   readonly countLabel: string;
   readonly origin: QueueOriginView;
   readonly reorder: QueueReorderButton | null;
-  readonly clearQueue: QueueClearButton | null;
   readonly current: {
     readonly title: string;
     readonly status: PlayerModel['status'];
@@ -236,14 +210,12 @@ export function useQueueScreenController({
   player = null,
   reordering = false,
   onToggleReorder,
-  onClearQueue,
   onOpenContext,
 }: {
   readonly queue: QueueModel;
   readonly player?: PlayerModel | null | undefined;
   readonly reordering?: boolean | undefined;
   readonly onToggleReorder?: MaybeFn;
-  readonly onClearQueue?: MaybeFn;
   readonly onOpenContext?: MaybeFn<[origin: QueueOrigin]>;
 }): QueueScreenView {
   return {
@@ -251,11 +223,6 @@ export function useQueueScreenController({
     countLabel: queueMetaLabel(queue),
     origin: queueOriginView(queue.origin, onOpenContext),
     reorder: queueReorderButton(reordering, onToggleReorder),
-    clearQueue: queueClearButton(
-      queue.items.length,
-      queue.currentOccurrenceId !== null,
-      onClearQueue,
-    ),
     current:
       player === null
         ? null
@@ -1478,8 +1445,11 @@ export type StageQueueHandlers = {
   /** Advisory row intent — hover/focus/long-press; the host warms the row. */
   readonly onQueueRowIntent?: MaybeFn<[occurrenceId: string]>;
   readonly onRemoveQueueItem?: MaybeFn<[occurrenceId: string]>;
-  /** Clear-queue intent — drops every row except the current one. */
-  readonly onClearQueue?: MaybeFn;
+  /**
+   * Up-next section Clear — the queue hands that section's occurrence
+   * ids for a batch remove.
+   */
+  readonly onClearUpcoming?: MaybeFn<[occurrenceIds: readonly string[]]>;
   /** "Playing from …" tap — navigate back to the queue's source surface. */
   readonly onOpenQueueContext?: MaybeFn<[origin: QueueOrigin]>;
   readonly onToggleQueueReorder?: MaybeFn;

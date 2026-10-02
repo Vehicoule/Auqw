@@ -1300,6 +1300,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
           ? undefined
           : new Set(failedQueueErrors.current.keys()),
       dealtOrder: state.shuffleOrder ?? undefined,
+      radioOccurrenceIds: state.radioOccurrenceIds,
+      radio: state.radio,
+      entities: state.entities,
+      entitySourceRefs: state.entitySourceRefs,
     });
     // localPlayable re-reads downloads/local after their mutations.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1311,6 +1315,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
     playbackType,
     playbackOccurrenceId,
     state.shuffleOrder,
+    state.radioOccurrenceIds,
+    state.radio,
+    state.entities,
+    state.entitySourceRefs,
     online,
     localPlayable,
     downloads,
@@ -2512,9 +2520,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [session],
   );
 
-  // Clear queue — keeps the cursor row playing, flushes the rest.
-  const clearQueue = useCallback(
-    () => void session.clearQueue(),
+  // Up-next section Clear — the queue's section header hands that
+  // section's occurrence ids for a batch remove.
+  const clearUpcoming = useCallback(
+    (occurrenceIds: readonly string[]) =>
+      void session.clearUpcoming(occurrenceIds),
     [session],
   );
 
@@ -3892,7 +3902,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     onMoveQueueItem,
     onMoveQueueItemTo,
     removeQueueOccurrence,
-    clearQueue,
+    clearUpcoming,
     openQueueContext,
     seekToPosition,
     canPlay,

@@ -76,7 +76,6 @@ import {
   downloadButtonView,
   lyricsHeaderView,
   lyricsPaneView,
-  queueClearButton,
   queueMetaLabel,
   queueOriginView,
   queueReorderButton,
@@ -688,7 +687,13 @@ export type StageSheetProps = {
   | ((occurrenceIds: readonly string[]) => void)
   | undefined;
   readonly onRemoveQueueItem?: ((occurrenceId: string) => void) | undefined;
-  readonly onClearQueue?: (() => void) | undefined;
+  /**
+   * Up-next section Clear — the list hands that section's occurrence
+   * ids for a batch remove.
+   */
+  readonly onClearUpcoming?:
+    | ((occurrenceIds: readonly string[]) => void)
+    | undefined;
   readonly onOpenQueueContext?: StageQueueHandlers['onOpenQueueContext'];
   readonly onToggleQueueReorder?: (() => void) | undefined;
   readonly onMoveQueueItem?:
@@ -748,7 +753,7 @@ export function StageSheet({
   onQueueRowIntent,
   onQueueViewport,
   onRemoveQueueItem,
-  onClearQueue,
+  onClearUpcoming,
   onOpenQueueContext,
   onToggleQueueReorder,
   onMoveQueueItem,
@@ -845,11 +850,6 @@ export function StageSheet({
   const queueReorder = queueReorderButton(
     queueReordering,
     onToggleQueueReorder,
-  );
-  const queueClear = queueClearButton(
-    queue?.items.length ?? 0,
-    queue?.currentOccurrenceId != null,
-    onClearQueue,
   );
   const queueOrigin = queueOriginView(
     queue?.origin ?? null,
@@ -1555,6 +1555,7 @@ export function StageSheet({
           onRemoveItem={onRemoveQueueItem}
           onMoveItem={onMoveQueueItem}
           onMoveItemTo={onMoveQueueItemTo}
+          onClearUpcoming={onClearUpcoming}
         />
       ),
     [
@@ -1566,6 +1567,7 @@ export function StageSheet({
       onQueueRowIntent,
       onQueueViewport,
       onRemoveQueueItem,
+      onClearUpcoming,
       onMoveQueueItem,
       onMoveQueueItemTo,
     ],
@@ -1976,7 +1978,6 @@ export function StageSheet({
           ) : (
             <>
               {(queueReorder !== null ||
-                queueClear !== null ||
                 queueOrigin !== null ||
                 queueMeta !== null) && (
                 <GestureDetector gesture={queueChromePan}>
@@ -2026,16 +2027,6 @@ export function StageSheet({
                         </Text>
                       )}
                     </View>
-                    {queueClear !== null && (
-                      <IconButton
-                        icon={queueClear.icon}
-                        size={32}
-                        iconSize={14}
-                        color={colors.textSecondary}
-                        accessibilityLabel={queueClear.a11yLabel}
-                        onPress={queueClear.onPress}
-                      />
-                    )}
                     {queueReorder !== null && (
                       <IconButton
                         icon={queueReorder.icon}

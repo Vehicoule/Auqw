@@ -32,7 +32,6 @@ import {
   downloadButtonView,
   lyricsHeaderView,
   lyricsPaneView,
-  queueClearButton,
   queueMetaLabel,
   queueOriginView,
   queueReorderButton,
@@ -277,7 +276,7 @@ export function NowPlayingScreen({
   onPressQueueItem,
   onQueueRowIntent,
   onRemoveQueueItem,
-  onClearQueue,
+  onClearUpcoming,
   onOpenQueueContext,
   onToggleQueueReorder,
   onMoveQueueItem,
@@ -303,11 +302,6 @@ export function NowPlayingScreen({
     radioSeedProvider,
   );
   const reorder = queueReorderButton(queueReordering, onToggleQueueReorder);
-  const clearQueue = queueClearButton(
-    queue?.items.length ?? 0,
-    queue?.currentOccurrenceId != null,
-    onClearQueue,
-  );
   const queueOrigin = queueOriginView(
     queue?.origin ?? null,
     onOpenQueueContext,
@@ -369,6 +363,7 @@ export function NowPlayingScreen({
           onRemoveItem={onRemoveQueueItem}
           onMoveItem={onMoveQueueItem}
           onMoveItemTo={onMoveQueueItemTo}
+          onClearUpcoming={onClearUpcoming}
         />
       ),
     [
@@ -380,6 +375,7 @@ export function NowPlayingScreen({
       onRemoveQueueItem,
       onMoveQueueItem,
       onMoveQueueItemTo,
+      onClearUpcoming,
     ],
   );
 
@@ -599,8 +595,7 @@ export function NowPlayingScreen({
               <>
                 {(queueOrigin !== null ||
                   queueMeta !== null ||
-                  reorder !== null ||
-                  clearQueue !== null) && (
+                  reorder !== null) && (
                   <div className="uw-stage__queue-tools">
                     <span className="uw-stage__queue-meta">
                       {queueOrigin !== null && (
@@ -628,16 +623,6 @@ export function NowPlayingScreen({
                         </Text>
                       )}
                     </span>
-                    {clearQueue !== null && (
-                      <IconButton
-                        icon={clearQueue.icon}
-                        size={32}
-                        iconSize={14}
-                        color="var(--text-secondary)"
-                        ariaLabel={clearQueue.a11yLabel}
-                        onPress={clearQueue.onPress}
-                      />
-                    )}
                     {reorder !== null && (
                       <IconButton
                         icon={reorder.icon}
@@ -753,7 +738,7 @@ export type StageIdlePaneProps = {
   readonly queue?: QueueModel | undefined;
   readonly queueReordering?: QueueScreenProps['reordering'];
   readonly onToggleQueueReorder?: QueueScreenProps['onToggleReorder'];
-  readonly onClearQueue?: QueueScreenProps['onClearQueue'];
+  readonly onClearUpcoming?: QueueScreenProps['onClearUpcoming'];
   readonly onOpenQueueContext?: QueueScreenProps['onOpenContext'];
   readonly onPressQueueItem?: QueueScreenProps['onPressItem'];
   readonly onQueueRowIntent?: QueueScreenProps['onRowIntent'];
@@ -773,7 +758,7 @@ export function StageIdlePane({
   queue,
   queueReordering,
   onToggleQueueReorder,
-  onClearQueue,
+  onClearUpcoming,
   onOpenQueueContext,
   onPressQueueItem,
   onQueueRowIntent,
@@ -788,7 +773,7 @@ export function StageIdlePane({
           queue={queue}
           reordering={queueReordering}
           onToggleReorder={onToggleQueueReorder}
-          onClearQueue={onClearQueue}
+          onClearUpcoming={onClearUpcoming}
           onOpenContext={onOpenQueueContext}
           onPressItem={onPressQueueItem}
           onRowIntent={onQueueRowIntent}

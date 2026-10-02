@@ -19,7 +19,6 @@ export function QueueScreen({
   reordering = false,
   scrollEnabled = true,
   onToggleReorder,
-  onClearQueue,
   onOpenContext,
   ...listHandlers
 }: QueueScreenProps) {
@@ -28,7 +27,6 @@ export function QueueScreen({
     player,
     reordering,
     onToggleReorder,
-    onClearQueue,
     onOpenContext,
   });
   return (
@@ -43,16 +41,6 @@ export function QueueScreen({
         <Text variant="metadata" color="secondary" className="uw-queue__count">
           {view.countLabel}
         </Text>
-        {view.clearQueue !== null && (
-          <IconButton
-            icon={view.clearQueue.icon}
-            size={32}
-            iconSize={14}
-            color="var(--text-secondary)"
-            ariaLabel={view.clearQueue.a11yLabel}
-            onPress={view.clearQueue.onPress}
-          />
-        )}
         {view.reorder !== null && (
           <IconButton
             icon={view.reorder.icon}

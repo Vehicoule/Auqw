@@ -150,8 +150,9 @@ function checkQueueModel(queue: QueueModel, label: string): void {
     assert(currents.length === 1, `${label}: expected exactly one current`);
   }
   // Sections partition every item, non-empty, in display order
-  // nowPlaying → upNext → history; item.index is the canonical slot.
-  const rank = { nowPlaying: 0, upNext: 1, history: 2 };
+  // nowPlaying → upNext → autoplay → history; item.index is the
+  // canonical slot.
+  const rank = { nowPlaying: 0, upNext: 1, autoplay: 2, history: 3 };
   let prevRank = -1;
   const sectioned: string[] = [];
   for (const section of queue.sections) {

@@ -911,6 +911,34 @@
   padding: var(--spacing-xs) var(--spacing-sm) 0;
 }
 
+.uw-queue-section {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+}
+
+/* Section-scoped clear — quiet text button beside the heading, the
+   same register as the secondary rows it drops. */
+.uw-queue-section__clear {
+  padding: 0 var(--spacing-sm);
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 550;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.uw-queue-section__clear:hover {
+  color: var(--accent);
+}
+
+/* Radio suggestions sit one step dimmer than user-minted rows. */
+.uw-list [data-section='autoplay'] .uw-track-row {
+  opacity: 0.75;
+}
+
 /* ---- states ------------------------------------------------------- */
 
 .uw-state {

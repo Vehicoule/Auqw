@@ -937,7 +937,7 @@ function Main({
     onMoveQueueItem,
     onMoveQueueItemTo,
     removeQueueOccurrence,
-    clearQueue,
+    clearUpcoming,
     openQueueContext,
     seekToPosition,
     canPlay,
@@ -2686,7 +2686,7 @@ function Main({
               }
               onQueueViewport={onQueueViewport}
               onRemoveQueueItem={removeQueueOccurrence}
-              onClearQueue={clearQueue}
+              onClearUpcoming={clearUpcoming}
               onOpenQueueContext={openQueueContext}
               onToggleQueueReorder={toggleReordering}
               onMoveQueueItem={onMoveQueueItem}

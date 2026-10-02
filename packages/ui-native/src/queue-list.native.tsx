@@ -31,6 +31,7 @@ export function QueueList({
   onRemoveItem,
   onMoveItem,
   onMoveItemTo,
+  onClearUpcoming,
 }: QueueListProps) {
   // FlatList requires a stable onViewableItemsChanged — rebind it
   // per render and the list throws, so the latest callback lives in
@@ -68,6 +69,9 @@ export function QueueList({
   // order the engine indexes — move calls translate through
   // `item.index` / the displaced neighbor's slot.
   const items = queue.sections.flatMap((section) => section.items);
+  const sectionByKey = new Map(queue.sections.map((s) => [s.key, s]));
+  const upNextIds =
+    sectionByKey.get('upNext')?.items.map((item) => item.occurrenceId) ?? [];
   const upNextStart = items.findIndex((item) => item.section === 'upNext');
   const upNextEnd = items.findLastIndex((item) => item.section === 'upNext');
   const renderItem = ({
@@ -84,6 +88,17 @@ export function QueueList({
     <QueueRowChrome
       item={item}
       sectionStart={items[index - 1]?.section !== item.section}
+      sectionHeading={sectionByKey.get(item.section)?.heading}
+      clear={
+        item.section === 'upNext' &&
+        onClearUpcoming !== undefined &&
+        !reordering
+          ? {
+              label: t('queue.clearSection'),
+              onPress: () => onClearUpcoming(upNextIds),
+            }
+          : undefined
+      }
     >
       <TrackRow
         row={item.row}
@@ -100,7 +115,10 @@ export function QueueList({
             : () => onRowIntent(item.occurrenceId)
         }
         onRemove={
-          onRemoveItem === undefined || item.current || reordering
+          onRemoveItem === undefined ||
+          item.current ||
+          reordering ||
+          item.section === 'autoplay'
             ? undefined
             : () => onRemoveItem(item.occurrenceId)
         }
