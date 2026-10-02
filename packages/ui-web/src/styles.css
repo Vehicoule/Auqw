@@ -2743,6 +2743,29 @@
     max-width: none;
     z-index: 20;
   }
+
+  /* The overlaying column + scrim cover the world bar — frameless
+     builds lose their only drag surface. The chrome's grip div
+     takes the strip over: the stage reserves it outright so no
+     control sits under a drag rect (same reserve macOS's traffic
+     lights get), and the floating stop control opts out like the
+     world bar's own children. */
+  .uw-stage-col__body > .uw-stage {
+    padding-top: var(--uw-titlebar-h);
+  }
+
+  .uw-stage-drag {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--uw-titlebar-h);
+    -webkit-app-region: drag;
+  }
+
+  .uw-stage__stop {
+    -webkit-app-region: no-drag;
+  }
 }
 
 /* ---- stack ------------------------------------------------------------------ */

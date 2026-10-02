@@ -36,7 +36,11 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { useSharedValue } from 'react-native-reanimated';
+import Animated, {
+  useAnimatedProps,
+  useAnimatedStyle,
+  useSharedValue,
+} from 'react-native-reanimated';
 import {
   SafeAreaProvider,
   useSafeAreaInsets,
@@ -592,6 +596,23 @@ function Main({
         barHeight + theme.spacing.md + theme.sizes.miniPlayer;
     },
     [theme, stageCollapsedHeight],
+  );
+  // The update card drops out the same frame the stage sheet starts
+  // lifting and stays dead through the settle — gating on the shared
+  // morph progress (not the `expanded` commit) mirrors the sheet's
+  // own row/content gates.
+  const updateCardGateStyle = useAnimatedStyle(() => ({
+    opacity: stageProgress.value > 0.001 ? 0 : 1,
+  }));
+  const updateCardGateProps = useAnimatedProps(
+    () =>
+      ({
+        pointerEvents:
+          stageProgress.value > 0.001 ? 'none' : 'box-none',
+        accessibilityElementsHidden: stageProgress.value > 0.001,
+        importantForAccessibility:
+          stageProgress.value > 0.001 ? 'no-hide-descendants' : 'auto',
+      }) as const,
   );
 
   // Slice-4 sync surface — null on iOS or when bring-up failed. The
@@ -2553,28 +2574,32 @@ function Main({
               sheet owns the screen; the toast owns this slot only
               transiently. */}
           {updateCard !== null && !(expanded && sheetPlayer !== null) && (
-            <View
+            <Animated.View
               pointerEvents="box-none"
-              style={{
-                position: 'absolute',
-                left: 0,
-                right: 0,
-                bottom:
-                  tabBarHeight > 0
-                    ? tabBarHeight +
-                      theme.spacing.md +
-                      (sheetPlayer !== null
-                        ? theme.sizes.miniPlayer + theme.spacing.xs
-                        : 0)
-                    : insets.bottom + 88,
-              }}
+              animatedProps={updateCardGateProps}
+              style={[
+                {
+                  position: 'absolute',
+                  left: 0,
+                  right: 0,
+                  bottom:
+                    tabBarHeight > 0
+                      ? tabBarHeight +
+                        theme.spacing.md +
+                        (sheetPlayer !== null
+                          ? theme.sizes.miniPlayer + theme.spacing.xs
+                          : 0)
+                      : insets.bottom + 88,
+                },
+                updateCardGateStyle,
+              ]}
             >
               <UpdateCard
                 model={updateCard}
                 onAct={onUpdateBannerAct}
                 onDismiss={onUpdateBannerDismiss}
               />
-            </View>
+            </Animated.View>
           )}
           {toast !== null && (
             <View
