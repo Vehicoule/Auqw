@@ -751,9 +751,14 @@ export class SqliteStorage implements StoragePort {
         }
         for (const count of doc.playCounts) {
           await conn.execute(
-            `INSERT INTO play_counts (recording_id, count, last_ms)
-             VALUES (?, ?, ?)`,
-            [count.recordingId, count.count, count.lastMs],
+            `INSERT INTO play_counts (recording_id, count, last_ms, local_count)
+             VALUES (?, ?, ?, ?)`,
+            [
+              count.recordingId,
+              count.count,
+              count.lastMs,
+              count.localCount ?? null,
+            ],
             signal,
           );
         }
@@ -1147,10 +1152,16 @@ function decodeState(
   const playCounts: PlayCount[] = [];
   for (const row of rows.playCounts) {
     const count = keep('play_counts', keyOf(row['recording_id']), (t) => {
+      const local = row['local_count'];
       const candidate: PlayCount = {
         recordingId: t.reqStr(row['recording_id']),
         count: t.reqNonNegInt(row['count']),
         lastMs: t.reqNonNegInt(row['last_ms']),
+        // Pre-v13 rows carry NULL — the baseline is unknown there,
+        // not zero.
+        ...(local !== null && local !== undefined
+          ? { localCount: t.reqNonNegInt(local) }
+          : {}),
       };
       if (
         countedIds.has(candidate.recordingId) ||
