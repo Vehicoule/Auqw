@@ -645,11 +645,13 @@ None — the napi artifact is a local cargo build output.
 
 ## Engine internals + media-session OS surface (MPRIS) probes
 
-- The built bundle (`apps/desktop/dist/renderer/app.js`) is UNMINIFIED —
-  surgical `console.warn('parkdbg', ...)` probes straight into the dist
-  file (engine gates, publishMetadata, clearOsSurface stacks) are the
-  fastest way to trace engine internals on a shared worktree: no source
+- The built bundle (`apps/desktop/dist/renderer/app.js`) is MINIFIED
+  since #320 — one giant line, but `keepNames` preserved function
+  names, so surgical `console.warn('parkdbg', ...)` probes still work
+  by string-splicing next to a greppable symbol (e.g. `rg -o
+  'function publishMetadata' app.js` to locate the anchor): no source
   edits, wiped by the next rebuild (`pnpm --filter desktop build`).
+  Pre-#320 builds were unminified — same recipe, nicer anchor points.
 - Chromium deactivates `navigator.mediaSession` AT the element's `ended`
   event: the bus reads `Stopped` + `mpris:length=0` + `CanPlay=false`,
   `playerctl play` is refused, and neither `playbackState` writes,
@@ -713,12 +715,17 @@ None — the napi artifact is a local cargo build output.
   resident after the request (shared session engine).
 - On datacenter egress the mint ends in typed
   `{"error":"unavailable","message":"pot: no ytAtN challenge on
-  homepage"}` — the child fetched + DOM-parsed the YouTube homepage
-  (proof real jsdom ran inside it) but no BotGuard challenge was
-  served. That is the DESIGNED honest-degradation path — the utility
-  logs `pot: session build failed (…)` once, no crash. Distinguish
-  wiring bugs: they'd print `jsdom is not bundled in the utility
-  process` (stub throw, post-#320) or kill the utility.
+  homepage"}` — the child fetched + regex-parsed the homepage
+  (`challengeFromHomepage` matches `window.ytAtN(…)` in raw html — no
+  jsdom yet) but no BotGuard challenge was served. `new JSDOM` only
+  runs later in `botGuardSandbox`, so this response proves the child
+  fetched the page, NOT that its jsdom bundle works — that needs a
+  served challenge, or static proof: `pot-minter-child.cjs` is a
+  separate esbuild bundle the stub alias never touches (size ~6 MB
+  ≈ jsdom inside). That is the DESIGNED honest-degradation path — the
+  utility logs `pot: session build failed (…)` once, no crash.
+  Distinguish wiring bugs: they'd print `jsdom is not bundled in the
+  utility process` (stub throw, post-#320) or kill the utility.
 - youtube-music playback resolve does NOT depend on a successful
   mint — resolves/plays fine with the pot session unavailable.
 
