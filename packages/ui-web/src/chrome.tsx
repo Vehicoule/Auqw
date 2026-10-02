@@ -228,6 +228,12 @@ export function DesktopChrome({
     });
     observer.observe(bar);
     observer.observe(end);
+    // The tabs' width is an input to the predicate — locale switches
+    // widen labels without resizing anything observed.
+    const tabs = bar.querySelector('.uw-tabs');
+    if (tabs !== null) {
+      observer.observe(tabs);
+    }
     return () => observer.disconnect();
   }, []);
   useEffect(() => {
