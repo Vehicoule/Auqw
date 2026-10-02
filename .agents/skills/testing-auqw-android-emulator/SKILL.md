@@ -731,9 +731,98 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   surface can throw 'Maximum update depth exceeded' as a dismissable
   overlay; app state survives. Verify App.tsx blame before
   attributing.
+- **2026-10-02 depth-error hunt — NOT reproduced.** ~79 appActive
+  transitions across ~46 legs (SAF tree/file pickers grant+cancel,
+  export dir-picker, camera grant+deny, unknown-sources page direct +
+  in-app needs-permission, PackageInstaller sheet, dev menu, HOME,
+  screen off/on, recents, lyrics-open+playing, mid-morph, end-hold,
+  rapid-fire) produced ZERO 'Maximum update depth' in a full-session
+  logcat. TLOG markers (temporary `console.log` in
+  `subscribeAppActive`, strip before commit) show every surface return
+  is a clean `bg→active→bg` flap (~40-90 ms) + single `active` — the
+  flap itself is benign; the loop (if real) needs a state/race this
+  fixture doesn't build. Mechanism observed: picker OPEN produces a
+  ~50 ms `bg→active→bg` triple — the app briefly believes it's
+  foreground mid-transition.
+- **Found instead — deterministic removeViewAt hard-kill (3/3).**
+  KEYCODE_BACK while the stage sheet is expanded AND SETTLED throws
+  `java.lang.IllegalStateException: Unable to remove a view from a
+  view that is not a ViewGroup` at `SurfaceMountingManager.kt:444`
+  (Fabric mount dispatch inside `Choreographer.doFrame`) → redbox →
+  DISMISS leaves a DEAD SURFACE (white screen; JS still logs, SAF
+  intents fail `no-result`; only `am force-stop` recovers). BACK
+  mid-morph does NOT crash — it navigates cleanly; the sheet must
+  have settled to progress=1 first. This is a genuine stage-sheet
+  unmount-ordering bug, worse than the reported depth LogBox.
+- `input keyevent 82` (KEYCODE_MENU) opens the RN dev menu — a
+  deterministic extra OS surface; BACK dismisses it (does NOT flap
+  AppState — it's a dialog activity).
+- The RN "Open debugger to view warnings" toast's parent window spans
+  ~`[26,2016][1054,2348]` — it eats ALL taps on the update card's
+  action row (retry/dismiss at y2031-2146) AND the stage segment
+  pill. On this box it re-fires whenever the dev client can't reach
+  Metro (`Cannot connect to Expo CLI` via 10.0.2.2:8081 — the dev
+  client uses the emulator NAT alias, NOT adb reverse; the reverse
+  tunnel serves the JS bundle fine, this warning is cosmetic but its
+  window blocks UI). Dismiss via its X (~device 1000,2208) before
+  tapping anything in that band.
+- Update-seam checksums leg detail: `parseRelease` drops asset URLs
+  that aren't `https://` — a localhost-served SHA256SUMS is filtered
+  at parse time (fetchText itself would take it; the LIST parse is
+  the gate). Serving the REAL `releases.json` verbatim works because
+  abilist `x86_64,arm64-v8a` resolves the arm64 asset anyway — no
+  faked files needed. `appops set … REQUEST_INSTALL_PACKAGES deny`
+  before install lands needs-permission deterministically.
 - Fresh checkout needs, in order: `pnpm install --frozen-lockfile`,
   `pnpm sync-plugins`, `rustup target add x86_64-linux-android` +
   `tooling/build-android-bindings.sh` when
   `modules/auqw-expo/android/src/main/jniLibs/<abi>/libauqw_mobile_bindings.so`
   is absent, then `(cd apps/mobile && pnpm exec expo prebuild
   --platform android --no-install)` only when `android/` is missing.
+
+
+## Synced-lyrics fixture + boot wedges + removeViewAt mode-switch trigger (post-#312)
+
+- **Deterministic synced-lyrics fixture (no deezer needed):** tag a generated audio
+  file with an LRCLIB-known identity — e.g.
+  `ffmpeg -f lavfi -i "sine=frequency=440:duration=223" -metadata artist="Daft Punk"
+  -metadata title="One More Time" -metadata album="Discovery" -b:a 96k /tmp/omt.mp3`.
+  LRCLIB matches on title+artist+album+duration; the app-side acceptance filter rejects
+  sheets whose `matched.durationMs` differs from the recording's by >5 s
+  (`LYRICS_DURATION_DRIFT_MS=5000`), so pick a song whose LRCLIB `duration` is within
+  ~2 s of the file you generate. Push to the SAF-granted folder, rescan, search — the
+  local row shows, play it, lyrics pane renders `synced · lyrics-lrclib` timed lines
+  and the orange active line tracks position. Sine audio is fine — the pane only needs
+  timed lines + positionMs.
+- **Corrupt stored snapshot → `invalid-response` boot wedge:** the app can boot into a
+  full-screen `couldn't restore your library — got an unexpected reply — try again`
+  with `[auqw] local boot load failed: invalid-response` (storage-sqlite snapshot
+  validation fails; force-stops mid-write can tear a snapshot). `pm clear
+  com.vehicoule.auqw` is the reliable recovery, then re-grant SAF (`auqw://local-add`
+  → DocumentsUI `USE THIS FOLDER` → `ALLOW` at `[790,1325][968,1451]`) and reseed
+  fixtures. Also seen once: a different wedge where chrome (header+navbar) renders but
+  every tab body stays empty and search returns nothing — session never reaches ready;
+  force-stop+relaunch recovered. Retry taps on the error card did nothing observable.
+- **`auqw://play-result?i=N` can no-op:** the journey logs `[journey] play-result` but
+  `playMetadata(items,{startAt})` silently did not start playback in one session —
+  the search-row UI tap and the home `recently played` card are the reliable play paths.
+- **`auqw://search` at cold boot races:** booting directly into `am start -d
+  auqw://search?...` wrote the query into the field but results never rendered on that
+  boot (even after Enter, query nudges, re-fires — `[journey] search` logged, zero
+  results). Boot via `auqw://open` first, let it warm, then fire the search link — or
+  use UI taps.
+- **removeViewAt crash — more triggers on the settled expanded sheet:** beyond
+  KEYCODE_BACK (post-#299 finding), tapping a different `ModeSegmentPill` segment
+  (lyrics→player) on the settled lyrics pane also throws `IllegalStateException:
+  Unable to remove a view ... (ParentTag: 1402 - Tag: 1400)` → same redbox → dismiss →
+  dead white surface → force-stop. #311's pin-the-panes fix does NOT cover these paths
+  on the #312 build — BACK-collapse and mid-song mode-switch both fire it. A mid-song
+  tap that misses the pill hitbox does nothing (no switch, no crash); a landed tap
+  crashes. Track-end while the pane is open is also a plausible trigger (coincided with
+  one fire).
+- **First play after `pm clear` prompts POST_NOTIFICATIONS** ("Allow Auqw to send you
+  notifications?") — it overlays the UI; Allow at ~(540,1312).
+- **Mini-player expand doesn't register via `input tap`/`input swipe`** on this build —
+  taps on the mini bar body and fling swipes across it left it collapsed (no crash, no
+  expand). The expanded 'player' pane (WaveformSeek) is only reachable via the
+  crash-prone mode-switch until the unmount bug is fixed.
