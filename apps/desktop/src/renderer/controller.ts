@@ -87,11 +87,12 @@ export type SessionController = {
    * Re-loads persisted state into the media owners after a
    * whole-library replace (import): rebuilds the local source and
    * re-inits the download ledger so their rows can't go stale.
+   * A rebuild that lands on live folder grants over an empty file
+   * index re-arms the rescan itself — the scan can always be
+   * cancelled by a newer rebuild, so only the surviving instance may
+   * carry it.
    */
-  rehydrateMedia(
-    signal: CancellationSignal,
-    rescanEmptyIndex?: boolean,
-  ): Promise<void>;
+  rehydrateMedia(signal: CancellationSignal): Promise<void>;
   /**
    * Whole-library replace with the file plane drained first — a live
    * transfer runner would otherwise repersist a ledger row the import
@@ -399,7 +400,6 @@ export async function createSessionController(
   let rehydrateTail: Promise<unknown> = Promise.resolve();
   const doRehydrateMedia = async (
     signal: CancellationSignal,
-    rescanEmptyIndex: boolean,
   ): Promise<void> => {
     // Retire BEFORE the load: a scan committing between the snapshot
     // and the swap would land its files in storage but never in the
@@ -416,14 +416,21 @@ export async function createSessionController(
     });
     if (!loaded.ok && !signal.cancelled) {
       // A transient load failure must not strand intact rows — the
-      // superseded source is gone, so retry the snapshot once on a
-      // fresh signal. A cancelled caller bails without retrying:
-      // teardown owns that signal.
-      loaded = await storage.load({
-        requestId: ids.next('media-rehydrate'),
-        deadlineMs: clock.nowMs() + 30_000,
-        signal: new CancellationSource().signal,
-      });
+      // superseded source is gone, so retry the snapshot once. The
+      // retry is linked to the caller's signal so a cancel still
+      // releases the rehydrate tail instead of pinning every queued
+      // rebuild behind a load that can no longer land.
+      const retryGate = new CancellationSource();
+      const release = signal.subscribe(() => retryGate.cancel());
+      try {
+        loaded = await storage.load({
+          requestId: ids.next('media-rehydrate'),
+          deadlineMs: clock.nowMs() + 30_000,
+          signal: retryGate.signal,
+        });
+      } finally {
+        release();
+      }
     }
     if (!loaded.ok || signal.cancelled) {
       warn('media rehydrate skipped: storage load failed');
@@ -437,41 +444,46 @@ export async function createSessionController(
         recordings: loaded.value.recordings,
       },
     );
+    // Imported recordings replace prior local rows — the session
+    // re-merges provenance-local rows through this hook. Runs before
+    // the download-ledger init: an init failure must not starve the
+    // media merge of the rows the session already loaded.
+    void session.syncLocalRecordings(localSource.recordings());
+    if (
+      loaded.value.localSources.length > 0 &&
+      loaded.value.localFiles.length === 0
+    ) {
+      // Live folder grants over an empty file index mean the index
+      // was wiped (import replace) or its rescan died with a retired
+      // predecessor — either way this surviving instance re-arms it.
+      // The scan belongs to the instance, not the caller: retire()
+      // cancels it through the linked lifecycle signal.
+      const source = localSource;
+      void source
+        .rescan(undefined, new CancellationSource().signal)
+        .then((scanned) => {
+          if (!scanned.ok) {
+            warn(`local: empty-index rescan failed: ${scanned.error.kind}`);
+            return;
+          }
+          // A later rehydrate may have swapped the instance mid-flight
+          // — committing the captured one's snapshot would clobber rows
+          // it never saw (same guard as afterLocalMutation).
+          if (localSource === source) {
+            void session.syncLocalRecordings(source.recordings());
+          }
+        });
+    }
     const inited = await downloads.init(loaded.value.downloads, signal);
     if (!inited.ok) {
       warn(`download init failed: ${inited.error.kind}`);
       return;
     }
-    // Imported recordings replace prior local rows — the session
-    // re-merges provenance-local rows through this hook.
-    void session.syncLocalRecordings(localSource.recordings());
-    if (rescanEmptyIndex && loaded.value.localSources.length > 0) {
-      // The import wiped the file index while the folder grants
-      // survived — rescan rejoins the rows and re-extracts embedded
-      // covers; without it imported recordings keep blank art until
-      // a manual rescan.
-      const source = localSource;
-      void source.rescan(undefined, signal).then((scanned) => {
-        if (!scanned.ok) {
-          warn(`local: post-import rescan failed: ${scanned.error.kind}`);
-          return;
-        }
-        // A later rehydrate may have swapped the instance mid-flight
-        // — committing the captured one's snapshot would clobber rows
-        // it never saw (same guard as afterLocalMutation).
-        if (localSource === source) {
-          void session.syncLocalRecordings(source.recordings());
-        }
-      });
-    }
   };
   const rehydrateMedia = (
     signal: CancellationSignal,
-    rescanEmptyIndex = false,
   ): Promise<void> => {
-    const run = rehydrateTail.then(() =>
-      doRehydrateMedia(signal, rescanEmptyIndex),
-    );
+    const run = rehydrateTail.then(() => doRehydrateMedia(signal));
     // A throwing run must not poison the tail — the next queued
     // rehydrate still rebuilds in order.
     rehydrateTail = run.catch(() => undefined);
@@ -800,10 +812,8 @@ export async function createSessionController(
       localSource = null;
       const hadSource = superseded !== null;
       await superseded?.retire();
-      let importedOk = false;
       try {
         const imported = await session.importLibrary(text);
-        importedOk = imported.ok;
         if (imported.ok) {
           // The swap landed — delete the old ledger's files by their
           // captured paths. A failed import instead leaves the ledger
@@ -822,15 +832,12 @@ export async function createSessionController(
         // Whatever landed — success, or a storage failure — the
         // manager re-inits off the persisted ledger so it can never
         // sit stopped with a stale row map.
-        await rehydrateMedia(signal, importedOk);
+        await rehydrateMedia(signal);
         // A failed import plus a failed load (dead caller signal or a
         // transient error) must not strand the source slot null while
         // folder grants persist — retry the rebuild on a fresh signal.
         if (hadSource && localSource === null) {
-          await rehydrateMedia(
-            new CancellationSource().signal,
-            importedOk,
-          );
+          await rehydrateMedia(new CancellationSource().signal);
         }
       }
     },

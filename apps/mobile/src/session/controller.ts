@@ -169,10 +169,7 @@ export type SessionController = {
    * whole-library replace (import): rebuilds the local source and
    * re-inits the download ledger so their rows can't go stale.
    */
-  rehydrateMedia(
-    signal: CancellationSignal,
-    rescanEmptyIndex?: boolean,
-  ): Promise<void>;
+  rehydrateMedia(signal: CancellationSignal): Promise<void>;
   /**
    * Local-source-only variant: rebuilds `localSource` from persisted
    * rows and projects them into the session WITHOUT touching the
@@ -487,14 +484,21 @@ export async function createSessionController(
     });
     if (!loaded.ok && !signal.cancelled) {
       // A transient load failure must not strand intact rows — the
-      // superseded source is gone, so retry the snapshot once on a
-      // fresh signal. A cancelled caller bails without retrying:
-      // teardown owns that signal.
-      loaded = await storage.load({
-        requestId: ids.next('media-rehydrate'),
-        deadlineMs: clock.nowMs() + 30_000,
-        signal: new CancellationSource().signal,
-      });
+      // superseded source is gone, so retry the snapshot once. The
+      // retry is linked to the caller's signal so a cancel still
+      // releases the rehydrate tail instead of pinning every queued
+      // rebuild behind a load that can no longer land.
+      const retryGate = new CancellationSource();
+      const release = signal.subscribe(() => retryGate.cancel());
+      try {
+        loaded = await storage.load({
+          requestId: ids.next('media-rehydrate'),
+          deadlineMs: clock.nowMs() + 30_000,
+          signal: retryGate.signal,
+        });
+      } finally {
+        release();
+      }
     }
     if (!loaded.ok || signal.cancelled) {
       void log.write({
@@ -505,6 +509,35 @@ export async function createSessionController(
       return null;
     }
     localSource = buildLocalSource(loaded.value);
+    if (
+      loaded.value.localSources.length > 0 &&
+      loaded.value.localFiles.length === 0
+    ) {
+      // Live folder grants over an empty file index mean the index
+      // was wiped (import replace) or its rescan died with a retired
+      // predecessor — either way this surviving instance re-arms it.
+      // The scan belongs to the instance, not the caller: retire()
+      // cancels it through the linked lifecycle signal.
+      const source = localSource;
+      void source
+        .rescan(undefined, new CancellationSource().signal)
+        .then((scanned) => {
+          if (!scanned.ok) {
+            void log.write({
+              level: 'warn',
+              message: `local: empty-index rescan failed: ${scanned.error.kind}`,
+              atMs: clock.nowMs(),
+            });
+            return;
+          }
+          // A later rehydrate may have swapped the instance mid-flight
+          // — committing the captured one's snapshot would clobber rows
+          // it never saw (same guard as afterLocalMutation).
+          if (localSource === source) {
+            session.syncLocalRecordings(source.recordings());
+          }
+        });
+    }
     return loaded.value;
   };
   /**
@@ -520,14 +553,10 @@ export async function createSessionController(
     rehydrateTail = next.catch(() => undefined);
     return next;
   };
-  const rehydrateMedia = (
-    signal: CancellationSignal,
-    rescanEmptyIndex = false,
-  ): Promise<void> =>
-    serializeRehydrate(() => doRehydrateMedia(signal, rescanEmptyIndex));
+  const rehydrateMedia = (signal: CancellationSignal): Promise<void> =>
+    serializeRehydrate(() => doRehydrateMedia(signal));
   const doRehydrateMedia = async (
     signal: CancellationSignal,
-    rescanEmptyIndex: boolean,
   ): Promise<void> => {
     const loaded = await reloadLocalSource(signal);
     if (loaded === null) {
@@ -544,33 +573,6 @@ export async function createSessionController(
     // Imported recordings replace prior local rows — the session
     // re-merges provenance-local rows through this hook.
     session.syncLocalRecordings(localSource?.recordings() ?? []);
-    const source = localSource;
-    if (
-      rescanEmptyIndex &&
-      source !== null &&
-      loaded.localSources.length > 0
-    ) {
-      // The import wiped the file index while the folder grants
-      // survived — rescan rejoins the rows and re-extracts embedded
-      // covers; without it imported recordings keep blank art until
-      // a manual rescan.
-      void source.rescan(undefined, signal).then((scanned) => {
-        if (!scanned.ok) {
-          void log.write({
-            level: 'warn',
-            message: `local: post-import rescan failed: ${scanned.error.kind}`,
-            atMs: clock.nowMs(),
-          });
-          return;
-        }
-        // A later rehydrate may have swapped the instance mid-flight
-        // — committing the captured one's snapshot would clobber rows
-        // it never saw (same guard as afterLocalMutation).
-        if (localSource === source) {
-          session.syncLocalRecordings(source.recordings());
-        }
-      });
-    }
   };
   const rehydrateLocal = (signal: CancellationSignal): Promise<void> =>
     serializeRehydrate(async () => {
@@ -957,10 +959,8 @@ export async function createSessionController(
       localSource = null;
       const hadSource = superseded !== null;
       await superseded?.retire();
-      let importedOk = false;
       try {
         const imported = await session.importLibrary(text);
-        importedOk = imported.ok;
         if (imported.ok) {
           // Imported settings may name providers this bundle lacks or
           // ids whose manifests no longer declare the slot — reconcile
@@ -992,15 +992,12 @@ export async function createSessionController(
         // Whatever landed — success, or a storage failure — the
         // manager re-inits off the persisted ledger so it can never
         // sit stopped with a stale row map.
-        await rehydrateMedia(signal, importedOk);
+        await rehydrateMedia(signal);
         // A failed import plus a failed load (dead caller signal or a
         // transient error) must not strand the source slot null while
         // folder grants persist — retry the rebuild on a fresh signal.
         if (hadSource && localSource === null) {
-          await rehydrateMedia(
-            new CancellationSource().signal,
-            importedOk,
-          );
+          await rehydrateMedia(new CancellationSource().signal);
         }
       }
     },

@@ -101,6 +101,8 @@ type Rig = {
   tagreadEntries: LocalEntry[] | null;
   tagreadFingerprints: Map<string, string> | null;
   tagreadTags: Map<string, LocalTags> | null;
+  tagreadHoldEnumerate: boolean;
+  tagreadEnumerateResolvers: (() => void)[];
   transferStats: {
     readonly bytes: number;
     readonly files: number;
@@ -139,6 +141,8 @@ function fakeApi(): Rig {
     tagreadEntries: null,
     tagreadFingerprints: null,
     tagreadTags: null,
+    tagreadHoldEnumerate: false,
+    tagreadEnumerateResolvers: [],
     transferStats: { bytes: 0, files: 0, partials: 0, freeBytes: null },
     api: {
       app: {
@@ -264,6 +268,13 @@ function fakeApi(): Rig {
       tagread: {
         enumerate: (args: { readonly treeUri: string }) => {
           rig.tagreadEnumerated.push(args.treeUri);
+          if (rig.tagreadHoldEnumerate) {
+            return new Promise((resolve) => {
+              rig.tagreadEnumerateResolvers.push(() =>
+                resolve({ entries: rig.tagreadEntries ?? [] }),
+              );
+            });
+          }
           if (rig.tagreadEntries === null) {
             return Promise.resolve({ entries: [] });
           }
@@ -739,6 +750,13 @@ async function pump(): Promise<void> {
   }
 }
 
+function settleTagreadEnumerate(rig: Rig): void {
+  const resolvers = rig.tagreadEnumerateResolvers.splice(0);
+  for (const resolve of resolvers) {
+    resolve();
+  }
+}
+
 /** The prepare calls the player saw, newest last. */
 function prepareCalls(player: FakePlayer) {
   return player.calls.filter((c) => c.method === 'prepare');
@@ -1077,6 +1095,109 @@ async function replaceLibraryRescansSources(): Promise<void> {
   await controller.dispose();
 }
 
+// 17. A second rehydrate (the applied-sync path) landing while the
+// post-import rescan is in flight retires the scanning instance —
+// the replacement must re-derive the scan need from the empty file
+// index itself, or the session keeps artless imported rows forever.
+async function rehydrateDuringRescanReArms(): Promise<void> {
+  const rig = fakeApi();
+  const player = new FakePlayer();
+  const storage = new FakeStorage(
+    persisted({
+      recordings: [rec('rec-lf', 'local')],
+      localSources: [localSourceRow()],
+      localFiles: [localFileRow()],
+    }),
+  );
+  const entry: LocalEntry = {
+    docId: 'sub/rip.flac',
+    name: 'rip.flac',
+    size: 5,
+    mime: 'audio/flac',
+    modifiedMs: 2,
+  };
+  rig.tagreadEntries = [entry];
+  rig.tagreadFingerprints = new Map([[entry.docId, 'fp-rejoin']]);
+  rig.tagreadTags = new Map([
+    [
+      entry.docId,
+      {
+        docId: entry.docId,
+        title: 'Rejoined Rip',
+        artist: 'Ripper',
+        album: null,
+        durationMs: 3210,
+        genre: null,
+        artworkUri: 'file:///u/art/cover.png',
+      },
+    ],
+  ]);
+  const controller = await boot(rig.api, {
+    storage,
+    player,
+    providers: defaultProviders(),
+  });
+  const rigEmpty = fakeApi();
+  const empty = await boot(rigEmpty.api, {
+    storage: new FakeStorage(
+      persisted({ recordings: [rec('rec-dl', 'provider')] }),
+    ),
+    providers: defaultProviders(),
+  });
+  const exported = await empty.session.exportLibrary();
+  assert(exported.ok, 'export failed');
+  await empty.dispose();
+
+  // Hold the post-import rescan's enumerate open so the applied-sync
+  // rehydrate lands mid-flight and retires the scanning instance.
+  rig.tagreadHoldEnumerate = true;
+  const replaced = controller.replaceLibrary(
+    exported.value.json,
+    new CancellationSource().signal,
+  );
+  // replaceLibrary's finally awaits the rehydrate run — resolving it
+  // guarantees the rescan was scheduled (its enumerate is held open).
+  assert((await replaced).ok, 'replaceLibrary failed');
+  await pump();
+  assertEqual(
+    rig.tagreadEnumerated.length,
+    1,
+    'post-import rescan did not start',
+  );
+  const second = controller.rehydrateMedia(new CancellationSource().signal);
+  await pump();
+  // Retire cancels the in-flight scan through the linked lifecycle
+  // signal — the cancel wins over the held IPC, so the replacement
+  // rebuild proceeds, lands on the still-empty file index, and must
+  // re-arm the rescan itself (its enumerate is held open too).
+  assertEqual(
+    rig.tagreadEnumerated.length,
+    2,
+    'the replacement instance did not re-arm the rescan',
+  );
+  rig.tagreadHoldEnumerate = false;
+  settleTagreadEnumerate(rig);
+  await second;
+  await pump(); // the re-armed rescan commits + merges into the session
+  const snap = controller.session.snapshot();
+  assertEqual(snap.type, 'ready');
+  if (snap.type !== 'ready') {
+    return;
+  }
+  const rejoined = snap.recordings.find((r) => r.title === 'Rejoined Rip');
+  assert(
+    rejoined !== undefined,
+    're-armed rescan did not mint the recording into the session',
+  );
+  assertDeepEqual(
+    rejoined.artwork,
+    [{ url: 'file:///u/art/cover.png', width: null, height: null }],
+    'session recording lost the re-extracted cover',
+  );
+  player.cancelPendingPrepares();
+  await controller.dispose();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['providersFromManifests', providersFromManifests],
   ['unavailableBindings', unavailableBindings],
@@ -1094,6 +1215,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['localPlaybackProbe', localPlaybackProbe],
   ['replaceLibraryDrainsDownloads', replaceLibraryDrainsDownloads],
   ['replaceLibraryRescansSources', replaceLibraryRescansSources],
+  ['rehydrateDuringRescanReArms', rehydrateDuringRescanReArms],
 ];
 
 export async function run(): Promise<void> {
