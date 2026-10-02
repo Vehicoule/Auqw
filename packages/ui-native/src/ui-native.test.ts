@@ -25,6 +25,7 @@ import type {
   PlaylistEntry,
   Recording,
   SourceRef,
+  TrackMetadata,
 } from '@auqw/application';
 import {
   assert,
@@ -1185,6 +1186,91 @@ function testSearchStates(): void {
   }
 }
 
+/**
+ * Listings a user cannot tell apart — same song under several ids —
+ * render once per surface while keeping their original page index
+ * so row keys still resolve back to the pressed item's metadata.
+ */
+function testListingDedupe(): void {
+  const meta = (id: string, title: string): TrackMetadata => ({
+    sourceRef: { provider: 'youtube-music', kind: 'track', id },
+    title,
+    artist: 'Portishead',
+    album: 'Dummy',
+    durationMs: 302_000,
+    releaseYear: 1994,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    storefront: 'AU',
+  });
+  const items: TrackMetadata[] = [
+    meta('ytm-a', 'Roads'),
+    meta('ytm-b', 'Roads - Topic'),
+    meta('ytm-c', 'Roads (Official Video)'),
+    meta('ytm-d', 'Glory Box'),
+  ];
+  const search = toSearchModel(
+    {
+      type: 'content',
+      revision: 1,
+      query: 'roads',
+      page: { items, storefront: null },
+    },
+    null,
+  );
+  assertEqual(
+    search.results.length,
+    2,
+    'three indistinguishable listings render as one row',
+  );
+  assertEqual(search.results[0]?.key, 'youtube-music:ytm-a:0');
+  assertEqual(search.results[1]?.key, 'youtube-music:ytm-d:3');
+  const entity = toEntityModel({
+    page: {
+      entity: {
+        sourceRef: { provider: 'youtube-music', kind: 'album', id: 'dummy' },
+        kind: 'album',
+        title: 'Dummy',
+        subtitle: 'Portishead',
+        artwork: [],
+      },
+      items,
+      complete: true,
+      continuation: null,
+    },
+    error: null,
+    likes: fixtureLikes,
+    entitySourceRefs: [],
+  });
+  assertEqual(
+    entity.items.length,
+    2,
+    'entity pages drop look-alike rows the same way',
+  );
+  // Genuinely different rows — a distinct artist — always survive.
+  const searchTwo = toSearchModel(
+    {
+      type: 'content',
+      revision: 2,
+      query: 'intro',
+      page: {
+        items: [
+          { ...meta('ytm-e', 'Intro'), artist: 'Band A' },
+          { ...meta('ytm-f', 'Intro'), artist: 'Band B' },
+        ],
+        storefront: null,
+      },
+    },
+    null,
+  );
+  assertEqual(
+    searchTwo.results.length,
+    2,
+    'same-name rows by different artists stay distinct',
+  );
+}
+
 function sheetOf(kind: LyricsSheet['kind']): LyricsSheet {
   const base = {
     provider: 'lyrics-lrclib',
@@ -1637,6 +1723,7 @@ testEntityModel();
 testPlaylistMembership();
 testHomeAndNav();
 testSearchStates();
+testListingDedupe();
 testLyricsModel();
 testRadioModel();
 testCorrectionsModel();

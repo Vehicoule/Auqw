@@ -10,14 +10,17 @@ import {
   hasExactKeys,
   isRecord,
   isTrackMetadata,
+  LOCAL_PROVIDER,
   mergeRecordingMetadata,
   recordingFromMetadata,
 } from '../domain.ts';
 import type { AppError } from '../errors.ts';
 import {
+  cleanerTitle,
   collapseByRef,
   MatchingEngine,
   refKey,
+  sameSongIdentity,
 } from '../matching/matching-engine.ts';
 import type { RadioPage } from '../ports/provider.ts';
 import type { IdPort } from '../ports/runtime.ts';
@@ -307,7 +310,18 @@ export function planRadioPage(
     if (queuedRefs.has(key)) {
       continue;
     }
-    const found = recByRef.get(key);
+    const byRef = recByRef.get(key);
+    // Content identity joins a suggestion naming a song the library
+    // already holds under a different ref — the tail then fills with
+    // distinct songs instead of the same recording re-uploaded.
+    const found =
+      byRef ??
+      (item.sourceRef.provider === LOCAL_PROVIDER
+        ? undefined
+        : [...working.values()].find(
+            (rec) =>
+              rec.provenance === 'provider' && sameSongIdentity(rec, item),
+          ));
     if (found !== undefined && queuedRecordingIds.has(found.id)) {
       continue;
     }
@@ -322,7 +336,25 @@ export function planRadioPage(
       if (mapped === null) {
         continue;
       }
-      rec = mergeRecordingMetadata(mapped, item);
+      const merged = mergeRecordingMetadata(mapped, item);
+      // A content join keeps the canonical title with its own
+      // labels/explicit; a same-ref refresh takes the item verbatim.
+      const title =
+        byRef === undefined
+          ? cleanerTitle(current.title, item.title)
+          : merged.title;
+      const titled =
+        byRef === undefined && title === current.title
+          ? {
+              ...merged,
+              title,
+              explicit: current.explicit,
+              versionLabels: current.versionLabels,
+            }
+          : { ...merged, title };
+      rec = titled.sourceRefs.some((s) => sameRef(s, item.sourceRef))
+        ? titled
+        : { ...titled, sourceRefs: [...titled.sourceRefs, item.sourceRef] };
     } else {
       const minted = withProviderMapping(
         recordingFromMetadata(item, ids.next('rec')),

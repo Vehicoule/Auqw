@@ -35,6 +35,7 @@ import type {
 } from '@auqw/application';
 import {
   ARTWORK_CACHE_BUDGET_DEFAULT_BYTES,
+  displayIdentityKey,
   isBotCheckWall,
   matchDisplayKey,
   topPlayed,
@@ -1690,7 +1691,7 @@ export function toEntityModel(input: {
     complete: page.complete,
     liked,
     canLike: entityId !== null,
-    items: page.items.map((meta, index) =>
+    items: dedupeTrackListings(page.items).map(({ meta, index }) =>
       toSearchRowModel(
         meta,
         index,
@@ -1703,6 +1704,33 @@ export function toEntityModel(input: {
     // A refresh error while content stays surfaces as a flagged note.
     message: errorText(error),
   };
+}
+
+/**
+ * Drops provider listings a user cannot tell apart — same analyzed
+ * song title, artist, and whole-second duration under different ids
+ * — keeping the first (provider-relevance order) of each group. The
+ * surviving rows carry their ORIGINAL page index: row keys embed it,
+ * and callers' key→metadata lookup maps still resolve the press.
+ */
+export function dedupeTrackListings(
+  items: readonly TrackMetadata[],
+): readonly { meta: TrackMetadata; index: number }[] {
+  const seen = new Set<string>();
+  const kept: { meta: TrackMetadata; index: number }[] = [];
+  items.forEach((meta, index) => {
+    const key = displayIdentityKey({
+      provider: meta.sourceRef.provider,
+      title: meta.title,
+      artist: meta.artist,
+      durationMs: meta.durationMs,
+    });
+    if (!seen.has(key)) {
+      seen.add(key);
+      kept.push({ meta, index });
+    }
+  });
+  return kept;
 }
 
 export function toRailCard(recording: Recording): RailCardModel {
@@ -1752,12 +1780,14 @@ export function toHomeModel(input: {
     .sort((a, b) => b.playedMs - a.playedMs || b.at - a.at)
     .slice(0, 12)
     .map((entry) => toRailCard(entry.recording));
-  const suggestions = input.suggestions.slice(0, 12).map((metadata) => ({
-    key: `${metadata.sourceRef.provider}:${metadata.sourceRef.id}`,
-    title: metadata.title,
-    subtitle: metadata.artist,
-    artworkUrl: pickArtworkUrl(metadata.artwork),
-  }));
+  const suggestions = dedupeTrackListings(input.suggestions)
+    .slice(0, 12)
+    .map(({ meta: metadata }) => ({
+      key: `${metadata.sourceRef.provider}:${metadata.sourceRef.id}`,
+      title: metadata.title,
+      subtitle: metadata.artist,
+      artworkUrl: pickArtworkUrl(metadata.artwork),
+    }));
   const paused =
     input.playback.type === 'paused' ? input.playback : null;
   const resumeRecording =

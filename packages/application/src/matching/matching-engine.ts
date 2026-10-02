@@ -44,6 +44,7 @@ const LABEL_TOKEN: ReadonlyMap<string, VersionLabel> = new Map([
 ]);
 
 // Tokens that are never meaningful title content on their own.
+// 'topic' is the auto-upload channel suffix ('Song - Topic').
 const FURNITURE: ReadonlySet<string> = new Set([
   ...LABEL_TOKEN.keys(),
   'alt',
@@ -54,6 +55,7 @@ const FURNITURE: ReadonlySet<string> = new Set([
   'audio',
   'feat',
   'ft',
+  'topic',
 ]);
 
 function tokenize(text: string): string[] {
@@ -316,6 +318,98 @@ function displayKey(candidate: MatchCandidate): string {
   });
 }
 
+/**
+ * The fields a recording-identity verdict reads — a subset both
+ * `Recording` and `TrackMetadata` satisfy.
+ */
+export type IdentityFields = {
+  readonly title: string;
+  readonly artist: string | null;
+  readonly durationMs: number | null;
+  readonly isrc?: string | null;
+};
+
+const SAME_SONG_ARTIST_SIM = 0.85;
+const SAME_SONG_DURATION_MS = 2500;
+
+/**
+ * Whether two records describe the same recording of a song — the
+ * question a catalog asks when it lists one song under several ids
+ * (album audio, topic upload, music video, re-upload). A same-song
+ * group is one choice wearing several keys: picking between members
+ * carries no information, so callers collapse them instead of
+ * asking.
+ *
+ * ISRC is decisive either way: equal codes are the same recording
+ * id industry-wide, different ones are different recordings (a
+ * remaster earns its own ISRC) even when the listings' metadata
+ * reads identically. Without a usable ISRC pair the verdict needs
+ * the analyzed title base (version-label/furniture tokens stripped)
+ * plus at least one corroborating axis — a similar artist credit or
+ * a duration inside ~2.5 s. Title alone never merges: two artists'
+ * 'Intro' rows are different songs the metadata cannot tell apart.
+ */
+export function sameSongIdentity(a: IdentityFields, b: IdentityFields): boolean {
+  const isrcA = a.isrc?.trim().toLowerCase();
+  const isrcB = b.isrc?.trim().toLowerCase();
+  if (isrcA !== undefined && isrcA !== '' && isrcB !== undefined && isrcB !== '') {
+    return isrcA === isrcB;
+  }
+  if (analyzeTitle(a.title).base !== analyzeTitle(b.title).base) {
+    return false;
+  }
+  const artistKnown = a.artist !== null && b.artist !== null;
+  const durationKnown = a.durationMs !== null && b.durationMs !== null;
+  if (!artistKnown && !durationKnown) {
+    return false;
+  }
+  if (
+    artistKnown &&
+    bestArtistSimilarity(a.artist, b.artist) < SAME_SONG_ARTIST_SIM
+  ) {
+    return false;
+  }
+  if (
+    durationKnown &&
+    Math.abs(a.durationMs - b.durationMs) > SAME_SONG_DURATION_MS
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * The key `matchDisplayKey` would emit had the title been the
+ * analyzed base: identical listings collapse, and so do listings
+ * whose only difference is version furniture ('(Official Video)',
+ * '- Topic', feat suffixes) — the difference a user can't act on.
+ * Distinct durations and artists still hold rows apart.
+ */
+export function displayIdentityKey(candidate: {
+  readonly provider: string;
+  readonly title: string;
+  readonly artist: string | null;
+  readonly durationMs: number | null;
+}): string {
+  return [
+    candidate.provider,
+    analyzeTitle(candidate.title).base,
+    normalizeFree(candidate.artist ?? ''),
+    candidate.durationMs === null || !Number.isFinite(candidate.durationMs)
+      ? ''
+      : Math.floor(candidate.durationMs / 1000).toString(),
+  ].join('\u001f');
+}
+
+/**
+ * The less decorated of two same-song listing titles — 'Sunset' over
+ * 'Sunset - Topic' or 'Sunset (Official Video)'. Same-song merges
+ * keep it so the canonical name outlives the noisier listings.
+ */
+export function cleanerTitle(a: string, b: string): string {
+  return normalizeFree(a).length <= normalizeFree(b).length ? a : b;
+}
+
 type Scored = {
   readonly candidate: MatchCandidate;
   readonly evidence: MatchEvidence;
@@ -398,6 +492,21 @@ export class MatchingEngine {
       return { type: 'matched', candidate: top.candidate, evidence: top.evidence };
     }
     if (top.evidence.score >= 65 && margin < 7) {
+      // A near-tie made only of same-song listings is one choice
+      // wearing several provider ids — the album audio, the topic
+      // upload, the video. Parking it for the user asks a question
+      // the rows cannot answer, so the best-scored member wins.
+      if (
+        distinct
+          .slice(1)
+          .every((s) => sameSongIdentity(top.candidate, s.candidate))
+      ) {
+        return {
+          type: 'matched',
+          candidate: top.candidate,
+          evidence: top.evidence,
+        };
+      }
       // The review parks every near-tie member — not just the display
       // representatives — because a reject vetoes each parked ref and
       // a hidden duplicate surviving the veto would auto-match on the
