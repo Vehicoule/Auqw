@@ -6064,6 +6064,81 @@ async function streamsCappedTransientHopsToAlternate(): Promise<void> {
   assertEqual(readyOf(r).playback.type, 'buffering');
 }
 
+/** A weather-refusal veto (capped mint) expires — after the TTL a
+ *  fresh intent re-mints the same video instead of keeping it dead
+ *  for the whole session. */
+async function weatherDeadRefVetoExpires(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('o1');
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  const capped = appError(
+    'transient',
+    'guest failure (transient): transient: streams-capped',
+  );
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-p1',
+    identity,
+    outcome: { type: 'failed', error: capped, attempt: TRACE },
+  });
+  await pump();
+  // Weather keeps its same-ref retry — advance into it.
+  r.clock.advance(400);
+  await pump();
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-p2',
+    identity: lastPrepareIdentity(r),
+    outcome: { type: 'failed', error: capped, attempt: TRACE },
+  });
+  await pump();
+  // The hop finds no alternates — the row marks failed with the veto set.
+  if (r.ytm.pendingCount('candidates') > 0) {
+    r.ytm.settleCandidatesAt(r.ytm.pendingCount('candidates') - 1, ok([]));
+    await pump();
+  }
+  assertEqual(readyOf(r).playback.type, 'failed', 'capped refusal is terminal');
+  r.player.settlePrepare(ok('req-sup1'));
+  r.player.settlePrepare(ok('req-sup2'));
+  assert(!(await playing).ok);
+  // Inside the TTL the same video stays vetoed — a retry hops, not re-mints.
+  const early = r.session.playOccurrence('o1');
+  await pump();
+  assertEqual(
+    r.ytm.pendingCount('candidates'),
+    1,
+    'vetoed ref forces a re-match',
+  );
+  r.ytm.settleCandidates(ok([]));
+  await pump();
+  assert(!(await early).ok, 'vetoed retry fails without alternates');
+  // Past the TTL the veto lifts — a fresh intent re-mints the video.
+  r.clock.advance(15 * 60_000 + 1_000);
+  const retry = r.session.playOccurrence('o1');
+  await pump();
+  const preps = calls(r, 'prepare');
+  const lastInput = preps.at(-1)?.input as { sourceRef?: string } | undefined;
+  assertEqual(lastInput?.sourceRef, 'y1', 'expired veto re-mints the video');
+  const idB = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(idB, 'h-y1'));
+  await pump();
+  assert(r.player.settlePrepare(ok('req-y1')), 're-mint prepare pending');
+  assert((await retry).ok, 're-mint plays after veto expiry');
+}
+
 /** A re-match that only offers the dead ref fails with the ORIGINAL
  *  refusal verdict — the veto proves the same video can't replay. */
 async function deadRefMatchSkipsVeto(): Promise<void> {
@@ -7909,6 +7984,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
     'streamsCappedTransientHopsToAlternate',
     streamsCappedTransientHopsToAlternate,
   ],
+  ['weatherDeadRefVetoExpires', weatherDeadRefVetoExpires],
   ['deadRefMatchSkipsVeto', deadRefMatchSkipsVeto],
   ['pauseDuringRetryBackoff', pauseDuringRetryBackoff],
   ['releaseRetry', releaseRetry],

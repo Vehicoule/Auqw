@@ -102,6 +102,15 @@ const REF_SCOPED_REFUSAL_KINDS: ReadonlySet<ErrorKind> = new Set([
 const ALTERNATE_REF_BUDGET = 3;
 /** The session dead-ref list evicts its oldest entry past this size. */
 const DEAD_REF_CAP = 64;
+/**
+ * A weather-class refusal (bot wall, capped mint) vetoes the video
+ * only this long — the verdict is per-mint stochastic and the
+ * serving edge recovers, so a later ordinary intent earns a fresh
+ * ladder. Permanent verdicts (`unavailable`, `auth-required`,
+ * `unsupported`, `expired-resource`, `streams-capped`) keep the
+ * session-long veto: the video itself was condemned.
+ */
+const WEATHER_DEAD_REF_TTL_MS = 15 * 60_000;
 /** The synthetic veto's evidence — the veto carries the verdict, not a score. */
 const DEAD_REF_EVIDENCE: MatchEvidence = {
   titleSimilarity: 0,
@@ -675,7 +684,10 @@ export class PlaybackEngine {
    * refusal proves the video dead, never the pairing wrong, so it is
    * never persisted as a 'rejected' mapping. Insertion-ordered.
    */
-  readonly #deadSourceRefs = new Map<string, SourceRef>();
+  readonly #deadSourceRefs = new Map<
+    string,
+    { readonly ref: SourceRef; readonly expiresAtMs: number | null }
+  >();
   /**
    * The candidates list an intent's alternate hops re-match — one
    * search serves every hop for the row, so a dead first match costs
@@ -1349,7 +1361,7 @@ export class PlaybackEngine {
     if (
       ref !== null &&
       ref.provider !== LOCAL_PROVIDER &&
-      this.#deadSourceRefs.has(refKey(ref))
+      this.#liveDeadRefKeys().has(refKey(ref))
     ) {
       // The session already proved this ref won't play — a stored
       // pick (pin or effective mapping) naming it must fall through
@@ -2017,16 +2029,41 @@ export class PlaybackEngine {
    * `match` vetoes. Insertion order is the eviction order; the cap
    * bounds the list to a session's plausible failures.
    */
-  #markSourceRefDead(ref: SourceRef): void {
+  #markSourceRefDead(ref: SourceRef, ttlMs?: number): void {
     const key = refKey(ref);
+    const now = ttlMs === undefined ? null : this.#host.safeNow();
     this.#deadSourceRefs.delete(key);
-    this.#deadSourceRefs.set(key, ref);
+    this.#deadSourceRefs.set(key, {
+      ref,
+      // A live clock stamps the expiry; a dead one keeps the veto
+      // session-long rather than guessing.
+      expiresAtMs:
+        now === null ? null : saturatingAdd(now, ttlMs ?? 0),
+    });
     if (this.#deadSourceRefs.size > DEAD_REF_CAP) {
       const oldest = this.#deadSourceRefs.keys().next().value;
       if (oldest !== undefined) {
         this.#deadSourceRefs.delete(oldest);
       }
     }
+  }
+
+  /** Dead-ref keys still in force — expired weather vetoes drop out. */
+  #liveDeadRefKeys(): Set<string> {
+    const now = this.#host.safeNow();
+    const keys = new Set<string>();
+    for (const [key, entry] of this.#deadSourceRefs) {
+      if (
+        now !== null &&
+        entry.expiresAtMs !== null &&
+        entry.expiresAtMs <= now
+      ) {
+        this.#deadSourceRefs.delete(key);
+      } else {
+        keys.add(key);
+      }
+    }
+    return keys;
   }
 
   /**
@@ -2038,7 +2075,11 @@ export class PlaybackEngine {
    */
   #deadVetoes(provider?: string): SourceMapping[] {
     const vetoes: SourceMapping[] = [];
-    for (const ref of this.#deadSourceRefs.values()) {
+    const live = this.#liveDeadRefKeys();
+    for (const [key, { ref }] of this.#deadSourceRefs) {
+      if (!live.has(key)) {
+        continue;
+      }
       if (provider === undefined || ref.provider === provider) {
         vetoes.push({
           ref,
@@ -2089,7 +2130,12 @@ export class PlaybackEngine {
     if (now === null || attempt.deadlineMs - now <= AUTO_RETRY_MIN_BUDGET_MS) {
       return false;
     }
-    this.#markSourceRefDead(ref);
+    this.#markSourceRefDead(
+      ref,
+      isBotCheckWall(error) || isStreamsCappedTransient(error)
+        ? WEATHER_DEAD_REF_TTL_MS
+        : undefined,
+    );
     attempt.terminalError ??= error;
     // Arm the chain BEFORE cancelling this source: a frame waking on
     // the cancel must already see `chain` and await the verdict —
