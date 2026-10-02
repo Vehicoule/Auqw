@@ -19,6 +19,40 @@ export function quadPath(quad: Quad): string {
   return `M${quad.xs[0]} ${quad.ys[0]}L${quad.xs[1]} ${quad.ys[1]}L${quad.xs[2]} ${quad.ys[2]}L${quad.xs[3]} ${quad.ys[3]}Z`;
 }
 
+const lerp = (from: number, to: number, t: number): number =>
+  from + (to - from) * t;
+
+function morphQuad(from: Quad, to: Quad, amount: number): Quad {
+  const t = Math.min(1, Math.max(0, amount));
+  return {
+    xs: [
+      lerp(from.xs[0], to.xs[0], t),
+      lerp(from.xs[1], to.xs[1], t),
+      lerp(from.xs[2], to.xs[2], t),
+      lerp(from.xs[3], to.xs[3], t),
+    ],
+    ys: [
+      lerp(from.ys[0], to.ys[0], t),
+      lerp(from.ys[1], to.ys[1], t),
+      lerp(from.ys[2], to.ys[2], t),
+      lerp(from.ys[3], to.ys[3], t),
+    ],
+  };
+}
+
+/** Play → pause vertex interpolation, `amount` 0 (play) → 1 (pause).
+    The web driver tweens it per frame via rAF; native keeps a
+    workletized twin in `ui-native/motion.ts` for shared values. */
+export function morphPlayPause(amount: number): {
+  readonly left: Quad;
+  readonly right: Quad;
+} {
+  return {
+    left: morphQuad(PLAY_LEFT, PAUSE_LEFT, amount),
+    right: morphQuad(PLAY_RIGHT, PAUSE_RIGHT, amount),
+  };
+}
+
 export type ProgressPathState = {
   readonly dashLength: number;
   readonly dashOffset: number;
