@@ -733,6 +733,9 @@ function Main({
   const ports = useMemo<AppShellPorts<Overlay>>(
     () => ({
       subscribeOnline: controller.subscribeOnline,
+      // Local index rows merge into the catalog search surface —
+      // provenance 'local' hits rank ahead of provider results.
+      localCatalog: true,
       // Foreground edges drive the shell's appActive gate — a hidden
       // window's lyrics clock stops ticking (Chromium throttles the
       // timer anyway; this skips the reconciler work it would wake).
