@@ -157,5 +157,15 @@ export async function applyImport(
   doc: ExportDocument,
   context: OperationContext,
 ): Promise<Result<void>> {
-  return storage.importOwned(doc, context);
+  const owned: ExportDocument = {
+    ...doc,
+    // An imported document's plays were committed elsewhere — its
+    // localCount must not become this device's baseline, or emit
+    // recovery would attribute foreign plays to this device's 'sum'
+    // component and count them twice on the wire.
+    playCounts: doc.playCounts.map(
+      ({ localCount: _imported, ...count }) => count,
+    ),
+  };
+  return storage.importOwned(owned, context);
 }

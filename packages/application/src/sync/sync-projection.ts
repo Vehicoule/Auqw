@@ -897,9 +897,19 @@ export function unsyncedWrites(
       const ours = evidence.components
         .get(`${write.kind}${KEY_SEP}${write.recordId}`)
         ?.[write.field]?.[evidence.deviceId];
+      // Only the headroom under the wire bound is stampable — a
+      // target beyond it clamps on emit, so the stamped component
+      // can never reach the raw target; comparing against the
+      // stampable bound closes what would be a boot-time replay
+      // loop on near-saturated counts.
+      const headroom = Number.MAX_SAFE_INTEGER - remoteShare(evidence, write);
       return (
         ours !== undefined &&
-        ours >= sumDeliveryTarget(write, input, synced, evidence)
+        ours >=
+          Math.min(
+            sumDeliveryTarget(write, input, synced, evidence),
+            headroom,
+          )
       );
     }
     if (merge === 'max' && typeof write.value === 'number') {

@@ -1828,6 +1828,37 @@ function testUnsyncedWrites(): void {
     'target plus remote share saturates at the wire bound',
   );
 
+  // Near-saturated: once our component is stamped to the headroom
+  // the wire bound leaves, it is delivered — the raw target is
+  // unreachable and the check must not replay it on every boot.
+  const nearSaturated = unsyncedWrites(
+    emitInput({
+      playCounts: [
+        {
+          recordingId: 'r-1',
+          count: Number.MAX_SAFE_INTEGER,
+          lastMs: 9,
+          localCount: 5,
+        },
+      ],
+    }),
+    new Map([
+      ['playCountr-1', { count: Number.MAX_SAFE_INTEGER }],
+    ]),
+    evidence({
+      'playCountr-1': {
+        count: { [DEV]: 2, 'peer-x': Number.MAX_SAFE_INTEGER - 2 },
+      },
+    }),
+  );
+  assert(
+    !nearSaturated.some(
+      (w) =>
+        w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'a component stamped to the headroom stays delivered',
+  );
+
   // A tombstoned synced record (empty fields) counts as absent —
   // the local row re-emits whole.
   const tombstoned = syncedMap(allWrites);

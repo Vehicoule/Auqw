@@ -169,7 +169,7 @@ const SEEDED: PersistedState = persisted({
       listenedMs: 200_000,
     },
   ],
-  playCounts: [{ recordingId: 'r1', count: 3, lastMs: 50 }],
+  playCounts: [{ recordingId: 'r1', count: 3, lastMs: 50, localCount: 3 }],
   matchReviews: [],
 });
 
@@ -317,6 +317,12 @@ async function applyReplaces(): Promise<void> {
   assertDeepEqual(loaded.value.likes, SEEDED.likes);
   assertDeepEqual(loaded.value.playlists, SEEDED.playlists);
   assertDeepEqual(loaded.value.playlistEntries, SEEDED.playlistEntries);
+  // An imported document's plays were committed elsewhere — the
+  // local baseline never transfers, or the importer would claim
+  // foreign plays as its own 'sum' component.
+  assertDeepEqual(loaded.value.playCounts, [
+    { recordingId: 'r1', count: 3, lastMs: 50 },
+  ]);
 }
 
 // 5. Session import: valid document applies and rehydrates the session.
