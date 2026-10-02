@@ -417,9 +417,9 @@
     mask-image:linear-gradient(to bottom,transparent 50%,rgba(0,0,0,.55) 72%,#000 90%),
       linear-gradient(to right,#000 calc(100% - 44px),transparent);
     mask-composite:intersect}
-  /* and the column's own base stays transparent under the bleed — the
-     sidebar tint + frost show through where the art dissolves */
-  .win .immersive{background:transparent}
+  /* and the column's own base keeps only the sidebar tint under the
+     bleed — it frosts through where the art dissolves */
+  .win .immersive{background:color-mix(in srgb,var(--bg-stage) 84%,transparent)}
   .immersive .sheet-frost{z-index:1;filter:blur(36px);
     mask-image:linear-gradient(transparent 50%,rgba(0,0,0,.55) 72%,#000 90%)}
   .immersive .sheet-scrim{z-index:2;
