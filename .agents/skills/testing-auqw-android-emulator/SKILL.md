@@ -846,4 +846,4 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
 ## Theme switching on-device (post-#314 palette legs)
 
 - Pure `input tap` flow, no CDP: settings tab → 'theme' row (~[76,374][798,424]) → scheme cards at fixed bounds on the 1080×2400 device — system/adaptive ~y1580, dark/light ~y1920, oled ~y2235.
-- The scheme applies live on selection — verify by screencap palette (e.g. OLED canvas stays pure black vs the GTK charcoal dark), or `uiautomator dump` for the selected card's checked state.
+- The scheme applies live on selection — verify by screencap palette (e.g. OLED canvas stays pure black vs the GTK charcoal dark), or `uiautomator dump` for the active card's `selected` state.
