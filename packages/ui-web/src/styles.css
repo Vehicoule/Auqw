@@ -463,7 +463,7 @@
   pointer-events: none;
 }
 
-.ui-web:not([data-reduced-motion='true']) .uw-heart--filled::after {
+.ui-web:not([data-reduced-motion='true']) .uw-heart--burst::after {
   animation: uw-heart-burst var(--motion-state) ease-out;
 }
 
@@ -2334,19 +2334,33 @@
 }
 
 /* Ghost-sized label stack: every candidate label shares the cell, so
-   the widest one sets the pill's width before it ever renders live. */
+   the widest one sets the pill's width before it ever renders live.
+   Bounded at 220px — a runaway status string ellipsizes instead of
+   stretching the pill. */
 .uw-stage__radio-labels {
   display: grid;
   align-items: center;
+  max-width: 220px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .uw-stage__radio-labels > * {
   grid-area: 1 / 1;
   justify-self: center;
+  min-width: 0;
 }
 
 .uw-stage__radio-ghost {
   visibility: hidden;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.uw-stage__radio-live {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .uw-stage__queue {

@@ -682,9 +682,24 @@ export function HeartIcon({
   readonly size?: number | undefined;
   readonly color?: string | undefined;
 }) {
+  // The burst ring only runs on a post-mount false→true transition —
+  // an already-filled heart mounting must not replay the animation.
+  const [burst, setBurst] = useState(false);
+  const prevFilled = useRef(filled);
+  useEffect(() => {
+    const became = filled && !prevFilled.current;
+    prevFilled.current = filled;
+    if (became) {
+      setBurst(true);
+      const timer = setTimeout(() => setBurst(false), 400);
+      return () => clearTimeout(timer);
+    }
+    if (!filled) setBurst(false);
+    return undefined;
+  }, [filled]);
   return (
     <span
-      className={`uw-heart${filled ? ' uw-heart--filled' : ''}`}
+      className={`uw-heart${filled ? ' uw-heart--filled' : ''}${burst ? ' uw-heart--burst' : ''}`}
       style={{ width: size, height: size }}
       aria-hidden="true"
     >

@@ -1661,8 +1661,12 @@ export function StageSheet({
                 header-bar rule): an in-flow ghost sized by the wider
                 candidate label keeps the chip's width, and stop keeps
                 its slot hidden while unarmed. */}
-            <View>
-              <Text variant="metadata" style={{ opacity: 0 }}>
+            <View style={{ flexShrink: 1, minWidth: 0, maxWidth: 220 }}>
+              <Text
+                variant="metadata"
+                numberOfLines={1}
+                style={{ opacity: 0 }}
+              >
                 {radioRow.statusText.length >= radioRow.start.label.length
                   ? radioRow.statusText
                   : radioRow.start.label}
@@ -1677,6 +1681,7 @@ export function StageSheet({
                   <Text
                     variant="metadata"
                     color={radioRow.failed ? 'warn' : 'accent'}
+                    numberOfLines={1}
                   >
                     {radioRow.statusText}
                   </Text>
