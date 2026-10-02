@@ -1491,10 +1491,14 @@ export function createPotService(opts: PotServiceDeps): PotService {
   }
 
   /**
-   * One listen attempt — resolves the bound port on success (the
-   * service's bound state moves to `srv`), null on failure. Both
-   * the pre-listen and post-listen sides re-check `closing`: a
-   * close() landing mid-attempt must not open a socket the
+   * One listen attempt — resolves the bound port on success, null
+   * on failure. Pure: it never writes the service's bound state;
+   * the caller commits via `commitBound` only once it knows the
+   * socket stays — that keeps `server` naming the one live
+   * listener (or its predecessor) at every await, so a close()
+   * interleaving mid-rebind can never lose track of a socket.
+   * Both the pre-listen and post-listen sides re-check `closing`:
+   * a close() landing mid-attempt must not open a socket the
    * teardown already walked past.
    */
   function listenOn(srv: Server, host: string): Promise<number | null> {
@@ -1518,15 +1522,24 @@ export function createPotService(opts: PotServiceDeps): PotService {
           return;
         }
         const address = srv.address();
-        boundPort =
+        resolve(
           address !== null && typeof address === 'object'
             ? address.port
-            : null;
-        boundHost = host;
-        server = srv;
-        resolve(boundPort);
+            : null,
+        );
       });
     });
+  }
+
+  /**
+   * Move the service's bound state onto a socket listenOn already
+   * proved — called only after every bail-out check passed, so
+   * `server` jumps straight from the old listener to the new.
+   */
+  function commitBound(srv: Server, host: string, port: number): void {
+    boundPort = port;
+    boundHost = host;
+    server = srv;
   }
 
   /**
@@ -1569,10 +1582,10 @@ export function createPotService(opts: PotServiceDeps): PotService {
     const replacement = createServer(requestHandler);
     const port = await listenOn(replacement, desired);
     if (closing) {
-      // close() parked on this pass — retire the replacement here;
-      // the still-live listener stays for close() to take down.
-      replacement.close(() => undefined);
-      replacement.closeAllConnections();
+      // close() parked on this pass — the replacement never joined
+      // `server`, so dropping it here loses no bound state;
+      // `previous` still is `server`, and close() takes it down.
+      cutDown(replacement);
       return;
     }
     if (port === null) {
@@ -1594,8 +1607,11 @@ export function createPotService(opts: PotServiceDeps): PotService {
       cutDown(previous);
       return;
     }
-    // The memoized bind follows the swap — a later bind() hands
-    // callers the live port, not the superseded one.
+    // The swap commits atomically — `server` never points at a
+    // socket a racing close() could then miss — and the memoized
+    // bind follows it, so a later bind() hands callers the live
+    // port, not the superseded one.
+    commitBound(replacement, desired, port);
     binding = Promise.resolve(port);
     log(
       `pot: pairing custody changed — rebound to ${
@@ -1619,9 +1635,17 @@ export function createPotService(opts: PotServiceDeps): PotService {
       binding = (async () => {
         const host = await bindHost();
         const bound = await listenOn(srv, host);
-        if (bound === null && !closing) {
-          binding = null; // a failed bind stays retryable
+        if (closing) {
+          // close() landed before the commit — the socket either
+          // never opened or was closed inside listenOn; drop it.
+          srv.close();
+          return null;
         }
+        if (bound === null) {
+          binding = null; // a failed bind stays retryable
+          return null;
+        }
+        commitBound(srv, host, bound);
         return bound;
       })();
       return binding;

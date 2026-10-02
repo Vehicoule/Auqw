@@ -307,22 +307,28 @@ if (port === null) {
   // custody from the mirror over a corrupt blob can resurrect
   // pairings. `deviceTouch` can't change membership — it only
   // updates a record that still exists — so it doesn't signal.
+  const custodyChanged = async (): Promise<void> => {
+    await pot.reevaluateBind();
+    // AUQW_POT_PROVIDER_URL owns the provider slot — under it the
+    // bundled service never binds, so its URL would only push null
+    // over the configured provider.
+    if (potOverride === undefined) {
+      runtime.hostIfLoaded()?.setPotProvider(pot.loopbackUrl());
+    }
+  };
   const syncKeys: SyncKeys = {
     ...custody,
     async devicePut(record) {
       await custody.devicePut(record);
-      await pot.reevaluateBind();
-      runtime.hostIfLoaded()?.setPotProvider(pot.loopbackUrl());
+      await custodyChanged();
     },
     async deviceDelete(id) {
       await custody.deviceDelete(id);
-      await pot.reevaluateBind();
-      runtime.hostIfLoaded()?.setPotProvider(pot.loopbackUrl());
+      await custodyChanged();
     },
     async identityReplace(identity) {
       await custody.identityReplace(identity);
-      await pot.reevaluateBind();
-      runtime.hostIfLoaded()?.setPotProvider(pot.loopbackUrl());
+      await custodyChanged();
     },
   };
   // The LAN sync service: listener + pairing + device registry +
