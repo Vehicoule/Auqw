@@ -157,15 +157,29 @@ export async function applyImport(
   doc: ExportDocument,
   context: OperationContext,
 ): Promise<Result<void>> {
+  // localCount is this device's own committed play total — a value
+  // an import can neither trust (a foreign document's plays were
+  // committed elsewhere and would be claimed twice on the wire) nor
+  // blanket-strip (re-importing our own export would lose the real
+  // baseline). The sync log survives the import, so the only honest
+  // baseline is the one this device already holds for a recording
+  // it knew before.
+  const ownBaseline = new Map<string, number>();
+  const prior = await storage.load(context);
+  if (prior.ok) {
+    for (const count of prior.value.playCounts) {
+      if (count.localCount !== undefined) {
+        ownBaseline.set(count.recordingId, count.localCount);
+      }
+    }
+  }
   const owned: ExportDocument = {
     ...doc,
-    // An imported document's plays were committed elsewhere — its
-    // localCount must not become this device's baseline, or emit
-    // recovery would attribute foreign plays to this device's 'sum'
-    // component and count them twice on the wire.
-    playCounts: doc.playCounts.map(
-      ({ localCount: _imported, ...count }) => count,
-    ),
+    playCounts: doc.playCounts.map((count) => {
+      const { localCount: _imported, ...rest } = count;
+      const own = ownBaseline.get(count.recordingId);
+      return own === undefined ? rest : { ...rest, localCount: own };
+    }),
   };
   return storage.importOwned(owned, context);
 }
