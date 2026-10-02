@@ -292,13 +292,19 @@ export function DesktopChrome({
   }, [onFocusSearch]);
   // The bleed retries the original URL when a CDN size variant fails
   // to load — and drops the whole layer (data-bleed off, so the stage
-  // re-solidifies) when the source itself can't load.
-  const [bleedSrc, setBleedSrc] = useState<string | null>(null);
-  useEffect(() => {
-    setBleedSrc(
-      backdropArtwork != null ? scaledArtworkUrl(backdropArtwork, 512) : null,
-    );
-  }, [backdropArtwork]);
+  // re-solidifies) when the source itself can't load. The failure
+  // state is keyed by its artwork URL and the live src is derived
+  // during render, so a track change never paints the old bleed.
+  const [bleed, setBleed] = useState<{
+    readonly url: string;
+    readonly src: string | null;
+  } | null>(null);
+  const bleedSrc =
+    bleed !== null && bleed.url === backdropArtwork
+      ? bleed.src
+      : backdropArtwork != null
+        ? scaledArtworkUrl(backdropArtwork, 512)
+        : null;
   return (
     <div
       className="uw-chrome"
@@ -318,9 +324,10 @@ export function DesktopChrome({
             alt=""
             aria-hidden="true"
             onError={() =>
-              setBleedSrc(
-                bleedSrc === backdropArtwork ? null : backdropArtwork,
-              )
+              setBleed({
+                url: backdropArtwork,
+                src: bleedSrc === backdropArtwork ? null : backdropArtwork,
+              })
             }
           />
           <div className="uw-wintint" aria-hidden="true" />
