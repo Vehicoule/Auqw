@@ -496,7 +496,9 @@ export async function run(): Promise<void> {
     };
   };
 
-  // happy path → 'applied'; progress ticks publish receivedBytes
+  // happy path → 'applied'; progress ticks publish receivedBytes —
+  // the sums fetch publishes 'verifying' first so a stalled fetch
+  // still surfaces an abortable in-flight run
   {
     const { calls, ports } = fakePorts();
     const applier = createUpdateApplier(ports);
@@ -506,7 +508,7 @@ export async function run(): Promise<void> {
     await settle();
     assertDeepEqual(
       states,
-      ['downloading', 'downloading', 'downloading', 'verifying', 'applying', 'applied'],
+      ['verifying', 'downloading', 'downloading', 'downloading', 'verifying', 'applying', 'applied'],
     );
     assertEqual(calls.downloads, 1);
     assertEqual(calls.applies, 1);
@@ -515,6 +517,66 @@ export async function run(): Promise<void> {
     applier.begin(APK_TARGET);
     await settle();
     assertEqual(calls.downloads, 1);
+  }
+
+  // a hung sums fetch is still a live, cancelable run — the 'idle'
+  // card it used to leave was a dead verb with no abort affordance
+  {
+    let hang = true;
+    const { calls, ports } = fakePorts();
+    const applier = createUpdateApplier({
+      ...ports,
+      fetchText: (url, signal) =>
+        hang ? new Promise<string>(() => {}) : ports.fetchText(url, signal),
+    });
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'verifying');
+    applier.cancel();
+    assertEqual(applier.snapshot().state, 'idle');
+    assertEqual(calls.downloads, 0, 'a cancelled sums fetch never downloads');
+    // and a fresh begin still runs after the cancel
+    hang = false;
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'applied');
+    assertEqual(calls.downloads, 1);
+  }
+
+  // progress publishes coalesce to a ~MiB cadence — ~64 KiB network
+  // ticks must not fan a snapshot out per chunk; a newly-known
+  // total and the completion tick still land
+  {
+    const { ports } = fakePorts();
+    const applier = createUpdateApplier({
+      ...ports,
+      download: (_url, _path, onProgress) => {
+        const total = 4 * 1024 * 1024;
+        for (let received = 64 * 1024; received <= total; received += 64 * 1024) {
+          onProgress(received, total);
+        }
+        return Promise.resolve();
+      },
+    });
+    const states: string[] = [];
+    applier.subscribe(() => states.push(applier.snapshot().state));
+    applier.begin(APK_TARGET);
+    await settle();
+    assertDeepEqual(
+      states,
+      [
+        'verifying',
+        'downloading', // the run's own 0-byte publish
+        'downloading', // first tick — total newly known
+        'downloading', // ~1 MiB step
+        'downloading', // ~2 MiB step
+        'downloading', // ~3 MiB step
+        'downloading', // completion tick
+        'verifying',
+        'applying',
+        'applied',
+      ],
+    );
   }
 
   // 'relaunch' outcome lands 'ready-to-restart'
@@ -825,5 +887,42 @@ export async function run(): Promise<void> {
       'a same-version begin on applied stays inert',
     );
     assertEqual(calls.applies, 1);
+  }
+
+  // a checked NEWER release supersedes 'ready-to-restart' the same
+  // way it supersedes 'applied' — the pending restart must not
+  // freeze the newer pipeline behind it; a same-version re-begin
+  // stays inert (the restart affordance owns that verb)
+  {
+    const NEWER_NAME = 'newer.apk';
+    const { calls, ports } = fakePorts({
+      applyOutcome: 'relaunch',
+      sumsBody: `${GOOD_HEX}  ${APK_NAME}\n${GOOD_HEX}  ${NEWER_NAME}\n`,
+    });
+    const applier = createUpdateApplier(ports);
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'ready-to-restart');
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(
+      calls.downloads,
+      1,
+      'a same-version begin on ready-to-restart stays inert',
+    );
+    applier.begin({
+      ...APK_TARGET,
+      version: '0.0.1-alpha.19',
+      artifact: { ...APK_TARGET.artifact, name: NEWER_NAME },
+    });
+    await settle();
+    const snap = applier.snapshot();
+    assert(snap.state === 'ready-to-restart');
+    assertEqual(snap.version, '0.0.1-alpha.19');
+    assertEqual(
+      calls.downloads,
+      2,
+      'a newer release supersedes ready-to-restart',
+    );
   }
 }

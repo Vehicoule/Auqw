@@ -47,6 +47,7 @@ import { run as runLocalPlayback } from './renderer/local-playback.test.ts';
 import { run as runProvider } from './renderer/provider.test.ts';
 import { run as runTransferFetch } from './renderer/transfer-fetch.test.ts';
 import { run as runController } from './renderer/controller.test.ts';
+import { run as runRendererUpdate } from './renderer/update.test.ts';
 
 runEnvelope();
 await runRouter();
@@ -97,4 +98,5 @@ runLocalPlayback();
 await runProvider();
 await runTransferFetch();
 await runController();
+await runRendererUpdate();
 console.log('desktop shell tests passed');

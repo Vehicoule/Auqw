@@ -1733,6 +1733,39 @@ const tap = (s: string) => {
     ),
     null,
   );
+
+  // apply-phase cards carry the RUN's version — a newer checked
+  // release must not relabel the in-flight pipeline's surface
+  const newerStatus = {
+    state: 'available',
+    version: '9.9.9',
+    url: 'https://example/releases',
+    artifact: null,
+    checksums: null,
+  } as const;
+  const runningOlder = toUpdateCard(
+    snap(newerStatus, {
+      state: 'downloading',
+      version: '0.0.1-alpha.22',
+      receivedBytes: 1,
+      totalBytes: 4,
+    }),
+    'install',
+    null,
+  );
+  assertEqual(runningOlder?.version, '0.0.1-alpha.22');
+  assertEqual(runningOlder?.actionLabel, 'cancel');
+
+  // 'ready-to-restart' gates on apply.version like 'applied' — a
+  // newer release supersedes into its ordinary offer rather than
+  // showing 'restart to vY' (which would boot the staged X)
+  const newerRestart = toUpdateCard(
+    snap(newerStatus, { state: 'ready-to-restart', version: '0.0.1-alpha.22' }),
+    'install',
+    null,
+  );
+  assertEqual(newerRestart?.version, '9.9.9');
+  assertEqual(newerRestart?.actionLabel, 'install');
 }
 
 // ---- artwork URL scaling ----------------------------------------------------------
