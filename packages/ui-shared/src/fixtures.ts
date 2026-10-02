@@ -626,7 +626,9 @@ const searchState = (
 ): SearchStateModel => ({
   phase,
   query,
+  filter: 'all',
   results: [],
+  hero: null,
   providerId: 'youtube-music',
   message: null,
   retryable: false,
@@ -640,6 +642,22 @@ export const fixtureSearchStates: readonly SearchStateModel[] = [
     results: fixtureSearchResults.map((meta, index) =>
       toSearchRowModel(meta, index),
     ),
+    hero: (() => {
+      const meta = fixtureSearchResults[0];
+      if (meta === undefined) {
+        return null;
+      }
+      return {
+        row: toSearchRowModel(meta, 0),
+        metaLabel: [
+          'song',
+          meta.artist ?? meta.album ?? '',
+          meta.releaseYear ?? '',
+        ]
+          .filter((part) => part !== '')
+          .join(' · '),
+      };
+    })(),
   }),
   searchState('empty', 'zkq dlpwmx'),
   searchState('error', 'roads portishead', {

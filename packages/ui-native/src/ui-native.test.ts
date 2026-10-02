@@ -1463,6 +1463,98 @@ function testListingDedupe(): void {
   );
 }
 
+/**
+ * The explore filter set — 'all' and 'songs' are the whole deduped
+ * list today (every result is a track), 'library' keeps only rows
+ * whose deduped group carries a ref the library owns. The hero is
+ * always the provider's #1 result after filtering.
+ */
+function testSearchFilters(): void {
+  const meta = (
+    id: string,
+    title: string,
+    extra?: Partial<TrackMetadata>,
+  ): TrackMetadata => ({
+    sourceRef: { provider: 'youtube-music', kind: 'track', id },
+    title,
+    artist: 'Portishead',
+    album: 'Dummy',
+    durationMs: 302_000,
+    releaseYear: 1994,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    storefront: null,
+    ...extra,
+  });
+  const items: TrackMetadata[] = [
+    meta('ytm-lib', 'Roads'),
+    meta('ytm-lib2', 'Roads - Topic'), // deduped twin of the library row
+    meta('ytm-out', 'Glory Box'),
+  ];
+  const baseRec = fixtureRecordings[0];
+  assert(baseRec !== undefined, 'need a fixture recording to spread');
+  const libraryRec: Recording = {
+    ...baseRec,
+    id: 'rec-lib',
+    sourceRefs: [{ provider: 'youtube-music', kind: 'track', id: 'ytm-lib2' }],
+  };
+  const state = {
+    type: 'content' as const,
+    revision: 1,
+    query: 'roads',
+    page: { items, storefront: null },
+  };
+  // 'all' — every deduped row, hero on the first.
+  const all = toSearchModel(state, null, [], [libraryRec], 'all');
+  assertEqual(all.results.length, 2, 'all filter keeps the deduped list');
+  assertEqual(all.filter, 'all');
+  assert(all.hero !== null, 'ready-with-results earns a hero');
+  assertEqual(
+    all.hero?.row.key,
+    all.results[0]?.key,
+    'the hero is the provider #1 result',
+  );
+  assert(
+    all.hero?.metaLabel.includes('Portishead') === true &&
+      all.hero.metaLabel.includes('1994'),
+    `hero meta should read kind · artist · year — got '${all.hero?.metaLabel ?? ''}'`,
+  );
+  // 'songs' — the whole set too; the chip names the reserved subset.
+  const songs = toSearchModel(state, null, [], [libraryRec], 'songs');
+  assertEqual(songs.results.length, 2, 'songs filter keeps every track');
+  // 'library' — membership is evaluated across the deduped group: the
+  // kept rep ref 'ytm-lib' is unowned but its twin 'ytm-lib2' is, so
+  // the row still counts as in-library.
+  const library = toSearchModel(state, null, [], [libraryRec], 'library');
+  assertEqual(library.results.length, 1, 'library filter drops unowned rows');
+  assertEqual(
+    library.results[0]?.key,
+    'youtube-music:ytm-lib:0',
+    "a hidden group member's owned ref keeps the deduped row",
+  );
+  assert(
+    library.hero?.row.key === 'youtube-music:ytm-lib:0',
+    'the hero re-centers on the filtered #1',
+  );
+  // No library-owned matches → an honest empty result list.
+  const none = toSearchModel(
+    { ...state, page: { items: [meta('ytm-x', 'Nils Frahm')], storefront: null } },
+    null,
+    [],
+    [libraryRec],
+    'library',
+  );
+  assertEqual(none.results.length, 0, 'unowned-only results filter out');
+  assert(none.hero === null, 'no results — no hero');
+  // Rows carry their album for the results-table column.
+  assertEqual(
+    all.results[0]?.album,
+    'Dummy',
+    'search rows surface the album column',
+  );
+}
+
 function sheetOf(kind: LyricsSheet['kind']): LyricsSheet {
   const base = {
     provider: 'lyrics-lrclib',
@@ -1917,6 +2009,7 @@ testPlaylistMembership();
 testHomeAndNav();
 testSearchStates();
 testListingDedupe();
+testSearchFilters();
 testLyricsModel();
 testRadioModel();
 testCorrectionsModel();

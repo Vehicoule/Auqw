@@ -22,6 +22,10 @@ function TailBtn(props: IconButtonProps) {
 export type TrackRowProps = {
   readonly row: TrackRowModel;
   readonly badge?: string | null | undefined;
+  /** The results-table '#' column — renders before the artwork. */
+  readonly index?: string | undefined;
+  /** The results-table album column — renders after the title block. */
+  readonly album?: string | null | undefined;
   readonly onPress?: (() => void) | undefined;
   /**
    * Advisory row intent — the pointer/focus landing on this row makes
@@ -50,6 +54,8 @@ export type TrackRowProps = {
 export function TrackRow({
   row,
   badge = null,
+  index,
+  album,
   onPress,
   onIntent,
   onToggleLike,
@@ -79,6 +85,13 @@ export function TrackRow({
       role="listitem"
       onMouseEnter={onIntent}
     >
+      {index !== undefined && (
+        <span className="uw-track-row__index">
+          <Text variant="metadata" color="secondary" numeric>
+            {index}
+          </Text>
+        </span>
+      )}
       {reorderControls !== 'none' && (
         <div className="uw-track-row__reorder">
           {reorderControls === 'drag' ? (
@@ -149,6 +162,13 @@ export function TrackRow({
             </Text>
           )}
         </span>
+        {album !== undefined && (
+          <span className="uw-track-row__album">
+            <Text variant="metadata" color="secondary" numberOfLines={1}>
+              {album ?? ''}
+            </Text>
+          </span>
+        )}
       </Pressable>
       <div className="uw-track-row__tail">
         <Text variant="metadata" color="secondary" numeric className="uw-track-row__clock">

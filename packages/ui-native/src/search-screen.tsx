@@ -47,6 +47,39 @@ function IconRow({
   );
 }
 
+function FilterChip({
+  label,
+  active,
+  onPress,
+}: {
+  readonly label: string;
+  readonly active: boolean;
+  readonly onPress: (() => void) | undefined;
+}) {
+  const theme = useTheme();
+  return (
+    <Pressable
+      compact
+      onPress={onPress}
+      accessibilityLabel={label}
+      accessibilityState={{ selected: active }}
+      style={{
+        minHeight: 30,
+        justifyContent: 'center',
+        paddingHorizontal: theme.spacing.md,
+        borderRadius: theme.radius.control,
+        borderWidth: theme.strokes.hairline,
+        borderColor: active ? theme.colors.accent : theme.colors.hairline,
+        backgroundColor: active ? theme.colors.accentSoft : 'transparent',
+      }}
+    >
+      <Text variant="metadata" color={active ? 'accent' : 'secondary'}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
 export type SearchScreenProps = SearchScreenHandlers & {
   readonly state: SearchStateModel;
   /**
@@ -84,6 +117,7 @@ export function SearchScreen({
   onRecentPress,
   suggestions = [],
   onSuggestionPress,
+  onFilterPress,
 }: SearchScreenProps) {
   const theme = useTheme();
   const view = useSearchScreenController({
@@ -100,6 +134,7 @@ export function SearchScreen({
     onRecentPress,
     suggestions,
     onSuggestionPress,
+    onFilterPress,
   });
   return (
     <View
@@ -153,12 +188,35 @@ export function SearchScreen({
           ))}
         </ScrollView>
       )}
+      {view.filters !== null && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          accessibilityLabel={view.filters.a11yLabel}
+          style={{ flexGrow: 0 }}
+          contentContainerStyle={{
+            gap: theme.spacing.xs,
+            paddingHorizontal: theme.spacing.screen,
+            paddingTop: topInset,
+            paddingBottom: theme.spacing.sm,
+          }}
+        >
+          {view.filters.chips.map((chip) => (
+            <FilterChip
+              key={chip.key}
+              label={chip.label}
+              active={chip.active}
+              onPress={chip.onPress}
+            />
+          ))}
+        </ScrollView>
+      )}
       {view.resultsHead !== null && (
         <View
           style={{
             alignItems: 'flex-start',
             paddingHorizontal: theme.spacing.screen,
-            paddingTop: topInset,
+            paddingTop: view.filters !== null ? 0 : topInset,
             marginBottom: theme.spacing.sm,
           }}
         >
@@ -225,9 +283,12 @@ export function SearchScreen({
           keyExtractor={(row) => row.row.key}
           scrollEnabled={scrollEnabled}
           contentContainerStyle={{
-            // The pinned results head already reserves the inset; when it
-            // is absent (loading with retained results) the list carries it.
-            paddingTop: view.resultsHead !== null ? 0 : topInset,
+            // The pinned chips / results head already reserves the inset;
+            // the list only carries it when nothing pinned sits above.
+            paddingTop:
+              view.resultsHead !== null || view.filters !== null
+                ? 0
+                : topInset,
             paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
             // Clears the floating miniplayer's strip.
             paddingBottom:

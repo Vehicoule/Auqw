@@ -1,6 +1,8 @@
 import {
+  Artwork,
   CapsLabel,
   Icon,
+  IconButton,
   Pressable,
   SkeletonRows,
   Text,
@@ -13,6 +15,7 @@ import {
   UnavailableState,
 } from './states.tsx';
 import type { SearchStateModel } from '@auqw/ui-shared';
+import { t } from '@auqw/ui-shared';
 import {
   useSearchScreenController,
   type SearchScreenHandlers,
@@ -86,6 +89,80 @@ export function SearchScreen({
           ))}
         </div>
       )}
+      {view.filters !== null && (
+        <div
+          className="uw-search__chips"
+          role="group"
+          aria-label={view.filters.a11yLabel}
+        >
+          {view.filters.chips.map((chip) => (
+            <Pressable
+              key={chip.key}
+              onPress={chip.onPress}
+              ariaLabel={chip.label}
+              ariaPressed={chip.active}
+              className={`uw-chip${chip.active ? ' uw-chip--active' : ''}`}
+            >
+              <Text variant="metadata" color={chip.active ? 'accent' : 'secondary'}>
+                {chip.label}
+              </Text>
+            </Pressable>
+          ))}
+        </div>
+      )}
+      {view.topRow !== null && (
+        <div className="uw-search__toprow">
+          <div className="uw-search__topres-col">
+            <Text variant="heading" color="bright" className="uw-search__band-title">
+              {view.topRow.topResultTitle}
+            </Text>
+            <div className="uw-topres" onMouseEnter={view.topRow.hero.onIntent}>
+              <Artwork
+                url={view.topRow.hero.row.artworkUrl}
+                size={96}
+                cornerRadius={10}
+                dimmed={view.topRow.hero.row.state !== 'available'}
+              />
+              <span className="uw-topres__text">
+                <Text variant="title" color="bright" numberOfLines={2}>
+                  {view.topRow.hero.row.title}
+                </Text>
+                <Text variant="metadata" color="secondary" numberOfLines={1}>
+                  {view.topRow.hero.metaLabel}
+                </Text>
+              </span>
+              <IconButton
+                icon="play"
+                size={40}
+                iconSize={18}
+                className="uw-topres__play"
+                ariaLabel={view.topRow.hero.a11yLabel}
+                onPress={view.topRow.hero.onPress}
+              />
+            </div>
+          </div>
+          <div className="uw-search__songs">
+            <Text variant="heading" color="bright" className="uw-search__band-title">
+              {view.topRow.songsTitle}
+            </Text>
+            <div role="list" aria-label={view.topRow.songsA11yLabel}>
+              {view.topRow.songs.map((row, index) => (
+                <TrackRow
+                  key={row.row.key}
+                  row={row.row}
+                  index={`${index + 1}`}
+                  album={row.row.album}
+                  onPress={row.onPress}
+                  onIntent={row.onIntent}
+                  onToggleLike={row.onToggleLike}
+                  onAddToPlaylist={row.onAddToPlaylist}
+                  onContext={row.onContext}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       {view.resultsHead !== null && (
         <div className="uw-search__results-head">
           <Text variant="heading" color="bright">
@@ -94,6 +171,30 @@ export function SearchScreen({
           <Text variant="metadata" color="secondary" className="uw-search__count">
             {view.resultsHead.metaLabel}
           </Text>
+        </div>
+      )}
+      {view.results !== null && (
+        <div className="uw-search__thead" aria-hidden="true">
+          <span className="uw-search__th uw-search__th--idx">
+            <Text variant="label" color="secondary">#</Text>
+          </span>
+          <span className="uw-search__th uw-search__th--art" />
+          <span className="uw-search__th uw-search__th--title">
+            <Text variant="label" color="secondary">
+              {t('search.table.title')}
+            </Text>
+          </span>
+          <span className="uw-search__th uw-search__th--album">
+            <Text variant="label" color="secondary">
+              {t('search.table.album')}
+            </Text>
+          </span>
+          <span className="uw-search__th uw-search__th--time">
+            <Text variant="label" color="secondary">
+              {t('search.table.time')}
+            </Text>
+          </span>
+          <span className="uw-search__th uw-search__th--tail" />
         </div>
       )}
       {view.idle !== null &&
@@ -152,6 +253,8 @@ export function SearchScreen({
             <TrackRow
               key={row.row.key}
               row={row.row}
+              index={`${index + 1}`}
+              album={row.row.album}
               tabIndex={list.rowTabIndex(index)}
               onFocusRow={() => list.onRowFocus(index)}
               onPress={row.onPress}
