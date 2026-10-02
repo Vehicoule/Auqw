@@ -3020,15 +3020,20 @@
   display: flex;
   height: 100%;
   min-height: 0;
-  /* The shell sits a step below the world's canvas so the world card
-     reads as raised even with no art bleed — the depth comes from the
-     surface ramp, not shadows. OLED keeps both black (its language is
+  /* The shell sits a step below the world's canvas — it only shows
+     through behind the artwork bleed and as the frame around the
+     floating world card. OLED keeps both black (its language is
      outlined, not elevated). */
   background: var(--deep);
   position: relative;
   /* the stage column's narrow-overlay breakpoint queries this width */
   container-type: inline-size;
 }
+
+/* The deep shell only ever shows through in two places: behind the
+   artwork bleed, and as the gap framing the floating world card. With
+   no art the window is one continuous canvas — the card float is
+   earned by the bleed, not decoration. */
 
 /* Golden-ratio stage column — the GTK sidebar's split fraction
    (0.382) with a 280px floor. No ceiling: the ratio holds on wide
@@ -3040,7 +3045,9 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--deep);
+  /* Content surface, flush to the window edge — never shell-colored,
+     or the column reads as border instead of content. */
+  background: var(--canvas);
 }
 .uw-chrome[data-stage='closed'] .uw-stage-col {
   display: none;
@@ -3071,15 +3078,29 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* The world is a floating card framed on all four sides — the art
-     bleed frames it; the card edge is what the stage art dissolves
-     under. */
+  /* Flat by default — stage and world share one continuous canvas,
+     split only by the split-view hairline. The floating card is
+     earned by art (data-bleed below). */
   position: relative;
+  margin: 0;
+  border-radius: 0;
+  background: var(--canvas);
+  border: 0;
+  border-left: var(--stroke-hairline) solid var(--hairline);
+  overflow: hidden;
+  /* The card detaches/reattaches as the artwork appears and drops —
+     a slow morph, not a pop. */
+  transition:
+    margin var(--motion-sheet) var(--ease-out),
+    border-radius var(--motion-sheet) var(--ease-out);
+}
+
+.uw-chrome[data-bleed='art'] .uw-world {
+  /* The art bleed frames the card on all four sides; its edge is what
+     the stage art dissolves under. */
   margin: var(--spacing-sm);
   border-radius: var(--radius-float);
-  background: var(--canvas);
   border: var(--stroke-hairline) solid var(--hairline);
-  overflow: hidden;
 }
 
 /* Window art bleed — while a track has artwork, a scaled-down copy
