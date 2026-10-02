@@ -122,6 +122,15 @@ private const val PARSE_STALL_PULLS = 2000
  *  unknown-duration stream can't produce a profile the same check
  *  would have refused. */
 private const val PEAKS_MAX_DECODE_MS = 8L * 60 * 1000
+/** Honest-settle slack: a finished decode's measured span may trail
+ *  the demuxer-declared duration by at most the larger of this and a
+ *  tenth of that duration — a bigger gap means the feed starved
+ *  mid-track while bytes still arrived, and settling would let
+ *  `fillFlat` clone the last measured bucket across an unmeasured
+ *  tail the tracker would cache as real. The proportional share
+ *  tolerates a container's overstated duration; the floor keeps the
+ *  gate honest on short tracks. */
+private const val SETTLE_TAIL_US = 2_000_000L
 
 private val DEAD_HANDLE_KINDS = setOf(
   "released", "evicted", "expired", "superseded", "not-found"
@@ -493,6 +502,22 @@ internal class AuqwWaveformPeaks(
       )
     }
     decodeError?.let { throw it }
+    val dur = durationUs.get()
+    if (dur > 0 && dur - lastPtsUs.get() > maxOf(SETTLE_TAIL_US, dur / 10)) {
+      // pullComplete gates on byte coverage, not decode coverage: a
+      // feed that starved mid-track still arrives here with every
+      // byte committed, and fillFlat would clone the last measured
+      // bucket across the unmeasured tail as a finished profile the
+      // tracker caches forever. Emit the honest prefix as coarse and
+      // fail typed so the retry re-measures rather than persisting
+      // the fabrication.
+      emitCoarse()
+      throw CodedException(
+        "invalid-response",
+        "decode settled short of the stream's duration",
+        null
+      )
+    }
     val flat = buildFlat()
       ?: throw CodedException("invalid-response", "no decodable audio", null)
     Log.i(
@@ -658,13 +683,17 @@ internal class AuqwWaveformPeaks(
           if (inIdx >= 0) {
             var s = pump.samples.removeFirstOrNull()
             var stalePulls = 0
-            while ((s === null || s.timeUs < 0) && !parseEnded) {
+            while (s === null || s.timeUs < 0) {
               if (s !== null) {
                 // Untimestamped access unit — unplaceable, drop it and
-                // keep pulling rather than feed the codec a lie.
-                s = null
+                // keep pulling rather than feed the codec a lie. The
+                // drop also applies at parse end: trailing junk at the
+                // queue head is not end-of-input while timestamped
+                // units may still sit behind it.
+                s = pump.samples.removeFirstOrNull()
                 continue
               }
+              if (parseEnded) break
               // Reads keep flowing while the demuxer still owes audio —
               // a bounded stall guard, never a silent EOS on a
               // non-ended parser: a truncated-at-limit profile would
@@ -683,16 +712,33 @@ internal class AuqwWaveformPeaks(
               }
               s = pump.samples.removeFirstOrNull()
             }
+            // Past the loop the sample is either a timestamped access
+            // unit or null at a drained, ended parse — the only true
+            // end-of-input. An unfeedable unit is neither.
             val ib = decoder.getInputBuffer(inIdx)
-            if (s === null || s.timeUs < 0 || ib === null ||
-              ib.remaining() < s.data.size
-            ) {
-              // No more honest samples (drained, wedged, or one too
-              // large for the codec's input slot) — end the feed.
+            if (s === null) {
               decoder.queueInputBuffer(
                 inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM
               )
               inputEOS = true
+            } else if (ib === null) {
+              // A dequeued slot with no buffer is a wedged codec, not
+              // a drained queue — typed failure, never a quiet EOS.
+              throw CodedException(
+                "unavailable", "codec input buffer lost", null
+              )
+            } else if (ib.remaining() < s.data.size) {
+              // An access unit too large for the vendor input slot can
+              // never be fed — drop it and hand the slot back empty
+              // rather than fake end-of-stream mid-track. If the drops
+              // starve the measured span the settle gate below refuses
+              // the truncated profile instead of fabricating its tail.
+              Log.w(
+                TAG,
+                "dropped unfeedable access unit " +
+                  "bytes=${s.data.size} slot=${ib.remaining()}"
+              )
+              decoder.queueInputBuffer(inIdx, 0, 0, 0, 0)
             } else {
               ib.put(s.data)
               decoder.queueInputBuffer(inIdx, 0, s.data.size, s.timeUs, 0)
@@ -1248,26 +1294,37 @@ private fun recordRefusal(ref: AtomicReference<String?>, kind: String) {
 
 /** An encoded sample awaiting the codec — its presentation time and
  *  whole payload, demuxed by the bundled extractor. */
-private class QueuedSample(
+internal class QueuedSample(
   val timeUs: Long,
   val data: ByteArray,
 )
 
 /** The ExtractorOutput side of a bundled parse: the first audio
  *  track's format + the SeekMap's duration land as state, and every
- *  demuxed access unit queues as a QueuedSample for the decode loop.
- *  Non-audio tracks discard. */
-private class SampleQueue : ExtractorOutput {
+ *  demuxed access unit of THAT track queues as a QueuedSample for
+ *  the decode loop. Non-audio tracks discard — and so does every
+ *  audio track after the first: the shared queue feeds one codec
+ *  configured for the first track's format, and a second track's
+ *  access units must never reach it. The selection keys on the
+ *  extractor's track id so a re-parse after a seek that re-emits
+ *  the same id keeps feeding the same track. */
+internal class SampleQueue : ExtractorOutput {
   var audioFormat: Format? = null
   var durationUs = -1L
   var seekable = false
   var seekMap: SeekMap? = null
   val samples = ArrayDeque<QueuedSample>()
+  private var audioTrackId: Int? = null
 
   override fun track(id: Int, type: Int): TrackOutput {
     if (type != C.TRACK_TYPE_AUDIO) {
       return DiscardingTrackOutput()
     }
+    val selected = audioTrackId
+    if (selected !== null && selected != id) {
+      return DiscardingTrackOutput()
+    }
+    audioTrackId = id
     return object : TrackOutput {
       // Per-track accumulation — sampleData may arrive split and must
       // assemble whole before sampleMetadata stamps the boundary.
