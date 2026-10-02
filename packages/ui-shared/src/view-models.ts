@@ -1031,7 +1031,12 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
     canPrevious: currentIndex > 0 || (wraps && currentIndex === 0),
     canNext:
       currentIndex >= 0 && (currentIndex < walk.length - 1 || wraps),
-    intentPlaying: queue.mode === 'playing' && playback.type !== 'paused',
+    // 'failed' keeps the queue's 'playing' intent but has nothing to
+    // pause — the affordance is a retry, so it reads as not-playing.
+    intentPlaying:
+      queue.mode === 'playing' &&
+      playback.type !== 'paused' &&
+      playback.type !== 'failed',
   };
   switch (playback.type) {
     case 'preparing':
