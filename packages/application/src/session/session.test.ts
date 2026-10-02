@@ -4209,6 +4209,9 @@ async function transitionReconcile(): Promise<void> {
   );
   await pump();
   currentIs('oB', 'remote-next adopted');
+  // This tail IS seedable (ytm refs) — the radio armed on landing,
+  // so the natural end drains to stopped rather than parking paused
+  // (unseedable tails park: see naturalEndParksTail).
   r.player.emit(
     transitionEvent(r, {
       from: 'oB',
