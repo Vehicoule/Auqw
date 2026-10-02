@@ -32,7 +32,12 @@ module.exports = function withAlphaSigning(config) {
       /release \{[\s\S]*?signingConfig signingConfigs\.debug/,
       (match) => match.replace('signingConfigs.debug', 'signingConfigs.alpha'),
     );
-    if (!gradle.includes('signingConfigs.alpha')) {
+    // The release buildType itself must point at alpha — the alpha
+    // signingConfigs block alone would satisfy a mere includes().
+    const releaseSigning = gradle.match(
+      /release \{[\s\S]*?signingConfig signingConfigs\.(\w+)/,
+    );
+    if (releaseSigning?.[1] !== 'alpha') {
       throw new Error('with-alpha-signing: release signingConfig not patched');
     }
     config.modResults.contents = gradle;

@@ -27,11 +27,12 @@ const RELEASE_DOWNLOAD_PREFIX =
  * counts against the dataSync foreground service so a switch to
  * another app doesn't suspend a ~150 MB fetch. When the
  * unknown-sources gate refuses, installApk opens this app's page of
- * that settings surface and returns 'needs-permission', which lands
- * as a retryable 'failed' apply — never a claimed install. On every
- * other platform, and on Android when the release ships no APK asset
- * or none built for the device's ABIs, `action` degrades to 'open'
- * and `act()` opens the release page.
+ * that settings surface and returns 'needs-permission', which the
+ * apply pipeline parks as its own state on the retained, verified
+ * stage — a retry refires installApk on it rather than
+ * re-downloading. On every other platform, and on Android when the
+ * release ships no APK asset or none built for the device's ABIs,
+ * `action` degrades to 'open' and `act()` opens the release page.
  */
 export function createExpoUpdate(currentVersion: string): UpdateShellPort {
   const target: UpdateTarget =
@@ -247,12 +248,13 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
       const snapshot = service.snapshot();
       const applyState = snapshot.apply.state;
       // 'applied' means the OS sheet owned the outcome — which may
-      // never have landed (cancelled sheet, failed install). The
-      // verified APK is still staged, so the affordance refires the
-      // handoff instead of dead-ending the offer — but only while the
-      // checked release IS the applied one: a newer release starts
+      // never have landed (cancelled sheet, failed install);
+      // 'needs-permission' means the unknown-sources gate refused it.
+      // Both keep the verified APK staged, so the affordance refires
+      // the handoff instead of dead-ending the offer — but only while
+      // the checked release IS the staged one: a newer release starts
       // its own pipeline rather than re-prompting the old APK.
-      if (applyState === 'applied' && snapshot.apply.state === 'applied') {
+      if (applyState === 'applied' || applyState === 'needs-permission') {
         const status = snapshot.status;
         if (
           status.state === 'available' &&

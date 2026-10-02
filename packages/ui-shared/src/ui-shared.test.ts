@@ -1783,6 +1783,20 @@ const tap = (s: string) => {
   assertEqual(failedCard.actionLabel, 'retry');
   assert(failedCard.dismissible);
 
+  // 'needs-permission' parks on the retained stage: the card names
+  // the OS gate and re-offers the handoff (reapply), not a failure
+  const gated = toUpdateCard(
+    live({ state: 'needs-permission', version: '0.0.1-alpha.22' }),
+    'install',
+    null,
+  );
+  assert(gated !== null);
+  assertEqual(gated.chip, 'failed');
+  assertEqual(gated.actionLabel, 'retry');
+  assert(gated.title.includes('permission'));
+  assert(gated.detail.includes('allow'));
+  assert(gated.dismissible);
+
   // 'applied' renders nothing on self-install builds — the OS
   // surface owns the story and the settings row re-offers the
   // handoff (reapply) when its outcome never lands

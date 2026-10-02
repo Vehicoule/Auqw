@@ -24,6 +24,7 @@ import type {
   FileFingerprint,
   LocalEntry,
   LocalTags,
+  LocalTreeListing,
   PickedFolder,
   TagReaderPort,
 } from '../ports/tag-reader.ts';
@@ -1134,6 +1135,7 @@ export class FakeTransfer implements MediaTransferPort {
 
 export class FakeTagReader implements TagReaderPort {
   readonly entries = new Map<string, LocalEntry[]>();
+  readonly failedTrees = new Map<string, string[]>();
   readonly tags = new Map<string, LocalTags>();
   readonly fingerprints = new Map<string, FileFingerprint>();
   pickResult: Result<PickedFolder> = err(
@@ -1148,10 +1150,13 @@ export class FakeTagReader implements TagReaderPort {
   }
 
   async enumerate(
-    _treeUri: string,
+    treeUri: string,
     _signal: CancellationSignal,
-  ): Promise<Result<readonly LocalEntry[]>> {
-    return ok(this.entries.get(_treeUri) ?? []);
+  ): Promise<Result<LocalTreeListing>> {
+    return ok({
+      entries: this.entries.get(treeUri) ?? [],
+      failedTrees: this.failedTrees.get(treeUri) ?? [],
+    });
   }
 
   async fingerprint(

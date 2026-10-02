@@ -4,6 +4,7 @@ import type {
   FileFingerprint,
   LocalEntry,
   LocalTags,
+  LocalTreeListing,
   PickedFolder,
   Result,
   TagReaderPort,
@@ -57,12 +58,32 @@ export function createExpoTagReader(native: AuqwTagReaderNative): TagReaderPort 
 
     enumerate: (treeUri: string, signal: CancellationSignal) =>
       call(signal, async () => {
-        const entries = await native.tagEnumerate(treeUri);
+        const listing = await native.tagEnumerate(treeUri);
         if (signal.cancelled) {
           return err(appCancelled());
         }
-        return ok<readonly LocalEntry[]>(
-          entries.map((e) => ({
+        // Older native builds answer the bare entry array — missing
+        // failedTrees degrades to the pre-marker behavior (whole-tree
+        // listing) rather than crashing on the new shape. ('entries'
+        // in raw is useless: arrays carry the Array.entries METHOD.)
+        const raw = listing as
+          | readonly LocalEntry[]
+          | {
+              entries?: readonly LocalEntry[];
+              failedTrees?: readonly string[];
+            };
+        const asListing = raw as {
+          entries?: readonly LocalEntry[];
+          failedTrees?: readonly string[];
+        };
+        const rows: readonly LocalEntry[] = Array.isArray(raw)
+          ? raw
+          : (asListing.entries ?? []);
+        const failedTrees: readonly string[] = Array.isArray(raw)
+          ? []
+          : (asListing.failedTrees ?? []);
+        return ok<LocalTreeListing>({
+          entries: rows.map((e) => ({
             docId: e.docId,
             name: e.name,
             size: e.size,
@@ -71,7 +92,10 @@ export function createExpoTagReader(native: AuqwTagReaderNative): TagReaderPort 
             // a fingerprint, not a false "unchanged".
             modifiedMs: e.modifiedMs ?? null,
           })),
-        );
+          failedTrees: failedTrees.filter(
+            (t): t is string => typeof t === 'string',
+          ),
+        });
       }),
 
     fingerprint: (

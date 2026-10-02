@@ -86,7 +86,7 @@ export async function run(): Promise<void> {
   const reader = createDesktopTagReader(fakeApi({}));
   const entries = await reader.enumerate('file:///music', signal);
   assert(
-    entries.ok && entries.value[0]?.docId === 'a.wav',
+    entries.ok && entries.value.entries[0]?.docId === 'a.wav',
     'enumerate maps entries',
   );
 

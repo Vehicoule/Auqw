@@ -309,6 +309,81 @@ async function runUnreadableKeepsRow(): Promise<void> {
   assert(files.length === 1 && files[0]!.size === 100, 'prior row kept');
 }
 
+/**
+ * A subtree the provider can't list reports `failedTrees` — 'could
+ * not list' is unknown, never 'empty'. Rows under it keep their row
+ * and `local` refs; only docIds under successfully-listed trees may
+ * vanish. docIds path-scope to their subtree on SAF's file-system
+ * providers, so the boundary is a prefix match.
+ */
+async function runFailedSubtreeKeepsRows(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [
+    entry('music/a.mp3', 100),
+    entry('music/sub/b.mp3', 200),
+    entry('music/c.mp3', 300),
+  ]);
+  tagReader.fingerprints.set('music/a.mp3', fp('music/a.mp3', 'fpa'));
+  tagReader.fingerprints.set('music/sub/b.mp3', fp('music/sub/b.mp3', 'fpb'));
+  tagReader.fingerprints.set('music/c.mp3', fp('music/c.mp3', 'fpc'));
+  const added = must(await source.addFolder(signal()));
+  assertEqual(source.filesFor(added.sourceId).length, 3, 'three rows indexed');
+
+  // 'music/sub' fails to list: b's row is unknown → kept verbatim.
+  // c.mp3 sits under the listed tree → vanishes honestly.
+  tagReader.entries.set(TREE, [entry('music/a.mp3', 100)]);
+  tagReader.failedTrees.set(TREE, ['music/sub']);
+  const res = must(await source.rescan(added.sourceId, signal()));
+  assertEqual(res[0]!.unlisted, 1, 'kept-under-unlisted counted');
+  assertEqual(res[0]!.removed, 1, 'only the listed-tree row vanished');
+  const files = source.filesFor(added.sourceId);
+  assertEqual(files.length, 2, 'failed-subtree row survives');
+  const kept = files.find((f) => f.docId === 'music/sub/b.mp3');
+  assert(kept !== undefined, 'row under the failed subtree kept');
+  const rec = source
+    .recordings()
+    .find((r) => r.sourceRefs.some((s) => s.id === kept!.fileId));
+  assert(
+    rec !== undefined && source.uriFor(rec.id) === docUri('music/sub/b.mp3'),
+    'kept row resolves its playable uri',
+  );
+
+  // The subtree lists again → the row now vanishes honestly.
+  tagReader.failedTrees.delete(TREE);
+  const again = must(await source.rescan(added.sourceId, signal()));
+  assertEqual(again[0]!.removed, 1, 'relided tree re-arms removal');
+  assert(
+    source.filesFor(added.sourceId).every((f) => f.docId !== 'music/sub/b.mp3'),
+    'vanished once the subtree lists',
+  );
+}
+
+/**
+ * Providers minting opaque docIds can't attribute a row to a listed
+ * vs failed subtree — the conservative answer while any subtree is
+ * unlisted is to keep every unenumerated row.
+ */
+async function runFailedTreeOpaqueIdsKeepAll(): Promise<void> {
+  const { tagReader, source } = rig();
+  pick(tagReader);
+  tagReader.entries.set(TREE, [entry('d1', 100), entry('d2', 200)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpa'));
+  tagReader.fingerprints.set('d2', fp('d2', 'fpb'));
+  const added = must(await source.addFolder(signal()));
+
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  tagReader.failedTrees.set(TREE, ['subtree-x']);
+  const res = must(await source.rescan(added.sourceId, signal()));
+  assertEqual(res[0]!.removed, 0, 'opaque ids vanish nothing under failure');
+  assertEqual(res[0]!.unlisted, 1, 'row kept');
+  assertEqual(
+    source.filesFor(added.sourceId).length,
+    2,
+    'both rows survive an un-attributable partial listing',
+  );
+}
+
 async function runRemoveSource(): Promise<void> {
   const { tagReader, source } = rig();
   pick(tagReader);
@@ -794,6 +869,8 @@ export async function run(): Promise<void> {
   await runTwoFoldersTwoRows();
   await runRescanRemovesMissing();
   await runUnreadableKeepsRow();
+  await runFailedSubtreeKeepsRows();
+  await runFailedTreeOpaqueIdsKeepAll();
   await runRemoveSource();
   await runReaddRelinksRecording();
   await runMixedRemoveRelinksRecording();
