@@ -102,7 +102,7 @@ const FAMILIES = {
   bold: 'Inter_700Bold',
 };
 const STYLES = {
-  display: { fontSize: 22, lineHeight: 26, fontFamily: 'bold' },
+  display: { fontSize: 26, lineHeight: 31, fontFamily: 'bold' },
   title: { fontSize: 17, lineHeight: 22, fontFamily: 'bold' },
   heading: { fontSize: 15, lineHeight: 19, fontFamily: 'bold' },
   body: { fontSize: 14, lineHeight: 19, fontFamily: 'medium' },

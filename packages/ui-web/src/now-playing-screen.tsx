@@ -70,8 +70,10 @@ export type TransportProps = {
   readonly onCycleRepeat?: (() => void) | undefined;
 };
 
-// Transport buttons come in two builds — 32/14 'side' flanks and
-// 36/15 'main' prev/next — over the shared IconButton.
+// Transport buttons come in two builds — 44/18 'side' flanks and
+// 44/20 'main' prev/next — over the shared IconButton. The box size
+// lives on the classes (not the size prop) so the narrow-stage
+// container query in styles.css can shrink them below the floor.
 function TBtn({
   main = false,
   ...props
@@ -81,8 +83,7 @@ function TBtn({
   return (
     <IconButton
       {...props}
-      size={main ? 36 : 32}
-      iconSize={main ? 15 : 14}
+      iconSize={main ? 20 : 18}
       className={`uw-transport__${main ? 'main' : 'side'}`}
     />
   );
@@ -124,9 +125,9 @@ export function TransportControls({
         className="uw-transport__play"
       >
         {view.busy ? (
-          <Spinner size={18} color={playColor} />
+          <Spinner size={24} color={playColor} />
         ) : (
-          <PlayPauseIcon playing={view.playing} size={18} color={playColor} />
+          <PlayPauseIcon playing={view.playing} size={24} color={playColor} />
         )}
       </Pressable>
       <TBtn

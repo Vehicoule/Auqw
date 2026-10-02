@@ -2200,6 +2200,8 @@
   max-width: 640px;
   width: 100%;
   margin: 0 auto;
+  /* the narrow-stage transport query below measures this width */
+  container-type: inline-size;
 }
 
 /* Player mode's cluster is pinned, not scrolled — it keeps the clear
@@ -2304,6 +2306,21 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/* The crisp art owns the top ~⅔ only: it fades out through the same
+   band the blurred frost fades in on, so the bottom cluster sits on
+   flattened blur instead of competing with the photo — the same
+   ~0.62/0.38 art-vs-chrome split the mobile sheet runs. */
+.uw-stage__backdrop-art {
+  -webkit-mask-image: linear-gradient(to bottom,
+      var(--text-bright) 0%,
+      var(--text-bright) 46%,
+      transparent 64%);
+  mask-image: linear-gradient(to bottom,
+      var(--text-bright) 0%,
+      var(--text-bright) 46%,
+      transparent 64%);
 }
 
 .uw-stage__backdrop-frost {
@@ -2505,9 +2522,10 @@
 .uw-transport {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: calc(var(--spacing-xs) + var(--spacing-xxs));
-  margin-top: var(--spacing-md);
+  justify-content: space-between;
+  gap: var(--spacing-xs);
+  margin-top: var(--spacing-lg);
+  padding: 0 var(--spacing-xs);
 }
 
 /* The shared segment language — tonal pill, same construction as the
@@ -2616,10 +2634,40 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 56px;
-  height: 44px;
-  border-radius: var(--radius-float);
+  width: 64px;
+  height: 64px;
+  border-radius: 30%;
   background: var(--accent);
+}
+
+/* Boxes live on the classes so the narrow-stage query can shrink
+   them — IconButton's `size` prop is an inline style CSS can't beat. */
+.uw-transport__side,
+.uw-transport__main {
+  width: 44px;
+  height: 44px;
+}
+
+/* Below ~360px (the 280px stage floor, and the <860px overlay which
+   can go narrower than the floor) the full-size row doesn't fit —
+   trade footprint for reach: every button keeps a pointer-fair box
+   instead of letting flex crush them unevenly. */
+@container (max-width: 360px) {
+  .uw-transport {
+    gap: var(--spacing-xxs);
+    padding: 0;
+  }
+
+  .uw-transport__play {
+    width: 56px;
+    height: 56px;
+  }
+
+  .uw-transport__side,
+  .uw-transport__main {
+    width: 36px;
+    height: 36px;
+  }
 }
 
 .uw-transport__play:hover:not(:disabled) {
@@ -2631,7 +2679,6 @@
   border-radius: var(--radius-float);
   background: var(--glass);
   border: var(--stroke-hairline) solid var(--hairline);
-  height: 56px;
 }
 
 .uw-transport--ios .uw-transport__main,
