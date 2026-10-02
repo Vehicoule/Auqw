@@ -16,12 +16,12 @@ CLANG_RT_DIR="$(dirname "$(find "$(xcode-select -p)/Toolchains/XcodeDefault.xcto
 export IPHONEOS_DEPLOYMENT_TARGET=16.4
 export RUSTFLAGS="-C link-arg=-lclang_rt.ios -C link-arg=-L$CLANG_RT_DIR"
 
-cargo build -p auqw-mobile-bindings --release --target aarch64-apple-ios
-cargo build -p auqw-mobile-bindings --release --target aarch64-apple-ios-sim
+cargo build --locked -p auqw-mobile-bindings --release --target aarch64-apple-ios
+cargo build --locked -p auqw-mobile-bindings --release --target aarch64-apple-ios-sim
 unset RUSTFLAGS
 
 # UniFFI codegen from either built library (metadata is identical).
-cargo run -p auqw-mobile-bindings --bin uniffi-bindgen -- generate \
+cargo run --locked -p auqw-mobile-bindings --bin uniffi-bindgen -- generate \
   --library "target/aarch64-apple-ios-sim/release/libauqw_mobile_bindings.a" \
   --language swift \
   --no-format \

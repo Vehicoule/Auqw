@@ -19,9 +19,9 @@ IFS=',' read -ra ABIS <<< "${AUQW_ANDROID_ABIS:-arm64-v8a,x86_64}"
 TARGETS=()
 for abi in "${ABIS[@]}"; do TARGETS+=(-t "$abi"); done
 
-cargo ndk "${TARGETS[@]}" -o "$JNILIBS" build -p auqw-mobile-bindings --release
+cargo ndk "${TARGETS[@]}" -o "$JNILIBS" build --locked -p auqw-mobile-bindings --release
 
-cargo run -p auqw-mobile-bindings --bin uniffi-bindgen -- generate \
+cargo run --locked -p auqw-mobile-bindings --bin uniffi-bindgen -- generate \
   --library "$JNILIBS/${ABIS[0]}/libauqw_mobile_bindings.so" \
   --language kotlin \
   --no-format \
