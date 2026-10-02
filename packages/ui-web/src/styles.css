@@ -2679,7 +2679,6 @@
   border-radius: var(--radius-float);
   background: var(--glass);
   border: var(--stroke-hairline) solid var(--hairline);
-  height: 64px;
 }
 
 .uw-transport--ios .uw-transport__main,
