@@ -56,6 +56,11 @@ const nodeBundle = {
   platform: 'node',
   target: 'node24',
   sourcemap: true,
+  // Minified shipped JS is ~50% smaller (utility 13.6 → 7.2 MB);
+  // keepNames keeps function/class names in packaged crash stacks —
+  // the maps are still kept for dev and still excluded from asar.
+  minify: true,
+  keepNames: true,
   // canvas/bufferutil/utf-8-validate are optional native addons jsdom
   // probes in try/catch — absent is the supported path.
   external: ['electron', 'canvas', 'bufferutil', 'utf-8-validate'],
@@ -87,12 +92,19 @@ await build({
 });
 
 // utilityProcess.fork children carry no Electron import; CJS keeps the
-// fork load path identical across platforms.
+// fork load path identical across platforms. jsdom is aliased to the
+// throwing stub: pot-service's `import { JSDOM }` is only exercised
+// inside the pot-minter child (the utility mints via fork), so bundling
+// the real jsdom here ships ~11 MB of dead library — index.cjs goes
+// 13.6 MB → ~2 MB.
 await build({
   ...nodeBundle,
   format: 'cjs',
   entryPoints: ['src/utility/index.ts'],
   outfile: 'dist/utility/index.cjs',
+  alias: {
+    jsdom: './src/utility/jsdom-stub.ts',
+  },
 });
 
 // The POT minter child — remote BotGuard interpreter code runs in this
@@ -112,6 +124,8 @@ await build({
   format: 'iife',
   define: browserDefine,
   sourcemap: true,
+  minify: true,
+  keepNames: true,
   logLevel: 'warning',
   entryPoints: ['src/renderer/index.ts'],
   outfile: 'dist/renderer/index.js',
@@ -126,6 +140,8 @@ await build({
   format: 'iife',
   define: browserDefine,
   sourcemap: true,
+  minify: true,
+  keepNames: true,
   logLevel: 'warning',
   // shared/local-paths.ts pulls node:url/node:path into this browser
   // bundle — alias to the POSIX implementations in src/shared/posix-

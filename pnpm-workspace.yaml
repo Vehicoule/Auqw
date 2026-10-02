@@ -29,3 +29,22 @@ minimumReleaseAgeExclude:
 allowBuilds:
   electron-winstaller: true
   esbuild: true
+# @expo/metro exact-pins the metro family at 0.84.5 while react-native
+# 0.86 resolves ^0.84.3 → 0.84.6 — remapping the fork onto 0.84.6
+# collapses one whole ~6 MB metro tree per install. (The 0.87.1 tree
+# is @react-native/metro-config's and can't merge into 0.84.)
+overrides:
+  metro@0.84.5: 0.84.6
+  metro-babel-transformer@0.84.5: 0.84.6
+  metro-cache@0.84.5: 0.84.6
+  metro-cache-key@0.84.5: 0.84.6
+  metro-config@0.84.5: 0.84.6
+  metro-core@0.84.5: 0.84.6
+  metro-file-map@0.84.5: 0.84.6
+  metro-minify-terser@0.84.5: 0.84.6
+  metro-resolver@0.84.5: 0.84.6
+  metro-runtime@0.84.5: 0.84.6
+  metro-source-map@0.84.5: 0.84.6
+  metro-symbolicate@0.84.5: 0.84.6
+  metro-transform-plugins@0.84.5: 0.84.6
+  metro-transform-worker@0.84.5: 0.84.6
