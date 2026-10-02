@@ -1274,6 +1274,8 @@
 }
 .uw-collections__cell {
   display: flex;
+  /* Anchor for the tile's absolute-positioned play affordance. */
+  position: relative;
 }
 .uw-collections__cell > .uw-collection {
   /* Buttons shrink to content — the tile must fill its cell. */
@@ -1308,6 +1310,31 @@
 
 .uw-collection.uw-off .uw-collection__icon {
   background: var(--fg08);
+}
+
+/* Reserve the play circle's slot at the tile's right edge. */
+.uw-collection--playable {
+  padding-right: calc(var(--spacing-lg) + 28px + var(--spacing-sm));
+}
+
+/* The collection's own play affordance — the same accent-soft circle
+   the mobile tile carries, floated over the tile's right edge. */
+.uw-collection__play {
+  position: absolute;
+  right: var(--spacing-lg);
+  top: 50%;
+  translate: 0 -50%;
+  width: 28px;
+  height: 28px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-soft);
+}
+
+.uw-collection__play:hover {
+  background: var(--uw-hover);
 }
 
 .uw-collection__label {

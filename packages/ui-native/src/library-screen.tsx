@@ -69,6 +69,23 @@ function CollectionTile({ view }: { readonly view: LibraryCollectionView }) {
           {view.countLabel}
         </Text>
       </View>
+      {view.onPlay !== undefined && (
+        <Pressable
+          compact
+          onPress={view.onPlay}
+          accessibilityLabel={view.playA11yLabel}
+          style={{
+            width: 28,
+            height: 28,
+            borderRadius: 14,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: theme.colors.accentSoft,
+          }}
+        >
+          <Icon name="play" size={12} color={theme.colors.accent} />
+        </Pressable>
+      )}
     </Pressable>
   );
 }

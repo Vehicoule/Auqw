@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppNavbar } from './navbar.tsx';
+import { StatusBarFade } from './primitives.tsx';
 import { useTheme } from './theme.tsx';
 import type { NavItemModel } from '@auqw/ui-shared';
 
@@ -90,20 +91,10 @@ export function PlatformTabs({
         {items.some((item) => item.key === activeKey)
           ? null
           : renderTab(activeKey)}
-        {/* Same solid-inset band as the native scenes — covers the
-            status bar area so scrolled content can't collide with
-            the clock/icons (0-height where there is no inset). */}
-        <View
-          pointerEvents="none"
-          style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            height: insets.top,
-            backgroundColor: theme.colors.canvas,
-          }}
-        />
+        {/* Edge-to-edge veil: scrolled content glides under the status
+            bar and a soft ramp — not a hard band — keeps the clock and
+            icons readable (0-height where there is no inset). */}
+        <StatusBarFade height={insets.top + 14} />
       </View>
       {!tabBarHidden && (
         <>

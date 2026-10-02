@@ -101,6 +101,7 @@ import {
   SheetScreen,
   StackItem,
   StageSheet,
+  StatusBarFade,
   SyncScreen,
   Text,
   ThemeProvider,
@@ -2122,6 +2123,9 @@ function Main({
         onOpenCollection={(key) =>
           pushOverlay({ type: 'collection', key })
         }
+        onPlayCollection={(key) =>
+          playCollectionRows(key, libraryModel.collectionRows[key])
+        }
         onOpenCard={onOpenCard}
         onOpenArtist={(artist) => {
           if (artist.entityRef !== null) {
@@ -2603,20 +2607,10 @@ function Main({
               onDismissed={() => dismissOverlay(entry.key)}
             >
               {content}
-              {/* Same solid-inset band as the tab scenes — pushed
-                  overlays scroll edge-to-edge under the status bar
-                  too. */}
-              <View
-                pointerEvents="none"
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  height: topInset,
-                  backgroundColor: theme.colors.canvas,
-                }}
-              />
+              {/* Same edge-to-edge veil as the tab scenes — pushed
+                  overlays scroll under the status bar behind the
+                  soft ramp too. */}
+              <StatusBarFade height={topInset + 14} />
             </PushScreen>
           );
         })}
