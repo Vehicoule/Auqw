@@ -608,3 +608,33 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   swept by a lead-side `git add -A` — apply → leg →
   `git checkout -- <file>` IMMEDIATELY (a stub reached a pushed PR once
   and broke CI).
+
+## Search-TextInput + stale-bundle + frame evidence (post-#274/275)
+
+- `input keyevent 66` does NOT reliably fire `onSubmitEditing` on the
+  search TextInput (Gboard consumes it — field clears or re-focuses; the
+  playlist-name field above DOES accept it). Submit by tapping the app's
+  own `search for "<query>"` suggestion row (uiautomator bounds →
+  device-px center tap). Mark the soft-keyboard submit path unverified
+  rather than passed.
+- A Gboard "Try out your stylus" overlay can appear after `input text` —
+  dismiss (Cancel) or it swallows later taps/keys.
+- Switching worktrees under the same dev-client keeps the PREVIOUS
+  branch's JS bundle (the client only refetches on a Metro reconnect).
+  First restart Metro against the right worktree per the Metro section
+  above — force-stop alone refetches from whatever Metro is still
+  serving. Then `am force-stop com.vehicoule.auqw` + relaunch (clears
+  in-memory state too), and sanity-check which bundle is running via a
+  marker symbol or the served bundle itself
+  (`curl ".../apps/mobile/index.bundle?platform=android&dev=true"` —
+  ~12MB real bundle vs ~5KB JSON error). The dev-client entry is
+  `apps/mobile/index.bundle`, not the repo-root index.
+- Spring-vs-snap proof from screenrecord frames: `ffmpeg -vf fps=30`
+  strip, crop a horizontal line through the control, mask the accentSoft
+  fill color, track min/max x per frame — trajectory + overshoot/settle
+  = spring glide; a 1-2 frame jump = snap. The same static-pixel crop
+  proves overlay presence/absence where uiautomator exposes no node
+  (e.g. the floating loupe under the player sheet).
+- Pulse/skeleton verification without a11y: crop the row area and
+  measure luminance across frames — oscillating = animation running,
+  flat = reduce-motion static.
