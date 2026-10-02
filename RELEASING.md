@@ -1,8 +1,10 @@
 # Releasing auqw
 
-**Status: Decided** — alpha channel mechanics (rows in the docs repo's
-`decisions.md`, a sibling checkout not vendored here); post-alpha
-signing and store channels stay Open in `apps/mobile/PACKAGING.md`.
+**Status: Decided** — alpha channel mechanics (rows in
+`auqw-docs/decisions.md`, the planning-level log — a sibling repo not
+vendored here, distinct from this repo's operational log
+`docs/decisions.md`); post-alpha signing and store channels stay Open
+in `apps/mobile/PACKAGING.md`.
 
 ## Scheme
 
