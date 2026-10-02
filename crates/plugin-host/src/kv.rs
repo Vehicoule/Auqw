@@ -345,13 +345,25 @@ impl KeyValueStore for FileKeyValueStore {
                 "{plugin_id}: admission declined"
             )));
         }
-        // The same predicate runs a second time on the doorstep of
-        // the rename — the tmp write + sync is the slow leg and the
-        // rename is the publication boundary, so a cancel or deadline
-        // that lands while bytes were being staged still discards
-        // them instead of publishing past a bound the caller already
-        // reported.
-        let tmp = self.stage_all(&all)?;
+        // The same predicate is consulted again at the publication
+        // boundary — the tmp write + sync is the slow leg and the
+        // rename is the commit point, so a cancel or deadline that
+        // lands while bytes were being staged still discards them
+        // instead of publishing past a bound the caller already
+        // reported. A staging failure consults the gate too: a closed
+        // gate owns the verdict (Rejected) over the backend's error.
+        let tmp = match self.stage_all(&all) {
+            Ok(tmp) => tmp,
+            Err(e) => {
+                return if admit() {
+                    Err(e)
+                } else {
+                    Err(KvError::Rejected(format!(
+                        "{plugin_id}: admission declined"
+                    )))
+                };
+            }
+        };
         if !admit() {
             let _ = std::fs::remove_file(&tmp);
             return Err(KvError::Rejected(format!(
