@@ -25,6 +25,8 @@ import type {
   UpdateSnapshot,
   UpdateTarget,
 } from '@auqw/application';
+import { accessSync, constants } from 'node:fs';
+import { dirname, isAbsolute } from 'node:path';
 import { shellError } from '../shared/errors.ts';
 
 /** How far `update:apply` can honestly take this build. */
@@ -91,9 +93,11 @@ export function updateTargetFor(
 /**
  * The format's honest self-install level:
  *
- * - **AppImage** (linux, `APPIMAGE` set): the running image's path is
- *   writable — a verified `.new` sibling renames over it and the next
- *   launch is the update. `install`.
+ * - **AppImage** (linux, `APPIMAGE` set to an absolute path inside a
+ *   writable dir): the running image's path is writable — a verified
+ *   `.new` sibling renames over it and the next launch is the update.
+ *   `install`. An empty or relative `APPIMAGE` can't stage, and a
+ *   root-owned image dir stages but can never swap — both stay `open`.
  * - **flatpak**: the sandbox's filesystem is invisible to the host
  *   (and `org.freedesktop.Flatpak` is not in finish-args, so no
  *   `flatpak-spawn --host flatpak install` either) — a staged bundle
@@ -106,10 +110,14 @@ export function updateTargetFor(
 export function updateCapabilityFor(
   target: UpdateTarget,
   env: { readonly APPIMAGE?: string | undefined },
+  imageDirWritable: (appimage: string) => boolean = appImageDirWritable,
 ): UpdateCapability {
   switch (target.os) {
     case 'linux':
-      return target.prefer === 'appimage' && env.APPIMAGE !== undefined
+      return target.prefer === 'appimage' &&
+        env.APPIMAGE !== undefined &&
+        isAbsolute(env.APPIMAGE) &&
+        imageDirWritable(env.APPIMAGE)
         ? 'install'
         : 'open';
     case 'mac':
@@ -118,6 +126,21 @@ export function updateCapabilityFor(
       return 'install';
     default:
       return 'open';
+  }
+}
+
+/** The 'install' verdict's probe: the image's own directory must
+    admit the `.new` sibling + the swap rename — a root-owned path
+    (a distro-managed /opt, /usr/local/bin) downloads fine but can
+    never apply, which reads on the card as a retry loop that can
+    only fail. Injectable so tests don't depend on this machine's
+    mounts. */
+function appImageDirWritable(appimage: string): boolean {
+  try {
+    accessSync(dirname(appimage), constants.W_OK);
+    return true;
+  } catch {
+    return false;
   }
 }
 

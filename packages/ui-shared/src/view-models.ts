@@ -2358,8 +2358,10 @@ export function toUpdateBanner(
   }
   switch (apply.state) {
     case 'downloading':
+      // Apply-phase surfaces carry the RUN's version — a newer
+      // checked release must not relabel the in-flight pipeline.
       return {
-        version,
+        version: apply.version,
         label: downloadProgressText(
           apply,
           'update.banner.downloading',
@@ -2370,7 +2372,7 @@ export function toUpdateBanner(
       };
     case 'verifying':
       return {
-        version,
+        version: apply.version,
         label: t('update.banner.verifying'),
         actionLabel: t('update.action.cancel'),
         cancelable: true,
@@ -2379,12 +2381,18 @@ export function toUpdateBanner(
       // The installer already holds the file — nothing honest to
       // abort into, so no action affordance at all.
       return {
-        version,
+        version: apply.version,
         label: t('update.banner.applying'),
         actionLabel: null,
         cancelable: false,
       };
     case 'ready-to-restart':
+      // Same supersede gate as the card: 'restart to vY' would
+      // relaunch into the staged X, so a newer checked release
+      // renders the ordinary offer below instead.
+      if (apply.version !== version) {
+        break;
+      }
       if (version === dismissedVersion) {
         return null;
       }
@@ -2411,7 +2419,7 @@ export function toUpdateBanner(
         return null;
       }
       return {
-        version,
+        version: apply.version,
         label: t('update.banner.failed'),
         actionLabel: t('update.action.retry'),
         cancelable: false,
@@ -2478,8 +2486,10 @@ export function toUpdateCard(
   const dismissed = version === dismissedVersion;
   switch (apply.state) {
     case 'downloading':
+      // Apply-phase cards carry the RUN's version — a newer checked
+      // release must not relabel the in-flight pipeline's surface.
       return {
-        version,
+        version: apply.version,
         title: t('update.card.downloading'),
         detail: downloadProgressText(
           apply,
@@ -2497,7 +2507,7 @@ export function toUpdateCard(
       };
     case 'verifying':
       return {
-        version,
+        version: apply.version,
         title: t('update.banner.verifying'),
         detail: '',
         progress: null,
@@ -2509,7 +2519,7 @@ export function toUpdateCard(
     case 'applying':
       // The OS surface is already firing — nothing honest to abort.
       return {
-        version,
+        version: apply.version,
         title: t('update.banner.applying'),
         detail: '',
         progress: null,
@@ -2519,6 +2529,12 @@ export function toUpdateCard(
         dismissible: false,
       };
     case 'ready-to-restart':
+      // Same gate as 'applied': a newer checked release owns the
+      // card — 'restart to vY' would relaunch into the staged X, so
+      // it renders the ordinary offer for the newer release below.
+      if (apply.version !== version) {
+        break;
+      }
       return dismissed
         ? null
         : {
@@ -2579,7 +2595,7 @@ export function toUpdateCard(
       return dismissed
         ? null
         : {
-            version,
+            version: apply.version,
             title: t('update.card.failed'),
             detail: errorText(apply.error) ?? '',
             progress: null,

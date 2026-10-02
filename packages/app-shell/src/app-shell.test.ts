@@ -34,6 +34,7 @@ import {
   rowActionsModel,
   sameNavLocation,
   sameOverlayRoute,
+  searchOrigin,
   searchRowTarget,
   skipTargetIds,
   stageDownloadChip,
@@ -569,6 +570,31 @@ assert(
     { type: 'entity', ref: { ...albumRef } },
   ),
   'entity routes match by ref identity, not object identity',
+);
+
+// The search-origin stamp holds the QueueOrigin contract bound
+// (query <= 256 UTF-16 units) — an over-cap committed query still
+// plays, its label clipped on a code-point boundary.
+assertDeepEqual(
+  searchOrigin('what a query'),
+  { kind: 'search', query: 'what a query' },
+  'a query inside the bound mints verbatim',
+);
+const clippedOrigin = searchOrigin('q'.repeat(300));
+assert(
+  clippedOrigin?.kind === 'search' &&
+    clippedOrigin.query === 'q'.repeat(256),
+  'an over-cap query clips to the contract bound',
+);
+assertEqual(
+  searchOrigin(''),
+  undefined,
+  'an empty query mints no origin',
+);
+const astralClipped = searchOrigin(`${'a'.repeat(255)}\u{1f600}`);
+assert(
+  astralClipped?.kind === 'search' && astralClipped.query.length === 255,
+  'the clip drops a split surrogate pair — no lone surrogate stored',
 );
 assert(
   !sameOverlayRoute(

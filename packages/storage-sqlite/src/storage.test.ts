@@ -271,6 +271,11 @@ async function fullRoundtrip(): Promise<void> {
       retryable: true,
       retryAfterMs: 30_000,
     },
+    origin: {
+      kind: 'playlist',
+      playlistId: 'pl-1',
+      name: 'Evening mix',
+    },
   };
   const settings: Settings = {
     catalogProvider: 'custom',
@@ -536,6 +541,24 @@ async function malformedRows(): Promise<void> {
         assertEqual(state.queue.currentOccurrenceId, null);
         assertEqual(state.queue.positionMs, 0);
         assertEqual(state.queue.mode, 'stopped');
+      },
+    ],
+    // A malformed or doc-invalid origin drops to absent too — the
+    // queue itself still restores.
+    [
+      'bad origin_json',
+      `UPDATE queue_state SET origin_json = '{oops' WHERE id = 1`,
+      (state) => {
+        assertDeepEqual(state.recordings, base().recordings);
+        assertDeepEqual(state.queue, base().queue);
+      },
+    ],
+    [
+      'invalid origin shape',
+      `UPDATE queue_state SET origin_json = '{"kind":"search","query":"${'q'.repeat(300)}"}' WHERE id = 1`,
+      (state) => {
+        assertDeepEqual(state.recordings, base().recordings);
+        assertDeepEqual(state.queue, base().queue);
       },
     ],
   ];
@@ -2253,6 +2276,7 @@ async function importResetsExcluded(): Promise<void> {
     currentOccurrenceId: 'o1',
     positionMs: 800,
     mode: 'playing',
+    origin: { kind: 'collection', collection: 'liked' },
   };
   const committed = await storage.commit(
     {
@@ -3016,6 +3040,49 @@ async function duplicateLyricsRejected(): Promise<void> {
   driver.close();
 }
 
+// 28b. v15 -> v16: queue_state gains origin_json — a pre-column row
+// loads originless, and a stamped origin then round-trips through
+// commit/load on the migrated schema.
+async function migrationV12toV16(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  for (const m of MIGRATIONS.slice(0, 12)) {
+    driver.execScript(`${m.join(';\n')};`);
+  }
+  driver.execScript(`
+    INSERT INTO schema_version (id, version) VALUES (1, 12);
+    INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered, language)
+      VALUES (1, 'itunes', 'youtube-music', 'US', 256, 'system', 1, NULL, NULL, NULL, 0, NULL);
+    INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+      VALUES (1, 0, NULL, 0, 'stopped', NULL);
+    INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json, provenance)
+      VALUES ('r1', 'Song r1', 'Artist', NULL, NULL, NULL, '[]', NULL, NULL, NULL, '[]', 'provider');
+    INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
+      VALUES ('r1', 0, 'itunes', 'track', 'i1');
+  `);
+  const storage = new SqliteStorage(driver, SETTINGS);
+  assert((await storage.initialize(ctx().context)).ok, 'v12 migrates through to v16');
+  const state = await loadOk(storage);
+  assertEqual(
+    state.queue.origin,
+    undefined,
+    'a pre-column queue carries no origin',
+  );
+  const queue: QueueSnapshot = {
+    revision: 1,
+    occurrences: [occurrence('o1', 'r1', ref('itunes', 'i1'))],
+    currentOccurrenceId: 'o1',
+    positionMs: 0,
+    mode: 'playing',
+    origin: { kind: 'collection', collection: 'liked' },
+  };
+  assert(
+    (await storage.commit({ queue }, ctx().context)).ok,
+    'a stamped origin commits on the migrated schema',
+  );
+  assertDeepEqual((await loadOk(storage)).queue, queue, 'origin round-trips');
+  driver.close();
+}
+
 // Cold-restart proof at the file level: write every section, close the
 // driver, reopen the same file on a fresh driver, and load — a dead
 // connection (the mobile dead-handle class) must never lose a row.
@@ -3163,6 +3230,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['largeRemovalCommits', largeRemovalCommits],
   ['duplicateLyricsRejected', duplicateLyricsRejected],
   ['recordingsMergeUndefined', recordingsMergeUndefined],
+  ['migrationV12toV16', migrationV12toV16],
   ['fileReopen', fileReopen],
 ];
 

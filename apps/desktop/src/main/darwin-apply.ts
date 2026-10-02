@@ -5,9 +5,9 @@
  * own .app: mount the verified image, `ditto` the bundle into a
  * sibling, rename-swap it over the running one, detach, and let
  * 'ready-to-restart' relaunch into the new bytes. Every step is
- * reversible up to the swap, and any failure throws so the leg can
- * fall back to the manual surface — never a half-swapped bundle
- * presented as 'installed'.
+ * reversible up to the swap, and any pre-swap failure throws so the
+ * leg can fall back to the manual surface — never a half-swapped
+ * bundle presented as 'installed'.
  *
  * The manual leg (unpackaged dev runs, or a refused assist) opens
  * the image so Finder fronts its installer window — the
@@ -16,6 +16,8 @@
  */
 import { execFile } from 'node:child_process';
 import {
+  existsSync,
+  lstatSync,
   mkdtempSync,
   readdirSync,
   renameSync,
@@ -61,7 +63,12 @@ export function bundleForExe(exePath: string): string | null {
  * the running bundle moves to `<bundle>.auqw-old`, the new one takes
  * its place, and the old one is removed. A failure before the second
  * rename leaves the running bundle untouched; a failure AT it puts
- * the old bundle back. Throws on any step's refusal.
+ * the old bundle back. Two edges don't throw: a previous run killed
+ * inside the swap gap leaves `<bundle>.auqw-old` orphaned with no
+ * `.app` — restored before anything stages — and once the second
+ * rename has landed, the cleanup that remains (old bundle, detach,
+ * mountpoint) is best-effort, since a refused detach can't un-install
+ * the new bundle. Throws on any pre-swap refusal.
  */
 export async function installFromDmg(
   dmgPath: string,
@@ -71,6 +78,13 @@ export async function installFromDmg(
   const mount = mkdtempSync(join(tmpdir(), 'auqw-update-'));
   const staged = `${appBundlePath}.auqw-new`;
   const replaced = `${appBundlePath}.auqw-old`;
+  // A swap killed between its two renames leaves no bundle at
+  // `appBundlePath` and the old one beside it — put the survivor
+  // back before the residue sweep can take the last copy.
+  if (!existsSync(appBundlePath) && existsSync(replaced)) {
+    renameSync(replaced, appBundlePath);
+  }
+  let swapped = false;
   try {
     await run('hdiutil', [
       'attach',
@@ -81,11 +95,18 @@ export async function installFromDmg(
       mount,
     ]);
     try {
-      const bundle = readdirSync(mount).find((name) =>
-        name.endsWith('.app'),
+      // The checksum proves the dmg is publisher-authored, not that
+      // it holds exactly one real bundle — a second .app, or a
+      // symlink wearing the extension, is an invalid payload, not a
+      // readdir-order coin flip.
+      const bundles = readdirSync(mount).filter(
+        (name) =>
+          name.endsWith('.app') &&
+          lstatSync(join(mount, name)).isDirectory(),
       );
+      const bundle = bundles.length === 1 ? bundles[0] : undefined;
       if (bundle === undefined) {
-        throw new Error(`no .app inside ${dmgPath}`);
+        throw new Error(`expected one .app inside ${dmgPath}`);
       }
       rmSync(staged, { force: true, recursive: true });
       rmSync(replaced, { force: true, recursive: true });
@@ -106,7 +127,13 @@ export async function installFromDmg(
         rmSync(staged, { force: true, recursive: true });
         throw thrown;
       }
-      rmSync(replaced, { force: true, recursive: true });
+      swapped = true;
+      try {
+        rmSync(replaced, { force: true, recursive: true });
+      } catch {
+        // The install has landed — a stubborn `.auqw-old` is residue
+        // the next apply sweeps, not a failed install.
+      }
     } finally {
       // Detach covers every post-attach failure — a prep throw before
       // the copy must not leave the private image mounted.
@@ -117,7 +144,16 @@ export async function installFromDmg(
       );
     }
   } finally {
-    rmSync(mount, { force: true, recursive: true });
+    try {
+      rmSync(mount, { force: true, recursive: true });
+    } catch (thrown) {
+      // Past the swap a mount dir that won't remove (a detach refused
+      // on a busy image) is residue, not a failed install — the new
+      // bundle already owns `appBundlePath`.
+      if (!swapped) {
+        throw thrown;
+      }
+    }
   }
 }
 

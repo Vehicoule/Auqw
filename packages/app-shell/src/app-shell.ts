@@ -122,6 +122,7 @@ import {
   reportStoredDownloadError,
   rowActionsModel,
   sameNavLocation,
+  searchOrigin,
   searchRowTarget,
   stageDownloadChip,
   stageReopenMode,
@@ -2252,7 +2253,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         'action.playResult',
         session.playMetadata(metas, {
           startAt,
-          origin: { kind: 'search', query: committedQuery },
+          origin: searchOrigin(committedQuery),
         }),
       );
     },

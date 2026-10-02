@@ -51,6 +51,7 @@ import {
   isPlaylist,
   isPlaylistEntry,
   isQueueOccurrence,
+  isQueueOrigin,
   isQueueSnapshot,
   isSettings,
   ok,
@@ -571,12 +572,14 @@ export class SqliteStorage implements StoragePort {
         await conn.execute(
           `UPDATE queue_state
            SET revision = revision + 1, current_occurrence_id = NULL,
-               position_ms = 0, mode = 'stopped', blocked_error_json = NULL
+               position_ms = 0, mode = 'stopped', blocked_error_json = NULL,
+               origin_json = NULL
            WHERE id = 1
              AND (current_occurrence_id IS NOT NULL
                   OR position_ms <> 0
                   OR mode <> 'stopped'
                   OR blocked_error_json IS NOT NULL
+                  OR origin_json IS NOT NULL
                   OR EXISTS (SELECT 1 FROM queue_occurrences))`,
           undefined,
           signal,
@@ -1471,6 +1474,24 @@ function decodeState(
   if (blockedBad) {
     dropped.push({ table: 'queue_state', key: 'blocked_error_json' });
   }
+  // The persisted origin must re-validate against the snapshot
+  // contract — a malformed document drops to absent like the other
+  // optional fields rather than reaching the engine unchecked.
+  let originBad = false;
+  const originTools = rowTools(() => {
+    originBad = true;
+  });
+  const origin =
+    queueRow['origin_json'] === null
+      ? undefined
+      : (originTools.json(queueRow['origin_json']) as QueueSnapshot['origin']);
+  if (!originBad && origin !== undefined && !isQueueOrigin(origin)) {
+    // Parses but isn't a queue origin — drop the field, keep the row.
+    originBad = true;
+  }
+  if (originBad) {
+    dropped.push({ table: 'queue_state', key: 'origin_json' });
+  }
   let queue: QueueSnapshot | null = {
     revision: reqNonNegInt(queueRow['revision']),
     occurrences,
@@ -1480,6 +1501,7 @@ function decodeState(
     ...(blockedBad || blocked === undefined
       ? {}
       : { blockedError: blocked }),
+    ...(originBad || origin === undefined ? {} : { origin }),
   };
   if (
     bad ||
