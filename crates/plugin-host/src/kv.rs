@@ -329,10 +329,18 @@ impl KeyValueStore for FileKeyValueStore {
         } else {
             all.insert(plugin_id.to_string(), ns);
         }
-        // Stage before gating: the tmp write + sync is the slow leg,
-        // and the rename is the publication boundary — the gate must
-        // run after staging, still under the write lock, so a cancel
-        // or deadline that lands while bytes were being staged still
+        // A declining gate short-circuits before any staging I/O —
+        // the caller's rejection outranks backend errors on a commit
+        // it already discarded.
+        if !admit() {
+            return Err(KvError::Rejected(format!(
+                "{plugin_id}: admission declined"
+            )));
+        }
+        // The gate runs a second time after staging, on the doorstep
+        // of the rename — the tmp write + sync is the slow leg and
+        // the rename is the publication boundary, so a cancel or
+        // deadline that lands while bytes were being staged still
         // discards them instead of publishing past a bound the caller
         // already reported.
         let tmp = self.stage_all(&all)?;
