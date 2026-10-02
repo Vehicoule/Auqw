@@ -38,6 +38,7 @@ import type {
   OperationContext,
   PrewarmFocus,
   QueueOrigin,
+  Recording,
   Result,
   SearchState,
   Settings,
@@ -51,6 +52,7 @@ import {
   SEARCH_LIMIT,
   THEME_ORDER,
   attemptLabel,
+  dedupeRecordings,
   downloadChipsByRecording,
   downloadLedgerCount,
   entityRefKey,
@@ -1681,7 +1683,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         .map((l) => l.targetId),
     );
     const localUris = controller.local()?.uriMap();
-    const rows: TrackRowModel[] = [];
+    const matched: Recording[] = [];
     for (const rec of state.recordings) {
       // Folder removal keeps the recording but drops its file row —
       // the uri index is the owned-bytes truth; orphans never surface.
@@ -1694,18 +1696,33 @@ export function useAppShell<E extends { readonly type: string } = never>(
       const haystack =
         `${rec.title} ${rec.artist ?? ''} ${rec.album ?? ''}`.toLowerCase();
       if (terms.every((term) => haystack.includes(term))) {
-        rows.push(
-          toTrackRowModel(rec, {
-            key: `local:${rec.id}`,
-            liked: liked.has(rec.id),
-            inPlaylist: inPlaylist.has(rec.id),
-            note: t('note.local'),
-            playing: activeRecordingId === rec.id,
-          }),
-        );
-        if (rows.length >= 25) {
-          break;
-        }
+        matched.push(rec);
+      }
+    }
+    // Two files of the same song are separate recordings — collapse
+    // them like provider results, flags of the hidden rows included.
+    // The survivor's id is the press target, so it must name the member
+    // the row's strongest state describes: the copy actually playing
+    // first (a playing row keeps the live file), then a liked one, then
+    // a playlist member, else the first in library order.
+    const rows: TrackRowModel[] = [];
+    for (const { rec, group } of dedupeRecordings(matched)) {
+      const rep =
+        group.find((r) => r.id === activeRecordingId) ??
+        group.find((r) => liked.has(r.id)) ??
+        group.find((r) => inPlaylist.has(r.id)) ??
+        rec;
+      rows.push(
+        toTrackRowModel(rep, {
+          key: `local:${rep.id}`,
+          liked: group.some((r) => liked.has(r.id)),
+          inPlaylist: group.some((r) => inPlaylist.has(r.id)),
+          note: t('note.local'),
+          playing: group.some((r) => r.id === activeRecordingId),
+        }),
+      );
+      if (rows.length >= 25) {
+        break;
       }
     }
     return rows;

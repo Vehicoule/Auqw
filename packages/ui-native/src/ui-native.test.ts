@@ -1,5 +1,6 @@
 import {
   collectionTiles,
+  dedupeRecordings,
   downloadIconState,
   entityIdForRef,
   formatClock,
@@ -1465,6 +1466,60 @@ function testListingDedupe(): void {
 }
 
 /**
+ * Local-search rows dedupe like provider listings: two recordings
+ * the user cannot tell apart (the double-ingested same song, or two
+ * copies that differ only sub-second) render once in library order,
+ * the hidden row riding in `group` so its flags still light the
+ * survivor. Rows that genuinely differ keep their own row.
+ */
+function testLocalRecordingDedupe(): void {
+  const roads = fixtureRecordings.find((r) => r.id === 'rec-roads');
+  const dracula = fixtureRecordings.find((r) => r.id === 'rec-dracula');
+  assert(roads !== undefined && dracula !== undefined, 'need fixtures');
+  const twin: Recording = { ...roads, id: 'rec-roads-copy' };
+  // Sub-second duration drift still keys the same whole-second row.
+  const drifted: Recording = {
+    ...roads,
+    id: 'rec-roads-drift',
+    durationMs: (roads.durationMs ?? 0) + 400,
+  };
+  const groups = dedupeRecordings([roads, twin, drifted, dracula]);
+  assertEqual(
+    groups.length,
+    2,
+    'three indistinguishable local recordings collapse to one row',
+  );
+  assertEqual(groups[0]?.rec.id, 'rec-roads', 'first in order survives');
+  assertEqual(
+    groups[0]?.group.length,
+    3,
+    'the hidden copies ride in the group for flag merging',
+  );
+  assertEqual(groups[1]?.rec.id, 'rec-dracula');
+  // A different artist, album, or whole-second duration splits —
+  // the row displays all three, so copies that differ keep their rows.
+  const longer: Recording = { ...roads, id: 'rec-roads-long', durationMs: 298_000 };
+  const split = dedupeRecordings([
+    roads,
+    { ...roads, id: 'rec-x', artist: 'Someone Else' },
+    { ...roads, id: 'rec-y', album: 'Live at Roseland' },
+    longer,
+  ]);
+  assertEqual(split.length, 4, 'distinct identity always keeps a row');
+  // The album segment is a separate field — digit albums can't fuse
+  // with the trailing duration into a colliding suffix.
+  const boundary = dedupeRecordings([
+    { ...roads, id: 'rec-b1', durationMs: 240_000, album: '1' },
+    { ...roads, id: 'rec-b2', durationMs: 24_000, album: '01' },
+  ]);
+  assertEqual(
+    boundary.length,
+    2,
+    'duration/album boundary keeps distinct recordings apart',
+  );
+}
+
+/**
  * The explore filter set — 'all' and 'songs' are the whole deduped
  * list today (every result is a track), 'library' keeps only rows
  * whose deduped group carries a ref the library owns. The hero is
@@ -2020,6 +2075,7 @@ testPlaylistMembership();
 testHomeAndNav();
 testSearchStates();
 testListingDedupe();
+testLocalRecordingDedupe();
 testSearchFilters();
 testLyricsModel();
 testRadioModel();

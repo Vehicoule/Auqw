@@ -231,7 +231,7 @@ export function collapseByRef(
   return byRef;
 }
 
-function normalizeFree(text: string): string {
+export function normalizeFree(text: string): string {
   return tokenize(text).join(' ');
 }
 
