@@ -6064,6 +6064,95 @@ async function streamsCappedTransientHopsToAlternate(): Promise<void> {
   assertEqual(readyOf(r).playback.type, 'buffering');
 }
 
+/** A weather retry on an alternate is still the intent's hop chain —
+ *  the spent hop budget and the verdict that started it carry into
+ *  the redrawn mint, so exhaustion reports the ORIGIN refusal. */
+async function weatherRetryOnAlternateCarriesChain(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('o1');
+  await pump();
+  const capped = appError(
+    'transient',
+    'guest failure (transient): transient: streams-capped',
+  );
+  // The original video's verdict is ref-scoped — straight to a hop.
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-p1',
+    identity: lastPrepareIdentity(r),
+    outcome: {
+      type: 'failed',
+      error: appError('unavailable', 'video unavailable'),
+      attempt: TRACE,
+    },
+  });
+  await pump();
+  assertEqual(r.ytm.pendingCount('candidates'), 1, 'hop resolves alternates');
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'y2', 'Song r1', 'Artist', 300_000)]),
+  );
+  await pump();
+  // The hop chain resolves once the alternate's prepare call lands —
+  // free the superseded p1 call and the alternate's (FIFO order).
+  const altIdentity = lastPrepareIdentity(r);
+  assert(r.player.settlePrepare(ok('req-p1')), 'superseded p1 frees');
+  assert(r.player.settlePrepare(ok('req-alt')), 'alternate call lands');
+  await pump();
+  // The alternate's mints cap — weather earns its retry…
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-alt',
+    identity: altIdentity,
+    outcome: { type: 'failed', error: capped, attempt: TRACE },
+  });
+  await pump();
+  r.clock.advance(400);
+  await pump();
+  // …which re-prepares the re-matched ref inside the same intent.
+  assertEqual(calls(r, 'prepare').length, 3, 'retry re-prepares the mint');
+  // The redrawn mint caps too. The chain exhausts (y1 and y2 both
+  // dead, no further alternates) and must report the ORIGIN verdict,
+  // not the latest weather — proof the retry carried the chain's
+  // state.
+  const retryIdentity = lastPrepareIdentity(r);
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-alt2',
+    identity: retryIdentity,
+    outcome: { type: 'failed', error: capped, attempt: TRACE },
+  });
+  await pump();
+  for (let i = 0; i < 6; i += 1) {
+    if (!r.player.settlePrepare(ok(`req-sup${i}`))) {
+      break;
+    }
+  }
+  // The intent already resolved when the alternate minted — the
+  // verdict the exhaust publishes on the row is the ORIGIN refusal,
+  // not the redrawn mint's weather. Without the carry the retry's
+  // chain names the capped transient instead.
+  const res = await playing;
+  assert(res.ok, 'intent resolved when the alternate minted');
+  const pb = readyOf(r).playback;
+  assertEqual(pb.type, 'failed', 'exhausted chain marks the row');
+  assert(
+    'error' in pb && pb.error.kind === 'unavailable',
+    'retry on alternate carries the origin verdict',
+  );
+}
+
 /** A weather-refusal veto (capped mint) expires — after the TTL a
  *  fresh intent re-mints the same video instead of keeping it dead
  *  for the whole session. */
@@ -7983,6 +8072,10 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   [
     'streamsCappedTransientHopsToAlternate',
     streamsCappedTransientHopsToAlternate,
+  ],
+  [
+    'weatherRetryOnAlternateCarriesChain',
+    weatherRetryOnAlternateCarriesChain,
   ],
   ['weatherDeadRefVetoExpires', weatherDeadRefVetoExpires],
   ['deadRefMatchSkipsVeto', deadRefMatchSkipsVeto],

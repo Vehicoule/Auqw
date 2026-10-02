@@ -2021,6 +2021,13 @@ export class PlaybackEngine {
       deadlineMs: attempt.deadlineMs,
       listenedMsAccum: attempt.listenedMsAccum,
       preparesUsed: attempt.preparesUsed,
+      // A weather retry on an alternate is still the same intent's
+      // hop chain — the spent budget and the verdict that started it
+      // carry so a redrawn mint can't reset either.
+      alternatesUsed: attempt.alternatesUsed,
+      ...(attempt.originError !== undefined
+        ? { originError: attempt.originError }
+        : {}),
     });
   }
 

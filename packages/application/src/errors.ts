@@ -147,12 +147,15 @@ export function isBotCheckWall(error: AppError): boolean {
  * refused this visitor/IP's mints. Unlike the bot wall it keeps its
  * auto-retry — redrawing the same ref's ladder mints fresh URLs —
  * and the attempt's alternate-ref hop still treats it as worth one
- * fresh ladder on a different video.
+ * fresh ladder on a different video. The detail may also arrive
+ * typed — `streams-capped` is itself a fail kind — and both shapes
+ * name the same weather.
  */
 export function isStreamsCappedTransient(error: AppError): boolean {
   return (
-    error.kind === 'transient' &&
-    error.message.split(':').at(-1)?.trim() === 'streams-capped'
+    error.kind === 'streams-capped' ||
+    (error.kind === 'transient' &&
+      error.message.split(':').at(-1)?.trim() === 'streams-capped')
   );
 }
 

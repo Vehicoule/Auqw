@@ -136,11 +136,16 @@ export function run(): void {
       `capped is not a bot wall: ${message}`,
     );
   }
+  // The typed shape: the kind itself is the verdict — the message is
+  // free detail.
+  assert(
+    isStreamsCappedTransient(appError('streams-capped', 'provider capped')),
+    'typed capped kind recognized',
+  );
   const notCapped: readonly [ErrorKind, string][] = [
     ['transient', 'socket hangup'],
     ['transient', 'transient: bot-check'],
     ['transient', 'streams-capped tomorrow'],
-    ['streams-capped', 'provider capped'],
     ['timeout', 'streams-capped'],
   ];
   for (const [kind, message] of notCapped) {
