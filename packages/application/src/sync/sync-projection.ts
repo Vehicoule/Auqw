@@ -2004,6 +2004,7 @@ function finishProjection(
       }
       countFoldIds.add(count.recordingId);
       const foldedLast = numField(fold.fields, 'lastMs');
+      const appliedCount = numField(fold.fields, 'count');
       const candidate: PlayCount = {
         recordingId: count.recordingId,
         // Remote folds never touch the local-only baseline — it is
@@ -2016,11 +2017,18 @@ function finishProjection(
           Math.max(
             0,
             fold.absolute
-              ? // An absolute page carries only logged components —
-                // plays still stranded locally keep the stored count
-                // above it, and dropping to the page's total would
-                // erase them (emitUnsynced recovers the difference).
-                Math.max(count.count, numField(fold.fields, 'count') ?? 0)
+              ? appliedCount === null
+                ? count.count
+                : // An absolute page carries only logged components,
+                  // so a stored surplus above it is unlogged play
+                  // evidence — but at most `localCount` worth:
+                  // components a tombstone deleted can never ride
+                  // back in through the floor.
+                  appliedCount +
+                    Math.min(
+                      Math.max(0, count.count - appliedCount),
+                      count.localCount ?? 0,
+                    )
               : count.count + (fold.sumDeltas.get('count') ?? 0),
           ),
         ),

@@ -1279,11 +1279,11 @@ function testSnapshotCountAbsolute(): void {
   );
 }
 
-// An absolute page carries only LOGGED components — a stored count
-// above it is stranded local play evidence, not a stale value.
-// Dropping to the page's total would erase plays emitUnsynced can
-// still recover.
-function testSnapshotCountFloorsAtStored(): void {
+// An absolute page carries only logged components — a stored surplus
+// above it may be unlogged local plays, but only up to `localCount`:
+// components a tombstone deleted must not ride back in through the
+// floor (a stored count alone can't tell them apart).
+function testSnapshotCountFloorHonorsTombstone(): void {
   const current = projInput({
     recordings: [recording('r-1', [ref('itunes', 't-1')])],
     playCounts: [playCount('r-1', 10)],
@@ -1300,8 +1300,57 @@ function testSnapshotCountFloorsAtStored(): void {
   const projected = projectAppliedEntries([outcome], current);
   assertEqual(
     projected.batch.playCounts?.[0]?.count,
-    10,
-    'absolute below stored keeps stranded local component',
+    7,
+    'surplus without local evidence folds to the page',
+  );
+}
+
+// The same floor keeps genuinely unlogged local plays — `localCount`
+// is the durable bound on how much of the stored surplus is ours.
+function testSnapshotCountFloorsAtLocalCount(): void {
+  const current = projInput({
+    recordings: [recording('r-1', [ref('itunes', 't-1')])],
+    playCounts: [
+      { recordingId: 'r-1', count: 200, lastMs: 100, localCount: 100 },
+    ],
+  });
+  const outcome = applied(
+    fieldEntry('playCount', 'r-1', 'count', 2),
+    [],
+    {
+      kind: 'playCount',
+      recordId: 'r-1',
+      fields: { count: 100, lastMs: 900 },
+    },
+  );
+  const projected = projectAppliedEntries([outcome], current);
+  assertEqual(
+    projected.batch.playCounts?.[0]?.count,
+    200,
+    'localCount-bounded surplus survives the page',
+  );
+  // A surplus above `localCount` can only be remote components —
+  // the cap drops the excess rather than resurrecting deletions.
+  const capped = projInput({
+    recordings: current.recordings,
+    playCounts: [
+      { recordingId: 'r-1', count: 300, lastMs: 100, localCount: 100 },
+    ],
+  });
+  const outcome2 = applied(
+    fieldEntry('playCount', 'r-1', 'count', 3),
+    [],
+    {
+      kind: 'playCount',
+      recordId: 'r-1',
+      fields: { count: 150, lastMs: 900 },
+    },
+  );
+  assertEqual(
+    projectAppliedEntries([outcome2], capped).batch.playCounts?.[0]
+      ?.count,
+    250,
+    'surplus beyond localCount is capped, not kept',
   );
 }
 
@@ -2048,7 +2097,8 @@ export function run(): void {
   testSnapshotSurvivesTombstone();
   testSnapshotEmptyDeletes();
   testSnapshotCountAbsolute();
-  testSnapshotCountFloorsAtStored();
+  testSnapshotCountFloorHonorsTombstone();
+  testSnapshotCountFloorsAtLocalCount();
   testSnapshotNewestWins();
   testProjectMaterialized();
   testProjectMaterializedPending();
