@@ -1404,6 +1404,41 @@ function testSnapshotCountFloorHonorsOurTombstone(): void {
     7,
     'replay does not resurrect the deleted share',
   );
+  // Delete-then-new-play before any fold: the page carries our new
+  // delivered component, so BOTH the old stamp and the new share
+  // come out — stored 11 (10 + the new play), page ours 1 + peer 7
+  // = 8, nothing unsent.
+  const regrown = projInput({
+    recordings: current.recordings,
+    playCounts: [
+      {
+        recordingId: 'r-1',
+        count: 11,
+        lastMs: 100,
+        loggedRemote: 7,
+        loggedOurs: 3,
+      },
+    ],
+    deviceId: 'dev-us',
+  });
+  const regrownOutcome = applied(
+    fieldEntry('playCount', 'r-1', 'count', 3),
+    [],
+    {
+      kind: 'playCount',
+      recordId: 'r-1',
+      fields: { count: 8, lastMs: 950 },
+      sumComponents: { count: { 'dev-us': 1, 'peer-x': 7 } },
+    },
+  );
+  const refolded = projectAppliedEntries([regrownOutcome], regrown)
+    .batch.playCounts?.[0];
+  assertEqual(
+    refolded?.count,
+    8,
+    'a delivered new play does not duplicate over the tombstone',
+  );
+  assertEqual(refolded?.loggedOurs, 1, 'the stamp re-anchors live');
 }
 
 // The baseline keeps plays the log never saw — stranded increments
@@ -2013,6 +2048,60 @@ function testUnsyncedWrites(): void {
       (w) => w.kind === 'playCount' && 'field' in w && w.field === 'count',
     ),
     'a deleted local component does not re-emit',
+  );
+
+  // Delete-then-new-delivered: every leg discounts the old stamp
+  // and the new share is already in the log — target 1, ours 1,
+  // suppressed instead of asserting a duplicated component.
+  const regrownDelivered = unsyncedWrites(
+    emitInput({
+      playCounts: [
+        {
+          recordingId: 'r-1',
+          count: 11,
+          lastMs: 9,
+          localCount: 4,
+          loggedRemote: 7,
+          loggedOurs: 3,
+        },
+      ],
+    }),
+    new Map([['playCount\u001fr-1', { count: 8 }]]),
+    evidence({
+      'playCount\u001fr-1': { count: { [DEV]: 1, 'peer-x': 7 } },
+    }),
+  );
+  assert(
+    !regrownDelivered.some(
+      (w) => w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'a delivered new play does not double-emit over the tombstone',
+  );
+
+  // Same ordering but the new play never delivered: the emit
+  // recovers exactly the stranded share (1) plus the remote 7 = 8.
+  const regrownStranded = unsyncedWrites(
+    emitInput({
+      playCounts: [
+        {
+          recordingId: 'r-1',
+          count: 11,
+          lastMs: 9,
+          localCount: 4,
+          loggedRemote: 7,
+          loggedOurs: 3,
+        },
+      ],
+    }),
+    new Map([['playCount\u001fr-1', { count: 7 }]]),
+    evidence({
+      'playCount\u001fr-1': { count: { 'peer-x': 7 } },
+    }),
+  );
+  assertEqual(
+    countValue(regrownStranded),
+    8,
+    'a stranded new play re-emits over the tombstone',
   );
 
   // A remote share at the wire bound fills it — the merge can't

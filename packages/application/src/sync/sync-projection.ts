@@ -800,14 +800,16 @@ function sumDeliveryTarget(
   const oursLive = evidence.components
     .get(`${write.kind}${KEY_SEP}${write.recordId}`)
     ?.[write.field]?.[evidence.deviceId];
-  // A tombstoned local component was delivered, then deleted — the
-  // share of the stored stamp above the live one is no longer ours
-  // to recover. Subtracting it keeps a reconcile from resurrecting
-  // the deleted plays as either estimate's intended component.
-  const deletedOurs = Math.max(
-    0,
-    (row?.loggedOurs ?? oursLive ?? 0) - (oursLive ?? 0),
-  );
+  // Our component only shrinks via deletion: below the stored
+  // stamp the whole stamp was delivered, then deleted — and every
+  // still-live play is post-deletion delivery, not pending
+  // evidence. Subtracting the stamp itself (not the gap) keeps a
+  // delete-then-new-play ordering from emitting the delivered
+  // share twice.
+  const deletedOurs =
+    row?.loggedOurs !== undefined && (oursLive ?? 0) < row.loggedOurs
+      ? row.loggedOurs
+      : 0;
   const domainEstimate =
     typeof write.value === 'number'
       ? Math.max(
@@ -2082,31 +2084,36 @@ function finishProjection(
       countFoldIds.add(count.recordingId);
       const foldedLast = numField(fold.fields, 'lastMs');
       const appliedCount = numField(fold.fields, 'count');
-      // `count - max(ourComponent, loggedOurs) - loggedRemote` is
-      // exactly the plays the log never saw: our live component
-      // reads out of the page's own `sumComponents`, so plays that
-      // already delivered stop counting as unsent; remote growth
-      // between pages can't eat the surplus the way a
-      // surplus-over-page floor would; and `loggedOurs` keeps a
-      // tombstoned local component — delivered, then deleted —
-      // from masquerading as unsent and resurrecting on every
-      // reconcile. Without the baseline or the breakdown the
-      // surplus over the page itself is the conservative bound —
-      // per-device components grow only, so it can never
-      // over-claim — capped further by this device's own committed
-      // plays.
+      // `count - oursAccounted - loggedRemote` is exactly the
+      // plays the log never saw: our live component reads out of
+      // the page's own `sumComponents`, so plays that already
+      // delivered stop counting as unsent; remote growth between
+      // pages can't eat the surplus the way a surplus-over-page
+      // floor would; and `loggedOurs` keeps a tombstoned local
+      // component — delivered, then deleted — from masquerading as
+      // unsent. When our share sits BELOW its stamp the live read
+      // is all post-deletion delivery, so both the stamp and the
+      // live share come out — one delivered generation covering
+      // the other would count a delivered-new play as unsent.
+      // Without the baseline or the breakdown the surplus over the
+      // page itself is the conservative bound — per-device
+      // components grow only, so it can never over-claim — capped
+      // further by this device's own committed plays.
       const countComponents = fold.sumComponents?.['count'];
       const oursNow =
         countComponents === undefined || current.deviceId === undefined
           ? undefined
           : (countComponents[current.deviceId] ?? 0);
+      const loggedOursVal = count.loggedOurs ?? 0;
+      const oursAccounted =
+        oursNow !== undefined && oursNow < loggedOursVal
+          ? oursNow + loggedOursVal
+          : oursNow;
       const unlogged =
         count.loggedRemote !== undefined && oursNow !== undefined
           ? Math.max(
               0,
-              count.count -
-                Math.max(oursNow, count.loggedOurs ?? oursNow) -
-                count.loggedRemote,
+              count.count - (oursAccounted ?? 0) - count.loggedRemote,
             )
           : Math.min(
               Math.max(0, count.count - (appliedCount ?? count.count)),
