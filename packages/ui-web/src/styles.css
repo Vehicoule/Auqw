@@ -2443,6 +2443,13 @@
   container-type: inline-size;
 }
 
+/* Inside the desktop column the stage merges with the world's canvas —
+   one split-view surface, no second tone across the seam. The sheet
+   host keeps --stage. */
+.uw-stage-col .uw-stage {
+  background: var(--canvas);
+}
+
 /* Player mode's cluster is pinned, not scrolled — it keeps the clear
    zone on the body; list modes reserve inside the scrollport. */
 .uw-stage[data-mode='player'] .uw-stage__body {
@@ -3088,6 +3095,9 @@
   border: 0;
   border-left: var(--stroke-hairline) solid var(--hairline);
   overflow: hidden;
+}
+
+.ui-web:not([data-reduced-motion='true']) .uw-world {
   /* The card detaches/reattaches as the artwork appears and drops —
      a slow morph, not a pop. */
   transition:
