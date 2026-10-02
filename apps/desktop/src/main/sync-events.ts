@@ -16,7 +16,7 @@ import type { NetSender } from './net-monitor.ts';
  * net monitor: refcounted attach, destroyed senders drop
  * automatically.
  */
-interface PushService<E> {
+export interface PushService<E> {
   attach(sender: NetSender): void;
   detach(sender: NetSender): void;
   /** Broadcast a validated event to every subscribed sender. */
@@ -24,7 +24,7 @@ interface PushService<E> {
   stop(): void;
 }
 
-function createPushService<E>(channel: string): PushService<E> {
+export function createPushService<E>(channel: string): PushService<E> {
   const senders = new Map<NetSender, number>();
   // A `destroyed` hook is registered once per sender and outlives a
   // full detach (drop is reference-based and stays correct), so

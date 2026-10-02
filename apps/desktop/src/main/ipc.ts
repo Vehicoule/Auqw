@@ -126,6 +126,12 @@ export interface ChannelDeps {
     readonly attach: (sender: NetSender) => void;
     readonly detach: (sender: NetSender) => void;
   };
+  /** `window:state` push registry — same refcounted sender pattern;
+      attach also reports the current maximize state. */
+  readonly windowState: {
+    readonly attach: (sender: NetSender) => void;
+    readonly detach: (sender: NetSender) => void;
+  };
   /**
    * The device-flow verification URL — main-side `shell.openExternal`
    * behind a google.com allowlist (the renderer's CSP can't open
@@ -664,6 +670,11 @@ export function registerChannels(
       CHANNELS.updateSubscribe,
       CHANNELS.updateUnsubscribe,
       deps.updateState,
+    ],
+    [
+      CHANNELS.windowStateSubscribe,
+      CHANNELS.windowStateUnsubscribe,
+      deps.windowState,
     ],
   ];
   for (const [sub, unsub, registry] of subscriptions) {

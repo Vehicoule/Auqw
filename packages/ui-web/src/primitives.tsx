@@ -430,6 +430,13 @@ const GLYPHS = {
     ],
   },
   close: { filled: false, shapes: [p('M6 6l12 12M18 6 6 18')] },
+  // Caption-cluster trio — desktop window chrome drawn in this family.
+  minimize: { filled: false, shapes: [p('M6 12h12')] },
+  maximize: { filled: false, shapes: [rr(6.5, 6.5, 11, 11, 2)] },
+  restore: {
+    filled: false,
+    shapes: [rr(6, 10.5, 8.5, 8.5, 1.5), p('M9 10.5V7A1.5 1.5 0 0 1 10.5 5.5h6A1.5 1.5 0 0 1 18 7v6a1.5 1.5 0 0 1-1.5 1.5h-2')],
+  },
   'drag-handle': { filled: false, shapes: [p('M5 9h14M5 15h14')] },
   spinner: { filled: false, shapes: [p('M20 12a8 8 0 1 1-8-8')] },
   warn: {
