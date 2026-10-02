@@ -49,14 +49,19 @@ pub trait KeyValueStore: Send + Sync {
     }
 
     /// `commit` gated by `admit`, evaluated inside the store's write
-    /// serialization immediately before publication — admission and
-    /// publish are one critical section, so a precondition that flips
-    /// concurrently (e.g. an invocation cancel) cannot lose to a
-    /// commit that already left the gate. `secrets` is the
-    /// invocation's collected token material: a guest that names a
-    /// key after a secret must not write it back out in a
-    /// cap-violation message, so the message is redacted with the
-    /// same set as every other guest-controlled surface.
+    /// serialization — admission and publish are one critical
+    /// section, so a precondition that flips concurrently (e.g. an
+    /// invocation cancel) cannot lose to a commit that already left
+    /// the gate. `admit` is a *predicate*, not a one-shot permit:
+    /// implementations may consult it zero or more times per commit
+    /// (before staging I/O and again at the publication boundary), so
+    /// it must be a cheap, repeatable, monotonic read of a condition
+    /// like a cancel token or a deadline — a stateful or consuming
+    /// callback is a caller bug. `secrets` is the invocation's
+    /// collected token material: a guest that names a key after a
+    /// secret must not write it back out in a cap-violation message,
+    /// so the message is redacted with the same set as every other
+    /// guest-controlled surface.
     ///
     /// # Errors
     /// [`KvError::Rejected`] when `admit` declines — nothing is
@@ -329,27 +334,24 @@ impl KeyValueStore for FileKeyValueStore {
         } else {
             all.insert(plugin_id.to_string(), ns);
         }
-        // The gate runs exactly once per commit — `admit` is not
-        // promised pure or monotonic, so it is consulted on only one
-        // path: on a staging failure (a closed gate owns the verdict
-        // — Rejected, not the backend's error — on a commit the caller
-        // already discarded), or on the doorstep of the rename. The
-        // rename is the publication boundary and staging is the slow
-        // leg, so a cancel or deadline landing mid-staging still
-        // discards the staged bytes instead of publishing past a
-        // bound the caller already reported.
-        let tmp = match self.stage_all(&all) {
-            Ok(tmp) => tmp,
-            Err(e) => {
-                return if admit() {
-                    Err(e)
-                } else {
-                    Err(KvError::Rejected(format!(
-                        "{plugin_id}: admission declined"
-                    )))
-                };
-            }
-        };
+        // A gate already closed is answered before any staging I/O —
+        // `admit` is a repeatable monotonic predicate (see the trait
+        // contract), so the caller's rejection outranks both the
+        // staged bytes and a backend error on a commit it discarded,
+        // and later KV operations aren't parked behind a doomed
+        // write+fsync.
+        if !admit() {
+            return Err(KvError::Rejected(format!(
+                "{plugin_id}: admission declined"
+            )));
+        }
+        // The same predicate runs a second time on the doorstep of
+        // the rename — the tmp write + sync is the slow leg and the
+        // rename is the publication boundary, so a cancel or deadline
+        // that lands while bytes were being staged still discards
+        // them instead of publishing past a bound the caller already
+        // reported.
+        let tmp = self.stage_all(&all)?;
         if !admit() {
             let _ = std::fs::remove_file(&tmp);
             return Err(KvError::Rejected(format!(
