@@ -3021,6 +3021,13 @@
   justify-self: start;
 }
 
+/* Back/forward chevrons stay mounted in both directions — the
+   unavailable one dims instead of leaving, so the pair's footprint
+   never shifts the centered tabs. */
+.uw-world-bar__start .uw-icon-btn:disabled {
+  opacity: 0.4;
+}
+
 .uw-world-bar__end {
   justify-content: flex-end;
   justify-self: end;

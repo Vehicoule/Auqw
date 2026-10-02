@@ -26,11 +26,13 @@ import type {
 import {
   advanceTargetId,
   failedSkipIds,
+  navRouteKey,
   overlayRouteIndex,
   playlistDownloadPlan,
   queueOriginRoute,
   reportStoredDownloadError,
   rowActionsModel,
+  sameNavLocation,
   sameOverlayRoute,
   skipTargetIds,
   stageDownloadChip,
@@ -616,6 +618,74 @@ assertEqual(
   ),
   1,
   'app-specific overlay entries (null after narrowing) are skipped',
+);
+
+// ---- navRouteKey / sameNavLocation ------------------------------------
+// The world-bar history dedupes locations by route identity: same
+// surface commits collapse, same-type routes with different payload
+// keys stay distinct, and app-extended overlays keep their own shape.
+
+const likedRoute: ShellOverlay = { type: 'collection', key: 'liked' };
+const top50Route: ShellOverlay = { type: 'collection', key: 'top50' };
+const albumRoute: ShellOverlay = { type: 'entity', ref: albumRef };
+const artistRoute: ShellOverlay = { type: 'entity', ref: artistRef };
+
+assertEqual(
+  navRouteKey(likedRoute),
+  'collection:liked',
+  'collection key = type + collection key',
+);
+const albumRouteCopy: ShellOverlay = {
+  type: 'entity',
+  ref: { ...albumRef },
+};
+assertEqual(
+  navRouteKey(albumRoute),
+  navRouteKey(albumRouteCopy),
+  'entity key follows ref identity, not object identity',
+);
+assert(
+  navRouteKey(albumRoute) !== navRouteKey(artistRoute),
+  'different entity refs keep different keys',
+);
+assert(
+  navRouteKey({ type: 'corrections' }) !== navRouteKey({ type: 'transfer' }),
+  'payload-less shell routes key on their type',
+);
+const syncA = { type: 'sync', extra: 1 };
+const syncB = { type: 'sync', extra: 2 };
+assert(
+  navRouteKey(syncA) !== navRouteKey(syncB),
+  'extension overlays keep their serialized shape',
+);
+
+assert(
+  sameNavLocation(
+    { tab: 'library', routes: [likedRoute, albumRoute] },
+    {
+      tab: 'library',
+      routes: [likedRoute, albumRouteCopy],
+    },
+  ),
+  'a restored stack names the same location',
+);
+assert(
+  !sameNavLocation(
+    { tab: 'home', routes: [] },
+    { tab: 'home', routes: [likedRoute] },
+  ) &&
+    !sameNavLocation(
+      { tab: 'library', routes: [likedRoute] },
+      { tab: 'library', routes: [top50Route] },
+    ),
+  'different stacks or payloads are different locations',
+);
+assert(
+  !sameNavLocation(
+    { tab: 'home', routes: [] },
+    { tab: 'library', routes: [] },
+  ),
+  'the tab is part of the location',
 );
 
 console.log('app-shell tests passed');

@@ -115,6 +115,7 @@ import {
   queueOriginRoute,
   reportStoredDownloadError,
   rowActionsModel,
+  sameNavLocation,
   stageDownloadChip,
   stageReopenMode,
   suggestionMetaMap,
@@ -570,6 +571,69 @@ export function useAppShell<E extends { readonly type: string } = never>(
     clearOverlayStack();
     setEntityFetches({});
   }, [clearOverlayStack]);
+
+  // ---- world-bar back/forward --------------------------------------
+  // Browser-style history: every committed (tab, overlay-stack) change
+  // appends a location; the chevrons walk the log. Restores rebuild the
+  // stack by re-pushing recorded routes — entity pages re-fetch through
+  // the stack effect, so a restored screen reloads its own content.
+  type NavLocation = {
+    readonly tab: string;
+    readonly routes: readonly (ShellOverlay | E)[];
+  };
+  const navLog = useRef<{ entries: NavLocation[]; cursor: number }>({
+    entries: [],
+    cursor: -1,
+  });
+  const [navAt, setNavAt] = useState(-1);
+  // A restore commit must not record itself — the flag outlives the
+  // batched setState and the recording effect consumes it.
+  const restoringNav = useRef(false);
+  useEffect(() => {
+    const log = navLog.current;
+    if (restoringNav.current) {
+      restoringNav.current = false;
+      return;
+    }
+    const routes = overlayStack.map((entry) => entry.overlay);
+    const cur = log.entries[log.cursor];
+    if (
+      cur !== undefined &&
+      sameNavLocation(cur, { tab, routes })
+    ) {
+      return;
+    }
+    log.entries = [...log.entries.slice(0, log.cursor + 1), { tab, routes }];
+    log.cursor = log.entries.length - 1;
+    setNavAt(log.cursor);
+  }, [tab, overlayStack]);
+  const navGo = useCallback(
+    (delta: -1 | 1) => {
+      const log = navLog.current;
+      const target = log.entries[log.cursor + delta];
+      if (target === undefined) {
+        return;
+      }
+      restoringNav.current = true;
+      log.cursor += delta;
+      setNavAt(log.cursor);
+      setTab(target.tab);
+      clearOverlays();
+      for (const route of target.routes) {
+        pushOverlay(route);
+      }
+    },
+    [pushOverlay, clearOverlays],
+  );
+  const navHistory = useMemo(
+    () => ({
+      canBack: navAt > 0,
+      canForward: navAt < navLog.current.entries.length - 1,
+      back: () => navGo(-1),
+      forward: () => navGo(1),
+    }),
+    [navAt, navGo],
+  );
   const entityMeta = useRef(new Map<string, TrackMetadata>());
   const [actionsFor, setActionsFor] = useState<ActionTarget | null>(null);
   const [pickerFor, setPickerFor] = useState<ActionTarget | null>(null);
@@ -3760,6 +3824,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     selectTab,
     focusSearch,
     searchFocusTick,
+    navHistory,
     // overlays
     overlayStack,
     overlay,
