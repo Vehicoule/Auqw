@@ -45,14 +45,35 @@ function fakeAudio(): FakeAudio {
 }
 
 function fakeMediaSession(): MediaSessionLike & {
-  actions: Map<string, (() => void) | null>;
+  actions: Map<
+    string,
+    ((details?: { seekTime?: number; seekOffset?: number }) => void) | null
+  >;
+  positions: Array<{
+    duration: number;
+    playbackRate: number;
+    position: number;
+  }>;
 } {
-  const actions = new Map<string, (() => void) | null>();
+  const actions = new Map<
+    string,
+    ((details?: { seekTime?: number; seekOffset?: number }) => void) | null
+  >();
+  const positions: Array<{
+    duration: number;
+    playbackRate: number;
+    position: number;
+  }> = [];
   return {
     playbackState: 'none',
+    metadata: null,
     actions,
+    positions,
     setActionHandler(action, handler) {
       actions.set(action, handler);
+    },
+    setPositionState(state) {
+      positions.push({ ...state });
     },
   };
 }
@@ -1592,13 +1613,466 @@ export async function run(): Promise<void> {
   }
 
   // remote-next at the queue tail stops the element — a null target
-  // while audio is live must not leave playback running.
+  // while audio is live must not leave playback running. The button
+  // greys at the tail, so this only lands through a handler captured
+  // before the cursor reached it (a stale-press race).
   {
     const audio = fakeAudio();
     const mediaSession = fakeMediaSession();
     const stream = fakeStream();
     const player = createWebPlayerPort({ stream, audio, mediaSession });
     const events = collect(player);
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    const nextHandler = mediaSession.actions.get('nexttrack');
+    assert(typeof nextHandler === 'function', 'precondition: next live');
+    // A re-projection lands the cursor on the tail before the press
+    // resolves.
+    await player.setQueueProjection(
+      twoItemProjection({ currentOccurrenceId: 'occ-2' }),
+    );
+    assertEqual(
+      mediaSession.actions.get('nexttrack'),
+      null,
+      'next greys once the cursor is at the tail',
+    );
+    nextHandler();
+    await settle();
+    const transition = events.find((e) => e.type === 'queue-transition');
+    assert(
+      transition !== undefined &&
+        transition.type === 'queue-transition' &&
+        transition.toOccurrenceId === null,
+      'tail next emits the null target',
+    );
+    assertEqual(audio.src, '', 'element detached at the tail');
+    assertEqual(mediaSession.playbackState, 'none');
+  }
+
+  // ---- OS now-playing surface --------------------------------------------
+
+  // Play publishes the current row's metadata; a remote cursor move
+  // re-publishes the successor's.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mediaSession,
+      mediaMetadata: (init) => init,
+    });
+    await player.setQueueProjection(
+      twoItemProjection({
+        items: [
+          {
+            occurrenceId: 'occ-1',
+            provider: 'deezer',
+            sourceRef: 't1',
+            title: 'One',
+            artist: 'A One',
+            artworkUrl: 'https://art/one.png',
+            album: 'Alb One',
+            artwork: [
+              { url: 'https://art/one.png', width: 300, height: 300 },
+              { url: 'https://art/one-64.png', width: 64, height: 64 },
+            ],
+          },
+          {
+            occurrenceId: 'occ-2',
+            provider: 'deezer',
+            sourceRef: 't2',
+            title: 'Two',
+            artist: null,
+            artworkUrl: null,
+          },
+        ],
+      }),
+    );
+    assertEqual(mediaSession.metadata, null, 'nothing playing — no card');
+    await player.play({ handle: 'h-1', identity });
+    const meta = mediaSession.metadata as {
+      title?: string;
+      artist?: string;
+      album?: string;
+      artwork?: Array<{ src: string; sizes?: string }>;
+    } | null;
+    assertEqual(meta?.title, 'One', 'metadata carries the playing title');
+    assertEqual(meta?.artist, 'A One', 'metadata carries the artist');
+    assertEqual(meta?.album, 'Alb One', 'metadata carries the album');
+    assertEqual(
+      meta?.artwork?.[0]?.src,
+      'https://art/one.png',
+      'metadata carries the artwork',
+    );
+    assertEqual(
+      meta?.artwork?.[0]?.sizes,
+      '300x300',
+      'artwork entries carry dims as sizes',
+    );
+    assertEqual(
+      meta?.artwork?.length,
+      2,
+      'the full artwork list reaches the OS for it to pick',
+    );
+    mediaSession.actions.get('nexttrack')?.();
+    await settle();
+    const next = mediaSession.metadata as {
+      title?: string;
+      artist?: string;
+      album?: string;
+    } | null;
+    assertEqual(next?.title, 'Two', 'successor republishes its own row');
+    assertEqual(next?.artist, undefined, 'missing artist omits the field');
+    assertEqual(next?.album, undefined, 'missing album omits the field');
+  }
+
+  // OS transport buttons must mirror playbackState — a media-key
+  // pause/play that left it stale would show the widget the wrong
+  // transport forever after.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    assertEqual(mediaSession.playbackState, 'playing', 'play marks playing');
+    mediaSession.actions.get('pause')?.();
+    assert(audio.paused, 'media pause pauses the element');
+    assertEqual(
+      mediaSession.playbackState,
+      'paused',
+      'media pause marks paused',
+    );
+    mediaSession.actions.get('play')?.();
+    await settle();
+    assert(!audio.paused, 'media play resumes the element');
+    assertEqual(
+      mediaSession.playbackState,
+      'playing',
+      'media play marks playing',
+    );
+  }
+
+  // A rejected OS play must not flip the widget to 'playing'.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    mediaSession.actions.get('pause')?.();
+    audio.play = () => Promise.reject(new Error('no media'));
+    mediaSession.actions.get('play')?.();
+    await settle();
+    assert(audio.paused, 'element stays paused');
+    assertEqual(
+      mediaSession.playbackState,
+      'paused',
+      'rejected OS play leaves the widget paused',
+    );
+  }
+
+  // A pause landing while an OS play() is still in flight wins — the
+  // late resolution must not resurrect 'playing'.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    mediaSession.actions.get('pause')?.();
+    let releasePlay: (() => void) | undefined;
+    audio.play = () =>
+      new Promise<void>((resolve) => {
+        releasePlay = () => resolve();
+      });
+    mediaSession.actions.get('play')?.();
+    mediaSession.actions.get('pause')?.();
+    releasePlay?.();
+    await settle();
+    assertEqual(
+      mediaSession.playbackState,
+      'paused',
+      'mid-flight pause beats the late play resolution',
+    );
+  }
+
+  // The OS scrubber lands the same as a seekTo on the live attempt.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    mediaSession.actions.get('seekto')?.({ seekTime: 12.34 });
+    assertEqual(audio.currentTime, 12.34, 'seekto lands on the element');
+    mediaSession.actions.get('seekto')?.();
+    assertEqual(audio.currentTime, 12.34, 'missing seekTime is ignored');
+  }
+
+  // Position state mirrors the element — OS widgets interpolate off it.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    const live =
+      mediaSession.positions[mediaSession.positions.length - 1];
+    assert(live !== undefined, 'play publishes a position state');
+    assertEqual(live?.duration, 60, 'duration mirrors the element');
+    assertEqual(live?.playbackRate, 1, 'playing rate is 1');
+    audio.pause();
+    const paused =
+      mediaSession.positions[mediaSession.positions.length - 1];
+    // Rate must stay nonzero — a 0 update is rejected; the paused
+    // signal rides playbackState, not this field.
+    assertEqual(paused?.playbackRate, 1, 'paused keeps a nonzero rate');
+  }
+
+  // Stop clears the card — the widget must not freeze on the last track.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mediaSession,
+      mediaMetadata: (init) => init,
+    });
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    assert(mediaSession.metadata !== null, 'precondition: card published');
+    await player.stop(identity);
+    assertEqual(mediaSession.playbackState, 'none');
+    assertEqual(mediaSession.metadata, null, 'stop blanks the card');
+  }
+
+  // Transport buttons grey at the walk's real edges — a null handler
+  // is the Chromium signal for a disabled OS button.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    // Head of a two-item walk under repeat=off: next live, prev grey.
+    assert(
+      typeof mediaSession.actions.get('nexttrack') === 'function',
+      'next live mid-walk',
+    );
+    assertEqual(
+      mediaSession.actions.get('previoustrack'),
+      null,
+      'prev greyed at the head',
+    );
+    await player.play({ handle: 'h-1', identity });
+    // At the head a live element makes previous restart in place —
+    // the button turns on with the attach.
+    assert(
+      typeof mediaSession.actions.get('previoustrack') === 'function',
+      'prev live once a track is attached',
+    );
+    // Reach the tail: repeat=off leaves no successor — next greys.
+    mediaSession.actions.get('nexttrack')?.();
+    await settle();
+    assertEqual(
+      mediaSession.actions.get('nexttrack'),
+      null,
+      'next greyed at the tail',
+    );
+    assert(
+      typeof mediaSession.actions.get('previoustrack') === 'function',
+      'prev live at the tail',
+    );
+  }
+
+  // Step seeks ride the same landing as the scrubber — offset
+  // honored, forward clamped to duration, backward floored at 0.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    audio.currentTime = 30;
+    mediaSession.actions.get('seekbackward')?.({ seekOffset: 10 });
+    assertEqual(audio.currentTime, 20, 'seekbackward steps the element');
+    mediaSession.actions.get('seekforward')?.({ seekOffset: 10 });
+    assertEqual(audio.currentTime, 30, 'seekforward steps the element');
+    mediaSession.actions.get('seekforward')?.();
+    assertEqual(audio.currentTime, 40, 'absent offset uses the 10 s default');
+    mediaSession.actions.get('seekforward')?.({ seekOffset: 30 });
+    assertEqual(audio.currentTime, 60, 'seekforward clamps to duration');
+    mediaSession.actions.get('seekbackward')?.({ seekOffset: 90 });
+    assertEqual(audio.currentTime, 0, 'seekbackward floors at zero');
+  }
+
+  // A step seek during a pending play starts from the pending resume
+  // target — not the element's still-stale position.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    let resolveA: ((v: { url: string }) => void) | undefined;
+    const stream = fakeStream({
+      serveUrl: (args) => {
+        const { handle } = args as { handle: string };
+        if (handle === 'h-a') {
+          return new Promise((resolve) => {
+            resolveA = resolve;
+          });
+        }
+        return Promise.resolve({ url: `http://127.0.0.1:9/s/${handle}` });
+      },
+    });
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    const pendingA = player.play({
+      handle: 'h-a',
+      identity,
+      positionMs: 30_000,
+    });
+    // Element untouched at 0; the pending slot holds the 30s resume.
+    mediaSession.actions.get('seekforward')?.({});
+    resolveA?.({ url: 'http://127.0.0.1:9/s/h-a' });
+    await pendingA;
+    await settle();
+    assertEqual(
+      audio.currentTime,
+      40,
+      'seekforward steps from the pending resume target',
+    );
+  }
+
+  // A superseded play's pending slot is dead — step seeks ride the
+  // live generation's resume target only.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const resolvers = new Map<string, (v: { url: string }) => void>();
+    const stream = fakeStream({
+      serveUrl: (args) => {
+        const { handle } = args as { handle: string };
+        return new Promise((resolve) => {
+          resolvers.set(handle, resolve);
+        });
+      },
+    });
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
+    await player.setQueueProjection(twoItemProjection());
+    const pendingA = player.play({
+      handle: 'h-a',
+      identity,
+      positionMs: 30_000,
+    });
+    const pendingB = player.play({
+      handle: 'h-b',
+      identity,
+      positionMs: 5_000,
+    });
+    mediaSession.actions.get('seekforward')?.({});
+    resolvers.get('h-b')?.({ url: 'http://127.0.0.1:9/s/h-b' });
+    await pendingB;
+    await settle();
+    assertEqual(
+      audio.currentTime,
+      15,
+      'step seek rides the live play, not the superseded one',
+    );
+    // The dead play's late resolve can't retake the element.
+    resolvers.get('h-a')?.({ url: 'http://127.0.0.1:9/s/h-a' });
+    await pendingA;
+    await settle();
+    assertEqual(audio.currentTime, 15, 'superseded play stays dead');
+  }
+
+  // The OS stop action reports a 'remote-stop' transition — the
+  // session reconciles it (queue stops) and its release is what
+  // tears the element down, so no local queue state can phantom.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mediaSession,
+      mediaMetadata: (init) => init,
+    });
+    const events = collect(player);
+    await player.setQueueProjection(twoItemProjection());
+    await player.play({ handle: 'h-1', identity });
+    assert(!audio.paused, 'precondition: playing');
+    mediaSession.actions.get('stop')?.();
+    assert(audio.paused, 'stop silences the element now');
+    assertEqual(mediaSession.playbackState, 'paused');
+    const transition = events.find((e) => e.type === 'queue-transition');
+    assert(
+      transition !== undefined &&
+        transition.type === 'queue-transition' &&
+        transition.reason === 'remote-stop' &&
+        transition.toOccurrenceId === null &&
+        transition.identity === null &&
+        transition.handle === null,
+      'stop is reported as a remote-stop drain transition',
+    );
+    // The session's release is what clears the surface.
+    await player.release({ handle: 'h-1', identity });
+    assertEqual(audio.src, '', 'release detaches the element');
+    assertEqual(mediaSession.playbackState, 'none');
+    assertEqual(mediaSession.metadata, null, 'release clears the card');
+  }
+
+  // An OS stop inside the attached-but-unsettled window kills the
+  // play's generation — the late settle must not restart audio.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const port = new FakePort();
+    const stream = fakeStream({
+      channel: () => Promise.resolve(port),
+    });
+    const media = new FakeMedia();
+    const player = createWebPlayerPort({
+      stream,
+      audio,
+      mediaSession,
+      mse: fakeMseFactories(media),
+    });
+    await player.setQueueProjection(twoItemProjection());
+    await player.prepare({
+      provider: 'deezer',
+      sourceRef: 'track:7',
+      identity,
+    });
+    const playResult = player.play({ handle: 'h-1', identity });
+    // attachUrl resolved — `current` is set, the settle is pending.
+    await settle();
+    mediaSession.actions.get('stop')?.();
+    assert(audio.paused, 'stop pauses the element');
+    media.fireSourceopen();
+    await settle();
+    await playResult;
+    assert(audio.paused, 'the late settle does not restart audio');
+  }
+
+  // A natural end at the tail reports 'paused' — the element stays
+  // loaded until the session releases it, and that release is what
+  // clears the surface.
+  {
+    const audio = fakeAudio();
+    const mediaSession = fakeMediaSession();
+    const stream = fakeStream();
+    const player = createWebPlayerPort({ stream, audio, mediaSession });
     await player.setQueueProjection(
       twoItemProjection({
         order: [0],
@@ -1615,18 +2089,14 @@ export async function run(): Promise<void> {
       }),
     );
     await player.play({ handle: 'h-1', identity });
-    assert(!audio.paused, 'precondition: playing');
-    mediaSession.actions.get('nexttrack')?.();
+    audio.pause();
+    audio.fire('ended');
     await settle();
-    const transition = events.find((e) => e.type === 'queue-transition');
-    assert(
-      transition !== undefined &&
-        transition.type === 'queue-transition' &&
-        transition.toOccurrenceId === null,
-      'tail next emits the null target',
+    assertEqual(
+      mediaSession.playbackState,
+      'paused',
+      'natural tail end reads paused, not detached',
     );
-    assertEqual(audio.src, '', 'element detached at the tail');
-    assertEqual(mediaSession.playbackState, 'none');
   }
 
   // ---- MSE primary path -------------------------------------------------

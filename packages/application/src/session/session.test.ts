@@ -1968,7 +1968,7 @@ function transitionEvent(
   fields: {
     from: string | null;
     to: string | null;
-    reason: 'ended' | 'remote-next' | 'remote-previous';
+    reason: 'ended' | 'remote-next' | 'remote-previous' | 'remote-stop';
     positionMs: number;
     identity: PlaybackIdentity | null;
     handle: string | null;
@@ -2027,6 +2027,12 @@ async function projectionBasics(): Promise<void> {
   assertEqual(itemA?.sourceRef, 'yA');
   assertEqual(itemA?.title, 'Song rA');
   assertEqual(itemA?.artworkUrl, 'https://art.example/a.png', 'first https art');
+  assertEqual(itemA?.album, 'Album', 'projection carries the album');
+  assertDeepEqual(
+    itemA?.artwork,
+    [{ url: 'https://art.example/a.png', width: 2, height: 2 }],
+    'projection carries the full art list',
+  );
   assertEqual(itemB?.provider, null, 'wrong-provider ref is null');
   assertEqual(itemB?.sourceRef, null);
   assertEqual(itemB?.artworkUrl, null);
@@ -4216,6 +4222,72 @@ async function transitionReconcile(): Promise<void> {
   const snapEnd = readyOf(r);
   assertEqual(snapEnd.queue.mode, 'stopped', 'null target stops');
   assertEqual(snapEnd.playback.type, 'idle');
+}
+
+async function remoteStopReconcile(): Promise<void> {
+  // A service stop is not a cursor move — it lands the null target
+  // from anywhere in the walk, the queue stops, and the live handle
+  // releases through the ordinary transition path. A non-null
+  // 'remote-stop' is never legal.
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('youtube-music', 'yB')]),
+      ],
+      queue: {
+        revision: 2,
+        occurrences: [
+          occurrence('oA', 'rA', ref('youtube-music', 'yA')),
+          occurrence('oB', 'rB', ref('youtube-music', 'yB')),
+        ],
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oA', 'playing oA');
+  // remote-stop to a real successor is not a stop — rejected.
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oA',
+      to: 'oB',
+      reason: 'remote-stop',
+      positionMs: 0,
+      identity: { attemptId: 'svc-1', queueRev: 0 },
+      handle: 'h-svc',
+    }),
+  );
+  await pump();
+  assertEqual(
+    readyOf(r).queue.currentOccurrenceId,
+    'oA',
+    'non-null remote-stop rejected',
+  );
+  // remote-stop to null mid-walk reconciles: queue stops, handle
+  // released.
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oA',
+      to: null,
+      reason: 'remote-stop',
+      positionMs: 4_000,
+      identity: null,
+      handle: null,
+    }),
+  );
+  await pump();
+  const snap = readyOf(r);
+  assertEqual(snap.queue.mode, 'stopped', 'remote-stop stops the queue');
+  assertEqual(snap.queue.currentOccurrenceId, null, 'cursor cleared');
+  assertEqual(snap.playback.type, 'idle');
+  const released = calls(r, 'release').map(
+    (c) => (c.input as { handle: string }).handle,
+  );
+  assert(released.includes('h-oA'), 'live handle released');
 }
 
 async function remotePausePlay(): Promise<void> {
@@ -7196,6 +7268,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['shuffleToggleSurvivesRollback', shuffleToggleSurvivesRollback],
   ['transitionAdoptsExecutedRef', transitionAdoptsExecutedRef],
   ['transitionReconcile', transitionReconcile],
+  ['remoteStopReconcile', remoteStopReconcile],
   ['remotePausePlay', remotePausePlay],
   ['statusJoinAcrossQueueEdits', statusJoinAcrossQueueEdits],
   ['successorMapping', successorMapping],

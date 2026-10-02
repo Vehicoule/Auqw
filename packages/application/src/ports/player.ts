@@ -5,6 +5,7 @@ import {
   isSafeNonNegative,
   isString,
 } from '../domain.ts';
+import type { ArtworkRef } from '../domain.ts';
 import type { AppError, Result } from '../errors.ts';
 
 export type PlaybackIdentity = {
@@ -145,6 +146,13 @@ export type QueueProjectionItem = {
   readonly artist: string | null;
   readonly artworkUrl: string | null;
   /**
+   * The recording's album and full artwork list, when the session
+   * carries them — richer OS now-playing metadata. `artworkUrl`
+   * stays the single best pick for consumers showing one image.
+   */
+  readonly album?: string | null;
+  readonly artwork?: readonly ArtworkRef[];
+  /**
    * The session marked this row failed — forward moves (ended,
    * remote-next, repeat=all wrap) step over it the way the engine's
    * next() does; backward moves still land on it the way previous()
@@ -181,7 +189,13 @@ export type QueueProjection = {
 export type QueueTransitionReason =
   | 'ended'
   | 'remote-next'
-  | 'remote-previous';
+  | 'remote-previous'
+  /**
+   * The service stopped the queue outright (OS transport stop) — not
+   * a cursor move: only a null target is legal, and the session must
+   * not read it as a natural drain for armed-tail resume purposes.
+   */
+  | 'remote-stop';
 
 export type PlayerEvent =
   | {

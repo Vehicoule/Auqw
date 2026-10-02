@@ -680,6 +680,7 @@ export class Session {
         },
         maybeGrowRadio: () => this.#radio.maybeGrowRadio(),
         maybeArmRadio: () => this.#radio.maybeArmRadio(),
+        disarmRadio: (r) => this.#radio.clearRadio(r),
         resumeDrainedQueue: (r, record, firstAppended) =>
           this.#radio.resumeDrainedQueue(r, record, firstAppended),
       },

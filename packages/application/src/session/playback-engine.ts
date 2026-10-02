@@ -498,6 +498,7 @@ export type PlaybackHost = SessionHostCore & {
   /** Radio-tail hooks the transition reconcile and derived ticks kick. */
   readonly maybeGrowRadio: () => void;
   readonly maybeArmRadio: () => void;
+  readonly disarmRadio: (r: Ready) => void;
   readonly resumeDrainedQueue: (
     r: Ready,
     record: RadioTailRecord,
@@ -2749,7 +2750,9 @@ export class PlaybackEngine {
           sourceRef: selected?.id ?? null,
           title: recording?.title ?? 'Unknown',
           artist: recording?.artist ?? null,
+          album: recording?.album ?? null,
           artworkUrl: artwork?.url ?? null,
+          artwork: recording?.artwork ?? [],
           skipsForward: r.queue.isUnplayable(occurrence.occurrenceId)
             ? true
             : undefined,
@@ -2994,6 +2997,12 @@ export class PlaybackEngine {
         legal = true;
         repeatEdge = true;
       }
+    } else if (event.reason === 'remote-stop') {
+      // A service stop is not a cursor move — only the null target
+      // (queue ran off / stopped) is legal. Unlike the walk edges
+      // this never depends on the projection's contents, so an
+      // evicted projection earns no free pass on a non-null stop.
+      legal = event.toOccurrenceId === null;
     }
     if (
       projection === null ||
@@ -3061,6 +3070,12 @@ export class PlaybackEngine {
     // time — a reseed during the write below swaps in a fresh record
     // whose own flag already reflects its queue state.
     const radioAtTransition = r.radio;
+    if (event.reason === 'remote-stop') {
+      // Session-stop semantics: drop the armed tail before the write
+      // below, so a page landing during it finds `r.radio` empty — a
+      // deliberate stop must not grow the queue it just stopped.
+      this.#host.disarmRadio(r);
+    }
     // Adopt the service-reported attempt, superseding the current one.
     const prev = this.#active;
     this.#active = null;
@@ -3169,15 +3184,17 @@ export class PlaybackEngine {
       // playing earns the resume; a stale transition landing on an
       // already-paused queue, a non-drain, or a failed write revokes
       // it. The flag marks only when the drain committed — a failed
-      // write must not authorize a later paused drain to resume.
+      // write must not authorize a later paused drain to resume. An
+      // explicit remote-stop is no drain: the user stopped on purpose.
       const rec = radioAtTransition;
+      const drain = toId === null && event.reason !== 'remote-stop';
       if (rec !== null && r.radio === rec && rec.status === 'growing') {
         rec.resumeOnDrain =
-          toId === null && wasPlaying && queueWritten.ok;
+          drain && wasPlaying && queueWritten.ok;
       }
       // A native drain bypasses host.derived: chase the armed tail's
       // continuation here too, or a drained queue strands forever.
-      if (toId === null && wasPlaying && rec !== null && r.radio === rec) {
+      if (drain && wasPlaying && rec !== null && r.radio === rec) {
         this.#host.resumeDrainedQueue(r, rec, undefined);
       }
     }
