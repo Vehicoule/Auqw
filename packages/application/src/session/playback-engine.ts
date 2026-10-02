@@ -2024,11 +2024,23 @@ export class PlaybackEngine {
       // A weather retry on an alternate is still the same intent's
       // hop chain — the spent budget and the verdict that started it
       // carry so a redrawn mint can't reset either.
+      ...this.#chainCarry(attempt),
+    });
+  }
+
+  /** Chain state an in-intent re-attempt inherits: the spent hop
+   *  budget and the verdict that started the chain — a re-attempt
+   *  (weather retry, dead-handle re-prepare) must not reset either. */
+  #chainCarry(attempt: ActiveAttempt): {
+    alternatesUsed: number;
+    originError?: AppError;
+  } {
+    return {
       alternatesUsed: attempt.alternatesUsed,
       ...(attempt.originError !== undefined
         ? { originError: attempt.originError }
         : {}),
-    });
+    };
   }
 
   /**
@@ -2498,6 +2510,7 @@ export class PlaybackEngine {
           deadlineMs: active.deadlineMs,
           listenedMsAccum: active.listenedMsAccum,
           preparesUsed: active.preparesUsed,
+          ...this.#chainCarry(active),
         });
         return;
       }
@@ -2769,6 +2782,7 @@ export class PlaybackEngine {
           deadlineMs: active.deadlineMs,
           listenedMsAccum: active.listenedMsAccum,
           preparesUsed: active.preparesUsed,
+          ...this.#chainCarry(active),
         });
       } else {
         await this.#failOrRetryAttempt(active, event.outcome.error);
@@ -2849,6 +2863,7 @@ export class PlaybackEngine {
           deadlineMs: active.deadlineMs,
           listenedMsAccum: active.listenedMsAccum,
           preparesUsed: active.preparesUsed,
+          ...this.#chainCarry(active),
         });
       }
       await this.#failOrRetryAttempt(active, playResult.error);
