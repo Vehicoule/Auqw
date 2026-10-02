@@ -170,8 +170,8 @@ export function WorldSearch({
           extends until the entry is ringed. Pure CSS on focus-within;
           reduced-motion paints the settled ring. */}
       <svg className="uw-wsearch__ring" aria-hidden="true">
-        <rect className="halo" x="1" y="1" pathLength="100" />
-        <rect className="core" x="1" y="1" pathLength="100" />
+        <rect className="halo" x="0.8" y="0.8" pathLength="100" />
+        <rect className="core" x="0.8" y="0.8" pathLength="100" />
       </svg>
     </div>
   );
