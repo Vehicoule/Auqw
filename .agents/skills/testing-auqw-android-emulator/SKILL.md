@@ -494,6 +494,87 @@ states deterministically.
   floating segment pill — dismiss it via its X (~device 1000,2211)
   before tapping the segment.
 
+## Stage-sheet device coords + end-of-queue variance (post-#319)
+
+### Device coords (1080x2400 auqw AVD, verified 2026-10-02)
+
+- Parked mini-player pill body center ≈ **(540,2090)** — `input tap` =
+  sync expand commit; `input swipe 540 2090 540 400 300` (fast up-fling)
+  = gesture expand.
+- Segment pill on the EXPANDED sheet: queue ≈ (165,2240), player ≈
+  (540,2240), lyrics ≈ (865,2240).
+- Grab handle ≈ (540,152); collapse chevron ≈ (134,218) (second
+  collapse affordance, same commit path as KEYCODE_BACK).
+- Player-pane waveform ≈ y1860 spanning x53–1020 — a plain `input tap`
+  seeks (25% tap at x≈295 lands position ≈ duration·0.25).
+- Transport play/pause ≈ (540,2074).
+- The RN LogBox bar spans ~y2150–2256 with X at ≈ (994,2200) — it
+  overlaps BOTH the segment pill zone and the parked pill's lower edge;
+  dismiss it before ANY pill tap (not just segment taps).
+
+### End-of-queue semantics vary with queue shape — read, don't assume
+
+- The deterministic IDLE+ENDED recipe above (`current_occurrence_id`
+  empty + `mode='stopped'` + dumpsys NONE) is queue-shape-dependent.
+  On a queue built from a home **recents-card** tap (recording-keyed
+  playRecordings), a natural end instead lands **PAUSED at position 0
+  with the occurrence RETAINED** — `queue_state` keeps
+  `current_occurrence_id` with `mode='paused'`, dumpsys `PAUSED pos=0`,
+  and home shows a `PAUSED · CONTINUE` card. The ENDED+IDLE 450 ms
+  transient-pill window did NOT reproduce on this queue shape.
+- A first natural end was observed RESTARTING the same occurrence id
+  PLAYING (queue tail behavior); later ends landed paused@0. Treat
+  end-of-queue state as evidence to READ (dumpsys + queue_state), not
+  assume.
+- **`auqw://seek?ms=N` does NOT resume a paused player** — it lands
+  PAUSED at the new position (the deep link calls `seekTo` only). To
+  race a natural end you must be PLAYING first (`auqw://resume`), then
+  seek, then time the trigger.
+
+### Dismiss + remount
+
+- A full-fling drag-dismiss (`input swipe 540 160 540 2300 300` from the
+  grab handle, ≥250 px/s) fires `emitDismiss` and RELEASES the stage
+  player: pill + sheet unmount, dumpsys → NONE, and `auqw://resume`
+  then returns the honest typed failure toast `resume failed — nothing
+  came back — try again` (NOT a defect). Recovery is a real re-play
+  (home recents card tap or `auqw://play-result?i=N`), which remounts
+  the whole gated subtree — good remount coverage for mount-crash-class
+  fixes.
+- A second `input keyevent 4` while the sheet is collapsing is consumed
+  by APP-LEVEL back navigation (previous tab), not the sheet — safe.
+- Re-expand taps during the collapse morph do NOT win: the BACK commit
+  takes precedence and `rowGate` may already be `pointerEvents=none` —
+  landing parked is correct, not a missed expand.
+- Mid-morph dismiss-surface taps: (540,500) at +0.3 s hits the
+  uncovered backdrop and collapses via `dismissBackdrop`; by +0.5 s the
+  rising card already covers the upper region (tap lands on the sheet,
+  expand completes). For hit-the-backdrop evidence stay ≤0.35 s or aim
+  lower.
+
+### Verifying a TS fix is in the SERVED bundle
+
+`curl ".../apps/mobile/index.bundle?platform=android&dev=true"` — dev
+bundles may partially strip comments, so match CODE not comments: e.g.
+`grep -n -A1 'animatedProps: dismissSurfaceProps' bundle.js` shows
+`collapsable: false` on the preceding lines for the pinned-wrapper fix.
+Bundle-curl beats guessing which worktree Metro serves.
+
+### Process notes (auqw AVD)
+
+- `adb shell monkey -p com.vehicoule.auqw -c android.intent.category.LAUNCHER 1`
+  is a clean relaunch (no component name needed). After relaunch,
+  `queue_state` persists but dumpsys is NONE and the stage is
+  unmounted — `auqw://resume` re-attaches playback and re-parks the
+  pill.
+- First PLAYING after relaunch can raise the system
+  notification-permission dialog ("Allow Auqw to send you
+  notifications?") — Allow at ≈ (540,1255) before driving pill taps.
+- Emulator window ignores maximize; `wmctrl -i -r <winid> -e
+  0,10,25,430,715` landed it at 321x714 (aspect-locked) — fully inside
+  a 1024x768 frame. The `Emulator Running in Nested Virtualization`
+  notice steals taps — dismiss its OK first.
+
 ## Waveform peaks gates (post-#waveform-fast)
 
 The UI waveform (`WaveformSeek` in the stage `player` segment) is fed by
