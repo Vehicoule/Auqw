@@ -160,13 +160,14 @@ export function SearchFab({
   });
 
   const ringPath = (w: number) => {
-    // Rounded-rect path hugging the field, 1px stroke inset.
-    const h = FAB - 2;
-    const r = theme.radius.float - 1;
-    const x0 = 1;
-    const y0 = 1;
-    const x1 = w - 1;
-    const y1 = h + 1;
+    // Stroke centerline on the hairline border's midline — the arc
+    // traces the entry's edge instead of orbiting inside it.
+    const inset = 0.8;
+    const r = theme.radius.float - inset;
+    const x0 = inset;
+    const y0 = inset;
+    const x1 = w - inset;
+    const y1 = FAB - inset;
     return `M ${x0 + r} ${y0} L ${x1 - r} ${y0} A ${r} ${r} 0 0 1 ${x1} ${y0 + r} L ${x1} ${y1 - r} A ${r} ${r} 0 0 1 ${x1 - r} ${y1} L ${x0 + r} ${y1} A ${r} ${r} 0 0 1 ${x0} ${y1 - r} L ${x0} ${y0 + r} A ${r} ${r} 0 0 1 ${x0 + r} ${y0} Z`;
   };
 
@@ -325,9 +326,12 @@ export function SearchFab({
           onLayout={(e) => {
             const w = e.nativeEvent.layout.width;
             setRingWidth(w);
-            const h = FAB;
-            const r = Math.min(theme.radius.float, h / 2);
-            ringPerim.value = 2 * (w + h) - 8 * r + 2 * Math.PI * r;
+            /* Match ringPath's extents: (w-1.6) × (FAB-1.6) at r 15.2. */
+            const inset = 0.8;
+            const rw = w - inset * 2;
+            const rh = FAB - inset * 2;
+            const r = theme.radius.float - inset;
+            ringPerim.value = 2 * (rw + rh) - 8 * r + 2 * Math.PI * r;
           }}
         >
           {ringWidth > 0 && (

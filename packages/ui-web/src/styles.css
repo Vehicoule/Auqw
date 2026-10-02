@@ -2443,11 +2443,10 @@
   container-type: inline-size;
 }
 
-/* Inside the desktop column the stage merges with the world's canvas —
-   one split-view surface, no second tone across the seam. The sheet
-   host keeps --stage. */
+/* Inside the desktop column the stage shows the sidebar's frosted
+   tone (no second surface of its own). The sheet host keeps --stage. */
 .uw-stage-col .uw-stage {
-  background: var(--canvas);
+  background: transparent;
 }
 
 /* Player mode's cluster is pinned, not scrolled — it keeps the clear
@@ -3052,9 +3051,12 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
-  /* Content surface, flush to the window edge — never shell-colored,
-     or the column reads as border instead of content. */
-  background: var(--canvas);
+  /* The sidebar's own tone — the GTK/macOS read: a step grayer than
+     the world's canvas, translucent and frosted so the art bleed
+     mists through it as vibrancy rather than clearing to bare blur. */
+  background: color-mix(in srgb, var(--stage) 84%, transparent);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
 }
 .uw-chrome[data-stage='closed'] .uw-stage-col {
   display: none;
@@ -3085,42 +3087,39 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* Flat by default — stage and world share one continuous canvas,
-     split only by the split-view hairline. The floating card is
-     earned by art (data-bleed below). */
+  /* The curved seam is the resting shape, not a state art earns —
+     the card sits flush top/right/bottom with the rounded inset edge
+     against the stage. When the bleed runs, the stage art dissolves
+     under that same edge. */
   position: relative;
-  margin: 0;
-  border-radius: 0;
+  margin: 0 0 0 var(--spacing-sm);
+  border-radius: var(--radius-float) 0 0 var(--radius-float);
   background: var(--canvas);
   border: 0;
   border-left: var(--stroke-hairline) solid var(--hairline);
   overflow: hidden;
 }
 
+/* No stage to seam against — a lone panel goes flush. */
+.uw-chrome[data-stage='closed'] .uw-world {
+  margin-left: 0;
+  border-radius: 0;
+}
+
 .ui-web:not([data-reduced-motion='true']) .uw-world {
-  /* The card detaches/reattaches as the artwork appears and drops —
-     a slow morph, not a pop. */
+  /* The card's seam edge folds away/returns as the stage opens and
+     closes — a slow morph, not a pop. */
   transition:
     margin var(--motion-sheet) var(--ease-out),
     border-radius var(--motion-sheet) var(--ease-out);
-}
-
-.uw-chrome[data-bleed='art'] .uw-world {
-  /* A right pane, not a floating island: flush to the window's
-     top/right/bottom so the bleed shows only along the stage seam —
-     the rounded inset edge the stage art dissolves under. The flush
-     top-right also leaves the OS window controls on a square corner. */
-  margin: 0 0 0 var(--spacing-sm);
-  border-radius: var(--radius-float) 0 0 var(--radius-float);
-  border: 0;
-  border-left: var(--stroke-hairline) solid var(--hairline);
 }
 
 /* Window art bleed — while a track has artwork, a scaled-down copy
    fills the shell behind stage + world: blurred once per artwork
    change (a static layer, no live filter) with a tint veil so it
    reads as ambient color, not a second picture. The stage column
-   goes transparent so the same blur flows around the player art.
+   keeps its translucent sidebar tone — the blur mists through it as
+   vibrancy instead of painting the column in bare art.
    (The 90px overhang, 72px blur, and 1.15 scale are effect constants,
    not layout tokens — they exist so the blurred edges never peek.) */
 .uw-winbg {
@@ -3142,9 +3141,6 @@
 .ui-web.t-oled .uw-wintint {
   background: color-mix(in srgb, var(--deep) 74%, transparent);
 }
-.uw-chrome[data-bleed='art'] .uw-stage-col {
-  background: transparent;
-}
 .uw-chrome[data-bleed='art'] .uw-stage--immersive {
   background: transparent;
 }
@@ -3164,24 +3160,23 @@
 }
 /* Past the overlay breakpoint the card overlaps the column's
    trailing 24px; the stage's content insets so nothing rides under
-   the card. The overlap exists only while a stage does — closed-stage
-   bleed leaves the card's margin alone. */
+   the card. The overlap exists only while a stage does. */
 @container (min-width: 861px) {
-  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-world {
+  .uw-chrome[data-stage='open'] .uw-world {
     margin-left: -24px;
   }
-  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-stage {
+  .uw-chrome[data-stage='open'] .uw-stage {
     padding-right: calc(var(--spacing-xl) + 24px);
   }
   /* Padding can't move the stage's absolute right-edge controls —
      stop + the track menu inset past the card overlap too. */
-  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-stage__stop {
+  .uw-chrome[data-stage='open'] .uw-stage__stop {
     right: calc(var(--spacing-sm) + 24px);
   }
-  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-stage__menu {
+  .uw-chrome[data-stage='open'] .uw-stage__menu {
     right: calc(var(--spacing-sm) + 40px + 24px);
   }
-  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-stage__segment {
+  .uw-chrome[data-stage='open'] .uw-stage__segment {
     right: calc(var(--spacing-xl) + 24px);
   }
 }
@@ -3417,12 +3412,14 @@
 
 /* The comet ring — on focus a short accent arc laps the border once
    (tail keeps drifting), then the head extends to close the ring.
-   Drawn as two strokes: a soft halo under a crisp core. */
+   Drawn as two strokes: a soft halo under a crisp core. The stroke
+   centerline sits on the border line itself (0.8px inset) so the arc
+   traces the entry's edge instead of orbiting a hair outside it. */
 .uw-wsearch__ring {
   position: absolute;
-  inset: -1px;
-  width: calc(100% + 2px);
-  height: calc(100% + 2px);
+  inset: 0;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
   overflow: visible;
   opacity: 0;
@@ -3430,8 +3427,8 @@
 }
 
 .uw-wsearch__ring rect {
-  width: calc(100% - 2px);
-  height: calc(100% - 2px);
+  width: calc(100% - 1.6px);
+  height: calc(100% - 1.6px);
   rx: calc(var(--radius-pill) / 2);
   fill: none;
   stroke: var(--accent);
