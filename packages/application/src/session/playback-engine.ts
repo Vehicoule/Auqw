@@ -3053,10 +3053,32 @@ export class PlaybackEngine {
       bumpListenCycle(r, toId);
     }
     const wasPlaying = r.queue.snapshot().mode === 'playing';
+    // The drain authorization belongs to the tail armed at reconcile
+    // time — a reseed during the write below swaps in a fresh record
+    // whose own flag already reflects its queue state.
+    const radioAtTransition = r.radio;
+    // A natural end with no tail chasing the drain parks the ended
+    // row instead: the queue pauses at position 0 rather than
+    // stopping, so an OS-side play reconciles into a real replay on
+    // the live element instead of landing on a cleared surface.
+    const parkedTail =
+      toId === null &&
+      event.reason === 'ended' &&
+      radioAtTransition === null
+        ? event.fromOccurrenceId
+        : null;
+    const retainTail = parkedTail !== null;
+    if (event.reason === 'remote-stop') {
+      // Session-stop semantics: drop the armed tail before the write
+      // below, so a page landing during it finds `r.radio` empty — a
+      // deliberate stop must not grow the queue it just stopped.
+      this.#host.disarmRadio(r);
+    }
     try {
-      // A null target means the cursor ran off the end: stopped.
+      // A null target means the cursor ran off the end: stopped —
+      // unless the tail parks the ended row (retainTail above).
       r.queue.reconcileNativeCurrent(
-        toId,
+        parkedTail ?? toId,
         toId === null ? 0 : event.positionMs,
         toId !== null,
       );
@@ -3064,18 +3086,8 @@ export class PlaybackEngine {
       this.#host.logWarn('queue transition rejected');
       return;
     }
-    marker.currentOccurrenceId = toId;
+    marker.currentOccurrenceId = parkedTail ?? toId;
     marker.reconciledQueueRev = r.queue.snapshot().revision;
-    // The drain authorization belongs to the tail armed at reconcile
-    // time — a reseed during the write below swaps in a fresh record
-    // whose own flag already reflects its queue state.
-    const radioAtTransition = r.radio;
-    if (event.reason === 'remote-stop') {
-      // Session-stop semantics: drop the armed tail before the write
-      // below, so a page landing during it finds `r.radio` empty — a
-      // deliberate stop must not grow the queue it just stopped.
-      this.#host.disarmRadio(r);
-    }
     // Adopt the service-reported attempt, superseding the current one.
     const prev = this.#active;
     this.#active = null;
@@ -3083,7 +3095,36 @@ export class PlaybackEngine {
       prev.source.cancel();
       prev.timer?.cancel();
     }
-    if (event.identity !== null && event.handle !== null && toId !== null) {
+    // Park the ended attempt rather than releasing it: the row
+    // replays in place on a remote play (its own 'ended' event is
+    // already spent — endedHandled bars a double-advance), and the
+    // replay counts as a fresh listen like a repeat=one loop.
+    const parked: ActiveAttempt | null =
+      parkedTail !== null && prev !== null && prev.handle !== undefined
+        ? {
+            identity: prev.identity,
+            recordingId: prev.recordingId,
+            occurrenceId: parkedTail,
+            ...(prev.ref === undefined ? {} : { ref: prev.ref }),
+            source: new CancellationSource(),
+            deadlineMs: this.#host.deadline(),
+            handle: prev.handle,
+            preparedHandled: true,
+            endedHandled: true,
+            listenedMsAccum: 0,
+            lastStatusPositionMs: 0,
+            preparesUsed: 0,
+          }
+        : null;
+    if (parked !== null) {
+      this.#active = parked;
+      bumpListenCycle(r, parked.occurrenceId);
+      this.#setPlaybackFromStatus(parked, 'paused');
+    } else if (
+      event.identity !== null &&
+      event.handle !== null &&
+      toId !== null
+    ) {
       const snap2 = r.queue.snapshot();
       const occurrence = snap2.occurrences.find(
         (o) => o.occurrenceId === toId,
@@ -3169,8 +3210,13 @@ export class PlaybackEngine {
       prev.source.cancel();
       prev.timer?.cancel();
       // The service may reuse the same handle for the new cursor
-      // position — releasing it would kill the live stream.
-      if (prev.handle !== undefined && prev.handle !== event.handle) {
+      // position — releasing it would kill the live stream. A parked
+      // tail keeps it too: the retained attempt replays in place.
+      if (
+        prev.handle !== undefined &&
+        prev.handle !== event.handle &&
+        parked === null
+      ) {
         await this.#releaseHandle(prev.handle, prev.identity);
       }
       if (prev.requestId !== undefined && !prev.preparedHandled) {
@@ -3186,8 +3232,10 @@ export class PlaybackEngine {
       // it. The flag marks only when the drain committed — a failed
       // write must not authorize a later paused drain to resume. An
       // explicit remote-stop is no drain: the user stopped on purpose.
+      // A parked tail is none either — the queue never drained.
       const rec = radioAtTransition;
-      const drain = toId === null && event.reason !== 'remote-stop';
+      const drain =
+        toId === null && event.reason !== 'remote-stop' && !retainTail;
       if (rec !== null && r.radio === rec && rec.status === 'growing') {
         rec.resumeOnDrain =
           drain && wasPlaying && queueWritten.ok;

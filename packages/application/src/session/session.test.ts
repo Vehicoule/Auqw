@@ -43,6 +43,7 @@ import {
 } from '../sync/sync-engine.ts';
 import { utf8ByteLength } from '../utf8.ts';
 import {
+  ALL_CAPABILITIES,
   FakeClock,
   FakeLog,
   FakePlayer,
@@ -4290,6 +4291,109 @@ async function remoteStopReconcile(): Promise<void> {
   assert(released.includes('h-oA'), 'live handle released');
 }
 
+async function naturalEndParksTail(): Promise<void> {
+  // A natural end with nothing chasing the drain parks the ended row
+  // instead of stopping: the queue pauses at position 0, the live
+  // handle is kept, and a service-side play reconciles into a real
+  // replay — recorded as a fresh listen like a repeat=one loop. The
+  // tail is unseedable — its provider declares no radio.seed — so
+  // ending here is a genuine queue end, and it attaches locally.
+  const localMap = new Map([['rB', '/l/b.mp3']]);
+  const noradio = new FakeProvider(
+    'noradio',
+    ALL_CAPABILITIES.filter((c) => c !== 'radio.seed'),
+  );
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('rA', [ref('youtube-music', 'yA')]),
+        recording('rB', [ref('noradio', 'n1')]),
+      ],
+      queue: {
+        revision: 2,
+        occurrences: [
+          occurrence('oA', 'rA', ref('youtube-music', 'yA')),
+          occurrence('oB', 'rB'),
+        ],
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [noradio],
+    localMap,
+  );
+  await restoreOk(r);
+  await playThrough(r, 'oA');
+  const next = r.session.next();
+  await pump();
+  await emitPrepared(r, 'h-oB');
+  assert((await next).ok, 'next to the local tail failed');
+  assertEqual(readyOf(r).queue.currentOccurrenceId, 'oB', 'tail playing');
+  assertEqual(readyOf(r).radio, null, 'unseedable tail never arms');
+  const playsBefore = readyOf(r).playHistory.length;
+  // The element ran out at the tail — the service reports the drain.
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oB',
+      to: null,
+      reason: 'ended',
+      positionMs: 300_000,
+      identity: null,
+      handle: null,
+    }),
+  );
+  await pump();
+  const parked = readyOf(r);
+  assertEqual(parked.queue.mode, 'paused', 'natural end parks, not stops');
+  assertEqual(parked.queue.currentOccurrenceId, 'oB', 'cursor retained');
+  assertEqual(parked.queue.positionMs, 0, 'parked at replay position');
+  assertEqual(
+    parked.playHistory.length,
+    playsBefore + 1,
+    'the finished listen counted',
+  );
+  assert(
+    parked.playback.type === 'paused',
+    'parked playback reports paused',
+  );
+  assertEqual(parked.playback.handle, 'h-oB', 'the live handle is kept');
+  const released = calls(r, 'release').map(
+    (c) => (c.input as { handle: string }).handle,
+  );
+  assert(!released.includes('h-oB'), 'parked handle must not release');
+  // An OS-side play replays the element in place — the remote-mode
+  // reconcile ticks the parked queue back to playing.
+  r.player.emit(
+    statusEvent(parked.playback.identity, 'h-oB', 'playing', 250),
+  );
+  await pump();
+  const replaying = readyOf(r);
+  assertEqual(replaying.queue.mode, 'playing', 'remote play resumes');
+  assertEqual(replaying.queue.currentOccurrenceId, 'oB');
+  assertEqual(calls(r, 'prepare').length, 2, 'replay reuses the handle');
+  // The replay ends too: parked again, counted as a second listen.
+  r.player.emit(
+    transitionEvent(r, {
+      from: 'oB',
+      to: null,
+      reason: 'ended',
+      positionMs: 300_000,
+      identity: null,
+      handle: null,
+    }),
+  );
+  await pump();
+  const parkedAgain = readyOf(r);
+  assertEqual(parkedAgain.queue.mode, 'paused', 'still parked');
+  assertEqual(parkedAgain.queue.currentOccurrenceId, 'oB');
+  assertEqual(
+    parkedAgain.playHistory.length,
+    playsBefore + 2,
+    'the replay counted as a fresh listen',
+  );
+}
+
 async function remotePausePlay(): Promise<void> {
   const r = rig(
     persisted({
@@ -7269,6 +7373,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['transitionAdoptsExecutedRef', transitionAdoptsExecutedRef],
   ['transitionReconcile', transitionReconcile],
   ['remoteStopReconcile', remoteStopReconcile],
+  ['naturalEndParksTail', naturalEndParksTail],
   ['remotePausePlay', remotePausePlay],
   ['statusJoinAcrossQueueEdits', statusJoinAcrossQueueEdits],
   ['successorMapping', successorMapping],
