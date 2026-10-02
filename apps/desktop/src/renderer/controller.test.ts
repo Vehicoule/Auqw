@@ -95,6 +95,7 @@ type Rig = {
   transferStat: { readonly exists: boolean; readonly bytes: number | null };
   transferSwept: number;
   transferRemoved: string[];
+  tagreadEnumerated: string[];
   transferStats: {
     readonly bytes: number;
     readonly files: number;
@@ -129,6 +130,7 @@ function fakeApi(): Rig {
     transferStat: { exists: true, bytes: null },
     transferSwept: 0,
     transferRemoved: [],
+    tagreadEnumerated: [],
     transferStats: { bytes: 0, files: 0, partials: 0, freeBytes: null },
     api: {
       app: {
@@ -252,7 +254,10 @@ function fakeApi(): Rig {
         fetchAbort: () => Promise.resolve(),
       },
       tagread: {
-        enumerate: () => Promise.reject(new Error('seam: inject tagread')),
+        enumerate: (args: { readonly treeUri: string }) => {
+          rig.tagreadEnumerated.push(args.treeUri);
+          return Promise.resolve({ entries: [] });
+        },
         fingerprint: () => Promise.reject(new Error('seam: inject tagread')),
         read: () => Promise.reject(new Error('seam: inject tagread')),
       },
@@ -946,6 +951,57 @@ async function replaceLibraryDrainsDownloads(): Promise<void> {
   await controller.dispose();
 }
 
+// 16. Import keeps the folder grants but wipes the file index —
+// replaceLibrary's rehydrate must schedule the rescan that rejoins
+// the rows (and re-extracts embedded covers), or imported recordings
+// sit blank until a manual rescan.
+async function replaceLibraryRescansSources(): Promise<void> {
+  const rig = fakeApi();
+  const player = new FakePlayer();
+  const controller = await boot(rig.api, {
+    storage: new FakeStorage(
+      persisted({
+        recordings: [rec('rec-lf', 'local')],
+        localSources: [localSourceRow()],
+        localFiles: [localFileRow()],
+      }),
+    ),
+    player,
+    providers: defaultProviders(),
+  });
+  // An import doc minted off an empty library — owned sections only,
+  // so the device-local file index does not round-trip.
+  const rigEmpty = fakeApi();
+  const empty = await boot(rigEmpty.api, {
+    storage: new FakeStorage(
+      persisted({ recordings: [rec('rec-dl', 'provider')] }),
+    ),
+    providers: defaultProviders(),
+  });
+  const exported = await empty.session.exportLibrary();
+  assert(exported.ok, 'export failed');
+  await empty.dispose();
+
+  const replaced = await controller.replaceLibrary(
+    exported.value.json,
+    new CancellationSource().signal,
+  );
+  assert(replaced.ok, `replaceLibrary: ${JSON.stringify(replaced)}`);
+  await pump(); // settle the fire-and-forget rescan
+  assertDeepEqual(
+    rig.tagreadEnumerated,
+    [localSourceRow().treeUri],
+    'the survived folder grant rescans after import',
+  );
+  assertEqual(
+    rigEmpty.tagreadEnumerated.length,
+    0,
+    'a failed or no-source import never scans',
+  );
+  player.cancelPendingPrepares();
+  await controller.dispose();
+}
+
 const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['providersFromManifests', providersFromManifests],
   ['unavailableBindings', unavailableBindings],
@@ -962,6 +1018,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['vanishedDownloadHonest', vanishedDownloadHonest],
   ['localPlaybackProbe', localPlaybackProbe],
   ['replaceLibraryDrainsDownloads', replaceLibraryDrainsDownloads],
+  ['replaceLibraryRescansSources', replaceLibraryRescansSources],
 ];
 
 export async function run(): Promise<void> {

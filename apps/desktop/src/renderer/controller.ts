@@ -88,7 +88,10 @@ export type SessionController = {
    * whole-library replace (import): rebuilds the local source and
    * re-inits the download ledger so their rows can't go stale.
    */
-  rehydrateMedia(signal: CancellationSignal): Promise<void>;
+  rehydrateMedia(
+    signal: CancellationSignal,
+    rescanEmptyIndex?: boolean,
+  ): Promise<void>;
   /**
    * Whole-library replace with the file plane drained first — a live
    * transfer runner would otherwise repersist a ledger row the import
@@ -390,6 +393,7 @@ export async function createSessionController(
    */
   const rehydrateMedia = async (
     signal: CancellationSignal,
+    rescanEmptyIndex = false,
   ): Promise<void> => {
     const loaded = await storage.load({
       requestId: ids.next('media-rehydrate'),
@@ -416,6 +420,25 @@ export async function createSessionController(
     // Imported recordings replace prior local rows — the session
     // re-merges provenance-local rows through this hook.
     void session.syncLocalRecordings(localSource.recordings());
+    if (rescanEmptyIndex && loaded.value.localSources.length > 0) {
+      // The import wiped the file index while the folder grants
+      // survived — rescan rejoins the rows and re-extracts embedded
+      // covers; without it imported recordings keep blank art until
+      // a manual rescan.
+      const source = localSource;
+      void source.rescan(undefined, signal).then((scanned) => {
+        if (!scanned.ok) {
+          warn(`local: post-import rescan failed: ${scanned.error.kind}`);
+          return;
+        }
+        // A later rehydrate may have swapped the instance mid-flight
+        // — committing the captured one's snapshot would clobber rows
+        // it never saw (same guard as afterLocalMutation).
+        if (localSource === source) {
+          void session.syncLocalRecordings(source.recordings());
+        }
+      });
+    }
   };
   let edged = false;
   const onlineListeners = new Set<(online: boolean) => void>();
@@ -732,8 +755,10 @@ export async function createSessionController(
         warn(`pre-import stop failed: ${stopped.error.kind}`);
         return err(stopped.error);
       }
+      let importedOk = false;
       try {
         const imported = await session.importLibrary(text);
+        importedOk = imported.ok;
         if (imported.ok) {
           // The swap landed — delete the old ledger's files by their
           // captured paths. A failed import instead leaves the ledger
@@ -752,7 +777,7 @@ export async function createSessionController(
         // Whatever landed — success, or a storage failure — the
         // manager re-inits off the persisted ledger so it can never
         // sit stopped with a stale row map.
-        await rehydrateMedia(signal);
+        await rehydrateMedia(signal, importedOk);
       }
     },
     async dispose() {

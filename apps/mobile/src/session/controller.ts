@@ -169,7 +169,10 @@ export type SessionController = {
    * whole-library replace (import): rebuilds the local source and
    * re-inits the download ledger so their rows can't go stale.
    */
-  rehydrateMedia(signal: CancellationSignal): Promise<void>;
+  rehydrateMedia(
+    signal: CancellationSignal,
+    rescanEmptyIndex?: boolean,
+  ): Promise<void>;
   /**
    * Local-source-only variant: rebuilds `localSource` from persisted
    * rows and projects them into the session WITHOUT touching the
@@ -487,6 +490,7 @@ export async function createSessionController(
   };
   const rehydrateMedia = async (
     signal: CancellationSignal,
+    rescanEmptyIndex = false,
   ): Promise<void> => {
     const loaded = await reloadLocalSource(signal);
     if (loaded === null) {
@@ -503,6 +507,33 @@ export async function createSessionController(
     // Imported recordings replace prior local rows — the session
     // re-merges provenance-local rows through this hook.
     session.syncLocalRecordings(localSource?.recordings() ?? []);
+    const source = localSource;
+    if (
+      rescanEmptyIndex &&
+      source !== null &&
+      loaded.localSources.length > 0
+    ) {
+      // The import wiped the file index while the folder grants
+      // survived — rescan rejoins the rows and re-extracts embedded
+      // covers; without it imported recordings keep blank art until
+      // a manual rescan.
+      void source.rescan(undefined, signal).then((scanned) => {
+        if (!scanned.ok) {
+          void log.write({
+            level: 'warn',
+            message: `local: post-import rescan failed: ${scanned.error.kind}`,
+            atMs: clock.nowMs(),
+          });
+          return;
+        }
+        // A later rehydrate may have swapped the instance mid-flight
+        // — committing the captured one's snapshot would clobber rows
+        // it never saw (same guard as afterLocalMutation).
+        if (localSource === source) {
+          session.syncLocalRecordings(source.recordings());
+        }
+      });
+    }
   };
   const rehydrateLocal = async (
     signal: CancellationSignal,
@@ -882,8 +913,10 @@ export async function createSessionController(
         });
         return err(stopped.error);
       }
+      let importedOk = false;
       try {
         const imported = await session.importLibrary(text);
+        importedOk = imported.ok;
         if (imported.ok) {
           // Imported settings may name providers this bundle lacks or
           // ids whose manifests no longer declare the slot — reconcile
@@ -915,7 +948,7 @@ export async function createSessionController(
         // Whatever landed — success, or a storage failure — the
         // manager re-inits off the persisted ledger so it can never
         // sit stopped with a stale row map.
-        await rehydrateMedia(signal);
+        await rehydrateMedia(signal, importedOk);
       }
     },
     async dispose() {
