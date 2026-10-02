@@ -609,3 +609,18 @@ None — the napi artifact is a local cargo build output.
   (opacity/transform) via repeated `Runtime.evaluate` at ~45ms intervals
   — changing values = animation running; sample in wall time since rAF
   may be throttled.
+
+## Engine internals + media-session OS surface (MPRIS) probes
+
+- The built bundle (`apps/desktop/dist/renderer/app.js`) is UNMINIFIED —
+  surgical `console.warn('parkdbg', ...)` probes straight into the dist
+  file (engine gates, publishMetadata, clearOsSurface stacks) are the
+  fastest way to trace engine internals on a shared worktree: no source
+  edits, wiped by the next rebuild (`pnpm --filter desktop build`).
+- Chromium deactivates `navigator.mediaSession` AT the element's `ended`
+  event: the bus reads `Stopped` + `mpris:length=0` + `CanPlay=false`,
+  `playerctl play` is refused, and neither `playbackState` writes,
+  metadata republishes, nor rewinding `currentTime` revives it — only a
+  real `play()` call resurrects the card. A parked/retained element past
+  `ended` therefore cannot accept OS-side play presses; in-app replay
+  still works.
