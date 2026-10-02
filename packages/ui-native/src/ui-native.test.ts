@@ -450,6 +450,13 @@ function testPlayerMapper(): void {
   const failed = toPlayerModel({ ...base, playback: fixturePlaybackFailed });
   assert(failed !== null, 'failed model null');
   assertEqual(failed.status, 'failed');
+  // A failed attempt keeps the queue's 'playing' intent but has
+  // nothing to pause — the affordance is a retry, not Pause.
+  assertEqual(
+    failed.intentPlaying,
+    false,
+    'failed under playing queue retries',
+  );
   assert(
     failed.errorMessage !== null && failed.errorMessage.length > 0,
     'failed carries error message',
