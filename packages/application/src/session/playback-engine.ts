@@ -1976,9 +1976,15 @@ export class PlaybackEngine {
     if (!slept.ok) {
       if (slept.error.kind === 'internal') {
         await this.#failAttempt(attempt, slept.error);
+        // A waiter on this chain must not fall back to the hiccup
+        // that armed the retry — the clock's own verdict is the
+        // honest report. A hop armed inside #failAttempt already
+        // wrote the chain's fresher outcome.
+        attempt.chainOutcome ??= err(slept.error);
       }
       // A cancelled sleep means a supersede already ran — leave the
-      // state it published alone.
+      // state it published alone, and claim no verdict: chainOutcome
+      // stays unset so a waiter keeps its own result.
       return;
     }
     // The re-attempt's verdict is the intent's — a frame freed by
