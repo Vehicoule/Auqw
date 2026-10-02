@@ -9,7 +9,7 @@
  */
 import { useMemo, useState } from 'react';
 import type { ThemeName } from '@auqw/design-tokens';
-import type { QueueOrigin, RepeatMode } from '@auqw/application';
+import type { QueueOrigin, RepeatMode, SourceRef } from '@auqw/application';
 import { t } from './i18n.ts';
 import type { MessageId } from './i18n.ts';
 import { formatClock, formatLongDuration } from './view-models.ts';
@@ -1778,6 +1778,25 @@ export type RadioRowView = {
     readonly onPress: MaybeFn;
   };
 };
+
+/**
+ * The ref a radio seed would arm with: the first candidate whose
+ * provider can seed, in the caller's preference order (playing ref,
+ * then source refs). A recording's own listings all name the same
+ * song, so a leading unseedable ref — a local file first — must not
+ * veto a provider twin behind it.
+ */
+export function seedableRadioRef(
+  candidates: readonly (SourceRef | null | undefined)[],
+  isSeedable: (ref: SourceRef) => boolean,
+): SourceRef | null {
+  for (const ref of candidates) {
+    if (ref !== null && ref !== undefined && isSeedable(ref)) {
+      return ref;
+    }
+  }
+  return null;
+}
 
 export function radioRowView(
   radio: RadioModel | undefined,

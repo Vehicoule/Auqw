@@ -106,6 +106,7 @@ import type {
   TrackRowModel,
   TransferModel,
 } from '@auqw/ui-shared';
+import { seedableRadioRef } from '@auqw/ui-shared/controllers';
 import {
   advanceTargetId,
   skipTargetIds,
@@ -2667,8 +2668,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
 
   // The stage radio control seeds from the playing occurrence's
-  // selected ref, falling back to the recording's first source ref —
-  // the same derivation the seed op uses so the gate mirrors it.
+  // selected ref, falling back to the recording's first seedable
+  // source ref — the same derivation the seed op uses so the gate
+  // mirrors it.
   const radioSeedRef = useMemo((): SourceRef | null => {
     const current = state.queue.occurrences.find(
       (o) => o.occurrenceId === state.queue.currentOccurrenceId,
@@ -2677,20 +2679,26 @@ export function useAppShell<E extends { readonly type: string } = never>(
       currentRecordingId === null
         ? undefined
         : state.recordings.find((r) => r.id === currentRecordingId);
-    return current?.selectedRef ?? recording?.sourceRefs[0] ?? null;
-  }, [state.queue, state.recordings, currentRecordingId]);
+    return seedableRadioRef(
+      [current?.selectedRef, ...(recording?.sourceRefs ?? [])],
+      radioSeedable,
+    );
+  }, [state.queue, state.recordings, currentRecordingId, radioSeedable]);
 
   // The row-action seed: a metadata row seeds its own ref; a library
-  // row seeds its first source ref.
+  // row seeds its first seedable source ref.
   const actionRadioRef = useMemo((): SourceRef | null => {
     if (actionsFor === null) {
       return null;
     }
     return actionsFor.kind === 'metadata'
-      ? actionsFor.meta.sourceRef
-      : (state.recordings.find((r) => r.id === actionsFor.recordingId)
-          ?.sourceRefs[0] ?? null);
-  }, [actionsFor, state.recordings]);
+      ? seedableRadioRef([actionsFor.meta.sourceRef], radioSeedable)
+      : seedableRadioRef(
+          state.recordings.find((r) => r.id === actionsFor.recordingId)
+            ?.sourceRefs ?? [],
+          radioSeedable,
+        );
+  }, [actionsFor, state.recordings, radioSeedable]);
 
   // The seed must still resolve through its own provider — guard the
   // op too, not just the affordance, since state may shift in between.
@@ -3397,7 +3405,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         ),
       recordFor: (id) => controller.downloads.recordFor(id),
       downloadRefFor,
-      radioSeedable: radioSeedable(actionRadioRef),
+      radioSeedable: actionRadioRef !== null,
       transport:
         actionsFor.kind === 'recording' &&
         stagePlayer !== null &&
@@ -3696,15 +3704,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
             recordingId: currentRecordingId,
           })
       : undefined;
-  const onStartRadioGated = radioSeedable(radioSeedRef)
-    ? onStartRadio
-    : undefined;
+  const onStartRadioGated =
+    radioSeedRef !== null ? onStartRadio : undefined;
   // The provider the seed would arm with — lets the chip reserve its
   // armed label's width before the tail exists (header-bar rule).
-  const radioSeedProvider =
-    radioSeedRef !== null && radioSeedable(radioSeedRef)
-      ? radioSeedRef.provider
-      : null;
+  const radioSeedProvider = radioSeedRef?.provider ?? null;
 
   const resultMetaFor = useCallback(
     (key: string) => resultMeta.current.get(key),
