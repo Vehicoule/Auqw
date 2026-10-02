@@ -81,7 +81,7 @@ const SPACING = {
   xxxl: 32,
   display: 48,
 };
-const RADIUS = { frame: 0, control: 8, card: 12, float: 16, thumb: 5, pill: 999 };
+const RADIUS = { frame: 0, control: 8, card: 12, float: 16, pane: 32, thumb: 5, pill: 999 };
 const SIZES = {
   trackRow: 50,
   touch: 44,
