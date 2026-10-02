@@ -11,10 +11,11 @@ signing and store channels stay Open in `apps/mobile/PACKAGING.md`.
   lives on `0.0.x`; `-alpha.N` marks pre-release builds, `-alpha.2`
   bumps it, a bare `v0.0.1` publishes the first stable of that line.
 - Repo manifests (`apps/desktop/package.json`,
-  `apps/mobile/package.json`, `app.config.ts`) carry the version
-  *currently in development* — today `0.0.1-alpha.1`. Only those three
-  are stamped; the private `packages/*` manifests are not
-  release-facing and never follow the tag.
+  `apps/mobile/package.json`, `apps/mobile/app.config.ts` — which also
+  holds the stamped `versionCode`) carry the version *currently in
+  development* — today `0.0.1-alpha.1`. Only those three are stamped;
+  the private `packages/*` manifests are not release-facing and never
+  follow the tag.
 - The **git tag is the build-time source of truth**: the release
   workflow runs `tooling/stamp-version.mjs <tag>` before any build,
   so every artifact embeds its own tag — never the repo's line.
@@ -42,8 +43,8 @@ git push origin v0.0.1-alpha.1
 
 | Job | Produces |
 |-----|----------|
-| `gate` | nothing — runs `ci.yml` (cargo fmt/clippy/test, `pnpm typecheck`, `pnpm test`). `desktop` + `android` build concurrently with it; `release` requires all three, so a tag cannot publish untested binaries |
-| `desktop` (matrix: `ubuntu-latest`, `macos-latest`, `windows-latest`) | linux: `auqw-<ver>-linux-x86_64.AppImage`, `.flatpak` · mac (arm64): `auqw-<ver>-mac-arm64.dmg` · win: `auqw-<ver>-win-x64-setup.exe` (nsis installer) — each OS dir gets its own `SHA256SUMS-<os>.txt` (`.blockmap` updater internals are not shipped) |
+| `gate` | nothing — calls `ci.yml` as a reusable workflow, so the release gate is the whole CI surface (cargo fmt/clippy/nextest + doc tests, node-bindings build + smoke, `pnpm typecheck`/`pnpm test`, tooling `node --test`) and can't drift from it. `desktop` + `android` build concurrently with it; `release` requires all three, so a tag cannot publish untested binaries |
+| `desktop` (matrix: `ubuntu-22.04`, `macos-latest`, `windows-latest`) | linux: `auqw-<ver>-linux-x86_64.AppImage`, `.flatpak` · mac (arm64): `auqw-<ver>-mac-arm64.dmg` · win: `auqw-<ver>-win-x64-setup.exe` (nsis installer) — each OS dir gets its own `SHA256SUMS-<os>.txt` (`.blockmap` updater internals are not shipped) |
 | `android` | `auqw-<ver>-android-arm64-v8a.apk` (`assembleRelease`, alpha-signed, arm64-only via `-Pauqw.abis` — local builds default to `arm64-v8a,x86_64` so emulator debug still works; standalone, upgrade-installs across alphas; not Play-ready) — plus its own `SHA256SUMS-Android.txt` |
 | `release` | a GitHub Release titled `<ver>` (`--prerelease` when the tag has a `-` suffix) with all assets + generated notes |
 
