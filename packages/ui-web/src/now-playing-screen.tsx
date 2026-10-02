@@ -177,6 +177,9 @@ export type NowPlayingScreenProps = StageScreenHandlers & {
   readonly queue?: QueueModel | undefined;
   readonly lyrics?: LyricsModel | undefined;
   readonly radio?: RadioModel | undefined;
+  /** Provider the radio seed would arm with — sizes the chip's ghost
+      slot before the tail exists. */
+  readonly radioSeedProvider?: string | null | undefined;
   readonly queueReordering?: boolean | undefined;
   readonly queueScrollEnabled?: boolean | undefined;
   readonly shuffle?: boolean | undefined;
@@ -267,6 +270,7 @@ export function NowPlayingScreen({
   peaks,
   onRetryLyrics,
   onStartRadio,
+  radioSeedProvider,
   onStopRadio,
   onModeChange,
   onPressQueueItem,
@@ -291,7 +295,12 @@ export function NowPlayingScreen({
     () => lyricsPaneView(lyrics, onRetryLyrics),
     [lyrics, onRetryLyrics],
   );
-  const radioRow = radioRowView(radio, onStartRadio, onStopRadio);
+  const radioRow = radioRowView(
+    radio,
+    onStartRadio,
+    onStopRadio,
+    radioSeedProvider,
+  );
   const reorder = queueReorderButton(queueReordering, onToggleQueueReorder);
   const clearQueue = queueClearButton(
     queue?.items.length ?? 0,
@@ -431,9 +440,7 @@ export function NowPlayingScreen({
                       className="uw-text uw-text--metadata uw-stage__radio-ghost"
                       aria-hidden="true"
                     >
-                      {radioRow.statusText.length >= radioRow.start.label.length
-                        ? radioRow.statusText
-                        : radioRow.start.label}
+                      {radioRow.ghostText}
                     </span>
                     {radioRow.armed ? (
                       <Text

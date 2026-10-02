@@ -1021,6 +1021,7 @@ function Main({
     playlistDownloadFor,
     onPlaylistDownloadAll,
     onStartRadioGated,
+    radioSeedProvider,
     onStopRadio,
     onRetryLyrics,
     setReviewFilter,
@@ -2566,6 +2567,7 @@ function Main({
               peaks={peaks}
               onRetryLyrics={onRetryLyrics}
               onStartRadio={onStartRadioGated}
+              radioSeedProvider={radioSeedProvider}
               onStopRadio={onStopRadio}
               onPressQueueItem={playQueueOccurrence}
               onQueueRowIntent={(id) =>

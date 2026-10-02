@@ -1408,6 +1408,17 @@ const tap = (s: string) => {
     null,
     'unarmed radio without a seed action hides the row',
   );
+  const unarmedRadio = radioRowView(
+    fixtureRadioModels[0],
+    () => tap('start'),
+    () => tap('stop'),
+    'youtube-music',
+  );
+  assert(
+    (unarmedRadio?.ghostText.length ?? 0) >
+      (unarmedRadio?.start.label.length ?? 0),
+    'unarmed ghost reserves the armed label for the seed provider',
+  );
   const armedRadio = radioRowView(
     fixtureRadioModels[1],
     () => tap('start'),

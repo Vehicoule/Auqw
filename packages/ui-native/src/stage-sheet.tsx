@@ -668,6 +668,9 @@ export type StageSheetProps = {
   readonly peaks?: readonly WaveformPeak[] | null | undefined;
   readonly onRetryLyrics?: (() => void) | undefined;
   readonly onStartRadio?: (() => void) | undefined;
+  /** Provider the radio seed would arm with — sizes the chip's ghost
+      slot before the tail exists. */
+  readonly radioSeedProvider?: string | null | undefined;
   readonly onStopRadio?: (() => void) | undefined;
   readonly onModeChange?: ((mode: StageMode) => void) | undefined;
   /** The pane the sheet must rest on once parked — a stale `mode` is
@@ -737,6 +740,7 @@ export function StageSheet({
   peaks,
   onRetryLyrics,
   onStartRadio,
+  radioSeedProvider,
   onStopRadio,
   onModeChange,
   restMode,
@@ -832,7 +836,12 @@ export function StageSheet({
     () => lyricsPaneView(lyrics, onRetryLyrics),
     [lyrics, onRetryLyrics],
   );
-  const radioRow = radioRowView(radio, onStartRadio, onStopRadio);
+  const radioRow = radioRowView(
+    radio,
+    onStartRadio,
+    onStopRadio,
+    radioSeedProvider,
+  );
   const queueReorder = queueReorderButton(
     queueReordering,
     onToggleQueueReorder,
@@ -1689,9 +1698,7 @@ export function StageSheet({
                     numberOfLines={1}
                     style={{ opacity: 0 }}
                   >
-                    {radioRow.statusText.length >= radioRow.start.label.length
-                      ? radioRow.statusText
-                      : radioRow.start.label}
+                    {radioRow.ghostText}
                   </Text>
                   <View
                     style={[
