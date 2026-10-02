@@ -20,6 +20,7 @@ export {
     PlayPauseIcon,
     Pressable,
     Spinner,
+    StatusBarFade,
     StatusMark,
     Text,
 } from './primitives.tsx';

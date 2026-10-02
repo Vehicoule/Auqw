@@ -610,6 +610,10 @@ export type LibraryScreenHandlers = {
   readonly onOpenCollection?: MaybeFn<
     [key: 'liked' | 'top50' | 'history' | 'downloads']
   >;
+  /** Tile's own play affordance — queues the whole collection. */
+  readonly onPlayCollection?: MaybeFn<
+    [key: 'liked' | 'top50' | 'history' | 'downloads']
+  >;
   readonly onOpenCard?: MaybeFn<[card: LibraryCardModel]>;
   readonly onOpenArtist?: MaybeFn<[artist: ArtistRailModel]>;
   readonly onCreatePlaylist?: MaybeFn<[name: string]>;
@@ -646,6 +650,9 @@ export type LibraryCollectionView = {
   readonly a11yLabel: string;
   readonly countLabel: string;
   readonly onOpen: MaybeFn;
+  /** The tile's play affordance — bound only while enabled. */
+  readonly onPlay: MaybeFn;
+  readonly playA11yLabel: string;
 };
 
 export type LibraryCardView = {
@@ -780,6 +787,7 @@ export function libraryScreenView(
     onAddToPlaylist,
     onContext,
     onOpenCollection,
+    onPlayCollection,
     onOpenCard,
     onOpenArtist,
     onCreatePlaylist,
@@ -797,6 +805,14 @@ export function libraryScreenView(
       }),
       countLabel: tile.note ?? t('common.trackCount', { count: tile.count }),
       onOpen: bind(onOpenCollection, tile.key),
+      // An empty collection opens its empty state — a play button
+      // there would queue nothing, so the affordance only exists
+      // while there's something to play.
+      onPlay:
+        tile.enabled && tile.count > 0 && onPlayCollection !== undefined
+          ? bind(onPlayCollection, tile.key)
+          : undefined,
+      playA11yLabel: t('collection.playAllA11y', { title: tile.label }),
     })),
     headingLabel: t('library.heading'),
     sortChip: {

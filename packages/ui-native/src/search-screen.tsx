@@ -106,17 +106,20 @@ export function SearchScreen({
       style={{
         flex: 1,
         backgroundColor: theme.colors.canvas,
-        paddingTop: topInset,
       }}
     >
       {/* The one search field is the floating loupe (SearchFab) —
-          the screen keeps recents, completions, and results only. */}
+          the screen keeps recents, completions, and results only.
+          Edge-to-edge: the inset lives inside each scroller's content
+          so rows glide under the status-bar fade; pinned blocks carry
+          it as plain padding. */}
       {view.suggestions !== null && (
         <ScrollView
           style={{ flex: 1 }}
           scrollEnabled={scrollEnabled}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{
+            paddingTop: topInset,
             // Clears the floating miniplayer's strip.
             paddingBottom:
               theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
@@ -155,6 +158,7 @@ export function SearchScreen({
           style={{
             alignItems: 'flex-start',
             paddingHorizontal: theme.spacing.screen,
+            paddingTop: topInset,
             marginBottom: theme.spacing.sm,
           }}
         >
@@ -172,7 +176,7 @@ export function SearchScreen({
       )}
       {view.idle !== null &&
         (view.idle.kind === 'recents' ? (
-          <View>
+          <View style={{ paddingTop: topInset }}>
             <Text
               variant="label"
               color="secondary"
@@ -208,6 +212,9 @@ export function SearchScreen({
           keyExtractor={(row) => row.row.key}
           scrollEnabled={scrollEnabled}
           contentContainerStyle={{
+            // The pinned results head already reserves the inset; when it
+            // is absent (loading with retained results) the list carries it.
+            paddingTop: view.resultsHead !== null ? 0 : topInset,
             paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
             // Clears the floating miniplayer's strip.
             paddingBottom:

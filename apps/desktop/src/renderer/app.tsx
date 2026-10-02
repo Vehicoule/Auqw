@@ -1163,6 +1163,9 @@ function Main({
         onOpenCollection={(key) =>
           pushOverlay({ type: 'collection', key })
         }
+        onPlayCollection={(key) =>
+          playCollectionRows(key, libraryModel.collectionRows[key])
+        }
         onOpenCard={onOpenCard}
         onOpenArtist={(artist) => {
           if (artist.entityRef !== null) {
@@ -1175,6 +1178,7 @@ function Main({
     [
       libraryModel,
       playRecording,
+      playCollectionRows,
       rowIntent,
       session,
       pushOverlay,

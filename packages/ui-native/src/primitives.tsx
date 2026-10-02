@@ -28,7 +28,14 @@ import Animated, {
   withSequence,
   withTiming,
 } from 'react-native-reanimated';
-import Svg, { Circle, Path, Rect } from 'react-native-svg';
+import Svg, {
+  Circle,
+  Defs,
+  LinearGradient,
+  Path,
+  Rect,
+  Stop,
+} from 'react-native-svg';
 import { useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
 import { useResolvedArtworkUri } from './artwork.tsx';
@@ -173,6 +180,54 @@ export function Hairline({
         style,
       ]}
     />
+  );
+}
+
+/**
+ * The edge-to-edge veil: content scrolls under the status bar and a
+ * soft canvas ramp — not a hard band — keeps the clock and icons
+ * readable. `height` covers the inset plus a short tail below it.
+ */
+export function StatusBarFade({
+  height,
+}: {
+  readonly height: number;
+}) {
+  const theme = useTheme();
+  return (
+    <View
+      pointerEvents="none"
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        height,
+      }}
+    >
+      <Svg width="100%" height={height}>
+        <Defs>
+          <LinearGradient id="uw-sbfade" x1="0" y1="0" x2="0" y2="1">
+            <Stop
+              offset="0"
+              stopColor={theme.colors.canvas}
+              stopOpacity={0.85}
+            />
+            <Stop
+              offset="0.55"
+              stopColor={theme.colors.canvas}
+              stopOpacity={0.4}
+            />
+            <Stop
+              offset="1"
+              stopColor={theme.colors.canvas}
+              stopOpacity={0}
+            />
+          </LinearGradient>
+        </Defs>
+        <Rect x={0} y={0} width="100%" height={height} fill="url(#uw-sbfade)" />
+      </Svg>
+    </View>
   );
 }
 
