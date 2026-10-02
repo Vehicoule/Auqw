@@ -107,6 +107,10 @@ export const WARN_MINI_DOT = { cx: 12, cy: 15.7, r: 1 } as const;
     `warn` GLYPHS, split so each piece can draw on. */
 export const CHECK_DRAW_PATH = 'm5 12.5 4.5 4.5L19 7';
 export const CHECK_DRAW_LENGTH = 21;
+
+/** Identical geometry to the `list-plus` GLYPH — the add-to-playlist
+    morph needs the path standalone so the check can draw over it. */
+export const LIST_PLUS_PATH = 'M4 6h12M4 11h12M4 16h7m4 0h6m-3-3v6';
 export const WARN_DRAW_TRIANGLE_PATH = 'M12 4 3 20h18z';
 export const WARN_DRAW_TRIANGLE_LENGTH = 55;
 export const WARN_DRAW_DETAIL_PATH = 'M12 10v4';

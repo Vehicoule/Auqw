@@ -1700,6 +1700,14 @@ export type RadioRowView = {
   readonly armed: boolean;
   readonly failed: boolean;
   readonly statusText: string;
+  /**
+   * The widest label the row can show — current status, the 'start
+   * radio' affordance, and the upper bound: unarmed, the armed estimate
+   * for the seedable provider; armed, the tail's own label with the
+   * fetching suffix reserved. Surfaces size their ghost slot to it so
+   * arm/disarm/fetch never shifts neighbours.
+   */
+  readonly ghostText: string;
   readonly start: {
     readonly label: string;
     readonly a11yLabel: string;
@@ -1716,18 +1724,47 @@ export function radioRowView(
   radio: RadioModel | undefined,
   onStartRadio: MaybeFn,
   onStopRadio: MaybeFn,
+  seedProvider?: string | null | undefined,
 ): RadioRowView | null {
   if (radio === undefined || (!radio.armed && onStartRadio === undefined)) {
     return null;
   }
+  const statusText = `${radio.label ?? ''}${
+    radio.fetching ? t('stage.radio.fetchingSuffix') : ''
+  }${radio.detail === null ? '' : ` · ${radio.detail}`}`;
+  const startLabel = t('stage.radio.start');
+  // The width the chip can grow into — kept stable across the toggles
+  // the contract freezes:
+  //  · unarmed → the armed estimate for the seed's own provider ('growing'
+  //    is the longest status word and fetching appends its suffix), so
+  //    pressing start can't shift neighbours;
+  //  · armed → the tail's own label with the fetching suffix reserved, so
+  //    continuation fetches don't shrink it — and deliberately NOT the
+  //    prospective provider, which follows the current track while the
+  //    tail keeps its original seed.
+  const armedBound = radio.armed
+    ? `${radio.label ?? ''}${t('stage.radio.fetchingSuffix')}${
+        radio.detail === null ? '' : ` · ${radio.detail}`
+      }`
+    : seedProvider === null || seedProvider === undefined
+      ? ''
+      : `${t('radio.label', { status: t('radio.status.growing') })}${
+          t('stage.radio.fetchingSuffix')
+        } · ${seedProvider}`;
   return {
     armed: radio.armed,
     failed: radio.status === 'failed',
-    statusText: `${radio.label ?? ''}${
-      radio.fetching ? t('stage.radio.fetchingSuffix') : ''
-    }${radio.detail === null ? '' : ` · ${radio.detail}`}`,
+    statusText,
+    ghostText:
+      statusText.length >= startLabel.length
+        ? statusText.length >= armedBound.length
+          ? statusText
+          : armedBound
+        : startLabel.length >= armedBound.length
+          ? startLabel
+          : armedBound,
     start: {
-      label: t('stage.radio.start'),
+      label: startLabel,
       a11yLabel: t('stage.radio.start'),
       onPress: onStartRadio,
     },

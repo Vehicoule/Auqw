@@ -1408,13 +1408,31 @@ const tap = (s: string) => {
     null,
     'unarmed radio without a seed action hides the row',
   );
+  const unarmedRadio = radioRowView(
+    fixtureRadioModels[0],
+    () => tap('start'),
+    () => tap('stop'),
+    'youtube-music',
+  );
+  assert(
+    (unarmedRadio?.ghostText.length ?? 0) >
+      (unarmedRadio?.start.label.length ?? 0),
+    'unarmed ghost reserves the armed label for the seed provider',
+  );
   const armedRadio = radioRowView(
     fixtureRadioModels[1],
     () => tap('start'),
     () => tap('stop'),
+    'a-much-longer-provider-id',
   );
   assert(armedRadio?.armed === true);
   assert(armedRadio.statusText.length > 0);
+  assert(
+    armedRadio.ghostText.includes('fetching') &&
+      armedRadio.ghostText.includes('deezer') &&
+      !armedRadio.ghostText.includes('a-much-longer-provider-id'),
+    'armed ghost reserves the tail own fetching bound, not the seed provider',
+  );
   const failedRadio = radioRowView(
     fixtureRadioModels[4],
     () => tap('start'),
