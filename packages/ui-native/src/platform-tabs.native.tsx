@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ImageSourcePropType, Keyboard, Platform, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import TabView, { useBottomTabBarHeight } from 'react-native-bottom-tabs';
 import type { AppleIcon } from 'react-native-bottom-tabs';
 import { useTheme } from './theme.tsx';
-import { StatusBarFade } from './primitives.tsx';
-import { PaneVisibleContext } from './platform-tabs.tsx';
+import { StatusBarCover } from './primitives.tsx';
+import { FloatingNavbar } from './navbar.tsx';
+import { PaneVisibleContext, NavFootprintContext } from './platform-tabs.tsx';
 import type { PlatformTabsProps } from './platform-tabs.tsx';
 import type { NavItemModel } from '@auqw/ui-shared';
 import iconHome from '../assets/tab-icons/home.png';
@@ -138,7 +138,31 @@ export function PlatformTabs({
   // top edge instead; the reported height drops to 0 when the bar hides
   // for the keyboard, keeping the dock just above the IME.
   const [tabBarHeight, setTabBarHeight] = useState<number | null>(null);
-  const insets = useSafeAreaInsets();
+
+  // Android replaces the native strip with the floating capsule — the
+  // native bar stays hidden and the capsule's measured footprint (bar
+  // + bottom margin) feeds the dock anchor, the stage sheet's park
+  // strip, and the panes' bottom reserve via NavFootprintContext.
+  const [floatFootprint, setFloatFootprint] = useState<number | null>(
+    null,
+  );
+  const floatHidden = tabBarHidden || keyboardOpen;
+  useEffect(() => {
+    // Only the keyboard zeroes the footprint — the dock then truly
+    // parks at the screen bottom. tabBarHidden keeps the last measured
+    // value: the sheet's collapse anchor must already hold the dock's
+    // resting height before the remounted bar reports it.
+    if (Platform.OS === 'android' && keyboardOpen) {
+      setFloatFootprint(0);
+      onTabBarHeight?.(0);
+    }
+  }, [keyboardOpen, onTabBarHeight]);
+  const dockBottom =
+    Platform.OS === 'android' ? (floatFootprint ?? 0) : (tabBarHeight ?? 0);
+  const dockUnmeasured =
+    Platform.OS === 'android'
+      ? floatFootprint === null
+      : tabBarHeight === null;
 
   // Two halves of the per-switch cost on top of the native host's
   // scene keep-alive:
@@ -164,8 +188,14 @@ export function PlatformTabs({
     return prev;
   };
   return (
-    <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
-      <TabView
+    // Android's floating capsule overlays the scenes — panes read the
+    // measured strip so their last rows scroll clear of it. iOS keeps 0
+    // (its native bar owns a real layout slot).
+    <NavFootprintContext.Provider
+      value={Platform.OS === 'android' ? (floatFootprint ?? 0) : 0}
+    >
+      <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
+        <TabView
         navigationState={{ index, routes }}
         getLazy={({ route }) => (warm ? false : route.lazy)}
         renderScene={({ route }) => (
@@ -182,13 +212,17 @@ export function PlatformTabs({
               {sceneFor(route.key)}
             </PaneVisibleContext.Provider>
             {/* Scenes draw edge-to-edge — scrolled content passes
-                under the status bar mid-scroll; the gradient veil (not
-                a hard band) keeps the clock and icons readable. */}
-            <StatusBarFade height={insets.top + 14} />
+                under the status bar mid-scroll; the flat canvas strip
+                keeps the clock and icons readable. */}
+            <StatusBarCover />
             <TabBarHeightProbe
               onHeight={(h) => {
                 setTabBarHeight(h);
-                onTabBarHeight?.(h);
+                // Android's strip is the floating capsule — its own
+                // overlay reports the footprint, not the native bar.
+                if (Platform.OS !== 'android') {
+                  onTabBarHeight?.(h);
+                }
               }}
             />
           </View>
@@ -208,12 +242,10 @@ export function PlatformTabs({
         hapticFeedbackEnabled
         minimizeBehavior="onScrollDown"
         scrollEdgeAppearance="transparent"
-        // Bar hides for the Android IME and while the stage sheet owns
-        // the screen — the sheet's own scrim covers the world either
-        // way, and a visible bar behind it reads as a second chrome row.
-        tabBarHidden={
-          tabBarHidden || (Platform.OS === 'android' && keyboardOpen)
-        }
+        // Android's native bar is permanently replaced by the floating
+        // capsule below (the capsule hides for the IME + stage sheet
+        // itself). On iOS the native bar only yields to the sheet.
+        tabBarHidden={Platform.OS === 'android' || tabBarHidden}
         {...(accessory != null && Platform.OS === 'ios'
           ? {
               renderBottomAccessoryView: () => (
@@ -222,21 +254,39 @@ export function PlatformTabs({
             }
           : {})}
       />
+      {Platform.OS === 'android' && !floatHidden && (
+        <View
+          pointerEvents="box-none"
+          onLayout={(event) => {
+            const h = event.nativeEvent.layout.height;
+            setFloatFootprint(h);
+            onTabBarHeight?.(h);
+          }}
+          style={{ position: 'absolute', left: 0, right: 0, bottom: 0 }}
+        >
+          <FloatingNavbar
+            items={items}
+            activeKey={activeKey}
+            onSelect={onSelect}
+          />
+        </View>
+      )}
       {androidDock && (
         <View
           style={{
             position: 'absolute',
             left: 0,
             right: 0,
-            bottom: tabBarHeight ?? 0,
-            // unmeasured (null) would overlay the bar for a frame
-            opacity: tabBarHeight === null ? 0 : 1,
+            bottom: dockBottom,
+            // unmeasured would overlay the bar for a frame
+            opacity: dockUnmeasured ? 0 : 1,
           }}
           pointerEvents="box-none"
         >
           {accessory}
         </View>
       )}
-    </View>
+      </View>
+    </NavFootprintContext.Provider>
   );
 }

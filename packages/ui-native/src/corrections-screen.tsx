@@ -1,5 +1,7 @@
+import { useContext } from 'react';
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
+import { NavFootprintContext } from './platform-tabs.tsx';
 import {
   BackRow,
   Icon,
@@ -41,6 +43,7 @@ export function CorrectionsScreen({
   onRetry,
 }: CorrectionsScreenProps) {
   const theme = useTheme();
+  const navPad = useContext(NavFootprintContext);
   const view = useCorrectionsScreenController({
     model,
     onFilter,
@@ -104,7 +107,7 @@ export function CorrectionsScreen({
       ) : (
         <ScrollView
           scrollEnabled={scrollEnabled}
-          contentContainerStyle={{ paddingBottom: theme.spacing.xxl }}
+          contentContainerStyle={{ paddingBottom: theme.spacing.xxl + navPad }}
         >
           {view.body.rows.map((row) => (
             <ReviewRow key={row.row.reviewId} view={row} />

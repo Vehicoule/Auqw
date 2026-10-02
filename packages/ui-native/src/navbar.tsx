@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Platform, View } from 'react-native';
 import type { LayoutChangeEvent } from 'react-native';
 import { BlurView } from 'expo-blur';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
@@ -71,12 +72,19 @@ export type NavbarProps = {
   readonly onSelect: (key: string) => void;
 };
 
-export function AndroidNavbar({
+/**
+ * The Android dock — a floating capsule (the iOS-26 style bar): own
+ * raised surface + shadow instead of the flat native strip, which had
+ * too little contrast against the canvas. Keeps the one traveling
+ * accent pill.
+ */
+export function FloatingNavbar({
   items,
   activeKey,
   onSelect,
 }: NavbarProps) {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   // One selection mark, not per-slot fills — the accent pill is a
   // single element that glides between slots (the seg indicator's
   // treatment on the dock). Equal flex:1 slots make the target x a
@@ -106,16 +114,31 @@ export function AndroidNavbar({
     setRowW(event.nativeEvent.layout.width);
   };
   return (
-    <View>
+    <View
+      style={{
+        marginHorizontal: theme.spacing.screen,
+        marginBottom: insets.bottom + theme.spacing.sm,
+        borderRadius: theme.radius.pill,
+        borderWidth: theme.strokes.hairline,
+        borderColor: theme.colors.hairline,
+        backgroundColor: theme.colors.raised,
+        // Separation comes from the shadow, not a tone step.
+        elevation: 8,
+        shadowColor: theme.colors.scrim,
+        shadowOpacity: 0.28,
+        shadowRadius: 16,
+        shadowOffset: { width: 0, height: 6 },
+        padding: theme.spacing.xs + theme.spacing.xxs,
+      }}
+    >
+      {/* The measured row stays padding-free — slot widths (and the
+          pill's target x) read straight off its layout box. */}
       <View
         accessibilityRole="tablist"
         onLayout={onRowLayout}
         style={{
-          // The preview's native bar sits on the deep surface.
-          backgroundColor: theme.colors.deep,
           flexDirection: 'row',
-          paddingTop: theme.spacing.sm,
-          paddingBottom: 10,
+          minHeight: theme.sizes.navbarIos,
         }}
       >
         {rowW > 0 && pillW > 0 && foundIndex >= 0 && (
@@ -124,7 +147,7 @@ export function AndroidNavbar({
             style={[
               {
                 position: 'absolute',
-                top: theme.spacing.sm,
+                top: 0,
                 left: 0,
                 width: pillW,
                 height: 30,
@@ -156,8 +179,6 @@ export function AndroidNavbar({
                 style={{
                   minWidth: 56,
                   height: 30,
-                  borderRadius: theme.radius.control,
-                  paddingHorizontal: theme.spacing.screen,
                   alignItems: 'center',
                   justifyContent: 'center',
                 }}
@@ -291,6 +312,6 @@ export function AppNavbar({ platform, ...props }: AppNavbarProps) {
   return variant === 'ios' ? (
     <IosGlassNavbar {...props} />
   ) : (
-    <AndroidNavbar {...props} />
+    <FloatingNavbar {...props} />
   );
 }

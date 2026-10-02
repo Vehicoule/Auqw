@@ -102,7 +102,7 @@ import {
   SheetScreen,
   StackItem,
   StageSheet,
-  StatusBarFade,
+  StatusBarCover,
   SyncScreen,
   Text,
   ThemePickerSheet,
@@ -2568,6 +2568,9 @@ function Main({
             onSelect={selectTab}
             renderTab={renderTabScreen}
             onTabBarHeight={reportStageCollapsed}
+            // The expanded sheet is the presented surface — the dock
+            // hides behind it rather than lingering as a second row.
+            tabBarHidden={expanded}
           />
           {/* The one search field — floats top-right over every tab
               (the panes own no second input); renders before the
@@ -2751,10 +2754,9 @@ function Main({
               onDismissed={() => dismissOverlay(entry.key)}
             >
               {content}
-              {/* Same edge-to-edge veil as the tab scenes — pushed
-                  overlays scroll under the status bar behind the
-                  soft ramp too. */}
-              <StatusBarFade height={topInset + 14} />
+              {/* Same edge-to-edge cover as the tab scenes — pushed
+                  overlays scroll under the flat strip too. */}
+              <StatusBarCover />
               {toastPill(
                 toastLayer === 'push' &&
                   entry === overlayStack[overlayStack.length - 1],

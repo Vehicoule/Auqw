@@ -1,5 +1,7 @@
+import { useContext } from 'react';
 import { FlatList, View } from 'react-native';
 import { useTheme } from './theme.tsx';
+import { NavFootprintContext } from './platform-tabs.tsx';
 import { BackRow, bind, Icon, Pressable, Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
@@ -120,6 +122,7 @@ export function CollectionScreen({
   onContext,
 }: CollectionScreenProps) {
   const theme = useTheme();
+  const navPad = useContext(NavFootprintContext);
   return (
     <View
       style={{
@@ -149,7 +152,7 @@ export function CollectionScreen({
           scrollEnabled={scrollEnabled}
           contentContainerStyle={{
             paddingHorizontal: theme.spacing.sm,
-            paddingBottom: theme.spacing.xxl,
+            paddingBottom: theme.spacing.xxl + navPad,
           }}
           renderItem={({ item }) => (
             <TrackRow

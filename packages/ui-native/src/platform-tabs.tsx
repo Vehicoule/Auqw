@@ -1,9 +1,8 @@
 import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppNavbar } from './navbar.tsx';
-import { StatusBarFade } from './primitives.tsx';
+import { StatusBarCover } from './primitives.tsx';
 import { useTheme } from './theme.tsx';
 import type { NavItemModel } from '@auqw/ui-shared';
 
@@ -20,6 +19,15 @@ export function usePaneVisible(): boolean {
 }
 
 export { PaneVisibleContext };
+
+/**
+ * The strip a floating nav bar overlays at the bottom of the scenes —
+ * panes add it to their scroll padding so the last rows clear the bar.
+ * 0 on iOS (the native bar reserves its own layout slot) and on the
+ * fallback renderer (its bar sits in flow).
+ */
+const NavFootprintContext = createContext(0);
+export { NavFootprintContext };
 
 export type PlatformTabsProps = {
   readonly items: readonly NavItemModel[];
@@ -54,7 +62,6 @@ export function PlatformTabs({
   onTabBarHeight,
 }: PlatformTabsProps) {
   const theme = useTheme();
-  const insets = useSafeAreaInsets();
   // Warm-mount the hidden panes after the first commit — first visits
   // then flip display instead of cold-mounting on the gesture.
   const [warm, setWarm] = useState(false);
@@ -91,10 +98,9 @@ export function PlatformTabs({
         {items.some((item) => item.key === activeKey)
           ? null
           : renderTab(activeKey)}
-        {/* Edge-to-edge veil: scrolled content glides under the status
-            bar and a soft ramp — not a hard band — keeps the clock and
-            icons readable (0-height where there is no inset). */}
-        <StatusBarFade height={insets.top + 14} />
+        {/* Edge-to-edge cover: scrolled content glides under a flat
+            canvas strip that keeps the clock and icons readable. */}
+        <StatusBarCover />
       </View>
       {!tabBarHidden && (
         <>
