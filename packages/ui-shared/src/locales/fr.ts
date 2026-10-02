@@ -568,6 +568,8 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'action.playPlaylist': 'lire la playlist',
   'action.playPlaylistEntry': "lire l'entrée de playlist",
   'action.shuffleAll': 'tout mélanger',
+  'action.shuffleOn': 'aléatoire : activé',
+  'action.toggleShuffle': 'basculer aléatoire',
   'action.resume': 'reprendre',
   'action.seek': 'position',
   'action.enqueueTrack': 'mettre en file',

@@ -548,6 +548,8 @@ export const en = {
   'action.playPlaylist': 'play playlist',
   'action.playPlaylistEntry': 'play playlist entry',
   'action.shuffleAll': 'shuffle all',
+  'action.shuffleOn': 'shuffle: on',
+  'action.toggleShuffle': 'toggle shuffle',
   'action.resume': 'resume',
   'action.seek': 'seek',
   'action.enqueueTrack': 'enqueue track',

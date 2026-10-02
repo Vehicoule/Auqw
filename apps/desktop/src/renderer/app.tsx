@@ -1507,6 +1507,16 @@ function Main({
                   download={stageDownload}
                   onDownload={onStageDownload}
                   onAddToPlaylist={onStageAddToPlaylist}
+                  onTrackMenu={
+                    player.recordingId === null
+                      ? undefined
+                      : () => {
+                          const recordingId = player.recordingId;
+                          if (recordingId !== null) {
+                            setActionsFor({ kind: 'recording', recordingId });
+                          }
+                        }
+                  }
                   onStopPlayback={() => void session.stop()}
                   onRecovery={onAuthRecovery}
                   onSeek={seekToPosition}

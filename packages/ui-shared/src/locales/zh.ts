@@ -540,6 +540,8 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'action.playPlaylist': '播放歌单',
   'action.playPlaylistEntry': '播放歌单条目',
   'action.shuffleAll': '随机播放全部',
+  'action.shuffleOn': '随机播放：开',
+  'action.toggleShuffle': '切换随机播放',
   'action.resume': '继续',
   'action.seek': '跳转',
   'action.enqueueTrack': '加入队列',

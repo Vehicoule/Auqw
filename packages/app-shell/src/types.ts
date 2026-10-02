@@ -502,6 +502,7 @@ export type ShellSheetAction = {
     | 'download'
     | 'close'
     | 'radio'
+    | 'shuffle'
     | 'note'
     | 'library';
 };
@@ -522,6 +523,10 @@ export function rowActionsModel(input: {
   ) => Pick<DownloadRecord, 'state' | 'error'> | null;
   readonly downloadRefFor: (recordingId: string) => SourceRef | null;
   readonly radioSeedable: boolean;
+  /** The playing track's transport toggles — only the menu opened on
+      the live recording offers shuffle (moved out of the transport
+      row itself; pass `undefined` for any other target). */
+  readonly transport?: { readonly shuffle: boolean } | undefined;
 }): { readonly title: string; readonly actions: ShellSheetAction[] } {
   const { target } = input;
   const actions: ShellSheetAction[] = [];
@@ -576,6 +581,15 @@ export function rowActionsModel(input: {
       key: 'radio',
       label: t('stage.radio.start'),
       icon: 'radio',
+    });
+  }
+  if (input.transport !== undefined) {
+    actions.push({
+      key: 'shuffle',
+      label: input.transport.shuffle
+        ? t('action.shuffleOn')
+        : t('common.shuffle'),
+      icon: 'shuffle',
     });
   }
   if (target.kind === 'metadata') {

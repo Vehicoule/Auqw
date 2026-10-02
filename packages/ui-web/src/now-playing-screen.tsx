@@ -110,14 +110,6 @@ export function TransportControls({
         onPress={view.like.onPress}
       />
       <TBtn
-        icon={view.shuffle.icon}
-        color={view.shuffle.active ? 'var(--accent)' : 'var(--text-secondary)'}
-        ariaLabel={view.shuffle.a11yLabel}
-        disabled={view.shuffle.disabled}
-        active={view.shuffle.active}
-        onPress={view.shuffle.onPress}
-      />
-      <TBtn
         main
         icon={view.previous.icon}
         color="var(--text-primary)"
@@ -268,6 +260,7 @@ export function NowPlayingScreen({
   download = null,
   onDownload,
   onAddToPlaylist,
+  onTrackMenu,
   onStopPlayback,
   onRecovery,
   onSeek,
@@ -472,7 +465,7 @@ export function NowPlayingScreen({
               )}
               <div className="uw-stage__meta-row">
                 <div className="uw-stage__meta">
-                  <Text variant="display" color="bright" numberOfLines={2}>
+                  <Text variant="display" color="bright" numberOfLines={1}>
                     {meta.title}
                   </Text>
                   <Text variant="body" color="primary" numberOfLines={1}>
@@ -661,6 +654,17 @@ export function NowPlayingScreen({
       {/* Stop/dismiss floats over the stage's top-right — out of the
           body flow, reachable in every mode (the old column-level
           close's home; the stage toggle only hides the column). */}
+      {onTrackMenu !== undefined && (
+        <IconButton
+          icon="ellipsis"
+          size={32}
+          iconSize={14}
+          color="var(--text-secondary)"
+          ariaLabel={t('track.a11y.rowActions')}
+          onPress={onTrackMenu}
+          className="uw-stage__menu"
+        />
+      )}
       {onStopPlayback !== undefined && (
         <IconButton
           icon="close"
