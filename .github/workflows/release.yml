@@ -136,7 +136,7 @@ jobs:
           pnpm install --frozen-lockfile
           node tooling/stamp-version.mjs "$VERSION"
           node tooling/stamp-version.mjs --check "${VERSION#v}"
-          node tooling/sync-plugins.mjs apps/desktop/plugins
+          node tooling/sync-plugins.mjs apps/desktop/plugins --release
           pnpm --dir apps/desktop run dist
       # sha256sum is not on the macOS runner image — the node tool
       # emits the same `<hex>  <name>` format the publish job verifies
@@ -258,7 +258,7 @@ jobs:
           pnpm install --frozen-lockfile
           node tooling/stamp-version.mjs "$VERSION"
           node tooling/stamp-version.mjs --check "${VERSION#v}"
-          node tooling/sync-plugins.mjs
+          node tooling/sync-plugins.mjs --release
           pnpm --dir apps/mobile exec expo prebuild --platform android
       - name: build release APK
         working-directory: auqw/apps/mobile

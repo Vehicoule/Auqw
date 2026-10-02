@@ -100,7 +100,7 @@ jobs:
           export ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME"/ndk/* | sort -V | tail -1)"
           ./tooling/build-android-bindings.sh
           pnpm install --frozen-lockfile
-          node tooling/sync-plugins.mjs
+          node tooling/sync-plugins.mjs --release
           pnpm --dir apps/mobile exec expo prebuild --platform android
       - name: warm assembleRelease
         working-directory: auqw/apps/mobile

@@ -8,6 +8,7 @@
       "version": "0.2.2",
       "abi": "0.3.0",
       "digest": "sha256:3c1066e8ccc73fdc8d99dd0e2f0bd9c9c7947abfb42ab4ab040f57719d2a847f",
+      "manifest_digest": "sha256:f1d3a534a26e2b98267129286804557754fd2d5530a6f5ac2e22e6351f003be7",
       "source": "release:../auqw-plugins/releases/itunes/0.2.2"
     },
     {
@@ -15,6 +16,7 @@
       "version": "0.4.10",
       "abi": "0.3.0",
       "digest": "sha256:c1ffb3fe3938033176029b556ac4deb0132e32beeb509a325f4f4ff95f5285b5",
+      "manifest_digest": "sha256:5840592ff06cd02e8b127ecd6ff8ed2cf1a752d988fcc99dd0f305a8186e68b6",
       "source": "release:../auqw-plugins/releases/youtube-music/0.4.10"
     },
     {
@@ -22,6 +24,7 @@
       "version": "0.1.2",
       "abi": "0.3.0",
       "digest": "sha256:27ca97b5b6f4cd3abef8872ebf36add6ad532d4c121973128905f43396fe8647",
+      "manifest_digest": "sha256:33fa556651ea10c10f616e9ceffac9081bba1b4d0824031758bce86241973133",
       "source": "release:../auqw-plugins/releases/deezer/0.1.2"
     },
     {
@@ -29,6 +32,7 @@
       "version": "0.1.4",
       "abi": "0.3.0",
       "digest": "sha256:6e759cabd05b35dd0b3baa070f217dd7ad9aa1377fd6c7eab2b838ab6cea3203",
+      "manifest_digest": "sha256:6063ae631a87266ed2a95fbf78347a8cb81757a0b9a2f7e3d29bec6024c2e292",
       "source": "release:../auqw-plugins/releases/lyrics-lrclib/0.1.4"
     }
   ]

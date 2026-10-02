@@ -36,10 +36,12 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo nextest run
+      # --locked pins resolution to the committed Cargo.lock — without
+      # it every CI build can silently re-resolve within semver.
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo nextest run --locked
       # Nextest does not run doctests — they are their own step.
-      - run: cargo test --doc
+      - run: cargo test --locked --doc
 
   # The desktop binding's artifact name and module loading are
   # platform-shaped — the smoke runs on all three target OSes.
@@ -57,7 +59,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
-      - run: cargo build -p auqw-node-bindings
+      - run: cargo build --locked -p auqw-node-bindings
       - run: node crates/node-bindings/test/smoke.mjs
 
   typescript:
@@ -76,3 +78,31 @@ jobs:
       # reaches it — the versionCode monotonicity tests have to be
       # called out or a colliding derivation ships unnoticed.
       - run: node --test 'tooling/**/*.test.mjs'
+
+  # providers.lock.json is the root of the plugin artifact trust
+  # chain — the pinned key + digests are the only reason a guest is
+  # trusted — but until now only release.yml and the cache warmer ever
+  # read it, so a drifted or tampered pin merged green. This job gives
+  # the lock a merge gate: --check verifies every entry against the
+  # sibling plugins checkout (release dir resolves, digests match
+  # provenance, signature verifies under the pinned key) without
+  # staging or copying anything, and --release refuses a local-build
+  # dev source ever landing in the lock.
+  plugin-lock:
+    runs-on: ubuntu-latest
+    steps:
+      # Same sibling layout as release.yml — the lock resolves
+      # `release:../auqw-plugins/...`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: auqw
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: Vehicoule/Auqw-plugins
+          path: auqw-plugins
+          token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - run: node tooling/sync-plugins.mjs --check --release
+        working-directory: auqw
