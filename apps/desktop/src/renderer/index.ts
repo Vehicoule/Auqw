@@ -389,4 +389,38 @@ async function boot(): Promise<void> {
   audio.addEventListener('durationchange', renderState);
 }
 
+// The hidden titlebar leaves this page chromeless too — wire the drag
+// strip's buttons to the same ops as the product cluster. macOS keeps
+// its traffic lights, so the buttons leave (the strip stays draggable).
+const maxButton = document.querySelector<HTMLButtonElement>(
+  '#caption button[data-op="toggle-maximize"]',
+);
+for (const button of document.querySelectorAll<HTMLButtonElement>(
+  '#caption button[data-op]',
+)) {
+  if (window.auqw.chrome.platform === 'darwin') {
+    button.remove();
+    continue;
+  }
+  button.addEventListener('click', () => {
+    const op = button.dataset.op;
+    if (
+      op === 'minimize' ||
+      op === 'toggle-maximize' ||
+      op === 'close'
+    ) {
+      window.auqw.chrome.control(op);
+    }
+  });
+}
+// The toggle restores a maximized window — its label + glyph must
+// follow the pushed window state, including the initial attach push.
+if (maxButton !== null) {
+  window.auqw.chrome.onState((event) => {
+    const maximized = event.maximized === true;
+    maxButton.setAttribute('aria-label', maximized ? 'restore' : 'maximize');
+    maxButton.textContent = maximized ? '❐' : '□';
+  });
+}
+
 void boot();

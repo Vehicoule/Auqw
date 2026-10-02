@@ -3209,6 +3209,13 @@
   -webkit-app-region: no-drag;
 }
 
+/* Tight bars floor the end track at the cluster's min-content — the
+   squeeze order then reads search collapse → tabs pill scrolls →
+   caption cluster stays whole, instead of the cluster overflowing
+   left over the tabs at the 640px floor on verbose locales. */
+.uw-world-bar[data-end-tight] {
+  grid-template-columns: minmax(100px, 1fr) minmax(0, max-content) minmax(min-content, 1fr);
+}
 /* One control height across the strip — field, icon buttons, chips
    (design.md's header-bar rule). */
 .uw-world-bar {
@@ -3224,32 +3231,40 @@
 .uw-update-card {
   -webkit-app-region: no-drag;
 }
-/* WCO caption buttons overlay the bar's far right — controls keep
-   clear of them. `--uw-caption-w` is measured in the renderer
-   (windowControlsOverlay) since its width is platform-drawn. The
-   padding is symmetric on purpose: the pills center on the world
-   column's midpoint, not on the bar minus its caption zone. */
-[data-platform='win32'] .uw-world-bar,
-[data-platform='linux'] .uw-world-bar {
-  padding-inline: var(--uw-caption-w, 140px);
+/* The renderer's own caption cluster — real end-cluster members, so
+   they need no reserve: the OS draws nothing over the bar. */
+.uw-win-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+/* Startup/restore/locale gates: the only surface on a hidden-titlebar
+   window — a drag strip carrying the caption cluster so a gated window
+   still moves and closes by mouse. */
+.uw-gate-caption {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: none;
+  height: 44px;
+  padding: 0 var(--spacing-sm);
+  -webkit-app-region: drag;
+}
+.uw-gate-caption > * {
+  -webkit-app-region: no-drag;
 }
 
 /* On macOS the lights land over the world bar once the stage column
-   that hosts them is collapsed — same symmetric reserve. */
+   that hosts them is collapsed — symmetric reserve instead. */
 [data-platform='darwin'] .uw-chrome[data-stage='closed'] .uw-world-bar {
   padding-inline: 96px;
 }
 
 /* Narrow windows: the mirrored reserve exists only to center the tab
-   pill — the side carrying real caption buttons (right on
-   Windows/Linux, left on macOS) never shrinks, but the purely
+   pill — the traffic-light side never shrinks, but the purely
    aesthetic mirror side collapses so both control clusters keep
-   their room inside the measured caption zone. */
+   their room inside the reserve. */
 @media (max-width: 960px) {
-  [data-platform='win32'] .uw-world-bar,
-  [data-platform='linux'] .uw-world-bar {
-    padding-left: var(--spacing-sm);
-  }
   [data-platform='darwin'] .uw-chrome[data-stage='closed'] .uw-world-bar {
     padding-right: var(--spacing-sm);
   }

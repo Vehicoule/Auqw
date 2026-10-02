@@ -110,9 +110,47 @@
         max-height: 12rem;
         overflow-y: auto;
       }
+      #caption {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 2px;
+        padding: 0 8px;
+        -webkit-app-region: drag;
+      }
+      #caption button {
+        -webkit-app-region: no-drag;
+        width: 32px;
+        height: 32px;
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        color: #a8abb3;
+        font: inherit;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      #caption button:hover {
+        background: #2c2e36;
+        color: #e8e8ea;
+      }
     </style>
   </head>
   <body>
+    <header id="caption">
+      <button type="button" data-op="minimize" aria-label="minimize">
+        &#x2013;
+      </button>
+      <button type="button" data-op="toggle-maximize" aria-label="maximize">
+        &#x25a1;
+      </button>
+      <button type="button" data-op="close" aria-label="close">&#xd7;</button>
+    </header>
     <main>
       <h1>auqw — desktop shell up</h1>
       <dl id="status">

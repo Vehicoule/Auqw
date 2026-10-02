@@ -89,7 +89,6 @@ import {
   t,
   toCollectionModel,
   toSyncPanel,
-  useTheme,
 } from '@auqw/ui-web';
 import type { TrackRowModel } from '@auqw/ui-web';
 import {
@@ -181,12 +180,19 @@ function App() {
   }, [attempt]);
 
   const reducedMotion = usePrefersReducedMotion();
-  return boot.type === 'ready' ? (
-    <Shell controller={boot.controller} />
-  ) : (
-    <ThemeProvider theme="system" reducedMotion={reducedMotion}>
-      <BootGate boot={boot} onRetry={() => setAttempt((n) => n + 1)} />
-    </ThemeProvider>
+  // Stamped at the root so `data-platform` is right on every gate too
+  // — the caption cluster needs it before a session even exists.
+  return (
+    <>
+      <PlatformChromeReporter />
+      {boot.type === 'ready' ? (
+        <Shell controller={boot.controller} />
+      ) : (
+        <ThemeProvider theme="system" reducedMotion={reducedMotion}>
+          <BootGate boot={boot} onRetry={() => setAttempt((n) => n + 1)} />
+        </ThemeProvider>
+      )}
+    </>
   );
 }
 
@@ -231,14 +237,34 @@ function usePrefersDarkScheme(): 'dark' | 'light' {
   return dark ? 'dark' : 'light';
 }
 
-/** Full-screen centered gate frame shared by boot/restore/locale gates. */
+/** Full-screen gate frame shared by boot/restore/locale gates. On a
+    hidden-titlebar window a gate is the only surface — it still needs
+    the drag strip + caption cluster or the window can't be moved or
+    closed by mouse. */
 const gateStyle: CSSProperties = {
   height: '100vh',
   display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
+  flexDirection: 'column',
   backgroundColor: 'var(--canvas)',
 };
+
+const gateBodyStyle: CSSProperties = {
+  flex: 1,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+};
+
+function GateShell({ children }: { readonly children: ReactNode }) {
+  return (
+    <div style={gateStyle}>
+      <div className="uw-gate-caption">
+        <WindowControls />
+      </div>
+      <div style={gateBodyStyle}>{children}</div>
+    </div>
+  );
+}
 
 /** Conditional SheetScreen — `body` renders only while the sheet is up. */
 const sheet = (
@@ -261,7 +287,7 @@ function BootGate({
   readonly onRetry: () => void;
 }) {
   return (
-    <div style={gateStyle}>
+    <GateShell>
       {boot.type === 'failed' ? (
         <ErrorState
           title={t('boot.startFailed')}
@@ -271,7 +297,7 @@ function BootGate({
       ) : (
         <LoadingState title={t('boot.loadingPlugins')} />
       )}
-    </div>
+    </GateShell>
   );
 }
 
@@ -307,7 +333,6 @@ function Shell({ controller }: { readonly controller: SessionController }) {
       source={themeSource}
       reducedMotion={reducedMotion}
     >
-      <ChromeSchemeReporter />
       {state.type === 'ready' ? (
         <Main controller={controller} state={state} />
       ) : (
@@ -317,53 +342,65 @@ function Shell({ controller }: { readonly controller: SessionController }) {
   );
 }
 
-/** Chrome integration: pushes the resolved scheme to main so the
-    titlebar overlay matches the canvas even when the user picked an
-    explicit scheme, stamps the platform so CSS can clear the macOS
-    traffic lights, and measures the caption-button zone so toolbar
-    controls keep clear of it on win32/linux. */
-function ChromeSchemeReporter(): null {
-  const { scheme, canvas, textBright } = useTheme();
+/** Chrome integration: stamps the platform so CSS can clear the macOS
+    traffic lights — win32/linux draw their own caption cluster through
+    `windowControls`, so no OS overlay pixels sit over the bar. */
+function PlatformChromeReporter(): null {
   useEffect(() => {
-    const root = document.documentElement;
-    root.dataset.platform = window.auqw.chrome.platform;
-    // getTitlebarAreaRect covers the free title area — the caption
-    // buttons occupy what's left of the window's top-right.
-    const wco = (
-      navigator as Navigator & {
-        windowControlsOverlay?: {
-          readonly visible: boolean;
-          getTitlebarAreaRect(): DOMRect;
-          addEventListener(type: 'geometrychange', listener: () => void): void;
-          removeEventListener(type: 'geometrychange', listener: () => void): void;
-        };
-      }
-    ).windowControlsOverlay;
-    const measureCaptions = () => {
-      // No overlay API at all → keep the CSS fallback rather than
-      // forcing 0 and losing the clearance guess on hosts without it.
-      if (wco === undefined) {
-        return;
-      }
-      const captionW = wco.visible
-        ? Math.max(0, window.innerWidth - wco.getTitlebarAreaRect().right)
-        : 0;
-      root.style.setProperty('--uw-caption-w', `${captionW}px`);
-    };
-    measureCaptions();
-    // The caption zone can change without a theme change (resize,
-    // overlay visibility) — re-measure on geometrychange.
-    wco?.addEventListener('geometrychange', measureCaptions);
-    // canvas/symbol ride along so an adaptive palette re-tints the
-    // overlay too, not just the built-ins.
-    window.auqw.chrome.setScheme({
-      scheme,
-      canvas,
-      symbol: textBright,
-    });
-    return () => wco?.removeEventListener('geometrychange', measureCaptions);
-  }, [scheme, canvas, textBright]);
+    document.documentElement.dataset.platform = window.auqw.chrome.platform;
+  }, []);
   return null;
+}
+
+/** The bar's own caption cluster — minimize · maximize↔restore · close
+    — on win32/linux (macOS keeps its traffic lights, nothing renders).
+    The maximize/restore glyph follows the pushed window state. */
+function WindowControls() {
+  const [maximized, setMaximized] = useState(false);
+  useEffect(
+    () =>
+      window.auqw.chrome.onState((event) => {
+        setMaximized(event.maximized);
+      }),
+    [],
+  );
+  if (window.auqw.chrome.platform === 'darwin') {
+    return null;
+  }
+  const control =
+    (op: 'minimize' | 'toggle-maximize' | 'close') => (): void => {
+      window.auqw.chrome.control(op);
+    };
+  return (
+    <div className="uw-win-controls">
+      <IconButton
+        icon="minimize"
+        size={32}
+        iconSize={16}
+        color="var(--text-secondary)"
+        ariaLabel={t('chrome.window.minimize')}
+        onPress={control('minimize')}
+      />
+      <IconButton
+        icon={maximized ? 'restore' : 'maximize'}
+        size={32}
+        iconSize={16}
+        color="var(--text-secondary)"
+        ariaLabel={t(
+          maximized ? 'chrome.window.restore' : 'chrome.window.maximize',
+        )}
+        onPress={control('toggle-maximize')}
+      />
+      <IconButton
+        icon="close"
+        size={32}
+        iconSize={16}
+        color="var(--text-secondary)"
+        ariaLabel={t('chrome.window.close')}
+        onPress={control('close')}
+      />
+    </div>
+  );
 }
 
 function SessionGate({
@@ -374,7 +411,7 @@ function SessionGate({
   readonly controller: SessionController;
 }) {
   return (
-    <div style={gateStyle}>
+    <GateShell>
       {state.type === 'restore-failed' ? (
         <ErrorState
           title={t('boot.restoreFailed')}
@@ -384,7 +421,7 @@ function SessionGate({
       ) : (
         <LoadingState title={t('boot.restoring')} />
       )}
-    </div>
+    </GateShell>
   );
 }
 
@@ -1439,9 +1476,9 @@ function Main({
   // rendering is correct) shows until the effect above has landed.
   if (!localeApplied) {
     return (
-      <div style={gateStyle}>
+      <GateShell>
         <LoadingState title={t('boot.restoring')} />
-      </div>
+      </GateShell>
     );
   }
 
@@ -1498,6 +1535,7 @@ function Main({
               onNavigateToSearch: tab === 'explore' ? undefined : focusSearch,
             }}
             backdropArtwork={player?.artworkUrl ?? null}
+            windowControls={<WindowControls />}
             updateEntry={
               <span style={{ position: 'relative', display: 'inline-flex' }}>
                 <IconButton

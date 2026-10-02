@@ -55,6 +55,7 @@ import {
   isUndefinedResult,
   isUpdateSnapshot,
   isUtilityPingResult,
+  isWindowStateEvent,
 } from '../shared/contract.ts';
 import type {
   AuqwApi,
@@ -217,9 +218,15 @@ const api: AuqwApi = {
   },
   chrome: {
     platform: process.platform,
-    setScheme: (scheme) => {
-      ipcRenderer.send(CHANNELS.chromeScheme, scheme);
+    control: (op) => {
+      ipcRenderer.send(CHANNELS.windowControl, { op });
     },
+    onState: subscribeTo(
+      CHANNELS.windowStateEvents,
+      CHANNELS.windowStateSubscribe,
+      CHANNELS.windowStateUnsubscribe,
+      isWindowStateEvent,
+    ),
   },
   dialog: {
     pickFolder: (title) =>

@@ -59,16 +59,20 @@ export const isThemeSourceEvent = v.object({
   source: isThemeSource,
 });
 
-/** `chrome:scheme` payload — resolved built-in scheme plus the canvas/
-    symbol colors to tint the titlebar overlay (differ under adaptive). */
-export type ChromeSchemePayload = v.Guarded<typeof isChromeSchemePayload>;
+/** `window:control` payload — one op from the renderer-drawn caption
+    cluster (minimize · toggle-maximize · close). */
+export type WindowControlPayload = v.Guarded<typeof isWindowControlPayload>;
 
-export const isChromeSchemePayload = v.object({
-  scheme: v.literals('dark', 'light', 'oled'),
-  // Palette-role color strings are hex tokens — bound them like the
-  // palette validator above rather than accepting arbitrary length.
-  canvas: v.optional(v.boundedString(32)),
-  symbol: v.optional(v.boundedString(32)),
+export const isWindowControlPayload = v.object({
+  op: v.literals('minimize', 'toggle-maximize', 'close'),
+});
+
+/** `window:state` push — maximize state driving the cluster's
+    maximize↔restore glyph swap. */
+export type WindowStateEvent = v.Guarded<typeof isWindowStateEvent>;
+
+export const isWindowStateEvent = v.object({
+  maximized: v.boolean(),
 });
 
 const pickFolderArgs = v.object({ title: v.optional(v.string()) });
@@ -1601,9 +1605,14 @@ export type AuqwApi = {
     /** `process.platform` captured in preload — the sandboxed renderer
         cannot read it itself but needs it for platform chrome tweaks. */
     readonly platform: string;
-    /** Reports the resolved ui-web scheme so main can re-tint the
-        titlebar overlay. One-way send; nothing to await. */
-    readonly setScheme: (scheme: ChromeSchemePayload) => void;
+    /** Caption-button op — main applies it to the sender's window.
+        One-way send; nothing to await. */
+    readonly control: (op: WindowControlPayload['op']) => void;
+    /** Main→renderer push of the maximize state — toggles the
+        maximize↔restore glyph. Unsubscribes on the returned call. */
+    readonly onState: (
+      listener: (event: WindowStateEvent) => void,
+    ) => () => void;
   };
   readonly dialog: {
     readonly pickFolder: (

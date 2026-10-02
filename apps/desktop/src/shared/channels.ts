@@ -85,9 +85,15 @@ export const CHANNELS = {
   tagreadEnumerate: 'tagread:enumerate',
   tagreadFingerprint: 'tagread:fingerprint',
   tagreadRead: 'tagread:read',
-  /** Renderer→main fire-and-forget: resolved ui-web scheme for the
-      titlebar overlay. */
-  chromeScheme: 'chrome:scheme',
+  /** Renderer→main fire-and-forget: caption-button op — the renderer
+      draws its own min/max/close cluster (no OS overlay) and drives
+      the window through this channel. */
+  windowControl: 'window:control',
+  /** Main→renderer push of the maximize state — drives the
+      maximize↔restore glyph swap in the renderer-drawn cluster. */
+  windowStateEvents: 'window:state',
+  windowStateSubscribe: 'window:subscribe',
+  windowStateUnsubscribe: 'window:unsubscribe',
   localAdd: 'local:add',
   localProbe: 'local:probe',
   localResolve: 'local:resolve',

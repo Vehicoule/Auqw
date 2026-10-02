@@ -169,6 +169,13 @@ export type DesktopChromeProps = {
    */
   readonly updateEntry?: ReactNode;
   /**
+   * The renderer's own caption cluster — min/max/close drawn in the
+   * icon family at the bar's right edge (nothing renders on macOS:
+   * the traffic lights own that corner). Rendered last in the end
+   * cluster so it sits flush against the window edge.
+   */
+  readonly windowControls?: ReactNode;
+  /**
    * Current-track artwork for the window bleed — when set, a heavily
    * blurred copy fills the shell behind the stage + world card and
    * the stage's art dissolves under the card's left edge (one static
@@ -200,6 +207,7 @@ export function DesktopChrome({
   onOpenSettings,
   nav,
   updateEntry,
+  windowControls,
   search,
   backdropArtwork,
   children,
@@ -359,7 +367,11 @@ export function DesktopChrome({
         />
       )}
       <div className="uw-world">
-        <header className="uw-world-bar" ref={barRef}>
+        <header
+          className="uw-world-bar"
+          ref={barRef}
+          data-end-tight={endTight || undefined}
+        >
           <div className="uw-world-bar__start">
             {nav !== undefined && (
               <>
@@ -421,6 +433,7 @@ export function DesktopChrome({
             {onOpenSettings !== undefined && (
               <WorldMenu onOpenSettings={onOpenSettings} />
             )}
+            {windowControls}
           </div>
         </header>
         <main

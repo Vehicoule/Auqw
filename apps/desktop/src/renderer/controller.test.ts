@@ -158,7 +158,8 @@ function fakeApi(): Rig {
       },
       chrome: {
         platform: 'linux',
-        setScheme: () => {},
+        control: () => {},
+        onState: () => () => {},
       },
       dialog: {
         pickFolder: () => Promise.resolve(null),

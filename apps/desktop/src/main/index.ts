@@ -15,7 +15,6 @@ import {
 } from 'electron';
 import type {
   BrowserWindowConstructorOptions,
-  TitleBarOverlay,
   WebContents,
 } from 'electron';
 import { execFile, spawn } from 'node:child_process';
@@ -41,19 +40,19 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { schemes } from '@auqw/design-tokens';
 import { CHANNELS } from '../shared/channels.ts';
 import type { ShellError } from '../shared/errors.ts';
 import { fromUnknown, isShellError, shellError } from '../shared/errors.ts';
 import { redactSensitive } from '../shared/redact.ts';
 import {
   isAuthSnapshot,
-  isChromeSchemePayload,
   isSyncAppliedEvent,
   isSyncNearbyEvent,
+  isWindowControlPayload,
 } from '../shared/contract.ts';
-import type { ChromeSchemePayload } from '../shared/contract.ts';
+import type { WindowStateEvent } from '../shared/contract.ts';
 import { registerChannels } from './ipc.ts';
+import type { NetSender } from './net-monitor.ts';
 import { createFetchProbe, createNetService } from './net-monitor.ts';
 import { createThemeMonitor } from './theme-monitor.ts';
 import { createSecureStore } from './secure-store.ts';
@@ -63,6 +62,7 @@ import {
   createAppliedPushService,
   createAuthStatePushService,
   createNearbyPushService,
+  createPushService,
   createUpdateStatePushService,
 } from './sync-events.ts';
 import type { UpdateApplyPorts } from '@auqw/application';
@@ -463,6 +463,28 @@ async function main(): Promise<void> {
   const nearbyPush = createNearbyPushService();
   const authStatePush = createAuthStatePushService();
   const updateStatePush = createUpdateStatePushService();
+  const windowStatePush = createPushService<WindowStateEvent>(
+    CHANNELS.windowStateEvents,
+  );
+  // Same refcounted registry as the other pushes, but attach also
+  // reports the CURRENT state — a renderer that booted inside an
+  // already-maximized window would otherwise wait for the next toggle
+  // to learn it (the 'maximize' event fired before it subscribed).
+  const windowState = {
+    attach(sender: NetSender): void {
+      windowStatePush.attach(sender);
+      try {
+        sender.send(CHANNELS.windowStateEvents, {
+          maximized: win?.isMaximized() ?? false,
+        });
+      } catch {
+        windowStatePush.detach(sender);
+      }
+    },
+    detach(sender: NetSender): void {
+      windowStatePush.detach(sender);
+    },
+  };
   // Release update check — lives in main because the renderer CSP
   // admits only 'self'. The egress is the GitHub releases list plus
   // (past 'open') the artifact + its SHA256SUMS row; the renderer sees
@@ -819,6 +841,7 @@ async function main(): Promise<void> {
     authState: authStatePush,
     update: updateService,
     updateState: updateStatePush,
+    windowState,
     secure,
     utility: supervisor,
     // The device flow's verification URL opens in the system browser —
@@ -849,18 +872,25 @@ async function main(): Promise<void> {
     messageChannel: () => new MessageChannelMain(),
   });
 
-  // The renderer reports its resolved ui-web scheme (which may differ
-  // from the OS theme when the user picked an explicit one) so the
-  // window-control overlay can re-tint itself to match the canvas.
-  ipcMain.on(CHANNELS.chromeScheme, (event, payload) => {
-    if (!isChromeSchemePayload(payload) || process.platform === 'darwin') {
+  // The renderer draws its own caption cluster — no OS-drawn overlay
+  // pixels, so nothing here has to fight the bar's design. Ops arrive
+  // fire-and-forget and apply to the sender's own window only.
+  ipcMain.on(CHANNELS.windowControl, (event, payload) => {
+    if (!isWindowControlPayload(payload)) {
       return;
     }
     const sender = BrowserWindow.fromWebContents(event.sender);
-    try {
-      sender?.setTitleBarOverlay(titleBarOverlay(payload));
-    } catch {
-      // platform without a working window-control overlay — ignore
+    if (sender === null || sender.isDestroyed()) {
+      return;
+    }
+    if (payload.op === 'minimize') {
+      sender.minimize();
+    } else if (payload.op === 'close') {
+      sender.close();
+    } else if (sender.isMaximized()) {
+      sender.unmaximize();
+    } else {
+      sender.maximize();
     }
   });
 
@@ -869,6 +899,12 @@ async function main(): Promise<void> {
   let win: BrowserWindow | null = null;
   const openWindow = (): void => {
     win = createWindow(stateRef, statePath);
+    win.on('maximize', () => {
+      windowStatePush.notify({ maximized: true });
+    });
+    win.on('unmaximize', () => {
+      windowStatePush.notify({ maximized: false });
+    });
     win.on('closed', () => {
       win = null;
     });
@@ -902,19 +938,9 @@ async function main(): Promise<void> {
     nearbyPush.stop();
     authStatePush.stop();
     updateStatePush.stop();
+    windowStatePush.stop();
     supervisor.shutdown();
   });
-}
-
-function titleBarOverlay(payload: ChromeSchemePayload): TitleBarOverlay {
-  const tokens = schemes[payload.scheme];
-  return {
-    color: payload.canvas ?? tokens.canvas,
-    symbolColor: payload.symbol ?? tokens.textBright,
-    // Matches --uw-titlebar-h in ui-web styles.css — the shell header
-    // is a tall strip, so the overlay draws the same height.
-    height: 56,
-  };
 }
 
 function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
@@ -926,8 +952,8 @@ function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
     minWidth: MIN_WINDOW_WIDTH,
     minHeight: MIN_WINDOW_HEIGHT,
     title: 'auqw',
-    // macOS draws a themed strip if a titleBarOverlay is given even under
-    // hiddenInset, so it gets the bare option instead.
+    // Frameless everywhere: the renderer's own caption cluster drives
+    // win32/linux while macOS keeps its traffic lights hidden-inset.
     titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
     webPreferences: {
       preload: PRELOAD,
@@ -938,10 +964,6 @@ function createWindow(stateRef: StateRef, statePath: string): BrowserWindow {
   };
   if (isMac) {
     options.trafficLightPosition = { x: 14, y: 22 };
-  } else {
-    options.titleBarOverlay = titleBarOverlay({
-      scheme: nativeTheme.shouldUseDarkColors ? 'dark' : 'light',
-    });
   }
   if (!app.isPackaged) {
     options.icon = WINDOW_ICON;

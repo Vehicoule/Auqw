@@ -107,6 +107,7 @@ export async function run(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'auqw-ipc-'));
   try {
     let online = true;
+    let windowStateAttached = 0;
     const net = createNetService({ readOnline: () => online, pollMs: 5 });
     const utilityCalls: Array<{ channel: string; args: unknown }> = [];
     let txSeq = 0;
@@ -162,6 +163,14 @@ export async function run(): Promise<void> {
         attach: () => undefined,
         detach: () => undefined,
       },
+      windowState: {
+        attach: () => {
+          windowStateAttached += 1;
+        },
+        detach: () => {
+          windowStateAttached -= 1;
+        },
+      },
       openUrl: () => Promise.resolve(),
       secure: createSecureStore({ dir: join(dir, 'secure'), safeStorage: WORKING_STORAGE }),
       utility: {
@@ -196,7 +205,7 @@ export async function run(): Promise<void> {
     // Channels whose listeners live outside registerChannels are named
     // here explicitly — the list must grow by hand so an unwired
     // channel can never satisfy the sweep by accident.
-    const BOOTSTRAP_REGISTERED = new Set<string>([CHANNELS.chromeScheme]);
+    const BOOTSTRAP_REGISTERED = new Set<string>([CHANNELS.windowControl]);
     {
       const preloadSrc = readFileSync(
         new URL('../preload/index.ts', import.meta.url),
@@ -267,6 +276,15 @@ export async function run(): Promise<void> {
     online = true;
     await sleep(30);
     assertEqual(sender.sent.length, 2, 'no events after unsubscribe');
+
+    // window:subscribe/unsubscribe routes to the state registry
+    const windowSub = ipc.listeners.get(CHANNELS.windowStateSubscribe);
+    const windowUnsub = ipc.listeners.get(CHANNELS.windowStateUnsubscribe);
+    assert(windowSub !== undefined && windowUnsub !== undefined);
+    windowSub(event);
+    assertEqual(windowStateAttached, 1, 'subscribe attaches');
+    windowUnsub(event);
+    assertEqual(windowStateAttached, 0, 'unsubscribe detaches');
 
     // secure round-trip through the real file-backed store
     const setRes = await invoke(CHANNELS.secureSet, {
