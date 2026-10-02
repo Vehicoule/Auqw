@@ -1133,6 +1133,12 @@
   margin-top: var(--spacing-xl);
 }
 
+/* Quick-access tiles reuse the library's .uw-collections 2x2 grid —
+   home just spaces them under the resume card. */
+.uw-home__tiles {
+  margin-top: var(--spacing-lg);
+}
+
 .uw-home {
   container-type: inline-size;
 }

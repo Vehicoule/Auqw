@@ -2,8 +2,10 @@ import { FlatList, ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
 import { Artwork, bind, Icon, PillButton, Pressable, Text } from './primitives.tsx';
 import { EmptyState } from './states.tsx';
+import { CollectionTile } from './collection-screen.tsx';
 import { formatClock, t } from '@auqw/ui-shared';
-import type { HomeModel, RailCardModel, ResumeModel } from '@auqw/ui-shared';
+import { collectionTileViews } from '@auqw/ui-shared/controllers';
+import type { CollectionKey, HomeModel, RailCardModel, ResumeModel } from '@auqw/ui-shared';
 
 export type HomeScreenProps = {
   readonly model: HomeModel;
@@ -11,6 +13,8 @@ export type HomeScreenProps = {
   readonly scrollEnabled?: boolean | undefined;
   readonly onPressCard?: ((card: RailCardModel) => void) | undefined;
   readonly onPressSeeAll?: ((section: 'recents' | 'played' | 'suggestions') => void) | undefined;
+  readonly onOpenCollection?: ((key: CollectionKey) => void) | undefined;
+  readonly onPlayCollection?: ((key: CollectionKey) => void) | undefined;
   readonly onResume?: (() => void) | undefined;
 };
 
@@ -201,9 +205,16 @@ export function HomeScreen({
   scrollEnabled = true,
   onPressCard,
   onPressSeeAll,
+  onOpenCollection,
+  onPlayCollection,
   onResume,
 }: HomeScreenProps) {
   const theme = useTheme();
+  const tiles = collectionTileViews(
+    model.collections,
+    onOpenCollection,
+    onPlayCollection,
+  );
   return (
     <ScrollView
       scrollEnabled={scrollEnabled}
@@ -238,6 +249,26 @@ export function HomeScreen({
       {model.resume !== null && (
         <ResumeCard resume={model.resume} onResume={onResume} />
       )}
+      {/* collections 2×2 — same quick-access tiles as the library */}
+      <View
+        style={{
+          flexDirection: 'row',
+          flexWrap: 'wrap',
+          rowGap: theme.spacing.md,
+          justifyContent: 'space-between',
+          marginHorizontal: theme.spacing.screen,
+          marginTop: theme.spacing.lg,
+        }}
+      >
+        {tiles.map((tile) => (
+          <View
+            key={tile.tile.key}
+            style={{ flexBasis: '48.5%', flexGrow: 1 }}
+          >
+            <CollectionTile view={tile} />
+          </View>
+        ))}
+      </View>
       {model.played.length > 0 && (
         <Rail
           title={t('home.played.title')}

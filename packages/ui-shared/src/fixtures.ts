@@ -24,6 +24,7 @@ import type {
 import { PEAKS_RESOLUTION } from './peaks.ts';
 import type { ThemeName } from '@auqw/design-tokens';
 import {
+  collectionTiles,
   toCollectionModel,
   toCorrectionsModel,
   toSyncModel,
@@ -902,6 +903,12 @@ export const fixtureHomeModel: HomeModel = {
     positionMs: 83_000,
     durationMs: 214_000,
   },
+  collections: collectionTiles({
+    recordings: fixtureRecordings,
+    likes: fixtureLikes,
+    playHistory: fixturePlayHistory,
+    playCounts: fixturePlayCounts,
+  }),
   recents: fixtureRecordings.slice(0, 5).map(toRailCard),
   played: [
     fixtureRecordings[2]!,

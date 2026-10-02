@@ -191,6 +191,8 @@ export type HomeModel = {
   readonly subline: string | null;
   /** Present when playback is paused mid-track — the resume card. */
   readonly resume: ResumeModel | null;
+  /** Quick-access tiles — the same four the library lists. */
+  readonly collections: readonly CollectionTileModel[];
   /** Materialized track recordings ordered by like time. */
   readonly recents: readonly RailCardModel[];
   /** Materialized recordings at their latest counted play. */
@@ -201,7 +203,7 @@ export type HomeModel = {
 
 export type CollectionKey = 'liked' | 'downloads' | 'top50' | 'history';
 
-type CollectionTileModel = {
+export type CollectionTileModel = {
   readonly key: CollectionKey;
   readonly label: string;
   readonly count: number;
@@ -1496,20 +1498,7 @@ export function toLibraryModel(input: {
   return {
     likedCount: items.length,
     items,
-    collections: (
-      [
-        ['liked', items.length],
-        ['downloads', downloadRows.length],
-        ['top50', top50.length],
-        ['history', history.length],
-      ] as const
-    ).map(([key, count]) => ({
-      key,
-      label: t(`collection.${key}`),
-      count,
-      enabled: true,
-      note: null,
-    })),
+    collections: collectionTiles(input),
     collectionRows: {
       liked: likedRows,
       top50,
@@ -1714,6 +1703,55 @@ export function toRailCard(recording: Recording): RailCardModel {
   };
 }
 
+/**
+ * The four collection tiles — one counting rule shared by home and
+ * library so a number never disagrees between surfaces. Counts mirror
+ * the collection row lists: materialized likes, kept downloads,
+ * resolvable top-played entries, and distinct played recordings.
+ */
+export function collectionTiles(input: {
+  readonly recordings: readonly Recording[];
+  readonly likes: readonly Like[];
+  readonly playHistory: readonly PlayEvent[];
+  readonly playCounts: readonly PlayCount[];
+  readonly downloads?: readonly DownloadProgress[] | undefined;
+}): readonly CollectionTileModel[] {
+  const byId = indexById(input.recordings);
+  const liked = input.likes.reduce(
+    (count, like) =>
+      like.entityKind === 'track' && byId.has(like.targetId)
+        ? count + 1
+        : count,
+    0,
+  );
+  const downloads = (input.downloads ?? []).reduce(
+    (count, entry) =>
+      entry.state !== 'removing' && byId.has(entry.recordingId)
+        ? count + 1
+        : count,
+    0,
+  );
+  const played = new Set<string>();
+  for (const event of input.playHistory) {
+    if (byId.has(event.recordingId)) {
+      played.add(event.recordingId);
+    }
+  }
+  const counts = [
+    ['liked', liked],
+    ['downloads', downloads],
+    ['top50', topPlayed(input.playCounts, input.recordings).length],
+    ['history', played.size],
+  ] as const;
+  return counts.map(([key, count]) => ({
+    key,
+    label: t(`collection.${key}`),
+    count,
+    enabled: true,
+    note: null,
+  }));
+}
+
 export function toHomeModel(input: {
   readonly recordings: readonly Recording[];
   readonly likes: readonly Like[];
@@ -1722,6 +1760,8 @@ export function toHomeModel(input: {
   readonly playback: SessionPlayback;
   readonly greeting: string;
   readonly subline: string;
+  readonly playCounts?: readonly PlayCount[] | undefined;
+  readonly downloads?: readonly DownloadProgress[] | undefined;
 }): HomeModel {
   const byId = indexById(input.recordings);
   const recents = [...input.likes]
@@ -1774,6 +1814,13 @@ export function toHomeModel(input: {
     greeting: input.greeting,
     subline: input.subline,
     resume,
+    collections: collectionTiles({
+      recordings: input.recordings,
+      likes: input.likes,
+      playHistory: input.playHistory,
+      playCounts: input.playCounts ?? [],
+      downloads: input.downloads,
+    }),
     recents,
     played,
     suggestions,

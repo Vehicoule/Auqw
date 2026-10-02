@@ -1103,10 +1103,23 @@ function Main({
       <HomeScreen
         model={homeModel}
         onPressCard={onHomeCardPress}
+        onOpenCollection={(key) =>
+          pushOverlay({ type: 'collection', key })
+        }
+        onPlayCollection={(key) =>
+          playCollectionRows(key, libraryModel.collectionRows[key])
+        }
         onResume={onPlayPause}
       />
     ),
-    [homeModel, onHomeCardPress, onPlayPause],
+    [
+      homeModel,
+      onHomeCardPress,
+      onPlayPause,
+      pushOverlay,
+      playCollectionRows,
+      libraryModel,
+    ],
   );
   const exploreEl = useMemo(
     () => (
