@@ -1,13 +1,16 @@
 import {
+  isArtworkRef,
   isDownloadRecord,
   isEntityRef,
   isLocalFile,
   isLocalSource,
   isRecording,
+  isRemoteArtworkRef,
   isSettings,
   isSourceRef,
   isTrackMetadata,
   isTrackRef,
+  portableArtwork,
   recordingFromMetadata,
 } from './domain.ts';
 import type {
@@ -89,6 +92,44 @@ export function run(): void {
     }),
   );
   assert(!isTrackMetadata({ ...META, stray: true }));
+
+  // Embedded local art: `file://` refs are valid on persisted
+  // recordings but never in a provider payload.
+  const localArt = {
+    url: 'file:///data/user/0/app/files/art/abc.png',
+    width: null,
+    height: null,
+  };
+  assert(isArtworkRef(localArt), 'file:// admitted on persisted art');
+  assert(
+    !isRemoteArtworkRef(localArt),
+    'provider payloads carry https only',
+  );
+  assert(
+    !isTrackMetadata({ ...META, artwork: [localArt] }),
+    'a guest cannot mint device-local art refs',
+  );
+  assert(
+    isRecording({
+      ...recordingFromMetadata(META, 'rec-art'),
+      artwork: [localArt],
+    }),
+    'persisted state keeps the platform art ref',
+  );
+  const mixed = [
+    localArt,
+    { url: 'https://art.example/y.jpg', width: 10, height: 10 },
+  ];
+  assertEqual(
+    portableArtwork(mixed).length,
+    1,
+    'portable form strips device-local refs',
+  );
+  assertEqual(
+    portableArtwork(mixed)[0]?.url,
+    'https://art.example/y.jpg',
+    'catalog art survives the boundary',
+  );
 
   // Inherited properties must not satisfy required keys.
   const inherited = Object.create(META) as Record<string, unknown>;

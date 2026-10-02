@@ -485,6 +485,10 @@ export class LocalFileSource {
       this.#recordings.filter((r) => r.artwork.length === 0).map((r) => r.id),
     );
     const artBackfill: LocalFile[] = [];
+    // Honest-nones staged here land on `#artChecked` only after the
+    // commit succeeds — a failed commit must not suppress the retry
+    // on the next scan this boot.
+    const artCheckedPending = new Set<string>();
 
     for (const entry of entries) {
       const known = byDocId.get(entry.docId);
@@ -691,7 +695,7 @@ export class LocalFileSource {
       const row = artBackfill[j]!;
       const tag = tags.value[tagDocs.length + j] ?? null;
       if (tag !== null) {
-        this.#artChecked.add(row.fileId);
+        artCheckedPending.add(row.fileId);
       }
       const entry = entryByDoc.get(row.docId);
       pendingRecordings.push({
@@ -832,6 +836,9 @@ export class LocalFileSource {
     );
     if (!committed.ok) {
       return err(committed.error);
+    }
+    for (const fileId of artCheckedPending) {
+      this.#artChecked.add(fileId);
     }
     void this.#log.write({
       level: 'info',

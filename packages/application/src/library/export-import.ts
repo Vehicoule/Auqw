@@ -2,7 +2,7 @@ import type { OperationContext } from '../cancellation.ts';
 import type { ClockPort } from '../ports/clock.ts';
 import type { Result } from '../errors.ts';
 import { appError, err, ok } from '../errors.ts';
-import { isSafeNonNegative } from '../domain.ts';
+import { isSafeNonNegative, portableArtwork } from '../domain.ts';
 import type { StoragePort } from '../ports/storage.ts';
 import type { ExportDocument } from './library.ts';
 import { isExportDocument } from './library.ts';
@@ -65,7 +65,7 @@ export function parseExportJson(text: string): Result<ExportDocument> {
   if (!isExportDocument(parsed)) {
     return err(invalidImport('import document failed validation'));
   }
-  return ok(parsed);
+  return ok(portableDoc(parsed));
 }
 
 /**
@@ -119,10 +119,31 @@ export async function exportLibrary(
   if (!exported.ok) {
     return exported;
   }
+  const doc = portableDoc(exported.value);
   return ok({
-    json: `${JSON.stringify(exported.value, null, 2)}\n`,
-    doc: exported.value,
+    json: `${JSON.stringify(doc, null, 2)}\n`,
+    doc,
   });
+}
+
+/**
+ * Artwork in its portable form on both sides of the boundary:
+ * device-local `file://` art-store refs (embedded covers) are stripped
+ * — the receiving device re-derives them from the backing file's own
+ * tags via the local-source backfill. A catalog (https) ref travels.
+ */
+function portableDoc(doc: ExportDocument): ExportDocument {
+  return {
+    ...doc,
+    recordings: doc.recordings.map((r) => ({
+      ...r,
+      artwork: portableArtwork(r.artwork),
+    })),
+    entities: doc.entities.map((e) => ({
+      ...e,
+      artwork: portableArtwork(e.artwork),
+    })),
+  };
 }
 
 /**

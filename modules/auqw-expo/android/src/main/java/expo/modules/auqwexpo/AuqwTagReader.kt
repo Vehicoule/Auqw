@@ -237,7 +237,10 @@ object AuqwTagReader {
         return null
       }
     }
-    return out.toURI().toString()
+    // Uri.fromFile mints the `file:///`-form the domain's artwork-url
+    // validator admits — java.io.File.toURI would emit single-slash
+    // `file:/`, which fails the recording commit's persisted check.
+    return Uri.fromFile(out).toString()
   }
 
   /** Image format sniffed from magic bytes — the retriever's

@@ -453,6 +453,48 @@ function testRecordingDeleteWrites(): void {
   );
 }
 
+function testArtworkEmissionPortable(): void {
+  // `file://` art-store refs are device-local: they never enter a
+  // delta, so a receiving device re-derives cover art from the
+  // backing file instead of holding a dead path that blocks backfill.
+  const fileArt = {
+    url: 'file:///home/u/.config/auqw/art/abc.png',
+    width: null,
+    height: null,
+  };
+  const httpsArt = {
+    url: 'https://images.example.com/a.jpg',
+    width: 100,
+    height: 100,
+  };
+  const rec = recording('r-1', [ref('itunes', 't-1')]);
+  const writes = recordingUpsertWrites({
+    ...rec,
+    artwork: [fileArt, httpsArt],
+  });
+  const artWrite = writes.find(
+    (w) => w.kind === 'recording' && 'field' in w && w.field === 'artwork',
+  );
+  assertDeepEqual(
+    artWrite !== undefined && 'value' in artWrite ? artWrite.value : null,
+    [httpsArt],
+    'recording artwork emits portable refs only',
+  );
+
+  const entWrites = entityUpsertWrites(
+    { ...entity('e-1', 'album'), artwork: [fileArt] },
+    [],
+  );
+  const entArt = entWrites.find(
+    (w) => w.kind === 'entity' && 'field' in w && w.field === 'artwork',
+  );
+  assertDeepEqual(
+    entArt !== undefined && 'value' in entArt ? entArt.value : null,
+    [],
+    'entity artwork emits portable refs only',
+  );
+}
+
 function testEntityWrites(): void {
   const ent = entity('e-1', 'album');
   const refs = [entityRef('e-1', 'itunes', 'al-1')];
@@ -1720,6 +1762,7 @@ export function run(): void {
   testRecordIdDecode();
   testRecordingUpsertWrites();
   testRecordingDeleteWrites();
+  testArtworkEmissionPortable();
   testEntityWrites();
   testSettingsWrites();
   testEmissionWritesBatch();
