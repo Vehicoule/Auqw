@@ -96,6 +96,7 @@ import {
   ProviderPickerSheet,
   PushScreen,
   RowActionsSheet,
+  SearchFab,
   SearchScreen,
   SettingsScreen,
   SheetScreen,
@@ -135,6 +136,7 @@ import {
   themeOptions,
   toAuthSheetModel,
 } from '@auqw/ui-shared';
+import { useSearchScreenController } from '@auqw/ui-shared/controllers';
 import type { Boot, OverlayEntry } from '@auqw/ui-shared';
 import { createSessionController } from './src/session/controller.ts';
 import type { SessionController } from './src/session/controller.ts';
@@ -585,6 +587,9 @@ function Main({
   // in JS state too so the update card can anchor above the pill.
   const stageCollapsedHeight = useSharedValue(0);
   const [tabBarHeight, setTabBarHeight] = useState(0);
+  const { width: paneWidth } = useWindowDimensions();
+  // The floating search loupe — the single search field on mobile.
+  const [searchFabOpen, setSearchFabOpen] = useState(false);
   const reportStageCollapsed = useCallback(
     (barHeight: number) => {
       setTabBarHeight(barHeight);
@@ -903,6 +908,8 @@ function Main({
     clearOverlays,
     stageOpen: expanded,
     setStageOpen: setExpanded,
+    focusSearch,
+    searchFocusTick,
     setStageOpenFor,
     stageMode,
     setStageMode,
@@ -2049,6 +2056,15 @@ function Main({
   }, [navBarStyle]);
 
   const topInset = insets.top;
+  // The floating loupe's field shares the explore pane's field view —
+  // same draft text, same submit/cancel, one query.
+  const fabFieldView = useSearchScreenController({
+    state: searchModel,
+    query,
+    onQueryChange: setQuery,
+    onSubmit: submitSearch,
+    onCancel: cancelSearch,
+  }).field;
   // Floating overlays (offline banner, toast) share the chrome.
   const floatStyle = {
     position: 'absolute' as const,
@@ -2430,6 +2446,21 @@ function Main({
             onSelect={selectTab}
             renderTab={renderTabScreen}
             onTabBarHeight={reportStageCollapsed}
+          />
+          {/* The one search field — floats top-right over every tab
+              (the panes own no second input); renders before the
+              sheets so the player covers it when open. */}
+          <SearchFab
+            field={fabFieldView}
+            live={query !== ''}
+            open={searchFabOpen}
+            onOpenChange={setSearchFabOpen}
+            focusSignal={searchFocusTick}
+            onNavigateToSearch={
+              tab === 'explore' ? undefined : focusSearch
+            }
+            topInset={topInset}
+            width={paneWidth}
           />
           {sheetPlayer !== null ? (
             <StageSheet

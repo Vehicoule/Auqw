@@ -3,6 +3,8 @@ import type { ReactNode } from 'react';
 import { Icon, IconButton, Pressable, SegmentItem, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { globalKeyAction } from './keyboard.ts';
+import { WorldSearch } from './search-field.tsx';
+import type { WorldSearchProps } from './search-field.tsx';
 import { useOverlayDismiss } from './stack.tsx';
 import { t } from '@auqw/ui-shared';
 import type { NavItemModel } from '@auqw/ui-shared';
@@ -148,6 +150,12 @@ export type DesktopChromeProps = {
    * state; nothing here may pop a surface uninvited).
    */
   readonly updateEntry?: ReactNode;
+  /**
+   * The one search field — a compact pill in the bar's end cluster that
+   * collapses to its loupe while the world body is scrolled. Tab bodies
+   * carry no second field.
+   */
+  readonly search?: Omit<WorldSearchProps, 'collapsed' | 'onExpand'>;
   readonly children: ReactNode;
 };
 
@@ -162,6 +170,7 @@ export function DesktopChrome({
   onFocusSearch,
   onOpenSettings,
   updateEntry,
+  search,
   children,
 }: DesktopChromeProps) {
   const [internalOpen, setInternalOpen] = useState(true);
@@ -170,6 +179,15 @@ export function DesktopChrome({
     setInternalOpen(value);
     onStageOpenChange?.(value);
   };
+  // The toolbar field rides the scroll: it drops to its loupe once the
+  // body moves, and comes back at the top or on demand. It never hides
+  // focus — a focused field stays open regardless of scroll.
+  const [searchCollapsed, setSearchCollapsed] = useState(false);
+  useEffect(() => {
+    if (search?.focusSignal !== undefined) {
+      setSearchCollapsed(false);
+    }
+  }, [search?.focusSignal]);
   useEffect(() => {
     if (onFocusSearch === undefined) {
       return;
@@ -214,26 +232,36 @@ export function DesktopChrome({
               active={open}
               onPress={() => setOpen(!open)}
             />
-            {onFocusSearch !== undefined && (
-              <IconButton
-                icon="search"
-                size={32}
-                iconSize={14}
-                color="var(--text-secondary)"
-                ariaLabel={t('search.fieldLabel')}
-                onPress={onFocusSearch}
-              />
-            )}
           </div>
           <WorldTabs tabs={tabs} activeKey={activeKey} onSelect={onSelect} />
           <div className="uw-world-bar__end">
+            {search !== undefined && (
+              <WorldSearch
+                {...search}
+                collapsed={searchCollapsed}
+                onExpand={() => setSearchCollapsed(false)}
+              />
+            )}
             {updateEntry}
             {onOpenSettings !== undefined && (
               <WorldMenu onOpenSettings={onOpenSettings} />
             )}
           </div>
         </header>
-        <main className="uw-world__content">{children}</main>
+        <main
+          className="uw-world__content"
+          // Scroll doesn't bubble — capture reaches every pane's own
+          // scroller; the target is whichever element scrolled.
+          onScrollCapture={(event) => {
+            if (search === undefined) {
+              return;
+            }
+            const top = (event.target as HTMLElement).scrollTop;
+            setSearchCollapsed(top > 24);
+          }}
+        >
+          {children}
+        </main>
       </div>
     </div>
   );
