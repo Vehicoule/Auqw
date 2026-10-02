@@ -3014,23 +3014,24 @@
 }
 /* Past the overlay breakpoint the card overlaps the column's
    trailing 24px; the stage's content insets so nothing rides under
-   the card. */
+   the card. The overlap exists only while a stage does — closed-stage
+   bleed leaves the card's margin alone. */
 @container (min-width: 861px) {
-  .uw-chrome[data-bleed='art'] .uw-world {
+  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-world {
     margin-left: -24px;
   }
-  .uw-chrome[data-bleed='art'] .uw-stage {
+  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-stage {
     padding-right: calc(var(--spacing-xl) + 24px);
   }
   /* Padding can't move the stage's absolute right-edge controls —
      stop + the track menu inset past the card overlap too. */
-  .uw-chrome[data-bleed='art'] .uw-stage__stop {
+  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-stage__stop {
     right: calc(var(--spacing-sm) + 24px);
   }
-  .uw-chrome[data-bleed='art'] .uw-stage__menu {
+  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-stage__menu {
     right: calc(var(--spacing-sm) + 40px + 24px);
   }
-  .uw-chrome[data-bleed='art'] .uw-stage__segment {
+  .uw-chrome[data-bleed='art'][data-stage='open'] .uw-stage__segment {
     right: calc(var(--spacing-xl) + 24px);
   }
 }

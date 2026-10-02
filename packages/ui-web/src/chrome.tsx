@@ -290,22 +290,38 @@ export function DesktopChrome({
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [onFocusSearch]);
+  // The bleed retries the original URL when a CDN size variant fails
+  // to load — and drops the whole layer (data-bleed off, so the stage
+  // re-solidifies) when the source itself can't load.
+  const [bleedSrc, setBleedSrc] = useState<string | null>(null);
+  useEffect(() => {
+    setBleedSrc(
+      backdropArtwork != null ? scaledArtworkUrl(backdropArtwork, 512) : null,
+    );
+  }, [backdropArtwork]);
   return (
     <div
       className="uw-chrome"
       data-stage={open ? 'open' : 'closed'}
-      data-bleed={backdropArtwork != null ? 'art' : undefined}
+      data-bleed={
+        backdropArtwork != null && bleedSrc != null ? 'art' : undefined
+      }
     >
-      {backdropArtwork != null && (
+      {backdropArtwork != null && bleedSrc != null && (
         <>
           {/* The window bleed — a scaled-down copy behind everything,
               blurred once per artwork change (no live filter). 512px
               is plenty at 72px of blur. */}
           <img
             className="uw-winbg"
-            src={scaledArtworkUrl(backdropArtwork, 512)}
+            src={bleedSrc}
             alt=""
             aria-hidden="true"
+            onError={() =>
+              setBleedSrc(
+                bleedSrc === backdropArtwork ? null : backdropArtwork,
+              )
+            }
           />
           <div className="uw-wintint" aria-hidden="true" />
         </>
