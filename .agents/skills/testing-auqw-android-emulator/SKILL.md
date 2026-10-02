@@ -725,12 +725,14 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
 - No stock way to force an unlistable SAF subtree (sdcardfs ignores
   chmod) — the `failedTrees` keep-rows leg stays static-evidence on
   device; verify `unlisted=` counter presence in scan lines instead.
-- Pre-existing dev-mode LogBox (PR #289, not PR-specific):
-  `subscribeAppActive` fires its listener inside
-  `AppState.addEventListener('change')` — returning from ANY OS
-  surface can throw 'Maximum update depth exceeded' as a dismissable
-  overlay; app state survives. Verify App.tsx blame before
-  attributing.
+- Dev-mode LogBox (PR #289, not PR-specific): 'Maximum update depth
+  exceeded' can surface as a dismissable overlay; app state survives.
+  SUPERSEDED cause note: earlier revisions blamed the
+  `subscribeAppActive` flap on OS-surface returns — the 2026-10-02
+  hunt below disproved that (the flap is benign). The real trigger
+  was uSES tearing on the position channel during synced-lyrics
+  playback, fixed in #312 — verify App.tsx blame before attributing
+  any new depth storm.
 - **2026-10-02 depth-error hunt — NOT reproduced.** ~79 appActive
   transitions across ~46 legs (SAF tree/file pickers grant+cancel,
   export dir-picker, camera grant+deny, unknown-sources page direct +
@@ -787,20 +789,30 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   file with an LRCLIB-known identity — e.g.
   `ffmpeg -f lavfi -i "sine=frequency=440:duration=223" -metadata artist="Daft Punk"
   -metadata title="One More Time" -metadata album="Discovery" -b:a 96k /tmp/omt.mp3`.
-  LRCLIB matches on title+artist+album+duration; the app-side acceptance filter rejects
-  sheets whose `matched.durationMs` differs from the recording's by >5 s
-  (`LYRICS_DURATION_DRIFT_MS=5000`), so pick a song whose LRCLIB `duration` is within
-  ~2 s of the file you generate. Push to the SAF-granted folder, rescan, search — the
-  local row shows, play it, lyrics pane renders `synced · lyrics-lrclib` timed lines
-  and the orange active line tracks position. Sine audio is fine — the pane only needs
-  timed lines + positionMs.
+  The app-side acceptance filter rejects sheets whose `matched.durationMs` differs
+  from the recording's by >5 s (`LYRICS_DURATION_DRIFT_MS=5000`). Why 223 s works
+  here despite the Discovery tag: LRCLIB currently has NO Discovery-album record,
+  so the match falls back to the 219 s synced 'NRJ Energy Music Awards 2002'
+  record (4 s drift — inside the gate). If LRCLIB later gains a canonical ~320 s
+  Discovery record it would win the match and FAIL the gate — regenerate the file
+  at `duration=320` in that case (the ~320 s 'Eurotrip' record accepts 0 s drift),
+  or pick a song with a single canonical record. Push to the SAF-granted folder,
+  rescan, search — the local row shows, play it, lyrics pane renders
+  `synced · lyrics-lrclib` timed lines and the orange active line tracks position.
+  Sine audio is fine — the pane only needs timed lines + positionMs.
 - **`invalid-response` boot wedge:** the app can boot into a
   full-screen `couldn't restore your library — got an unexpected reply — try again`
   with `[auqw] local boot load failed: invalid-response` — storage-sqlite snapshot
   validation rejects the persisted state. Cause UNCONFIRMED (writes are
-  transactional — a torn write can't produce this; suspect a version/schema
-  or write-path bug — worth a real investigation, not just a workaround).
-  `pm clear com.vehicoule.auqw` is the reliable recovery, then re-grant SAF (`auqw://local-add`
+  transactional — `SqliteStorage.commit` wraps each delta in
+  `BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK`, so a torn write can't produce this;
+  suspect a version/schema or write-path bug — worth a real investigation,
+  not just a workaround). PRESERVE EVIDENCE FIRST on a debuggable build:
+  `adb exec-out run-as com.vehicoule.auqw sh -c 'cat files/SQLite/*.db'
+  > wedge.db` before wiping so the malformed row/schema survives for diagnosis.
+  `pm clear com.vehicoule.auqw` is the reliable recovery on throwaway dev
+  installs (it erases the library — never the first move on real data),
+  then re-grant SAF (`auqw://local-add`
   → DocumentsUI `USE THIS FOLDER` → `ALLOW` at `[790,1325][968,1451]`) and reseed
   fixtures. Also seen once: a different wedge where chrome (header+navbar) renders but
   every tab body stays empty and search returns nothing — session never reaches ready;
