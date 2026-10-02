@@ -697,9 +697,14 @@ export class SqliteStorage implements StoragePort {
         }
         for (const count of doc.playCounts) {
           await conn.execute(
-            `INSERT INTO play_counts (recording_id, count, last_ms)
-             VALUES (?, ?, ?)`,
-            [count.recordingId, count.count, count.lastMs],
+            `INSERT INTO play_counts (recording_id, count, last_ms, local_count)
+             VALUES (?, ?, ?, ?)`,
+            [
+              count.recordingId,
+              count.count,
+              count.lastMs,
+              count.localCount ?? null,
+            ],
             signal,
           );
         }
@@ -1066,10 +1071,16 @@ function decodeState(rows: TableRows): PersistedState | null {
       fail();
     }
     countedIds.add(recordingId);
+    const local = row['local_count'];
     return {
       recordingId,
       count: reqNonNegInt(row['count']),
       lastMs: reqNonNegInt(row['last_ms']),
+      // Pre-v13 rows carry NULL — the baseline is unknown there,
+      // not zero.
+      ...(local !== null && local !== undefined
+        ? { localCount: reqNonNegInt(local) }
+        : {}),
     };
   });
   const reviewIds = new Set<string>();

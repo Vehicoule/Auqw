@@ -758,7 +758,9 @@ function remoteShare(
       sum += component;
     }
   }
-  return sum;
+  // The wire bound the merge itself saturates at — beyond it the
+  // share stays representable without inflating past it.
+  return Math.min(sum, Number.MAX_SAFE_INTEGER);
 }
 
 /**
@@ -806,7 +808,15 @@ function sumDeliveryTarget(
         ours += 1;
       }
     }
-    return Math.max(domainEstimate, ours);
+    // The durable local baseline: `localCount` is this device's own
+    // committed play total, kept beside the merged `count` and never
+    // touched by remote folds — it still proves a lost increment
+    // after the bounded event window expires or a remote share lands
+    // ahead of the domain fold.
+    const localCount = input.playCounts.find(
+      (c) => c.recordingId === write.recordId,
+    )?.localCount;
+    return Math.max(domainEstimate, ours, localCount ?? 0);
   }
   return domainEstimate;
 }
@@ -831,7 +841,12 @@ function sumDeliveryTarget(
  *   or above the recovery target proves this write (or a
  *   superseding one) reached the log; the merged total can't —
  *   remote coverage equal to or above our value is not evidence,
- *   and a lost increment under it must re-emit.
+ *   and a lost increment under it must re-emit. The target is the
+ *   best durable estimate of our intended component: domain events
+ *   attributable to us, floored by `playCounts.localCount` (this
+ *   device's committed total — the only evidence that survives
+ *   event expiry and an unprojected remote share) and the raw
+ *   domain estimate.
  *
  * Re-emitted `sum` writes assert the recovered aggregate — our
  * evidence-backed component target plus the remote share the merged
@@ -872,6 +887,12 @@ export function unsyncedWrites(
     if (merge === 'sum' && typeof write.value === 'number') {
       if (evidence === undefined) {
         return false;
+      }
+      // A saturated remote share fills the wire bound — the merge
+      // can't represent any further component and a re-emit stamps
+      // 0 forever, so count the write delivered.
+      if (remoteShare(evidence, write) >= Number.MAX_SAFE_INTEGER) {
+        return true;
       }
       const ours = evidence.components
         .get(`${write.kind}${KEY_SEP}${write.recordId}`)
@@ -953,9 +974,15 @@ export function unsyncedWrites(
       }
       return {
         ...write,
-        value:
+        // Saturate at the wire bound: target + remoteShare past
+        // MAX_SAFE_INTEGER is unrepresentable, and the engine's own
+        // 'sum' merge saturates there — an overflowing aggregate
+        // would fail write validation and wedge the emit queue.
+        value: Math.min(
           sumDeliveryTarget(write, input, synced, evidence) +
-          remoteShare(evidence, write),
+            remoteShare(evidence, write),
+          Number.MAX_SAFE_INTEGER,
+        ),
       };
     });
 }
@@ -1969,6 +1996,11 @@ function finishProjection(
       const foldedLast = numField(fold.fields, 'lastMs');
       const candidate: PlayCount = {
         recordingId: count.recordingId,
+        // Remote folds never touch the local-only baseline — it is
+        // this device's committed play total, not a merged value.
+        ...(count.localCount !== undefined
+          ? { localCount: count.localCount }
+          : {}),
         count: Math.min(
           Number.MAX_SAFE_INTEGER,
           Math.max(

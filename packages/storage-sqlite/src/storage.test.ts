@@ -1160,7 +1160,7 @@ function ownedSections(): OwnedSections {
       },
     ],
     playCounts: [
-      { recordingId: 'r1', count: 12, lastMs: 100 },
+      { recordingId: 'r1', count: 12, lastMs: 100, localCount: 7 },
       { recordingId: 'r2', count: 1, lastMs: 200 },
     ],
     matchReviews: [

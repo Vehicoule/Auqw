@@ -114,6 +114,7 @@ export function recordPlay(
   const count: PlayCount = {
     recordingId: input.recordingId,
     count: (existing?.count ?? 0) + 1,
+    localCount: (existing?.localCount ?? 0) + 1,
     lastMs: Math.max(horizon, existing?.lastMs ?? 0),
   };
   const playCounts =

@@ -86,6 +86,16 @@ export type PlayCount = {
   recordingId: string;
   count: number;
   lastMs: number;
+  /**
+   * This device's own committed play total — `count` merges remote
+   * plays in, `localCount` counts only what this device committed.
+   * Emit recovery uses it as the durable intended 'sum' component:
+   * the merged total can't attribute shares, and the play-event
+   * window expires, so neither proves a lost local increment.
+   * Absent on rows written before the baseline existed (and on rows
+   * folded from remote plays the device never committed locally).
+   */
+  localCount?: number;
 };
 
 /** A candidate frozen at review time for later confirmation. */
@@ -325,12 +335,13 @@ export function isPlayEvent(value: unknown): value is PlayEvent {
 
 export function isPlayCount(value: unknown): value is PlayCount {
   if (!isRecord(value)) return false;
-  const { recordingId, count, lastMs } = value;
+  const { recordingId, count, lastMs, localCount } = value;
   return (
-    hasExactKeys(value, ['recordingId', 'count', 'lastMs']) &&
+    hasKeys(value, ['recordingId', 'count', 'lastMs'], ['localCount']) &&
     isString(recordingId, 64) &&
     isSafeNonNegative(count) &&
-    isSafeNonNegative(lastMs)
+    isSafeNonNegative(lastMs) &&
+    (localCount === undefined || isSafeNonNegative(localCount))
   );
 }
 

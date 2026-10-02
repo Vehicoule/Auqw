@@ -1763,6 +1763,71 @@ function testUnsyncedWrites(): void {
     'a partially lost component re-emits the recovered total',
   );
 
+  // Durable baseline: the event window expired (no playHistory
+  // rows), so events can't prove our lost increment — the
+  // committed localCount still can. Our live component is 4 but
+  // localCount says 5, so the target is 5 and the emit asserts
+  // 5 + remoteShare(9) = 14.
+  const expired = unsyncedWrites(
+    emitInput({
+      playCounts: [
+        { recordingId: 'r-1', count: 13, lastMs: 9, localCount: 5 },
+      ],
+    }),
+    new Map([['playCountr-1', { count: 13 }]]),
+    evidence({
+      'playCountr-1': { count: { [DEV]: 4, 'peer-x': 9 } },
+    }),
+  );
+  assertEqual(
+    countValue(expired),
+    14,
+    'a lost increment past the event window re-emits via localCount',
+  );
+
+  // A remote share at the wire bound fills it — the merge can't
+  // represent any further component, so the write is delivered.
+  const saturatedRemote = unsyncedWrites(
+    playInput,
+    new Map([
+      ['playCountr-1', { count: Number.MAX_SAFE_INTEGER }],
+    ]),
+    evidence({
+      'playCountr-1': {
+        count: { 'peer-x': Number.MAX_SAFE_INTEGER },
+      },
+    }),
+  );
+  assert(
+    !saturatedRemote.some(
+      (w) =>
+        w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'a saturated remote share stays suppressed',
+  );
+
+  // target + remoteShare past the bound emits the saturated
+  // aggregate the merge itself would compute.
+  const saturatingEmit = unsyncedWrites(
+    emitInput({
+      playHistory: fiveEvents,
+      playCounts: [{ recordingId: 'r-1', count: 5, lastMs: 9 }],
+    }),
+    new Map([
+      ['playCountr-1', { count: Number.MAX_SAFE_INTEGER }],
+    ]),
+    evidence({
+      'playCountr-1': {
+        count: { 'peer-x': Number.MAX_SAFE_INTEGER - 4 },
+      },
+    }),
+  );
+  assertEqual(
+    countValue(saturatingEmit),
+    Number.MAX_SAFE_INTEGER,
+    'target plus remote share saturates at the wire bound',
+  );
+
   // A tombstoned synced record (empty fields) counts as absent —
   // the local row re-emits whole.
   const tombstoned = syncedMap(allWrites);
