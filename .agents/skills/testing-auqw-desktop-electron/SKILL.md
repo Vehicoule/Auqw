@@ -646,3 +646,18 @@ None — the napi artifact is a local cargo build output.
 - `playerctl position N` absolute-seek compresses long tracks for
   end-of-track tests — seek near the tail instead of waiting out the
   duration.
+
+## Queue restore + autoplay legs (post-#289)
+
+- `queue_state`/`queue_occurrences` rows persist but are NOT
+  rehydrated into the session on relaunch — the app boots to 'nothing
+  playing'. DB-seeding a queue does nothing; rebuild it through the UI
+  (search → play a row → context enqueues).
+- Reaching an autoplay section: `playback.resolve` is bot-checked so
+  `selected_provider` stays null, and the 'start radio' chip gates on
+  `selectedRef ?? sourceRefs[0]` being radioSeed-capable (only
+  youtube-music). Trick: while the app is stopped, seed
+  `INSERT INTO likes VALUES ('track', <id of a youtube-music:0
+  recording>, <ms>)`, relaunch → it tops 'your latest liked tracks' →
+  play it → the queue auto-arms the tail ('autoplay · similar to
+  {title}', 49+ rows). Delete the like afterwards.
