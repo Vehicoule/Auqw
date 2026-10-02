@@ -102,7 +102,7 @@ import {
   SheetScreen,
   StackItem,
   StageSheet,
-  StatusBarFade,
+  StatusBarCover,
   SyncScreen,
   Text,
   ThemePickerSheet,
@@ -2751,10 +2751,9 @@ function Main({
               onDismissed={() => dismissOverlay(entry.key)}
             >
               {content}
-              {/* Same edge-to-edge veil as the tab scenes — pushed
-                  overlays scroll under the status bar behind the
-                  soft ramp too. */}
-              <StatusBarFade height={topInset + 14} />
+              {/* Same edge-to-edge cover as the tab scenes — pushed
+                  overlays scroll under the flat strip too. */}
+              <StatusBarCover />
               {toastPill(
                 toastLayer === 'push' &&
                   entry === overlayStack[overlayStack.length - 1],

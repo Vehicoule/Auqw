@@ -1,5 +1,7 @@
+import { useContext } from 'react';
 import { FlatList, View } from 'react-native';
 import { useTheme } from './theme.tsx';
+import { NavFootprintContext } from './platform-tabs.tsx';
 import {
   Artwork,
   BackButton,
@@ -54,6 +56,7 @@ export function EntityScreen({
   onRetry,
 }: EntityScreenProps) {
   const theme = useTheme();
+  const navPad = useContext(NavFootprintContext);
   const view = useEntityScreenController({
     model,
     onShuffleAll,
@@ -208,7 +211,7 @@ export function EntityScreen({
           contentContainerStyle={{
             paddingHorizontal: theme.spacing.sm,
             paddingTop: theme.spacing.md,
-            paddingBottom: theme.spacing.xxl,
+            paddingBottom: theme.spacing.xxl + navPad,
           }}
           renderItem={({ item }) => (
             <TrackRow

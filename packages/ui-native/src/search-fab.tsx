@@ -8,7 +8,6 @@ import Animated, {
   withTiming,
   interpolate,
 } from 'react-native-reanimated';
-import { BlurView } from 'expo-blur';
 import Svg, { Path } from 'react-native-svg';
 import type { SearchFieldView } from '@auqw/ui-shared/controllers';
 import { Icon, Pressable, Spinner, Text } from './primitives.tsx';
@@ -19,7 +18,7 @@ const AnimatedPath = Animated.createAnimatedComponent(Path);
 const FAB = 44;
 
 /**
- * The one search field, floating: a glass loupe pinned top-right over
+ * The one search field, floating: a solid loupe pinned top-right over
  * every tab that springs open into the field (the loupe icon travels
  * into the field's leading slot — one element, no swap). On focus an
  * accent comet laps the border once, tail drifting, then the head
@@ -100,8 +99,9 @@ export function SearchFab({
     transform: [{ scale: interpolate(openT.value, [0, 1], [1, 0.8]) }],
   }));
   const innerStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(openT.value, [0.45, 1], [0, 1]),
-    transform: [{ translateX: interpolate(openT.value, [0.45, 1], [8, 0]) }],
+    // Fade only — no slide; the content materializes once the field
+    // is wide enough to hold it.
+    opacity: interpolate(openT.value, [0.55, 0.85], [0, 1]),
   }));
 
   // Comet ring — the dash math mirrors the web `@keyframes ringdraw`
@@ -183,32 +183,14 @@ export function SearchFab({
           alignItems: 'center',
           borderWidth: theme.strokes.hairline,
           borderColor: theme.colors.hairline,
-          backgroundColor: theme.colors.glass,
+          // Solid surface — the field must read over the content it
+          // overlays; a blurred loupe cost a glass pass and still
+          // showed fragments of the rows beneath.
+          backgroundColor: theme.colors.raised,
         },
         box,
       ]}
     >
-      {/* Blur clipped to the morphing shape — an inner layer whose
-          radius tracks the container (the ring must overhang it). */}
-      <Animated.View
-        style={[
-          {
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            overflow: 'hidden',
-          },
-          box,
-        ]}
-      >
-        <BlurView
-          intensity={60}
-          tint={theme.scheme === 'light' ? 'light' : 'dark'}
-          style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
-        />
-      </Animated.View>
       <Pressable
         compact
         accessibilityLabel={field.label}

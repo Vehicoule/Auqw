@@ -1,5 +1,7 @@
+import { useContext } from 'react';
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
+import { NavFootprintContext } from './platform-tabs.tsx';
 import { Artwork, Icon, Pressable, Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
@@ -210,6 +212,7 @@ export function LibraryScreen({
   onCreatePlaylist,
 }: LibraryScreenProps) {
   const theme = useTheme();
+  const navPad = useContext(NavFootprintContext);
   const view = useLibraryScreenController({
     model,
     onPressItem,
@@ -232,7 +235,7 @@ export function LibraryScreen({
         paddingHorizontal: theme.spacing.lg,
         // Clears the floating miniplayer's strip.
         paddingBottom:
-          theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
+          theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md + navPad,
         gap: theme.spacing.lg,
       }}
     >

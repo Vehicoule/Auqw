@@ -1,5 +1,7 @@
+import { useContext } from 'react';
 import { FlatList, ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
+import { NavFootprintContext } from './platform-tabs.tsx';
 import { Icon, Pressable, SkeletonRows, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
@@ -136,6 +138,55 @@ export function SearchScreen({
     onSuggestionPress,
     onFilterPress,
   });
+  const navPad = useContext(NavFootprintContext);
+  // Chips + results head scroll with the rows — pinned siblings each
+  // juggling the top inset clipped under the floating field.
+  const resultHeader = (
+    <>
+      {view.filters !== null && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          accessibilityLabel={view.filters.a11yLabel}
+          style={{ flexGrow: 0 }}
+          contentContainerStyle={{
+            gap: theme.spacing.xs,
+            paddingHorizontal: theme.spacing.sm,
+            paddingBottom: theme.spacing.sm,
+          }}
+        >
+          {view.filters.chips.map((chip) => (
+            <FilterChip
+              key={chip.key}
+              label={chip.label}
+              active={chip.active}
+              onPress={chip.onPress}
+            />
+          ))}
+        </ScrollView>
+      )}
+      {view.resultsHead !== null && (
+        <View
+          style={{
+            alignItems: 'flex-start',
+            paddingHorizontal: theme.spacing.sm,
+            marginBottom: theme.spacing.sm,
+          }}
+        >
+          <Text variant="heading" color="bright">
+            {view.resultsHead.title}
+          </Text>
+          <Text
+            variant="metadata"
+            color="secondary"
+            style={{ marginTop: theme.spacing.xxs }}
+          >
+            {view.resultsHead.metaLabel}
+          </Text>
+        </View>
+      )}
+    </>
+  );
   return (
     <View
       style={{
@@ -157,7 +208,7 @@ export function SearchScreen({
             paddingTop: topInset,
             // Clears the floating miniplayer's strip.
             paddingBottom:
-              theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
+              theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md + navPad,
           }}
         >
           <Text
@@ -188,50 +239,17 @@ export function SearchScreen({
           ))}
         </ScrollView>
       )}
-      {view.filters !== null && (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          accessibilityLabel={view.filters.a11yLabel}
-          style={{ flexGrow: 0 }}
-          contentContainerStyle={{
-            gap: theme.spacing.xs,
-            paddingHorizontal: theme.spacing.screen,
-            paddingTop: topInset,
-            paddingBottom: theme.spacing.sm,
-          }}
-        >
-          {view.filters.chips.map((chip) => (
-            <FilterChip
-              key={chip.key}
-              label={chip.label}
-              active={chip.active}
-              onPress={chip.onPress}
-            />
-          ))}
-        </ScrollView>
-      )}
-      {view.resultsHead !== null && (
-        <View
-          style={{
-            alignItems: 'flex-start',
-            paddingHorizontal: theme.spacing.screen,
-            paddingTop: view.filters !== null ? 0 : topInset,
-            marginBottom: theme.spacing.sm,
-          }}
-        >
-          <Text variant="heading" color="bright">
-            {view.resultsHead.title}
-          </Text>
-          <Text
-            variant="metadata"
-            color="secondary"
-            style={{ marginTop: theme.spacing.xxs }}
+      {view.results === null &&
+        (view.filters !== null || view.resultsHead !== null) && (
+          <View
+            style={{
+              paddingTop: topInset,
+              paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
+            }}
           >
-            {view.resultsHead.metaLabel}
-          </Text>
-        </View>
-      )}
+            {resultHeader}
+          </View>
+        )}
       {view.idle !== null &&
         (view.idle.kind === 'recents' ? (
           <View style={{ paddingTop: topInset }}>
@@ -282,17 +300,13 @@ export function SearchScreen({
           data={view.results.rows}
           keyExtractor={(row) => row.row.key}
           scrollEnabled={scrollEnabled}
+          ListHeaderComponent={resultHeader}
           contentContainerStyle={{
-            // The pinned chips / results head already reserves the inset;
-            // the list only carries it when nothing pinned sits above.
-            paddingTop:
-              view.resultsHead !== null || view.filters !== null
-                ? 0
-                : topInset,
+            paddingTop: topInset,
             paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
             // Clears the floating miniplayer's strip.
             paddingBottom:
-              theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
+              theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md + navPad,
           }}
           renderItem={({ item }) => (
             <TrackRow

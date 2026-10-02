@@ -27,7 +27,7 @@ import {
   LoadingState,
   UnavailableState,
 } from './states.tsx';
-import { AndroidNavbar, AppNavbar, IosGlassNavbar } from './navbar.tsx';
+import { FloatingNavbar, AppNavbar, IosGlassNavbar } from './navbar.tsx';
 import { MiniPlayer } from './mini-player.tsx';
 import { StageSheet, TransportControls } from './stage-sheet.tsx';
 import { SearchScreen } from './search-screen.tsx';
@@ -605,8 +605,8 @@ function GalleryBody({
         ))}
       </Section>
 
-      <Section title="navbars" note="m3e bar · liquid glass capsule">
-        <AndroidNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} />
+      <Section title="navbars" note="floating capsule · ios glass">
+        <FloatingNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} />
         <View style={{ height: theme.spacing.md }} />
         <IosGlassNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} />
       </Section>
