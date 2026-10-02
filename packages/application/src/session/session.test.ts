@@ -4335,7 +4335,12 @@ async function naturalEndParksTail(): Promise<void> {
   assertEqual(readyOf(r).queue.currentOccurrenceId, 'oB', 'tail playing');
   assertEqual(readyOf(r).radio, null, 'unseedable tail never arms');
   const playsBefore = readyOf(r).playHistory.length;
-  // The element ran out at the tail — the service reports the drain.
+  // The element ran out at the tail — real ports emit the 'ended'
+  // status BEFORE the queue-transition; the park must survive both.
+  const live = readyOf(r).playback;
+  assert('identity' in live, 'playing before the end');
+  r.player.emit(statusEvent(live.identity, 'h-oB', 'ended', 300_000));
+  await pump();
   r.player.emit(
     transitionEvent(r, {
       from: 'oB',
@@ -4375,7 +4380,12 @@ async function naturalEndParksTail(): Promise<void> {
   assertEqual(replaying.queue.mode, 'playing', 'remote play resumes');
   assertEqual(replaying.queue.currentOccurrenceId, 'oB');
   assertEqual(calls(r, 'prepare').length, 2, 'replay reuses the handle');
-  // The replay ends too: parked again, counted as a second listen.
+  // The replay ends too: same status-then-transition order — parked
+  // again, counted as a second listen.
+  const replayId =
+    'identity' in replaying.playback ? replaying.playback.identity : live.identity;
+  r.player.emit(statusEvent(replayId, 'h-oB', 'ended', 300_000));
+  await pump();
   r.player.emit(
     transitionEvent(r, {
       from: 'oB',
