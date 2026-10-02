@@ -3114,6 +3114,7 @@ export class PlaybackEngine {
             listenedMsAccum: 0,
             lastStatusPositionMs: 0,
             preparesUsed: 0,
+            alternatesUsed: 0,
           }
         : null;
     if (parked !== null) {
