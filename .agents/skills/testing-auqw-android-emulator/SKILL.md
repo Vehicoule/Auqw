@@ -687,8 +687,11 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   serving `gh api 'repos/Vehicoule/Auqw/releases?per_page=3'` verbatim
   — real asset URLs keep download+SHA256SUMS honest (fetchText has no
   allowlist; the APK download port enforces the releases/download/
-  prefix itself). network_security_config permits cleartext ONLY for
-  localhost/127.0.0.1 — a `10.0.2.2` fixture URL is silently blocked.
+  prefix itself). The loopback-only networkSecurityConfig is a
+  RELEASE-manifest overlay (with-loopback-cleartext.cjs): debug builds
+  keep the debug manifest's broad cleartext flag, so `10.0.2.2` works
+  there too — serve via adb reverse + localhost anyway so the recipe
+  holds on both build types.
 - APK asset ABI comes from the asset NAME (`…-android-<abi>.apk`);
   x86_64 emulator abilist is `x86_64,arm64-v8a` (ARM translation), so
   arm64-only splits still resolve 'install' on this AVD.
