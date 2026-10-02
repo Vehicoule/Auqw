@@ -213,7 +213,8 @@ export function DesktopChrome({
   // expand → overflow → collapse → fits → repeat), so derive it from
   // stable geometry — the bar's content box, the tabs' width, and the
   // end cluster's non-field siblings. Each outer grid track gets half
-  // the space left over from the tabs (floor 68px, per the grid def).
+  // the space left over from the tabs (floor 100px, per the grid def:
+  // the larger side cluster's width).
   const barRef = useRef<HTMLElement | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const [endTight, setEndTight] = useState(false);
@@ -232,7 +233,7 @@ export function DesktopChrome({
         parseFloat(style.paddingLeft) -
         parseFloat(style.paddingRight);
       const trackHalf = Math.max(
-        68,
+        100,
         (content - (tabs === null ? 0 : tabs.clientWidth)) / 2,
       );
       let others = 0;

@@ -574,9 +574,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   // ---- world-bar back/forward --------------------------------------
   // Browser-style history: every committed (tab, overlay-stack) change
-  // appends a location; the chevrons walk the log. Restores rebuild the
-  // stack by re-pushing recorded routes — entity pages re-fetch through
-  // the stack effect, so a restored screen reloads its own content.
+  // appends a location; the chevrons walk the log. navGo lives beside
+  // loadEntityPage below — a restore re-fetches its entity pages.
   type NavLocation = {
     readonly tab: string;
     readonly routes: readonly (ShellOverlay | E)[];
@@ -607,33 +606,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
     log.cursor = log.entries.length - 1;
     setNavAt(log.cursor);
   }, [tab, overlayStack]);
-  const navGo = useCallback(
-    (delta: -1 | 1) => {
-      const log = navLog.current;
-      const target = log.entries[log.cursor + delta];
-      if (target === undefined) {
-        return;
-      }
-      restoringNav.current = true;
-      log.cursor += delta;
-      setNavAt(log.cursor);
-      setTab(target.tab);
-      clearOverlays();
-      for (const route of target.routes) {
-        pushOverlay(route);
-      }
-    },
-    [pushOverlay, clearOverlays],
-  );
-  const navHistory = useMemo(
-    () => ({
-      canBack: navAt > 0,
-      canForward: navAt < navLog.current.entries.length - 1,
-      back: () => navGo(-1),
-      forward: () => navGo(1),
-    }),
-    [navAt, navGo],
-  );
   const entityMeta = useRef(new Map<string, TrackMetadata>());
   const [actionsFor, setActionsFor] = useState<ActionTarget | null>(null);
   const [pickerFor, setPickerFor] = useState<ActionTarget | null>(null);
@@ -2985,6 +2957,46 @@ export function useAppShell<E extends { readonly type: string } = never>(
       loadEntityPage(ref);
     },
     [overlay, pushOverlay, loadEntityPage],
+  );
+
+  // Back/forward walk the recorded log. A restore re-applies the
+  // location wholesale: tab switch, stack cleared, recorded routes
+  // re-pushed — and each entity route gets a fresh loadEntityPage, so a
+  // restored page actually loads instead of sitting on a null fetch.
+  const navGo = useCallback(
+    (delta: -1 | 1) => {
+      const log = navLog.current;
+      const target = log.entries[log.cursor + delta];
+      if (target === undefined) {
+        return;
+      }
+      restoringNav.current = true;
+      log.cursor += delta;
+      setNavAt(log.cursor);
+      setTab(target.tab);
+      clearOverlays();
+      const entityRefs = new Map<string, EntityRef>();
+      for (const route of target.routes) {
+        pushOverlay(route);
+        const so = shellOverlayOf(route);
+        if (so?.type === 'entity') {
+          entityRefs.set(entityRefKey(so.ref), so.ref);
+        }
+      }
+      for (const ref of entityRefs.values()) {
+        loadEntityPage(ref);
+      }
+    },
+    [pushOverlay, clearOverlays, loadEntityPage],
+  );
+  const navHistory = useMemo(
+    () => ({
+      canBack: navAt > 0,
+      canForward: navAt < navLog.current.entries.length - 1,
+      back: () => navGo(-1),
+      forward: () => navGo(1),
+    }),
+    [navAt, navGo],
   );
 
   const onLoadMore = useCallback(() => {
