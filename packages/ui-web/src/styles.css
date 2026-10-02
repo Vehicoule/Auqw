@@ -3314,7 +3314,9 @@
 }
 
 .uw-wsearch:focus-within {
-  border-color: var(--accent);
+  /* The comet ring owns the accent edge — the field border stays at
+     hairline or it draws a second accent circle outside the stroke. */
+  border-color: var(--hairline);
   background: var(--fg12);
 }
 
@@ -3383,7 +3385,7 @@
   font: inherit;
   font-size: 11px;
   color: var(--text-secondary);
-  border: var(--stroke-hairline) solid var(--fg16);
+  border: var(--stroke-hairline) solid var(--hairline);
   border-radius: var(--radius-control);
   padding: 0 var(--spacing-xs);
   line-height: 16px;
