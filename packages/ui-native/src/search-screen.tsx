@@ -212,7 +212,9 @@ export function SearchScreen({
           keyExtractor={(row) => row.row.key}
           scrollEnabled={scrollEnabled}
           contentContainerStyle={{
-            paddingTop: topInset,
+            // The pinned results head already reserves the inset; when it
+            // is absent (loading with retained results) the list carries it.
+            paddingTop: view.resultsHead !== null ? 0 : topInset,
             paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
             // Clears the floating miniplayer's strip.
             paddingBottom:
