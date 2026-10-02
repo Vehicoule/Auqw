@@ -63,10 +63,6 @@ function invalidBatch(): AppError {
   return appError('invalid-response', 'commit batch failed validation');
 }
 
-function invalidData(): AppError {
-  return appError('invalid-response', 'stored data failed validation');
-}
-
 /* ------------------------------------------------------------------ */
 /* Row decoding helpers — shared by decodeState (load) and the         */
 /* `recordingsMerge` read inside commit.                               */
@@ -145,113 +141,161 @@ export function rowTools(fail: () => void) {
 }
 
 /**
+ * A stored row the decode dropped — table + identifying key for the
+ * load/commit logs. Keys are opaque ids only, never row content.
+ */
+export type DroppedRow = {
+  readonly table: string;
+  readonly key: string;
+};
+
+export type DecodedRecordings = {
+  readonly recordings: Recording[];
+  readonly recordingIds: ReadonlySet<string>;
+  /**
+   * Stored recording ids the decode dropped. The merge never sees
+   * them, so the row diff deletes them outright — their dependents
+   * must go down with the parent (see planCommit's purge pass).
+   */
+  readonly droppedRecordingIds: ReadonlySet<string>;
+  readonly dropped: readonly DroppedRow[];
+};
+
+/**
  * Recording rows + their per-recording junction rows → Recording[].
- * `refRows`/`mappingRows` must arrive ordered by (recording_id,
- * ordinal) — ordinals must be contiguous from 0 per recording. Any
- * malformed row flags the caller's `bad` via `tools.fail`.
+ * Stored rows arrive through the raw statement path (renderer
+ * `storage:*` writes, a migrated file), so malformed rows drop rather
+ * than fail — an invalid row is an orphan the commit diff deletes,
+ * not a reason to brick the document. `refRows`/`mappingRows` must
+ * arrive ordered by (recording_id, ordinal); the ordinal itself is
+ * order-only — a gapped or renumbered column heals on the row's next
+ * write, so only its decode validity gates the row.
  */
 export function decodeRecordingRows(
-  tools: RowTools,
   recordingRows: readonly SqlRow[],
   refRows: readonly SqlRow[],
   mappingRows: readonly SqlRow[],
-): { recordings: Recording[]; recordingIds: ReadonlySet<string> } {
-  const { reqStr, reqNonEmpty, reqNonNegInt, optStr, optInt, optBool, json } =
-    tools;
-  const { fail } = tools;
-  // Recording ids first so every dependent row can be verified against
-  // them; duplicate recording rows are rejected even without the PK.
-  const recordingIds = new Set<string>();
+): DecodedRecordings {
+  const dropped: DroppedRow[] = [];
+  const droppedRecordingIds = new Set<string>();
+  // Row-scoped fail flags: a malformed cell condemns its own row, not
+  // the sweep — the row drops and decoding continues. The draft
+  // keeps junction arrays mutable until the element gate retypes it.
+  type DraftRecording = Omit<Recording, 'sourceRefs' | 'mappings'> & {
+    sourceRefs: SourceRef[];
+    mappings: SourceMapping[];
+  };
+  const byId = new Map<string, DraftRecording>();
+  const order: DraftRecording[] = [];
   for (const row of recordingRows) {
-    const id = reqStr(row['id']);
-    if (recordingIds.has(id)) {
-      fail();
+    let bad = false;
+    const t = rowTools(() => {
+      bad = true;
+    });
+    const rec: DraftRecording = {
+      id: t.reqStr(row['id']),
+      title: t.reqStr(row['title']),
+      artist: t.optStr(row['artist']),
+      album: t.optStr(row['album']),
+      durationMs: t.optInt(row['duration_ms']),
+      releaseYear: t.optInt(row['release_year']),
+      artwork: t.json(row['artwork_json']) as Recording['artwork'],
+      explicit: t.optBool(row['explicit']),
+      genre: t.optStr(row['genre']),
+      isrc: t.optStr(row['isrc']),
+      versionLabels: t.json(
+        row['version_labels_json'],
+      ) as Recording['versionLabels'],
+      sourceRefs: [],
+      mappings: [],
+      provenance: row['provenance'] as Recording['provenance'],
+    };
+    if (bad || rec.id.length === 0) {
+      dropped.push({ table: 'recordings', key: rec.id });
+      if (rec.id.length > 0) {
+        droppedRecordingIds.add(rec.id);
+      }
+      continue;
     }
-    recordingIds.add(id);
+    if (byId.has(rec.id)) {
+      // A duplicate id drops but stays out of the purge set — the
+      // surviving row keeps its dependents.
+      dropped.push({ table: 'recordings', key: rec.id });
+      continue;
+    }
+    byId.set(rec.id, rec);
+    order.push(rec);
   }
-  const refsByRecording = new Map<string, SourceRef[]>();
-  const refOrdinals = new Map<string, number>();
   const seenRefs = new Map<string, Set<string>>();
   for (const row of refRows) {
-    const recordingId = reqStr(row['recording_id']);
-    if (!recordingIds.has(recordingId)) {
-      fail();
+    let bad = false;
+    const t = rowTools(() => {
+      bad = true;
+    });
+    const recordingId = t.reqStr(row['recording_id']);
+    t.reqNonNegInt(row['ordinal']);
+    const provider = t.reqNonEmpty(row['provider']);
+    const sourceId = t.reqNonEmpty(row['source_id']);
+    const target = byId.get(recordingId);
+    if (bad || row['kind'] !== 'track' || target === undefined) {
+      dropped.push({ table: 'source_refs', key: recordingId });
+      continue;
     }
-    if (row['kind'] !== 'track') {
-      fail();
-    }
-    const ordinal = reqNonNegInt(row['ordinal']);
-    const expected = refOrdinals.get(recordingId) ?? 0;
-    if (ordinal !== expected) {
-      fail();
-    }
-    refOrdinals.set(recordingId, expected + 1);
-    const provider = reqNonEmpty(row['provider']);
-    const sourceId = reqNonEmpty(row['source_id']);
-    const ref: SourceRef = { provider, kind: 'track', id: sourceId };
     const seen = seenRefs.get(recordingId) ?? new Set<string>();
     const key = `${provider} track ${sourceId}`;
     if (seen.has(key)) {
-      fail();
+      dropped.push({ table: 'source_refs', key: recordingId });
+      continue;
     }
     seen.add(key);
     seenRefs.set(recordingId, seen);
-    const list = refsByRecording.get(recordingId) ?? [];
-    list.push(ref);
-    refsByRecording.set(recordingId, list);
+    target.sourceRefs.push({
+      provider,
+      kind: 'track',
+      id: sourceId,
+    });
   }
-  const mappingsByRecording = new Map<string, SourceMapping[]>();
-  const mappingOrdinals = new Map<string, number>();
   for (const row of mappingRows) {
-    const recordingId = reqStr(row['recording_id']);
-    if (!recordingIds.has(recordingId)) {
-      fail();
-    }
-    if (row['kind'] !== 'track') {
-      fail();
-    }
-    const ordinal = reqNonNegInt(row['ordinal']);
-    const expected = mappingOrdinals.get(recordingId) ?? 0;
-    if (ordinal !== expected) {
-      fail();
-    }
-    mappingOrdinals.set(recordingId, expected + 1);
+    let bad = false;
+    const t = rowTools(() => {
+      bad = true;
+    });
+    const recordingId = t.reqStr(row['recording_id']);
+    t.reqNonNegInt(row['ordinal']);
+    const target = byId.get(recordingId);
     const mapping: SourceMapping = {
       ref: {
-        provider: reqNonEmpty(row['provider']),
+        provider: t.reqNonEmpty(row['provider']),
         kind: 'track',
-        id: reqNonEmpty(row['source_id']),
+        id: t.reqNonEmpty(row['source_id']),
       },
       status: row['status'] as SourceMapping['status'],
-      matchedAtMs: reqNonNegInt(row['matched_at_ms']),
-      evidence: json(row['evidence_json']) as SourceMapping['evidence'],
+      matchedAtMs: t.reqNonNegInt(row['matched_at_ms']),
+      evidence: t.json(row['evidence_json']) as SourceMapping['evidence'],
     };
-    const list = mappingsByRecording.get(recordingId) ?? [];
-    list.push(mapping);
-    mappingsByRecording.set(recordingId, list);
+    if (bad || row['kind'] !== 'track' || target === undefined) {
+      dropped.push({ table: 'mappings', key: recordingId });
+      continue;
+    }
+    target.mappings.push(mapping);
   }
-  const recordings: Recording[] = recordingRows.map((row) => {
-    const id = reqStr(row['id']);
-    return {
-      id,
-      title: reqStr(row['title']),
-      artist: optStr(row['artist']),
-      album: optStr(row['album']),
-      durationMs: optInt(row['duration_ms']),
-      releaseYear: optInt(row['release_year']),
-      artwork: json(row['artwork_json']) as Recording['artwork'],
-      explicit: optBool(row['explicit']),
-      genre: optStr(row['genre']),
-      isrc: optStr(row['isrc']),
-      versionLabels: json(
-        row['version_labels_json'],
-      ) as Recording['versionLabels'],
-      sourceRefs: refsByRecording.get(id) ?? [],
-      mappings: mappingsByRecording.get(id) ?? [],
-      provenance: row['provenance'] as Recording['provenance'],
-    };
-  });
-  return { recordings, recordingIds };
+  const recordings: Recording[] = [];
+  const recordingIds = new Set<string>();
+  for (const rec of order) {
+    // Rows that reassemble into a contract violation — zero source
+    // refs, wrong provenance, malformed list cells — drop wholesale;
+    // the merge diff purges the row and the purge pass takes its
+    // dependents down.
+    const key = rec.id;
+    if (!isRecording(rec)) {
+      dropped.push({ table: 'recordings', key });
+      droppedRecordingIds.add(key);
+      continue;
+    }
+    recordings.push(rec);
+    recordingIds.add(rec.id);
+  }
+  return { recordings, recordingIds, droppedRecordingIds, dropped };
 }
 
 /* ------------------------------------------------------------------ */
@@ -988,11 +1032,17 @@ function allUnique<T>(items: readonly T[], key: (item: T) => string): boolean {
  * dangling foreign key. Only after the whole document validates does
  * the per-table row diff emit writes.
  */
+export type CommitPlan = {
+  readonly statements: SqlStatement[];
+  /** Stored rows the recordings decode dropped (merge path only). */
+  readonly dropped: readonly DroppedRow[];
+};
+
 export async function planCommit(
   conn: SqliteConnection,
   batch: StorageBatch,
   signal: CancellationSignal,
-): Promise<Result<SqlStatement[]>> {
+): Promise<Result<CommitPlan>> {
   const check = (): void => {
     if (signal.cancelled) {
       throw CANCELLED;
@@ -1022,6 +1072,8 @@ export async function planCommit(
   let currentRecordings: readonly SqlRow[] = [];
   let currentSourceRefs: readonly SqlRow[] = [];
   let currentMappings: readonly SqlRow[] = [];
+  let droppedStored: readonly DroppedRow[] = [];
+  let purgedRecordingIds: ReadonlySet<string> = new Set<string>();
   if (recordingsTouched) {
     currentRecordings = await conn.query<SqlRow>(
       `SELECT ${RECORDINGS.columns.join(', ')} FROM recordings ORDER BY rowid`,
@@ -1040,19 +1092,16 @@ export async function planCommit(
     );
     check();
     if (batch.recordingsMerge !== undefined) {
-      let bad = false;
-      const tools = rowTools(() => {
-        bad = true;
-      });
+      // The stored-row decode is drop-tolerant: malformed rows land in
+      // `dropped` instead of failing the merge — the merge applies to
+      // the clean subset and the diff deletes what it never saw.
       const decoded = decodeRecordingRows(
-        tools,
         currentRecordings,
         currentSourceRefs,
         currentMappings,
       );
-      if (bad) {
-        return err(invalidData());
-      }
+      droppedStored = decoded.dropped;
+      purgedRecordingIds = decoded.droppedRecordingIds;
       mergedRecordings = batch.recordingsMerge(decoded.recordings);
     } else {
       mergedRecordings = batch.recordings;
@@ -1589,9 +1638,14 @@ export async function planCommit(
   // kind) breaks an unprovided dependent's foreign key in place — the
   // merged document would dangle, exactly as `isPersistedState` finds
   // on the rebuilt document. Probe only the affected keys.
+  // Decode-dropped recordings purge wholesale — their dependents get
+  // explicit deletes below, so the probes only guard recordings the
+  // merge itself removed.
   const removedRecordingIds = (
     plans.get(RECORDINGS)?.removedKeys ?? []
-  ).map((key) => key[0] as string);
+  )
+    .map((key) => key[0] as string)
+    .filter((id) => !purgedRecordingIds.has(id));
   const entityPlan = plans.get(ENTITIES);
   const kindIndex = ENTITIES.columns.indexOf('kind');
   const touchedEntityIds =
@@ -1758,6 +1812,60 @@ export async function planCommit(
   // tables put their changed-row deletes in the early phase so a
   // UNIQUE non-key column never sees its replacement collide.
   const statements: SqlStatement[] = [];
+  // Purge pass: recordings the merge decode dropped fall to the row
+  // diff's plain delete — the dependents that don't cascade on their
+  // recording FK need explicit deletes first (source_refs/mappings/
+  // downloads/local_files cascade; entity_source_refs key on
+  // entities). The queue_state playhead must release before the
+  // occurrence rows it can name are deleted.
+  const purgedIds = [...purgedRecordingIds];
+  for (let i = 0; i < purgedIds.length; i += MAX_PARAMS) {
+    const chunk = purgedIds.slice(i, i + MAX_PARAMS);
+    const inIds = placeholders(chunk.length);
+    statements.push(
+      stmt(
+        `UPDATE queue_state SET
+           current_occurrence_id = NULL,
+           position_ms = 0,
+           mode = 'stopped',
+           blocked_error_json = NULL
+         WHERE current_occurrence_id IN (
+           SELECT occurrence_id FROM queue_occurrences
+           WHERE recording_id IN ${inIds})`,
+        chunk,
+      ),
+      stmt(
+        `DELETE FROM queue_occurrences WHERE recording_id IN ${inIds}`,
+        chunk,
+      ),
+      stmt(
+        `DELETE FROM playlist_entries WHERE recording_id IN ${inIds}`,
+        chunk,
+      ),
+      stmt(
+        `DELETE FROM play_history WHERE recording_id IN ${inIds}`,
+        chunk,
+      ),
+      stmt(
+        `DELETE FROM play_counts WHERE recording_id IN ${inIds}`,
+        chunk,
+      ),
+      stmt(
+        `DELETE FROM match_reviews WHERE recording_id IN ${inIds}`,
+        chunk,
+      ),
+      stmt(
+        `DELETE FROM lyrics_cache WHERE recording_id IN ${inIds}`,
+        chunk,
+      ),
+      // likes.target_id is polymorphic — no FK, so track likes on a
+      // purged recording would dangle.
+      stmt(
+        `DELETE FROM likes WHERE entity_kind = 'track' AND target_id IN ${inIds}`,
+        chunk,
+      ),
+    );
+  }
   const DELETE_ORDER: readonly TableDef[] = [
     QUEUE_OCCURRENCES,
     PLAYLIST_ENTRIES,
@@ -1857,5 +1965,5 @@ export async function planCommit(
       `DELETE FROM attempt_traces WHERE seq NOT IN (SELECT seq FROM attempt_traces ORDER BY seq DESC LIMIT ${ATTEMPT_CAP})`,
     ),
   );
-  return ok(statements);
+  return ok({ statements, dropped: droppedStored });
 }

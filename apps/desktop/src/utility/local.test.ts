@@ -13,12 +13,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
+import { CancellationSource } from '@auqw/application';
+import type { OperationContext } from '@auqw/application';
 import {
   assert,
   assertEqual,
 } from '@auqw/application/testing';
-import { MIGRATIONS } from '@auqw/storage-sqlite';
+import {
+  CURRENT_SCHEMA_VERSION,
+  MIGRATIONS,
+  SqliteStorage,
+} from '@auqw/storage-sqlite';
+import type { SqlRow, SqlValue } from '@auqw/storage-sqlite';
+import { createSqliteDriver } from '../renderer/sqlite-driver.ts';
 import { CHANNELS } from '../shared/channels.ts';
+import type { StorageStatement } from '../shared/contract.ts';
 import { dirTreeUri } from '../shared/local-paths.ts';
 import type { UtilityResponse } from './envelope.ts';
 import { createUtilityRouter } from './router.ts';
@@ -46,6 +55,26 @@ export async function run(): Promise<void> {
       dbW.exec(sql);
     }
   }
+  // The version + singleton rows live outside MIGRATIONS (initialize
+  // writes them at version zero), so a manual-migrated store seeds
+  // them here — the decode requires both singletons present.
+  dbW.prepare('INSERT INTO schema_version (id, version) VALUES (1, ?)').run(
+    CURRENT_SCHEMA_VERSION,
+  );
+  dbW.exec(
+    `INSERT INTO queue_state
+     (id, revision, current_occurrence_id, position_ms, mode,
+      blocked_error_json)
+     VALUES (1, 0, NULL, 0, 'stopped', NULL)`,
+  );
+  dbW.prepare(
+    `INSERT INTO settings
+     (id, catalog_provider, playback_provider, storefront, quality_kbps,
+      theme, prefetch, lyrics_provider, radio_provider,
+      artwork_cache_bytes, download_metered, language)
+     VALUES (1, 'itunes', 'youtube-music', 'US', 256, 'system', 1,
+             NULL, NULL, NULL, 0, NULL)`,
+  ).run();
   // The grant authority is utility-owned — `local:add` mints here,
   // dbW's renderer-role row inserts are UI mirrors only.
   const localGrants = createLocalGrants({
@@ -77,6 +106,15 @@ export async function run(): Promise<void> {
   const pickAdd = async (paths: string[]): Promise<UtilityResponse> => {
     await call(CHANNELS.localPicks, { paths });
     return call(CHANNELS.localAdd, { paths });
+  };
+  let opSeq = 0;
+  const ctx = (): OperationContext => {
+    opSeq += 1;
+    return {
+      requestId: `local-test-${opSeq}`,
+      deadlineMs: Number.MAX_SAFE_INTEGER,
+      signal: new CancellationSource().signal,
+    };
   };
   const insertRecording = (id: string, provenance = 'provider'): void => {
     dbW.prepare(
@@ -878,6 +916,181 @@ export async function run(): Promise<void> {
       !postDeleteEnum.ok &&
         postDeleteEnum.error?.kind === 'permission-denied',
       'a removed source revokes the grant in the authority',
+    );
+
+    // — removeSource totality through the renderer's own bridge:
+    //   schema-legal but doc-invalid rows written past the doc
+    //   validators (what a renderer `storage:*` commit can leave
+    //   behind) must not wedge the removal commit nor the next boot's
+    //   restore — decode drops the orphan, the purge clears its
+    //   dependents, the queue playhead releases.
+    const rmDir = join(root, 'rm-source');
+    await mkdir(rmDir);
+    await writeFile(join(rmDir, 'track.wav'), Buffer.alloc(8, 5));
+    const rmAdd = await pickAdd([rmDir]);
+    assert(rmAdd.ok, 'rm-source pick adds');
+    const rmTree = (rmAdd.result as { picks: { treeUri: string }[] })
+      .picks[0]?.treeUri;
+    dbW.prepare(
+      `INSERT INTO local_sources (source_id, tree_uri, label, added_ms)
+       VALUES ('src-rm', ?, 'rm', 1)`,
+    ).run(rmTree ?? '');
+    insertRecording('rec-rm', 'local');
+    dbW.prepare(
+      `INSERT INTO local_files
+       (file_id, source_id, doc_id, size, fingerprint, recording_id)
+       VALUES ('lf-rm', 'src-rm', 'track.wav', 8, 'fprm', 'rec-rm')`,
+    ).run();
+    // The poison: a zero-source_refs recording (isRecording requires
+    // >=1) with dependents that don't cascade — a queue entry the
+    // playhead is parked on.
+    insertRecording('rec-poison');
+    dbW.prepare(
+      `INSERT INTO queue_occurrences
+       (occurrence_id, ordinal, recording_id)
+       VALUES ('occ-poison', 50, 'rec-poison')`,
+    ).run();
+    dbW.prepare(
+      `UPDATE queue_state
+       SET current_occurrence_id = 'occ-poison', mode = 'paused',
+           position_ms = 42`,
+    ).run();
+
+    // The renderer-role storage — SqliteStorage over the storage:*
+    // IPC surface, exactly the bridge the engine's removal uses.
+    const bridge = {
+      begin: () =>
+        sCall(CHANNELS.storageBegin, undefined).then((r) => {
+          assert(r.ok, 'begin ok');
+          return r.result as { txId: string };
+        }),
+      commit: (txId: string) =>
+        sCall(CHANNELS.storageCommit, { txId }).then((r) => {
+          assert(r.ok, 'commit ok');
+        }),
+      rollback: (txId: string) =>
+        sCall(CHANNELS.storageRollback, { txId }).then((r) => {
+          assert(r.ok, 'rollback ok');
+        }),
+      cancel: (txId: string) =>
+        sCall(CHANNELS.storageCancel, { txId }).then((r) => {
+          assert(r.ok, 'cancel ok');
+        }),
+      execute: (
+        txId: string,
+        sql: string,
+        params: readonly SqlValue[] = [],
+      ) =>
+        sCall(CHANNELS.storageExecute, { txId, sql, params }).then(
+          (r) => {
+            assert(r.ok, `execute ok: ${sql.slice(0, 40)}`);
+            return r.result as { changes: number; lastInsertRowId: number | null };
+          },
+        ),
+      execMany: (
+        txId: string,
+        statements: readonly StorageStatement[],
+      ) =>
+        sCall(CHANNELS.storageExecMany, { txId, statements }).then(
+          (r) => {
+            assert(r.ok, 'execMany ok');
+          },
+        ),
+      query: (
+        txId: string,
+        sql: string,
+        params: readonly SqlValue[] = [],
+      ) =>
+        sCall(CHANNELS.storageQuery, { txId, sql, params }).then((r) => {
+          assert(r.ok, `query ok: ${sql.slice(0, 40)}`);
+          return r.result as { rows: SqlRow[] };
+        }),
+      backup: (tag: string) =>
+        sCall(CHANNELS.storageBackup, { tag }).then((r) => {
+          assert(r.ok, 'backup ok');
+        }),
+      dropBackup: (tag: string) =>
+        sCall(CHANNELS.storageDropBackup, { tag }).then((r) => {
+          assert(r.ok, 'dropBackup ok');
+        }),
+    };
+    const renderer = new SqliteStorage(createSqliteDriver(bridge), {
+      catalogProvider: 'itunes',
+      playbackProvider: 'youtube-music',
+      storefront: 'US',
+      qualityKbps: 256,
+      theme: 'system',
+      prefetch: true,
+    });
+    assert(
+      (await renderer.initialize(ctx())).ok,
+      'renderer storage initializes',
+    );
+    // The removal commit: source+file sections resolve together —
+    // local_files rows must not dangle on a dropped source, and every
+    // surviving source comes back in the provided list.
+    const surviving = (
+      db
+        .prepare(
+          `SELECT source_id, tree_uri, label, added_ms, last_scan_ms
+           FROM local_sources WHERE source_id != 'src-rm'`,
+        )
+        .all() as {
+        source_id: string;
+        tree_uri: string;
+        label: string;
+        added_ms: number;
+        last_scan_ms: number | null;
+      }[]
+    ).map((row) => ({
+      sourceId: row.source_id,
+      treeUri: row.tree_uri,
+      label: row.label,
+      addedMs: row.added_ms,
+      lastScanMs: row.last_scan_ms,
+    }));
+    // Every file row's recording here is a bare insert — zero
+    // source_refs — so all of them decode-drop; none can be provided
+    // back. An empty survivors list is exactly what the flow emits
+    // when every indexed file's recording is malformed.
+    const removed = await renderer.commit(
+      { localSources: surviving, localFiles: [] },
+      ctx(),
+    );
+    assert(removed.ok, 'removeSource completes over poisoned rows');
+    const remaining = db.prepare(
+      `SELECT source_id FROM local_sources WHERE source_id = 'src-rm'`,
+    ).all();
+    assertEqual(remaining.length, 0, 'source row deleted');
+    const filesLeft = db.prepare(
+      `SELECT file_id FROM local_files WHERE source_id = 'src-rm'`,
+    ).all();
+    assertEqual(filesLeft.length, 0, 'source files cascade');
+    const rmEnum = await call(CHANNELS.tagreadEnumerate, {
+      treeUri: rmTree,
+    });
+    assert(
+      !rmEnum.ok && rmEnum.error?.kind === 'permission-denied',
+      'removal revokes the grant',
+    );
+    // The orphan rows persist physically — removal doesn't rewrite
+    // unrelated tables — but they're dead weight the decode drops.
+    // Boot restore: a fresh load over the same bridge reads clean.
+    const restored = await renderer.load(ctx());
+    assert(
+      restored.ok,
+      `boot restore reads the post-removal state: ${JSON.stringify(
+        restored.ok ? null : restored.error,
+      )}`,
+    );
+    assert(
+      !restored.value.recordings.some((r) => r.id === 'rec-poison'),
+      'the malformed recording stays gone',
+    );
+    assert(
+      restored.value.queue.currentOccurrenceId === null &&
+        restored.value.queue.mode === 'stopped',
+      'queue restored parked',
     );
     storage.close();
 

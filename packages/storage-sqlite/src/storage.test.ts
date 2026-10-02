@@ -30,7 +30,7 @@ import type {
   SourceRef,
 } from '@auqw/application';
 import { assert, assertDeepEqual, assertEqual } from '@auqw/application/testing';
-import type { SqliteConnection } from './driver.ts';
+import type { SqliteConnection, SqlRow } from './driver.ts';
 import { CURRENT_SCHEMA_VERSION, MIGRATIONS } from './migrations.ts';
 import { SqliteStorage } from './storage.ts';
 import { FailingDriver, NodeSqliteDriver } from './testing/node-sqlite-driver.ts';
@@ -419,14 +419,104 @@ async function malformedRows(): Promise<void> {
       mode: 'paused',
     },
   });
-  const corruptions: readonly string[] = [
-    `UPDATE recordings SET artwork_json = '{not-json' WHERE id = 'r1'`,
-    `UPDATE recordings SET version_labels_json = 'not-json' WHERE id = 'r1'`,
-    `UPDATE mappings SET evidence_json = 'x' WHERE recording_id = 'r1'`,
-    `UPDATE queue_state SET blocked_error_json = '{oops' WHERE id = 1`,
-    `PRAGMA foreign_keys = OFF; DELETE FROM recordings WHERE id = 'r1'`,
+  const cases: readonly (readonly [
+    string,
+    string,
+    (state: PersistedState) => void,
+  ])[] = [
+    // A malformed row drops instead of failing the load; dependents
+    // that dangle on it drop too, and a dangling queue playhead
+    // parks back to stopped.
+    [
+      'bad artwork_json',
+      `UPDATE recordings SET artwork_json = '{not-json' WHERE id = 'r1'`,
+      (state) => {
+        assertDeepEqual(state.recordings, []);
+        assertDeepEqual(state.queue.occurrences, []);
+        assertEqual(state.queue.currentOccurrenceId, null);
+        assertEqual(state.queue.mode, 'stopped');
+        assertEqual(state.queue.positionMs, 0);
+      },
+    ],
+    [
+      'bad version_labels_json',
+      `UPDATE recordings SET version_labels_json = 'not-json' WHERE id = 'r1'`,
+      (state) => {
+        assertDeepEqual(state.recordings, []);
+        assertDeepEqual(state.queue.occurrences, []);
+        assertEqual(state.queue.currentOccurrenceId, null);
+        assertEqual(state.queue.mode, 'stopped');
+      },
+    ],
+    // A malformed junction row drops alone — its recording survives
+    // on the refs that still decode.
+    [
+      'bad mapping evidence_json',
+      `UPDATE mappings SET evidence_json = 'x' WHERE recording_id = 'r1'`,
+      (state) => {
+        assertEqual(state.recordings.length, 1);
+        assertDeepEqual(state.recordings[0]?.mappings, []);
+        assertDeepEqual(
+          state.recordings[0]?.sourceRefs,
+          [ref('itunes', 'i1')],
+        );
+        assertDeepEqual(state.queue, base().queue);
+      },
+    ],
+    // A malformed optional field on the queue_state singleton drops
+    // to absent; required fields still hold.
+    [
+      'bad blocked_error_json',
+      `UPDATE queue_state SET blocked_error_json = '{oops' WHERE id = 1`,
+      (state) => {
+        assertDeepEqual(state.recordings, base().recordings);
+        assertDeepEqual(state.queue, base().queue);
+      },
+    ],
+    [
+      'deleted recording row',
+      `PRAGMA foreign_keys = OFF; DELETE FROM recordings WHERE id = 'r1'`,
+      (state) => {
+        assertDeepEqual(state.recordings, []);
+        assertDeepEqual(state.queue.occurrences, []);
+        assertEqual(state.queue.currentOccurrenceId, null);
+        assertEqual(state.queue.mode, 'stopped');
+      },
+    ],
+    // Schema-legal but doc-invalid queue shapes a renderer write can
+    // leave: a playhead while stopped, or position without one. The
+    // playhead parks; the occurrence rows survive.
+    [
+      'playhead while stopped',
+      `UPDATE queue_state SET mode = 'stopped' WHERE id = 1`,
+      (state) => {
+        assertDeepEqual(state.recordings, base().recordings);
+        assertDeepEqual(
+          state.queue.occurrences,
+          base().queue.occurrences,
+        );
+        assertEqual(state.queue.currentOccurrenceId, null);
+        assertEqual(state.queue.mode, 'stopped');
+        assertEqual(state.queue.positionMs, 0);
+      },
+    ],
+    [
+      'position without playhead',
+      `UPDATE queue_state
+       SET current_occurrence_id = NULL, position_ms = 99, mode = 'stopped'
+       WHERE id = 1`,
+      (state) => {
+        assertDeepEqual(
+          state.queue.occurrences,
+          base().queue.occurrences,
+        );
+        assertEqual(state.queue.currentOccurrenceId, null);
+        assertEqual(state.queue.positionMs, 0);
+        assertEqual(state.queue.mode, 'stopped');
+      },
+    ],
   ];
-  for (const sql of corruptions) {
+  for (const [name, sql, check] of cases) {
     const { driver, storage } = rig();
     const seed = base();
     assert(
@@ -436,19 +526,25 @@ async function malformedRows(): Promise<void> {
           ctx().context,
         )
       ).ok,
-      `seed commit ok for ${sql.slice(0, 32)}`,
+      `seed commit ok for ${name}`,
     );
     driver.execScript(sql);
     const loaded = await storage.load(ctx().context);
-    assert(!loaded.ok, `corruption detected: ${sql.slice(0, 40)}`);
-    assertEqual(loaded.error.kind, 'invalid-response');
-    assertEqual(loaded.error.message, 'stored data failed validation');
+    assert(loaded.ok, `load tolerates: ${name}`);
+    check(loaded.value);
+    // Repeated loads stay consistent — drops are read-path orphans,
+    // not state the decode mutates.
+    const again = await storage.load(ctx().context);
+    assert(again.ok, `load tolerates twice: ${name}`);
+    check(again.value);
     driver.close();
   }
 }
 
-// 6b. Relational corruption that only survives with constraints
-// removed or foreign_keys off must also fail the whole load.
+// 6b. Orphaned rows — dangling references, duplicates, gaps the
+// statement path can leave behind — drop out of the document
+// instead of failing the load; the diff of the next commit touching
+// their section deletes the stored orphans.
 async function corruptedRelations(): Promise<void> {
   const seed = async (storage: SqliteStorage): Promise<void> => {
     assert(
@@ -487,44 +583,71 @@ async function corruptedRelations(): Promise<void> {
       'seed commit ok',
     );
   };
-  const cases: readonly (readonly [string, string])[] = [
+  const seedState = async (storage: SqliteStorage): Promise<PersistedState> => {
+    const loaded = await storage.load(ctx().context);
+    assert(loaded.ok, 'seeded load resolves');
+    return loaded.value;
+  };
+  const cases: readonly (readonly [
+    string,
+    string,
+    (state: PersistedState, seeded: PersistedState) => void,
+  ])[] = [
     [
       'orphan source_ref',
       `PRAGMA foreign_keys = OFF;
        INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
        VALUES ('ghost', 0, 'itunes', 'track', 'g1')`,
+      (state, seeded) => assertDeepEqual(state, seeded),
     ],
     [
       'orphan mapping',
       `PRAGMA foreign_keys = OFF;
        INSERT INTO mappings (recording_id, ordinal, provider, kind, source_id, status, matched_at_ms, evidence_json)
        VALUES ('ghost', 0, 'itunes', 'track', 'g1', 'automatic', 1, '{}')`,
+      (state, seeded) => assertDeepEqual(state, seeded),
     ],
     [
       'orphan entity like',
       // likes.target_id is polymorphic, so no SQL FK — an album like
-      // naming a nonexistent entity is app-level corruption.
+      // naming a nonexistent entity is an app-level orphan.
       `INSERT INTO likes (entity_kind, target_id, liked_ms)
        VALUES ('album', 'ghost-entity', 2)`,
+      (state, seeded) => assertDeepEqual(state, seeded),
     ],
     [
       'orphan track like',
       `INSERT INTO likes (entity_kind, target_id, liked_ms)
        VALUES ('track', 'ghost-recording', 2)`,
+      (state, seeded) => assertDeepEqual(state, seeded),
     ],
     [
+      // Junction ordinals are order-only — a stored gap renumbers on
+      // the row's next write instead of failing the decode.
       'source_ref ordinal gap',
       `UPDATE source_refs SET ordinal = 7 WHERE source_id = 'y1'`,
+      (state, seeded) => assertDeepEqual(state, seeded),
     ],
     [
       'queue ordinal gap',
       `UPDATE queue_occurrences SET ordinal = 9 WHERE occurrence_id = 'o2'`,
+      (state, seeded) => assertDeepEqual(state, seeded),
     ],
     [
+      // The o1 row's partial selected-ref tuple drops the occurrence;
+      // the playhead then dangles and parks back to stopped.
       'partial selected-ref tuple',
       `DROP TABLE queue_occurrences;
        CREATE TABLE queue_occurrences (occurrence_id TEXT, ordinal INTEGER, recording_id TEXT, selected_provider TEXT, selected_kind TEXT, selected_source_id TEXT);
        INSERT INTO queue_occurrences VALUES ('o1', 0, 'r1', 'youtube-music', NULL, 'y1'), ('o2', 1, 'r1', NULL, NULL, NULL)`,
+      (state) => {
+        assertDeepEqual(state.queue.occurrences, [
+          { occurrenceId: 'o2', recordingId: 'r1', selectedRef: null },
+        ]);
+        assertEqual(state.queue.currentOccurrenceId, null);
+        assertEqual(state.queue.mode, 'stopped');
+        assertEqual(state.queue.positionMs, 0);
+      },
     ],
     [
       'duplicate source ref',
@@ -534,24 +657,365 @@ async function corruptedRelations(): Promise<void> {
          ('r1', 0, 'itunes', 'track', 'i1'),
          ('r1', 1, 'itunes', 'track', 'i1'),
          ('r1', 2, 'youtube-music', 'track', 'y1')`,
+      (state, seeded) => assertDeepEqual(state, seeded),
     ],
     [
       'duplicate occurrence id',
       `DROP TABLE queue_occurrences;
        CREATE TABLE queue_occurrences (occurrence_id TEXT, ordinal INTEGER, recording_id TEXT, selected_provider TEXT, selected_kind TEXT, selected_source_id TEXT);
        INSERT INTO queue_occurrences VALUES ('o1', 0, 'r1', NULL, NULL, NULL), ('o1', 1, 'r1', NULL, NULL, NULL)`,
+      (state) => {
+        assertDeepEqual(state.queue.occurrences, [
+          { occurrenceId: 'o1', recordingId: 'r1', selectedRef: null },
+        ]);
+        assertEqual(state.queue.currentOccurrenceId, 'o1');
+        assertEqual(state.queue.mode, 'paused');
+      },
     ],
   ];
-  for (const [name, sql] of cases) {
+  for (const [name, sql, check] of cases) {
     const { driver, storage } = rig();
     await seed(storage);
+    const seeded = await seedState(storage);
     driver.execScript(sql);
     const loaded = await storage.load(ctx().context);
-    assert(!loaded.ok, `corruption detected: ${name}`);
-    assertEqual(loaded.error.kind, 'invalid-response', name);
-    // No silent reset: the same malformed state still fails on retry.
+    assert(loaded.ok, `load tolerates: ${name}`);
+    check(loaded.value, seeded);
     const again = await storage.load(ctx().context);
-    assert(!again.ok, `state left untouched: ${name}`);
+    assert(again.ok, `load tolerates twice: ${name}`);
+    driver.close();
+  }
+}
+
+// 6c. A merge commit purges decode-dropped recordings wholesale:
+// rows the renderer's `storage:*` path can legally write (zero-ref
+// recordings, malformed cells, dangling dependents — the rows that
+// used to wedge removeSource and brick boot) delete with every
+// dependent, and a playhead parked on one parks back to stopped.
+async function mergePurgeMalformedStored(): Promise<void> {
+  const { driver, storage } = rig();
+  const r1 = recording('r1', [ref('itunes', 'i1')]);
+  const playlist: Playlist = {
+    playlistId: 'pl1',
+    name: 'P',
+    createdMs: 1,
+    updatedMs: 1,
+  };
+  assert(
+    (
+      await storage.commit(
+        {
+          recordings: [r1],
+          playlists: [playlist],
+          playlistEntries: [
+            {
+              entryId: 'pe1',
+              playlistId: 'pl1',
+              recordingId: 'r1',
+              position: 0,
+              selectedRef: null,
+              addedMs: 1,
+            },
+          ],
+          likes: [{ entityKind: 'track', targetId: 'r1', likedAtMs: 1 }],
+          queue: {
+            revision: 1,
+            occurrences: [occurrence('o1', 'r1')],
+            currentOccurrenceId: 'o1',
+            positionMs: 10,
+            mode: 'paused',
+          },
+          playHistory: [
+            {
+              eventId: 'ev1',
+              recordingId: 'r1',
+              occurrenceId: 'o1',
+              playedMs: 1,
+              listenedMs: 1,
+            },
+          ],
+        },
+        ctx().context,
+      )
+    ).ok,
+    'seed commit ok',
+  );
+  // Schema-legal but doc-invalid rows: zero-ref recordings, malformed
+  // JSON cells, dependents on them, and the playhead parked on the
+  // poisoned recording's queue occurrence.
+  driver.execScript(`
+    INSERT INTO recordings (id, title, artwork_json, version_labels_json, provenance)
+      VALUES ('rec-poison', 'Poison', '[]', '[]', 'provider');
+    INSERT INTO recordings (id, title, artwork_json, version_labels_json, provenance)
+      VALUES ('rec-badjson', 'Bad', '{oops', '[]', 'provider');
+    INSERT INTO play_history (event_id, recording_id, played_ms, listened_ms)
+      VALUES ('ev-p1', 'rec-poison', 1, 1);
+    INSERT INTO play_counts (recording_id, count, last_ms)
+      VALUES ('rec-poison', 5, 1);
+    INSERT INTO likes (entity_kind, target_id, liked_ms)
+      VALUES ('track', 'rec-poison', 1);
+    INSERT INTO playlist_entries
+      (entry_id, playlist_id, recording_id, position, added_ms)
+      VALUES ('pe-p1', 'pl1', 'rec-poison', 1, 1);
+    INSERT INTO queue_occurrences (occurrence_id, ordinal, recording_id)
+      VALUES ('occ-p1', 9, 'rec-poison');
+    UPDATE queue_state
+      SET current_occurrence_id = 'occ-p1', mode = 'paused', position_ms = 42
+      WHERE id = 1;
+    INSERT INTO match_reviews
+      (review_id, recording_id, candidates_json, status, created_ms)
+      VALUES ('rv-p1', 'rec-poison', '[]', 'pending', 1);
+    INSERT INTO lyrics_cache
+      (recording_id, provider, kind, payload_json, fetched_ms)
+      VALUES ('rec-poison', 'p', 'plain', '"x"', 1);
+    INSERT INTO play_history (event_id, recording_id, played_ms, listened_ms)
+      VALUES ('ev-p2', 'rec-badjson', 2, 2);
+  `);
+  // The removeSource shape: a recordings merge over stored rows. It
+  // completes — the poisoned rows purge with their dependents instead
+  // of failing the decode.
+  const committed = await storage.commit(
+    { recordingsMerge: (current) => current },
+    ctx().context,
+  );
+  assert(committed.ok, 'merge commit tolerates malformed stored rows');
+  const count = async (sql: string): Promise<number> => {
+    const rows = await driver.transaction((conn) =>
+      conn.query<{ n: number }>(sql),
+    );
+    return rows[0]?.n ?? -1;
+  };
+  assertEqual(
+    await count(
+      `SELECT COUNT(*) AS n FROM recordings
+       WHERE id IN ('rec-poison','rec-badjson')`,
+    ),
+    0,
+    'dropped recordings purged',
+  );
+  for (const table of [
+    'play_history',
+    'play_counts',
+    'playlist_entries',
+    'queue_occurrences',
+    'match_reviews',
+    'lyrics_cache',
+  ]) {
+    assertEqual(
+      await count(
+        `SELECT COUNT(*) AS n FROM ${table}
+         WHERE recording_id IN ('rec-poison','rec-badjson')`,
+      ),
+      0,
+      `${table} dependents purged`,
+    );
+  }
+  assertEqual(
+    await count(
+      `SELECT COUNT(*) AS n FROM likes
+       WHERE entity_kind = 'track'
+         AND target_id IN ('rec-poison','rec-badjson')`,
+    ),
+    0,
+    'likes dependents purged',
+  );
+  // The playhead parked on a purged occurrence parked back to stopped.
+  const qs = await driver.transaction((conn) =>
+    conn.query<SqlRow>(
+      `SELECT current_occurrence_id, mode, position_ms
+       FROM queue_state WHERE id = 1`,
+    ),
+  );
+  assertEqual(qs[0]?.['current_occurrence_id'], null);
+  assertEqual(qs[0]?.['mode'], 'stopped');
+  assertEqual(qs[0]?.['position_ms'], 0);
+  const state = await loadOk(storage);
+  assertDeepEqual(
+    state.recordings.map((r) => r.id),
+    ['r1'],
+    'surviving document intact',
+  );
+  assertDeepEqual(state.queue.occurrences.map((o) => o.occurrenceId), ['o1']);
+  driver.close();
+}
+
+// A merge that drops a VALID recording keeps the strict contract:
+// dependents stay protected — the batch rejects rather than purge
+// live state. Purge covers only rows that failed to decode.
+async function mergeRemovalStillGuarded(): Promise<void> {
+  const { driver, storage } = rig();
+  const r1 = recording('r1', [ref('itunes', 'i1')]);
+  assert(
+    (
+      await storage.commit(
+        {
+          recordings: [r1],
+          likes: [{ entityKind: 'track', targetId: 'r1', likedAtMs: 1 }],
+          playHistory: [
+            {
+              eventId: 'ev1',
+              recordingId: 'r1',
+              occurrenceId: 'o1',
+              playedMs: 1,
+              listenedMs: 1,
+            },
+          ],
+          queue: {
+            revision: 1,
+            occurrences: [occurrence('o1', 'r1')],
+            currentOccurrenceId: 'o1',
+            positionMs: 10,
+            mode: 'paused',
+          },
+        },
+        ctx().context,
+      )
+    ).ok,
+    'seed commit ok',
+  );
+  const res = await storage.commit(
+    { recordingsMerge: () => [] },
+    ctx().context,
+  );
+  assert(!res.ok, 'merge dropping a depended-on recording rejects');
+  assertEqual(res.error.kind, 'invalid-response');
+  assertDeepEqual(
+    (await loadOk(storage)).recordings.map((r) => r.id),
+    ['r1'],
+    'stored recordings untouched',
+  );
+  driver.close();
+}
+
+// Malformed `local_*`/`recordings` rows (the removeSource wedge
+// class) drop on load; the next section commit's diff deletes the
+// stored orphans while untouched sections keep their strays until
+// their own commit lands.
+async function localSourceOrphansHeal(): Promise<void> {
+  const { driver, storage } = rig();
+  const r1 = recording('r1', [ref('itunes', 'i1')]);
+  const ls: LocalSource = {
+    sourceId: 'ls-good',
+    treeUri: 'file:///music',
+    label: 'Music',
+    addedMs: 1,
+    lastScanMs: null,
+  };
+  const lf: LocalFile = {
+    fileId: 'lf-1',
+    sourceId: 'ls-good',
+    docId: 'doc-1',
+    size: 1,
+    fingerprint: 'fp-1',
+    modifiedMs: 1,
+    title: 'Song',
+    artist: 'A',
+    album: 'B',
+    durationMs: 1,
+    genre: null,
+    recordingId: 'r1',
+  };
+  assert(
+    (
+      await storage.commit(
+        { recordings: [r1], localSources: [ls], localFiles: [lf] },
+        ctx().context,
+      )
+    ).ok,
+    'seed commit ok',
+  );
+  // '' tree_uri fails isLocalSource; a zero-ref recording + a file
+  // hanging on it are the wedge pair the renderer could write.
+  driver.execScript(`
+    INSERT INTO local_sources (source_id, tree_uri, label, added_ms)
+      VALUES ('ls-bad', '', '', 1);
+    INSERT INTO recordings (id, title, artwork_json, version_labels_json, provenance)
+      VALUES ('rec-ghost', 'Ghost', '[]', '[]', 'local');
+    INSERT INTO local_files
+      (file_id, source_id, doc_id, size, fingerprint, recording_id)
+      VALUES ('lf-ghost', 'ls-good', 'doc-g', 1, 'fp-g', 'rec-ghost');
+  `);
+  const state = await loadOk(storage);
+  assertDeepEqual(
+    state.localSources.map((s) => s.sourceId),
+    ['ls-good'],
+    'malformed local source dropped',
+  );
+  assertDeepEqual(
+    state.localFiles.map((f) => f.fileId),
+    ['lf-1'],
+    'file on a dropped recording dropped',
+  );
+  assertDeepEqual(
+    state.recordings.map((r) => r.id),
+    ['r1'],
+    'zero-ref recording dropped',
+  );
+  // The local_* commits clean their own orphans; the recordings
+  // section wasn't in this batch so its stray row survives until a
+  // recordings-touching commit purges it.
+  const committed = await storage.commit(
+    { localSources: [ls], localFiles: [lf] },
+    ctx().context,
+  );
+  assert(committed.ok, 'local section commit heals');
+  const [sourceRows, fileRows, recRows] = await driver.transaction(
+    (conn) =>
+      Promise.all([
+        conn.query<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM local_sources`,
+        ),
+        conn.query<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM local_files`,
+        ),
+        conn.query<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM recordings`,
+        ),
+      ]),
+  );
+  assertEqual(sourceRows[0]?.n, 1, 'local_sources orphan deleted');
+  assertEqual(fileRows[0]?.n, 1, 'local_files orphan deleted');
+  assertEqual(recRows[0]?.n, 2, 'unprovided recordings row untouched');
+  driver.close();
+}
+
+// The strict surface that survives tolerance: the queue_state and
+// settings singletons' required fields — engine-owned shape, not
+// droppable orphans.
+async function strictSingletonRows(): Promise<void> {
+  const cases: readonly (readonly [string, string, string])[] = [
+    ['queue_state row missing', `DELETE FROM queue_state`, 'invalid-response'],
+    [
+      'queue_state non-integer revision',
+      `UPDATE queue_state SET revision = 1.5`,
+      'invalid-response',
+    ],
+    [
+      'queue_state text revision',
+      `UPDATE queue_state SET revision = 'abc'`,
+      'invalid-response',
+    ],
+    // A blob defeats the TEXT column's affinity — a value the driver
+    // can't decode — the read still fails closed rather than heal.
+    [
+      'queue_state blob current',
+      `UPDATE queue_state SET current_occurrence_id = x'ff'`,
+      'transient',
+    ],
+    [
+      'settings empty required field',
+      `UPDATE settings SET catalog_provider = ''`,
+      'invalid-response',
+    ],
+    ['settings row missing', `DELETE FROM settings`, 'invalid-response'],
+  ];
+  for (const [name, sql, kind] of cases) {
+    const { driver, storage } = rig();
+    assert((await storage.initialize(ctx().context)).ok, 'init ok');
+    driver.execScript(sql);
+    const loaded = await storage.load(ctx().context);
+    assert(!loaded.ok, `strict singleton fails: ${name}`);
+    assertEqual(loaded.error.kind, kind, name);
     driver.close();
   }
 }
@@ -1502,15 +1966,19 @@ async function entityKindCrossCheck(): Promise<void> {
     !badLike.ok && badLike.error.kind === 'invalid-response',
     'mismatched like rejected at commit',
   );
-  // Decode side: the same row written past the validator fails load.
+  // Decode side: the same row written past the validator drops as an
+  // orphan — the load succeeds without it.
   driver.execScript(
     `INSERT INTO likes (entity_kind, target_id, liked_ms)
      VALUES ('artist', 'e-album', 5)`,
   );
   const loaded = await storage.load(ctx().context);
+  assert(loaded.ok, 'mismatched like drops on decode');
   assert(
-    !loaded.ok && loaded.error.kind === 'invalid-response',
-    'mismatched like fails decode',
+    !loaded.value.likes.some(
+      (l) => l.entityKind === 'artist' && l.targetId === 'e-album',
+    ),
+    'mismatched like absent',
   );
   driver.execScript(
     `DELETE FROM likes WHERE entity_kind = 'artist' AND target_id = 'e-album'`,
@@ -1533,16 +2001,20 @@ async function entityKindCrossCheck(): Promise<void> {
     !badRef.ok && badRef.error.kind === 'invalid-response',
     'mismatched entity ref rejected at commit',
   );
-  // Decode side.
+  // Decode side: drops the same way — the entity's surviving refs
+  // load, the mismatched row is excluded.
   driver.execScript(
     `UPDATE entity_source_refs
      SET ref_json = '{"provider":"deezer","kind":"artist","id":"d-alb"}'
      WHERE entity_id = 'e-album'`,
   );
   const again = await storage.load(ctx().context);
+  assert(again.ok, 'mismatched entity ref drops on decode');
   assert(
-    !again.ok && again.error.kind === 'invalid-response',
-    'mismatched entity ref fails decode',
+    !again.value.entitySourceRefs.some(
+      (r) => r.entityId === 'e-album' && r.provider === 'deezer',
+    ),
+    'mismatched ref absent',
   );
   driver.close();
 }
@@ -2456,6 +2928,10 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['migrationFailureRetry', migrationFailureRetry],
   ['malformedRows', malformedRows],
   ['corruptedRelations', corruptedRelations],
+  ['mergePurgeMalformedStored', mergePurgeMalformedStored],
+  ['mergeRemovalStillGuarded', mergeRemovalStillGuarded],
+  ['localSourceOrphansHeal', localSourceOrphansHeal],
+  ['strictSingletonRows', strictSingletonRows],
   ['schemaVersionEdges', schemaVersionEdges],
   ['attemptTraces', attemptTraces],
   ['attemptReplayIdempotent', attemptReplayIdempotent],
