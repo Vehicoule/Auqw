@@ -104,11 +104,6 @@ export function WorldSearch({
           !event.currentTarget.contains(event.relatedTarget as Node)
         ) {
           reportFocus(true);
-          // Only the input navigates — landing on clear/cancel is a
-          // field action, not a request to switch surfaces.
-          if (event.target === inputRef.current) {
-            onNavigateToSearch?.();
-          }
         }
       }}
       onBlur={(event) => {
@@ -128,6 +123,9 @@ export function WorldSearch({
         readOnly={field.readOnly}
         placeholder={field.label}
         aria-label={field.label}
+        // Navigation rides the input's own focus — inner-button focus
+        // is a field action, but the caret entering the input routes.
+        onFocus={() => onNavigateToSearch?.()}
         onChange={(event) => field.onChange?.(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === 'Enter') {
