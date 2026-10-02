@@ -1078,6 +1078,56 @@ export async function run(): Promise<void> {
     );
     assert(afterFree.ok, 'a freed slot admits a new fetch');
     capped.close();
+
+    // An abandoned parked fetch can't hold its slot forever — the
+    // hard-timeout backstop frees the entry itself, so a renderer that
+    // never calls fetchBody/fetchAbort can't wedge the fetch plane at
+    // the cap. 32 parked (the production default), a 33rd must start.
+    const timedOut = createTransferService({
+      mediaDir: join(fetchRoot, 'media-timed'),
+      fetchImpl: fakeFetch,
+      lookupImpl: fakeLookup,
+      fetchHardTimeoutMs: 40,
+    });
+    const timedRoute = createUtilityRouter(timedOut.handlers);
+    let timedSeq = 200;
+    const timedCall = (
+      channel: string,
+      args?: unknown,
+    ): Promise<UtilityResponse> => {
+      const id = timedSeq;
+      timedSeq += 1;
+      return timedRoute({ id, channel, args });
+    };
+    for (let i = 1; i <= 32; i += 1) {
+      const parkedN = await timedCall(
+        CHANNELS.transferFetch,
+        argsFor(`t-${i}`, 'https://cdn.example/ok2'),
+      );
+      assert(parkedN.ok, `fetch ${i} parks`);
+    }
+    const wedged = await timedCall(
+      CHANNELS.transferFetch,
+      argsFor('t-33', 'https://cdn.example/ok2'),
+    );
+    assert(
+      !wedged.ok && wedged.error.kind === 'unavailable',
+      'a fully-parked cap refuses',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 160));
+    const reclaimed = await timedCall(
+      CHANNELS.transferFetch,
+      argsFor('t-33', 'https://cdn.example/ok2'),
+    );
+    assert(reclaimed.ok, 'the backstop frees abandoned parked fetches');
+    const staleBody = await timedCall(CHANNELS.transferFetchBody, {
+      requestId: 't-1',
+    });
+    assert(
+      !staleBody.ok && staleBody.error.kind === 'invalid-request',
+      'a reclaimed fetch answers unknown-id',
+    );
+    timedOut.close();
   } finally {
     rmSync(fetchRoot, { recursive: true, force: true });
   }

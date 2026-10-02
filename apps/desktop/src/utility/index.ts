@@ -8,6 +8,7 @@ import { createPotService } from './pot-service.ts';
 import { createUtilityRouter } from './router.ts';
 import { createServiceClient } from './service.ts';
 import { createIndexDb } from './index-db.ts';
+import { createLocalGrants } from './local-grants.ts';
 import { createLocalService } from './local.ts';
 import { createStorageService } from './storage.ts';
 import { createStreamHandlers } from './stream.ts';
@@ -109,9 +110,28 @@ if (port === null) {
   // entry any other way is a wiring bug, not a usable mode.
   process.exitCode = 1;
 } else {
-  // The bundled POT minter (bgutil /get_pot): a LAN-visible service
-  // the plugin host mints through and the phone discovers via the
-  // pairing payload. AUQW_POT_PROVIDER_URL points the host at an
+  // Utility→main service client: safeStorage exists only in main, so
+  // the sync service's identity + device key custody rides the
+  // whitelisted `sync:keys` channel. Its replies share the envelope
+  // shape but are consumed by the client, never by the router.
+  const serviceClient = createServiceClient({
+    post: (message) => port.postMessage(message),
+  });
+  // Fire-and-forget pushes into main — the service call's reply is
+  // never read, and a dead client must not reject upward.
+  const push = (channel: string, args: unknown): Promise<void> =>
+    serviceClient.request(channel, args).then(
+      () => undefined,
+      () => undefined,
+    );
+  // The bundled POT minter (bgutil /get_pot): binds loopback by
+  // default — the endpoint answers unauthenticated, so a wildcard
+  // listen would let any LAN peer mint under this host's residential
+  // IP. `AUQW_POT_LAN=1` opts into `0.0.0.0` for the paired-phone
+  // shape, and the custody channel must prove a paired device (a
+  // paired phone legitimately shares this host's public IP);
+  // opt-in without a pairing falls back to loopback.
+  // AUQW_POT_PROVIDER_URL points the host at an
   // external provider instead — then this never binds and pairing
   // advertises nothing. The bind rides the startup gate below so a
   // QR minted early can't advertise a dead endpoint.
@@ -124,6 +144,17 @@ if (port === null) {
       : undefined;
   const pot = createPotService({
     log: (line) => console.warn(`[auqw] ${line}`),
+    lanOptIn: process.env['AUQW_POT_LAN'] === '1',
+    lanReady: async () => {
+      try {
+        const { devices } = await createServiceKeys(
+          serviceClient.request,
+        ).deviceList();
+        return devices.length > 0;
+      } catch {
+        return false;
+      }
+    },
   });
   const potBound: Promise<number | null> =
     potOverride === undefined
@@ -194,23 +225,25 @@ if (port === null) {
   // `AUQW_DB_PATH` points under userData; the service opens lazily on
   // the first storage request so a missing path is a typed
   // `unavailable`, not a crashed child.
+  const indexDb = createIndexDb(process.env['AUQW_DB_PATH']);
+  const userData = process.env['AUQW_USER_DATA'];
+  // The authoritative local-file grant store — utility-owned file
+  // under userData (local-grants.ts): `local:add` mints, the storage
+  // commit-diff revokes, a renderer's `local_sources` writes do
+  // neither. Bootstrap imports pre-existing rows once on first boot.
+  const localGrants = createLocalGrants({
+    path:
+      userData === undefined
+        ? undefined
+        : `${userData}/local-grants.json`,
+    database: indexDb.get,
+    log: (line) => console.warn(`[auqw] ${line}`),
+  });
   const storage = createStorageService({
     dbPath: process.env['AUQW_DB_PATH'],
+    localGrants,
+    log: (line) => console.warn(`[auqw] ${line}`),
   });
-  // Utility→main service client: safeStorage exists only in main, so
-  // the sync service's identity + device key custody rides the
-  // whitelisted `sync:keys` channel. Its replies share the envelope
-  // shape but are consumed by the client, never by the router.
-  const serviceClient = createServiceClient({
-    post: (message) => port.postMessage(message),
-  });
-  // Fire-and-forget pushes into main — the service call's reply is
-  // never read, and a dead client must not reject upward.
-  const push = (channel: string, args: unknown): Promise<void> =>
-    serviceClient.request(channel, args).then(
-      () => undefined,
-      () => undefined,
-    );
   // OAuth session trust: custody rides `auth:custody` up to main's
   // sealed store; the access token (memory-only) lands in the host
   // slot — a host that isn't loaded yet gets it via the constructor
@@ -239,7 +272,6 @@ if (port === null) {
   // stamps. Construction is async, so the service resolves the
   // promise inside start() — a failed build degrades to
   // engine-absent and the listener/pairing still serve.
-  const userData = process.env['AUQW_USER_DATA'];
   const syncLogOpened: Promise<OpenedSyncLog | null> | null =
     userData === undefined
       ? null
@@ -356,7 +388,6 @@ if (port === null) {
   // (same file the storage service drives — never a second file), the
   // transfer sink service over `userData/media`, the grant-checked tag
   // reader, and the local probe/list/sweep surface.
-  const indexDb = createIndexDb(process.env['AUQW_DB_PATH']);
   const mediaDir =
     userData === undefined ? undefined : `${userData}/media`;
   const transfer = createTransferService({
@@ -371,8 +402,14 @@ if (port === null) {
     ...storage.handlers,
     ...syncService.handlers,
     ...transfer.handlers,
-    ...createTagService({ database: indexDb.get }).handlers,
-    ...createLocalService({ database: indexDb.get, mediaDir }).handlers,
+    ...createTagService({
+      grants: localGrants,
+    }).handlers,
+    ...createLocalService({
+      database: indexDb.get,
+      mediaDir,
+      grants: localGrants,
+    }).handlers,
     ...auth.handlers,
   });
   // Startup integrity resolves before the port starts delivering:

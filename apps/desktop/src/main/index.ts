@@ -8,6 +8,7 @@ import {
   net,
   safeStorage,
   screen,
+  session,
   shell,
   systemPreferences,
   utilityProcess,
@@ -31,6 +32,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  readFileSync,
   readSync,
   renameSync,
   rmSync,
@@ -56,6 +58,7 @@ import { createFetchProbe, createNetService } from './net-monitor.ts';
 import { createThemeMonitor } from './theme-monitor.ts';
 import { createSecureStore } from './secure-store.ts';
 import { createSupervisor } from './supervisor.ts';
+import { verifyUtilityIntegrity } from './utility-integrity.ts';
 import {
   createAppliedPushService,
   createAuthStatePushService,
@@ -76,6 +79,7 @@ import {
   syncHasPairedDevices,
 } from './sync-keys.ts';
 import { createAuthCustodyHandler } from './auth-custody.ts';
+import { imgSrcSources, rewriteCsp } from './csp.ts';
 import type { WindowState } from './window-state.ts';
 import {
   loadWindowState,
@@ -147,6 +151,9 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     'AUQW_SYNC_NAME',
     'AUQW_SYNC_NO_MDNS',
     'AUQW_POT_PROVIDER_URL',
+    // Opt-in wildcard bind for the POT minter — the utility still
+    // refuses 0.0.0.0 without a paired device in sync custody.
+    'AUQW_POT_LAN',
     // Advanced OAuth overrides — the utility owns the token exchange,
     // so an explicitly-set client credential must reach it (opt-in
     // allowlist entries, not ambient env passthrough).
@@ -247,6 +254,36 @@ if (!gotLock) {
 
 async function main(): Promise<void> {
   await app.whenReady();
+
+  // The product window's CSP meta ships static — `img-src 'self'
+  // https:` would hand the sandboxed renderer unrestricted HTTPS
+  // egress (every fetch-shaped side channel hides in an <img>). The
+  // serve-time rewrite enumerates the installed manifests' network:
+  // hosts + the proven artwork CDNs instead (src/main/csp.ts). Only
+  // the loaded document is rewritten; every other file:// load passes
+  // through to the default loader — and the file:// origin is kept,
+  // since Chrome refuses non-file subresources into a file-less
+  // parent scheme (local media playback rides media-src file:).
+  const imgSrc = imgSrcSources(
+    process.env['AUQW_PLUGIN_DIR'] ??
+      (app.isPackaged
+        ? join(process.resourcesPath, 'plugins')
+        : join(here, '../../plugins')),
+  );
+  session.defaultSession.protocol.handle('file', (request) => {
+    try {
+      if (fileURLToPath(request.url) === RENDERER) {
+        return new Response(
+          rewriteCsp(readFileSync(RENDERER, 'utf8'), imgSrc),
+          { headers: { 'content-type': 'text/html; charset=utf-8' } },
+        );
+      }
+    } catch {
+      // Fall through to the default file loader — a malformed request
+      // URL or unreadable document is not ours to answer for.
+    }
+    return net.fetch(request, { bypassCustomProtocolHandlers: true });
+  });
 
   const userDataPath = app.getPath('userData');
   const statePath = join(userDataPath, 'window-state.json');
@@ -639,13 +676,23 @@ async function main(): Promise<void> {
   });
   updateService.subscribe((snapshot) => updateStatePush.notify(snapshot));
   const supervisor = createSupervisor({
-    fork: () =>
-      utilityProcess.fork(UTILITY, [], {
+    fork: () => {
+      if (app.isPackaged) {
+        // The fork target lives outside app.asar — outside the fuse
+        // integrity envelope — so after-pack's manifest verifies its
+        // bytes first (and the loose napi artifact it loads). A
+        // tampered file throws here; the supervisor treats it like a
+        // crash: the retry re-verifies and never forks loose bytes
+        // that don't match.
+        verifyUtilityIntegrity(process.resourcesPath);
+      }
+      return utilityProcess.fork(UTILITY, [], {
         // The utility needs only platform essentials plus the AUQW_*
         // knobs — never the parent's full env (credentials would leak
         // into a process that loads native artifacts).
         env: utilityEnv(userDataPath),
-      }),
+      });
+    },
     // Utility→main service calls: safeStorage lives only in main, so
     // sync identity + device key material rides `sync:keys` up to the
     // SecureStore. The child gets no other main-process reach.

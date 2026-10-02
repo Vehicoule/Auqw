@@ -18,6 +18,7 @@ import { MIGRATIONS } from '@auqw/storage-sqlite';
 import { CHANNELS } from '../shared/channels.ts';
 import { dirTreeUri, pickedFileTreeUri } from '../shared/local-paths.ts';
 import type { UtilityResponse } from './envelope.ts';
+import { createLocalGrants } from './local-grants.ts';
 import { createUtilityRouter } from './router.ts';
 import { createTagService } from './tags.ts';
 
@@ -95,7 +96,14 @@ export async function run(): Promise<void> {
       db.exec(sql);
     }
   }
-  const service = createTagService({ database: () => db });
+  // Grant authority lives in the utility-owned store — the tag
+  // reader never reads `local_sources`; a `local:add` pick is what
+  // mints, and the helper mints straight into the authority.
+  const grants = createLocalGrants({
+    path: join(root, 'local-grants.json'),
+    database: () => db,
+  });
+  const service = createTagService({ grants });
   const route = createUtilityRouter(service.handlers);
   let nextId = 1;
   const call = (
@@ -107,9 +115,7 @@ export async function run(): Promise<void> {
     return route({ id, channel, args });
   };
   const grant = (treeUri: string): void => {
-    db.prepare(
-      'INSERT INTO local_sources (source_id, tree_uri, label, added_ms) VALUES (?, ?, ?, ?)',
-    ).run(`src-${treeUri.length}-${Math.random().toString(36).slice(2)}`, treeUri, 'x', 1);
+    grants.grant(treeUri);
   };
 
   try {

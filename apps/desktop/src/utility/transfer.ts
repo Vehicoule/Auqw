@@ -81,6 +81,12 @@ type TransferServiceOptions = {
   readonly maxFetches?: number | undefined;
   /** Wire fetch for `transfer:fetch*` — Node fetch in production. */
   readonly fetchImpl?: typeof fetch | undefined;
+  /**
+   * Socket-lease backstop for a fetch whose cancel never arrives —
+   * `FETCH_HARD_TIMEOUT_MS` in production; tests shorten it to drive
+   * the parked-entry reclamation without a two-minute wait.
+   */
+  readonly fetchHardTimeoutMs?: number | undefined;
   /** Host resolver for the private-address verdict — node:dns in production. */
   readonly lookupImpl?:
     | ((hostname: string) => Promise<LookupAddress[]>)
@@ -777,6 +783,8 @@ export function createTransferService(
   const fetches = new Map<string, LiveFetch>();
   const maxFetches = options.maxFetches ?? DEFAULT_MAX_FETCHES;
   const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchHardTimeoutMs =
+    options.fetchHardTimeoutMs ?? FETCH_HARD_TIMEOUT_MS;
   const lookupImpl =
     options.lookupImpl ??
     ((hostname: string) =>
@@ -978,7 +986,18 @@ export function createTransferService(
       timer: setTimeout(() => {
         live.timedOut = true;
         live.controller.abort();
-      }, FETCH_HARD_TIMEOUT_MS),
+        // A parked post-response fetch has no rejection to unwind it
+        // — the renderer may never call fetchBody/fetchAbort, so the
+        // backstop frees its own slot or the fetch cap wedges for
+        // the service's life. The in-flight case already unwinds
+        // through the fetch() rejection → catch → delete path.
+        if (
+          live.response !== null &&
+          fetches.get(args.requestId) === live
+        ) {
+          fetches.delete(args.requestId);
+        }
+      }, fetchHardTimeoutMs),
       response: null,
       consumed: false,
       timedOut: false,

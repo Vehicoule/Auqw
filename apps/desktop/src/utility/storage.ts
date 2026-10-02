@@ -20,6 +20,7 @@ import {
 import type { ShellError } from '../shared/errors.ts';
 import { isShellError, shellError } from '../shared/errors.ts';
 import { guarded, type UtilityHandler } from './router.ts';
+import type { LocalGrants } from './local-grants.ts';
 
 type StorageServiceOptions = {
   /**
@@ -28,6 +29,16 @@ type StorageServiceOptions = {
    * every storage channel to `unavailable` instead of a crash.
    */
   readonly dbPath: string | undefined;
+  /**
+   * Authoritative local-file grant store (`local-grants.ts`). Source
+   * removal rides this service's commit boundary: `local_sources`
+   * treeUris a committed tx deleted are revoked in the authority —
+   * the only renderer-reachable un-grant path, since every table
+   * write arrives through a managed tx.
+   */
+  readonly localGrants?: LocalGrants | undefined;
+  /** Warn-level lines only — never sql or row content. */
+  readonly log?: ((line: string) => void) | undefined;
 };
 
 type StorageService = {
@@ -36,7 +47,12 @@ type StorageService = {
   readonly close: () => void;
 };
 
-type OpenTx = { cancelled: boolean };
+type OpenTx = {
+  cancelled: boolean;
+  /** `local_sources.tree_uri` at tx start — the commit-diff baseline
+   *  for grant revocation (see `localGrants` above). */
+  readonly localSourcesBefore: Set<string>;
+};
 
 /**
  * Maps a thrown sqlite/fs failure to a typed io error. The raw value —
@@ -237,6 +253,62 @@ export function createStorageService(
     }
   }
 
+  /** `local_sources.tree_uri` at the connection's current commit —
+   *  an absent table reads as empty (fresh install, pre-migration). */
+  function sourceTreeUris(db: DatabaseSync): Set<string> {
+    try {
+      const rows = db
+        .prepare('SELECT tree_uri AS treeUri FROM local_sources')
+        .all() as { treeUri?: unknown }[];
+      return new Set(
+        rows
+          .map((row) => row['treeUri'])
+          .filter((uri): uri is string => typeof uri === 'string'),
+      );
+    } catch (thrown) {
+      const message = thrown instanceof Error ? thrown.message : '';
+      if (message.includes('no such table')) {
+        return new Set();
+      }
+      rethrowStorage('local_sources read failed', thrown);
+    }
+  }
+
+  /**
+   * A committed tx's `local_sources` deletions revoke the matching
+   * grants — inserts never grant (only `local:add` mints), so the
+   * authority moves exactly one direction on this boundary. A table
+   * rewrite (DELETE-all + INSERT-all) revokes only genuinely dropped
+   * treeUris; a carried-over uri stays granted, matching "source still
+   * present" semantics the UI mirror tracks.
+   */
+  function revokeDroppedSources(tx: OpenTx): void {
+    if (
+      options.localGrants === undefined ||
+      tx.localSourcesBefore.size === 0
+    ) {
+      return;
+    }
+    try {
+      const after = sourceTreeUris(database());
+      const dropped = [...tx.localSourcesBefore].filter(
+        (uri) => !after.has(uri),
+      );
+      if (dropped.length > 0) {
+        options.localGrants.revoke(dropped);
+      }
+    } catch {
+      // The commit already landed — a failed diff must not report a
+      // landed tx as failed. A missed revoke fails closed the other
+      // way on reboot only if the store file went too; in-memory the
+      // grant stays live until the next diff succeeds. Warn, don't
+      // surface.
+      options.log?.(
+        'storage: grant-revocation diff failed — committed tx stands',
+      );
+    }
+  }
+
   async function begin(): Promise<unknown> {
     // A second begin waits on the slot the active tx releases on
     // commit/rollback; statements for the open tx keep flowing
@@ -257,7 +329,12 @@ export function createStorageService(
       rethrowStorage('storage begin failed', thrown);
     }
     const txId = randomUUID();
-    openTxs.set(txId, { cancelled: false });
+    openTxs.set(txId, {
+      cancelled: false,
+      // Inside the write tx, the snapshot is the diff baseline — a
+      // renderer DELETE inside this tx is what commit() un-grants.
+      localSourcesBefore: sourceTreeUris(database()),
+    });
     activeTx = txId;
     txClosed = new Promise<void>((resolve) => {
       releaseTx = resolve;
@@ -282,6 +359,7 @@ export function createStorageService(
     } catch (thrown) {
       rethrowStorage('storage commit failed', thrown);
     }
+    revokeDroppedSources(tx);
     return undefined;
   }
 

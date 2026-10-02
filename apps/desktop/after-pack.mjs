@@ -19,8 +19,9 @@
 // seals a bundle nobody signed, so adopting a real identity later needs
 // no change here.
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 
 const run = (args) => {
   const result = spawnSync('codesign', args, { encoding: 'utf8' });
@@ -70,7 +71,73 @@ export function sealAppBundle(appPath) {
   }
 }
 
+// Loose-file integrity: `asarUnpack` puts dist/utility/** outside
+// app.asar, and the napi artifact ships loose at the resources root —
+// the fuse asar-integrity check covers neither. Write
+// utility-integrity.sha256 under resources/ in the sha256sum format
+// tooling/checksums.mjs uses ("<hex>  <relpath>", POSIX separators,
+// rel against the resources dir); main verifies every entry before
+// each utilityProcess.fork (src/main/utility-integrity.ts).
+export function writeUtilityIntegrity(resourcesDir) {
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const abs = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(abs);
+      } else if (entry.isFile()) {
+        files.push(abs);
+      }
+    }
+  };
+  const unpacked = join(resourcesDir, 'app.asar.unpacked');
+  if (existsSync(unpacked)) {
+    walk(unpacked);
+  }
+  for (const name of readdirSync(resourcesDir).sort()) {
+    const abs = join(resourcesDir, name);
+    if (name.endsWith('.node') && statSync(abs).isFile()) {
+      files.push(abs);
+    }
+  }
+  if (files.length === 0) {
+    throw new Error(
+      `after-pack: no loose utility files under ${resourcesDir} — the integrity manifest would cover nothing`,
+    );
+  }
+  const lines = files
+    .map((abs) => {
+      const rel = relative(resourcesDir, abs).split(sep).join('/');
+      const hex = createHash('sha256').update(readFileSync(abs)).digest('hex');
+      return `${hex}  ${rel}`;
+    })
+    .sort();
+  writeFileSync(
+    join(resourcesDir, 'utility-integrity.sha256'),
+    lines.join('\n') + '\n',
+  );
+  console.log(
+    `after-pack: utility-integrity.sha256 covers ${files.length} loose file(s)`,
+  );
+}
+
+function resourcesDirOf(context) {
+  return context.electronPlatformName === 'darwin'
+    ? join(
+        context.appOutDir,
+        `${context.packager.appInfo.productFilename}.app`,
+        'Contents',
+        'Resources',
+      )
+    : join(context.appOutDir, 'resources');
+}
+
 export default async function afterPack(context) {
+  const resourcesDir = resourcesDirOf(context);
+  // The manifest must land before sealAppBundle on macOS: codesign
+  // --deep seals Contents/Resources/, so writing it after the seal
+  // would ship a manifest the signature doesn't cover.
+  writeUtilityIntegrity(resourcesDir);
   if (context.electronPlatformName !== 'darwin') return;
   sealAppBundle(join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`));
 }

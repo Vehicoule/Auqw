@@ -31,6 +31,7 @@ import {
 import { guarded, type UtilityHandler } from './router.ts';
 import { mimeForPath } from '../shared/audio-mime.ts';
 import { isBareName } from './transfer.ts';
+import type { LocalGrants } from './local-grants.ts';
 
 /**
  * `local:*` — the desktop local-files surface the renderer's engines
@@ -45,6 +46,13 @@ import { isBareName } from './transfer.ts';
  * that needs a real filesystem), probing the index for a playable
  * `file://` URI (`local:probe`/`local:playback`), and the startup
  * integrity sweep (`local:sweep` — index rows whose files vanished).
+ *
+ * File access is grant-checked against the utility-owned store (see
+ * `local-grants.ts`): `local:add` mints a grant for every pick it
+ * returns, and every index row is only ever followed when its
+ * `tree_uri` is still granted — a `local_sources` row alone is a UI
+ * mirror, never a read path, because the renderer writes that table
+ * freely through `storage:*`.
  */
 
 type LocalServiceOptions = {
@@ -52,6 +60,8 @@ type LocalServiceOptions = {
   readonly database: () => DatabaseSync | null;
   /** Managed media dir — for probing `downloads.file_path` rows. */
   readonly mediaDir: string | undefined;
+  /** Authoritative grant check — the utility-owned store. */
+  readonly grants: LocalGrants;
 };
 
 type LocalService = {
@@ -219,7 +229,7 @@ type LocalRow = {
   readonly recordingId: string;
 };
 
-function localRows(db: DatabaseSync): LocalRow[] {
+function localRows(db: DatabaseSync, grants: LocalGrants): LocalRow[] {
   try {
     const rows = db
       .prepare(
@@ -230,14 +240,19 @@ function localRows(db: DatabaseSync): LocalRow[] {
          JOIN local_sources s ON s.source_id = f.source_id`,
       )
       .all() as Record<string, unknown>[];
-    return rows.filter(
-      (row): row is LocalRow =>
-        typeof row['fileId'] === 'string' &&
-        typeof row['sourceId'] === 'string' &&
-        typeof row['docId'] === 'string' &&
-        typeof row['treeUri'] === 'string' &&
-        typeof row['recordingId'] === 'string',
-    );
+    return rows
+      .filter(
+        (row): row is LocalRow =>
+          typeof row['fileId'] === 'string' &&
+          typeof row['sourceId'] === 'string' &&
+          typeof row['docId'] === 'string' &&
+          typeof row['treeUri'] === 'string' &&
+          typeof row['recordingId'] === 'string',
+      )
+      // A row is a read path only while its tree stays granted —
+      // `local_sources` itself is renderer-writable, so membership
+      // in the table can never mint access.
+      .filter((row) => grants.has(row.treeUri));
   } catch (thrown) {
     const message = thrown instanceof Error ? thrown.message : '';
     if (message.includes('no such table')) {
@@ -251,7 +266,12 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
   async function add(args: LocalAddArgs): Promise<unknown> {
     const picks: PickedTree[] = [];
     for (const path of args.paths) {
-      picks.push(await describePick(path));
+      const pick = await describePick(path);
+      // The one grant-mint path: only a pick this service validated
+      // (absolute, real, readable, dir or known-audio file) can grant
+      // the tree it names.
+      options.grants.grant(pick.treeUri);
+      picks.push(pick);
     }
     return { picks };
   }
@@ -307,7 +327,8 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
       for (const row of rows) {
         if (
           typeof row.docId !== 'string' ||
-          typeof row.treeUri !== 'string'
+          typeof row.treeUri !== 'string' ||
+          !options.grants.has(row.treeUri)
         ) {
           continue;
         }
@@ -471,14 +492,19 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
           (await realpathChecked(options.mediaDir)) ?? undefined;
       }
       for (const row of rows) {
-        if (typeof row['filePath'] !== 'string') {
+        // A ledger name carrying separators is never joined — the
+        // same isBareName guard the probe/playback legs apply. The
+        // anchored pathConfined below is the second fence, not the
+        // only one.
+        if (
+          typeof row['filePath'] !== 'string' ||
+          !isBareName(row['filePath'])
+        ) {
           continue;
         }
         const nameReal = await realpathChecked(
           join(options.mediaDir, row['filePath']),
         );
-        // A ledger name carrying separators must not resolve outside
-        // the media dir — same guard the probe leg applies.
         if (
           nameReal !== null &&
           nameReal === real &&
@@ -489,7 +515,7 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
         }
       }
     }
-    for (const row of localRows(db)) {
+    for (const row of localRows(db, options.grants)) {
       // The file must BE an indexed row — compare realpath'd paths, not
       // lexical URIs, so both the lexical docUri (resolve) and the
       // minted realpath'd URI (read) answer the same.
@@ -680,7 +706,7 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
           }
         }
       }
-      for (const row of localRows(db)) {
+      for (const row of localRows(db, options.grants)) {
         if (seen.has(row.recordingId)) {
           continue;
         }
@@ -724,7 +750,7 @@ export function createLocalService(options: LocalServiceOptions): LocalService {
     }
     const missingBySource = new Map<string, number>();
     let missing = 0;
-    for (const row of localRows(db)) {
+    for (const row of localRows(db, options.grants)) {
       let abs: string | null;
       try {
         abs = await probeDocAbs(row.treeUri, row.docId);

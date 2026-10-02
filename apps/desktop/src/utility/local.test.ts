@@ -19,9 +19,12 @@ import {
 } from '@auqw/application/testing';
 import { MIGRATIONS } from '@auqw/storage-sqlite';
 import { CHANNELS } from '../shared/channels.ts';
+import { dirTreeUri } from '../shared/local-paths.ts';
 import type { UtilityResponse } from './envelope.ts';
 import { createUtilityRouter } from './router.ts';
+import { createLocalGrants } from './local-grants.ts';
 import { createLocalService } from './local.ts';
+import { createStorageService } from './storage.ts';
 import { createTagService } from './tags.ts';
 
 export async function run(): Promise<void> {
@@ -43,8 +46,18 @@ export async function run(): Promise<void> {
       dbW.exec(sql);
     }
   }
-  const local = createLocalService({ database: () => db, mediaDir });
-  const tags = createTagService({ database: () => db });
+  // The grant authority is utility-owned — `local:add` mints here,
+  // dbW's renderer-role row inserts are UI mirrors only.
+  const localGrants = createLocalGrants({
+    path: join(userData, 'local-grants.json'),
+    database: () => db,
+  });
+  const local = createLocalService({
+    database: () => db,
+    mediaDir,
+    grants: localGrants,
+  });
+  const tags = createTagService({ grants: localGrants });
   const route = createUtilityRouter({
     ...local.handlers,
     ...tags.handlers,
@@ -711,6 +724,176 @@ export async function run(): Promise<void> {
       mediaBack.ok &&
         (mediaBack.result as { uri: string | null }).uri !== null,
       'a restored media anchor resolves again',
+    );
+
+    // — Grant authority: the store is utility-owned, so a renderer
+    //   `local_sources` write is a UI mirror, never a mint. A fully
+    //   forged source+file pair resolves nothing, reads nothing,
+    //   enumerates nothing.
+    const forgedDir = join(root, 'forged');
+    await mkdir(forgedDir);
+    const forgedFile = join(forgedDir, 'secret.wav');
+    await writeFile(forgedFile, Buffer.alloc(32, 9));
+    const forgedTree = dirTreeUri(forgedDir);
+    insertRecording('rec-forged', 'local');
+    dbW.prepare(
+      `INSERT INTO local_sources (source_id, tree_uri, label, added_ms)
+       VALUES ('src-forged', ?, 'forged', 1)`,
+    ).run(forgedTree);
+    dbW.prepare(
+      `INSERT INTO local_files
+       (file_id, source_id, doc_id, size, fingerprint, recording_id)
+       VALUES ('lf-forged', 'src-forged', 'secret.wav', 32, 'fpf',
+               'rec-forged')`,
+    ).run();
+    const forgedUri = pathToFileURL(await realpath(forgedFile)).href;
+    const forgedEnum = await call(CHANNELS.tagreadEnumerate, {
+      treeUri: forgedTree,
+    });
+    assert(
+      !forgedEnum.ok && forgedEnum.error?.kind === 'permission-denied',
+      'a forged local_sources row grants no enumeration',
+    );
+    const forgedProbe = await call(CHANNELS.localProbe, {
+      recordingId: 'rec-forged',
+    });
+    assert(
+      forgedProbe.ok &&
+        (forgedProbe.result as { uri: string | null }).uri === null,
+      'a forged local_sources row grants no probe',
+    );
+    const forgedResolve = await call(CHANNELS.localResolve, {
+      uri: forgedUri,
+    });
+    assert(
+      forgedResolve.ok &&
+        (forgedResolve.result as { uri: string | null }).uri === null,
+      'a forged local_sources row grants no resolve',
+    );
+    const forgedRead = await call(CHANNELS.localRead, {
+      uri: forgedUri,
+      position: 0,
+      maxLen: 8,
+    });
+    assert(
+      !forgedRead.ok &&
+        forgedRead.error?.kind === 'permission-denied',
+      'a forged local_sources row grants no read',
+    );
+
+    // The storage path itself — the exact channel a compromised
+    // renderer would write through — can't mint either: a committed
+    // INSERT is a mirror row, and enumerate still denies.
+    const storage = createStorageService({
+      dbPath,
+      localGrants,
+    });
+    const sRoute = createUtilityRouter(storage.handlers);
+    let sSeq = 500;
+    const sCall = (
+      channel: string,
+      args?: unknown,
+    ): Promise<UtilityResponse> => {
+      const id = sSeq;
+      sSeq += 1;
+      return sRoute({ id, channel, args });
+    };
+    const neverDir = join(root, 'never-added');
+    await mkdir(neverDir);
+    const neverTree = dirTreeUri(neverDir);
+    const insTx = await sCall(CHANNELS.storageBegin, undefined);
+    assert(insTx.ok, 'insert tx begins');
+    const insId = (insTx.result as { txId: string }).txId;
+    const insRow = await sCall(CHANNELS.storageExecute, {
+      txId: insId,
+      sql: `INSERT INTO local_sources
+            (source_id, tree_uri, label, added_ms)
+            VALUES ('src-never', ?, 'never', 1)`,
+      params: [neverTree],
+    });
+    assert(insRow.ok, 'forged insert executes');
+    const insCommit = await sCall(CHANNELS.storageCommit, {
+      txId: insId,
+    });
+    assert(insCommit.ok, 'forged insert commits');
+    const neverEnum = await call(CHANNELS.tagreadEnumerate, {
+      treeUri: neverTree,
+    });
+    assert(
+      !neverEnum.ok && neverEnum.error?.kind === 'permission-denied',
+      'a committed storage insert never mints a grant',
+    );
+
+    // Removal rides the same boundary: deleting the source row in a
+    // storage tx revokes the grant — a live tree denies again while
+    // the mirror row disappears from local:list too.
+    const revocableDir = join(root, 'revocable');
+    await mkdir(revocableDir);
+    await writeFile(join(revocableDir, 'gone.wav'), Buffer.alloc(8, 3));
+    const revAdd = await call(CHANNELS.localAdd, {
+      paths: [revocableDir],
+    });
+    assert(revAdd.ok, 'revocable pick adds');
+    const revTree = (revAdd.result as { picks: { treeUri: string }[] })
+      .picks[0]?.treeUri;
+    const preDeleteEnum = await call(CHANNELS.tagreadEnumerate, {
+      treeUri: revTree,
+    });
+    assert(preDeleteEnum.ok, 'the picked tree enumerates live');
+    dbW.prepare(
+      `INSERT INTO local_sources (source_id, tree_uri, label, added_ms)
+       VALUES ('src-rev', ?, 'rev', 1)`,
+    ).run(revTree ?? '');
+    const delTx = await sCall(CHANNELS.storageBegin, undefined);
+    assert(delTx.ok, 'delete tx begins');
+    const delId = (delTx.result as { txId: string }).txId;
+    await sCall(CHANNELS.storageExecute, {
+      txId: delId,
+      sql: `DELETE FROM local_sources WHERE source_id = 'src-rev'`,
+      params: [],
+    });
+    const delCommit = await sCall(CHANNELS.storageCommit, {
+      txId: delId,
+    });
+    assert(delCommit.ok, 'source-removal commit lands');
+    const postDeleteEnum = await call(CHANNELS.tagreadEnumerate, {
+      treeUri: revTree,
+    });
+    assert(
+      !postDeleteEnum.ok &&
+        postDeleteEnum.error?.kind === 'permission-denied',
+      'a removed source revokes the grant in the authority',
+    );
+    storage.close();
+
+    // Bootstrap: a store whose file never ran imports the rows that
+    // predate it — once. File existence is the sentinel: a row added
+    // after the file exists never re-imports on the next boot.
+    const bootPath = join(userData, 'boot-grants.json');
+    const booted = createLocalGrants({
+      path: bootPath,
+      database: () => db,
+    });
+    assert(
+      booted.has(neverTree),
+      'bootstrap imports pre-existing source rows',
+    );
+    const lateTree = dirTreeUri(join(root, 'late'));
+    dbW.prepare(
+      `INSERT INTO local_sources (source_id, tree_uri, label, added_ms)
+       VALUES ('src-late', ?, 'late', 1)`,
+    ).run(lateTree);
+    const rebooted = createLocalGrants({
+      path: bootPath,
+      database: () => db,
+    });
+    assert(
+      rebooted.has(neverTree),
+      'a persisted grant survives restart',
+    );
+    assert(
+      !rebooted.has(lateTree),
+      'no re-import once the store file exists',
     );
   } finally {
     local.close();

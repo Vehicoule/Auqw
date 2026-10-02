@@ -21,7 +21,7 @@ import {
 /**
  * Bundled proof-of-origin-token provider (bgutil `/get_pot`
  * contract). A lazily-bound `node:http` listener on
- * `0.0.0.0:<ephemeral>` answers `POST /get_pot {content_binding}`
+ * `127.0.0.1:<ephemeral>` answers `POST /get_pot {content_binding}`
  * with `{poToken, contentBinding, expiresAt}` — the exact shape the
  * plugin-host's `pot_token` capability relays to guests verbatim.
  *
@@ -37,10 +37,15 @@ import {
  * (verified: one token resolved two different video ids,
  * ttl ~43200s).
  *
- * The bind is intentionally on the wildcard address: a phone that
- * paired over LAN shares this host's public IP, so desktop-minted
- * tokens attest for it too (docs/decisions.md — unauthenticated
- * LAN endpoint tradeoff). Sessions are IP-bound and shared: one
+ * Loopback is the default bind because the endpoint answers
+ * unauthenticated: a wildcard listen would let any LAN peer drive
+ * BotGuard minting under this host's residential IP. The paired-
+ * phone shape still needs the wildcard — a LAN-paired device shares
+ * the host's public IP, so desktop-minted tokens attest for it — so
+ * `lanOptIn` (the `AUQW_POT_LAN` env knob) + `lanReady` (device
+ * custody lists a paired device) together select `0.0.0.0`. An opt-
+ * in without a pairing falls back to loopback, never a refusal to
+ * serve the local host. Sessions are IP-bound and shared: one
  * integrity session mints every content binding until
  * `estimatedTtlSecs` minus a margin, and a single in-flight
  * promise dedupes concurrent cold starts.
@@ -160,11 +165,25 @@ type PotServiceDeps = {
    * a deterministic key.
    */
   readonly clientKey?: (req: IncomingMessage) => string;
+  /**
+   * Wildcard-bind opt-in (`AUQW_POT_LAN=1`). Without it the
+   * listener always binds `127.0.0.1` — the LAN surface exists for
+   * paired devices only.
+   */
+  readonly lanOptIn?: boolean;
+  /**
+   * Custody check the opt-in must pass: a paired device exists in
+   * the `sync:keys` store. Evaluated per bind attempt so a mid-
+   * session pairing takes effect on retry, and a custody failure
+   * reads as not-ready — the wildcard is never the default answer.
+   */
+  readonly lanReady?: () => Promise<boolean>;
 };
 
 type PotService = {
   /**
-   * Binds the listener once (0.0.0.0:ephemeral) and resolves the
+   * Binds the listener once — `127.0.0.1:ephemeral`, or `0.0.0.0`
+   * when the LAN opt-in holds a live pairing — and resolves the
    * bound port, or null when the bind failed — callers degrade to
    * "no provider" instead of throwing. A failed bind stays
    * retryable on the next call.
@@ -172,6 +191,8 @@ type PotService = {
   bind(): Promise<number | null>;
   /** Bound port once bind() has resolved, else null. */
   port(): number | null;
+  /** Bound host once bind() has resolved, else null. */
+  host(): string | null;
   /** `http://127.0.0.1:<port>` once bound, else null. */
   loopbackUrl(): string | null;
   close(): Promise<void>;
@@ -1144,6 +1165,7 @@ export function createPotService(opts: PotServiceDeps): PotService {
   let server: Server | null = null;
   let binding: Promise<number | null> | null = null;
   let boundPort: number | null = null;
+  let boundHost: string | null = null;
   let closing = false;
 
   let session: PotSession | null = null;
@@ -1431,37 +1453,65 @@ export function createPotService(opts: PotServiceDeps): PotService {
           }
         });
       });
-      binding = new Promise<number | null>((resolve) => {
-        srv.once('error', (thrown) => {
+      binding = (async () => {
+        // The wildcard is opt-in AND pairing-gated: an
+        // unauthenticated mint endpoint on the LAN is only
+        // justified by a device that paired under this host's
+        // public IP. Opt-in without pairing still serves —
+        // loopback, never the LAN.
+        const lanReady =
+          opts.lanOptIn === true &&
+          (await (opts.lanReady?.() ?? Promise.resolve(false)).catch(
+            () => false,
+          ));
+        if (opts.lanOptIn === true && !lanReady) {
           log(
-            `pot: bind failed (${
-              thrown instanceof Error ? thrown.message : 'unknown'
-            })`,
+            'pot: LAN bind refused — no paired device; serving loopback',
           );
-          binding = null; // a failed bind stays retryable
-          resolve(null);
-        });
-        srv.listen({ host: '0.0.0.0', port: 0 }, () => {
-          // close() can land while listen is still pending — don't
-          // resurrect a listener into post-shutdown state.
+        }
+        const host = lanReady ? '0.0.0.0' : '127.0.0.1';
+        return await new Promise<number | null>((resolve) => {
+          // close() can land while lanReady was pending — don't
+          // open a socket we're about to tear down.
           if (closing) {
-            srv.close();
             resolve(null);
             return;
           }
-          const address = srv.address();
-          boundPort =
-            address !== null && typeof address === 'object'
-              ? address.port
-              : null;
-          server = srv;
-          resolve(boundPort);
+          srv.once('error', (thrown) => {
+            log(
+              `pot: bind failed (${
+                thrown instanceof Error ? thrown.message : 'unknown'
+              })`,
+            );
+            binding = null; // a failed bind stays retryable
+            resolve(null);
+          });
+          srv.listen({ host, port: 0 }, () => {
+            // close() can land while listen is still pending —
+            // don't resurrect a listener into post-shutdown state.
+            if (closing) {
+              srv.close();
+              resolve(null);
+              return;
+            }
+            const address = srv.address();
+            boundPort =
+              address !== null && typeof address === 'object'
+                ? address.port
+                : null;
+            boundHost = host;
+            server = srv;
+            resolve(boundPort);
+          });
         });
-      });
+      })();
       return binding;
     },
     port() {
       return boundPort;
+    },
+    host() {
+      return boundHost;
     },
     loopbackUrl() {
       return boundPort === null
@@ -1477,6 +1527,7 @@ export function createPotService(opts: PotServiceDeps): PotService {
       const srv = server;
       server = null;
       boundPort = null;
+      boundHost = null;
       // The minter child dies with the service — its sessions' vm
       // timers are inside it, and 'disconnect' unloads them there.
       await engine?.close();
