@@ -2076,6 +2076,87 @@ function Main({
     borderWidth: theme.strokes.hairline,
     borderColor: theme.colors.hairline,
   };
+  // Toasts report failures from sheets and pushed screens too, so a
+  // copy mounts inside every screen layer — whichever is topmost
+  // shows it AND announces (a presenting screen's live region can be
+  // hidden from a11y while its sheet is up). iOS formSheets/pushes
+  // are native VCs above the whole React tree: a sibling outside the
+  // stack can never float over them. Every covered copy stays
+  // a11y-hidden; only the topmost one is a live region.
+  const toastPill = (live: boolean, bottom: number) =>
+    toast === null ? null : (
+      <View
+        {...(live
+          ? { accessibilityLiveRegion: 'polite' as const }
+          : { importantForAccessibility: 'no-hide-descendants' as const })}
+        pointerEvents="none"
+        style={{
+          ...floatStyle,
+          bottom,
+          maxWidth: '92%',
+          paddingHorizontal: 14,
+          paddingVertical: 6,
+        }}
+      >
+        <Text variant="metadata" color="primary">
+          {toast}
+        </Text>
+      </View>
+    );
+  // In-sheet copies take a real slot under the sheet's rows instead
+  // of floating — the sheet's wrapper is fit-to-contents, so an
+  // absolute pill would land on the last action row. Canvas bg keeps
+  // it legible on the raised sheet.
+  const toastPillInSheet = (live: boolean) =>
+    toast === null ? null : (
+      <View
+        {...(live
+          ? { accessibilityLiveRegion: 'polite' as const }
+          : { importantForAccessibility: 'no-hide-descendants' as const })}
+        pointerEvents="none"
+        style={{
+          alignSelf: 'center',
+          borderRadius: theme.radius.float,
+          backgroundColor: theme.colors.canvas,
+          borderWidth: theme.strokes.hairline,
+          borderColor: theme.colors.hairline,
+          marginTop: theme.spacing.sm,
+          marginBottom: theme.spacing.sm,
+          maxWidth: '92%',
+          paddingHorizontal: 14,
+          paddingVertical: 6,
+        }}
+      >
+        <Text variant="metadata" color="primary">
+          {toast}
+        </Text>
+      </View>
+    );
+  // Presentation order is JSX order: the last open layer is topmost
+  // and owns the live region.
+  const toastLayer = authClientSheetOpen
+    ? 'authClient'
+    : authSheetOpen
+      ? 'auth'
+      : artworkCachePickerOpen
+        ? 'artworkCache'
+        : qualityPickerOpen
+          ? 'quality'
+          : storefrontSheetOpen
+            ? 'storefront'
+            : languagePickerOpen
+              ? 'language'
+              : themePickerOpen
+                ? 'theme'
+                : providerPicker !== null
+                  ? 'provider'
+                  : pickerFor !== null
+                    ? 'playlist'
+                    : rowActions !== null
+                      ? 'rowActions'
+                      : overlayStack.length > 0
+                        ? 'push'
+                        : 'root';
   // World-pane elements memoized per tab: the tab host keeps every
   // visited pane mounted (the switch hides/shows instead of remounting),
   // and identical inputs hand back the identical element so React bails
@@ -2625,23 +2706,7 @@ function Main({
               />
             </View>
           )}
-          {toast !== null && (
-            <View
-              accessibilityLiveRegion="polite"
-              style={{
-                ...floatStyle,
-                bottom: insets.bottom + 88,
-                maxWidth: '92%',
-                paddingHorizontal: 14,
-                paddingVertical: 6,
-                zIndex: 70,
-              }}
-            >
-              <Text variant="metadata" color="primary">
-                {toast}
-              </Text>
-            </View>
-          )}
+          {toastPill(toastLayer === 'root', insets.bottom + 88)}
         </StackItem>
         {overlayStack.map((entry) => {
           const content = renderOverlayEntry(entry);
@@ -2656,6 +2721,11 @@ function Main({
                   overlays scroll under the status bar behind the
                   soft ramp too. */}
               <StatusBarFade height={topInset + 14} />
+              {toastPill(
+                toastLayer === 'push' &&
+                  entry === overlayStack[overlayStack.length - 1],
+                insets.bottom + 88,
+              )}
             </PushScreen>
           );
         })}
@@ -2670,6 +2740,7 @@ function Main({
               onAction={onRowAction}
               onDismiss={closeRowActions}
             />
+            {toastPillInSheet(toastLayer === 'rowActions')}
           </SheetScreen>
         )}
         {pickerFor !== null && (
@@ -2683,6 +2754,7 @@ function Main({
               onCreate={onCreateAndPick}
               onDismiss={closePlaylistPicker}
             />
+            {toastPillInSheet(toastLayer === 'playlist')}
           </SheetScreen>
         )}
         {providerPicker !== null && (
@@ -2697,6 +2769,7 @@ function Main({
               onPick={onPickProvider}
               onDismiss={closeProviderPicker}
             />
+            {toastPillInSheet(toastLayer === 'provider')}
           </SheetScreen>
         )}
         {themePickerOpen && (
@@ -2711,6 +2784,7 @@ function Main({
               onPick={onPickTheme}
               onDismiss={closeThemePicker}
             />
+            {toastPillInSheet(toastLayer === 'theme')}
           </SheetScreen>
         )}
         {languagePickerOpen && (
@@ -2724,6 +2798,7 @@ function Main({
               onPick={onPickLanguage}
               onDismiss={closeLanguagePicker}
             />
+            {toastPillInSheet(toastLayer === 'language')}
           </SheetScreen>
         )}
         {storefrontSheetOpen && (
@@ -2741,6 +2816,7 @@ function Main({
               onClear={onClearStorefront}
               onDismiss={closeStorefront}
             />
+            {toastPillInSheet(toastLayer === 'storefront')}
           </SheetScreen>
         )}
         {qualityPickerOpen && (
@@ -2755,6 +2831,7 @@ function Main({
               onPick={onPickQuality}
               onDismiss={closeQualityPicker}
             />
+            {toastPillInSheet(toastLayer === 'quality')}
           </SheetScreen>
         )}
         {artworkCachePickerOpen && (
@@ -2773,6 +2850,7 @@ function Main({
               onPick={onPickArtworkCache}
               onDismiss={closeArtworkCache}
             />
+            {toastPillInSheet(toastLayer === 'artworkCache')}
           </SheetScreen>
         )}
         {authSheetOpen && (
@@ -2790,6 +2868,7 @@ function Main({
               onSignOut={onAuthSignOut}
               onDismiss={closeAuthSheet}
             />
+            {toastPillInSheet(toastLayer === 'auth')}
           </SheetScreen>
         )}
         {authClientSheetOpen && (
@@ -2807,6 +2886,7 @@ function Main({
               onClear={onClearAuthClient}
               onDismiss={closeAuthClient}
             />
+            {toastPillInSheet(toastLayer === 'authClient')}
           </SheetScreen>
         )}
       </AppStack>
