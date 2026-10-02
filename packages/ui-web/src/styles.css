@@ -3431,7 +3431,9 @@
 .uw-wsearch__ring rect {
   width: calc(100% - 1.6px);
   height: calc(100% - 1.6px);
-  rx: calc(var(--radius-pill) / 2);
+  /* rx percent would resolve against WIDTH — a pill's corner radius is
+     half its HEIGHT minus the inset, else the caps merge into an oval. */
+  rx: calc(var(--uw-bar-control-h, 32px) / 2 - 0.8px);
   fill: none;
   stroke: var(--accent);
   stroke-linecap: round;
