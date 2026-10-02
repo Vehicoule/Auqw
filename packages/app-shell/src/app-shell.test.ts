@@ -34,6 +34,7 @@ import {
   rowActionsModel,
   sameNavLocation,
   sameOverlayRoute,
+  searchRowTarget,
   skipTargetIds,
   stageDownloadChip,
   stageReopenMode,
@@ -687,5 +688,41 @@ assert(
   ),
   'the tab is part of the location',
 );
+
+// ---- searchRowTarget ------------------------------------------------
+// Merged local rows key by `local:<recordingId>` — their actions need
+// a recording target, not the provider meta the catalog map holds.
+{
+  const meta: TrackMetadata = {
+    sourceRef: { provider: 'ytm', kind: 'track', id: 's1' },
+    title: 'provider hit',
+    artist: 'a',
+    album: null,
+    durationMs: 60_000,
+    releaseYear: null,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    storefront: null,
+  };
+  const metaFor = (key: string): TrackMetadata | undefined =>
+    key === 'ytm:track:s1:0' ? meta : undefined;
+
+  assertDeepEqual(
+    searchRowTarget('local:rec-9', metaFor),
+    { kind: 'recording', recordingId: 'rec-9' },
+    'a local row targets its recording',
+  );
+  assertDeepEqual(
+    searchRowTarget('ytm:track:s1:0', metaFor),
+    { kind: 'metadata', meta },
+    'a provider row targets its metadata',
+  );
+  assertEqual(
+    searchRowTarget('deezer:track:missing:0', metaFor),
+    null,
+    'a key with no meta resolves to null — actions stay inert',
+  );
+}
 
 console.log('app-shell tests passed');

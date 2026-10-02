@@ -70,11 +70,15 @@ export function TrackRow({
   onFocusRow,
 }: TrackRowProps) {
   const unavailable = row.state !== 'available';
+  // A state note replaces the line outright on unavailable rows; a
+  // provenance note like `local` leads it instead of swallowing the
+  // artist (same semantics as the native row).
   const sub =
-    row.note ??
-    [badge, row.artist, row.versionLabel]
-      .filter((part): part is string => part !== null && part !== '')
-      .join(' · ');
+    unavailable && row.note !== null
+      ? row.note
+      : [row.note, badge, row.artist, row.versionLabel]
+          .filter((part): part is string => part !== null && part !== '')
+          .join(' · ');
   return (
     <div
       className="uw-track-row"

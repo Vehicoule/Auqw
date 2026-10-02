@@ -966,6 +966,7 @@ function Main({
     searchRecents,
     suggestions,
     resultMetaFor,
+    resultTargetFor,
     libraryModel,
     playlistModelFor,
     entityModelFor,
@@ -2190,15 +2191,17 @@ function Main({
         onRetry={retrySearch}
         onResultPress={onResultPress}
         onRowIntent={(row) => {
-          const meta = resultMetaFor(row.key);
-          if (meta !== undefined) {
-            rowIntent({ kind: 'track', track: meta });
+          const target = resultTargetFor(row.key);
+          if (target?.kind === 'recording') {
+            rowIntent({ kind: 'recording', id: target.recordingId });
+          } else if (target?.kind === 'metadata') {
+            rowIntent({ kind: 'track', track: target.meta });
           }
         }}
         onContext={(row) => {
-          const meta = resultMetaFor(row.key);
-          if (meta !== undefined) {
-            setActionsFor({ kind: 'metadata', meta });
+          const target = resultTargetFor(row.key);
+          if (target !== null) {
+            setActionsFor(target);
           }
         }}
         recents={searchRecents}
@@ -2217,7 +2220,8 @@ function Main({
       retrySearch,
       onResultPress,
       rowIntent,
-      resultMetaFor,
+      resultTargetFor,
+      setActionsFor,
       searchRecents,
       applySearchText,
       suggestions,
