@@ -175,6 +175,11 @@ export class DownloadManager {
     // of times before reporting the ledger unavailable; non-retryable
     // kinds (cancelled, validation) pass straight through.
     let attemptErr: AppError | null = null;
+    // Survives attempts: a pass that mutates `staged` but fails the
+    // fixup persist must re-commit on the next attempt — re-running
+    // the checks alone would find nothing dirty and report success
+    // while the disk still holds the pre-fixup rows.
+    const fixup = { dirty: false };
     for (let attempt = 0; ; attempt++) {
       if (attempt > 0) {
         const slept = await this.#deps.clock.sleep(
@@ -186,7 +191,7 @@ export class DownloadManager {
           break;
         }
       }
-      const verified = await this.#verifyStaged(staged, signal);
+      const verified = await this.#verifyStaged(staged, signal, fixup);
       if (verified.ok) {
         attemptErr = null;
         break;
@@ -264,12 +269,15 @@ export class DownloadManager {
    * no owning row, drop `available` rows whose file vanished or whose
    * size stopped matching the ledger, finish `removing` rows, demote
    * interrupted `transferring` rows to `requested`, and persist the
-   * fixups. Mutates `staged` in place — a retry re-runs only the
-   * checks the failed attempt never reached.
+   * fixups. Mutates `staged` in place and marks `fixup.dirty` — the
+   * caller's marker survives attempts, so a failed fixup persist
+   * re-commits on the next one (a retry re-runs only the checks the
+   * failed attempt never reached).
    */
   async #verifyStaged(
     staged: Map<string, DownloadRecord>,
     signal: CancellationSignal,
+    fixup: { dirty: boolean },
   ): Promise<Result<void>> {
     // Keep .part files for rows that own resumable bytes — including
     // failed_with_retry, whose explicit retry resumes the prefix.
@@ -292,7 +300,6 @@ export class DownloadManager {
       );
     }
 
-    let dirty = false;
     for (const row of [...staged.values()]) {
       if (signal.cancelled) {
         return err(cancelledError());
@@ -318,7 +325,7 @@ export class DownloadManager {
             return removed;
           }
           staged.delete(row.downloadId);
-          dirty = true;
+          fixup.dirty = true;
           this.#log(
             'warn',
             `downloads: ${row.downloadId} file ${st.value.exists ? 'size-mismatch' : 'vanished'} — degrading to streaming`,
@@ -333,18 +340,19 @@ export class DownloadManager {
           return removed;
         }
         staged.delete(row.downloadId);
-        dirty = true;
+        fixup.dirty = true;
       } else if (row.state === 'transferring') {
         // Interrupted mid-transfer — resume from the durable offset.
         staged.set(row.downloadId, { ...row, state: 'requested' });
-        dirty = true;
+        fixup.dirty = true;
       }
     }
-    if (dirty) {
+    if (fixup.dirty) {
       const persisted = await this.#persist([...staged.values()]);
       if (!persisted.ok) {
         return persisted;
       }
+      fixup.dirty = false;
     }
     return ok(undefined);
   }
@@ -1072,8 +1080,19 @@ export class DownloadManager {
         // write failed — reclaim the finished file so it can't sit
         // orphaned next to a row that will re-download into `.part`,
         // then surface the failure honestly. The next attempt's
-        // begin-mismatch path restarts it from 0.
-        await this.#deps.transfer.removeFile(after.filePath, signal);
+        // begin-mismatch path restarts it from 0. Cleanup rides a
+        // detached signal: a cancelled transfer must not strand the
+        // completed file.
+        const reclaimed = await this.#deps.transfer.removeFile(
+          after.filePath,
+          new CancellationSource().signal,
+        );
+        if (!reclaimed.ok) {
+          this.#log(
+            'warn',
+            `downloads: ${after.downloadId} finalized-file reclaim failed (${reclaimed.error.kind}) — orphaned until a later sweep`,
+          );
+        }
         await this.#fail(
           after,
           finalized.error.kind,

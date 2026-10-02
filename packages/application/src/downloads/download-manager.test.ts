@@ -554,6 +554,46 @@ async function initIntegrity(): Promise<void> {
 }
 
 /**
+ * A fixup persist that fails transiently must commit on the retry:
+ * the dirty marker survives attempts, so a `staged` map already
+ * cleaned by the first pass can't report success while disk still
+ * holds the pre-fixup rows.
+ */
+async function initFixupPersistRetries(): Promise<void> {
+  const interrupted = row({
+    downloadId: 'dl-x1',
+    recordingId: 'rec-x',
+    filePath: 'dl-x1',
+    state: 'transferring',
+    committedOffset: 512,
+    bytes: 3 * 1024 * 1024 + 7,
+    itag: 140,
+    expiresAtMs: 5_000,
+  });
+  const r = rig({ downloads: [interrupted] });
+  r.storage.failNext(appError('transient', 'disk busy'));
+  const pending = r.manager.init([interrupted], r.signal);
+  // Attempt 1 fails the fixup persist and parks on the backoff
+  // sleeper — advance the manual clock to release the retry.
+  await drain();
+  r.clock.advance(1_000);
+  const res = await pending;
+  assert(res.ok, 'init retries past a transient fixup persist');
+  const last = r.storage.commits[r.storage.commits.length - 1];
+  assertEqual(
+    last?.batch.downloads?.[0]?.state,
+    'requested',
+    'fixup committed on the retry',
+  );
+  assertEqual(
+    r.manager.recordFor('rec-x')?.state,
+    'requested',
+    'demoted row published',
+  );
+  assert(!r.manager.unavailable(), 'verified init clears unavailable');
+}
+
+/**
  * Mid-flight cancel: chunk 1 stalls on the signal so the cancel edge
  * lands while the transfer is in the loop — row lands
  * failed_with_retry('cancelled'), the .part is kept for resume.
@@ -1177,6 +1217,7 @@ export async function run(): Promise<void> {
   await removeWaitsForRunner();
   await stopWaitsForRunner();
   await initFailurePublishesNothing();
+  await initFixupPersistRetries();
   await removeDeletes();
   await requestAllSnapshots();
   await initIntegrity();
