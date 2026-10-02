@@ -1878,7 +1878,7 @@ export function dedupeRecordings(
       title: rec.title,
       artist: rec.artist,
       durationMs: rec.durationMs,
-    })}${normalizeFree(rec.album ?? '')}`;
+    })}\u001f${normalizeFree(rec.album ?? '')}`;
     const existing = byKey.get(key);
     if (existing === undefined) {
       const entry = { rec, group: [rec] };

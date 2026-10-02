@@ -1506,6 +1506,17 @@ function testLocalRecordingDedupe(): void {
     longer,
   ]);
   assertEqual(split.length, 4, 'distinct identity always keeps a row');
+  // The album segment is a separate field — digit albums can't fuse
+  // with the trailing duration into a colliding suffix.
+  const boundary = dedupeRecordings([
+    { ...roads, id: 'rec-b1', durationMs: 240_000, album: '1' },
+    { ...roads, id: 'rec-b2', durationMs: 24_000, album: '01' },
+  ]);
+  assertEqual(
+    boundary.length,
+    2,
+    'duration/album boundary keeps distinct recordings apart',
+  );
 }
 
 /**
