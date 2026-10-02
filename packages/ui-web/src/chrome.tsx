@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Icon, IconButton, Pressable, SegmentItem, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
@@ -155,7 +155,10 @@ export type DesktopChromeProps = {
    * collapses to its loupe while the world body is scrolled. Tab bodies
    * carry no second field.
    */
-  readonly search?: Omit<WorldSearchProps, 'collapsed' | 'onExpand'>;
+  readonly search?: Omit<
+    WorldSearchProps,
+    'collapsed' | 'onExpand' | 'onFocusChange'
+  >;
   readonly children: ReactNode;
 };
 
@@ -183,6 +186,8 @@ export function DesktopChrome({
   // body moves, and comes back at the top or on demand. It never hides
   // focus — a focused field stays open regardless of scroll.
   const [searchCollapsed, setSearchCollapsed] = useState(false);
+  const [searchFocused, setSearchFocused] = useState(false);
+  const lastScrollTop = useRef(0);
   useEffect(() => {
     if (search?.focusSignal !== undefined) {
       setSearchCollapsed(false);
@@ -240,6 +245,12 @@ export function DesktopChrome({
                 {...search}
                 collapsed={searchCollapsed}
                 onExpand={() => setSearchCollapsed(false)}
+                onFocusChange={(focused) => {
+                  setSearchFocused(focused);
+                  if (!focused) {
+                    setSearchCollapsed(lastScrollTop.current > 24);
+                  }
+                }}
               />
             )}
             {updateEntry}
@@ -257,7 +268,12 @@ export function DesktopChrome({
               return;
             }
             const top = (event.target as HTMLElement).scrollTop;
-            setSearchCollapsed(top > 24);
+            lastScrollTop.current = top;
+            // A focused field stays open — collapsing it would drop
+            // the caret mid-typing; the blur re-applies the scroll.
+            if (!searchFocused) {
+              setSearchCollapsed(top > 24);
+            }
           }}
         >
           {children}

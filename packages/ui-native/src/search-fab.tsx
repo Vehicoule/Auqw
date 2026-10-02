@@ -65,6 +65,9 @@ export function SearchFab({
       const timer = setTimeout(() => inputRef.current?.focus(), 120);
       return () => clearTimeout(timer);
     }
+    // Closing while focused keeps the soft keyboard over the tab —
+    // drop the caret with the field.
+    inputRef.current?.blur();
     ring.value = 0;
     ringOn.value = 0;
     return undefined;
@@ -180,7 +183,6 @@ export function SearchFab({
           borderWidth: theme.strokes.hairline,
           borderColor: theme.colors.hairline,
           backgroundColor: theme.colors.glass,
-          zIndex: 40,
         },
         box,
       ]}

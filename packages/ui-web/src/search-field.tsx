@@ -19,6 +19,9 @@ export type WorldSearchProps = {
   readonly focusSignal?: number | undefined;
   /** Focused while the search surface isn't active — the app routes. */
   readonly onNavigateToSearch?: (() => void) | undefined;
+  /** Reports focus so the chrome can hold the field open against
+      scroll-collapse while it's being typed in. */
+  readonly onFocusChange?: ((focused: boolean) => void) | undefined;
 };
 
 /**
@@ -33,10 +36,18 @@ export function WorldSearch({
   onExpand,
   focusSignal,
   onNavigateToSearch,
+  onFocusChange,
 }: WorldSearchProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  // The signal must *change* to focus — the always-mounted toolbar
+  // field would otherwise steal focus on startup and route the app
+  // to explore before the user asked.
+  const lastSignal = useRef(focusSignal);
   useEffect(() => {
-    inputRef.current?.focus();
+    if (focusSignal !== lastSignal.current) {
+      lastSignal.current = focusSignal;
+      inputRef.current?.focus();
+    }
   }, [focusSignal]);
   // Collapse→expand transition lands the caret — the loupe press and the
   // '/' signal both route through it (the input only exists expanded).
@@ -70,7 +81,11 @@ export function WorldSearch({
         readOnly={field.readOnly}
         placeholder={field.label}
         aria-label={field.label}
-        onFocus={onNavigateToSearch}
+        onFocus={() => {
+          onFocusChange?.(true);
+          onNavigateToSearch?.();
+        }}
+        onBlur={() => onFocusChange?.(false)}
         onChange={(event) => field.onChange?.(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === 'Enter') {

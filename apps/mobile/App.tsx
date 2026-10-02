@@ -2085,7 +2085,9 @@ function Main({
       <SearchScreen
         state={searchModel}
         query={query}
-        topInset={topInset}
+        // The floating loupe occupies a 44px slot under the inset —
+        // reserve it so it never covers the recents/results heading.
+        topInset={topInset + 52}
         onQueryChange={setQuery}
         onSubmit={submitSearch}
         onCancel={cancelSearch}
