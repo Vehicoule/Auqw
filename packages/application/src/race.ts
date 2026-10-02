@@ -20,7 +20,15 @@ export function raced<T>(
   signal: CancellationSignal,
 ): Promise<Raced<T>> {
   return new Promise<Raced<T>>((resolve) => {
-    const unsubscribe = signal.subscribe(() => {
+    if (signal.cancelled) {
+      resolve({ t: 'cancelled' });
+      return;
+    }
+    // Assigned after subscribe() returns: a signal whose listener
+    // fires synchronously inside subscribe (an already-cancelled
+    // implementation) must not read the binding in its TDZ.
+    let unsubscribe: () => void = () => { };
+    unsubscribe = signal.subscribe(() => {
       unsubscribe();
       resolve({ t: 'cancelled' });
     });
@@ -31,10 +39,6 @@ export function raced<T>(
       unsubscribe();
       resolve(outcome);
     };
-    if (signal.cancelled) {
-      settle({ t: 'cancelled' });
-      return;
-    }
     void call.then(
       (value) => settle({ t: 'value', value }),
       (thrown: unknown) => settle({ t: 'failed', thrown }),

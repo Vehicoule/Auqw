@@ -717,10 +717,12 @@ export function emissionWrites(
  * - the field is absent or carries a different value — the stale
  *   `lww` case a record-existence check misses (a rename committed
  *   but never emitted);
- * - for `sum`/`max` fields, only when the local value is LARGER —
- *   asserting a smaller aggregate/ceiling is a guaranteed no-op
- *   (clamped to a zero component), so only a truly undelivered
- *   increment re-emits.
+ * - for `max` fields, only when the local value is LARGER —
+ *   asserting a smaller ceiling is a guaranteed no-op.
+ * - for `sum` fields, only when the materialized value differs —
+ *   a per-device component can't be proven inside the merged sum,
+ *   so remote coverage above ours is not evidence of delivery
+ *   (a lost increment under remote coverage must re-emit).
  *
  * Tombstones never emit — absent-from-domain can't be told apart
  * from a remote create the inbound pass hasn't folded yet, so a
@@ -749,10 +751,14 @@ export function unsyncedWrites(
       return write.value === undefined;
     }
     const merge = SYNC_FIELD_RULES[write.kind][write.field]?.merge;
-    if (
-      (merge === 'sum' || merge === 'max') &&
-      typeof write.value === 'number'
-    ) {
+    if (merge === 'sum' && typeof write.value === 'number') {
+      // The merged sum can't prove OUR component landed — remote
+      // coverage above (or coincidentally equal to) ours suppresses a
+      // genuinely lost increment under `>=`. Only the exact match is
+      // suppression-safe; everything else re-emits.
+      return syncedValue === write.value;
+    }
+    if (merge === 'max' && typeof write.value === 'number') {
       return typeof syncedValue === 'number' && syncedValue >= write.value;
     }
     return jsonEquals(syncedValue, write.value);

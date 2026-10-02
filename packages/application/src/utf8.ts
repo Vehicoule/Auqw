@@ -64,7 +64,7 @@ export function utf8Decode(bytes: Uint8Array): string {
     } else if (b0 >= 0xe0 && b0 < 0xf0) {
       cp = b0 & 0x0f;
       len = 3;
-    } else if (b0 >= 0xf0 && b0 < 0xf8) {
+    } else if (b0 >= 0xf0 && b0 <= 0xf4) {
       cp = b0 & 0x07;
       len = 4;
     } else {
@@ -80,6 +80,19 @@ export function utf8Decode(bytes: Uint8Array): string {
           valid = false;
           break;
         }
+        // Second-byte bounds reject the forms a bare continuation
+        // mask accepts: overlongs (0xe0/0xf0 lows), UTF-16 surrogates
+        // (0xed highs), and >U+10FFFF (0xf4 highs) — RFC 3629.
+        if (
+          j === 1 &&
+          ((b0 === 0xe0 && cont < 0xa0) ||
+            (b0 === 0xed && cont > 0x9f) ||
+            (b0 === 0xf0 && cont < 0x90) ||
+            (b0 === 0xf4 && cont > 0x8f))
+        ) {
+          valid = false;
+          break;
+        }
         cp = (cp << 6) | (cont & 0x3f);
       }
     }
@@ -88,7 +101,7 @@ export function utf8Decode(bytes: Uint8Array): string {
       i += 1;
       continue;
     }
-    cps.push(cp > 0x10ffff ? 0xfffd : cp);
+    cps.push(cp);
     i += len;
   }
   let out = '';
