@@ -109,6 +109,10 @@ import type {
   TransferModel,
 } from '@auqw/ui-shared';
 import {
+  seedableRadioRef,
+  stageRadioSeedRef,
+} from '@auqw/ui-shared/controllers';
+import {
   advanceTargetId,
   skipTargetIds,
   failedSkipIds,
@@ -2683,10 +2687,15 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [controller],
   );
 
-  // The stage radio control seeds from the playing occurrence's
-  // selected ref, falling back to the recording's first source ref —
-  // the same derivation the seed op uses so the gate mirrors it.
+  // The stage radio control mirrors the coordinator's derivation:
+  // a resolved non-local playing ref is a verdict — seed that exact
+  // version or nothing (a different provider's ref would mix from
+  // another rendition); local playback and the unresolved pick fall
+  // through to the occurrence pin then the catalog refs. The shared
+  // helper carries the rule so the gate and the op can't drift.
   const radioSeedRef = useMemo((): SourceRef | null => {
+    const seedableTrack = (ref: SourceRef): boolean =>
+      ref.kind === 'track' && radioSeedable(ref);
     const current = state.queue.occurrences.find(
       (o) => o.occurrenceId === state.queue.currentOccurrenceId,
     );
@@ -2694,20 +2703,46 @@ export function useAppShell<E extends { readonly type: string } = never>(
       currentRecordingId === null
         ? undefined
         : state.recordings.find((r) => r.id === currentRecordingId);
-    return current?.selectedRef ?? recording?.sourceRefs[0] ?? null;
-  }, [state.queue, state.recordings, currentRecordingId]);
+    const playback = state.playback;
+    const playing =
+      playback.type === 'preparing' ||
+      playback.type === 'buffering' ||
+      playback.type === 'playing' ||
+      playback.type === 'paused'
+        ? { ref: playback.ref, occurrenceId: playback.occurrenceId }
+        : null;
+    return stageRadioSeedRef({
+      playingRef: playing?.ref,
+      playingOccurrenceId: playing?.occurrenceId,
+      currentOccurrenceId: current?.occurrenceId,
+      candidates: [current?.selectedRef, ...(recording?.sourceRefs ?? [])],
+      isSeedable: seedableTrack,
+    });
+  }, [
+    state.queue,
+    state.recordings,
+    state.playback,
+    currentRecordingId,
+    radioSeedable,
+  ]);
 
   // The row-action seed: a metadata row seeds its own ref; a library
-  // row seeds its first source ref.
+  // row seeds its first seedable source ref. A row names one version
+  // per ref, so any seedable listing is a faithful seed here.
   const actionRadioRef = useMemo((): SourceRef | null => {
     if (actionsFor === null) {
       return null;
     }
+    const seedableTrack = (ref: SourceRef): boolean =>
+      ref.kind === 'track' && radioSeedable(ref);
     return actionsFor.kind === 'metadata'
-      ? actionsFor.meta.sourceRef
-      : (state.recordings.find((r) => r.id === actionsFor.recordingId)
-          ?.sourceRefs[0] ?? null);
-  }, [actionsFor, state.recordings]);
+      ? seedableRadioRef([actionsFor.meta.sourceRef], seedableTrack)
+      : seedableRadioRef(
+          state.recordings.find((r) => r.id === actionsFor.recordingId)
+            ?.sourceRefs ?? [],
+          seedableTrack,
+        );
+  }, [actionsFor, state.recordings, radioSeedable]);
 
   // The seed must still resolve through its own provider — guard the
   // op too, not just the affordance, since state may shift in between.
@@ -3414,7 +3449,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         ),
       recordFor: (id) => controller.downloads.recordFor(id),
       downloadRefFor,
-      radioSeedable: radioSeedable(actionRadioRef),
+      radioSeedable: actionRadioRef !== null,
       transport:
         actionsFor.kind === 'recording' &&
         stagePlayer !== null &&
@@ -3713,15 +3748,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
             recordingId: currentRecordingId,
           })
       : undefined;
-  const onStartRadioGated = radioSeedable(radioSeedRef)
-    ? onStartRadio
-    : undefined;
+  const onStartRadioGated =
+    radioSeedRef !== null ? onStartRadio : undefined;
   // The provider the seed would arm with — lets the chip reserve its
   // armed label's width before the tail exists (header-bar rule).
-  const radioSeedProvider =
-    radioSeedRef !== null && radioSeedable(radioSeedRef)
-      ? radioSeedRef.provider
-      : null;
+  const radioSeedProvider = radioSeedRef?.provider ?? null;
 
   const resultMetaFor = useCallback(
     (key: string) => resultMeta.current.get(key),
