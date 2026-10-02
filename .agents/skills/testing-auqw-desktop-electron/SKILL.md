@@ -284,10 +284,18 @@ identity mint (a few extra seconds).
 
 ## Discriminating the utility's listeners
 
-The utility binds two `0.0.0.0:<ephemeral>` sockets — the POT service and
-the sync listener. `GET /ping` answers `{"ok":true}` ONLY on the pot port;
+The utility binds two sockets — the POT service and the sync listener.
+`GET /ping` answers `{"ok":true}` ONLY on the pot port;
 the sync listener answers nothing. `POST /get_pot` confirms (200 + token).
 `ss -tlnp` shows both owned by the `node.mojom.NodeService` child PID.
+
+Address shape depends on custody (see 'Sync/pairing needs a secrets
+backend'): with `AUQW_POT_LAN` unset the pot port binds `127.0.0.1`
+immediately — `bindHost()` returns loopback without ever consulting
+`lanReady`/custody, so a plain launch (no dbus-run-session, no keyring)
+still gets a working pot listener while the SYNC listener stays dormant.
+Only under LAN opt-in + successful custody do BOTH appear as
+`0.0.0.0:<ephemeral>` wildcards.
 
 ## FOOTGUN reinforcement
 
@@ -682,3 +690,54 @@ None — the napi artifact is a local cargo build output.
   recording>, <ms>)`, relaunch → it tops 'your latest liked tracks' →
   play it → the queue auto-arms the tail ('autoplay · similar to
   {title}', 49+ rows). Delete the like afterwards.
+
+## Verified 2026-10-02 on devin/1790972281-build-size-wins (PR #320)
+
+## POT legs without a secrets backend
+
+- `pot.bind()` is NOT gated on sync custody: with `AUQW_POT_LAN` unset,
+  `bindHost()` returns `127.0.0.1` immediately — the lanOptIn check
+  never consults `lanReady`/custody. A plain launch still gets a working
+  `127.0.0.1:<ephemeral>` pot listener; only the SYNC listener stays
+  dormant. `ss -tlnp | grep <utility-pid>` then shows exactly one
+  listener; `/ping` → `{"ok":true}` and
+  `POST /get_pot -d '{}'` → `{"error":"invalid-request","message":
+  "pot: content_binding must be a bounded string"}` — the envelope is
+  `{"error","message"}`, not bare text.
+
+## /get_pot as a runtime probe of the pot-minter child
+
+- A real mint `POST /get_pot {"content_binding":"<str>"}` forks
+  `dist/utility/pot-minter-child.cjs` as a node child of the utility
+  PID (`ps -eo pid,ppid,cmd | grep pot-minter`). The child stays
+  resident after the request (shared session engine).
+- On datacenter egress the mint ends in typed
+  `{"error":"unavailable","message":"pot: no ytAtN challenge on
+  homepage"}` — the child fetched + DOM-parsed the YouTube homepage
+  (proof real jsdom ran inside it) but no BotGuard challenge was
+  served. That is the DESIGNED honest-degradation path — the utility
+  logs `pot: session build failed (…)` once, no crash. Distinguish
+  wiring bugs: they'd print `jsdom is not bundled in the utility
+  process` (stub throw, post-#320) or kill the utility.
+- youtube-music playback resolve does NOT depend on a successful
+  mint — resolves/plays fine with the pot session unavailable.
+
+## Diagnostics 'attempt trace' = resolve ground truth
+
+- settings → DIAGNOSTICS → `attempt trace` prints
+  `N attempt · last: wreq-<n> · <steps> steps · <http> http · <dur>`
+  after any playback resolve — cheap proof a resolve ran without
+  scraping logs. Adjacent `last failure` reads `none` after success.
+
+## Misc legs
+
+- `/` and other chrome keyboard shortcuts need the auqw window to hold
+  X focus first — click inside the window once, THEN send keys; a bare
+  `key slash` on a freshly-mapped window may go nowhere.
+- Verifying a minified build actually landed (post-#320): `wc -l
+  apps/desktop/dist/renderer/app.js` (a handful of lines, not
+  thousands) + grep the utility bundle for feature markers (e.g.
+  `jsdom is not bundled` for the stub).
+- The settings menu (≡) rows sit ~6px lower than first-glance
+  coordinates on this display scale — zoom the popover before
+  clicking; a click on the row's top edge dead-zones.
