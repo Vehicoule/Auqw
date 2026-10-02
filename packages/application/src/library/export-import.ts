@@ -166,11 +166,15 @@ export async function applyImport(
   // it knew before.
   const ownBaseline = new Map<string, number>();
   const prior = await storage.load(context);
-  if (prior.ok) {
-    for (const count of prior.value.playCounts) {
-      if (count.localCount !== undefined) {
-        ownBaseline.set(count.recordingId, count.localCount);
-      }
+  if (!prior.ok) {
+    // A failed read must not silently drop every baseline this
+    // device holds — the import would commit with localCount
+    // evidence erased.
+    return prior;
+  }
+  for (const count of prior.value.playCounts) {
+    if (count.localCount !== undefined) {
+      ownBaseline.set(count.recordingId, count.localCount);
     }
   }
   const owned: ExportDocument = {
@@ -178,7 +182,19 @@ export async function applyImport(
     playCounts: doc.playCounts.map((count) => {
       const { localCount: _imported, ...rest } = count;
       const own = ownBaseline.get(count.recordingId);
-      return own === undefined ? rest : { ...rest, localCount: own };
+      if (own === undefined) {
+        return rest;
+      }
+      return {
+        ...rest,
+        localCount: own,
+        // The merged total can't sit below this device's own
+        // stamped component — the sync log survives the import, so
+        // a doc that under-reports it gets the honest floor, not a
+        // row where the next play emits an aggregate peers can't
+        // advance.
+        count: Math.max(rest.count, own),
+      };
     }),
   };
   return storage.importOwned(owned, context);

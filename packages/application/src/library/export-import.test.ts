@@ -343,8 +343,11 @@ async function applyReplaces(): Promise<void> {
   assert(reapplied.ok, 'rebase apply resolves');
   const reloaded = await rebased.load(ctx().context);
   assert(reloaded.ok);
+  // The imported merged count can't sit below the retained
+  // component — the log still carries our stamped 4, so the floor
+  // is max(doc count, baseline), not the doc's 3.
   assertDeepEqual(reloaded.value.playCounts, [
-    { recordingId: 'r1', count: 3, lastMs: 50, localCount: 4 },
+    { recordingId: 'r1', count: 4, lastMs: 50, localCount: 4 },
   ]);
 }
 
