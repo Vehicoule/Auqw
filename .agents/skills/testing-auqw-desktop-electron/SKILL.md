@@ -241,11 +241,12 @@ while hidden).
   `.sync-stage-*` / `.sync-hold-*` residue.
 - In-UI load proof: the `host:plugins` console line is dev-harness only.
   The product-UI signal is settings → diagnostics → providers row, which
-  lists loaded providerIds (e.g. `deezer, itunes, lyrics-lrclib,
-  youtube-music`) with `last failure: none` — settings via the hamburger
-  (≡) in the world toolbar → `settings` row. A broken/empty staged dir
-  throws `no plugin providers available` at boot; an empty provider slot
-  shows `sheets.noProvider` in the picker sheet.
+  lists the loaded providerIds (e.g. `deezer, itunes, lyrics-lrclib,
+  youtube-music`) — the row's contents are the proof, since the adjacent
+  `last failure` field tracks playback, not plugin loading. Settings via
+  the hamburger (≡) in the world toolbar → `settings` row. A broken/empty
+  staged dir throws `no plugin providers available` at boot; an empty
+  provider slot shows `sheets.noProvider` in the picker sheet.
 - youtube-music `playback.resolve` takes an 11-char video ID as `source_ref`
   (e.g. `kJQP7kiw5Fk`), not a URL.
 - `sync-plugins.mjs` can fail `ENOENT … releases/<id>/<version>` when the
