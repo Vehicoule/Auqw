@@ -2246,6 +2246,12 @@ async function repeatAllWrapSkipsMarkedHead(): Promise<void> {
     ),
   );
   await pump();
+  // A ref-scoped refusal spends its next-best hop before the verdict
+  // lands — no alternate candidates means the refusal stands.
+  if (r.ytm.pendingCount('candidates') > 0) {
+    r.ytm.settleCandidatesAt(r.ytm.pendingCount('candidates') - 1, ok([]));
+    await pump();
+  }
   assert((await r.session.setRepeatMode('all')).ok);
   await pump();
   const identity = (id: string): PlaybackIdentity => ({
@@ -4858,6 +4864,12 @@ async function earlyPrepareFailure(): Promise<void> {
   };
   r.player.emit(failure2);
   await pump();
+  // Retry exhausted, the refusal searches next-best alternates —
+  // none available, so the original verdict stands.
+  if (r.ytm.pendingCount('candidates') > 0) {
+    r.ytm.settleCandidatesAt(r.ytm.pendingCount('candidates') - 1, ok([]));
+    await pump();
+  }
   assertEqual(readyOf(r).playback.type, 'failed');
   // The first attempt's pending prepare settles late — its caller
   // gets the real verdict, not 'superseded'.
@@ -5318,6 +5330,12 @@ async function permanentFailureSkipsForward(): Promise<void> {
     },
   });
   await pump();
+  // A ref-scoped refusal searches next-best alternates first — none
+  // are offered, so the permanent verdict stands and flags the row.
+  if (r.ytm.pendingCount('candidates') > 0) {
+    r.ytm.settleCandidatesAt(r.ytm.pendingCount('candidates') - 1, ok([]));
+    await pump();
+  }
   const snap = readyOf(r);
   assertEqual(snap.playback.type, 'failed');
   assertEqual(snap.queue.mode, 'paused');
@@ -5372,7 +5390,13 @@ async function botCheckWallPolicy(): Promise<void> {
   });
   await pump();
   // A wall is provider truth, not weather: no 400 ms auto-retry, no
-  // row flag — the typed verdict pauses the queue honestly.
+  // row flag — the typed verdict pauses the queue honestly. The
+  // next-best hop draws a fresh ladder on another video; with no
+  // alternate offered the wall verdict stands.
+  if (r.ytm.pendingCount('candidates') > 0) {
+    r.ytm.settleCandidatesAt(r.ytm.pendingCount('candidates') - 1, ok([]));
+    await pump();
+  }
   assertEqual(readyOf(r).playback.type, 'failed', 'wall is terminal');
   assertEqual(calls(r, 'prepare').length, 1, 'no re-attempt issued');
   r.clock.advance(2_000);
@@ -5403,6 +5427,124 @@ async function botCheckWallPolicy(): Promise<void> {
   assert((await retry).ok, 'explicit retry accepted');
   await pump();
   assertEqual(readyOf(r).playback.type, 'buffering');
+}
+
+/** A dead ref's refusal hops to the next-best matched alternate and
+ *  plays it inside the same intent — the row never surfaces failure. */
+async function deadRefHopsToAlternate(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('o1');
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-p1',
+    identity,
+    outcome: {
+      type: 'failed',
+      error: appError('unavailable', 'gone'),
+      attempt: TRACE,
+    },
+  });
+  await pump();
+  // The refusal doesn't publish — the intent searches next-best.
+  assertEqual(readyOf(r).playback.type, 'preparing');
+  assertEqual(r.ytm.pendingCount('candidates'), 1, 'hop resolves alternates');
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'y2', 'Song r1', 'Artist', 300_000)]),
+  );
+  await pump();
+  // The matched alternate earns a fresh prepare; the intent keeps its
+  // deadline but a hop resets the provider-call budget.
+  assertEqual(calls(r, 'prepare').length, 2, 'alternate re-prepares');
+  const altInput = calls(r, 'prepare').at(-1)?.input as
+    | { sourceRef?: string }
+    | undefined;
+  assertEqual(altInput?.sourceRef, 'y2', 'alternate video prepared');
+  const altIdentity = lastPrepareIdentity(r);
+  r.player.emit(preparedEvent(altIdentity, 'h-alt'));
+  await pump();
+  // Two prepare deferreds queue behind the hop — the superseded p1
+  // and the alternate's own request; both settle FIFO before the
+  // intent reports the chain's verdict.
+  assert(r.player.settlePrepare(ok('req-alt')), 'superseded call frees');
+  assert(r.player.settlePrepare(ok('req-alt2')), 'alternate request id lands');
+  const res = await playing;
+  // The chain's outcome is the intent's verdict — a tap that
+  // recovered on an alternate reports ok, never a false refusal.
+  assert(res.ok, 'recovered tap resolves with the chain outcome');
+  await pump();
+  assertEqual(readyOf(r).playback.type, 'buffering');
+  const rec = readyOf(r).recordings.find((x) => x.id === 'r1');
+  assert(
+    rec?.mappings.some(
+      (m) => m.ref.id === 'y2' && m.status === 'automatic',
+    ) === true,
+    'alternate commits an automatic mapping',
+  );
+}
+
+/** A re-match that only offers the dead ref fails with the ORIGINAL
+ *  refusal verdict — the veto proves the same video can't replay. */
+async function deadRefMatchSkipsVeto(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [recording('r1', [ref('youtube-music', 'y1')])],
+      queue: {
+        revision: 1,
+        occurrences: [occurrence('o1', 'r1', ref('youtube-music', 'y1'))],
+        currentOccurrenceId: null,
+        positionMs: 0,
+        mode: 'stopped',
+      },
+    }),
+  );
+  await restoreOk(r);
+  const playing = r.session.playOccurrence('o1');
+  await pump();
+  const identity = lastPrepareIdentity(r);
+  r.player.emit({
+    type: 'prepare',
+    requestId: 'req-p1',
+    identity,
+    outcome: {
+      type: 'failed',
+      error: appError('unavailable', 'gone'),
+      attempt: TRACE,
+    },
+  });
+  await pump();
+  assertEqual(r.ytm.pendingCount('candidates'), 1, 'hop resolves alternates');
+  // The only candidate the provider offers IS the dead ref — the
+  // session veto excludes it and the intent fails on the origin
+  // verdict, not an anonymous 'no-result'.
+  r.ytm.settleCandidates(
+    ok([meta('youtube-music', 'y1', 'Song r1', 'Artist', 300_000)]),
+  );
+  await pump();
+  const res = await playing;
+  assert(!res.ok, 'intent resolves failed');
+  assertEqual(res.error.kind, 'unavailable', 'origin refusal survives');
+  assertEqual(calls(r, 'prepare').length, 1, 'dead ref never re-prepares');
+  // The dead mark is session memory, not a mapping verdict — the
+  // recording keeps no 'rejected' pair for a refusal.
+  const rec = readyOf(r).recordings.find((x) => x.id === 'r1');
+  assert(
+    rec?.mappings.some((m) => m.status === 'rejected') !== true,
+    'refusal writes no rejected mapping',
+  );
 }
 
 async function pauseDuringRetryBackoff(): Promise<void> {
@@ -7075,6 +7217,8 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ],
   ['permanentFailureSkipsForward', permanentFailureSkipsForward],
   ['botCheckWallPolicy', botCheckWallPolicy],
+  ['deadRefHopsToAlternate', deadRefHopsToAlternate],
+  ['deadRefMatchSkipsVeto', deadRefMatchSkipsVeto],
   ['pauseDuringRetryBackoff', pauseDuringRetryBackoff],
   ['releaseRetry', releaseRetry],
   ['failedRetryReleaseIsNotStranded', failedRetryReleaseIsNotStranded],
@@ -7775,6 +7919,12 @@ async function onlineCallReArmsWeatherPark(): Promise<void> {
   await pump();
   assert(r.player.settlePrepare(err(appError('unavailable', 'gone'))));
   await pump();
+  // The refusal spends its next-best hop first — no alternates on
+  // offer means the 'unavailable' verdict stands.
+  if (r.ytm.pendingCount('candidates') > 0) {
+    r.ytm.settleCandidatesAt(r.ytm.pendingCount('candidates') - 1, ok([]));
+    await pump();
+  }
   assert(!(await started).ok);
   assertEqual(readyOf(r).queue.blockedError?.kind, 'unavailable');
   assertEqual(calls(r, 'prepare').length, 1);
@@ -7822,6 +7972,11 @@ async function reconnectKeepsLegacyBotWall(): Promise<void> {
   // auto-retry, so the verdict parks as a block on first failure.
   assert(r.player.settlePrepare(err(appError('transient', 'io: bot-check'))));
   await pump();
+  // The wall's alternate hop draws no candidates — the verdict stays.
+  if (r.ytm.pendingCount('candidates') > 0) {
+    r.ytm.settleCandidatesAt(r.ytm.pendingCount('candidates') - 1, ok([]));
+    await pump();
+  }
   assert(!(await started).ok);
   assertEqual(readyOf(r).queue.blockedError?.kind, 'transient');
   online = false;
@@ -7868,6 +8023,11 @@ async function reconnectKeepsVerdictBlocks(): Promise<void> {
     'pending prepare',
   );
   await pump();
+  // The wall's alternate hop draws no candidates — the verdict stays.
+  if (r.ytm.pendingCount('candidates') > 0) {
+    r.ytm.settleCandidatesAt(r.ytm.pendingCount('candidates') - 1, ok([]));
+    await pump();
+  }
   assert(!(await started).ok);
   assertEqual(readyOf(r).queue.blockedError?.kind, 'provider-wall');
   online = false;
@@ -8679,6 +8839,12 @@ async function streamWarmAdoptedPlayFailureFails(): Promise<void> {
   const started = r.session.playOccurrence('oA');
   await pump();
   assertEqual(calls(r, 'prepare').length, 0, 'warm adopted: no prepare');
+  // The refusal spends its next-best hop first — with no alternates
+  // on offer the 'unavailable' verdict stands.
+  if (r.ytm.pendingCount('candidates') > 0) {
+    r.ytm.settleCandidatesAt(r.ytm.pendingCount('candidates') - 1, ok([]));
+    await pump();
+  }
   const res = await started;
   assert(!res.ok, 'playOccurrence reports the play failure');
   assertEqual(
@@ -9309,6 +9475,11 @@ async function streamWarmSkipsUnplayableSuccessor(): Promise<void> {
     statusEvent(idB, 'h-oB', 'failed', 0, appError('no-result', 'gone')),
   );
   await pump();
+  // The refusal's next-best hop draws no alternates — verdict stands.
+  if (r.ytm.pendingCount('candidates') > 0) {
+    r.ytm.settleCandidatesAt(r.ytm.pendingCount('candidates') - 1, ok([]));
+    await pump();
+  }
   assertEqual(readyOf(r).queue.mode, 'paused');
   await playThrough(r, 'oA');
   const playback = readyOf(r).playback;
@@ -9475,6 +9646,11 @@ async function streamWarmSurfaceOutranksFailed(): Promise<void> {
     statusEvent(idA, 'h-oA', 'failed', 0, appError('no-result', 'gone')),
   );
   await pump();
+  // The refusal's next-best hop draws no alternates — verdict stands.
+  if (r.ytm.pendingCount('candidates') > 0) {
+    r.ytm.settleCandidatesAt(r.ytm.pendingCount('candidates') - 1, ok([]));
+    await pump();
+  }
   assertEqual(readyOf(r).playback.type, 'failed');
   r.session.prewarm({ sourceRefs: [ref('youtube-music', 'yB')] });
   await pump();
