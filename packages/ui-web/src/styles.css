@@ -3231,6 +3231,21 @@
   align-items: center;
   gap: 2px;
 }
+/* Startup/restore/locale gates: the only surface on a hidden-titlebar
+   window — a drag strip carrying the caption cluster so a gated window
+   still moves and closes by mouse. */
+.uw-gate-caption {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: none;
+  height: 44px;
+  padding: 0 var(--spacing-sm);
+  -webkit-app-region: drag;
+}
+.uw-gate-caption > * {
+  -webkit-app-region: no-drag;
+}
 
 /* On macOS the lights land over the world bar once the stage column
    that hosts them is collapsed — symmetric reserve instead. */

@@ -389,4 +389,26 @@ async function boot(): Promise<void> {
   audio.addEventListener('durationchange', renderState);
 }
 
+// The hidden titlebar leaves this page chromeless too — wire the drag
+// strip's buttons to the same ops as the product cluster. macOS keeps
+// its traffic lights, so the buttons leave (the strip stays draggable).
+for (const button of document.querySelectorAll<HTMLButtonElement>(
+  '#caption button[data-op]',
+)) {
+  if (window.auqw.chrome.platform === 'darwin') {
+    button.remove();
+    continue;
+  }
+  button.addEventListener('click', () => {
+    const op = button.dataset.op;
+    if (
+      op === 'minimize' ||
+      op === 'toggle-maximize' ||
+      op === 'close'
+    ) {
+      window.auqw.chrome.control(op);
+    }
+  });
+}
+
 void boot();

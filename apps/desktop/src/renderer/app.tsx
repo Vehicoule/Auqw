@@ -180,12 +180,19 @@ function App() {
   }, [attempt]);
 
   const reducedMotion = usePrefersReducedMotion();
-  return boot.type === 'ready' ? (
-    <Shell controller={boot.controller} />
-  ) : (
-    <ThemeProvider theme="system" reducedMotion={reducedMotion}>
-      <BootGate boot={boot} onRetry={() => setAttempt((n) => n + 1)} />
-    </ThemeProvider>
+  // Stamped at the root so `data-platform` is right on every gate too
+  // — the caption cluster needs it before a session even exists.
+  return (
+    <>
+      <PlatformChromeReporter />
+      {boot.type === 'ready' ? (
+        <Shell controller={boot.controller} />
+      ) : (
+        <ThemeProvider theme="system" reducedMotion={reducedMotion}>
+          <BootGate boot={boot} onRetry={() => setAttempt((n) => n + 1)} />
+        </ThemeProvider>
+      )}
+    </>
   );
 }
 
@@ -230,14 +237,34 @@ function usePrefersDarkScheme(): 'dark' | 'light' {
   return dark ? 'dark' : 'light';
 }
 
-/** Full-screen centered gate frame shared by boot/restore/locale gates. */
+/** Full-screen gate frame shared by boot/restore/locale gates. On a
+    hidden-titlebar window a gate is the only surface — it still needs
+    the drag strip + caption cluster or the window can't be moved or
+    closed by mouse. */
 const gateStyle: CSSProperties = {
   height: '100vh',
   display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
+  flexDirection: 'column',
   backgroundColor: 'var(--canvas)',
 };
+
+const gateBodyStyle: CSSProperties = {
+  flex: 1,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+};
+
+function GateShell({ children }: { readonly children: ReactNode }) {
+  return (
+    <div style={gateStyle}>
+      <div className="uw-gate-caption">
+        <WindowControls />
+      </div>
+      <div style={gateBodyStyle}>{children}</div>
+    </div>
+  );
+}
 
 /** Conditional SheetScreen — `body` renders only while the sheet is up. */
 const sheet = (
@@ -260,7 +287,7 @@ function BootGate({
   readonly onRetry: () => void;
 }) {
   return (
-    <div style={gateStyle}>
+    <GateShell>
       {boot.type === 'failed' ? (
         <ErrorState
           title={t('boot.startFailed')}
@@ -270,7 +297,7 @@ function BootGate({
       ) : (
         <LoadingState title={t('boot.loadingPlugins')} />
       )}
-    </div>
+    </GateShell>
   );
 }
 
@@ -306,7 +333,6 @@ function Shell({ controller }: { readonly controller: SessionController }) {
       source={themeSource}
       reducedMotion={reducedMotion}
     >
-      <PlatformChromeReporter />
       {state.type === 'ready' ? (
         <Main controller={controller} state={state} />
       ) : (
@@ -385,7 +411,7 @@ function SessionGate({
   readonly controller: SessionController;
 }) {
   return (
-    <div style={gateStyle}>
+    <GateShell>
       {state.type === 'restore-failed' ? (
         <ErrorState
           title={t('boot.restoreFailed')}
@@ -395,7 +421,7 @@ function SessionGate({
       ) : (
         <LoadingState title={t('boot.restoring')} />
       )}
-    </div>
+    </GateShell>
   );
 }
 
@@ -1450,9 +1476,9 @@ function Main({
   // rendering is correct) shows until the effect above has landed.
   if (!localeApplied) {
     return (
-      <div style={gateStyle}>
+      <GateShell>
         <LoadingState title={t('boot.restoring')} />
-      </div>
+      </GateShell>
     );
   }
 
