@@ -1279,6 +1279,32 @@ function testSnapshotCountAbsolute(): void {
   );
 }
 
+// An absolute page carries only LOGGED components — a stored count
+// above it is stranded local play evidence, not a stale value.
+// Dropping to the page's total would erase plays emitUnsynced can
+// still recover.
+function testSnapshotCountFloorsAtStored(): void {
+  const current = projInput({
+    recordings: [recording('r-1', [ref('itunes', 't-1')])],
+    playCounts: [playCount('r-1', 10)],
+  });
+  const outcome = applied(
+    fieldEntry('playCount', 'r-1', 'count', 2),
+    [],
+    {
+      kind: 'playCount',
+      recordId: 'r-1',
+      fields: { count: 7, lastMs: 900 },
+    },
+  );
+  const projected = projectAppliedEntries([outcome], current);
+  assertEqual(
+    projected.batch.playCounts?.[0]?.count,
+    10,
+    'absolute below stored keeps stranded local component',
+  );
+}
+
 // W98I — several applied outcomes may snapshot the same record; the
 // LAST one in canonical order is the merge truth. Picking the first
 // rewinds the row to a stale generation.
@@ -2022,6 +2048,7 @@ export function run(): void {
   testSnapshotSurvivesTombstone();
   testSnapshotEmptyDeletes();
   testSnapshotCountAbsolute();
+  testSnapshotCountFloorsAtStored();
   testSnapshotNewestWins();
   testProjectMaterialized();
   testProjectMaterializedPending();

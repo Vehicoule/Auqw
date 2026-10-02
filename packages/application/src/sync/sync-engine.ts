@@ -2739,7 +2739,10 @@ export async function createSyncEngine(
   function fieldsOf(
     record: RecordState | undefined,
   ): Record<string, unknown> {
-    const fields: Record<string, unknown> = {};
+    // Null-prototype maps: field names and device ids come from log
+    // entries, and a '__proto__' key must store, not invoke the
+    // legacy prototype setter or read an inherited member.
+    const fields: Record<string, unknown> = Object.create(null);
     if (record !== undefined) {
       for (const [field, cell] of record.fields) {
         fields[field] = cell.value;
@@ -2760,7 +2763,7 @@ export async function createSyncEngine(
       if (syncFieldRule(record.kind, field)?.merge !== 'sum') {
         continue;
       }
-      const perDevice: Record<string, number> = {};
+      const perDevice: Record<string, number> = Object.create(null);
       for (const entry of cell.live) {
         if (typeof entry.value !== 'number') {
           continue;
@@ -2770,7 +2773,7 @@ export async function createSyncEngine(
           cur === undefined ? entry.value : Math.max(cur, entry.value);
       }
       if (Object.keys(perDevice).length > 0) {
-        (out ??= {})[field] = perDevice;
+        (out ??= Object.create(null))[field] = perDevice;
       }
     }
     return out;
@@ -2793,7 +2796,7 @@ export async function createSyncEngine(
     if (record === undefined) {
       return { fields };
     }
-    const winnerDeviceIds: Record<string, string> = {};
+    const winnerDeviceIds: Record<string, string> = Object.create(null);
     for (const [field, cell] of record.fields) {
       if (syncFieldRule(kind, field)?.merge === 'lww') {
         winnerDeviceIds[field] = cell.winner.deviceId;

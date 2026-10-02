@@ -2016,7 +2016,11 @@ function finishProjection(
           Math.max(
             0,
             fold.absolute
-              ? (numField(fold.fields, 'count') ?? count.count)
+              ? // An absolute page carries only logged components —
+                // plays still stranded locally keep the stored count
+                // above it, and dropping to the page's total would
+                // erase them (emitUnsynced recovers the difference).
+                Math.max(count.count, numField(fold.fields, 'count') ?? 0)
               : count.count + (fold.sumDeltas.get('count') ?? 0),
           ),
         ),

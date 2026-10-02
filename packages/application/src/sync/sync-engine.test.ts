@@ -2859,6 +2859,46 @@ async function peerMarkSenderNamedProto(): Promise<void> {
   assertDeepEqual(a.store.storedPeerMarks['__proto__'], { a: 1 });
 }
 
+async function materializeProtoNamedDeviceComponents(): Promise<void> {
+  const a = await makeEngine('a');
+  // Prototype-named device ids must accumulate as DATA — a plain-
+  // record read on '__proto__' returns the inherited prototype and
+  // NaNs the component, and the legacy setter silently drops it.
+  await mustApply(
+    a.engine,
+    delta(
+      [
+        rawEntry('playCount', 'r1', 'count', 9, { l: 9_000, c: 0 }, '__proto__'),
+      ],
+      '__proto__',
+    ),
+  );
+  await mustApply(
+    a.engine,
+    delta(
+      [
+        rawEntry(
+          'playCount',
+          'r1',
+          'count',
+          4,
+          { l: 9_001, c: 0 },
+          'constructor',
+        ),
+      ],
+      'constructor',
+    ),
+  );
+  const count = a.engine
+    .materialize()
+    .find((r) => r.kind === 'playCount' && r.recordId === 'r1');
+  const expected = Object.create(null) as Record<string, number>;
+  expected['__proto__'] = 9;
+  expected['constructor'] = 4;
+  assertDeepEqual(count?.sumComponents, { count: expected });
+  assertDeepEqual(count?.fields, { count: 13 });
+}
+
 async function forgedSenderDeviceIdRejected(): Promise<void> {
   const a = await makeEngine('a', 1_000);
   // The doc's sender stamp is the sender's claim; the transport id
@@ -3124,6 +3164,7 @@ export async function run(): Promise<void> {
   await livePeerRegressionReplacesRow();
   await peerMarkClaimOnlyDeltaNoops();
   await peerMarkSenderNamedProto();
+  await materializeProtoNamedDeviceComponents();
   await forgedSenderDeviceIdRejected();
   await propertyHarness();
 }
