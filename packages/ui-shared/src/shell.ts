@@ -31,12 +31,14 @@ import { errorText } from './error-text.ts';
 import {
   dedupeTrackListings,
   formatClock,
+  librarySourceRefs,
   playlistSourceRefs,
   refKey,
   toSearchRowModel,
 } from './view-models.ts';
 import type {
   NavItemModel,
+  SearchFilter,
   SearchStateModel,
   TransferModel,
 } from './view-models.ts';
@@ -113,17 +115,38 @@ export type Boot<TController> =
   | { readonly type: 'failed'; readonly message: string }
   | { readonly type: 'ready'; readonly controller: TController };
 
+/** 'song · artist · year/album' — the hero card's own line. */
+function searchHeroMeta(meta: TrackMetadata): string {
+  const second = meta.artist ?? meta.album;
+  const third =
+    meta.releaseYear !== null
+      ? `${meta.releaseYear}`
+      : meta.artist !== null
+        ? meta.album
+        : null;
+  return [t('search.kind.song'), second, third]
+    .filter((part): part is string => part !== null)
+    .join(' · ');
+}
+
 export function toSearchModel(
   state: SearchState,
   playingRef: SourceRef | null = null,
   playlistEntries: readonly PlaylistEntry[] = [],
   recordings: readonly Recording[] = [],
+  filter: SearchFilter = 'all',
 ): SearchStateModel {
   const inPlaylist = playlistSourceRefs(playlistEntries, recordings);
+  // 'In your library' = the result's ref is one the library owns.
+  const library =
+    filter === 'library' ? librarySourceRefs(recordings) : null;
   const playingKey = refKey(playingRef);
   const base = {
     query: state.type === 'idle' ? '' : state.query,
     results: [],
+    filter,
+    hero: null,
+    playItems: [],
     providerId: null,
     message: null,
     retryable: false,
@@ -133,25 +156,39 @@ export function toSearchModel(
     case 'loading':
     case 'empty':
       return { ...base, phase: state.type };
-    case 'content':
+    case 'content': {
+      const deduped = dedupeTrackListings(state.page.items);
+      const items =
+        library === null
+          ? deduped
+          : deduped.filter(({ group }) =>
+              group.some((m) => library.has(refKey(m.sourceRef) ?? '')),
+            );
+      const results = items.map(({ meta, index, group }) => ({
+        ...toSearchRowModel(
+          meta,
+          index,
+          null,
+          group.some((m) => inPlaylist.has(refKey(m.sourceRef) ?? '')),
+        ),
+        playing:
+          playingKey !== null &&
+          group.some((m) => refKey(m.sourceRef) === playingKey),
+      }));
+      const first = items[0];
+      const heroRow = results[0];
       return {
         ...base,
         phase: state.page.items.length === 0 ? 'empty' : 'ready',
-        results: dedupeTrackListings(state.page.items).map(
-          ({ meta, index, group }) => ({
-            ...toSearchRowModel(
-              meta,
-              index,
-              null,
-              group.some((m) => inPlaylist.has(refKey(m.sourceRef) ?? '')),
-            ),
-            playing:
-              playingKey !== null &&
-              group.some((m) => refKey(m.sourceRef) === playingKey),
-          }),
-        ),
+        results,
+        playItems: items.map(({ meta }) => meta),
+        hero:
+          first === undefined || heroRow === undefined
+            ? null
+            : { row: heroRow, metaLabel: searchHeroMeta(first.meta) },
         message: errorText(state.refreshError),
       };
+    }
     case 'error': {
       const unavailable =
         state.error.kind === 'unavailable' ||

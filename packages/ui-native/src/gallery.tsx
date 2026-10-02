@@ -496,6 +496,7 @@ function GalleryBody({
               title: 'Fallback',
               versionLabel: null,
               artist: null,
+              album: null,
               durationMs: null,
               artworkUrl: null,
               liked: false,

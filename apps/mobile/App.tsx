@@ -953,6 +953,7 @@ function Main({
     searchSession: search,
     query,
     setQuery,
+    setSearchFilter,
     submitSearch,
     retrySearch,
     cancelSearch,
@@ -2192,6 +2193,7 @@ function Main({
         onRecentPress={applySearchText}
         suggestions={suggestions}
         onSuggestionPress={applySearchText}
+        onFilterPress={setSearchFilter}
       />
     ),
     [
@@ -2207,6 +2209,7 @@ function Main({
       searchRecents,
       applySearchText,
       suggestions,
+      setSearchFilter,
     ],
   );
   const libraryEl = useMemo(

@@ -632,7 +632,11 @@ function render(node: ReactNode): string {
       onResultPress: () => {},
     }),
   );
-  assertIncludes('search results header', markup, 'matches');
+  assertIncludes('search results header', markup, 'all results');
+  check(
+    'results table head renders the column labels',
+    markup.includes('uw-search__thead'),
+  );
   check('search result rows render as listitems', markup.includes('role="listitem"'));
   // The one search field lives in the toolbar — the pane carries no
   // second input (single-search rule).

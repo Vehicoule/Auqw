@@ -30,6 +30,7 @@ import type {
   QueueSectionKey,
   RadioModel,
   ReviewRowModel,
+  SearchFilter,
   SearchStateModel,
   StageMode,
   TrackRowModel,
@@ -1145,6 +1146,7 @@ export type SearchScreenHandlers = {
   readonly onContext?: MaybeFn<[row: TrackRowModel]>;
   readonly onRecentPress?: MaybeFn<[query: string]>;
   readonly onSuggestionPress?: MaybeFn<[query: string]>;
+  readonly onFilterPress?: MaybeFn<[filter: SearchFilter]>;
 };
 
 export type SearchFieldView = {
@@ -1176,10 +1178,35 @@ export type SearchRowView = {
   readonly onContext: MaybeFn;
 };
 
+export type SearchFilterChip = {
+  readonly key: SearchFilter;
+  readonly label: string;
+  readonly active: boolean;
+  readonly onPress: MaybeFn;
+};
+
+export type SearchHeroView = SearchRowView & {
+  readonly metaLabel: string;
+  readonly a11yLabel: string;
+};
+
 export type SearchScreenView = {
   /** Live text vs committed query — owns the suggestions pane. */
   readonly draft: boolean;
   readonly field: SearchFieldView;
+  readonly filters: {
+    readonly a11yLabel: string;
+    readonly chips: readonly SearchFilterChip[];
+  } | null;
+  /** 'top result' hero + the top songs column — desktop renders the
+      two-column band; a surface may skip it and list plainly. */
+  readonly topRow: {
+    readonly topResultTitle: string;
+    readonly hero: SearchHeroView;
+    readonly songsTitle: string;
+    readonly songsA11yLabel: string;
+    readonly songs: readonly SearchRowView[];
+  } | null;
   readonly suggestions: {
     readonly heading: string;
     readonly a11yLabel: string;
@@ -1264,6 +1291,7 @@ export function useSearchScreenController({
   onRecentPress,
   suggestions = [],
   onSuggestionPress,
+  onFilterPress,
 }: {
   readonly state: SearchStateModel;
   readonly query?: string | undefined;
@@ -1276,8 +1304,55 @@ export function useSearchScreenController({
   // Draft mode: the box carries text that was never committed as the
   // shown query — completions own the pane until submit.
   const draft = trimmed !== '' && trimmed !== state.query;
+  const rowView = (row: TrackRowModel): SearchRowView => ({
+    row,
+    onPress: bind(onResultPress, row),
+    onIntent: bind(onRowIntent, row),
+    onToggleLike: bind(onToggleLike, row),
+    onAddToPlaylist: bind(onAddToPlaylist, row),
+    onContext: bind(onContext, row),
+  });
+  const listed =
+    !draft &&
+    (state.phase === 'ready' || state.phase === 'loading') &&
+    state.results.length > 0;
+  // Chips own the result set even when a filter empties it — hiding
+  // them on a filtered-empty list would strand the user with no way
+  // back to 'all'. They ride the ready phase (or a reload carrying
+  // retained rows); a provider 'empty'/'error' never shows them.
+  const chipsVisible =
+    !draft &&
+    (state.phase === 'ready' ||
+      (state.phase === 'loading' && state.results.length > 0));
   return {
     draft,
+    filters: chipsVisible
+      ? {
+          a11yLabel: t('search.a11y.filters'),
+          chips: (['all', 'songs', 'library'] as const).map((key) => ({
+            key,
+            label: t(`search.filters.${key}`),
+            active: state.filter === key,
+            onPress: bind(onFilterPress, key),
+          })),
+        }
+      : null,
+    topRow:
+      !draft && state.phase === 'ready' && state.hero !== null
+        ? {
+            topResultTitle: t('search.topResult'),
+            hero: {
+              ...rowView(state.hero.row),
+              metaLabel: state.hero.metaLabel,
+              a11yLabel: t('search.a11y.hero', {
+                title: state.hero.row.title,
+              }),
+            },
+            songsTitle: t('search.songsHead'),
+            songsA11yLabel: t('search.a11y.songsColumn'),
+            songs: state.results.slice(0, 4).map(rowView),
+          }
+        : null,
     field: {
       icon: 'search',
       label: t('search.fieldLabel'),
@@ -1322,13 +1397,12 @@ export function useSearchScreenController({
         }
       : null,
     resultsHead:
-      !draft && state.phase === 'ready'
+      !draft && state.phase === 'ready' && state.results.length > 0
         ? {
-            title: t('search.results'),
-            metaLabel: t('search.resultsMeta', {
-              provider: state.providerId ?? t('search.providerFallback'),
+            title: t(`search.section.${state.filter}`, {
               count: state.results.length,
             }),
+            metaLabel: state.providerId ?? t('search.providerFallback'),
           }
         : null,
     idle:
@@ -1352,7 +1426,16 @@ export function useSearchScreenController({
             }
         : null,
     status:
-      !draft && state.phase === 'empty'
+      !draft && state.phase === 'ready' && state.results.length === 0
+        ? {
+            // Only a filter can empty a ready phase — the library chip
+            // with no owned matches.
+            kind: 'empty' as const,
+            title: t('search.noLibraryResults', { query: state.query }),
+            hint: t('search.filterEmptyHint'),
+            icon: 'search' as const,
+          }
+        : !draft && state.phase === 'empty'
         ? {
             kind: 'empty' as const,
             title: t('search.noResults', { query: state.query }),
@@ -1379,22 +1462,12 @@ export function useSearchScreenController({
                   hint: state.query,
                 }
               : null,
-    results:
-      !draft &&
-      (state.phase === 'ready' || state.phase === 'loading') &&
-      state.results.length > 0
-        ? {
-            a11yLabel: t('search.resultsA11y'),
-            rows: state.results.map((row) => ({
-              row,
-              onPress: bind(onResultPress, row),
-              onIntent: bind(onRowIntent, row),
-              onToggleLike: bind(onToggleLike, row),
-              onAddToPlaylist: bind(onAddToPlaylist, row),
-              onContext: bind(onContext, row),
-            })),
-          }
-        : null,
+    results: listed
+      ? {
+          a11yLabel: t('search.resultsA11y'),
+          rows: state.results.map(rowView),
+        }
+      : null,
   };
 }
 

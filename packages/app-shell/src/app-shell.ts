@@ -100,6 +100,7 @@ import type {
   PlayerModel,
   ProviderSlot,
   ReviewFetch,
+  SearchFilter,
   SkipPeek,
   StageMode,
   TrackRowModel,
@@ -280,6 +281,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const [stageMode, setStageMode] = useState<StageMode>('player');
   const [reordering, setReordering] = useState(false);
   const [query, setQuery] = useState('');
+  const [searchFilter, setSearchFilter] = useState<SearchFilter>('all');
   // Bumped when '/' routes to explore — the persistent toolbar field
   // and floating loupe watch it to expand + refocus, even when the
   // tab was already active.
@@ -1681,6 +1683,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       playingRef,
       state.playlistEntries,
       state.recordings,
+      searchFilter,
     );
     if (localResults.length === 0 || base.phase === 'idle') {
       return base;
@@ -1696,6 +1699,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   }, [
     searchState,
     localResults,
+    searchFilter,
     playingRef,
     state.playlistEntries,
     state.recordings,
@@ -2130,10 +2134,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
       if (tapped === undefined || !canPlayMeta(tapped)) {
         return;
       }
-      // The provider result list is the play context — the tapped
-      // result starts mid-list with its siblings queued behind it.
-      const items =
-        searchState.type === 'content' ? searchState.page.items : [];
+      // The *visible* result set is the play context — the tapped row
+      // starts mid-list with the rows behind it queued. playItems is
+      // the filtered deduped view, not the raw page: materializing
+      // filtered-out items would save them as recordings and expand
+      // the 'in your library' filter against the user's intent.
+      const items = searchModel.playItems;
       const metas =
         ports.entityPlayRequiresCanPlay === true || online === false
           ? items.filter(canPlayMeta)
@@ -2159,7 +2165,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
       online,
       ports.localCatalog,
       ports.entityPlayRequiresCanPlay,
-      searchState,
+      searchModel,
       canPlayMeta,
       recordRecentSearch,
       dispatchPlay,
@@ -3818,6 +3824,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     // search
     query,
     setQuery,
+    searchFilter,
+    setSearchFilter,
     searchState,
     submitSearch,
     retrySearch,

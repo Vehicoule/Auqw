@@ -62,6 +62,7 @@ export type TrackRowModel = {
   readonly title: string;
   readonly versionLabel: string | null;
   readonly artist: string | null;
+  readonly album: string | null;
   readonly durationMs: number | null;
   readonly artworkUrl: string | null;
   readonly liked: boolean;
@@ -166,10 +167,30 @@ export type QueueModel = {
 
 type SearchPhase = 'idle' | 'loading' | 'ready' | 'empty' | 'error' | 'unavailable';
 
+/** Result-set filter — 'songs' is the whole set today (every result
+    is a track) but names the subset the contract reserves. */
+export type SearchFilter = 'all' | 'songs' | 'library';
+
+export type SearchHeroModel = {
+  readonly row: TrackRowModel;
+  /** 'song · artist · year/album' — composed from the #1 result. */
+  readonly metaLabel: string;
+};
+
 export type SearchStateModel = {
   readonly phase: SearchPhase;
   readonly query: string;
   readonly results: readonly TrackRowModel[];
+  readonly filter: SearchFilter;
+  /** Provider's top-ranked result after the filter — the hero card. */
+  readonly hero: SearchHeroModel | null;
+  /**
+   * The play context behind `results` — the visible provider items
+   * (deduped reps, post-filter). Playing a row queues exactly what the
+   * list shows; feeding the raw page would materialize filtered-out
+   * tracks as recordings and re-expand 'in your library' membership.
+   */
+  readonly playItems: readonly TrackMetadata[];
   readonly providerId: string | null;
   readonly message: string | null;
   readonly retryable: boolean;
@@ -799,6 +820,7 @@ export function toTrackRowModel(
         ? null
         : recording.versionLabels.join(' · '),
     artist: recording.artist,
+    album: recording.album,
     durationMs: recording.durationMs,
     artworkUrl: pickArtworkUrl(recording.artwork),
     liked: options.liked ?? false,
@@ -821,6 +843,7 @@ export function toSearchRowModel(
     title: metadata.title,
     versionLabel: null,
     artist: metadata.artist,
+    album: metadata.album,
     durationMs: metadata.durationMs,
     artworkUrl: pickArtworkUrl(metadata.artwork),
     liked: false,
@@ -847,6 +870,7 @@ function missingRecordingRow(key: string, playing: boolean): TrackRowModel {
     title: t('track.unknown'),
     versionLabel: null,
     artist: null,
+    album: null,
     durationMs: null,
     artworkUrl: null,
     liked: false,
@@ -923,6 +947,20 @@ export function playlistSourceRefs(
     const key = refKey(entry.selectedRef);
     if (key !== null) refs.add(key);
     for (const ref of byId.get(entry.recordingId)?.sourceRefs ?? []) {
+      refs.add(`${ref.provider}:${ref.kind}:${ref.id}`);
+    }
+  }
+  return refs;
+}
+
+/** Every track ref the library owns — 'in your library' membership
+    for catalog rows is this set. */
+export function librarySourceRefs(
+  recordings: readonly Recording[],
+): ReadonlySet<string> {
+  const refs = new Set<string>();
+  for (const recording of recordings) {
+    for (const ref of recording.sourceRefs) {
       refs.add(`${ref.provider}:${ref.kind}:${ref.id}`);
     }
   }

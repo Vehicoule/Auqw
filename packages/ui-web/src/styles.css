@@ -1264,6 +1264,126 @@
   background: var(--uw-hover);
 }
 
+.uw-search__chips {
+  display: flex;
+  gap: var(--spacing-xs);
+  flex-wrap: wrap;
+  margin-bottom: var(--spacing-lg);
+}
+
+.uw-search__band-title {
+  display: block;
+  margin-bottom: var(--spacing-sm);
+}
+
+.uw-search__toprow {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: var(--spacing-xl);
+  align-items: start;
+  margin-bottom: var(--spacing-lg);
+}
+
+/* Top-result hero card — the provider's #1 pick, big and tappable. */
+.uw-topres {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-md);
+  background: var(--surface);
+  border: var(--stroke-hairline) solid var(--hairline);
+  border-radius: var(--radius-card);
+}
+
+.uw-topres__text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xxs);
+}
+
+.uw-topres__play {
+  flex-shrink: 0;
+  color: var(--on-accent);
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+}
+
+.uw-topres__play:hover:not(:disabled) {
+  background: var(--accent);
+  box-shadow: inset 0 0 0 var(--stroke-hairline) var(--fg25);
+}
+
+/* 'All results' table — the head row shadows the row cells. */
+.uw-search__thead {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  height: 28px;
+  padding: 0 var(--spacing-xs);
+  margin-bottom: var(--spacing-xxs);
+  border-bottom: var(--stroke-hairline) solid var(--hairline);
+}
+
+.uw-search__th {
+  display: block;
+}
+
+.uw-search__th--idx {
+  width: 24px;
+  text-align: center;
+}
+
+.uw-search__th--art {
+  width: 40px;
+  flex-shrink: 0;
+}
+
+.uw-search__th--title {
+  flex: 1;
+  min-width: 0;
+}
+
+.uw-search__th--album {
+  width: 160px;
+  flex-shrink: 0;
+}
+
+.uw-search__th--time {
+  min-width: 4ch;
+  text-align: right;
+}
+
+.uw-search__th--tail {
+  width: 88px;
+  flex-shrink: 0;
+}
+
+.uw-track-row__index {
+  width: 24px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.uw-track-row__album {
+  width: 160px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+@container (max-width: 480px) {
+  .uw-search__toprow {
+    grid-template-columns: 1fr;
+    gap: var(--spacing-lg);
+  }
+
+  .uw-track-row__album,
+  .uw-search__th--album {
+    display: none;
+  }
+}
+
 /* ---- queue ------------------------------------------------------------- */
 
 .uw-queue__head {
