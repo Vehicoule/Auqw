@@ -285,8 +285,6 @@
 .ui-web:not([data-reduced-motion='true']) .uw-pressable,
 .ui-web:not([data-reduced-motion='true']) .uw-back,
 .ui-web:not([data-reduced-motion='true']) .uw-sheet-panel__close,
-.ui-web:not([data-reduced-motion='true']) .uw-search__cancel,
-.ui-web:not([data-reduced-motion='true']) .uw-search__clear,
 .ui-web:not([data-reduced-motion='true']) .uw-namefield__action,
 .ui-web:not([data-reduced-motion='true']) .uw-mini,
 .ui-web:not([data-reduced-motion='true']) .uw-mini__play,
@@ -1089,71 +1087,6 @@
 /* The field pins above the results while the screen scrolls — the
    translucent fg08 fill would show rows ghosting through, so the
    background layers it over canvas as one opaque surface. */
-.uw-search__field {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-sm);
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background:
-    linear-gradient(var(--fg08), var(--fg08)),
-    var(--canvas);
-  border: var(--stroke-hairline) solid transparent;
-  border-radius: var(--radius-pill);
-  padding: 0 var(--spacing-md);
-  min-height: var(--size-touch);
-  margin-bottom: var(--spacing-sm);
-}
-
-/* Rows sliding under the pinned field must not peek through the gap
-   below it — the screen's spacing-md row gap plus the field's own
-   spacing-sm margin. A canvas-colored plug keeps the illusion. */
-.uw-search__field::after {
-  content: '';
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  height: calc(var(--spacing-md) + var(--spacing-sm));
-  background: var(--canvas);
-}
-
-.uw-search__field:focus-within {
-  border-color: var(--fg40);
-}
-
-.uw-search__input {
-  flex: 1;
-  min-width: 0;
-  background: none;
-  border: none;
-  color: var(--text-primary);
-  font: inherit;
-  padding: var(--spacing-sm) 0;
-}
-
-.uw-search__input:focus {
-  outline: none;
-}
-
-/* Chromium draws its own clear button on type=search next to the
-   app's custom one — hide the native twin. */
-.uw-search__input::-webkit-search-cancel-button {
-  -webkit-appearance: none;
-}
-
-.uw-search__cancel,
-.uw-search__clear {
-  padding: var(--spacing-xs);
-  border-radius: var(--radius-control);
-}
-
-.uw-search__cancel:hover:not(:disabled),
-.uw-search__clear:hover:not(:disabled) {
-  background: var(--uw-hover);
-}
-
 .uw-search__count {
   margin-left: auto;
 }
@@ -2645,6 +2578,196 @@
 .uw-world-bar__end {
   justify-content: flex-end;
   justify-self: end;
+  /* Overlay anchor for the tight-bar search field below. */
+  position: relative;
+}
+
+/* The one search field — compact pill in the bar's end cluster. It
+   collapses to a bare loupe while the world body is scrolled; the
+   chrome owns that collapse (search stays reachable without taking
+   header space). */
+.uw-wsearch {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  height: var(--size-chip);
+  width: 200px;
+  padding: 0 var(--spacing-xs) 0 var(--spacing-sm);
+  border-radius: var(--radius-pill);
+  background: var(--fg08);
+  border: var(--stroke-hairline) solid transparent;
+  color: var(--text-secondary);
+  transition:
+    width var(--motion-state) var(--ease-out),
+    padding var(--motion-state) var(--ease-out),
+    border-color var(--motion-micro) var(--ease-out),
+    background var(--motion-micro) var(--ease-out);
+}
+
+.uw-wsearch:focus-within {
+  border-color: var(--accent);
+  background: var(--fg12);
+}
+
+/* Tight bar (field + tabs + caption can't coexist): the expanded
+   field pops out of flow and covers the tabs as transient chrome on
+   its own opaque surface — no text-on-text. Blur/scroll folds it
+   back to the loupe. */
+.uw-wsearch--overlay {
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  translate: 0 -50%;
+  z-index: 2;
+  background: var(--canvas);
+}
+
+.uw-wsearch--overlay:focus-within {
+  background: var(--canvas);
+}
+
+.uw-wsearch > svg {
+  flex: none;
+}
+
+.uw-wsearch__input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  padding: 0;
+}
+
+.uw-wsearch__input:focus {
+  outline: none;
+}
+
+.uw-wsearch__input::placeholder {
+  color: var(--text-secondary);
+}
+
+.uw-wsearch__cancel,
+.uw-wsearch__clear {
+  flex: none;
+  padding: var(--spacing-xs);
+  border-radius: var(--radius-control);
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.uw-wsearch__clear {
+  color: var(--text-secondary);
+}
+
+.uw-wsearch__cancel:hover,
+.uw-wsearch__clear:hover {
+  background: var(--uw-hover);
+}
+
+/* The '/' shortcut hint — only while the field is empty and unfocused;
+   on caption-overlay platforms it yields to the caption buttons' room. */
+.uw-wsearch__hint {
+  flex: none;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border: var(--stroke-hairline) solid var(--fg16);
+  border-radius: var(--radius-control);
+  padding: 0 var(--spacing-xs);
+  line-height: 16px;
+}
+
+.uw-wsearch:focus-within .uw-wsearch__hint,
+.uw-wsearch[data-live] .uw-wsearch__hint {
+  display: none;
+}
+
+/* Collapsed — the bare loupe, accent when a query is live. */
+.uw-wsearch--loupe {
+  width: var(--size-chip);
+  padding: 0;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.uw-wsearch--loupe:hover {
+  background: var(--fg12);
+}
+
+.uw-wsearch--loupe[data-live] {
+  color: var(--accent);
+}
+
+/* The comet ring — on focus a short accent arc laps the border once
+   (tail keeps drifting), then the head extends to close the ring.
+   Drawn as two strokes: a soft halo under a crisp core. */
+.uw-wsearch__ring {
+  position: absolute;
+  inset: -1px;
+  width: calc(100% + 2px);
+  height: calc(100% + 2px);
+  pointer-events: none;
+  overflow: visible;
+  opacity: 0;
+  transition: opacity var(--motion-state) var(--ease-out);
+}
+
+.uw-wsearch__ring rect {
+  width: calc(100% - 2px);
+  height: calc(100% - 2px);
+  rx: calc(var(--radius-pill) / 2);
+  fill: none;
+  stroke: var(--accent);
+  stroke-linecap: round;
+  stroke-dasharray: 5 95;
+  stroke-dashoffset: 0;
+}
+
+.uw-wsearch__ring .halo {
+  stroke-width: 4.5px;
+  opacity: 0.28;
+}
+
+.uw-wsearch__ring .core {
+  stroke-width: 1.6px;
+}
+
+.uw-wsearch:focus-within .uw-wsearch__ring {
+  opacity: 1;
+}
+
+.uw-wsearch:focus-within .uw-wsearch__ring rect {
+  animation: uw-ringdraw 1.5s linear 0.1s 1 forwards;
+}
+
+@keyframes uw-ringdraw {
+  0% {
+    stroke-dasharray: 5 95;
+    stroke-dashoffset: 0;
+    animation-timing-function: cubic-bezier(0.5, 0.05, 0.4, 0.95);
+  }
+  30% {
+    stroke-dasharray: 24 76;
+    stroke-dashoffset: -42;
+  }
+  58% {
+    stroke-dasharray: 13 87;
+    stroke-dashoffset: -100;
+    animation-timing-function: cubic-bezier(0.25, 0.6, 0.15, 1);
+  }
+  100% {
+    stroke-dasharray: 114 0.01;
+    stroke-dashoffset: -114;
+  }
+}
+
+.ui-web[data-reduced-motion='true'] .uw-wsearch:focus-within .uw-wsearch__ring rect {
+  animation: none;
+  stroke-dasharray: 100 0.01;
 }
 
 .uw-tabs {

@@ -280,8 +280,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const [stageMode, setStageMode] = useState<StageMode>('player');
   const [reordering, setReordering] = useState(false);
   const [query, setQuery] = useState('');
-  // Bumped when '/' routes to explore — remounts SearchScreen so its
-  // autoFocus refocuses even when the tab was already active.
+  // Bumped when '/' routes to explore — the persistent toolbar field
+  // and floating loupe watch it to expand + refocus, even when the
+  // tab was already active.
   const [searchFocusTick, setSearchFocusTick] = useState(0);
   // Newest first; seeded empty until the persisted store hydrates —
   // an absent `ports.searchHistory` keeps recents session-scoped.
@@ -3452,8 +3453,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     },
     [clearOverlays],
   );
-  // '/' — focus the explore search box (a remount tick refocuses even
-  // when the tab was already active).
+  // '/' — focus the single search field (the tick refocuses the
+  // persistent chrome even when the tab was already active).
   const focusSearch = useCallback(() => {
     setTab('explore');
     clearOverlays();

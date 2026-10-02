@@ -84,6 +84,8 @@ export type { QueueListProps } from './queue-list';
 
 export { SearchScreen } from './search-screen.tsx';
 export type { SearchScreenProps } from './search-screen.tsx';
+export { SearchFab } from './search-fab.tsx';
+export type { SearchFabProps } from './search-fab.tsx';
 
 export { LibraryScreen } from './library-screen.tsx';
 export type { LibraryScreenProps } from './library-screen.tsx';

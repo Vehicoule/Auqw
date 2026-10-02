@@ -1,6 +1,6 @@
-import { FlatList, ScrollView, TextInput, View } from 'react-native';
+import { FlatList, ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Icon, Pressable, Spinner, Text } from './primitives.tsx';
+import { Icon, Pressable, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState, StateFor } from './states.tsx';
@@ -109,68 +109,8 @@ export function SearchScreen({
         paddingTop: topInset,
       }}
     >
-      <View
-        style={{
-          marginHorizontal: theme.spacing.screen,
-          marginTop: theme.spacing.xxs,
-          marginBottom: theme.spacing.sm,
-          backgroundColor: theme.colors.fg08,
-          borderRadius: theme.radius.pill,
-          paddingHorizontal: theme.spacing.md,
-          minHeight: theme.sizes.touch,
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: theme.spacing.sm,
-        }}
-      >
-        <Icon name="search" size={14} color={theme.colors.textSecondary} />
-        <TextInput
-          value={view.field.value}
-          onChangeText={view.field.onChange}
-          onSubmitEditing={view.field.onSubmit}
-          placeholder={view.field.label}
-          placeholderTextColor={theme.colors.textSecondary}
-          autoCapitalize="none"
-          autoCorrect={false}
-          returnKeyType="search"
-          accessibilityLabel={view.field.label}
-          style={[
-            theme.typography.body,
-            {
-              flex: 1,
-              color: theme.colors.textPrimary,
-              paddingVertical: theme.spacing.sm,
-            },
-          ]}
-        />
-        {view.field.loading && (
-          <>
-            <Spinner size={14} />
-            {view.field.cancel !== null && (
-              <Pressable
-                compact
-                onPress={view.field.cancel.onPress}
-                accessibilityLabel={view.field.cancel.a11yLabel}
-                style={{ paddingHorizontal: theme.spacing.xs }}
-              >
-                <Text variant="metadata" color="accent">
-                  {view.field.cancel.label}
-                </Text>
-              </Pressable>
-            )}
-          </>
-        )}
-        {view.field.clear !== null && (
-          <Pressable
-            compact
-            onPress={view.field.clear.onPress}
-            accessibilityLabel={view.field.clear.a11yLabel}
-            style={{ padding: theme.spacing.xs }}
-          >
-            <Icon name="close" size={12} color={theme.colors.textSecondary} />
-          </Pressable>
-        )}
-      </View>
+      {/* The one search field is the floating loupe (SearchFab) —
+          the screen keeps recents, completions, and results only. */}
       {view.suggestions !== null && (
         <ScrollView
           style={{ flex: 1 }}

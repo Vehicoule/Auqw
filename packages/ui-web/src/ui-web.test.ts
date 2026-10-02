@@ -66,6 +66,7 @@ const {
   TrackRow,
   TransferScreen,
   WorldPanes,
+  WorldSearch,
   applyPendingMove,
   globalKeyAction,
   toSyncPanel,
@@ -94,6 +95,24 @@ function check(name: string, cond: boolean) {
 }
 function assertIncludes(name: string, markup: string, needle: string) {
   check(name, markup.includes(needle));
+}
+
+function fixtureField() {
+  return {
+    icon: 'search' as const,
+    label: 'search',
+    value: 'neon',
+    readOnly: false,
+    loading: false,
+    onChange: (_q: string) => {},
+    onSubmit: () => {},
+    cancel: null,
+    clear: {
+      icon: 'close' as const,
+      a11yLabel: 'clear search',
+      onPress: () => {},
+    },
+  };
 }
 
 /** Deterministic SSR tree — ThemeProvider fixes the scheme. */
@@ -613,21 +632,33 @@ function render(node: ReactNode): string {
       onResultPress: () => {},
     }),
   );
-  check('search field is an input', markup.includes('type="search"'));
   assertIncludes('search results header', markup, 'matches');
   check('search result rows render as listitems', markup.includes('role="listitem"'));
+  // The one search field lives in the toolbar — the pane carries no
+  // second input (single-search rule).
+  check('search pane carries no in-body field', !markup.includes('type="search"'));
 }
 {
-  const markup = render(
-    h(SearchScreen, {
-      state: fixtureSearchStates[0]!,
-      autoFocus: true,
+  const collapsed = render(
+    h(WorldSearch, {
+      field: fixtureField(),
+      live: true,
+      collapsed: true,
+      onExpand: () => {},
     }),
   );
-  check(
-    'autofocus input carries the reveal-focus marker',
-    markup.includes('data-autofocus'),
+  check('collapsed search renders the loupe', collapsed.includes('uw-wsearch--loupe'));
+  check('live query tints the loupe', collapsed.includes('data-live'));
+  const expanded = render(
+    h(WorldSearch, {
+      field: fixtureField(),
+      live: false,
+      collapsed: false,
+      onExpand: () => {},
+    }),
   );
+  check('expanded search renders the input', expanded.includes('uw-wsearch__input'));
+  check('expanded search draws the comet ring', expanded.includes('uw-wsearch__ring'));
 }
 
 // ---- markup: world panes (keep-alive tab host) --------------------------------

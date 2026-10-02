@@ -15,6 +15,8 @@ export { WaveformSeek } from './progress.tsx';
 export { TrackRow } from './track-row.tsx';
 export { EmptyState, ErrorState, LoadingState } from './states.tsx';
 export { DesktopChrome } from './chrome.tsx';
+export { WorldSearch } from './search-field.tsx';
+export type { WorldSearchProps } from './search-field.tsx';
 export { WorldPanes } from './world-panes.tsx';
 export { AppStack, PushScreen, SheetScreen, StackItem } from './stack.tsx';
 export { MiniPlayer } from './mini-player.tsx';
