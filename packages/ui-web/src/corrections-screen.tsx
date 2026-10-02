@@ -1,5 +1,11 @@
-import { Icon, Pressable, ScreenHead, Text } from './primitives.tsx';
-import { EmptyState, ErrorState, LoadingState } from './states.tsx';
+import {
+  Icon,
+  Pressable,
+  ScreenHead,
+  SkeletonRows,
+  Text,
+} from './primitives.tsx';
+import { EmptyState, ErrorState } from './states.tsx';
 import type { CorrectionsModel } from '@auqw/ui-shared';
 import {
   useCorrectionsScreenController,
@@ -60,7 +66,7 @@ export function CorrectionsScreen({
         ))}
       </div>
       {view.body.kind === 'loading' ? (
-        <LoadingState title={view.body.title} />
+        <SkeletonRows count={8} label={view.body.title} />
       ) : view.body.kind === 'error' ? (
         <ErrorState
           title={view.body.title}

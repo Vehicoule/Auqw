@@ -922,6 +922,52 @@
   flex: 1;
 }
 
+/* Skeleton placeholders — row-shaped ghosts pulsing on the fg08 wash
+   while a list loads. One pulse, opacity only (paint cost stays
+   off-layout), under the reduced-motion gate. */
+.uw-skeleton {
+  display: block;
+  background: var(--fg08);
+  opacity: 0.6;
+}
+
+.ui-web:not([data-reduced-motion='true']) .uw-skeleton {
+  animation: uw-skel-pulse 900ms var(--ease-out) infinite alternate;
+}
+
+@keyframes uw-skel-pulse {
+  from {
+    opacity: 0.45;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.uw-skelrows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  padding: var(--spacing-sm);
+  flex: 1;
+  align-content: flex-start;
+}
+
+.uw-skelrow {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  min-height: var(--size-track-row);
+}
+
+.uw-skelrow__lines {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
 .uw-state .uw-text {
   text-align: center;
 }
@@ -1883,6 +1929,42 @@
   border-radius: var(--radius-control);
   border: var(--stroke-hairline) solid var(--hairline);
   background: var(--raised);
+}
+
+/* Import step marker — pick → review → apply, closed steps show the
+   check and the current one carries the accent dot. */
+.uw-isteps {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin: 0 0 var(--spacing-sm);
+  padding: 0;
+  list-style: none;
+}
+
+.uw-isteps__step {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.uw-isteps__step + .uw-isteps__step::before {
+  content: '';
+  width: 10px;
+  height: var(--stroke-hairline);
+  margin-right: var(--spacing-sm);
+  background: var(--hairline);
+}
+
+.uw-isteps__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--fg25);
+}
+
+.uw-isteps__step[data-state='current'] .uw-isteps__dot {
+  background: var(--accent);
 }
 
 .uw-import-preview__meta {

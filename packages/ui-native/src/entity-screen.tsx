@@ -7,6 +7,7 @@ import {
   IconButton,
   PillButton,
   Pressable,
+  SkeletonRows,
   Spinner,
   Text,
 } from './primitives.tsx';
@@ -85,7 +86,11 @@ export function EntityScreen({
             accessibilityLabel={view.backA11yLabel}
           />
         </View>
-        <StateFor view={view} />
+        {view.kind === 'loading' ? (
+          <SkeletonRows count={8} label={view.title} />
+        ) : (
+          <StateFor view={view} />
+        )}
       </View>
     );
   }

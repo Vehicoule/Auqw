@@ -3,11 +3,12 @@ import {
   Icon,
   IconButton,
   Pressable,
+  SkeletonRows,
   Spinner,
   Text,
 } from './primitives.tsx';
 import { TrackRow, indexAdapter, useTrackList } from './track-row.tsx';
-import { EmptyState, ErrorState, LoadingState } from './states.tsx';
+import { EmptyState, ErrorState } from './states.tsx';
 import type { EntityScreenModel } from '@auqw/ui-shared';
 import {
   useEntityScreenController,
@@ -84,7 +85,7 @@ export function EntityScreen({
     return (
       <div className="uw-screen uw-entity">
         <BackRow a11yLabel={view.backA11yLabel} onBack={onBack} />
-        <LoadingState title={view.title} />
+        <SkeletonRows count={8} label={view.title} />
       </div>
     );
   }

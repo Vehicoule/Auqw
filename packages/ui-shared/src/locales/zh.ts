@@ -297,6 +297,9 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'transfer.startOver': '重新开始',
   'transfer.apply': '替换资料库',
   'transfer.applying': '替换中…',
+  'transfer.stepPick': '选择文件',
+  'transfer.stepReview': '检查',
+  'transfer.stepApply': '应用',
   'transfer.replaceWarn':
     '将抹除此设备上的资料库、下载内容、队列、播放历史和设置 — 导出仅保留资料库，不含下载和队列',
   'transfer.cancelA11y': '取消导入',

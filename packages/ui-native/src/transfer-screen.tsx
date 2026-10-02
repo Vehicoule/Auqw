@@ -9,6 +9,7 @@ import {
   Text,
 } from './primitives.tsx';
 import { ErrorState } from './states.tsx';
+import { t } from '@auqw/ui-shared';
 import type { TransferModel } from '@auqw/ui-shared';
 import {
   useTransferScreenController,
@@ -133,6 +134,76 @@ function TransferRow({ view }: { readonly view: TransferRowView }) {
   );
 }
 
+function ImportSteps({ phase }: { readonly phase: TransferImportView['phase'] }) {
+  const theme = useTheme();
+  // The body exists only after a file was picked: pick is always done.
+  // Review stays current through preview/reading, apply takes over while
+  // the replacement runs (and when it errors), done closes every step.
+  const current =
+    phase === 'done' ? 3 : phase === 'applying' || phase === 'error' ? 2 : 1;
+  const steps = [
+    t('transfer.stepPick'),
+    t('transfer.stepReview'),
+    t('transfer.stepApply'),
+  ];
+  return (
+    <View
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: theme.spacing.sm,
+        marginBottom: theme.spacing.sm,
+      }}
+    >
+      {steps.map((label, i) => (
+        <View
+          key={label}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: theme.spacing.sm }}
+        >
+          {i > 0 && (
+            <View
+              style={{
+                width: 10,
+                height: theme.strokes.hairline,
+                backgroundColor: theme.colors.hairline,
+              }}
+            />
+          )}
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: theme.spacing.xs,
+            }}
+          >
+            {i < current ? (
+              <StatusMark kind="check" size={10} color={theme.colors.accent} />
+            ) : (
+              <View
+                style={{
+                  width: 5,
+                  height: 5,
+                  borderRadius: theme.radius.pill,
+                  backgroundColor:
+                    i === current ? theme.colors.accent : theme.colors.fg25,
+                }}
+              />
+            )}
+            <Text
+              variant="label"
+              color={i === current ? 'accent' : i < current ? 'primary' : 'secondary'}
+            >
+              {label}
+            </Text>
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 function ImportBody({
   body,
 }: {
@@ -153,6 +224,7 @@ function ImportBody({
         borderColor: theme.colors.hairline,
       }}
     >
+      <ImportSteps phase={body.phase} />
       <Text variant="body" color="bright">
         {body.title}
       </Text>
