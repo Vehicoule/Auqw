@@ -83,7 +83,7 @@ The token set is a small ramp, so an external palette maps onto it mechanically.
 
 Settings gains `adaptive` alongside `dark · light · oled · system`: dark/light flag from `nativeTheme`/`useColorScheme`, palette where the platform exposes one; Electron's main process owns the watchers and pushes over IPC.
 
-The theme picker's sheet is preview cards, not a name list — each option renders a mini-window drawn in that scheme's own palette (art strip · panel · text bars · accent swatch), so the pick is visual. Selected card reads an accent ring + check (the ring is an outline — depth stays the canvas ramp's job); 'system' and 'adaptive' preview under the live OS light/dark scheme since the OS resolves both.
+The theme picker's sheet is preview cards, not a name list — each option renders a mini-window drawn in that scheme's own palette (art strip · panel · text bars · accent swatch), so the pick is visual. Selected card reads an accent ring + check (the ring is an outline — depth stays the canvas ramp's job); 'system' previews under the live OS light/dark scheme, and 'adaptive' previews the palette `deriveScheme` lands on from the live OS source — a Material You palette preview when the OS supplies one, falling back to the OS-scheme base when it doesn't.
 
 ## Type
 
