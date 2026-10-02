@@ -774,6 +774,7 @@ function Main({
     selectTab,
     focusSearch,
     searchFocusTick,
+    navHistory,
     overlayStack,
     pushOverlay,
     closeOverlay,
@@ -1436,6 +1437,18 @@ function Main({
             onSelect={selectTab}
             onOpenSettings={() => selectTab('settings')}
             onFocusSearch={focusSearch}
+            nav={{
+              back: {
+                canGo: navHistory.canBack,
+                onPress: navHistory.back,
+                label: t('chrome.nav.back'),
+              },
+              forward: {
+                canGo: navHistory.canForward,
+                onPress: navHistory.forward,
+                label: t('chrome.nav.forward'),
+              },
+            }}
             search={{
               // The toolbar field IS the one search box — the explore
               // pane keeps recents + results but carries no second

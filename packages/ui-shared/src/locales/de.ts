@@ -17,6 +17,8 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'common.dismiss': 'schließen',
   'chrome.menu': 'menü',
   'chrome.stage.show': 'player zeigen',
+  'chrome.nav.back': 'zurück',
+  'chrome.nav.forward': 'vor',
   'chrome.stage.hide': 'player verbergen',
   'common.done': 'fertig',
   'common.like': 'gefällt mir',

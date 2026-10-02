@@ -771,3 +771,42 @@ export const overlayRouteIndex = (
   }
   return -1;
 };
+
+// ---- world-bar back/forward -------------------------------------------
+// The history log dedupes locations by route identity: two commits
+// naming the same surface (same collection/playlist/entity ref) are
+// one entry, while same-type routes with different payload keys are
+// distinct. Extension overlays fall back to their serialized shape.
+
+/** Identity key for one overlay route in the navigation log. */
+export const navRouteKey = (o: { readonly type: string }): string => {
+  const so = o as ShellOverlay;
+  switch (so.type) {
+    case 'collection':
+      return `collection:${so.key}`;
+    case 'playlist':
+      return `playlist:${so.playlistId}`;
+    case 'entity':
+      return `entity:${entityRefKey(so.ref)}`;
+    case 'corrections':
+    case 'transfer':
+      return `shell:${so.type}`;
+    default:
+      return JSON.stringify(o);
+  }
+};
+
+/** Whether two recorded locations name the same (tab, route-stack)
+    destination — same tab and pairwise-equal route keys. */
+export const sameNavLocation = (
+  a: { readonly tab: string; readonly routes: readonly { type: string }[] },
+  b: { readonly tab: string; readonly routes: readonly { type: string }[] },
+): boolean =>
+  a.tab === b.tab &&
+  a.routes.length === b.routes.length &&
+  a.routes.every((route, i) => {
+    const other = b.routes[i];
+    return (
+      other !== undefined && navRouteKey(route) === navRouteKey(other)
+    );
+  });

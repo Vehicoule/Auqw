@@ -3040,11 +3040,12 @@
   height: var(--uw-titlebar-h);
   /* 3 tracks, equal outer columns: the tabs sit at the bar's true
      midpoint and can never overlap the side clusters. The outer
-     minimum matches the larger cluster (toggle+search ≈ 68px) so a
-     squeezed track clamps instead of letting its buttons slide under
-     the pills. */
+     minimum matches the larger cluster (chevrons + toggle / loupe +
+     entries ≈ 3×32px + gaps = 100px) so a squeezed track clamps
+     instead of letting its buttons slide under the pills — the tab
+     track's own floor is 0 and its pill scrolls as the last resort. */
   display: grid;
-  grid-template-columns: minmax(68px, 1fr) minmax(0, max-content) minmax(68px, 1fr);
+  grid-template-columns: minmax(100px, 1fr) minmax(0, max-content) minmax(100px, 1fr);
   align-items: center;
   gap: var(--spacing-xxs);
   padding: 0 var(--spacing-sm);
@@ -3088,6 +3089,21 @@
   padding-inline: 96px;
 }
 
+/* Narrow windows: the mirrored reserve exists only to center the tab
+   pill — the side carrying real caption buttons (right on
+   Windows/Linux, left on macOS) never shrinks, but the purely
+   aesthetic mirror side collapses so both control clusters keep
+   their room inside the measured caption zone. */
+@media (max-width: 960px) {
+  [data-platform='win32'] .uw-world-bar,
+  [data-platform='linux'] .uw-world-bar {
+    padding-left: var(--spacing-sm);
+  }
+  [data-platform='darwin'] .uw-chrome[data-stage='closed'] .uw-world-bar {
+    padding-right: var(--spacing-sm);
+  }
+}
+
 .uw-world-bar__start,
 .uw-world-bar__end {
   display: flex;
@@ -3097,6 +3113,13 @@
   /* shrink to content: the rest of the outer track stays the bar's
      own surface, so the gaps keep dragging the window */
   justify-self: start;
+}
+
+/* Back/forward chevrons stay mounted in both directions — the
+   unavailable one dims instead of leaving, so the pair's footprint
+   never shifts the centered tabs. */
+.uw-world-bar__start .uw-icon-btn:disabled {
+  opacity: 0.4;
 }
 
 .uw-world-bar__end {

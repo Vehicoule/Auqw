@@ -115,6 +115,7 @@ import {
   queueOriginRoute,
   reportStoredDownloadError,
   rowActionsModel,
+  sameNavLocation,
   stageDownloadChip,
   stageReopenMode,
   suggestionMetaMap,
@@ -566,10 +567,48 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const [entityFetches, setEntityFetches] = useState<
     Readonly<Record<string, EntityFetch>>
   >({});
+  // Epoch counter for entity loads — each fetch stores its minted
+  // token so a superseded request can't land on a newer entry.
+  const entityFetchSeq = useRef(0);
   const clearOverlays = useCallback(() => {
     clearOverlayStack();
     setEntityFetches({});
   }, [clearOverlayStack]);
+
+  // ---- world-bar back/forward --------------------------------------
+  // Browser-style history: every committed (tab, overlay-stack) change
+  // appends a location; the chevrons walk the log. navGo lives beside
+  // loadEntityPage below — a restore re-fetches its entity pages.
+  type NavLocation = {
+    readonly tab: string;
+    readonly routes: readonly (ShellOverlay | E)[];
+  };
+  const navLog = useRef<{ entries: NavLocation[]; cursor: number }>({
+    entries: [],
+    cursor: -1,
+  });
+  const [navAt, setNavAt] = useState(-1);
+  // A restore commit must not record itself — the flag outlives the
+  // batched setState and the recording effect consumes it.
+  const restoringNav = useRef(false);
+  useEffect(() => {
+    const log = navLog.current;
+    if (restoringNav.current) {
+      restoringNav.current = false;
+      return;
+    }
+    const routes = overlayStack.map((entry) => entry.overlay);
+    const cur = log.entries[log.cursor];
+    if (
+      cur !== undefined &&
+      sameNavLocation(cur, { tab, routes })
+    ) {
+      return;
+    }
+    log.entries = [...log.entries.slice(0, log.cursor + 1), { tab, routes }];
+    log.cursor = log.entries.length - 1;
+    setNavAt(log.cursor);
+  }, [tab, overlayStack]);
   const entityMeta = useRef(new Map<string, TrackMetadata>());
   const [actionsFor, setActionsFor] = useState<ActionTarget | null>(null);
   const [pickerFor, setPickerFor] = useState<ActionTarget | null>(null);
@@ -2882,6 +2921,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const loadEntityPage = useCallback(
     (ref: EntityRef) => {
       const key = entityRefKey(ref);
+      const req = (entityFetchSeq.current += 1);
       setEntityFetches((prev) => ({
         ...prev,
         [key]: {
@@ -2890,11 +2930,15 @@ export function useAppShell<E extends { readonly type: string } = never>(
           error: null,
           loading: true,
           loadingMore: false,
+          req,
         },
       }));
       void session.getEntityPage(ref).then((result) => {
         updateEntityFetch(key, (cur) =>
-          cur.ref !== ref
+          // A later load of the same ref (a history restore, a
+          // re-open) supersedes this response — ref identity alone
+          // can't tell them apart since routes reuse ref objects.
+          cur.req !== req
             ? null
             : {
                 ...cur,
@@ -2921,6 +2965,46 @@ export function useAppShell<E extends { readonly type: string } = never>(
       loadEntityPage(ref);
     },
     [overlay, pushOverlay, loadEntityPage],
+  );
+
+  // Back/forward walk the recorded log. A restore re-applies the
+  // location wholesale: tab switch, stack cleared, recorded routes
+  // re-pushed — and each entity route gets a fresh loadEntityPage, so a
+  // restored page actually loads instead of sitting on a null fetch.
+  const navGo = useCallback(
+    (delta: -1 | 1) => {
+      const log = navLog.current;
+      const target = log.entries[log.cursor + delta];
+      if (target === undefined) {
+        return;
+      }
+      restoringNav.current = true;
+      log.cursor += delta;
+      setNavAt(log.cursor);
+      setTab(target.tab);
+      clearOverlays();
+      const entityRefs = new Map<string, EntityRef>();
+      for (const route of target.routes) {
+        pushOverlay(route);
+        const so = shellOverlayOf(route);
+        if (so?.type === 'entity') {
+          entityRefs.set(entityRefKey(so.ref), so.ref);
+        }
+      }
+      for (const ref of entityRefs.values()) {
+        loadEntityPage(ref);
+      }
+    },
+    [pushOverlay, clearOverlays, loadEntityPage],
+  );
+  const navHistory = useMemo(
+    () => ({
+      canBack: navAt > 0,
+      canForward: navAt < navLog.current.entries.length - 1,
+      back: () => navGo(-1),
+      forward: () => navGo(1),
+    }),
+    [navAt, navGo],
   );
 
   const onLoadMore = useCallback(() => {
@@ -2954,7 +3038,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     }));
     void session.getEntityPage(more).then((result) => {
       updateEntityFetch(key, (latest) => {
-        if (latest.ref !== cur.ref || latest.page === null) {
+        if (latest.req !== cur.req || latest.page === null) {
           return null;
         }
         if (!result.ok) {
@@ -3760,6 +3844,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     selectTab,
     focusSearch,
     searchFocusTick,
+    navHistory,
     // overlays
     overlayStack,
     overlay,

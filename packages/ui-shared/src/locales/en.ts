@@ -17,6 +17,8 @@ export const en = {
   'common.dismiss': 'dismiss',
   'chrome.menu': 'menu',
   'chrome.stage.show': 'show player',
+  'chrome.nav.back': 'back',
+  'chrome.nav.forward': 'forward',
   'chrome.stage.hide': 'hide player',
   'common.done': 'done',
   'common.like': 'like',
