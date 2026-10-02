@@ -2625,23 +2625,6 @@ function Main({
               />
             </View>
           )}
-          {toast !== null && (
-            <View
-              accessibilityLiveRegion="polite"
-              style={{
-                ...floatStyle,
-                bottom: insets.bottom + 88,
-                maxWidth: '92%',
-                paddingHorizontal: 14,
-                paddingVertical: 6,
-                zIndex: 70,
-              }}
-            >
-              <Text variant="metadata" color="primary">
-                {toast}
-              </Text>
-            </View>
-          )}
         </StackItem>
         {overlayStack.map((entry) => {
           const content = renderOverlayEntry(entry);
@@ -2810,6 +2793,26 @@ function Main({
           </SheetScreen>
         )}
       </AppStack>
+      {/* Toasts report failures from sheets and pushed screens too,
+          so they must live outside the ScreenStack — a sibling above
+          every screen layer, not inside the root screen. */}
+      {toast !== null && (
+        <View
+          accessibilityLiveRegion="polite"
+          pointerEvents="none"
+          style={{
+            ...floatStyle,
+            bottom: insets.bottom + 88,
+            maxWidth: '92%',
+            paddingHorizontal: 14,
+            paddingVertical: 6,
+          }}
+        >
+          <Text variant="metadata" color="primary">
+            {toast}
+          </Text>
+        </View>
+      )}
     </View>
   );
 }
