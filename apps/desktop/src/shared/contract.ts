@@ -1348,6 +1348,17 @@ export const isLocalAddArgs = v.object({
   }),
 });
 
+export type LocalPicksArgs = v.Guarded<typeof isLocalPicksArgs>;
+
+/** `local:picks` — main attests the paths an OS dialog produced.
+ *  Same shape as `local:add`: a bounded absolute-path list. */
+export const isLocalPicksArgs = v.object({
+  paths: v.array(v.boundedString(MAX_LOCAL_PATH), {
+    min: 1,
+    max: MAX_LOCAL_PATHS,
+  }),
+});
+
 export type LocalPickPayload = v.Guarded<typeof isLocalPickPayload>;
 
 const isLocalPickPayload = v.object({

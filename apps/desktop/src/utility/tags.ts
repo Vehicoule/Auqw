@@ -8,7 +8,7 @@ import {
 import type { FileHandle } from 'node:fs/promises';
 import { basename, join, relative, sep } from 'node:path';
 import { parseFile } from 'music-metadata';
-import type { DatabaseSync } from 'node:sqlite';
+import type { LocalGrants } from './local-grants.ts';
 import { CHANNELS } from '../shared/channels.ts';
 import type {
   TagreadBatchArgs,
@@ -40,16 +40,15 @@ import { guarded, type UtilityHandler } from './router.ts';
  * on mobile; this service exposes only the file-touching halves of the
  * port: recursive enumeration, content fingerprinting, and tag reads.
  *
- * Every call is grant-checked: `treeUri` must be a live row in
- * `local_sources` (the only table that records a granted tree), so a
- * renderer can never read outside a tree the user actually picked. The
- * check reads through the shared index accessor — the same database
- * file the storage service writes, second connection, never a second
- * file.
+ * Every call is grant-checked: `treeUri` must be live in the
+ * utility-owned grant store (see `local-grants.ts`) — never the
+ * renderer-writable `local_sources` table — so a compromised renderer
+ * can never read outside a tree the pick path actually minted.
  */
 
 type TagServiceOptions = {
-  readonly database: () => DatabaseSync | null;
+  /** Authoritative grant check — the utility-owned store. */
+  readonly grants: LocalGrants;
 };
 
 type TagService = {
@@ -131,38 +130,14 @@ async function resolveDocAbs(
 }
 
 /**
- * The grant check: `treeUri` must name a row in `local_sources`. A
- * missing database or a missing table means no grants exist yet —
- * `permission-denied` either way, matching the port's revoked-grant
+ * The grant check: `treeUri` must be present in the utility-owned
+ * grant store — minted by `local:add` (or the one-shot bootstrap
+ * import), revoked by the storage-commit diff of `local_sources`.
+ * A miss is `permission-denied`, matching the port's revoked-grant
  * semantics the engine already maps.
  */
-function requireGrant(
-  database: () => DatabaseSync | null,
-  treeUri: string,
-): void {
-  const db = database();
-  if (db === null) {
-    throw shellError(
-      'permission-denied',
-      'no local grants — the tree is not registered',
-    );
-  }
-  let row: unknown;
-  try {
-    row = db
-      .prepare('SELECT 1 FROM local_sources WHERE tree_uri = ?')
-      .get(treeUri);
-  } catch (thrown) {
-    const message = thrown instanceof Error ? thrown.message : '';
-    if (message.includes('no such table')) {
-      throw shellError(
-        'permission-denied',
-        'no local grants — the tree is not registered',
-      );
-    }
-    asIo('grant check failed', thrown);
-  }
-  if (row === undefined) {
+function requireGrant(grants: LocalGrants, treeUri: string): void {
+  if (!grants.has(treeUri)) {
     throw shellError(
       'permission-denied',
       'treeUri is not a granted local source',
@@ -270,7 +245,7 @@ export function createTagService(options: TagServiceOptions): TagService {
   async function enumerate(
     args: TagreadEnumerateArgs,
   ): Promise<unknown> {
-    requireGrant(options.database, args.treeUri);
+    requireGrant(options.grants, args.treeUri);
     const tree = parseTree(args.treeUri);
     if (tree === null) {
       throw shellError('invalid-request', 'not a desktop treeUri');
@@ -393,7 +368,7 @@ export function createTagService(options: TagServiceOptions): TagService {
   async function fingerprint(
     args: TagreadBatchArgs,
   ): Promise<unknown> {
-    requireGrant(options.database, args.treeUri);
+    requireGrant(options.grants, args.treeUri);
     const fingerprints: unknown[] = [];
     for (const docId of args.docIds) {
       const abs = await resolveDocAbs(args.treeUri, docId);
@@ -404,7 +379,7 @@ export function createTagService(options: TagServiceOptions): TagService {
   }
 
   async function read(args: TagreadBatchArgs): Promise<unknown> {
-    requireGrant(options.database, args.treeUri);
+    requireGrant(options.grants, args.treeUri);
     const tags: unknown[] = [];
     for (const docId of args.docIds) {
       const abs = await resolveDocAbs(args.treeUri, docId);

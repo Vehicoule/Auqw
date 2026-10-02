@@ -819,4 +819,76 @@ export async function run(): Promise<void> {
     'close-during-build mint succeeded',
   );
   assertEqual(disposeCalls, 1, 'close-during-build leaked a session');
+
+  // The bind is loopback by default — the endpoint answers
+  // unauthenticated, so the wildcard only ever serves a paired device
+  // that shares this host's public IP (lanOptIn + lanReady together).
+  const stubSession = async (): Promise<PotSession> => ({
+    mint: async () => 'tok',
+    expiresAtMs: now.ms + 60_000,
+  });
+  const defaulted = createPotService({ nowMs: () => now.ms, log: () => {}, session: stubSession });
+  await defaulted.bind();
+  assertEqual(
+    defaulted.host(),
+    '127.0.0.1',
+    'default bind left loopback',
+  );
+  await defaulted.close();
+
+  // Opt-in alone is not enough — no paired device means the LAN
+  // surface stays refused and loopback still serves.
+  const unpaired = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    session: stubSession,
+    lanOptIn: true,
+    lanReady: () => Promise.resolve(false),
+  });
+  await unpaired.bind();
+  assertEqual(
+    unpaired.host(),
+    '127.0.0.1',
+    'opt-in without a pairing bound wildcard',
+  );
+  const unpairedPort = unpaired.port();
+  assert(unpairedPort !== null, 'unpaired opt-in still serves locally');
+  await unpaired.close();
+
+  // A custody failure reads as not-ready — never the wildcard.
+  const custodyDown = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    session: stubSession,
+    lanOptIn: true,
+    lanReady: () => Promise.reject(new Error('custody unavailable')),
+  });
+  await custodyDown.bind();
+  assertEqual(
+    custodyDown.host(),
+    '127.0.0.1',
+    'a custody failure bound wildcard',
+  );
+  await custodyDown.close();
+
+  // Both halves hold: opted in AND a paired device exists.
+  const paired = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    session: stubSession,
+    lanOptIn: true,
+    lanReady: () => Promise.resolve(true),
+  });
+  await paired.bind();
+  assertEqual(
+    paired.host(),
+    '0.0.0.0',
+    'paired opt-in did not bind wildcard',
+  );
+  // The loopback URL stays canonical for the local host either way.
+  assert(
+    paired.loopbackUrl()?.startsWith('http://127.0.0.1:') === true,
+    'wildcard bind still advertises loopback locally',
+  );
+  await paired.close();
 }

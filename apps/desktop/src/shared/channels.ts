@@ -95,6 +95,10 @@ export const CHANNELS = {
   localList: 'local:list',
   localPlayback: 'local:playback',
   localSweep: 'local:sweep',
+  // Main→utility only (never in the renderer `fwd` allowlist): main
+  // attests the OS dialog's returned paths — `local:add` mints
+  // grants for attested paths only.
+  localPicks: 'local:picks',
   /**
    * OAuth session trust — snapshot pull, flow verbs, the client-id
    * override, and the allowlisted verification-URL open. Token

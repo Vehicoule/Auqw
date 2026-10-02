@@ -826,6 +826,55 @@ export async function run(): Promise<void> {
     }
   }
 
+  // —— The advertised POT endpoint follows the bound host ——
+  {
+    // Loopback-bound minter (the default): the welcome carries no pot
+    // — a LAN phone could never reach the socket anyway.
+    const loop = await startService({
+      potHost: () => '127.0.0.1',
+      potPort: () => 40_001,
+    });
+    try {
+      const pairing = await pairingCode(loop.service);
+      const phone = await pairPhone({
+        port: loop.port,
+        deviceId: 'phone-potloop',
+        code: pairing.code,
+        fp: pairing.fp,
+      });
+      assert(
+        phone.welcome['pot'] === undefined,
+        `loopback bind advertises no pot, got ${JSON.stringify(phone.welcome['pot'])}`,
+      );
+      phone.client.close();
+    } finally {
+      await loop.service.close();
+    }
+    // Wildcard bind: the same endpoint the pairing payload advertises
+    // is the one phones dial.
+    const wide = await startService({
+      potHost: () => '0.0.0.0',
+      potPort: () => 40_002,
+    });
+    try {
+      const pairing = await pairingCode(wide.service);
+      const phone = await pairPhone({
+        port: wide.port,
+        deviceId: 'phone-potwide',
+        code: pairing.code,
+        fp: pairing.fp,
+      });
+      assertEqual(
+        phone.welcome['pot'],
+        '127.0.0.1:40002',
+        'wildcard bind advertises its port on the endpoint host',
+      );
+      phone.client.close();
+    } finally {
+      await wide.service.close();
+    }
+  }
+
   // —— Local-write kicks debounce trailing-edge, like the phone ——
   {
     const desk = await testUtilityEngine('dsk-trail');
