@@ -1392,6 +1392,9 @@ export type StageScreenHandlers = StageQueueHandlers & {
   readonly onDownload?: MaybeFn;
   /** Add-to-playlist affordance on the meta row (same as native). */
   readonly onAddToPlaylist?: MaybeFn;
+  /** The playing track's ⋯ row-actions menu (top-right on desktop,
+      top row on the sheet). */
+  readonly onTrackMenu?: MaybeFn;
   /**
    * Stops playback and clears the stage's track (the queue keeps its
    * items — the native mini-player's swipe-down dismiss). Overlays the

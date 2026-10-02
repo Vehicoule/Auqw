@@ -560,6 +560,7 @@ export const fixturePlayerPlaying: PlayerModel = {
   positionMs: 97_200,
   durationMs: 180_000,
   occurrenceId: 'occ-self-aware',
+  recordingId: 'rec-self-aware',
   liked: true,
   inPlaylist: false,
   canPrevious: false,

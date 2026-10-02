@@ -567,6 +567,8 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'action.playPlaylist': 'playlist abspielen',
   'action.playPlaylistEntry': 'playlist-eintrag abspielen',
   'action.shuffleAll': 'alle zufällig abspielen',
+  'action.shuffleOn': 'zufällig: an',
+  'action.toggleShuffle': 'zufällig umschalten',
   'action.resume': 'fortsetzen',
   'action.seek': 'springen',
   'action.enqueueTrack': 'titel einreihen',

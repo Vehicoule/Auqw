@@ -2132,13 +2132,26 @@
   background: var(--fg08);
 }
 
+.uw-stage__menu {
+  position: absolute;
+  top: var(--spacing-sm);
+  right: calc(var(--spacing-sm) + 40px);
+  z-index: 5;
+  background: var(--fg08);
+}
+
 /* The queue tools row's reorder button shares the top-right corner —
-   reserve the stop's footprint when it exists. The centered radio
-   pill takes the same reserve: a long status can stretch its
-   trailing action under the stop on a narrow stage. */
+   reserve the stop's footprint when it exists; the ⋯ track menu
+   widens it by its own slot. The centered radio pill takes the same
+   reserve: a long status can stretch its trailing action under the
+   stop on a narrow stage. */
 .uw-stage:has(> .uw-stage__stop) .uw-stage__queue-tools,
 .uw-stage:has(> .uw-stage__stop) .uw-stage__radio {
   padding-right: 44px;
+}
+.uw-stage:has(> .uw-stage__menu) .uw-stage__queue-tools,
+.uw-stage:has(> .uw-stage__menu) .uw-stage__radio {
+  padding-right: 88px;
 }
 
 .uw-stage__body {
