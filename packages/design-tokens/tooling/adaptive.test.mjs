@@ -144,6 +144,7 @@ const TEXT_ROLES = [
     { scheme: 'dark', palette: { bg: '#242424', fg: '#ececf0' } },
     'dark',
   );
+  check('dark palette is derived, not the fallback', dark.values !== schemes.dark);
   check('dark palette reproduces dark stage', near(dark.values.stage, '#1e1e1e'));
   check('dark palette reproduces dark deep', near(dark.values.deep, '#191919'));
   check('dark palette reproduces dark raised', near(dark.values.raised, '#303030'));
@@ -151,6 +152,7 @@ const TEXT_ROLES = [
     { scheme: 'light', palette: { bg: '#fafafa', fg: '#232326' } },
     'light',
   );
+  check('light palette is derived, not the fallback', light.values !== schemes.light);
   check('light palette reproduces light stage', near(light.values.stage, '#ececee'));
   check('light palette reproduces light deep', near(light.values.deep, '#d8d8dd'));
   check('light palette reproduces light raised', near(light.values.raised, '#ffffff'));
