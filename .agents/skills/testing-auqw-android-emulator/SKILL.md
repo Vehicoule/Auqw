@@ -808,8 +808,10 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   `BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK`, so a torn write can't produce this;
   suspect a version/schema or write-path bug — worth a real investigation,
   not just a workaround). PRESERVE EVIDENCE FIRST on a debuggable build:
-  `adb exec-out run-as com.vehicoule.auqw sh -c 'cat files/SQLite/*.db'
-  > wedge.db` before wiping so the malformed row/schema survives for diagnosis.
+  `adb exec-out run-as com.vehicoule.auqw tar -cf - files/SQLite > wedge.tar`
+  before wiping — the tar captures every db plus the -wal/-shm/-journal
+  sidecars (a `cat *.db` glob concatenates multiple dbs and drops the WAL,
+  so it can miss the malformed state entirely).
   `pm clear com.vehicoule.auqw` is the reliable recovery on throwaway dev
   installs (it erases the library — never the first move on real data),
   then re-grant SAF (`auqw://local-add`
