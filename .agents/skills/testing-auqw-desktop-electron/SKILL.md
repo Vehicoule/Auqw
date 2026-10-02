@@ -646,12 +646,15 @@ None — the napi artifact is a local cargo build output.
 ## Engine internals + media-session OS surface (MPRIS) probes
 
 - The built bundle (`apps/desktop/dist/renderer/app.js`) is MINIFIED
-  since #320 — one giant line, but `keepNames` preserved function
-  names, so surgical `console.warn('parkdbg', ...)` probes still work
-  by string-splicing next to a greppable symbol (e.g. `rg -o
-  'function publishMetadata' app.js` to locate the anchor): no source
-  edits, wiped by the next rebuild (`pnpm --filter desktop build`).
-  Pre-#320 builds were unminified — same recipe, nicer anchor points.
+  since #320 — one giant line, and `keepNames` preserves a name only
+  as the string arg in a `__name(fn,"publishMetadata")` wrapper —
+  `function publishMetadata` does NOT survive as text. Verified anchor:
+  grep the quoted name (`rg -o '.\{60\}"publishMetadata".\{20\}'`)
+  to find the `__name` call site, which names the minified identifier
+  (`je` there) — splice `console.warn('parkdbg', ...)` inside that
+  function or at its call sites. No source edits; wiped by the next
+  rebuild (`pnpm --filter desktop build`). Pre-#320 builds were
+  unminified — same recipe, nicer anchor points.
 - Chromium deactivates `navigator.mediaSession` AT the element's `ended`
   event: the bus reads `Stopped` + `mpris:length=0` + `CanPlay=false`,
   `playerctl play` is refused, and neither `playbackState` writes,
