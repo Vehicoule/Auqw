@@ -3209,6 +3209,13 @@
   -webkit-app-region: no-drag;
 }
 
+/* Tight bars floor the end track at the cluster's min-content — the
+   squeeze order then reads search collapse → tabs pill scrolls →
+   caption cluster stays whole, instead of the cluster overflowing
+   left over the tabs at the 640px floor on verbose locales. */
+.uw-world-bar[data-end-tight] {
+  grid-template-columns: minmax(100px, 1fr) minmax(0, max-content) minmax(min-content, 1fr);
+}
 /* One control height across the strip — field, icon buttons, chips
    (design.md's header-bar rule). */
 .uw-world-bar {

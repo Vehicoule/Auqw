@@ -367,7 +367,11 @@ export function DesktopChrome({
         />
       )}
       <div className="uw-world">
-        <header className="uw-world-bar" ref={barRef}>
+        <header
+          className="uw-world-bar"
+          ref={barRef}
+          data-end-tight={endTight || undefined}
+        >
           <div className="uw-world-bar__start">
             {nav !== undefined && (
               <>
