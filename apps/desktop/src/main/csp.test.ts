@@ -29,6 +29,7 @@ export function run(): void {
     // img-src enumerates the proven artwork CDNs even with no
     // manifests — the bundled providers' covers must never break.
     const bare = imgSrcSources(dir);
+    const bareSources = new Set(bare.split(' '));
     for (const host of [
       'https://*.dzcdn.net',
       'https://*.ggpht.com',
@@ -36,16 +37,16 @@ export function run(): void {
       'https://*.mzstatic.com',
     ]) {
       assert(
-        bare.includes(host),
+        bareSources.has(host),
         `img-src dropped the artwork host ${host}: ${bare}`,
       );
     }
     assert(
-      !bare.includes('https: '),
+      !bareSources.has('https:'),
       `img-src kept the blanket https: source: ${bare}`,
     );
     for (const local of ["'self'", 'data:', 'blob:']) {
-      assert(bare.includes(local), `img-src dropped ${local}: ${bare}`);
+      assert(bareSources.has(local), `img-src dropped ${local}: ${bare}`);
     }
 
     // Manifest network: permissions widen img-src — a provider whose
@@ -82,24 +83,27 @@ export function run(): void {
     writeFileSync(join(dir, 'plugins', 'broken.manifest.json'), '{nope', 'utf8');
     const pluginDir = join(dir, 'plugins');
     const widened = imgSrcSources(pluginDir);
+    // img-src is a space-separated source list — membership means the
+    // whole token, not a substring inside some longer host.
+    const widenedSources = new Set(widened.split(' '));
     assert(
-      widened.includes('https://api.deezer.com'),
+      widenedSources.has('https://api.deezer.com'),
       `network: grant did not widen img-src: ${widened}`,
     );
     assert(
-      widened.includes('https://music.youtube.com'),
+      widenedSources.has('https://music.youtube.com'),
       `network: grant did not widen img-src: ${widened}`,
     );
     // network:*.h grants the wildcard AND the bare apex — CSP `*.h`
     // alone never matches the apex.
     assert(
-      widened.includes('https://*.googlevideo.com') &&
-        widened.includes('https://googlevideo.com'),
+      widenedSources.has('https://*.googlevideo.com') &&
+        widenedSources.has('https://googlevideo.com'),
       `wildcard network: grant lost its apex: ${widened}`,
     );
     // Non-origin permissions contribute nothing — every token must be
     // a real CSP source expression.
-    for (const token of widened.split(' ')) {
+    for (const token of widenedSources) {
       assert(
         /^('self'|data:|blob:|https:\/\/\S+)$/.test(token),
         `capability name leaked into img-src: ${token}`,
