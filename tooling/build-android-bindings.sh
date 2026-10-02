@@ -5,8 +5,7 @@
 # Requires: cargo-ndk, ANDROID NDK at $ANDROID_NDK_HOME (or the SDK
 # default below).
 # AUQW_ANDROID_ABIS narrows the built targets (comma-separated); the
-# release workflow ships arm64 only and sets it accordingly. The first
-# entry's .so feeds uniffi-bindgen.
+# release workflow ships arm64 only and sets it accordingly.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -21,8 +20,11 @@ for abi in "${ABIS[@]}"; do TARGETS+=(-t "$abi"); done
 
 cargo ndk "${TARGETS[@]}" -o "$JNILIBS" build --locked -p auqw-mobile-bindings --release
 
-cargo run --locked -p auqw-mobile-bindings --bin uniffi-bindgen -- generate \
-  --library "$JNILIBS/${ABIS[0]}/libauqw_mobile_bindings.so" \
+# uniffi-bindgen reads its metadata off library symbols, which the
+# release profile strips — generate from an unstripped dev build.
+cargo build --locked -p auqw-mobile-bindings
+target/debug/uniffi-bindgen generate \
+  --library target/debug/libauqw_mobile_bindings.a \
   --language kotlin \
   --no-format \
   --out-dir "$JAVA_OUT"
