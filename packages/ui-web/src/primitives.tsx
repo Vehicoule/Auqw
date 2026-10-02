@@ -1,10 +1,11 @@
 import type { CSSProperties, MouseEvent, ReactNode, Ref } from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTheme } from './theme.tsx';
 import {
   CHECK_DRAW_PATH,
   CHECK_MINI_PATH,
   DOWNLOAD_ARROW_PATH,
+  LIST_PLUS_PATH,
   downloadIconState,
   ICON_ARC_PATH,
   ICON_RING_PATH,
@@ -221,6 +222,8 @@ export function IconButton({
     >
       {icon === 'heart' || icon === 'heart-filled' ? (
         <HeartIcon filled={icon === 'heart-filled' || filled === true} size={iconSize} color={color} />
+      ) : icon === 'list-plus' && filled !== undefined ? (
+        <PlaylistAddIcon added={filled} size={iconSize} color={color} />
       ) : (
         <Icon name={icon} size={iconSize} color={color} filled={filled} />
       )}
@@ -693,6 +696,52 @@ export function HeartIcon({
   );
 }
 
+/** The add-to-playlist mark: the plus glyph spins out while the check
+    draws on — same one-SVG layering as the download state machine. */
+export function PlaylistAddIcon({
+  added,
+  size = 14,
+  color,
+  strokeWidth,
+}: {
+  readonly added: boolean;
+  readonly size?: number | undefined;
+  readonly color?: string | undefined;
+  readonly strokeWidth?: number | undefined;
+}) {
+  const paint = color ?? 'currentColor';
+  const sw = strokeWidth ?? strokes.icon;
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      focusable="false"
+      className={`uw-pladd${added ? ' uw-pladd--added' : ''}`}
+    >
+      <path
+        className="uw-pladd__plus"
+        d={LIST_PLUS_PATH}
+        stroke={paint}
+        strokeWidth={sw}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        className="uw-pladd__check"
+        d={CHECK_DRAW_PATH}
+        pathLength={1}
+        stroke={paint}
+        strokeWidth={sw}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function Spinner({
   size = 16,
   color,
@@ -755,6 +804,94 @@ export function SegmentItem({
         {label}
       </Text>
     </Pressable>
+  );
+}
+
+export type SegmentTab = {
+  readonly key: string;
+  readonly icon: IconName;
+  readonly label: string;
+  readonly active: boolean;
+  readonly onPress?: (() => void) | undefined;
+};
+
+/** A segmented pill whose selection mark is ONE thumb gliding between
+    items instead of a fill popping per item — the preview's "indicator
+    glide". The thumb measures the active item's slot (offsetLeft +
+    offsetWidth, refreshed by a ResizeObserver so locale/font/geometry
+    changes re-track it) and transitions transform + width. */
+export function Segment({
+  tabs,
+  variant,
+  ariaLabel,
+  iconSize = 12,
+  textVariant = 'metadata',
+  numberOfLines,
+  className,
+}: {
+  readonly tabs: readonly SegmentTab[];
+  readonly variant: 'float' | 'tabs';
+  readonly ariaLabel?: string | undefined;
+  readonly iconSize?: number | undefined;
+  readonly textVariant?: TextVariant | undefined;
+  readonly numberOfLines?: number | undefined;
+  readonly className?: string | undefined;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [thumb, setThumb] = useState<{ x: number; w: number } | null>(
+    null,
+  );
+  const activeIdx = tabs.findIndex((tab) => tab.active);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el === null || activeIdx < 0) return undefined;
+    const measure = () => {
+      const item =
+        el.querySelectorAll<HTMLElement>('.uw-segment__item')[activeIdx];
+      if (item === undefined) return;
+      setThumb({ x: item.offsetLeft, w: item.offsetWidth });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    for (const item of el.querySelectorAll('.uw-segment__item')) {
+      observer.observe(item);
+    }
+    return () => observer.disconnect();
+  }, [activeIdx, tabs.length]);
+  return (
+    <div
+      ref={ref}
+      className={
+        `uw-segment uw-segment--${variant}` +
+        (className ? ` ${className}` : '')
+      }
+      role="tablist"
+      aria-label={ariaLabel}
+    >
+      {thumb !== null && (
+        <div
+          className="uw-segment__thumb"
+          aria-hidden="true"
+          style={{
+            transform: `translateX(${thumb.x}px)`,
+            width: thumb.w,
+          }}
+        />
+      )}
+      {tabs.map((tab) => (
+        <SegmentItem
+          key={tab.key}
+          icon={tab.icon}
+          label={tab.label}
+          active={tab.active}
+          onPress={tab.onPress}
+          iconSize={iconSize}
+          textVariant={textVariant}
+          numberOfLines={numberOfLines}
+        />
+      ))}
+    </div>
   );
 }
 

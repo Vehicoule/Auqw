@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Icon, IconButton, Pressable, SegmentItem, Text } from './primitives.tsx';
+import { Icon, IconButton, Pressable, Segment, Text } from './primitives.tsx';
 import type { IconName } from './primitives.tsx';
 import { globalKeyAction } from './keyboard.ts';
 import { WorldSearch } from './search-field.tsx';
@@ -53,27 +53,26 @@ function WorldTabs({
   readonly onSelect: (key: string) => void;
 }) {
   return (
-    <nav className="uw-tabs" aria-label={t('nav.primaryA11y')}>
-      <div className="uw-segment uw-segment--tabs">
-        {tabs.map((item) => (
-          <SegmentItem
-            key={item.key}
-            icon={
-              (item.key === activeKey
-                ? NAV_ICONS_ACTIVE[item.key]
-                : undefined) ??
-              NAV_ICONS[item.key] ??
-              'note'
-            }
-            label={item.label}
-            active={item.key === activeKey}
-            onPress={() => onSelect(item.key)}
-            iconSize={13}
-            textVariant="body"
-            numberOfLines={1}
-          />
-        ))}
-      </div>
+    <nav className="uw-tabs">
+      <Segment
+        variant="tabs"
+        ariaLabel={t('nav.primaryA11y')}
+        tabs={tabs.map((item) => ({
+          key: item.key,
+          icon:
+            (item.key === activeKey
+              ? NAV_ICONS_ACTIVE[item.key]
+              : undefined) ??
+            NAV_ICONS[item.key] ??
+            'note',
+          label: item.label,
+          active: item.key === activeKey,
+          onPress: () => onSelect(item.key),
+        }))}
+        iconSize={13}
+        textVariant="body"
+        numberOfLines={1}
+      />
     </nav>
   );
 }
