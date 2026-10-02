@@ -626,10 +626,12 @@ None — the napi artifact is a local cargo build output.
   `ended` never fires: a parked card reads `Paused` + `CanPlay=true`
   with position ≈ duration−80 ms while the queue row reads 0 — expected,
   not a bug (the element rewinds on the OS `play` press).
-- The desktop launch script needs NO `AUQW_*` env vars — defaults
-  already resolve `apps/desktop/plugins` and
+- On a checkout that already has the artifacts, launch needs NO `AUQW_*`
+  env vars — defaults resolve `apps/desktop/plugins` and
   `target/debug/libauqw_node_bindings.so`; setting wrong values is the
-  common cause of "couldn't start".
+  common cause of "couldn't start". Only pass `AUQW_NODE_BINDINGS` /
+  `AUQW_PLUGIN_DIR` when the checkout lacks the built pieces (see
+  Launch).
 - mp3 fixtures are `doc_id`-bound by PATH: fingerprint/size are
   scan-time fields and play does not re-verify, so a same-path file with
   different audio still plays under the fixture's doc.
