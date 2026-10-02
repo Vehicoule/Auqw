@@ -2049,11 +2049,11 @@ function Main({
   }, [navBarStyle]);
 
   const topInset = insets.top;
-  // Both floating pills (offline banner, toast) share the chrome.
-  const pillStyle = {
+  // Floating overlays (offline banner, toast) share the chrome.
+  const floatStyle = {
     position: 'absolute' as const,
     alignSelf: 'center' as const,
-    borderRadius: 999,
+    borderRadius: theme.radius.float,
     backgroundColor: theme.colors.raised,
     borderWidth: theme.strokes.hairline,
     borderColor: theme.colors.hairline,
@@ -2546,7 +2546,7 @@ function Main({
           {online === false && (
             <View
               style={{
-                ...pillStyle,
+                ...floatStyle,
                 top: topInset + 4,
                 paddingHorizontal: 12,
                 paddingVertical: 5,
@@ -2590,7 +2590,7 @@ function Main({
             <View
               accessibilityLiveRegion="polite"
               style={{
-                ...pillStyle,
+                ...floatStyle,
                 bottom: insets.bottom + 88,
                 maxWidth: '92%',
                 paddingHorizontal: 14,

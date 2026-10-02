@@ -514,7 +514,7 @@ export function PillButton({
           gap: theme.spacing.sm,
           paddingHorizontal: theme.spacing.md,
           minHeight,
-          borderRadius: theme.radius.pill,
+          borderRadius: theme.radius.control,
           backgroundColor: bg[tone],
           borderWidth: bordered ? theme.strokes.hairline : 0,
           borderColor: theme.colors.hairline,

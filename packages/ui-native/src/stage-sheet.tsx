@@ -150,8 +150,8 @@ function transportVariant(
 } {
   if (variant === 'm3e') {
     return {
-      side: { borderRadius: 12 },
-      main: { borderRadius: 12, backgroundColor: theme.colors.raised },
+      side: { borderRadius: theme.radius.card },
+      main: { borderRadius: theme.radius.card, backgroundColor: theme.colors.raised },
       play: {
         borderRadius: theme.radius.float,
         backgroundColor: theme.colors.accent,
@@ -161,15 +161,15 @@ function transportVariant(
     };
   }
   const glass: ViewStyle = {
-    borderRadius: theme.radius.pill,
+    borderRadius: theme.radius.card,
     backgroundColor: theme.colors.glass,
     borderWidth: theme.strokes.hairline,
     borderColor: theme.colors.hairline,
   };
   return {
-    side: { borderRadius: theme.radius.pill },
+    side: { borderRadius: theme.radius.card },
     main: glass,
-    play: { ...glass, width: 56, height: 56 },
+    play: { ...glass, borderRadius: theme.radius.float, width: 56, height: 56 },
   };
 }
 
@@ -312,7 +312,7 @@ function ModeSegmentPill({
            lands the float at the 52px chrome height — the mini
            player's. Don't pull it onto the spacing scale. */
         padding: 3,
-        borderRadius: theme.radius.pill,
+        borderRadius: theme.radius.float,
         borderWidth: theme.strokes.hairline,
         borderColor: theme.colors.hairline,
         shadowColor: theme.colors.scrim,
@@ -348,7 +348,7 @@ function ModeSegmentPill({
               justifyContent: 'center',
               gap: 7,
               minHeight: theme.sizes.touch,
-              borderRadius: theme.radius.pill,
+              borderRadius: theme.radius.card,
               backgroundColor: tab.active ? activeBg : 'transparent',
             }}
           >
@@ -1629,14 +1629,14 @@ export function StageSheet({
             }}
           >
             {radioRow !== null && (
-              /* Same accent pill as the mode selector's active item —
-                  accentSoft fill, accent content, pill radius. */
+              /* Same accent fill as the mode selector's active item —
+                  accentSoft fill, accent content, control radius. */
               <View
                 style={{
                   flexDirection: 'row',
                   alignItems: 'center',
                   gap: theme.spacing.sm,
-                  borderRadius: theme.radius.pill,
+                  borderRadius: theme.radius.control,
                   backgroundColor: colors.accentSoft,
                   paddingHorizontal: theme.spacing.md,
                   paddingVertical: theme.spacing.xs,
