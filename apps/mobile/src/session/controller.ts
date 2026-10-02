@@ -848,7 +848,12 @@ export async function createSessionController(
           onApplied: (applied) => {
             void refold(
               applied.outcomes,
-              (entries, s) => session.applySyncedEntries(entries, s),
+              (entries, s) =>
+                session.applySyncedEntries(
+                  entries,
+                  s,
+                  syncSurface?.engine.deviceId,
+                ),
               'sync apply',
             ).catch(() => undefined);
           },
@@ -899,11 +904,13 @@ export async function createSessionController(
           // truth and this rebuild restores anything lost (Review
           // #46). Idempotent — outcomes that already projected just
           // re-fold to the same rows.
+          const syncDeviceId = syncSurface.engine.deviceId;
           void (async () => {
             const materialized = syncSurface.engine.materialize();
             const ok_ = await refold(
               materialized,
-              (entries, s) => session.applyMaterializedEntries(entries, s),
+              (entries, s) =>
+                session.applyMaterializedEntries(entries, s, syncDeviceId),
               'sync reconcile',
             );
             if (!ok_) {

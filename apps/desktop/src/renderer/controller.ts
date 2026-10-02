@@ -593,6 +593,11 @@ export async function createSessionController(
       string,
       Readonly<Record<string, string>>
     >();
+    // The count fold needs our deviceId to read our live component
+    // out of each page's `sumComponents` — the same identity the
+    // emit diff charges against.
+    const status = await api.sync.status().catch(() => null);
+    const deviceId = status?.deviceId ?? undefined;
     for (let offset = 0; ; ) {
       const page = await api.sync.materialized({ offset });
       for (const rec of page.records as readonly MaterializedRecord[]) {
@@ -615,6 +620,7 @@ export async function createSessionController(
               ? (page.records as readonly MaterializedRecord[])
               : [],
             attemptSignal,
+            deviceId,
           ),
         );
         if (disposed) {
@@ -640,12 +646,10 @@ export async function createSessionController(
         // attribution the same records carry — a merged total
         // can't prove our share landed.
         if (emitDiff && !disposed) {
-          const status = await api.sync.status().catch(() => null);
-          const deviceId = status?.deviceId ?? null;
           await session
             .emitUnsynced(
               synced,
-              deviceId === null
+              deviceId === undefined
                 ? undefined
                 : { deviceId, components, winners },
             )
@@ -691,12 +695,14 @@ export async function createSessionController(
           // — the next drain re-serves them if this never commits.
           // Disposing or exhausting attempts exits; the next
           // `sync:applied` push re-arms.
+          const status = await api.sync.status().catch(() => null);
           const applied = await retryApply((attemptSignal, attempt) =>
             session.applySyncedEntries(
               attempt === 1
                 ? (batch.outcomes as readonly MergeOutcome[])
                 : [],
               attemptSignal,
+              status?.deviceId ?? undefined,
             ),
           );
           if (disposed) {

@@ -428,17 +428,18 @@ const MIGRATION_13: readonly string[] = [
 ];
 
 /**
- * v13 -> v14: `play_counts.logged_count` — the aggregate the sync
- * log last materialized for the row. `count - logged_count` is the
- * device's unsent play evidence (stranded local plays, imported
- * totals), durable beside `count`: projection preserves exactly
- * that surplus on absolute writes instead of losing it or
- * resurrecting components a tombstone deleted. NULL on rows that
- * never took an absolute count write — the baseline is unknown
- * there, not zero.
+ * v13 -> v14: `play_counts.logged_remote` — the remote devices'
+ * combined share the sync log last materialized for the row.
+ * `count - ourComponent - logged_remote` is the device's unsent
+ * play evidence (stranded local plays, imported totals), durable
+ * beside `count`: projection preserves exactly that surplus on
+ * absolute writes instead of losing it, double-counting plays that
+ * already delivered, or resurrecting components a tombstone
+ * deleted. NULL on rows that never took an absolute count write —
+ * the baseline is unknown there, not zero.
  */
 const MIGRATION_14: readonly string[] = [
-  `ALTER TABLE play_counts ADD COLUMN logged_count INTEGER CHECK (logged_count >= 0)`,
+  `ALTER TABLE play_counts ADD COLUMN logged_remote INTEGER CHECK (logged_remote >= 0)`,
 ];
 
 /** Read-only migration index for driver/release inspection. */

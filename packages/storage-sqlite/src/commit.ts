@@ -435,7 +435,7 @@ const PLAY_COUNTS: TableDef = {
     'count',
     'last_ms',
     'local_count',
-    'logged_count',
+    'logged_remote',
   ],
   key: ['recording_id'],
   reinsert: false,
@@ -643,7 +643,7 @@ const playCountRow = (count: PlayCount): SqlValue[] => [
   count.count,
   count.lastMs,
   count.localCount ?? null,
-  count.loggedCount ?? null,
+  count.loggedRemote ?? null,
 ];
 
 const matchReviewRow = (review: MatchReview): SqlValue[] => [

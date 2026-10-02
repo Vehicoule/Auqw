@@ -231,6 +231,9 @@ function projInput(
     localFiles: partial.localFiles ?? [],
     queue: partial.queue ?? queueEmpty(),
     settings: partial.settings ?? SETTINGS,
+    ...(partial.deviceId !== undefined
+      ? { deviceId: partial.deviceId }
+      : {}),
   };
 }
 
@@ -1279,17 +1282,16 @@ function testSnapshotCountAbsolute(): void {
   );
 }
 
-// An absolute page carries only logged components — a stored surplus
-// over `loggedCount` (the last-stamped log total) is unsent domain
-// evidence, while the same surplus over the raw count alone could
-// not be told apart from components a tombstone deleted. The
-// baseline splits them durably: deleted logged shares fold away.
+// `count - ourComponent - loggedRemote` is exactly the plays the
+// log never saw — a remote share deleted inside the page folds
+// away, while the unsent surplus above the live components survives.
 function testSnapshotCountFloorHonorsTombstone(): void {
   const current = projInput({
     recordings: [recording('r-1', [ref('itunes', 't-1')])],
     playCounts: [
-      { recordingId: 'r-1', count: 10, lastMs: 100, loggedCount: 10 },
+      { recordingId: 'r-1', count: 10, lastMs: 100, loggedRemote: 10 },
     ],
+    deviceId: 'dev-us',
   });
   const outcome = applied(
     fieldEntry('playCount', 'r-1', 'count', 2),
@@ -1298,6 +1300,8 @@ function testSnapshotCountFloorHonorsTombstone(): void {
       kind: 'playCount',
       recordId: 'r-1',
       fields: { count: 7, lastMs: 900 },
+      // All-remote baseline, peer's component deleted in-page.
+      sumComponents: { count: { 'peer-x': 7 } },
     },
   );
   const projected = projectAppliedEntries([outcome], current);
@@ -1307,17 +1311,23 @@ function testSnapshotCountFloorHonorsTombstone(): void {
     7,
     'a deleted logged component folds to the page',
   );
-  assertEqual(folded?.loggedCount, 7, 'the page restamps the baseline');
+  assertEqual(
+    folded?.loggedRemote,
+    7,
+    'the page restamps the remote baseline',
+  );
 }
 
-// The same baseline keeps committed plays the log never saw —
-// stranded local increments and imported totals alike.
-function testSnapshotCountFloorsAtLoggedCount(): void {
+// Delivered plays stop counting as unsent: our live component
+// reads out of the page, so a successfully emitted play doesn't
+// double — and replaying the same page can't regrow it.
+function testSnapshotCountFloorDeliveredPlays(): void {
   const current = projInput({
     recordings: [recording('r-1', [ref('itunes', 't-1')])],
     playCounts: [
-      { recordingId: 'r-1', count: 200, lastMs: 100, loggedCount: 100 },
+      { recordingId: 'r-1', count: 11, lastMs: 100, loggedRemote: 0 },
     ],
+    deviceId: 'dev-us',
   });
   const outcome = applied(
     fieldEntry('playCount', 'r-1', 'count', 2),
@@ -1325,49 +1335,77 @@ function testSnapshotCountFloorsAtLoggedCount(): void {
     {
       kind: 'playCount',
       recordId: 'r-1',
-      fields: { count: 100, lastMs: 900 },
+      fields: { count: 11, lastMs: 900 },
+      sumComponents: { count: { 'dev-us': 11 } },
     },
   );
   const projected = projectAppliedEntries([outcome], current);
+  const folded = projected.batch.playCounts?.[0];
   assertEqual(
-    projected.batch.playCounts?.[0]?.count,
-    200,
-    'the unsent surplus survives the page',
+    folded?.count,
+    11,
+    'a delivered play folds once, not twice',
   );
-  // An imported aggregate is unsent evidence too: count 300 with a
-  // stamped baseline of 100 keeps the imported share above the page.
-  const imported = projInput({
-    recordings: current.recordings,
+  assertEqual(
+    projectAppliedEntries([outcome], {
+      ...current,
+      playCounts: folded === undefined ? [] : [folded],
+    }).batch.playCounts?.[0]?.count,
+    11,
+    'replaying the same page does not inflate',
+  );
+}
+
+// The baseline keeps plays the log never saw — stranded increments
+// and imported totals — and remote growth between pages can't eat
+// them: stored 300, baseline remote 70, page ours 30 + remote 120.
+function testSnapshotCountFloorsAtLoggedRemote(): void {
+  const current = projInput({
+    recordings: [recording('r-1', [ref('itunes', 't-1')])],
     playCounts: [
-      { recordingId: 'r-1', count: 300, lastMs: 100, loggedCount: 100 },
+      { recordingId: 'r-1', count: 300, lastMs: 100, loggedRemote: 70 },
     ],
+    deviceId: 'dev-us',
   });
-  const outcome2 = applied(
+  const outcome = applied(
     fieldEntry('playCount', 'r-1', 'count', 3),
     [],
     {
       kind: 'playCount',
       recordId: 'r-1',
       fields: { count: 150, lastMs: 900 },
+      sumComponents: { count: { 'dev-us': 30, 'peer-x': 120 } },
+    },
+  );
+  const projected = projectAppliedEntries([outcome], current);
+  const folded = projected.batch.playCounts?.[0];
+  // unsent = 300 - 30 - 70 = 200; merged = 150 + 200 = 350.
+  assertEqual(folded?.count, 350, 'the unsent surplus survives');
+  assertEqual(folded?.loggedRemote, 120, 'the baseline re-anchors');
+  // A row that never stamped a baseline falls back to the
+  // local-count floor — conservative, never over-claims.
+  const legacy = projInput({
+    recordings: current.recordings,
+    playCounts: [
+      { recordingId: 'r-1', count: 11, lastMs: 100, localCount: 5 },
+    ],
+    deviceId: 'dev-us',
+  });
+  const page = applied(
+    fieldEntry('playCount', 'r-1', 'count', 2),
+    [],
+    {
+      kind: 'playCount',
+      recordId: 'r-1',
+      fields: { count: 10, lastMs: 900 },
+      sumComponents: { count: { 'dev-us': 5, 'peer-x': 5 } },
     },
   );
   assertEqual(
-    projectAppliedEntries([outcome2], imported).batch.playCounts?.[0]
+    projectAppliedEntries([page], legacy).batch.playCounts?.[0]
       ?.count,
-    350,
-    'imported totals persist as unsent evidence',
-  );
-  // A row that never stamped a baseline can't prove a surplus —
-  // it folds to the page rather than resurrect deletions.
-  const legacy = projInput({
-    recordings: current.recordings,
-    playCounts: [playCount('r-1', 10)],
-  });
-  assertEqual(
-    projectAppliedEntries([outcome], legacy).batch.playCounts?.[0]
-      ?.count,
-    100,
-    'baseline-less rows cannot prove a surplus',
+    11,
+    'baseline-less rows keep the bounded local surplus',
   );
 }
 
@@ -1877,14 +1915,14 @@ function testUnsyncedWrites(): void {
     'a lost increment past the event window re-emits via localCount',
   );
 
-  // The aggregate-side baseline: count − loggedCount is every
-  // committed play the log never saw — an imported total whose
-  // emission failed survives the reconcile and re-emits under
-  // this device's id (pending 200 > domainEstimate 180 > our 30).
+  // The aggregate-side baseline: count − loggedRemote is our full
+  // intended component — an imported total whose emission failed
+  // re-emits above OUR live share, not just the pending delta
+  // (ours 30 + unsent 200 = 230 > domainEstimate 180 → emit 350).
   const pending = unsyncedWrites(
     emitInput({
       playCounts: [
-        { recordingId: 'r-1', count: 300, lastMs: 9, loggedCount: 100 },
+        { recordingId: 'r-1', count: 300, lastMs: 9, loggedRemote: 70 },
       ],
     }),
     new Map([['playCount\u001fr-1', { count: 150 }]]),
@@ -1894,8 +1932,8 @@ function testUnsyncedWrites(): void {
   );
   assertEqual(
     countValue(pending),
-    320,
-    'an unsent aggregate re-emits via the loggedCount baseline',
+    350,
+    'an unsent aggregate re-emits the complete component',
   );
 
   // A remote share at the wire bound fills it — the merge can't
@@ -2136,7 +2174,8 @@ export function run(): void {
   testSnapshotEmptyDeletes();
   testSnapshotCountAbsolute();
   testSnapshotCountFloorHonorsTombstone();
-  testSnapshotCountFloorsAtLoggedCount();
+  testSnapshotCountFloorDeliveredPlays();
+  testSnapshotCountFloorsAtLoggedRemote();
   testSnapshotNewestWins();
   testProjectMaterialized();
   testProjectMaterializedPending();

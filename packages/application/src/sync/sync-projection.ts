@@ -116,7 +116,15 @@ export type SyncProjectionInput = Pick<
   | 'localFiles'
   | 'queue'
   | 'settings'
->;
+> & {
+  /**
+   * This device's engine identity — the emitter's own partition.
+   * Count folds read our live component out of a snapshot's
+   * `sumComponents` to split delivered plays from unsent ones;
+   * absent, every logged share counts as remote.
+   */
+  readonly deviceId?: string | undefined;
+};
 
 /** A record that can never materialize — the caller typed-logs it.
  * `kind` is 'unknown' when the wire shape itself was rejected — a
@@ -816,13 +824,14 @@ function sumDeliveryTarget(
     const row = input.playCounts.find(
       (c) => c.recordingId === write.recordId,
     );
-    // The aggregate-side baseline: `count - loggedCount` is every
-    // committed play the log never saw — stranded local increments
-    // AND imported totals — which emit under this device's id no
-    // matter who originally played them.
+    // The aggregate-side baseline: `count - loggedRemote` is our
+    // intended component — every committed play that isn't a remote
+    // share emits under this device's id, delivered or not. Remote
+    // growth between folds can't inflate it: `remoteShare` is
+    // charged separately at emit time.
     const pendingAggregate =
       typeof write.value === 'number'
-        ? Math.max(0, write.value - (row?.loggedCount ?? write.value))
+        ? Math.max(0, write.value - (row?.loggedRemote ?? write.value))
         : 0;
     return Math.max(
       domainEstimate,
@@ -1079,9 +1088,15 @@ type RecordFold = {
   readonly fields: Map<string, unknown>;
   /** 'sum' field → this drain's count delta against the domain row. */
   readonly sumDeltas: Map<string, number>;
+  /** 'sum' field → the remote-devices share of `sumDeltas`. */
+  readonly remoteDeltas: Map<string, number>;
   readonly outcomes: AppliedOutcome[];
   /** Materialized rebuild only: the source record to retain on pend. */
   readonly pendingRecord?: MaterializedRecord;
+  /** Snapshot-carried 'sum' field → deviceId → live component. */
+  sumComponents:
+    | Readonly<Record<string, Readonly<Record<string, number>>>>
+    | undefined;
   /** Earliest hlc.l folded — createdMs fallback for new rows. */
   minL: number;
   /**
@@ -1092,7 +1107,11 @@ type RecordFold = {
   absolute: boolean;
 };
 
-function foldOutcome(fold: RecordFold, outcome: AppliedOutcome): void {
+function foldOutcome(
+  fold: RecordFold,
+  outcome: AppliedOutcome,
+  deviceId?: string,
+): void {
   const entry = outcome.entry;
   fold.outcomes.push(outcome);
   if (entry.hlc.l < fold.minL) {
@@ -1102,6 +1121,7 @@ function foldOutcome(fold: RecordFold, outcome: AppliedOutcome): void {
     fold.tombstoned = true;
     fold.fields.clear();
     fold.sumDeltas.clear();
+    fold.remoteDeltas.clear();
     return;
   }
   fold.tombstoned = false;
@@ -1112,12 +1132,22 @@ function foldOutcome(fold: RecordFold, outcome: AppliedOutcome): void {
       displaced !== undefined && typeof displaced.value === 'number'
         ? displaced.value
         : 0;
+    const delta =
+      (typeof entry.value === 'number' ? entry.value : 0) -
+      prevComponent;
     fold.sumDeltas.set(
       entry.field,
-      (fold.sumDeltas.get(entry.field) ?? 0) +
-        (typeof entry.value === 'number' ? entry.value : 0) -
-        prevComponent,
+      (fold.sumDeltas.get(entry.field) ?? 0) + delta,
     );
+    // Our own entries echoing back are delivered plays, not new
+    // remote share — they must not inflate either the count fold
+    // or the remote baseline.
+    if (entry.deviceId !== deviceId) {
+      fold.remoteDeltas.set(
+        entry.field,
+        (fold.remoteDeltas.get(entry.field) ?? 0) + delta,
+      );
+    }
     return;
   }
   if (rule?.merge === 'max') {
@@ -1214,7 +1244,9 @@ export function projectAppliedEntries(
         tombstoned: false,
         fields: new Map(),
         sumDeltas: new Map(),
+        remoteDeltas: new Map(),
         outcomes: [],
+        sumComponents: undefined,
         minL: Number.MAX_SAFE_INTEGER,
         absolute: false,
       };
@@ -1223,7 +1255,11 @@ export function projectAppliedEntries(
     return fold;
   };
   for (const outcome of ordered) {
-    foldOutcome(foldFor(outcome.entry.kind, outcome.entry.recordId), outcome);
+    foldOutcome(
+      foldFor(outcome.entry.kind, outcome.entry.recordId),
+      outcome,
+      current.deviceId,
+    );
   }
   // Engine-attached materialized snapshots override fold inference —
   // the fold can't see fields that merged in earlier drains, and a
@@ -1254,8 +1290,10 @@ export function projectAppliedEntries(
       fold.fields.set(field, value);
     }
     fold.sumDeltas.clear();
+    fold.remoteDeltas.clear();
     fold.tombstoned = Object.keys(snap.fields).length === 0;
     fold.absolute = true;
+    fold.sumComponents = snap.sumComponents;
   }
 
   return finishProjection(folds, current, pending, skipped, applyOrder);
@@ -1287,10 +1325,12 @@ export function projectMaterialized(
       tombstoned: fields.size === 0,
       fields,
       sumDeltas: new Map(),
+      remoteDeltas: new Map(),
       outcomes: [],
       pendingRecord: rec,
       minL: 0,
       absolute: true,
+      sumComponents: rec.sumComponents,
     });
   }
   return finishProjection(folds, current, [], skipped);
@@ -2018,31 +2058,43 @@ function finishProjection(
       countFoldIds.add(count.recordingId);
       const foldedLast = numField(fold.fields, 'lastMs');
       const appliedCount = numField(fold.fields, 'count');
-      // An absolute page carries only logged components. The stored
-      // surplus over the last-stamped log total is this device's
-      // unsent play evidence — stranded local plays, imported
-      // totals — while a surplus over the raw count alone couldn't
-      // be told apart from components a tombstone deleted.
-      // `loggedCount` splits them durably; a row that never stamped
-      // one can't prove a surplus and folds to the page.
-      const unlogged = Math.max(
-        0,
-        count.count - (count.loggedCount ?? count.count),
-      );
+      // `count - ourComponent - loggedRemote` is exactly the plays
+      // the log never saw: our live component reads out of the
+      // page's own `sumComponents`, so plays that already delivered
+      // stop counting as unsent, and remote growth between pages
+      // can't eat the surplus the way a surplus-over-page floor
+      // would. Without the baseline or the breakdown the surplus
+      // over the page itself is the conservative bound — per-device
+      // components grow only, so it can never over-claim — capped
+      // further by this device's own committed plays.
+      const countComponents = fold.sumComponents?.['count'];
+      const oursNow =
+        countComponents === undefined || current.deviceId === undefined
+          ? undefined
+          : (countComponents[current.deviceId] ?? 0);
+      const unlogged =
+        count.loggedRemote !== undefined && oursNow !== undefined
+          ? Math.max(0, count.count - oursNow - count.loggedRemote)
+          : Math.min(
+              Math.max(0, count.count - (appliedCount ?? count.count)),
+              count.localCount ?? 0,
+            );
       const mergedCount = fold.absolute
         ? appliedCount === null
           ? count.count
           : appliedCount + unlogged
-        : count.count + (fold.sumDeltas.get('count') ?? 0);
-      const stampedLogged = fold.absolute
-        ? (appliedCount ?? count.loggedCount)
-        : count.loggedCount === undefined
+        : count.count + (fold.remoteDeltas.get('count') ?? 0);
+      const stampedRemote = fold.absolute
+        ? oursNow !== undefined && appliedCount !== null
+          ? Math.max(0, appliedCount - oursNow)
+          : count.loggedRemote
+        : count.loggedRemote === undefined
           ? undefined
           : Math.min(
               mergedCount,
               Math.max(
                 0,
-                count.loggedCount + (fold.sumDeltas.get('count') ?? 0),
+                count.loggedRemote + (fold.remoteDeltas.get('count') ?? 0),
               ),
             );
       const candidate: PlayCount = {
@@ -2052,8 +2104,8 @@ function finishProjection(
         ...(count.localCount !== undefined
           ? { localCount: count.localCount }
           : {}),
-        ...(stampedLogged !== undefined
-          ? { loggedCount: stampedLogged }
+        ...(stampedRemote !== undefined
+          ? { loggedRemote: stampedRemote }
           : {}),
         count: Math.min(
           Number.MAX_SAFE_INTEGER,
@@ -2093,15 +2145,22 @@ function finishProjection(
           0,
           fold.absolute
             ? (numField(fold.fields, 'count') ?? 0)
-            : (fold.sumDeltas.get('count') ?? 0),
+            : (fold.remoteDeltas.get('count') ?? 0),
         ),
       );
+      const countComponents = fold.sumComponents?.['count'];
+      const oursNow =
+        countComponents === undefined || current.deviceId === undefined
+          ? undefined
+          : (countComponents[current.deviceId] ?? 0);
       const candidate: PlayCount = {
         recordingId: fold.recordId,
         count: mergedCount,
         // A fresh row holds only what the log materialized — the
-        // baseline stamps the same total.
-        loggedCount: mergedCount,
+        // remote baseline stamps the non-ours share of it.
+        ...(oursNow !== undefined
+          ? { loggedRemote: Math.max(0, mergedCount - oursNow) }
+          : {}),
         lastMs: Math.max(0, numField(fold.fields, 'lastMs') ?? 0),
       };
       if (!isPlayCount(candidate)) {

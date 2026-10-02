@@ -425,8 +425,9 @@ export class SyncIngress {
   async applySyncedEntries(
     outcomes: readonly MergeOutcome[],
     signal?: CancellationSignal,
+    deviceId?: string,
   ): Promise<Result<SyncApplyReport>> {
-    return this.#runSyncApply(outcomes, APPLIED_LANE, signal);
+    return this.#runSyncApply(outcomes, APPLIED_LANE, signal, deviceId);
   }
 
   /**
@@ -440,8 +441,9 @@ export class SyncIngress {
   async applyMaterializedEntries(
     records: readonly MaterializedRecord[],
     signal?: CancellationSignal,
+    deviceId?: string,
   ): Promise<Result<SyncApplyReport>> {
-    return this.#runSyncApply(records, MATERIALIZED_LANE, signal);
+    return this.#runSyncApply(records, MATERIALIZED_LANE, signal, deviceId);
   }
 
   /**
@@ -455,6 +457,7 @@ export class SyncIngress {
     fresh: readonly T[],
     lane: SyncApplyLane<T>,
     signal?: CancellationSignal,
+    deviceId?: string,
   ): Promise<Result<SyncApplyReport>> {
     const ready = this.#host.requireReady();
     if (!ready.ok) {
@@ -512,6 +515,7 @@ export class SyncIngress {
               localFiles: input.localFiles,
               queue: r.queue.snapshot(),
               settings: r.settings,
+              deviceId,
             });
           let projection = project(loaded.value);
           // Spread lifts the readonly section map — the settings

@@ -1370,8 +1370,13 @@ export class Session {
   applySyncedEntries(
     outcomes: readonly MergeOutcome[],
     signal?: CancellationSignal,
+    deviceId?: string,
   ): Promise<Result<SyncApplyReport>> {
-    return this.#syncIngress.applySyncedEntries(outcomes, signal);
+    return this.#syncIngress.applySyncedEntries(
+      outcomes,
+      signal,
+      deviceId,
+    );
   }
 
   /**
@@ -1385,8 +1390,13 @@ export class Session {
   applyMaterializedEntries(
     records: readonly MaterializedRecord[],
     signal?: CancellationSignal,
+    deviceId?: string,
   ): Promise<Result<SyncApplyReport>> {
-    return this.#syncIngress.applyMaterializedEntries(records, signal);
+    return this.#syncIngress.applyMaterializedEntries(
+      records,
+      signal,
+      deviceId,
+    );
   }
 
   /**

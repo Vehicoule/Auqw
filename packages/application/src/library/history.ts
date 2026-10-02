@@ -117,8 +117,8 @@ export function recordPlay(
     localCount: (existing?.localCount ?? 0) + 1,
     // A local play widens the unsent gap — the log's baseline
     // advances only when a synced fold stamps it.
-    ...(existing?.loggedCount !== undefined
-      ? { loggedCount: existing.loggedCount }
+    ...(existing?.loggedRemote !== undefined
+      ? { loggedRemote: existing.loggedRemote }
       : {}),
     lastMs: Math.max(horizon, existing?.lastMs ?? 0),
   };
