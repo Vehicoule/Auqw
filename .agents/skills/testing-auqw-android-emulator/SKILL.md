@@ -794,10 +794,13 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   local row shows, play it, lyrics pane renders `synced · lyrics-lrclib` timed lines
   and the orange active line tracks position. Sine audio is fine — the pane only needs
   timed lines + positionMs.
-- **Corrupt stored snapshot → `invalid-response` boot wedge:** the app can boot into a
+- **`invalid-response` boot wedge:** the app can boot into a
   full-screen `couldn't restore your library — got an unexpected reply — try again`
-  with `[auqw] local boot load failed: invalid-response` (storage-sqlite snapshot
-  validation fails; force-stops mid-write can tear a snapshot). `pm clear
+  with `[auqw] local boot load failed: invalid-response` — storage-sqlite snapshot
+  validation rejects the persisted state. Cause UNCONFIRMED (writes are
+  transactional — a torn write can't produce this; suspect a version/schema
+  or write-path bug — worth a real investigation, not just a workaround).
+  `pm clear`
   com.vehicoule.auqw` is the reliable recovery, then re-grant SAF (`auqw://local-add`
   → DocumentsUI `USE THIS FOLDER` → `ALLOW` at `[790,1325][968,1451]`) and reseed
   fixtures. Also seen once: a different wedge where chrome (header+navbar) renders but
