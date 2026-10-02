@@ -357,6 +357,7 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
   fwd(CHANNELS.transferStat, isTransferNameArgs),
   fwd(CHANNELS.transferRemove, isTransferNameArgs),
   fwd(CHANNELS.transferSweepPartials, isTransferSweepArgs),
+  fwd(CHANNELS.transferSweepFinalized, isTransferSweepArgs),
   fwd(CHANNELS.transferList, noArgs),
   fwd(CHANNELS.transferStatus, isTransferSinkArgs),
   fwd(CHANNELS.transferStats, noArgs),

@@ -299,6 +299,24 @@ export class DownloadManager {
         `downloads: swept ${swept.value} stale .part files`,
       );
     }
+    // Finalized orphans mirror the .part sweep: a cascade or purge
+    // that drops a ledger row without `removeFile` leaves the file.
+    const keptFinalized = [...staged.values()].map(
+      (row) => row.filePath,
+    );
+    const sweptOrphaned = await this.#deps.transfer.sweepFinalized(
+      keptFinalized,
+      signal,
+    );
+    if (!sweptOrphaned.ok) {
+      return err(sweptOrphaned.error);
+    }
+    if (sweptOrphaned.value > 0) {
+      this.#log(
+        'info',
+        `downloads: swept ${sweptOrphaned.value} orphan media files`,
+      );
+    }
 
     for (const row of [...staged.values()]) {
       if (signal.cancelled) {

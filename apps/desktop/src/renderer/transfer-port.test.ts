@@ -32,6 +32,7 @@ function fakeApi(overrides: Partial<Record<string, unknown>> = {}): AuqwApi {
       stat: () => Promise.resolve({ exists: true, bytes: 10 }),
       remove: () => Promise.resolve(undefined),
       sweepPartials: () => Promise.resolve({ swept: 2 }),
+      sweepFinalized: () => Promise.resolve({ swept: 3 }),
       list: () => Promise.resolve({ sinks: [], files: [] }),
       status: (args: { sinkId: string }) =>
         Promise.resolve({
@@ -86,6 +87,11 @@ export async function run(): Promise<void> {
   assert(stat.ok && stat.value.exists && stat.value.bytes === 10, 'stat');
   const swept = await port.sweepPartials(['x.part'], signal);
   assert(swept.ok && swept.value === 2, 'sweep count crosses');
+  const sweptFin = await port.sweepFinalized(['dl-1'], signal);
+  assert(
+    sweptFin.ok && sweptFin.value === 3,
+    'finalized sweep count crosses',
+  );
   const usage = await port.usage(signal);
   assert(usage.ok && usage.value === 42, 'usage reads stats.bytes');
   const free = await port.freeBytes(signal);

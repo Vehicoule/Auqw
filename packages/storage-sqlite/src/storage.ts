@@ -12,6 +12,7 @@ import type {
   Like,
   LocalFile,
   LocalSource,
+  LogPort,
   LyricsCacheEntry,
   MatchReview,
   OperationContext,
@@ -20,6 +21,7 @@ import type {
   PlayEvent,
   Playlist,
   PlaylistEntry,
+  QueueOccurrence,
   QueueSnapshot,
   Result,
   Settings,
@@ -31,9 +33,25 @@ import type {
 import {
   appError,
   err,
+  isAppErrorLike,
+  isArtworkCacheEntry,
   isAttemptTrace,
+  isDownloadRecord,
+  isEntity,
+  isEntitySourceRef,
   isExportDocument,
+  isLike,
+  isLocalFile,
+  isLocalSource,
+  isLyricsCacheEntry,
+  isMatchReview,
   isPersistedState,
+  isPlayCount,
+  isPlayEvent,
+  isPlaylist,
+  isPlaylistEntry,
+  isQueueOccurrence,
+  isQueueSnapshot,
   isSettings,
   ok,
 } from '@auqw/application';
@@ -42,6 +60,7 @@ import type {
   SqliteConnection,
   SqliteDriver,
   SqlRow,
+  SqlValue,
 } from './driver.ts';
 import { enqueueDriverTransaction } from './transaction-queue.ts';
 import {
@@ -50,6 +69,7 @@ import {
   planCommit,
   rowTools,
 } from './commit.ts';
+import type { DroppedRow, RowTools } from './commit.ts';
 import {
   CURRENT_SCHEMA_VERSION,
   KNOWN_SCHEMA_OBJECTS,
@@ -134,14 +154,41 @@ function cancelledError(): AppError {
 export class SqliteStorage implements StoragePort {
   readonly #driver: SqliteDriver;
   readonly #defaults: Settings;
+  readonly #log: LogPort | undefined;
   #init: Promise<Result<void>> | null = null;
 
-  constructor(driver: SqliteDriver, defaultSettings: Settings) {
+  constructor(
+    driver: SqliteDriver,
+    defaultSettings: Settings,
+    log?: LogPort,
+  ) {
     if (!isSettings(defaultSettings)) {
       throw new TypeError('defaultSettings must be a valid Settings');
     }
     this.#driver = driver;
     this.#defaults = defaultSettings;
+    this.#log = log;
+  }
+
+  /** Reports decode-dropped stored rows — table:key, content-free. */
+  #reportDrops(context: string, dropped: readonly DroppedRow[]): void {
+    if (this.#log === undefined || dropped.length === 0) {
+      return;
+    }
+    const detail = dropped
+      .slice(0, 8)
+      .map((d) => `${d.table}:${d.key}`)
+      .join(', ');
+    void this.#log
+      .write({
+        level: 'warn',
+        message:
+          `storage: ${context} dropped ${dropped.length} malformed` +
+          ` stored row${dropped.length === 1 ? '' : 's'}` +
+          ` (${detail}${dropped.length > 8 ? ', …' : ''})`,
+        atMs: Date.now(),
+      })
+      .catch(() => undefined);
   }
 
   #check(signal: CancellationSignal | undefined): void {
@@ -387,17 +434,24 @@ export class SqliteStorage implements StoragePort {
     }
     const signal = context.signal;
     try {
-      return await this.#transaction(async (conn) => {
+      const result = await this.#transaction(async (conn) => {
         this.#check(signal);
         const planned = await planCommit(conn, batch, signal);
         if (!planned.ok) {
-          return planned;
+          return err(planned.error);
         }
         this.#check(signal);
-        await conn.executeAll(planned.value, signal);
+        await conn.executeAll(planned.value.statements, signal);
         this.#check(signal);
-        return ok(undefined);
+        return ok(planned.value.dropped);
       }, signal);
+      if (!result.ok) {
+        return result;
+      }
+      // Report only after the transaction commits — a rolled-back
+      // commit dropped nothing.
+      this.#reportDrops('commit', result.value);
+      return ok(undefined);
     } catch (thrown) {
       return err(this.#mapError(thrown, signal));
     }
@@ -759,10 +813,11 @@ export class SqliteStorage implements StoragePort {
     }
     this.#check(signal);
     const built = decodeState(rows);
-    if (built === null || !isPersistedState(built)) {
+    if (built === null || !isPersistedState(built.state)) {
       return err(invalidData());
     }
-    return ok(built);
+    this.#reportDrops('load', built.dropped);
+    return ok(built.state);
   }
 }
 
@@ -850,14 +905,11 @@ const TABLE_QUERIES: readonly (readonly [keyof TableRows, string])[] = [
   ['queueOccurrences', 'SELECT * FROM queue_occurrences ORDER BY ordinal'],
   ['settings', 'SELECT * FROM settings WHERE id = 1'],
 ];
-
-function decodeState(rows: TableRows): PersistedState | null {
-  const recordingRows = rows.recordings;
-  const refRows = rows.sourceRefs;
-  const mappingRows = rows.mappings;
-  const likeRows = rows.likes;
-  const queueRows = rows.queueState;
+function decodeState(
+  rows: TableRows,
+): { state: PersistedState; dropped: readonly DroppedRow[] } | null {
   const occurrenceRows = rows.queueOccurrences;
+  const queueRows = rows.queueState;
   const settingsRows = rows.settings;
   if (queueRows.length !== 1 || settingsRows.length !== 1) {
     return null;
@@ -867,427 +919,587 @@ function decodeState(rows: TableRows): PersistedState | null {
   if (queueRow === undefined || settingsRow === undefined) {
     return null;
   }
+  const dropped: DroppedRow[] = [];
+  const keyOf = (value: SqlValue | undefined): string =>
+    typeof value === 'string' ? value : '#';
+  // Rows reach these tables through the raw statement path (renderer
+  // `storage:*` writes, a migrated file), so the decode is
+  // drop-tolerant: a row violating shape, uniqueness, or a foreign
+  // reference is an orphan — dropped, reported, and deleted by the
+  // next section commit's diff — never a reason to fail the whole
+  // restore. The queue_state/settings singletons stay strict on their
+  // required fields: a corrupt singleton is engine damage, not an
+  // orphan.
+  const keep = <T>(
+    table: string,
+    key: string,
+    decode: (t: RowTools) => T | null,
+  ): T | null => {
+    let bad = false;
+    const value = decode(rowTools(() => {
+      bad = true;
+    }));
+    if (bad || value === null) {
+      dropped.push({ table, key });
+      return null;
+    }
+    return value;
+  };
+
+  const decoded = decodeRecordingRows(
+    rows.recordings,
+    rows.sourceRefs,
+    rows.mappings,
+  );
+  dropped.push(...decoded.dropped);
+  const recordings = decoded.recordings;
+  const recordingIds = decoded.recordingIds;
+
+  // Entities decode before entity_source_refs and entity-kind likes:
+  // both resolve their target id against this set. Duplicate ids drop
+  // (the PK normally prevents them).
+  const entityIds = new Set<string>();
+  const entityKinds = new Map<string, Entity['kind']>();
+  const entities: Entity[] = [];
+  for (const row of rows.entities) {
+    const entity = keep('entities', keyOf(row['entity_id']), (t) => {
+      const candidate: Entity = {
+        entityId: t.reqStr(row['entity_id']),
+        kind: row['kind'] as Entity['kind'],
+        title: t.reqStr(row['title']),
+        artistName: t.optStr(row['artist_name']),
+        artwork:
+          row['artwork_json'] === null
+            ? []
+            : (t.json(row['artwork_json']) as Entity['artwork']),
+        createdMs: t.reqNonNegInt(row['created_ms']),
+      };
+      if (entityIds.has(candidate.entityId) || !isEntity(candidate)) {
+        return null;
+      }
+      entityIds.add(candidate.entityId);
+      entityKinds.set(candidate.entityId, candidate.kind);
+      return candidate;
+    });
+    if (entity !== null) {
+      entities.push(entity);
+    }
+  }
+
+  // likes: polymorphic target_id — 'track' names a recording,
+  // 'album'/'artist' name an entity of the same kind.
+  const likeKeys = new Set<string>();
+  const likes: Like[] = [];
+  for (const row of rows.likes) {
+    const like = keep('likes', keyOf(row['target_id']), (t) => {
+      const candidate: Like = {
+        entityKind: row['entity_kind'] as Like['entityKind'],
+        targetId: t.reqStr(row['target_id']),
+        likedAtMs: t.reqNonNegInt(row['liked_ms']),
+      };
+      const key = `${candidate.entityKind} ${candidate.targetId}`;
+      const resolves =
+        candidate.entityKind === 'track'
+          ? recordingIds.has(candidate.targetId)
+          : entityKinds.get(candidate.targetId) === candidate.entityKind;
+      if (likeKeys.has(key) || !isLike(candidate) || !resolves) {
+        return null;
+      }
+      likeKeys.add(key);
+      return candidate;
+    });
+    if (like !== null) {
+      likes.push(like);
+    }
+  }
+
+  const entityRefKeys = new Set<string>();
+  const entitySourceRefs: EntitySourceRef[] = [];
+  for (const row of rows.entitySourceRefs) {
+    const ref = keep(
+      'entity_source_refs',
+      `${keyOf(row['entity_id'])} ${keyOf(row['provider'])}`,
+      (t) => {
+        const candidate: EntitySourceRef = {
+          entityId: t.reqStr(row['entity_id']),
+          provider: t.reqNonEmpty(row['provider']),
+          ref: t.json(row['ref_json']) as EntityRef,
+        };
+        const key = `${candidate.entityId} ${candidate.provider}`;
+        // The ref's kind must agree with the target entity's kind.
+        const refKind =
+          typeof candidate.ref === 'object' && candidate.ref !== null
+            ? candidate.ref.kind
+            : undefined;
+        if (
+          !entityIds.has(candidate.entityId) ||
+          entityRefKeys.has(key) ||
+          refKind !== entityKinds.get(candidate.entityId) ||
+          !isEntitySourceRef(candidate)
+        ) {
+          return null;
+        }
+        entityRefKeys.add(key);
+        return candidate;
+      },
+    );
+    if (ref !== null) {
+      entitySourceRefs.push(ref);
+    }
+  }
+
+  const playlistIds = new Set<string>();
+  const playlists: Playlist[] = [];
+  for (const row of rows.playlists) {
+    const playlist = keep(
+      'playlists',
+      keyOf(row['playlist_id']),
+      (t) => {
+        const candidate: Playlist = {
+          playlistId: t.reqStr(row['playlist_id']),
+          name: t.reqStr(row['name']),
+          createdMs: t.reqNonNegInt(row['created_ms']),
+          updatedMs: t.reqNonNegInt(row['updated_ms']),
+        };
+        if (
+          playlistIds.has(candidate.playlistId) ||
+          !isPlaylist(candidate)
+        ) {
+          return null;
+        }
+        playlistIds.add(candidate.playlistId);
+        return candidate;
+      },
+    );
+    if (playlist !== null) {
+      playlists.push(playlist);
+    }
+  }
+
+  const entryIds = new Set<string>();
+  const entryPositions = new Map<string, Set<number>>();
+  const playlistEntries: PlaylistEntry[] = [];
+  for (const row of rows.playlistEntries) {
+    const entry = keep('playlist_entries', keyOf(row['entry_id']), (t) => {
+      const position = row['position'];
+      if (typeof position !== 'number' || !Number.isFinite(position)) {
+        return null;
+      }
+      const candidate: PlaylistEntry = {
+        entryId: t.reqStr(row['entry_id']),
+        playlistId: t.reqStr(row['playlist_id']),
+        recordingId: t.reqStr(row['recording_id']),
+        position,
+        selectedRef:
+          row['selected_ref_json'] === null
+            ? null
+            : (t.json(row['selected_ref_json']) as SourceRef),
+        addedMs: t.reqNonNegInt(row['added_ms']),
+      };
+      const seen =
+        entryPositions.get(candidate.playlistId) ?? new Set<number>();
+      if (
+        !playlistIds.has(candidate.playlistId) ||
+        !recordingIds.has(candidate.recordingId) ||
+        entryIds.has(candidate.entryId) ||
+        seen.has(position) ||
+        !isPlaylistEntry(candidate)
+      ) {
+        return null;
+      }
+      entryIds.add(candidate.entryId);
+      seen.add(position);
+      entryPositions.set(candidate.playlistId, seen);
+      return candidate;
+    });
+    if (entry !== null) {
+      playlistEntries.push(entry);
+    }
+  }
+
+  const eventIds = new Set<string>();
+  const playHistory: PlayEvent[] = [];
+  for (const row of rows.playHistory) {
+    const event = keep('play_history', keyOf(row['event_id']), (t) => {
+      const candidate: PlayEvent = {
+        eventId: t.reqStr(row['event_id']),
+        recordingId: t.reqStr(row['recording_id']),
+        occurrenceId: t.optStr(row['occurrence_id']),
+        playedMs: t.reqNonNegInt(row['played_ms']),
+        listenedMs: t.reqNonNegInt(row['listened_ms']),
+      };
+      if (
+        eventIds.has(candidate.eventId) ||
+        !recordingIds.has(candidate.recordingId) ||
+        !isPlayEvent(candidate)
+      ) {
+        return null;
+      }
+      eventIds.add(candidate.eventId);
+      return candidate;
+    });
+    if (event !== null) {
+      playHistory.push(event);
+    }
+  }
+
+  const countedIds = new Set<string>();
+  const playCounts: PlayCount[] = [];
+  for (const row of rows.playCounts) {
+    const count = keep('play_counts', keyOf(row['recording_id']), (t) => {
+      const candidate: PlayCount = {
+        recordingId: t.reqStr(row['recording_id']),
+        count: t.reqNonNegInt(row['count']),
+        lastMs: t.reqNonNegInt(row['last_ms']),
+      };
+      if (
+        countedIds.has(candidate.recordingId) ||
+        !recordingIds.has(candidate.recordingId) ||
+        !isPlayCount(candidate)
+      ) {
+        return null;
+      }
+      countedIds.add(candidate.recordingId);
+      return candidate;
+    });
+    if (count !== null) {
+      playCounts.push(count);
+    }
+  }
+
+  const reviewIds = new Set<string>();
+  const matchReviews: MatchReview[] = [];
+  for (const row of rows.matchReviews) {
+    const review = keep('match_reviews', keyOf(row['review_id']), (t) => {
+      const resolvedMs = t.optInt(row['resolved_ms']);
+      const candidate: MatchReview = {
+        reviewId: t.reqStr(row['review_id']),
+        recordingId: t.reqStr(row['recording_id']),
+        candidates: t.json(
+          row['candidates_json'],
+        ) as MatchReview['candidates'],
+        status: row['status'] as MatchReview['status'],
+        resolution:
+          row['resolution_json'] === null
+            ? null
+            : (t.json(row['resolution_json']) as MatchReview['resolution']),
+        createdMs: t.reqNonNegInt(row['created_ms']),
+        resolvedMs,
+      };
+      if (
+        reviewIds.has(candidate.reviewId) ||
+        !recordingIds.has(candidate.recordingId) ||
+        (resolvedMs !== null && resolvedMs < 0) ||
+        !isMatchReview(candidate)
+      ) {
+        return null;
+      }
+      reviewIds.add(candidate.reviewId);
+      return candidate;
+    });
+    if (review !== null) {
+      matchReviews.push(review);
+    }
+  }
+
+  const lyricIds = new Set<string>();
+  const lyricsCache: LyricsCacheEntry[] = [];
+  for (const row of rows.lyricsCache) {
+    const entry = keep('lyrics_cache', keyOf(row['recording_id']), (t) => {
+      // provider_version is three-way: NULL = a pre-versioning row
+      // (decodes as an absent field, so the session sees it stale and
+      // refetches once); '' = an explicitly-recorded null provenance
+      // from a versionless provider's write; else the version string.
+      const providerVersion = row['provider_version'];
+      const candidate: LyricsCacheEntry = {
+        recordingId: t.reqStr(row['recording_id']),
+        provider: t.reqNonEmpty(row['provider']),
+        kind: row['kind'] as LyricsCacheEntry['kind'],
+        payload: t.json(
+          row['payload_json'],
+        ) as LyricsCacheEntry['payload'],
+        fetchedMs: t.reqNonNegInt(row['fetched_ms']),
+        ...(providerVersion === null
+          ? {}
+          : {
+              providerVersion:
+                providerVersion === '' ? null : t.reqStr(providerVersion),
+            }),
+      };
+      if (
+        lyricIds.has(candidate.recordingId) ||
+        !recordingIds.has(candidate.recordingId) ||
+        !isLyricsCacheEntry(candidate)
+      ) {
+        return null;
+      }
+      lyricIds.add(candidate.recordingId);
+      return candidate;
+    });
+    if (entry !== null) {
+      lyricsCache.push(entry);
+    }
+  }
+
+  const artworkUrls = new Set<string>();
+  const artworkCache: ArtworkCacheEntry[] = [];
+  for (const row of rows.artworkCache) {
+    // Key on file_path, never url — a signed URL's query params must
+    // not reach the drop report.
+    const entry = keep('artwork_cache', keyOf(row['file_path']), (t) => {
+      const candidate: ArtworkCacheEntry = {
+        url: t.reqStr(row['url']),
+        filePath: t.reqStr(row['file_path']),
+        bytes: t.reqNonNegInt(row['bytes']),
+        lastAccessedMs: t.reqNonNegInt(row['last_accessed_ms']),
+      };
+      if (artworkUrls.has(candidate.url) || !isArtworkCacheEntry(candidate)) {
+        return null;
+      }
+      artworkUrls.add(candidate.url);
+      return candidate;
+    });
+    if (entry !== null) {
+      artworkCache.push(entry);
+    }
+  }
+
+  const downloadIds = new Set<string>();
+  const downloadedRecordingIds = new Set<string>();
+  const downloads: DownloadRecord[] = [];
+  for (const row of rows.downloads) {
+    const download = keep('downloads', keyOf(row['download_id']), (t) => {
+      const candidate: DownloadRecord = {
+        downloadId: t.reqStr(row['download_id']),
+        recordingId: t.reqStr(row['recording_id']),
+        provider: t.reqNonEmpty(row['provider']),
+        sourceRef: t.json(row['source_ref_json']) as SourceRef,
+        filePath: t.reqStr(row['file_path']),
+        bytes: t.reqNonNegInt(row['bytes']),
+        state: row['state'] as DownloadState,
+        committedOffset: t.reqNonNegInt(row['committed_offset']),
+        checksum: t.optStr(row['checksum']),
+        mime: t.optStr(row['mime']),
+        itag: t.optInt(row['itag']),
+        expiresAtMs: t.optInt(row['expires_at_ms']),
+        error:
+          row['error_json'] === null
+            ? null
+            : (t.json(row['error_json']) as DownloadRecord['error']),
+        priority: t.reqNonNegInt(row['priority']),
+        requestedMs: t.reqNonNegInt(row['requested_ms']),
+        downloadedMs: t.optInt(row['downloaded_ms']),
+      };
+      if (
+        downloadIds.has(candidate.downloadId) ||
+        !recordingIds.has(candidate.recordingId) ||
+        downloadedRecordingIds.has(candidate.recordingId) ||
+        !isDownloadRecord(candidate)
+      ) {
+        return null;
+      }
+      downloadIds.add(candidate.downloadId);
+      downloadedRecordingIds.add(candidate.recordingId);
+      return candidate;
+    });
+    if (download !== null) {
+      downloads.push(download);
+    }
+  }
+
+  const localSourceIds = new Set<string>();
+  const localSources: LocalSource[] = [];
+  for (const row of rows.localSources) {
+    const source = keep('local_sources', keyOf(row['source_id']), (t) => {
+      const candidate: LocalSource = {
+        sourceId: t.reqStr(row['source_id']),
+        treeUri: t.reqStr(row['tree_uri']),
+        label: t.reqStr(row['label']),
+        addedMs: t.reqNonNegInt(row['added_ms']),
+        lastScanMs: t.optInt(row['last_scan_ms']),
+      };
+      if (
+        localSourceIds.has(candidate.sourceId) ||
+        !isLocalSource(candidate)
+      ) {
+        return null;
+      }
+      localSourceIds.add(candidate.sourceId);
+      return candidate;
+    });
+    if (source !== null) {
+      localSources.push(source);
+    }
+  }
+
+  const localFileIds = new Set<string>();
+  const localFiles: LocalFile[] = [];
+  for (const row of rows.localFiles) {
+    const file = keep('local_files', keyOf(row['file_id']), (t) => {
+      const candidate: LocalFile = {
+        fileId: t.reqStr(row['file_id']),
+        sourceId: t.reqStr(row['source_id']),
+        docId: t.reqStr(row['doc_id']),
+        size: t.reqNonNegInt(row['size']),
+        fingerprint: t.reqStr(row['fingerprint']),
+        modifiedMs: t.optInt(row['modified_ms']),
+        title: t.optStr(row['title']),
+        artist: t.optStr(row['artist']),
+        album: t.optStr(row['album']),
+        durationMs: t.optInt(row['duration_ms']),
+        genre: t.optStr(row['genre']),
+        recordingId: t.reqStr(row['recording_id']),
+      };
+      if (
+        localFileIds.has(candidate.fileId) ||
+        !localSourceIds.has(candidate.sourceId) ||
+        !recordingIds.has(candidate.recordingId) ||
+        !isLocalFile(candidate)
+      ) {
+        return null;
+      }
+      localFileIds.add(candidate.fileId);
+      return candidate;
+    });
+    if (file !== null) {
+      localFiles.push(file);
+    }
+  }
+
+  // Queue occurrences decode row-tolerant: malformed, duplicated, or
+  // dangling-recording rows drop. Ordinals are order-only (the query
+  // sorts by them), so a gap heals on the row's next write.
+  const occurrenceIds = new Set<string>();
+  const occurrences: QueueOccurrence[] = [];
+  for (const row of occurrenceRows) {
+    const occurrence = keep(
+      'queue_occurrences',
+      keyOf(row['occurrence_id']),
+      (t) => {
+        t.reqNonNegInt(row['ordinal']);
+        const provider = row['selected_provider'];
+        const kind = row['selected_kind'];
+        const sourceId = row['selected_source_id'];
+        // Exactly all-null or a complete (provider,'track',source_id).
+        let selectedRef: SourceRef | null = null;
+        if (provider !== null || kind !== null || sourceId !== null) {
+          const providerStr = typeof provider === 'string' ? provider : '';
+          const sourceStr = typeof sourceId === 'string' ? sourceId : '';
+          if (
+            providerStr.length === 0 ||
+            kind !== 'track' ||
+            sourceStr.length === 0
+          ) {
+            return null;
+          }
+          selectedRef = {
+            provider: providerStr,
+            kind: 'track',
+            id: sourceStr,
+          };
+        }
+        const candidate: QueueOccurrence = {
+          occurrenceId: t.reqStr(row['occurrence_id']),
+          recordingId: t.reqStr(row['recording_id']),
+          selectedRef,
+        };
+        if (
+          occurrenceIds.has(candidate.occurrenceId) ||
+          !recordingIds.has(candidate.recordingId) ||
+          !isQueueOccurrence(candidate)
+        ) {
+          return null;
+        }
+        occurrenceIds.add(candidate.occurrenceId);
+        return candidate;
+      },
+    );
+    if (occurrence !== null) {
+      occurrences.push(occurrence);
+    }
+  }
+
+  // The queue_state/settings singletons stay strict on their required
+  // fields — a corrupt revision/mode is engine-written damage, not a
+  // droppable orphan.
   let bad = false;
   const tools = rowTools(() => {
     bad = true;
   });
-  const {
-    fail,
-    reqStr,
-    reqNonEmpty,
-    optStr,
-    reqInt,
-    reqNonNegInt,
-    optInt,
-    optBool,
-    reqBool,
-    json,
-  } = tools;
-
-  const { recordings, recordingIds } = decodeRecordingRows(
-    tools,
-    recordingRows,
-    refRows,
-    mappingRows,
-  );
-  // likes: polymorphic target_id — 'track' names a recording,
-  // 'album'/'artist' name an entity (checked after entity decode).
-  const likeKeys = new Set<string>();
-  const likes: Like[] = likeRows.map((row) => {
-    const kind = row['entity_kind'];
-    if (kind !== 'track' && kind !== 'album' && kind !== 'artist') {
-      fail();
-    }
-    const targetId = reqStr(row['target_id']);
-    const key = `${kind as string} ${targetId}`;
-    if (likeKeys.has(key)) {
-      fail();
-    }
-    likeKeys.add(key);
-    return {
-      entityKind: kind as Like['entityKind'],
-      targetId,
-      likedAtMs: reqNonNegInt(row['liked_ms']),
-    };
-  });
-  // Entities: ids and kinds first so entity_source_refs and
-  // entity-kind likes can be verified; duplicate entity rows rejected
-  // without the PK.
-  const entityIds = new Set<string>();
-  const entityKinds = new Map<string, Entity['kind']>();
-  for (const row of rows.entities) {
-    const id = reqStr(row['entity_id']);
-    if (entityIds.has(id)) {
-      fail();
-    }
-    entityIds.add(id);
-    const kind = row['kind'];
-    if (kind !== 'album' && kind !== 'artist') {
-      fail();
-    } else {
-      entityKinds.set(id, kind);
-    }
-  }
-  const entities: Entity[] = rows.entities.map((row) => {
-    const kind = row['kind'];
-    if (kind !== 'album' && kind !== 'artist') {
-      fail();
-    }
-    return {
-      entityId: reqStr(row['entity_id']),
-      kind: kind as Entity['kind'],
-      title: reqStr(row['title']),
-      artistName: optStr(row['artist_name']),
-      artwork:
-        row['artwork_json'] === null
-          ? []
-          : (json(row['artwork_json']) as Entity['artwork']),
-      createdMs: reqNonNegInt(row['created_ms']),
-    };
-  });
-  for (const like of likes) {
-    // 'track' likes name recordings; entity likes must name an entity
-    // of the same kind.
-    const resolves =
-      like.entityKind === 'track'
-        ? recordingIds.has(like.targetId)
-        : entityKinds.get(like.targetId) === like.entityKind;
-    if (!resolves) {
-      fail();
-    }
-  }
-  const entityRefKeys = new Set<string>();
-  const entitySourceRefs: EntitySourceRef[] = rows.entitySourceRefs.map(
-    (row) => {
-      const entityId = reqStr(row['entity_id']);
-      if (!entityIds.has(entityId)) {
-        fail();
-      }
-      const provider = reqNonEmpty(row['provider']);
-      const key = `${entityId} ${provider}`;
-      if (entityRefKeys.has(key)) {
-        fail();
-      }
-      entityRefKeys.add(key);
-      const ref = json(row['ref_json']);
-      // The ref's kind must agree with the target entity's kind.
-      if (
-        typeof ref !== 'object' ||
-        ref === null ||
-        (ref as EntityRef).kind !== entityKinds.get(entityId)
-      ) {
-        fail();
-      }
-      return {
-        entityId,
-        provider,
-        ref: ref as EntityRef,
-      };
-    },
-  );
-  const playlistIds = new Set<string>();
-  for (const row of rows.playlists) {
-    const id = reqStr(row['playlist_id']);
-    if (playlistIds.has(id)) {
-      fail();
-    }
-    playlistIds.add(id);
-  }
-  const playlists: Playlist[] = rows.playlists.map((row) => ({
-    playlistId: reqStr(row['playlist_id']),
-    name: reqStr(row['name']),
-    createdMs: reqNonNegInt(row['created_ms']),
-    updatedMs: reqNonNegInt(row['updated_ms']),
-  }));
-  const entryIds = new Set<string>();
-  const entryPositions = new Map<string, Set<number>>();
-  const playlistEntries: PlaylistEntry[] = rows.playlistEntries.map(
-    (row) => {
-      const playlistId = reqStr(row['playlist_id']);
-      if (!playlistIds.has(playlistId)) {
-        fail();
-      }
-      const recordingId = reqStr(row['recording_id']);
-      if (!recordingIds.has(recordingId)) {
-        fail();
-      }
-      const entryId = reqStr(row['entry_id']);
-      if (entryIds.has(entryId)) {
-        fail();
-      }
-      entryIds.add(entryId);
-      const position = row['position'];
-      if (typeof position !== 'number' || !Number.isFinite(position)) {
-        fail();
-      }
-      const seen = entryPositions.get(playlistId) ?? new Set<number>();
-      if (seen.has(position as number)) {
-        fail();
-      }
-      seen.add(position as number);
-      entryPositions.set(playlistId, seen);
-      const selectedRef =
-        row['selected_ref_json'] === null
-          ? null
-          : (json(row['selected_ref_json']) as SourceRef);
-      return {
-        entryId,
-        playlistId,
-        recordingId,
-        position: position as number,
-        selectedRef,
-        addedMs: reqNonNegInt(row['added_ms']),
-      };
-    },
-  );
-  const eventIds = new Set<string>();
-  const playHistory: PlayEvent[] = rows.playHistory.map((row) => {
-    const eventId = reqStr(row['event_id']);
-    if (eventIds.has(eventId)) {
-      fail();
-    }
-    eventIds.add(eventId);
-    const recordingId = reqStr(row['recording_id']);
-    if (!recordingIds.has(recordingId)) {
-      fail();
-    }
-    return {
-      eventId,
-      recordingId,
-      occurrenceId: optStr(row['occurrence_id']),
-      playedMs: reqNonNegInt(row['played_ms']),
-      listenedMs: reqNonNegInt(row['listened_ms']),
-    };
-  });
-  const countedIds = new Set<string>();
-  const playCounts: PlayCount[] = rows.playCounts.map((row) => {
-    const recordingId = reqStr(row['recording_id']);
-    if (!recordingIds.has(recordingId) || countedIds.has(recordingId)) {
-      fail();
-    }
-    countedIds.add(recordingId);
-    return {
-      recordingId,
-      count: reqNonNegInt(row['count']),
-      lastMs: reqNonNegInt(row['last_ms']),
-    };
-  });
-  const reviewIds = new Set<string>();
-  const matchReviews: MatchReview[] = rows.matchReviews.map((row) => {
-    const reviewId = reqStr(row['review_id']);
-    if (reviewIds.has(reviewId)) {
-      fail();
-    }
-    reviewIds.add(reviewId);
-    const recordingId = reqStr(row['recording_id']);
-    if (!recordingIds.has(recordingId)) {
-      fail();
-    }
-    const status = row['status'];
-    if (
-      status !== 'pending' &&
-      status !== 'confirmed' &&
-      status !== 'rejected' &&
-      status !== 'dismissed'
-    ) {
-      fail();
-    }
-    const resolvedMs = optInt(row['resolved_ms']);
-    if (resolvedMs !== null && resolvedMs < 0) {
-      fail();
-    }
-    return {
-      reviewId,
-      recordingId,
-      candidates: json(row['candidates_json']) as MatchReview['candidates'],
-      status: status as MatchReview['status'],
-      resolution:
-        row['resolution_json'] === null
-          ? null
-          : (json(row['resolution_json']) as MatchReview['resolution']),
-      createdMs: reqNonNegInt(row['created_ms']),
-      resolvedMs,
-    };
-  });
-  const lyricIds = new Set<string>();
-  const lyricsCache: LyricsCacheEntry[] = rows.lyricsCache.map((row) => {
-    const recordingId = reqStr(row['recording_id']);
-    if (!recordingIds.has(recordingId) || lyricIds.has(recordingId)) {
-      fail();
-    }
-    lyricIds.add(recordingId);
-    const kind = row['kind'];
-    if (kind !== 'plain' && kind !== 'synced') {
-      fail();
-    }
-    // provider_version is three-way: NULL = a pre-versioning row
-    // (decodes as an absent field, so the session sees it stale and
-    // refetches once); '' = an explicitly-recorded null provenance
-    // from a versionless provider's write; else the version string.
-    const providerVersion = row['provider_version'];
-    return {
-      recordingId,
-      provider: reqNonEmpty(row['provider']),
-      kind: kind as LyricsCacheEntry['kind'],
-      payload: json(row['payload_json']) as LyricsCacheEntry['payload'],
-      fetchedMs: reqNonNegInt(row['fetched_ms']),
-      ...(providerVersion === null
-        ? {}
-        : {
-            providerVersion:
-              providerVersion === '' ? null : reqStr(providerVersion),
-          }),
-    };
-  });
-  const artworkUrls = new Set<string>();
-  const artworkCache: ArtworkCacheEntry[] = rows.artworkCache.map((row) => {
-    const url = reqStr(row['url']);
-    if (artworkUrls.has(url)) {
-      fail();
-    }
-    artworkUrls.add(url);
-    return {
-      url,
-      filePath: reqStr(row['file_path']),
-      bytes: reqNonNegInt(row['bytes']),
-      lastAccessedMs: reqNonNegInt(row['last_accessed_ms']),
-    };
-  });
-  const downloadIds = new Set<string>();
-  const downloadedRecordingIds = new Set<string>();
-  const downloads: DownloadRecord[] = rows.downloads.map((row) => {
-    const downloadId = reqStr(row['download_id']);
-    if (downloadIds.has(downloadId)) {
-      fail();
-    }
-    downloadIds.add(downloadId);
-    const recordingId = reqStr(row['recording_id']);
-    if (!recordingIds.has(recordingId) ||
-        downloadedRecordingIds.has(recordingId)) {
-      fail();
-    }
-    downloadedRecordingIds.add(recordingId);
-    const state = row['state'];
-    return {
-      downloadId,
-      recordingId,
-      provider: reqNonEmpty(row['provider']),
-      sourceRef: json(row['source_ref_json']) as SourceRef,
-      filePath: reqStr(row['file_path']),
-      bytes: reqNonNegInt(row['bytes']),
-      state: state as DownloadState,
-      committedOffset: reqNonNegInt(row['committed_offset']),
-      checksum: optStr(row['checksum']),
-      mime: optStr(row['mime']),
-      itag: optInt(row['itag']),
-      expiresAtMs: optInt(row['expires_at_ms']),
-      error:
-        row['error_json'] === null
-          ? null
-          : (json(row['error_json']) as DownloadRecord['error']),
-      priority: reqNonNegInt(row['priority']),
-      requestedMs: reqNonNegInt(row['requested_ms']),
-      downloadedMs: optInt(row['downloaded_ms']),
-    };
-  });
-  const localSourceIds = new Set<string>();
-  const localSources: LocalSource[] = rows.localSources.map((row) => {
-    const sourceId = reqStr(row['source_id']);
-    if (localSourceIds.has(sourceId)) {
-      fail();
-    }
-    localSourceIds.add(sourceId);
-    return {
-      sourceId,
-      treeUri: reqStr(row['tree_uri']),
-      label: reqStr(row['label']),
-      addedMs: reqNonNegInt(row['added_ms']),
-      lastScanMs: optInt(row['last_scan_ms']),
-    };
-  });
-  const localFileIds = new Set<string>();
-  const localFiles: LocalFile[] = rows.localFiles.map((row) => {
-    const fileId = reqStr(row['file_id']);
-    if (localFileIds.has(fileId)) {
-      fail();
-    }
-    localFileIds.add(fileId);
-    const sourceId = reqStr(row['source_id']);
-    if (!localSourceIds.has(sourceId)) {
-      fail();
-    }
-    const recordingId = reqStr(row['recording_id']);
-    if (!recordingIds.has(recordingId)) {
-      fail();
-    }
-    return {
-      fileId,
-      sourceId,
-      docId: reqStr(row['doc_id']),
-      size: reqNonNegInt(row['size']),
-      fingerprint: reqStr(row['fingerprint']),
-      modifiedMs: optInt(row['modified_ms']),
-      title: optStr(row['title']),
-      artist: optStr(row['artist']),
-      album: optStr(row['album']),
-      durationMs: optInt(row['duration_ms']),
-      genre: optStr(row['genre']),
-      recordingId,
-    };
+  const { reqStr, optStr, reqInt, reqNonNegInt, optInt, reqBool, json } =
+    tools;
+  const mode = queueRow['mode'];
+  // A malformed optional field drops to absent rather than bricking
+  // the restore (storage:* writes can reach this row).
+  let blockedBad = false;
+  const blockedTools = rowTools(() => {
+    blockedBad = true;
   });
   const blocked =
     queueRow['blocked_error_json'] === null
       ? undefined
-      : (json(queueRow['blocked_error_json']) as AppError);
-  const mode = queueRow['mode'];
-  if (mode !== 'stopped' && mode !== 'paused' && mode !== 'playing') {
-    fail();
+      : (blockedTools.json(queueRow['blocked_error_json']) as AppError);
+  if (
+    !blockedBad &&
+    blocked !== undefined &&
+    !isAppErrorLike(blocked)
+  ) {
+    // Parses but isn't a queue error — drop the field, keep the row.
+    blockedBad = true;
   }
-  const occurrenceIds = new Set<string>();
-  const queue: QueueSnapshot = {
+  if (blockedBad) {
+    dropped.push({ table: 'queue_state', key: 'blocked_error_json' });
+  }
+  let queue: QueueSnapshot | null = {
     revision: reqNonNegInt(queueRow['revision']),
-    occurrences: occurrenceRows.map((row, index) => {
-      // Ordinals are globally contiguous from 0 in query order.
-      if (reqNonNegInt(row['ordinal']) !== index) {
-        fail();
-      }
-      const occurrenceId = reqStr(row['occurrence_id']);
-      if (occurrenceIds.has(occurrenceId)) {
-        fail();
-      }
-      occurrenceIds.add(occurrenceId);
-      const provider = row['selected_provider'];
-      const kind = row['selected_kind'];
-      const sourceId = row['selected_source_id'];
-      // Exactly all-null or a complete (provider,'track',source_id).
-      let selectedRef: SourceRef | null = null;
-      if (provider !== null || kind !== null || sourceId !== null) {
-        const providerStr = typeof provider === 'string' ? provider : '';
-        const sourceStr = typeof sourceId === 'string' ? sourceId : '';
-        if (
-          providerStr.length === 0 ||
-          kind !== 'track' ||
-          sourceStr.length === 0
-        ) {
-          fail();
-        }
-        selectedRef = {
-          provider: providerStr,
-          kind: 'track',
-          id: sourceStr,
-        };
-      }
-      return {
-        occurrenceId,
-        recordingId: reqStr(row['recording_id']),
-        selectedRef,
-      };
-    }),
+    occurrences,
     currentOccurrenceId: optStr(queueRow['current_occurrence_id']),
     positionMs: reqNonNegInt(queueRow['position_ms']),
     mode: mode as QueueSnapshot['mode'],
-    ...(blocked === undefined ? {} : { blockedError: blocked }),
+    ...(blockedBad || blocked === undefined
+      ? {}
+      : { blockedError: blocked }),
   };
+  if (
+    bad ||
+    (mode !== 'stopped' && mode !== 'paused' && mode !== 'playing')
+  ) {
+    return null;
+  }
+  if (
+    queue.currentOccurrenceId !== null &&
+    !occurrenceIds.has(queue.currentOccurrenceId)
+  ) {
+    // The playhead names an occurrence the decode dropped (or one
+    // never written) — park the queue back to stopped rather than
+    // fail the restore on a dangling reference.
+    dropped.push({ table: 'queue_state', key: queue.currentOccurrenceId });
+    queue = {
+      revision: queue.revision,
+      occurrences,
+      currentOccurrenceId: null,
+      positionMs: 0,
+      mode: 'stopped',
+    };
+  }
+  const queueRevision = queue.revision;
+  if (!isQueueSnapshot(queue)) {
+    // The remaining doc-invalid shapes are renderer-writable too: a
+    // playhead while parked, a position without a playhead, or a
+    // blocked error on a stopped queue — schema-legal but not a
+    // snapshot. Park the playhead; the occurrence rows stand.
+    dropped.push({ table: 'queue_state', key: 'shape' });
+    queue = {
+      revision: queueRevision,
+      occurrences,
+      currentOccurrenceId: null,
+      positionMs: 0,
+      mode: 'stopped',
+    };
+  }
+  if (!isQueueSnapshot(queue)) {
+    return null;
+  }
   const settings: Settings = {
     catalogProvider: reqStr(settingsRow['catalog_provider']),
     playbackProvider: reqStr(settingsRow['playback_provider']),
@@ -1316,21 +1528,24 @@ function decodeState(rows: TableRows): PersistedState | null {
     return null;
   }
   return {
-    recordings,
-    likes,
-    entities,
-    entitySourceRefs,
-    playlists,
-    playlistEntries,
-    playHistory,
-    playCounts,
-    matchReviews,
-    lyricsCache,
-    artworkCache,
-    downloads,
-    localSources,
-    localFiles,
-    queue,
-    settings,
+    state: {
+      recordings,
+      likes,
+      entities,
+      entitySourceRefs,
+      playlists,
+      playlistEntries,
+      playHistory,
+      playCounts,
+      matchReviews,
+      lyricsCache,
+      artworkCache,
+      downloads,
+      localSources,
+      localFiles,
+      queue,
+      settings,
+    },
+    dropped,
   };
 }

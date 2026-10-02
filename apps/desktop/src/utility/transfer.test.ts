@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { LookupAddress } from 'node:dns';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { chmod, mkdir, readFile, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, stat, utimes, writeFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -295,6 +295,27 @@ export async function run(): Promise<void> {
       'stats count finals and partials',
     );
 
+    // Finalized sweep mirrors the partial one: finalized names the
+    // keep set doesn't own are reaped; owned names and suffix files
+    // stand.
+    await writeFile(join(mediaDir, 'orphan.mp4'), payload);
+    const sweptFin = await call(CHANNELS.transferSweepFinalized, {
+      keepPaths: ['track.mp4', 'part.mp4', 'long.mp4'],
+    });
+    assert(
+      sweptFin.ok &&
+        (sweptFin.result as { swept: number }).swept === 1,
+      'finalized sweep removes unowned files only',
+    );
+    const orphanGone = await stat(join(mediaDir, 'orphan.mp4')).catch(
+      () => null,
+    );
+    assert(orphanGone === null, 'orphan file reaped');
+    const keeperAlive = await stat(join(mediaDir, 'track.mp4')).catch(
+      () => null,
+    );
+    assert(keeperAlive !== null, 'ledger-owned file kept');
+
     // Remove is idempotent over file + .part.
     const removed = await call(CHANNELS.transferRemove, {
       name: 'track.mp4',
@@ -519,8 +540,20 @@ export async function run(): Promise<void> {
     await writeFile(join(media2, 'crashed.mp4.replace'), 'old bytes');
     await writeFile(join(media2, 'stale.mp4'), 'new bytes');
     await writeFile(join(media2, 'stale.mp4.replace'), 'old bytes');
+    // Finalized leg: an unowned finalized file old enough is reaped
+    // (the ledger can lose a row without removeFile — purge/cascade);
+    // a just-landed unowned one survives the age gate, and the owned
+    // `keep.mp4` name stands.
+    await writeFile(join(media2, 'orphan.mp4'), 'no row');
+    await writeFile(join(media2, 'fresh.mp4'), 'no row yet');
+    await writeFile(join(media2, 'keep.mp4'), 'owned');
+    await utimes(
+      join(media2, 'orphan.mp4'),
+      stale2,
+      stale2,
+    );
     const swept = await sweeping.sweepOrphans();
-    assertEqual(swept, 1, 'only the unclaimed stale partial reaped');
+    assertEqual(swept, 2, 'stale partial + finalized orphan reaped');
     const keptRow = await readFile(
       join(media2, 'keep.mp4.part'),
     ).catch(() => null);
@@ -541,6 +574,18 @@ export async function run(): Promise<void> {
     assert(staleBackup === null, 'stale backup reaped');
     const landedDest = await readFile(join(media2, 'stale.mp4'));
     assertEqual(landedDest.toString(), 'new bytes', 'live dest kept');
+    const orphanFile = await stat(join(media2, 'orphan.mp4')).catch(
+      () => null,
+    );
+    assert(orphanFile === null, 'unowned finalized file reaped');
+    const freshFile = await stat(join(media2, 'fresh.mp4')).catch(
+      () => null,
+    );
+    assert(freshFile !== null, 'young unowned file survives the age gate');
+    const ownedFile = await stat(join(media2, 'keep.mp4')).catch(
+      () => null,
+    );
+    assert(ownedFile !== null, 'ledger-owned finalized file kept');
     sweeping.close();
     db.close();
   } finally {

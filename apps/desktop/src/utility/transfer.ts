@@ -651,6 +651,50 @@ export function createTransferService(
     return { swept };
   }
 
+  async function sweepFinalized(args: TransferSweepArgs): Promise<unknown> {
+    const keep = new Set<string>([
+      ...args.keepPaths,
+      // An open sink's destPath is mid-publish — not an orphan.
+      ...[...livePartNames()].map((name) =>
+        name.slice(0, -PART_SUFFIX.length),
+      ),
+    ]);
+    let entries;
+    try {
+      entries = await readdir(dir());
+    } catch (thrown) {
+      const code =
+        thrown instanceof Error && 'code' in thrown
+          ? String((thrown as { code?: unknown }).code)
+          : '';
+      if (code === 'ENOENT') {
+        return { swept: 0 };
+      }
+      asIo('transfer sweep failed', thrown);
+    }
+    let swept = 0;
+    for (const name of entries) {
+      if (
+        name.endsWith(PART_SUFFIX) ||
+        name.endsWith(REPLACE_SUFFIX) ||
+        keep.has(name)
+      ) {
+        continue;
+      }
+      try {
+        const info = await stat(join(dir(), name));
+        if (!info.isFile()) {
+          continue;
+        }
+        await rm(join(dir(), name), { force: true });
+        swept += 1;
+      } catch {
+        // Vanished or locked between readdir and rm — next sweep.
+      }
+    }
+    return { swept };
+  }
+
   /**
    * Startup pass: `.part` files older than `ORPHAN_MIN_AGE_MS` whose
    * ledger row is absent or no longer resumable get deleted. The
@@ -740,6 +784,48 @@ export function createTransferService(
         swept += 1;
       } catch {
         // Vanished or locked between readdir and rm — next sweep.
+      }
+    }
+    // Finalized orphans need every ledger row — a purge/cascade can
+    // drop rows without removeFile, leaving owned-name-less files.
+    // Same contract as the .part leg: an unreadable index deletes
+    // nothing for this pass (the .part sweeps above already ran).
+    if (db !== null) {
+      try {
+        const owned = new Set<string>();
+        const rows = db
+          .prepare(`SELECT file_path FROM downloads`)
+          .all() as { file_path?: unknown }[];
+        for (const row of rows) {
+          if (typeof row.file_path === 'string') {
+            owned.add(row.file_path);
+          }
+        }
+        for (const name of entries) {
+          if (
+            name.endsWith(PART_SUFFIX) ||
+            name.endsWith(REPLACE_SUFFIX) ||
+            owned.has(name)
+          ) {
+            continue;
+          }
+          try {
+            const info = await stat(join(dir(), name));
+            if (!info.isFile() || info.mtimeMs > cutoff) {
+              continue;
+            }
+            await rm(join(dir(), name), { force: true });
+            swept += 1;
+          } catch {
+            // Vanished or locked between readdir and rm — next sweep.
+          }
+        }
+      } catch (thrown) {
+        const message = thrown instanceof Error ? thrown.message : '';
+        if (!message.includes('no such table')) {
+          return swept;
+        }
+        // Pre-migration database — no finalized owner can exist.
       }
     }
     return swept;
@@ -1263,6 +1349,11 @@ export function createTransferService(
         CHANNELS.transferSweepPartials,
         isTransferSweepArgs,
         sweep,
+      ),
+      [CHANNELS.transferSweepFinalized]: guarded(
+        CHANNELS.transferSweepFinalized,
+        isTransferSweepArgs,
+        sweepFinalized,
       ),
       [CHANNELS.transferList]: guarded(
         CHANNELS.transferList,

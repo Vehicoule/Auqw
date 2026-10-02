@@ -416,6 +416,12 @@ const api: AuqwApi = {
         args,
         isTransferSweepResult,
       ),
+    sweepFinalized: (args) =>
+      invoke(
+        CHANNELS.transferSweepFinalized,
+        args,
+        isTransferSweepResult,
+      ),
     list: () =>
       invoke(CHANNELS.transferList, undefined, isTransferListResult),
     status: (args) =>

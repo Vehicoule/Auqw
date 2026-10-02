@@ -247,6 +247,16 @@ export function createDesktopTransfer(api: AuqwApi): MediaTransferPort {
       return res.ok ? ok(res.value.swept) : res;
     },
 
+    sweepFinalized: async (keepPaths, signal) => {
+      const res =
+        ifCancelled(signal) ??
+        (await settleIpc(
+          api.transfer.sweepFinalized({ keepPaths }),
+          signal,
+        ));
+      return res.ok ? ok(res.value.swept) : res;
+    },
+
     usage: async (signal) => {
       const res =
         ifCancelled(signal) ??
