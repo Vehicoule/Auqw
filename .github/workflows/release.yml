@@ -31,6 +31,11 @@ jobs:
   # publish — the legs just run concurrently instead of waiting ~2m.
   gate:
     uses: ./.github/workflows/ci.yml
+    # ci.yml's plugin-lock job checks out the plugins repo — a reusable
+    # workflow sees no secrets unless asked, so without this the gate's
+    # checkout token falls back to github.token and a private
+    # Auqw-plugins would block every tag at the gate.
+    secrets: inherit
 
   desktop:
     strategy:

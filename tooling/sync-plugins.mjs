@@ -203,8 +203,8 @@ const verifyRelease = (plugin, dir, lock) => {
 };
 
 // Resolve + verify one lock entry's source, returning the manifest and
-// the path of the .wasm artifact a sync would copy. Verification is
-// identical in --check and sync modes — only the copying differs.
+// the verified .wasm bytes a sync would stage. Verification is
+// identical in --check and sync modes — only the writing differs.
 // `local-build:` stays dev-loop-only: its resolved path (and the
 // manifest beside it) must live inside this repo, and --release refuses
 // it outright. release: sources legitimately leave the repo — they name
@@ -229,19 +229,28 @@ const loadPluginArtifacts = (plugin, lock, { releaseOnly = false } = {}) => {
       'local-build manifest',
       source,
     );
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-    return { manifest, artifactPath: wasmPath };
+    const manifestBuf = readFileSync(manifestPath);
+    // Same repin contract the wasm digest already imposes: a manifest
+    // edit (permissions, capabilities) must land in the lock too —
+    // otherwise stale bytes stage under the existing pin.
+    if (sha256(manifestBuf) !== plugin.manifest_digest) {
+      throw new Error(
+        `${plugin.id}: manifest digest ${sha256(manifestBuf)} != lock manifest_digest ${plugin.manifest_digest}`,
+      );
+    }
+    const manifest = JSON.parse(manifestBuf.toString('utf8'));
+    return { manifest, wasm };
   }
   if (source.startsWith('release:')) {
     if (!lock.keyId || !lock.publicKey) {
       throw new Error('release sources need keyId + publicKey in providers.lock.json');
     }
     const releaseDir = resolveSourcePath(source.slice('release:'.length));
-    const { manifest } = verifyRelease(plugin, releaseDir, lock);
-    return {
-      manifest,
-      artifactPath: join(releaseDir, `${plugin.id}-${plugin.version}.wasm`),
-    };
+    // verifyRelease returns the wasm bytes it hashed — staging writes
+    // them verbatim rather than re-reading the path, so a source that
+    // changes between verify and copy can't smuggle unverified bytes
+    // into the provider set.
+    return verifyRelease(plugin, releaseDir, lock);
   }
   throw new Error(`${plugin.id}: unsupported source ${source}`);
 };
@@ -285,6 +294,9 @@ const main = (argv) => {
   // Optional positional arg: output dir relative to the repo root
   // (desktop's packaged plugin set, for example). The default keeps the
   // mobile path. --check writes nothing, so it takes no output dir.
+  if (positional.length > 1) {
+    throw new Error(`sync-plugins: unexpected extra arguments: ${positional.slice(1).join(' ')}`);
+  }
   const outArg = positional[0];
   if (check && outArg !== undefined) {
     throw new Error(`sync-plugins: --check verifies only; no output dir: ${outArg}`);
@@ -302,9 +314,9 @@ const main = (argv) => {
       throw new Error(`providers.lock.json: duplicate plugin id ${plugin.id}`);
     }
     ids.add(plugin.id);
-    const { manifest, artifactPath } = loadPluginArtifacts(plugin, lock, { releaseOnly });
+    const { manifest, wasm } = loadPluginArtifacts(plugin, lock, { releaseOnly });
     assertLockAgreement(plugin, manifest, lock);
-    artifacts.push({ plugin, manifest, artifactPath });
+    artifacts.push({ plugin, manifest, wasm });
   }
 
   if (check) {
@@ -365,8 +377,11 @@ const main = (argv) => {
     rmSync(STAGE, { recursive: true, force: true });
   });
 
-  for (const { plugin, manifest, artifactPath } of artifacts) {
-    copyFileSync(artifactPath, join(STAGE, `${plugin.id}.wasm`));
+  for (const { plugin, manifest, wasm } of artifacts) {
+    // The staged bytes are the ones verification hashed — writing the
+    // verified buffer (not copying the source path again) keeps a
+    // source that changed mid-run out of the provider set.
+    writeFileSync(join(STAGE, `${plugin.id}.wasm`), wasm);
     writeFileSync(join(STAGE, `${plugin.id}.manifest.json`), JSON.stringify(manifest));
     console.log(`synced ${plugin.id} ${plugin.version} ${plugin.digest.slice(0, 19)}…`);
   }
