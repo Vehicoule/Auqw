@@ -148,11 +148,15 @@ export function PlatformTabs({
   );
   const floatHidden = tabBarHidden || keyboardOpen;
   useEffect(() => {
-    if (Platform.OS === 'android' && floatHidden) {
+    // Only the keyboard zeroes the footprint — the dock then truly
+    // parks at the screen bottom. tabBarHidden keeps the last measured
+    // value: the sheet's collapse anchor must already hold the dock's
+    // resting height before the remounted bar reports it.
+    if (Platform.OS === 'android' && keyboardOpen) {
       setFloatFootprint(0);
       onTabBarHeight?.(0);
     }
-  }, [floatHidden, onTabBarHeight]);
+  }, [keyboardOpen, onTabBarHeight]);
   const dockBottom =
     Platform.OS === 'android' ? (floatFootprint ?? 0) : (tabBarHeight ?? 0);
   const dockUnmeasured =
