@@ -906,6 +906,7 @@ export class Session {
       base.shuffle === prev.shuffle &&
       base.shuffleOrder === prev.shuffleOrder &&
       base.radio === prev.radio &&
+      base.radioOccurrenceIds === prev.radioOccurrenceIds &&
       base.persistenceError === prev.persistenceError
     ) {
       return false;
@@ -2807,14 +2808,22 @@ export class Session {
         snap.currentOccurrenceId === null
           ? -1
           : ids.indexOf(snap.currentOccurrenceId);
-      const upcoming = ids
-        .slice(cursorIndex + 1)
-        // Random-key sort — uniform over permutations, same deal as
-        // playMetadata's enqueue shuffle.
-        .map((id) => ({ id, rank: this.#random.unit() }))
-        .sort((a, b) => a.rank - b.rank)
-        .map(({ id }) => id);
-      r.shuffleOrder = [...ids.slice(0, cursorIndex + 1), ...upcoming];
+      const upcoming = ids.slice(cursorIndex + 1);
+      // Random-key sort — uniform over permutations, same deal as
+      // playMetadata's enqueue shuffle. The user/suggestion boundary
+      // survives the deal: each block shuffles within itself so a
+      // suggestion never walks ahead of a manual pick — the rendered
+      // sections stay the true play order.
+      const deal = (list: readonly string[]) =>
+        list
+          .map((id) => ({ id, rank: this.#random.unit() }))
+          .sort((a, b) => a.rank - b.rank)
+          .map(({ id }) => id);
+      r.shuffleOrder = [
+        ...ids.slice(0, cursorIndex + 1),
+        ...deal(upcoming.filter((id) => !r.radioIds.has(id))),
+        ...deal(upcoming.filter((id) => r.radioIds.has(id))),
+      ];
     } else {
       r.shuffleOrder = null;
     }
@@ -2863,24 +2872,54 @@ export class Session {
         ? -1
         : order.indexOf(snap.currentOccurrenceId);
     let changed = order.length !== dealt.length;
+    // The user/suggestion boundary the canonical order enforces is the
+    // dealt walk's contract too: an upcoming run that interleaves them
+    // (a pre-boundary persisted deal) repartitions — stable inside each
+    // block, so an honest deal passes through untouched.
+    const upcoming = order.slice(cursorPos + 1);
+    const partitioned = [
+      ...upcoming.filter((id) => !r.radioIds.has(id)),
+      ...upcoming.filter((id) => r.radioIds.has(id)),
+    ];
+    if (partitioned.some((id, i) => id !== upcoming[i])) {
+      order.splice(cursorPos + 1, upcoming.length, ...partitioned);
+      changed = true;
+    }
     for (const occurrence of snap.occurrences) {
       if (dealtSet.has(occurrence.occurrenceId)) {
         continue;
       }
       dealtSet.add(occurrence.occurrenceId);
       // No cursor means the walk is all history (drained) or all
-      // future (never started) — new items append in order rather
-      // than landing mid-walk, which also keeps a drained queue's
-      // resume pointed at the first appended item. With a cursor,
-      // insert at a uniform slot behind it.
+      // future (never started) — new items append rather than landing
+      // mid-walk, which also keeps a drained queue's resume pointed at
+      // the first appended item. With a cursor the row inserts at a
+      // uniform slot — inside its own block either way: the dealt walk
+      // keeps the user/suggestion boundary the canonical order
+      // enforces, so a manual add never plays behind fetched
+      // suggestions and a suggestion never ahead of a manual pick.
+      const firstSuggestion = order.findIndex(
+        (id, i) => i > cursorPos && r.radioIds.has(id),
+      );
+      const suggestionStart =
+        firstSuggestion === -1 ? order.length : firstSuggestion;
+      const suggested = r.radioIds.has(occurrence.occurrenceId);
       const slot =
         snap.currentOccurrenceId === null
-          ? order.length
-          : cursorPos +
-          1 +
-          Math.floor(
-            this.#random.unit() * (order.length - cursorPos),
-          );
+          ? suggested
+            ? order.length
+            : suggestionStart
+          : suggested
+            ? suggestionStart +
+              Math.floor(
+                this.#random.unit() *
+                  (order.length - suggestionStart + 1),
+              )
+            : cursorPos +
+              1 +
+              Math.floor(
+                this.#random.unit() * (suggestionStart - cursorPos),
+              );
       order.splice(slot, 0, occurrence.occurrenceId);
       changed = true;
     }
@@ -2998,13 +3037,15 @@ export class Session {
   }
 
   /**
-   * Batch remove — the queue pane's section Clear hands the ids it
-   * shows. Each listed occurrence drops inside one commit; a listed
-   * current or unknown id is skipped (a stale render's row can be
-   * gone — or current — by tap time). Radio-minted ids prune their
-   * suggestion mark with the row; an empty hit list is a no-op.
+   * Up-next section Clear — the queue pane hands the occurrence ids
+   * it renders as upcoming; each id still ahead of the cursor in the
+   * real play walk drops inside one commit. A listed id that turned
+   * current, played into history, or disappeared between render and
+   * tap is skipped — a stale render's row is outside what the action
+   * showed. Radio-minted ids prune their suggestion mark with the
+   * row; an empty hit list is a no-op.
    */
-  async removeOccurrences(
+  async clearUpcoming(
     occurrenceIds: readonly string[],
   ): Promise<Result<void>> {
     const ready = this.#requireReady();
@@ -3013,9 +3054,23 @@ export class Session {
     }
     const r = ready.value;
     const snap = r.queue.snapshot();
+    // Walk positions in the dealt order under shuffle, canonical
+    // otherwise — section membership is decided at commit time, not
+    // against the render the ids came from.
+    const order =
+      this.#dealtOrder(r) ?? snap.occurrences.map((o) => o.occurrenceId);
+    const pos = new Map(order.map((id, i) => [id, i] as const));
+    const cursorPos =
+      snap.currentOccurrenceId === null
+        ? -1
+        : (pos.get(snap.currentOccurrenceId) ?? -1);
     const live = new Set(snap.occurrences.map((o) => o.occurrenceId));
-    const doomed = occurrenceIds.filter(
-      (id) => live.has(id) && id !== snap.currentOccurrenceId,
+    // An undealt live row walks past the dealt tail — still upcoming.
+    const doomed = [...new Set(occurrenceIds)].filter(
+      (id) =>
+        live.has(id) &&
+        id !== snap.currentOccurrenceId &&
+        (pos.get(id) ?? order.length) > cursorPos,
     );
     if (doomed.length === 0) {
       return ok(undefined);

@@ -2524,7 +2524,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // section's occurrence ids for a batch remove.
   const clearUpcoming = useCallback(
     (occurrenceIds: readonly string[]) =>
-      void session.removeOccurrences(occurrenceIds),
+      void session.clearUpcoming(occurrenceIds),
     [session],
   );
 

@@ -3323,11 +3323,11 @@ async function clearQueueEmptiesDead(): Promise<void> {
   await r.session.dispose();
 }
 
-async function removeOccurrencesBatchClears(): Promise<void> {
+async function clearUpcomingBatchRemoves(): Promise<void> {
   // The queue's section Clear hands up-next occurrence ids for a batch
-  // remove: the cursor and unknown ids are skipped, and suggestion
-  // ids prune out of radioOccurrenceIds. An empty selection is a
-  // no-op ok.
+  // remove: the cursor, unknown ids and duplicates are skipped, and
+  // suggestion ids prune out of radioOccurrenceIds. An empty
+  // selection is a no-op ok.
   const r = rig(
     persisted({
       recordings: ['A', 'B', 'C', 'D'].map((id) =>
@@ -3371,14 +3371,16 @@ async function removeOccurrencesBatchClears(): Promise<void> {
   );
   assert(
     (
-      await r.session.removeOccurrences([
+      await r.session.clearUpcoming([
         'oB',
         'oC',
+        'oB',
         suggested,
         'oA',
         'o-ghost',
       ])
     ).ok,
+    'duplicates and unknown ids are skipped inside one commit',
   );
   const snap = readyOf(r);
   assertDeepEqual(
@@ -3392,8 +3394,101 @@ async function removeOccurrencesBatchClears(): Promise<void> {
     'removed suggestions prune out of the mint set',
   );
   assert(
-    (await r.session.removeOccurrences([])).ok,
+    (await r.session.clearUpcoming([])).ok,
     'an empty selection is a no-op',
+  );
+  await r.session.dispose();
+}
+
+async function clearUpcomingSkipsPlayed(): Promise<void> {
+  // Section membership is judged at commit time in the real walk: a
+  // listed row that already sits behind the cursor — history at tap
+  // time — is outside what the Clear showed, so it stays.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C'].map((id) =>
+        recording(`r${id}`, [ref('itunes', `i${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B', 'C'].map((id) => occurrence(`o${id}`, `r${id}`)),
+        currentOccurrenceId: 'oB',
+        positionMs: 1_000,
+        mode: 'paused',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  assert((await r.session.clearUpcoming(['oA', 'oB', 'oC'])).ok);
+  const snap = readyOf(r).queue;
+  assertDeepEqual(
+    snap.occurrences.map((o) => o.occurrenceId),
+    ['oA', 'oB'],
+    'the history row and the cursor survive — only the upcoming row left',
+  );
+  assertEqual(snap.currentOccurrenceId, 'oB');
+  await r.session.dispose();
+}
+
+async function shuffleDealKeepsSuggestionBoundary(): Promise<void> {
+  // The dealt walk keeps the canonical boundary: upcoming user rows
+  // shuffle among themselves, suggestions among themselves — a
+  // suggestion never walks ahead of a manual pick, so the rendered
+  // sections stay the true play order. Draws [0.8,0.1] shuffle the
+  // user block to oC,oB; [0.9,0.3] the suggestions to R2,R1.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C'].map((id) =>
+        recording(`r${id}`, [ref('youtube-music', `y${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B', 'C'].map((id) => occurrence(`o${id}`, `r${id}`)),
+        currentOccurrenceId: 'oA',
+        positionMs: 0,
+        mode: 'paused',
+      },
+    }),
+    [],
+    undefined,
+    undefined,
+    undefined,
+    new SequenceRandom([0.8, 0.1, 0.9, 0.3]),
+  );
+  await restoreOk(r);
+  await pump();
+  const radio = r.session.startRadio(ref('youtube-music', 'yA'));
+  await pump();
+  assert(
+    r.ytm.settleRadio(
+      ok({
+        candidates: [
+          meta('youtube-music', 'yR1', 'R1', 'Artist', 200_000),
+          meta('youtube-music', 'yR2', 'R2', 'Artist', 200_000),
+        ],
+        continuation: null,
+      }),
+    ),
+    'radio seed pending',
+  );
+  assert((await radio).ok, 'startRadio failed');
+  await pump();
+  assert((await r.session.setShuffle(true)).ok);
+  const snap = readyOf(r);
+  const [s1, s2] = snap.queue.occurrences.slice(-2).map((o) => o.occurrenceId);
+  assertDeepEqual(
+    snap.shuffleOrder,
+    ['oA', 'oC', 'oB', s2, s1],
+    'user block deals ahead of the suggestion block, each shuffled',
+  );
+  assert(
+    snap.queue.occurrences
+      .map((o) => o.occurrenceId)
+      .every(
+        (id) => snap.radioOccurrenceIds.has(id) === (id === s1 || id === s2),
+      ),
+    'the tail keeps its suggestion marks',
   );
   await r.session.dispose();
 }
@@ -7445,7 +7540,9 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['addOnDeadCursorParksPaused', addOnDeadCursorParksPaused],
   ['clearQueueKeepsCurrent', clearQueueKeepsCurrent],
   ['clearQueueEmptiesDead', clearQueueEmptiesDead],
-  ['removeOccurrencesBatchClears', removeOccurrencesBatchClears],
+  ['clearUpcomingBatchRemoves', clearUpcomingBatchRemoves],
+  ['clearUpcomingSkipsPlayed', clearUpcomingSkipsPlayed],
+  ['shuffleDealKeepsSuggestionBoundary', shuffleDealKeepsSuggestionBoundary],
   ['shuffleToggleOffRestoresCanonical', shuffleToggleOffRestoresCanonical],
   ['shuffleEndedFallbackFollowsDeal', shuffleEndedFallbackFollowsDeal],
   ['shuffleStaleProjectionEdge', shuffleStaleProjectionEdge],
