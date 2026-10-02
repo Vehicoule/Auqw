@@ -96,6 +96,16 @@ export type PlayCount = {
    * folded from remote plays the device never committed locally).
    */
   localCount?: number;
+  /**
+   * The aggregate the sync log last materialized for this row —
+   * `count - loggedCount` is this device's unsent play evidence:
+   * local plays stranded before emission, imported totals the wire
+   * never saw. Absolute pages stamp it and delta folds advance it
+   * with the logged increment, so it is the only durable split
+   * between "plays the log deleted" and "plays the log never saw".
+   * Absent on rows that never took an absolute count write.
+   */
+  loggedCount?: number;
 };
 
 /** A candidate frozen at review time for later confirmation. */
@@ -335,13 +345,18 @@ export function isPlayEvent(value: unknown): value is PlayEvent {
 
 export function isPlayCount(value: unknown): value is PlayCount {
   if (!isRecord(value)) return false;
-  const { recordingId, count, lastMs, localCount } = value;
+  const { recordingId, count, lastMs, localCount, loggedCount } = value;
   return (
-    hasKeys(value, ['recordingId', 'count', 'lastMs'], ['localCount']) &&
+    hasKeys(
+      value,
+      ['recordingId', 'count', 'lastMs'],
+      ['localCount', 'loggedCount'],
+    ) &&
     isString(recordingId, 64) &&
     isSafeNonNegative(count) &&
     isSafeNonNegative(lastMs) &&
-    (localCount === undefined || isSafeNonNegative(localCount))
+    (localCount === undefined || isSafeNonNegative(localCount)) &&
+    (loggedCount === undefined || isSafeNonNegative(loggedCount))
   );
 }
 

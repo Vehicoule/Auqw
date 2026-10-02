@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 13;
+export const CURRENT_SCHEMA_VERSION = 14;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -427,6 +427,20 @@ const MIGRATION_13: readonly string[] = [
   `ALTER TABLE play_counts ADD COLUMN local_count INTEGER CHECK (local_count >= 0)`,
 ];
 
+/**
+ * v13 -> v14: `play_counts.logged_count` — the aggregate the sync
+ * log last materialized for the row. `count - logged_count` is the
+ * device's unsent play evidence (stranded local plays, imported
+ * totals), durable beside `count`: projection preserves exactly
+ * that surplus on absolute writes instead of losing it or
+ * resurrecting components a tombstone deleted. NULL on rows that
+ * never took an absolute count write — the baseline is unknown
+ * there, not zero.
+ */
+const MIGRATION_14: readonly string[] = [
+  `ALTER TABLE play_counts ADD COLUMN logged_count INTEGER CHECK (logged_count >= 0)`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
@@ -442,6 +456,7 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_11]),
   Object.freeze([...MIGRATION_12]),
   Object.freeze([...MIGRATION_13]),
+  Object.freeze([...MIGRATION_14]),
 ]);
 
 const CREATED_OBJECT_NAME =

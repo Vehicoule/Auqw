@@ -813,10 +813,23 @@ function sumDeliveryTarget(
     // touched by remote folds — it still proves a lost increment
     // after the bounded event window expires or a remote share lands
     // ahead of the domain fold.
-    const localCount = input.playCounts.find(
+    const row = input.playCounts.find(
       (c) => c.recordingId === write.recordId,
-    )?.localCount;
-    return Math.max(domainEstimate, ours, localCount ?? 0);
+    );
+    // The aggregate-side baseline: `count - loggedCount` is every
+    // committed play the log never saw — stranded local increments
+    // AND imported totals — which emit under this device's id no
+    // matter who originally played them.
+    const pendingAggregate =
+      typeof write.value === 'number'
+        ? Math.max(0, write.value - (row?.loggedCount ?? write.value))
+        : 0;
+    return Math.max(
+      domainEstimate,
+      ours,
+      row?.localCount ?? 0,
+      pendingAggregate,
+    );
   }
   return domainEstimate;
 }
@@ -2005,6 +2018,33 @@ function finishProjection(
       countFoldIds.add(count.recordingId);
       const foldedLast = numField(fold.fields, 'lastMs');
       const appliedCount = numField(fold.fields, 'count');
+      // An absolute page carries only logged components. The stored
+      // surplus over the last-stamped log total is this device's
+      // unsent play evidence — stranded local plays, imported
+      // totals — while a surplus over the raw count alone couldn't
+      // be told apart from components a tombstone deleted.
+      // `loggedCount` splits them durably; a row that never stamped
+      // one can't prove a surplus and folds to the page.
+      const unlogged = Math.max(
+        0,
+        count.count - (count.loggedCount ?? count.count),
+      );
+      const mergedCount = fold.absolute
+        ? appliedCount === null
+          ? count.count
+          : appliedCount + unlogged
+        : count.count + (fold.sumDeltas.get('count') ?? 0);
+      const stampedLogged = fold.absolute
+        ? (appliedCount ?? count.loggedCount)
+        : count.loggedCount === undefined
+          ? undefined
+          : Math.min(
+              mergedCount,
+              Math.max(
+                0,
+                count.loggedCount + (fold.sumDeltas.get('count') ?? 0),
+              ),
+            );
       const candidate: PlayCount = {
         recordingId: count.recordingId,
         // Remote folds never touch the local-only baseline — it is
@@ -2012,25 +2052,12 @@ function finishProjection(
         ...(count.localCount !== undefined
           ? { localCount: count.localCount }
           : {}),
+        ...(stampedLogged !== undefined
+          ? { loggedCount: stampedLogged }
+          : {}),
         count: Math.min(
           Number.MAX_SAFE_INTEGER,
-          Math.max(
-            0,
-            fold.absolute
-              ? appliedCount === null
-                ? count.count
-                : // An absolute page carries only logged components,
-                  // so a stored surplus above it is unlogged play
-                  // evidence — but at most `localCount` worth:
-                  // components a tombstone deleted can never ride
-                  // back in through the floor.
-                  appliedCount +
-                    Math.min(
-                      Math.max(0, count.count - appliedCount),
-                      count.localCount ?? 0,
-                    )
-              : count.count + (fold.sumDeltas.get('count') ?? 0),
-          ),
+          Math.max(0, mergedCount),
         ),
         lastMs:
           foldedLast !== null && foldedLast > count.lastMs
@@ -2060,17 +2087,21 @@ function finishProjection(
         pend(fold);
         continue;
       }
+      const mergedCount = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        Math.max(
+          0,
+          fold.absolute
+            ? (numField(fold.fields, 'count') ?? 0)
+            : (fold.sumDeltas.get('count') ?? 0),
+        ),
+      );
       const candidate: PlayCount = {
         recordingId: fold.recordId,
-        count: Math.min(
-          Number.MAX_SAFE_INTEGER,
-          Math.max(
-            0,
-            fold.absolute
-              ? (numField(fold.fields, 'count') ?? 0)
-              : (fold.sumDeltas.get('count') ?? 0),
-          ),
-        ),
+        count: mergedCount,
+        // A fresh row holds only what the log materialized — the
+        // baseline stamps the same total.
+        loggedCount: mergedCount,
         lastMs: Math.max(0, numField(fold.fields, 'lastMs') ?? 0),
       };
       if (!isPlayCount(candidate)) {

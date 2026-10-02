@@ -169,7 +169,15 @@ const SEEDED: PersistedState = persisted({
       listenedMs: 200_000,
     },
   ],
-  playCounts: [{ recordingId: 'r1', count: 3, lastMs: 50, localCount: 3 }],
+  playCounts: [
+    {
+      recordingId: 'r1',
+      count: 3,
+      lastMs: 50,
+      localCount: 3,
+      loggedCount: 2,
+    },
+  ],
   matchReviews: [],
 });
 
@@ -331,7 +339,13 @@ async function applyReplaces(): Promise<void> {
   const rebased = new FakeStorage(
     persisted({
       playCounts: [
-        { recordingId: 'r1', count: 9, lastMs: 1, localCount: 4 },
+        {
+          recordingId: 'r1',
+          count: 9,
+          lastMs: 1,
+          localCount: 4,
+          loggedCount: 8,
+        },
       ],
     }),
   );
@@ -346,8 +360,16 @@ async function applyReplaces(): Promise<void> {
   // The imported merged count can't sit below the retained
   // component — the log still carries our stamped 4, so the floor
   // is max(doc count, baseline), not the doc's 3.
+  // Both baselines are this device's own — the log side survives
+  // alongside the local side; foreign values strip either way.
   assertDeepEqual(reloaded.value.playCounts, [
-    { recordingId: 'r1', count: 4, lastMs: 50, localCount: 4 },
+    {
+      recordingId: 'r1',
+      count: 4,
+      lastMs: 50,
+      localCount: 4,
+      loggedCount: 8,
+    },
   ]);
 }
 

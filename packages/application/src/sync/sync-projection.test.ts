@@ -1280,13 +1280,16 @@ function testSnapshotCountAbsolute(): void {
 }
 
 // An absolute page carries only logged components — a stored surplus
-// above it may be unlogged local plays, but only up to `localCount`:
-// components a tombstone deleted must not ride back in through the
-// floor (a stored count alone can't tell them apart).
+// over `loggedCount` (the last-stamped log total) is unsent domain
+// evidence, while the same surplus over the raw count alone could
+// not be told apart from components a tombstone deleted. The
+// baseline splits them durably: deleted logged shares fold away.
 function testSnapshotCountFloorHonorsTombstone(): void {
   const current = projInput({
     recordings: [recording('r-1', [ref('itunes', 't-1')])],
-    playCounts: [playCount('r-1', 10)],
+    playCounts: [
+      { recordingId: 'r-1', count: 10, lastMs: 100, loggedCount: 10 },
+    ],
   });
   const outcome = applied(
     fieldEntry('playCount', 'r-1', 'count', 2),
@@ -1298,20 +1301,22 @@ function testSnapshotCountFloorHonorsTombstone(): void {
     },
   );
   const projected = projectAppliedEntries([outcome], current);
+  const folded = projected.batch.playCounts?.[0];
   assertEqual(
-    projected.batch.playCounts?.[0]?.count,
+    folded?.count,
     7,
-    'surplus without local evidence folds to the page',
+    'a deleted logged component folds to the page',
   );
+  assertEqual(folded?.loggedCount, 7, 'the page restamps the baseline');
 }
 
-// The same floor keeps genuinely unlogged local plays — `localCount`
-// is the durable bound on how much of the stored surplus is ours.
-function testSnapshotCountFloorsAtLocalCount(): void {
+// The same baseline keeps committed plays the log never saw —
+// stranded local increments and imported totals alike.
+function testSnapshotCountFloorsAtLoggedCount(): void {
   const current = projInput({
     recordings: [recording('r-1', [ref('itunes', 't-1')])],
     playCounts: [
-      { recordingId: 'r-1', count: 200, lastMs: 100, localCount: 100 },
+      { recordingId: 'r-1', count: 200, lastMs: 100, loggedCount: 100 },
     ],
   });
   const outcome = applied(
@@ -1327,14 +1332,14 @@ function testSnapshotCountFloorsAtLocalCount(): void {
   assertEqual(
     projected.batch.playCounts?.[0]?.count,
     200,
-    'localCount-bounded surplus survives the page',
+    'the unsent surplus survives the page',
   );
-  // A surplus above `localCount` can only be remote components —
-  // the cap drops the excess rather than resurrecting deletions.
-  const capped = projInput({
+  // An imported aggregate is unsent evidence too: count 300 with a
+  // stamped baseline of 100 keeps the imported share above the page.
+  const imported = projInput({
     recordings: current.recordings,
     playCounts: [
-      { recordingId: 'r-1', count: 300, lastMs: 100, localCount: 100 },
+      { recordingId: 'r-1', count: 300, lastMs: 100, loggedCount: 100 },
     ],
   });
   const outcome2 = applied(
@@ -1347,10 +1352,22 @@ function testSnapshotCountFloorsAtLocalCount(): void {
     },
   );
   assertEqual(
-    projectAppliedEntries([outcome2], capped).batch.playCounts?.[0]
+    projectAppliedEntries([outcome2], imported).batch.playCounts?.[0]
       ?.count,
-    250,
-    'surplus beyond localCount is capped, not kept',
+    350,
+    'imported totals persist as unsent evidence',
+  );
+  // A row that never stamped a baseline can't prove a surplus —
+  // it folds to the page rather than resurrect deletions.
+  const legacy = projInput({
+    recordings: current.recordings,
+    playCounts: [playCount('r-1', 10)],
+  });
+  assertEqual(
+    projectAppliedEntries([outcome], legacy).batch.playCounts?.[0]
+      ?.count,
+    100,
+    'baseline-less rows cannot prove a surplus',
   );
 }
 
@@ -1849,9 +1866,9 @@ function testUnsyncedWrites(): void {
         { recordingId: 'r-1', count: 13, lastMs: 9, localCount: 5 },
       ],
     }),
-    new Map([['playCountr-1', { count: 13 }]]),
+    new Map([['playCount\u001fr-1', { count: 13 }]]),
     evidence({
-      'playCountr-1': { count: { [DEV]: 4, 'peer-x': 9 } },
+      'playCount\u001fr-1': { count: { [DEV]: 4, 'peer-x': 9 } },
     }),
   );
   assertEqual(
@@ -1860,15 +1877,36 @@ function testUnsyncedWrites(): void {
     'a lost increment past the event window re-emits via localCount',
   );
 
+  // The aggregate-side baseline: count − loggedCount is every
+  // committed play the log never saw — an imported total whose
+  // emission failed survives the reconcile and re-emits under
+  // this device's id (pending 200 > domainEstimate 180 > our 30).
+  const pending = unsyncedWrites(
+    emitInput({
+      playCounts: [
+        { recordingId: 'r-1', count: 300, lastMs: 9, loggedCount: 100 },
+      ],
+    }),
+    new Map([['playCount\u001fr-1', { count: 150 }]]),
+    evidence({
+      'playCount\u001fr-1': { count: { [DEV]: 30, 'peer-x': 120 } },
+    }),
+  );
+  assertEqual(
+    countValue(pending),
+    320,
+    'an unsent aggregate re-emits via the loggedCount baseline',
+  );
+
   // A remote share at the wire bound fills it — the merge can't
   // represent any further component, so the write is delivered.
   const saturatedRemote = unsyncedWrites(
     playInput,
     new Map([
-      ['playCountr-1', { count: Number.MAX_SAFE_INTEGER }],
+      ['playCount\u001fr-1', { count: Number.MAX_SAFE_INTEGER }],
     ]),
     evidence({
-      'playCountr-1': {
+      'playCount\u001fr-1': {
         count: { 'peer-x': Number.MAX_SAFE_INTEGER },
       },
     }),
@@ -1889,10 +1927,10 @@ function testUnsyncedWrites(): void {
       playCounts: [{ recordingId: 'r-1', count: 5, lastMs: 9 }],
     }),
     new Map([
-      ['playCountr-1', { count: Number.MAX_SAFE_INTEGER }],
+      ['playCount\u001fr-1', { count: Number.MAX_SAFE_INTEGER }],
     ]),
     evidence({
-      'playCountr-1': {
+      'playCount\u001fr-1': {
         count: { 'peer-x': Number.MAX_SAFE_INTEGER - 4 },
       },
     }),
@@ -1918,10 +1956,10 @@ function testUnsyncedWrites(): void {
       ],
     }),
     new Map([
-      ['playCountr-1', { count: Number.MAX_SAFE_INTEGER }],
+      ['playCount\u001fr-1', { count: Number.MAX_SAFE_INTEGER }],
     ]),
     evidence({
-      'playCountr-1': {
+      'playCount\u001fr-1': {
         count: { [DEV]: 2, 'peer-x': Number.MAX_SAFE_INTEGER - 2 },
       },
     }),
@@ -2098,7 +2136,7 @@ export function run(): void {
   testSnapshotEmptyDeletes();
   testSnapshotCountAbsolute();
   testSnapshotCountFloorHonorsTombstone();
-  testSnapshotCountFloorsAtLocalCount();
+  testSnapshotCountFloorsAtLoggedCount();
   testSnapshotNewestWins();
   testProjectMaterialized();
   testProjectMaterializedPending();

@@ -164,7 +164,10 @@ export async function applyImport(
   // baseline). The sync log survives the import, so the only honest
   // baseline is the one this device already holds for a recording
   // it knew before.
-  const ownBaseline = new Map<string, number>();
+  const ownBaseline = new Map<
+    string,
+    { localCount?: number; loggedCount?: number }
+  >();
   const prior = await storage.load(context);
   if (!prior.ok) {
     // A failed read must not silently drop every baseline this
@@ -173,27 +176,43 @@ export async function applyImport(
     return prior;
   }
   for (const count of prior.value.playCounts) {
-    if (count.localCount !== undefined) {
-      ownBaseline.set(count.recordingId, count.localCount);
-    }
+    ownBaseline.set(count.recordingId, {
+      ...(count.localCount !== undefined
+        ? { localCount: count.localCount }
+        : {}),
+      ...(count.loggedCount !== undefined
+        ? { loggedCount: count.loggedCount }
+        : {}),
+    });
   }
   const owned: ExportDocument = {
     ...doc,
     playCounts: doc.playCounts.map((count) => {
-      const { localCount: _imported, ...rest } = count;
+      const {
+        localCount: _importedLocal,
+        loggedCount: _importedLogged,
+        ...rest
+      } = count;
       const own = ownBaseline.get(count.recordingId);
       if (own === undefined) {
         return rest;
       }
       return {
         ...rest,
-        localCount: own,
+        ...(own.localCount !== undefined
+          ? { localCount: own.localCount }
+          : {}),
+        // The log baseline survives the import untouched — the doc's
+        // count stays entirely unsent until the next absolute page.
+        ...(own.loggedCount !== undefined
+          ? { loggedCount: own.loggedCount }
+          : {}),
         // The merged total can't sit below this device's own
         // stamped component — the sync log survives the import, so
         // a doc that under-reports it gets the honest floor, not a
         // row where the next play emits an aggregate peers can't
         // advance.
-        count: Math.max(rest.count, own),
+        count: Math.max(rest.count, own.localCount ?? 0),
       };
     }),
   };
