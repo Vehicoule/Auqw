@@ -4310,7 +4310,11 @@ async function naturalEndParksTail(): Promise<void> {
     persisted({
       recordings: [
         recording('rA', [ref('youtube-music', 'yA')]),
-        recording('rB', [ref('noradio', 'n1')]),
+        // The 20 s clip crosses its count threshold inside a few
+        // ticks, so the status leg's own play accounting actually
+        // runs — needed to prove the finish isn't counted twice
+        // when the transition lands after a status-side park.
+        { ...recording('rB', [ref('noradio', 'n1')]), durationMs: 20_000 },
       ],
       queue: {
         revision: 2,
@@ -4328,6 +4332,11 @@ async function naturalEndParksTail(): Promise<void> {
   );
   await restoreOk(r);
   await playThrough(r, 'oA');
+  // Make the tail's own projection install fail: the 'ended' status
+  // leg's installed-marker early-return then misses, so the fallback
+  // must park the row itself before the transition arrives — the
+  // emission order real ports actually produce.
+  r.player.failNextProjection(appError('transient', 'projection down'));
   const next = r.session.next();
   await pump();
   await emitPrepared(r, 'h-oB');
@@ -4339,14 +4348,28 @@ async function naturalEndParksTail(): Promise<void> {
   // status BEFORE the queue-transition; the park must survive both.
   const live = readyOf(r).playback;
   assert('identity' in live, 'playing before the end');
-  r.player.emit(statusEvent(live.identity, 'h-oB', 'ended', 300_000));
+  // Accepted 2.5 s ticks to 12.5 s — past the 20 s clip's 10 s
+  // count threshold (the first tick only sets the delta baseline) —
+  // the status leg records the finished listen itself.
+  for (const positionMs of [2_500, 5_000, 7_500, 10_000, 12_500]) {
+    r.player.emit(statusEvent(live.identity, 'h-oB', 'playing', positionMs));
+    await pump();
+  }
+  r.player.emit(statusEvent(live.identity, 'h-oB', 'ended', 20_000));
   await pump();
+  // The failed projection leaves no installed marker to defer to —
+  // the status leg parks the row itself rather than releasing.
+  assertEqual(
+    readyOf(r).queue.mode,
+    'paused',
+    'failed projection: the status leg parks the tail itself',
+  );
   r.player.emit(
     transitionEvent(r, {
       from: 'oB',
       to: null,
       reason: 'ended',
-      positionMs: 300_000,
+      positionMs: 20_000,
       identity: null,
       handle: null,
     }),
@@ -4359,7 +4382,7 @@ async function naturalEndParksTail(): Promise<void> {
   assertEqual(
     parked.playHistory.length,
     playsBefore + 1,
-    'the finished listen counted',
+    'the finished listen counted once across status + transition',
   );
   assert(
     parked.playback.type === 'paused',
@@ -4384,14 +4407,26 @@ async function naturalEndParksTail(): Promise<void> {
   // again, counted as a second listen.
   const replayId =
     'identity' in replaying.playback ? replaying.playback.identity : live.identity;
-  r.player.emit(statusEvent(replayId, 'h-oB', 'ended', 300_000));
+  for (const positionMs of [2_500, 5_000, 7_500, 10_000, 12_500]) {
+    r.player.emit(statusEvent(replayId, 'h-oB', 'playing', positionMs));
+    await pump();
+  }
+  r.player.emit(statusEvent(replayId, 'h-oB', 'ended', 20_000));
   await pump();
+  // The parked projection installed cleanly: an installed marker
+  // defers the advance to the service's transition — the queue is
+  // still playing until it lands.
+  assertEqual(
+    readyOf(r).queue.mode,
+    'playing',
+    'installed marker: status defers to the transition',
+  );
   r.player.emit(
     transitionEvent(r, {
       from: 'oB',
       to: null,
       reason: 'ended',
-      positionMs: 300_000,
+      positionMs: 20_000,
       identity: null,
       handle: null,
     }),

@@ -274,6 +274,15 @@ type ActiveAttempt = {
   endedHandled: boolean;
   /** True on the single in-budget re-attempt after a retryable failure. */
   autoRetried?: boolean;
+  /**
+   * The listen cycle the finished play accounted under — set on an
+   * attempt parked by a natural tail end. The status leg bumps the
+   * cycle when it parks; the matching transition then records the
+   * finish against this pre-bump key so one listen can't mint two
+   * play events under adjacent cycles. Cleared when the parked
+   * attempt goes live again.
+   */
+  endedCycleAtPark?: number;
   /** Next-best hops this intent already spent on dead refs. */
   alternatesUsed: number;
   /**
@@ -770,12 +779,13 @@ export class PlaybackEngine {
     recordingId: string,
     listenedMs: number,
     durationMs: number | null,
+    cycleOverride?: number,
   ): Promise<void> {
     const r = this.#host.ready();
     if (r === null) {
       return;
     }
-    const cycle = r.listenCycles[occurrenceId] ?? 0;
+    const cycle = cycleOverride ?? r.listenCycles[occurrenceId] ?? 0;
     const dedupeId = playDedupeId(occurrenceId, cycle);
     if (
       !isSafeNonNegative(listenedMs) ||
@@ -2277,6 +2287,11 @@ export class PlaybackEngine {
         prior.identity.attemptId === attempt.identity.attemptId
         ? prior.durationMs
         : undefined);
+    if (state !== 'paused') {
+      // A parked attempt that went live again accounts its next end
+      // under the bumped cycle like any fresh listen.
+      delete attempt.endedCycleAtPark;
+    }
     r.playback = {
       type: state,
       recordingId: attempt.recordingId,
@@ -2297,7 +2312,11 @@ export class PlaybackEngine {
    * the intent budgets start fresh, and the bumped listen cycle lets
    * the replay count like a repeat=one loop.
    */
-  #parkEndedAttempt(r: Ready, from: ActiveAttempt): void {
+  #parkEndedAttempt(
+    r: Ready,
+    from: ActiveAttempt,
+    freshCycle = true,
+  ): void {
     const attempt: ActiveAttempt = {
       identity: from.identity,
       recordingId: from.recordingId,
@@ -2308,13 +2327,20 @@ export class PlaybackEngine {
       ...(from.handle === undefined ? {} : { handle: from.handle }),
       preparedHandled: true,
       endedHandled: true,
+      // The finish accounts under the cycle live when it ended — the
+      // pre-bump key the matching transition dedupes against. A
+      // re-park after a status-side park carries that key forward.
+      endedCycleAtPark:
+        from.endedCycleAtPark ?? r.listenCycles[from.occurrenceId] ?? 0,
       listenedMsAccum: 0,
       lastStatusPositionMs: 0,
       preparesUsed: 0,
       alternatesUsed: 0,
     };
     this.#active = attempt;
-    bumpListenCycle(r, attempt.occurrenceId);
+    if (freshCycle) {
+      bumpListenCycle(r, attempt.occurrenceId);
+    }
     this.#setPlaybackFromStatus(attempt, 'paused');
   }
 
@@ -3109,6 +3135,13 @@ export class PlaybackEngine {
           from.recordingId,
           rec?.durationMs ?? r.queue.snapshot().positionMs,
           rec?.durationMs ?? null,
+          // A status-side park already accounted this finish under
+          // the pre-bump cycle — record against that key so the
+          // bump can't mint a second play for one listen.
+          this.#active !== null &&
+            this.#active.occurrenceId === event.fromOccurrenceId
+            ? this.#active.endedCycleAtPark
+            : undefined,
         );
       }
     }
@@ -3165,7 +3198,9 @@ export class PlaybackEngine {
     const parked =
       parkedTail !== null && prev !== null && prev.handle !== undefined;
     if (parked && prev !== null) {
-      this.#parkEndedAttempt(r, prev);
+      // A status-side park already bumped the cycle — refresh the
+      // parked shape without minting a second one.
+      this.#parkEndedAttempt(r, prev, prev.endedCycleAtPark === undefined);
     } else if (
       event.identity !== null &&
       event.handle !== null &&
