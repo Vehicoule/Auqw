@@ -7,7 +7,7 @@ import {
   IconButton,
   Pressable,
   PlayPauseIcon,
-  SegmentItem,
+  Segment,
   Spinner,
   Text,
 } from './primitives.tsx';
@@ -161,24 +161,13 @@ export function ModeSegment({
   // or a flat stage in every mode, and the pane scheme's fg08 pill
   // would wash out grey-on-grey on light stages.
   return (
-    <div
-      className="uw-segment uw-segment--float t-dark"
-      role="tablist"
-      aria-label={t('stage.modeTabsA11y')}
-    >
-      {/* Tonal pill — same construction as the native segment's
-          m3e fill: accentSoft chip, accent icon + label. */}
-      {tabs.map((tab) => (
-        <SegmentItem
-          key={tab.key}
-          icon={tab.icon}
-          label={tab.label}
-          active={tab.active}
-          onPress={tab.onPress}
-          iconSize={12}
-        />
-      ))}
-    </div>
+    <Segment
+      variant="float"
+      className="t-dark"
+      ariaLabel={t('stage.modeTabsA11y')}
+      tabs={tabs}
+      iconSize={12}
+    />
   );
 }
 
@@ -188,6 +177,9 @@ export type NowPlayingScreenProps = StageScreenHandlers & {
   readonly queue?: QueueModel | undefined;
   readonly lyrics?: LyricsModel | undefined;
   readonly radio?: RadioModel | undefined;
+  /** Provider the radio seed would arm with — sizes the chip's ghost
+      slot before the tail exists. */
+  readonly radioSeedProvider?: string | null | undefined;
   readonly queueReordering?: boolean | undefined;
   readonly queueScrollEnabled?: boolean | undefined;
   readonly shuffle?: boolean | undefined;
@@ -241,15 +233,17 @@ function StageBackdrop({
 function RadioAction({
   action,
   color,
+  hidden = false,
 }: {
   readonly action: RadioRowView['start'];
   readonly color: 'primary' | 'accent';
+  readonly hidden?: boolean | undefined;
 }) {
   return (
     <Pressable
-      onPress={action.onPress}
+      onPress={hidden ? undefined : action.onPress}
       ariaLabel={action.a11yLabel}
-      className="uw-stage__radio-action"
+      className={`uw-stage__radio-action${hidden ? ' uw-stage__radio-action--hidden' : ''}`}
     >
       <Text variant="metadata" color={color}>
         {action.label}
@@ -276,6 +270,7 @@ export function NowPlayingScreen({
   peaks,
   onRetryLyrics,
   onStartRadio,
+  radioSeedProvider,
   onStopRadio,
   onModeChange,
   onPressQueueItem,
@@ -300,7 +295,12 @@ export function NowPlayingScreen({
     () => lyricsPaneView(lyrics, onRetryLyrics),
     [lyrics, onRetryLyrics],
   );
-  const radioRow = radioRowView(radio, onStartRadio, onStopRadio);
+  const radioRow = radioRowView(
+    radio,
+    onStartRadio,
+    onStopRadio,
+    radioSeedProvider,
+  );
   const reorder = queueReorderButton(queueReordering, onToggleQueueReorder);
   const clearQueue = queueClearButton(
     queue?.items.length ?? 0,
@@ -431,19 +431,34 @@ export function NowPlayingScreen({
                     size={13}
                     color={radioRow.failed ? 'var(--warn)' : 'var(--accent)'}
                   />
-                  {radioRow.armed ? (
-                    <>
+                  {/* Fixed footprint across arm/disarm (the header-bar
+                      rule): stacked ghosts keep the widest candidate's
+                      width, and stop keeps its slot hidden while
+                      unarmed. */}
+                  <span className="uw-stage__radio-labels">
+                    <span
+                      className="uw-text uw-text--metadata uw-stage__radio-ghost"
+                      aria-hidden="true"
+                    >
+                      {radioRow.ghostText}
+                    </span>
+                    {radioRow.armed ? (
                       <Text
                         variant="metadata"
                         color={radioRow.failed ? 'warn' : 'accent'}
+                        className="uw-stage__radio-live"
                       >
                         {radioRow.statusText}
                       </Text>
-                      <RadioAction action={radioRow.stop} color="primary" />
-                    </>
-                  ) : (
-                    <RadioAction action={radioRow.start} color="accent" />
-                  )}
+                    ) : (
+                      <RadioAction action={radioRow.start} color="accent" />
+                    )}
+                  </span>
+                  <RadioAction
+                    action={radioRow.stop}
+                    color="primary"
+                    hidden={!radioRow.armed}
+                  />
                 </div>
               </div>
             )}
@@ -500,8 +515,9 @@ export function NowPlayingScreen({
                     )}
                     {onAddToPlaylist !== undefined && (
                       <IconButton
-                        icon={player.inPlaylist ? 'check' : 'list-plus'}
+                        icon="list-plus"
                         active={player.inPlaylist}
+                        filled={player.inPlaylist}
                         size={36}
                         iconSize={15}
                         color="var(--text-secondary)"

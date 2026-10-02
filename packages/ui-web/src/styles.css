@@ -31,6 +31,13 @@
      read as "greyed out" and drowned on accent-filled controls;
      design.md owns this choice. */
   --uw-hover: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+  /* Un-tokened channels: micro duration + the two easing curves the
+     sheet/field transitions reference (the token file emits durations
+     and spring constants only). ease-spring ≈ the design's soft
+     spring — a hair of overshoot, no bounce. */
+  --motion-micro: 120ms;
+  --ease-out: cubic-bezier(0.25, 0.6, 0.15, 1);
+  --ease-spring: cubic-bezier(0.34, 1.25, 0.5, 1);
 }
 
 .ui-web.t-light {
@@ -441,6 +448,77 @@
   transition:
     opacity var(--motion-state) ease,
     transform var(--motion-state) ease;
+}
+
+/* The like burst — one ring splashes outward on fill, then it's gone
+   (state animations run once, per design.md's motion rules). */
+.uw-heart::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: var(--stroke-icon) solid var(--liked, var(--accent));
+  opacity: 0;
+  transform: scale(0.6);
+  pointer-events: none;
+}
+
+.ui-web:not([data-reduced-motion='true']) .uw-heart--burst::after {
+  animation: uw-heart-burst var(--motion-state) ease-out;
+}
+
+@keyframes uw-heart-burst {
+  from {
+    opacity: 0.7;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+}
+
+/* ---- playlist-add morph ------------------------------------------
+   list-plus spins out while the check draws on — same layering as the
+   download state machine. */
+
+.uw-pladd {
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.uw-pladd__plus,
+.uw-pladd__check {
+  transform-box: view-box;
+  transform-origin: 62% 68%;
+}
+
+.uw-pladd__check {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  opacity: 0;
+}
+
+.uw-pladd--added .uw-pladd__plus {
+  opacity: 0;
+  transform: rotate(90deg) scale(0.5);
+}
+
+.uw-pladd--added .uw-pladd__check {
+  stroke-dashoffset: 0;
+  opacity: 1;
+}
+
+.ui-web:not([data-reduced-motion='true']) .uw-pladd__plus {
+  transition:
+    opacity var(--motion-press) ease,
+    transform var(--motion-press) ease;
+}
+
+.ui-web:not([data-reduced-motion='true']) .uw-pladd__check {
+  transition:
+    opacity var(--motion-press) ease,
+    stroke-dashoffset var(--motion-state) var(--ease-out);
 }
 
 /* The play/pause morph runs per-frame over rAF in the component —
@@ -2262,6 +2340,42 @@
   padding: 0 var(--spacing-xs);
 }
 
+.uw-stage__radio-action--hidden {
+  /* Keeps its slot so the pill's width is identical across arm/disarm —
+     invisible elements drop out of tab order and the a11y tree. */
+  visibility: hidden;
+}
+
+/* Ghost-sized label stack: every candidate label shares the cell, so
+   the widest one sets the pill's width before it ever renders live.
+   Bounded at 220px — a runaway status string ellipsizes instead of
+   stretching the pill. */
+.uw-stage__radio-labels {
+  display: grid;
+  align-items: center;
+  max-width: 220px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.uw-stage__radio-labels > * {
+  grid-area: 1 / 1;
+  justify-self: center;
+  min-width: 0;
+}
+
+.uw-stage__radio-ghost {
+  visibility: hidden;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.uw-stage__radio-live {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .uw-stage__queue {
   flex: 1;
   min-height: 0;
@@ -2318,6 +2432,7 @@
    native mode segment (accentSoft fill, accent glyph + label). Used
    floating in the stage and centered as the world's page switcher. */
 .uw-segment {
+  position: relative;
   display: flex;
   gap: var(--spacing-xxs);
   background: var(--fg08);
@@ -2326,6 +2441,30 @@
      the spacing scale. */
   padding: 3px;
   border-radius: var(--radius-control);
+}
+
+/* The single selection mark — it glides between slots instead of
+   popping a fill per item. The component measures the active item and
+   sets transform + width; items sit above it. */
+.uw-segment__thumb {
+  position: absolute;
+  left: 0;
+  top: 3px;
+  bottom: 3px;
+  border-radius: var(--radius-control);
+  background: var(--accent-soft);
+  pointer-events: none;
+}
+
+/* Concentric with the float's pad — same radius the items carry. */
+.uw-segment--float .uw-segment__thumb {
+  border-radius: var(--radius-card);
+}
+
+.ui-web:not([data-reduced-motion='true']) .uw-segment__thumb {
+  transition:
+    transform var(--motion-state) var(--ease-spring),
+    width var(--motion-state) var(--ease-spring);
 }
 
 /* The stage's floating mode switch — dark in every scheme (the
@@ -2342,6 +2481,8 @@
 }
 
 .uw-segment__item {
+  position: relative;
+  z-index: 1;
   flex: 1;
   display: flex;
   align-items: center;
@@ -2361,7 +2502,7 @@
 }
 
 .uw-segment__item--on {
-  background: var(--accent-soft);
+  /* The shared thumb carries the fill — the item only recolors. */
 }
 
 /* Activation nudge: the glyph lifts a touch when its tab takes over. */
@@ -2582,6 +2723,16 @@
 .uw-world-bar > * {
   -webkit-app-region: no-drag;
 }
+
+/* One control height across the strip — field, icon buttons, chips
+   (design.md's header-bar rule). */
+.uw-world-bar {
+  --uw-bar-control-h: 32px;
+}
+
+.uw-world-bar .uw-chip {
+  min-height: var(--uw-bar-control-h);
+}
 /* The update card floats over the chrome strip's drag region — without
    opting out, every control on it is a window-drag grip on macOS (the
    dead-click defect on the old pill). */
@@ -2631,7 +2782,7 @@
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
-  height: var(--size-chip);
+  height: var(--uw-bar-control-h, 32px);
   width: 200px;
   padding: 0 var(--spacing-xs) 0 var(--spacing-sm);
   border-radius: var(--radius-pill);
@@ -2728,7 +2879,7 @@
 
 /* Collapsed — the bare loupe, accent when a query is live. */
 .uw-wsearch--loupe {
-  width: var(--size-chip);
+  width: var(--uw-bar-control-h, 32px);
   padding: 0;
   justify-content: center;
   cursor: pointer;

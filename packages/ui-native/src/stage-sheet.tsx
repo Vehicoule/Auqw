@@ -302,8 +302,42 @@ function ModeSegmentPill({
 }) {
   const theme = useTheme();
   const tabs = stageModeTabs(STAGE_MODE_ORDER, mode, onSelect);
+  const [width, setWidth] = useState(0);
+  const activeIdx = tabs.findIndex((tab) => tab.active);
+  const thumbX = useSharedValue(3);
+  const thumbW = useSharedValue(0);
+  const didInit = useRef(false);
+  // flex:1 slots are equal, but the row's xxs gaps are NOT inside the
+  // slot widths — item i sits at 3 + i·(itemW + gap).
+  const gap = theme.spacing.xxs;
+  const itemW =
+    width > 0 ? (width - 6 - gap * (tabs.length - 1)) / tabs.length : 0;
+  useEffect(() => {
+    if (activeIdx < 0 || itemW <= 0) return undefined;
+    const x = 3 + activeIdx * (itemW + gap);
+    if (!didInit.current || theme.reducedMotion) {
+      thumbX.value = x;
+      thumbW.value = itemW;
+      didInit.current = true;
+      return undefined;
+    }
+    thumbX.value = withSpring(x, STAGE_SETTLE_SPRING);
+    thumbW.value = withSpring(itemW, STAGE_SETTLE_SPRING);
+    return undefined;
+  }, [activeIdx, itemW, gap, thumbX, thumbW, theme.reducedMotion]);
+  const thumbStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: thumbX.value }],
+    width: thumbW.value,
+  }));
+  // M3E segmented-button: the selection mark reads as a tonal
+  // (secondary-container) pill; iOS keeps the glass slab. One shared
+  // thumb glides between slots — the per-item fill is gone.
+  const m3e = Platform.OS === 'android';
+  const activeBg = m3e ? theme.colors.accentSoft : theme.colors.glassControl;
+  const activeColor = m3e ? theme.colors.accent : theme.colors.textBright;
   return (
     <View
+      onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
       style={{
         flexDirection: 'row',
         gap: theme.spacing.xxs,
@@ -322,53 +356,51 @@ function ModeSegmentPill({
         elevation: 8,
       }}
     >
-      {tabs.map((tab) => {
-        // M3E segmented-button: the selected segment reads as a tonal
-        // (secondary-container) pill; iOS keeps the glass slab.
-        // The pill silhouette matches the rounded transport controls —
-        // only the fill differs per platform (tonal on Android, glass
-        // on iOS).
-        const m3e = Platform.OS === 'android';
-        const activeBg = m3e
-          ? theme.colors.accentSoft
-          : theme.colors.glassControl;
-        const activeColor = m3e ? theme.colors.accent : theme.colors.textBright;
-        return (
-          <Pressable
-            key={tab.key}
-            compact
-            onPress={tab.onPress}
-            accessibilityRole="tab"
-            accessibilityLabel={tab.label}
-            accessibilityState={{ selected: tab.active }}
-            style={{
-              flex: 1,
-              flexDirection: 'row',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 7,
-              minHeight: theme.sizes.touch,
-              borderRadius: theme.radius.card,
-              backgroundColor: tab.active ? activeBg : 'transparent',
-            }}
+      <Animated.View
+        style={[
+          {
+            position: 'absolute',
+            left: 0,
+            top: 3,
+            bottom: 3,
+            borderRadius: theme.radius.card,
+            backgroundColor: activeBg,
+          },
+          thumbStyle,
+        ]}
+      />
+      {tabs.map((tab) => (
+        <Pressable
+          key={tab.key}
+          compact
+          onPress={tab.onPress}
+          accessibilityRole="tab"
+          accessibilityLabel={tab.label}
+          accessibilityState={{ selected: tab.active }}
+          style={{
+            flex: 1,
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 7,
+            minHeight: theme.sizes.touch,
+            borderRadius: theme.radius.card,
+          }}
+        >
+          <Icon
+            name={tab.icon}
+            size={12}
+            color={tab.active ? activeColor : theme.colors.textSecondary}
+          />
+          <Text
+            variant="metadata"
+            color={tab.active ? (m3e ? 'accent' : 'bright') : 'secondary'}
+            style={[tab.active && { fontFamily: theme.fontFamilies.bold }]}
           >
-            <Icon
-              name={tab.icon}
-              size={12}
-              color={tab.active ? activeColor : theme.colors.textSecondary}
-            />
-            <Text
-              variant="metadata"
-              color={tab.active ? (m3e ? 'accent' : 'bright') : 'secondary'}
-              style={[
-                tab.active && { fontFamily: theme.fontFamilies.bold },
-              ]}
-            >
-              {tab.label}
-            </Text>
-          </Pressable>
-        );
-      })}
+            {tab.label}
+          </Text>
+        </Pressable>
+      ))}
     </View>
   );
 }
@@ -636,6 +668,9 @@ export type StageSheetProps = {
   readonly peaks?: readonly WaveformPeak[] | null | undefined;
   readonly onRetryLyrics?: (() => void) | undefined;
   readonly onStartRadio?: (() => void) | undefined;
+  /** Provider the radio seed would arm with — sizes the chip's ghost
+      slot before the tail exists. */
+  readonly radioSeedProvider?: string | null | undefined;
   readonly onStopRadio?: (() => void) | undefined;
   readonly onModeChange?: ((mode: StageMode) => void) | undefined;
   /** The pane the sheet must rest on once parked — a stale `mode` is
@@ -705,6 +740,7 @@ export function StageSheet({
   peaks,
   onRetryLyrics,
   onStartRadio,
+  radioSeedProvider,
   onStopRadio,
   onModeChange,
   restMode,
@@ -800,7 +836,12 @@ export function StageSheet({
     () => lyricsPaneView(lyrics, onRetryLyrics),
     [lyrics, onRetryLyrics],
   );
-  const radioRow = radioRowView(radio, onStartRadio, onStopRadio);
+  const radioRow = radioRowView(
+    radio,
+    onStartRadio,
+    onStopRadio,
+    radioSeedProvider,
+  );
   const queueReorder = queueReorderButton(
     queueReordering,
     onToggleQueueReorder,
@@ -1647,37 +1688,60 @@ export function StageSheet({
                   size={13}
                   color={radioRow.failed ? colors.warn : colors.accent}
                 />
-                {radioRow.armed ? (
-                  <>
-                    <Text
-                      variant="metadata"
-                      color={radioRow.failed ? 'warn' : 'accent'}
-                    >
-                      {radioRow.statusText}
-                    </Text>
-                    <Pressable
-                      compact
-                      onPress={radioRow.stop.onPress}
-                      accessibilityLabel={radioRow.stop.a11yLabel}
-                      style={{ paddingHorizontal: theme.spacing.xs }}
-                    >
-                      <Text variant="metadata" color="primary">
-                        {radioRow.stop.label}
-                      </Text>
-                    </Pressable>
-                  </>
-                ) : (
-                  <Pressable
-                    compact
-                    onPress={radioRow.start.onPress}
-                    accessibilityLabel={radioRow.start.a11yLabel}
-                    style={{ paddingHorizontal: theme.spacing.xs }}
+                {/* Fixed footprint across the arm/disarm toggle (the
+                    header-bar rule): an in-flow ghost sized by the wider
+                    candidate label keeps the chip's width, and stop keeps
+                    its slot hidden while unarmed. */}
+                <View style={{ flexShrink: 1, minWidth: 0, maxWidth: 220 }}>
+                  <Text
+                    variant="metadata"
+                    numberOfLines={1}
+                    style={{ opacity: 0 }}
                   >
-                    <Text variant="metadata" color="accent">
-                      {radioRow.start.label}
-                    </Text>
-                  </Pressable>
-                )}
+                    {radioRow.ghostText}
+                  </Text>
+                  <View
+                    style={[
+                      StyleSheet.absoluteFill,
+                      { justifyContent: 'center' },
+                    ]}
+                  >
+                    {radioRow.armed ? (
+                      <Text
+                        variant="metadata"
+                        color={radioRow.failed ? 'warn' : 'accent'}
+                        numberOfLines={1}
+                      >
+                        {radioRow.statusText}
+                      </Text>
+                    ) : (
+                      <Pressable
+                        compact
+                        onPress={radioRow.start.onPress}
+                        accessibilityLabel={radioRow.start.a11yLabel}
+                        style={{ paddingHorizontal: theme.spacing.xs }}
+                      >
+                        <Text variant="metadata" color="accent">
+                          {radioRow.start.label}
+                        </Text>
+                      </Pressable>
+                    )}
+                  </View>
+                </View>
+                <Pressable
+                  compact
+                  onPress={radioRow.armed ? radioRow.stop.onPress : undefined}
+                  accessibilityLabel={radioRow.stop.a11yLabel}
+                  accessibilityState={{ disabled: !radioRow.armed }}
+                  style={{
+                    paddingHorizontal: theme.spacing.xs,
+                    opacity: radioRow.armed ? 1 : 0,
+                  }}
+                >
+                  <Text variant="metadata" color="primary">
+                    {radioRow.stop.label}
+                  </Text>
+                </Pressable>
               </View>
             )}
           </View>
@@ -1810,7 +1874,8 @@ export function StageSheet({
                   )}
                   {onAddToPlaylist !== undefined && (
                     <IconButton
-                      icon={player.inPlaylist ? 'check' : 'list-plus'}
+                      icon="list-plus"
+                      filled={player.inPlaylist}
                       size={36}
                       iconSize={15}
                       color={

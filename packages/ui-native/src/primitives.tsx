@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import {
   Image,
@@ -20,6 +20,7 @@ import type {
 import Animated, {
   cancelAnimation,
   Easing,
+  interpolate,
   useAnimatedProps,
   useAnimatedStyle,
   useDerivedValue,
@@ -495,6 +496,12 @@ export function IconButton({
       {icon === 'heart' || icon === 'heart-filled' ? (
         <HeartIcon
           filled={icon === 'heart-filled' || filled === true}
+          size={iconSize}
+          color={color ?? theme.colors.textSecondary}
+        />
+      ) : icon === 'list-plus' && filled !== undefined ? (
+        <PlaylistAddIcon
+          added={filled}
           size={iconSize}
           color={color ?? theme.colors.textSecondary}
         />
@@ -1130,10 +1137,15 @@ export function HeartIcon({
   const theme = useTheme();
   const fill = useSharedValue(filled ? 1 : 0);
   const scale = useSharedValue(1);
+  const burst = useSharedValue(1);
+  const didMount = useRef(false);
   useEffect(() => {
+    const first = !didMount.current;
+    didMount.current = true;
     if (theme.reducedMotion) {
       fill.value = filled ? 1 : 0;
       scale.value = 1;
+      burst.value = 1;
       return undefined;
     }
     if (filled) {
@@ -1142,6 +1154,14 @@ export function HeartIcon({
         withTiming(1.14, { duration: theme.motion.press }),
         withTiming(1, { duration: theme.motion.state }),
       );
+      // The ring splashes only on a tap after mount — a list of
+      // already-liked rows doesn't burst on arrival.
+      if (!first) {
+        burst.value = withSequence(
+          withTiming(0, { duration: 0 }),
+          withTiming(1, { duration: theme.motion.state }),
+        );
+      }
     } else {
       fill.value = withTiming(0, { duration: theme.motion.press });
       scale.value = withTiming(1, { duration: theme.motion.press });
@@ -1150,6 +1170,7 @@ export function HeartIcon({
   }, [
     fill,
     scale,
+    burst,
     filled,
     theme.motion.press,
     theme.motion.state,
@@ -1159,9 +1180,29 @@ export function HeartIcon({
     opacity: fill.value,
     transform: [{ scale: scale.value }],
   }));
+  // The burst ring splashes once on fill, then is gone.
+  const ringStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(burst.value, [0, 0.15, 1], [0, 0.7, 0]),
+    transform: [{ scale: interpolate(burst.value, [0, 1], [0.6, 1.5]) }],
+  }));
   const paint = color ?? theme.colors.textSecondary;
   return (
     <View style={{ width: size, height: size }} accessible={false}>
+      <Animated.View
+        style={[
+          {
+            position: 'absolute',
+            top: -2,
+            left: -2,
+            width: size + 4,
+            height: size + 4,
+            borderRadius: (size + 4) / 2,
+            borderWidth: theme.strokes.icon,
+            borderColor: theme.colors.liked,
+          },
+          ringStyle,
+        ]}
+      />
       <Icon name="heart" size={size} color={paint} />
       <Animated.View
         style={[
@@ -1179,6 +1220,78 @@ export function HeartIcon({
       >
         <Icon name="heart-filled" size={size} color={paint} />
       </Animated.View>
+    </View>
+  );
+}
+
+/** The add-to-playlist mark: the plus glyph spins out while the check
+    draws on — same layered construction as DownloadIcon and the web
+    PlaylistAddIcon. `added` is the in-playlist truth. */
+export function PlaylistAddIcon({
+  added,
+  size = 14,
+  color,
+}: {
+  readonly added: boolean;
+  readonly size?: number | undefined;
+  readonly color?: string | undefined;
+}) {
+  const theme = useTheme();
+  const plus = useSharedValue(added ? 0 : 1);
+  const draw = useSharedValue(added ? 1 : 0);
+  useEffect(() => {
+    if (theme.reducedMotion) {
+      plus.value = added ? 0 : 1;
+      draw.value = added ? 1 : 0;
+      return undefined;
+    }
+    plus.value = withTiming(added ? 0 : 1, {
+      duration: theme.motion.press,
+    });
+    draw.value = withTiming(added ? 1 : 0, {
+      duration: theme.motion.state,
+    });
+    return undefined;
+  }, [plus, draw, added, theme.motion.press, theme.motion.state, theme.reducedMotion]);
+  const plusStyle = useAnimatedStyle(() => ({
+    opacity: plus.value,
+    transform: [
+      { rotate: `${(1 - plus.value) * 90}deg` },
+      { scale: 1 - 0.5 * (1 - plus.value) },
+    ],
+  }));
+  const checkProps = useAnimatedProps(() => ({
+    strokeDashoffset: CHECK_DRAW_LENGTH * (1 - draw.value),
+    opacity: draw.value,
+  }));
+  const paint = color ?? theme.colors.textSecondary;
+  return (
+    <View style={{ width: size, height: size }} accessible={false}>
+      <Animated.View
+        style={[
+          { position: 'absolute', top: 0, left: 0, width: size, height: size },
+          plusStyle,
+        ]}
+      >
+        <Icon name="list-plus" size={size} color={paint} />
+      </Animated.View>
+      <Svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        style={{ position: 'absolute', top: 0, left: 0 }}
+      >
+        <AnimatedPath
+          d={CHECK_DRAW_PATH}
+          stroke={paint}
+          strokeWidth={theme.strokes.icon}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          fill="none"
+          strokeDasharray={CHECK_DRAW_LENGTH}
+          animatedProps={checkProps}
+        />
+      </Svg>
     </View>
   );
 }

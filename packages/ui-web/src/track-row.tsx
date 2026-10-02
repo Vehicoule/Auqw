@@ -186,8 +186,9 @@ export function TrackRow({
         )}
         {onAddToPlaylist !== undefined && (
           <TailBtn
-            icon={row.inPlaylist ? 'check' : 'list-plus'}
+            icon="list-plus"
             active={row.inPlaylist}
+            filled={row.inPlaylist}
             ariaLabel={t('track.a11y.addToPlaylist')}
             onPress={onAddToPlaylist}
             className="uw-track-row__add"

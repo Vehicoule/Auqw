@@ -3580,6 +3580,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const onStartRadioGated = radioSeedable(radioSeedRef)
     ? onStartRadio
     : undefined;
+  // The provider the seed would arm with — lets the chip reserve its
+  // armed label's width before the tail exists (header-bar rule).
+  const radioSeedProvider =
+    radioSeedRef !== null && radioSeedable(radioSeedRef)
+      ? radioSeedRef.provider
+      : null;
 
   const resultMetaFor = useCallback(
     (key: string) => resultMeta.current.get(key),
@@ -3876,6 +3882,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     // lyrics/radio/corrections
     onRetryLyrics,
     onStartRadioGated,
+    radioSeedProvider,
     onStopRadio,
     setReviewFilter,
     loadReviews,
