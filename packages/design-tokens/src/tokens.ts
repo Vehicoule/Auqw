@@ -119,7 +119,7 @@ export const fontFamilies = {
 } as const;
 
 export const typography = {
-  display: { fontSize: 22, lineHeight: 26, fontFamily: 'Inter_700Bold' },
+  display: { fontSize: 26, lineHeight: 31, fontFamily: 'Inter_700Bold' },
   title: { fontSize: 17, lineHeight: 22, fontFamily: 'Inter_700Bold' },
   heading: { fontSize: 15, lineHeight: 19, fontFamily: 'Inter_700Bold' },
   body: { fontSize: 14, lineHeight: 19, fontFamily: 'Inter_500Medium' },

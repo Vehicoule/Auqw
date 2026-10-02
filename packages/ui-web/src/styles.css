@@ -2306,6 +2306,21 @@
   object-fit: cover;
 }
 
+/* The crisp art owns the top ~⅔ only: it fades out through the same
+   band the blurred frost fades in on, so the bottom cluster sits on
+   flattened blur instead of competing with the photo — the same
+   ~0.62/0.38 art-vs-chrome split the mobile sheet runs. */
+.uw-stage__backdrop-art {
+  -webkit-mask-image: linear-gradient(to bottom,
+      var(--text-bright) 0%,
+      var(--text-bright) 46%,
+      transparent 64%);
+  mask-image: linear-gradient(to bottom,
+      var(--text-bright) 0%,
+      var(--text-bright) 46%,
+      transparent 64%);
+}
+
 .uw-stage__backdrop-frost {
   filter: blur(36px);
   transform: scale(1.08);
@@ -2505,9 +2520,10 @@
 .uw-transport {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: calc(var(--spacing-xs) + var(--spacing-xxs));
-  margin-top: var(--spacing-md);
+  justify-content: space-between;
+  gap: var(--spacing-xs);
+  margin-top: var(--spacing-lg);
+  padding: 0 var(--spacing-xs);
 }
 
 /* The shared segment language — tonal pill, same construction as the
@@ -2616,9 +2632,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 56px;
-  height: 44px;
-  border-radius: var(--radius-float);
+  width: 64px;
+  height: 64px;
+  border-radius: 30%;
   background: var(--accent);
 }
 
@@ -2631,7 +2647,7 @@
   border-radius: var(--radius-float);
   background: var(--glass);
   border: var(--stroke-hairline) solid var(--hairline);
-  height: 56px;
+  height: 64px;
 }
 
 .uw-transport--ios .uw-transport__main,
