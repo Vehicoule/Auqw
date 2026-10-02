@@ -1427,10 +1427,11 @@ const tap = (s: string) => {
   );
   assert(armedRadio?.armed === true);
   assert(armedRadio.statusText.length > 0);
-  assertEqual(
-    armedRadio.ghostText,
-    armedRadio.statusText,
-    'armed ghost ignores a prospective longer provider',
+  assert(
+    armedRadio.ghostText.includes('fetching') &&
+      armedRadio.ghostText.includes('deezer') &&
+      !armedRadio.ghostText.includes('a-much-longer-provider-id'),
+    'armed ghost reserves the tail own fetching bound, not the seed provider',
   );
   const failedRadio = radioRowView(
     fixtureRadioModels[4],

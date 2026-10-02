@@ -1702,10 +1702,10 @@ export type RadioRowView = {
   readonly statusText: string;
   /**
    * The widest label the row can show — current status, the 'start
-   * radio' affordance, and the armed estimate for the seedable provider
-   * (same `label + fetching-suffix + detail` shape the armed state
-   * renders). Surfaces size their ghost slot to it so arm/disarm never
-   * shifts neighbours.
+   * radio' affordance, and the upper bound: unarmed, the armed estimate
+   * for the seedable provider; armed, the tail's own label with the
+   * fetching suffix reserved. Surfaces size their ghost slot to it so
+   * arm/disarm/fetch never shifts neighbours.
    */
   readonly ghostText: string;
   readonly start: {
@@ -1733,16 +1733,20 @@ export function radioRowView(
     radio.fetching ? t('stage.radio.fetchingSuffix') : ''
   }${radio.detail === null ? '' : ` · ${radio.detail}`}`;
   const startLabel = t('stage.radio.start');
-  // The armed label the chip can grow into for the seed's own provider —
-  // 'growing' is the longest status word and fetching appends its suffix,
-  // so this upper-bounds the label before the tail exists. It only counts
-  // while unarmed: an armed tail keeps its seed's provider, and the
-  // prospective estimate would resize the pill under an unchanged label
-  // when the queue moves to a longer-named provider.
-  const armedEstimate =
-    radio.armed ||
-    seedProvider === null ||
-    seedProvider === undefined
+  // The width the chip can grow into — kept stable across the toggles
+  // the contract freezes:
+  //  · unarmed → the armed estimate for the seed's own provider ('growing'
+  //    is the longest status word and fetching appends its suffix), so
+  //    pressing start can't shift neighbours;
+  //  · armed → the tail's own label with the fetching suffix reserved, so
+  //    continuation fetches don't shrink it — and deliberately NOT the
+  //    prospective provider, which follows the current track while the
+  //    tail keeps its original seed.
+  const armedBound = radio.armed
+    ? `${radio.label ?? ''}${t('stage.radio.fetchingSuffix')}${
+        radio.detail === null ? '' : ` · ${radio.detail}`
+      }`
+    : seedProvider === null || seedProvider === undefined
       ? ''
       : `${t('radio.label', { status: t('radio.status.growing') })}${
           t('stage.radio.fetchingSuffix')
@@ -1753,12 +1757,12 @@ export function radioRowView(
     statusText,
     ghostText:
       statusText.length >= startLabel.length
-        ? statusText.length >= armedEstimate.length
+        ? statusText.length >= armedBound.length
           ? statusText
-          : armedEstimate
-        : startLabel.length >= armedEstimate.length
+          : armedBound
+        : startLabel.length >= armedBound.length
           ? startLabel
-          : armedEstimate,
+          : armedBound,
     start: {
       label: startLabel,
       a11yLabel: t('stage.radio.start'),
