@@ -19,6 +19,21 @@ import { holdDownloadForeground } from './download-foreground.ts';
 const RELEASE_DOWNLOAD_PREFIX =
   'https://github.com/Vehicoule/Auqw/releases/download/';
 
+// The 'open' leg's destination is pinned the same way: the release
+// page the button opens must sit inside this repo's releases tree —
+// the same gate the desktop open() applies, so a feed-side bug can't
+// point 'get it' at an arbitrary https page.
+const RELEASE_PAGE_PREFIX = 'https://github.com/Vehicoule/Auqw/releases';
+
+/** Open `url` in the browser when it's inside the repo's releases
+    tree; refuse anything else. */
+function openReleasePage(url: string): void {
+  if (!url.startsWith(RELEASE_PAGE_PREFIX)) {
+    return;
+  }
+  void Linking.openURL(url).catch(() => undefined);
+}
+
 /**
  * The mobile UpdateShellPort: the shared release check over RN
  * `fetch`, and the shared apply pipeline over `File.downloadFileAsync`
@@ -268,7 +283,7 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
           ) {
             service.apply();
           } else {
-            void Linking.openURL(status.url).catch(() => undefined);
+            openReleasePage(status.url);
           }
           return;
         }
@@ -289,7 +304,7 @@ export function createExpoUpdate(currentVersion: string): UpdateShellPort {
       ) {
         const url =
           status.state === 'available' ? status.url : UPDATE_RELEASES_PAGE;
-        void Linking.openURL(url).catch(() => undefined);
+        openReleasePage(url);
         return;
       }
       // 'idle' starts the pipeline; 'failed' retries it.

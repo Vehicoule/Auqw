@@ -630,9 +630,12 @@ async function main(): Promise<void> {
           relaunch: () => {
             // The AppImage apply already renamed the new bytes over
             // $APPIMAGE — the restart must exec THAT file, not
-            // process.execPath inside the dying FUSE mount.
+            // process.execPath inside the dying FUSE mount. The quit
+            // runs the will-quit chain — supervisor kill + service
+            // stops — so the relaunched build doesn't inherit live
+            // ports (mDNS, LAN sync) from the dying process.
             app.relaunch(appImageRelaunchOptions(process.argv, appimagePath));
-            app.exit(0);
+            app.quit();
           },
         }
       : {}),
