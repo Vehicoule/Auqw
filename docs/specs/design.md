@@ -83,6 +83,8 @@ The token set is a small ramp, so an external palette maps onto it mechanically.
 
 Settings gains `adaptive` alongside `dark · light · oled · system`: dark/light flag from `nativeTheme`/`useColorScheme`, palette where the platform exposes one; Electron's main process owns the watchers and pushes over IPC.
 
+The theme picker's sheet is preview cards, not a name list — each option renders a mini-window drawn in that scheme's own palette (art strip · panel · text bars · accent swatch), so the pick is visual. Selected card reads an accent ring + check (the ring is an outline — depth stays the canvas ramp's job); 'system' and 'adaptive' preview under the live OS light/dark scheme since the OS resolves both.
+
 ## Type
 
 - **One family, sans:** Inter (OFL, bundled everywhere — `@expo-google-fonts/inter` on mobile; the wght-axis variable woff2 (`@fontsource-variable/inter`) copied into the desktop renderer, aliased to the `Inter_*` token names; `ui-sans-serif → system-ui` stays the fallback stack) — chrome, controls, metadata, lists, display. Hierarchy is built from size + weight + the fg ramp, not from a second family.

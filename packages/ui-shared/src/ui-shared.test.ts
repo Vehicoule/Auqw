@@ -21,6 +21,7 @@ import {
   settingsGroups,
   settingsRowConfirms,
   t,
+  themeCardViews,
   toAuthSheetModel,
   toHomeModel,
   toLibraryModel,
@@ -1812,6 +1813,51 @@ const tap = (s: string) => {
       scaledArtworkUrl('https://img.example/a.png', 40) ===
         'https://img.example/a.png',
     'non-https and unknown shapes pass through untouched',
+  );
+}
+
+// Theme-picker cards — the palette follows the option's own scheme;
+// 'system'/'adaptive' preview under the passed OS scheme since the OS
+// resolves both.
+{
+  setLocale('en');
+  const cards = themeCardViews('light');
+  assert(cards.length === 5, 'one card per theme option');
+  const byKey = new Map(cards.map((card) => [card.key, card]));
+  assertEqual(
+    byKey.get('dark')?.palette.canvas,
+    '#161512',
+    'the dark card previews the dark canvas',
+  );
+  assertEqual(
+    byKey.get('light')?.palette.canvas,
+    '#faf8f3',
+    'the light card previews the light canvas',
+  );
+  assertEqual(
+    byKey.get('oled')?.palette.canvas,
+    '#000000',
+    'the oled card previews true black',
+  );
+  assertEqual(
+    byKey.get('system')?.palette.canvas,
+    '#faf8f3',
+    'system previews under the OS scheme',
+  );
+  assertEqual(
+    byKey.get('adaptive')?.palette.canvas,
+    '#faf8f3',
+    'adaptive previews under the OS scheme',
+  );
+  assertEqual(
+    themeCardViews('dark').find((card) => card.key === 'system')?.palette
+      .canvas,
+    '#161512',
+    'a dark OS flips the system card',
+  );
+  assert(
+    byKey.get('light')?.palette.accent !== byKey.get('dark')?.palette.accent,
+    'each card carries its own scheme accent',
   );
 }
 

@@ -75,6 +75,7 @@ import {
   StackItem,
   StageIdlePane,
   Text,
+  ThemePickerSheet,
   ThemeProvider,
   TransferScreen,
   WorldPanes,
@@ -97,7 +98,7 @@ import {
   navItems,
   qualityOptions,
   reportResult,
-  themeOptions,
+  themeCardViews,
   toAuthSheetModel,
 } from '@auqw/ui-shared';
 import { useSearchScreenController } from '@auqw/ui-shared/controllers';
@@ -1838,9 +1839,14 @@ function Main({
           />
         ))}
         {sheet('sheet-theme', closeThemePicker, themePickerOpen, () => (
-          <ProviderPickerSheet
+          <ThemePickerSheet
             title={t('settings.theme')}
-            options={themeOptions()}
+            cards={themeCardViews(
+              typeof window.matchMedia === 'function' &&
+                window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light',
+            )}
             selectedKey={state.settings.theme}
             onPick={onPickTheme}
             onDismiss={closeThemePicker}
