@@ -214,10 +214,11 @@ while hidden).
   (`index.html`, the UI documented above); without it the window loads the
   product UI (`app.html`) — a different surface (search/home/settings).
 - Dev mode defaults `AUQW_PLUGIN_DIR` to `apps/desktop/plugins`
-  (`utilityEnv` in `src/main/index.ts`) — plugins fail to load only when
-  that dir is EMPTY or the var points elsewhere: `#provider` stays empty
-  and the provider path logs `prepare failed — no plugins loaded`. Pass
-  the var only to point at a different set.
+  (`utilityEnv` in `src/main/index.ts`) — plugins fail to load when that
+  dir is EMPTY, the var points elsewhere, or the staged pairs are
+  incomplete/malformed (`loadPluginDir` skips them): `#provider` stays
+  empty and the provider path logs `prepare failed — no plugins loaded`.
+  Pass the var only to point at a different set.
 - The PRODUCT UI is stricter: `src/renderer/controller.ts` throws
   `'no plugin providers available'` when the plugin dir is empty → boot dies
   at `[ui] boot failed: internal` and nothing interactive ever renders.
