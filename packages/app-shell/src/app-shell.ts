@@ -1701,11 +1701,20 @@ export function useAppShell<E extends { readonly type: string } = never>(
     }
     // Two files of the same song are separate recordings — collapse
     // them like provider results, flags of the hidden rows included.
+    // The survivor's id is the press target, so it must carry the
+    // flags the row advertises: a liked copy over an unliked one, then
+    // the copy actually playing, then a playlist member, else the
+    // first in library order.
     const rows: TrackRowModel[] = [];
     for (const { rec, group } of dedupeRecordings(matched)) {
+      const rep =
+        group.find((r) => liked.has(r.id)) ??
+        group.find((r) => r.id === activeRecordingId) ??
+        group.find((r) => inPlaylist.has(r.id)) ??
+        rec;
       rows.push(
-        toTrackRowModel(rec, {
-          key: `local:${rec.id}`,
+        toTrackRowModel(rep, {
+          key: `local:${rep.id}`,
           liked: group.some((r) => liked.has(r.id)),
           inPlaylist: group.some((r) => inPlaylist.has(r.id)),
           note: t('note.local'),

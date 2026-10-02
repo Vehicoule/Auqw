@@ -1496,10 +1496,16 @@ function testLocalRecordingDedupe(): void {
     'the hidden copies ride in the group for flag merging',
   );
   assertEqual(groups[1]?.rec.id, 'rec-dracula');
-  // A different artist or a different whole-second duration splits.
+  // A different artist, album, or whole-second duration splits —
+  // the row displays all three, so copies that differ keep their rows.
   const longer: Recording = { ...roads, id: 'rec-roads-long', durationMs: 298_000 };
-  const split = dedupeRecordings([roads, { ...roads, id: 'rec-x', artist: 'Someone Else' }, longer]);
-  assertEqual(split.length, 3, 'distinct identity always keeps a row');
+  const split = dedupeRecordings([
+    roads,
+    { ...roads, id: 'rec-x', artist: 'Someone Else' },
+    { ...roads, id: 'rec-y', album: 'Live at Roseland' },
+    longer,
+  ]);
+  assertEqual(split.length, 4, 'distinct identity always keeps a row');
 }
 
 /**

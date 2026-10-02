@@ -39,6 +39,7 @@ import {
   displayIdentityKey,
   isBotCheckWall,
   matchDisplayKey,
+  normalizeFree,
   sameSongIdentity,
   topPlayed,
 } from '@auqw/application';
@@ -1854,11 +1855,14 @@ export function dedupeTrackListings(
 
 /**
  * The local-catalog sibling of `dedupeTrackListings`: recordings the
- * user cannot tell apart — same analyzed title, artist, whole-second
- * duration — collapse to the first in library order, with the hidden
- * rows returned as `group` so their flags (liked, playing, playlist)
- * still light the surviving row. There is no identity evidence to
- * weigh for owned files, so the display key alone is the verdict.
+ * user cannot tell apart — same analyzed title, artist, album,
+ * whole-second duration — collapse to the first in library order,
+ * with the hidden rows returned as `group` so their flags (liked,
+ * playing, playlist) still light the surviving row. The album sits in
+ * the key because the row displays it: files tagged under different
+ * albums stay findable and playable as their own rows. There is no
+ * identity evidence to weigh for owned files, so the display key
+ * alone is the verdict.
  */
 export function dedupeRecordings(
   recordings: readonly Recording[],
@@ -1869,12 +1873,12 @@ export function dedupeRecordings(
   const kept: { rec: Recording; group: Recording[] }[] = [];
   const byKey = new Map<string, { rec: Recording; group: Recording[] }>();
   for (const rec of recordings) {
-    const key = displayIdentityKey({
+    const key = `${displayIdentityKey({
       provider: LOCAL_PROVIDER,
       title: rec.title,
       artist: rec.artist,
       durationMs: rec.durationMs,
-    });
+    })}${normalizeFree(rec.album ?? '')}`;
     const existing = byKey.get(key);
     if (existing === undefined) {
       const entry = { rec, group: [rec] };
