@@ -3228,6 +3228,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
           // ref; a library row seeds its first source ref.
           startRadioSeed(actionRadioRef);
           break;
+        case 'shuffle':
+          void session
+            .toggleShuffle()
+            .then(reporter('action.toggleShuffle'));
+          break;
         case 'album':
           if (target.kind === 'metadata' && target.meta.albumRef) {
             openEntity(target.meta.albumRef);
@@ -3274,6 +3279,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
       recordFor: (id) => controller.downloads.recordFor(id),
       downloadRefFor,
       radioSeedable: radioSeedable(actionRadioRef),
+      transport:
+        actionsFor.kind === 'recording' &&
+        stagePlayer !== null &&
+        actionsFor.recordingId === stagePlayer.recordingId
+          ? { shuffle: state.shuffle }
+          : undefined,
     });
     return { target: actionsFor, ...model };
     // downloads refresh rebuilds the ledger read inside recordFor.
@@ -3282,6 +3293,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     actionsFor,
     state.recordings,
     state.likes,
+    state.shuffle,
+    stagePlayer,
     controller,
     downloadRefFor,
     radioSeedable,

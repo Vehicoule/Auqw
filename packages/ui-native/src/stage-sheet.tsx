@@ -242,7 +242,6 @@ export function TransportControls({
       }}
     >
       {button(view.like, view.like.liked ? c.liked : c.textSecondary)}
-      {button(view.shuffle, accent(view.shuffle.active))}
       {button(view.previous, c.textPrimary, true)}
       <Pressable
         compact
@@ -612,6 +611,8 @@ export type StageSheetProps = {
   readonly download?: import('@auqw/ui-shared').DownloadChip | null | undefined;
   readonly onDownload?: (() => void) | undefined;
   readonly onAddToPlaylist?: (() => void) | undefined;
+  /** Opens the playing track's row-actions menu (the top-row ⋯). */
+  readonly onTrackMenu?: (() => void) | undefined;
   /**
    * Provider-wall recovery affordance — fires when the user taps the
    * 'sign in to fix playback' CTA (`player.recovery === 'sign-in'`).
@@ -694,6 +695,7 @@ export function StageSheet({
   download = null,
   onDownload,
   onAddToPlaylist,
+  onTrackMenu,
   onRecovery,
   shuffle = false,
   onToggleShuffle,
@@ -1597,64 +1599,98 @@ export function StageSheet({
           />
         </View>
       </GestureDetector>
-      {/* Radio lives top-center on the player surface, under the grab
-          handle — a seed affordance or the armed tail's status. */}
-      {activeMode === 'player' && radioRow !== null && (
+      {/* The player-mode top row — collapse chevron at the left edge,
+          radio pill dead-center (a seed affordance or the armed
+          tail's status), the playing track's ⋯ menu at the right. */}
+      {activeMode === 'player' && (
         <View
           style={{
             flexDirection: 'row',
-            justifyContent: 'center',
+            alignItems: 'center',
             marginTop: theme.spacing.sm,
+            paddingHorizontal: theme.spacing.lg,
           }}
         >
-          {/* Same accent fill as the mode selector's active item —
-              accentSoft fill, accent content, control radius. */}
+          <View style={{ width: 36, alignItems: 'flex-start' }}>
+            <IconButton
+              icon="chevron-down"
+              size={32}
+              iconSize={15}
+              color={colors.textSecondary}
+              accessibilityLabel={t('sheets.closeA11y')}
+              onPress={dismissBackdrop}
+            />
+          </View>
           <View
             style={{
+              flex: 1,
               flexDirection: 'row',
-              alignItems: 'center',
-              gap: theme.spacing.sm,
-              borderRadius: theme.radius.control,
-              backgroundColor: colors.accentSoft,
-              paddingHorizontal: theme.spacing.md,
-              paddingVertical: theme.spacing.xs,
+              justifyContent: 'center',
             }}
           >
-            <Icon
-              name="radio"
-              size={13}
-              color={radioRow.failed ? colors.warn : colors.accent}
-            />
-            {radioRow.armed ? (
-              <>
-                <Text
-                  variant="metadata"
-                  color={radioRow.failed ? 'warn' : 'accent'}
-                >
-                  {radioRow.statusText}
-                </Text>
-                <Pressable
-                  compact
-                  onPress={radioRow.stop.onPress}
-                  accessibilityLabel={radioRow.stop.a11yLabel}
-                  style={{ paddingHorizontal: theme.spacing.xs }}
-                >
-                  <Text variant="metadata" color="primary">
-                    {radioRow.stop.label}
-                  </Text>
-                </Pressable>
-              </>
-            ) : (
-              <Pressable
-                compact
-                onPress={radioRow.start.onPress}
-                accessibilityLabel={radioRow.start.a11yLabel}
-                style={{ paddingHorizontal: theme.spacing.xs }}
+            {radioRow !== null && (
+              /* Same accent fill as the mode selector's active item —
+                  accentSoft fill, accent content, control radius. */
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: theme.spacing.sm,
+                  borderRadius: theme.radius.control,
+                  backgroundColor: colors.accentSoft,
+                  paddingHorizontal: theme.spacing.md,
+                  paddingVertical: theme.spacing.xs,
+                }}
               >
-                <Text variant="metadata" color="accent">
-                  {radioRow.start.label}
-                </Text>
-              </Pressable>
+                <Icon
+                  name="radio"
+                  size={13}
+                  color={radioRow.failed ? colors.warn : colors.accent}
+                />
+                {radioRow.armed ? (
+                  <>
+                    <Text
+                      variant="metadata"
+                      color={radioRow.failed ? 'warn' : 'accent'}
+                    >
+                      {radioRow.statusText}
+                    </Text>
+                    <Pressable
+                      compact
+                      onPress={radioRow.stop.onPress}
+                      accessibilityLabel={radioRow.stop.a11yLabel}
+                      style={{ paddingHorizontal: theme.spacing.xs }}
+                    >
+                      <Text variant="metadata" color="primary">
+                        {radioRow.stop.label}
+                      </Text>
+                    </Pressable>
+                  </>
+                ) : (
+                  <Pressable
+                    compact
+                    onPress={radioRow.start.onPress}
+                    accessibilityLabel={radioRow.start.a11yLabel}
+                    style={{ paddingHorizontal: theme.spacing.xs }}
+                  >
+                    <Text variant="metadata" color="accent">
+                      {radioRow.start.label}
+                    </Text>
+                  </Pressable>
+                )}
+              </View>
+            )}
+          </View>
+          <View style={{ width: 36, alignItems: 'flex-end' }}>
+            {onTrackMenu !== undefined && (
+              <IconButton
+                icon="ellipsis"
+                size={32}
+                iconSize={15}
+                color={colors.textSecondary}
+                accessibilityLabel={t('track.a11y.rowActions')}
+                onPress={onTrackMenu}
+              />
             )}
           </View>
         </View>
@@ -1704,7 +1740,7 @@ export function StageSheet({
               }}
             >
               <View style={{ flex: 1, minWidth: 0 }}>
-                <Text variant="display" color="bright" numberOfLines={2}>
+                <Text variant="display" color="bright" numberOfLines={1}>
                   {meta.title}
                 </Text>
                 <Text

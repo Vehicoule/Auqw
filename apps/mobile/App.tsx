@@ -2521,6 +2521,16 @@ function Main({
               download={stageDownload}
               onDownload={onStageDownload}
               onAddToPlaylist={onStageAddToPlaylist}
+              onTrackMenu={
+                sheetPlayer.recordingId === null
+                  ? undefined
+                  : () => {
+                      const recordingId = sheetPlayer.recordingId;
+                      if (recordingId !== null) {
+                        setActionsFor({ kind: 'recording', recordingId });
+                      }
+                    }
+              }
               onRecovery={onAuthRecovery}
               onSeek={
                 heldOccurrenceId !== null
