@@ -46,24 +46,24 @@ Native chrome, per platform — not a shrunken desktop:
 
 ## Tokens
 
-Typed JSON source (DTCG), one authority; generated TS/CSS outputs. Three schemes share one geometry — `dark` (warm charcoal), `light` (warm paper), `oled` (true black). Measured WCAG 2.2 contrast below (re-measure any value that changes).
+Typed JSON source (DTCG), one authority; generated TS/CSS outputs. Three schemes share one geometry — `dark` (neutral charcoal, the GTK window ramp), `light` (neutral white, the GTK/adwaita paper read), `oled` (true black). Measured WCAG 2.2 contrast below (re-measure any value that changes).
 
 | Role | Dark | Light | OLED | Ratio (d / l / o) |
 |---|---|---|---|---|
-| surface.canvas | `#161512` | `#faf8f3` | `#000000` | — |
-| surface.stage | `#100e0c` | `#f1ede5` | `#070605` | — |
-| surface.deep | `#0b0a09` | `#e7e1d4` | `#000000` | — |
-| surface.raised | `#232019` | `#ffffff` | `#16140f` | — |
-| text.primary | `#e6e1d8` | `#2a251f` | `#e6e1d8` | on canvas: 14.0 / 14.3 / 16.1 |
-| text.bright | `#f5f1e9` | `#171310` | `#f5f1e9` | on canvas: 16.2 / 17.4 / 18.6 |
-| text.secondary | `#a8a094` | `#6f6659` | `#a8a094` | on canvas: 7.1 / 5.3 / 8.1 |
-| accent.active | `#ff8a3d` | `#c2410c` | `#ff8a3d` | on canvas: 7.8 / 4.9 / 9.0 |
+| surface.canvas | `#242424` | `#fafafa` | `#000000` | — |
+| surface.stage | `#1e1e1e` | `#ececee` | `#070605` | — |
+| surface.deep | `#191919` | `#d8d8dd` | `#000000` | — |
+| surface.raised | `#303030` | `#ffffff` | `#16140f` | — |
+| text.primary | `#ececf0` | `#232326` | `#e6e1d8` | on canvas: 13.2 / 15.0 / 16.1 |
+| text.bright | `#ffffff` | `#101013` | `#f5f1e9` | on canvas: 15.5 / 18.2 / 18.6 |
+| text.secondary | `#9c9ca3` | `#66666d` | `#a8a094` | on canvas: 5.7 / 5.5 / 8.1 |
+| accent.active | `#ff8a3d` | `#c2410c` | `#ff8a3d` | on canvas: 6.6 / 5.0 / 9.0 |
 | accent.soft | `rgba(255,138,61,.16)` | `rgba(194,65,12,.11)` | `rgba(255,138,61,.18)` | fill for selected/active only |
-| status.warn | `#ff8787` | `#a61e1e` | `#ff8787` | on canvas: 7.9 / 7.0 / 9.1 |
-| status.liked | `#f97b9b` | `#b0214f` | `#f97b9b` | on canvas: 7.3 / 6.2 / 8.3 |
-| divider | `#3a352d` | `#d8d1c2` | `#29241e` | seams only |
+| status.warn | `#ff8787` | `#a61e1e` | `#ff8787` | on canvas: 6.7 / 7.1 / 9.1 |
+| status.liked | `#f97b9b` | `#b0214f` | `#f97b9b` | on canvas: 6.2 / 6.3 / 8.3 |
+| divider | `#3d3d42` | `#d6d6dc` | `#29241e` | seams only |
 | switch.thumb | `#ffffff` | `#ffffff` | `#ffffff` | thumb is constant white |
-| hairline | `fg @ 14%` | `fg @ 15%` | `fg @ 13%` | furniture borders |
+| hairline | `fg @ 14%` | `fg @ 14%` | `fg @ 13%` | furniture borders |
 | alpha.fg08/18/25/40 | `fg @ 8/16/26/42%` | `fg @ 6/13/26/42%` | same as dark | selected fills, disabled |
 | hover | `accent.soft @ 55%` | `accent.soft @ 55%` | `accent.soft @ 55%` | hover wash — half the selected fill's own source so it always reads below selected in every scheme (adaptive palettes may source the selection color elsewhere than accent); the neutral fg08 wash read as "greyed out" and drowned on accent-filled controls |
 

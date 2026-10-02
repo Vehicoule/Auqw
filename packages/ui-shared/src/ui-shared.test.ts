@@ -1946,12 +1946,12 @@ const tap = (s: string) => {
   const byKey = new Map(cards.map((card) => [card.key, card]));
   assertEqual(
     byKey.get('dark')?.palette.canvas,
-    '#161512',
+    '#242424',
     'the dark card previews the dark canvas',
   );
   assertEqual(
     byKey.get('light')?.palette.canvas,
-    '#faf8f3',
+    '#fafafa',
     'the light card previews the light canvas',
   );
   assertEqual(
@@ -1961,18 +1961,18 @@ const tap = (s: string) => {
   );
   assertEqual(
     byKey.get('system')?.palette.canvas,
-    '#faf8f3',
+    '#fafafa',
     'system previews under the OS scheme',
   );
   assertEqual(
     byKey.get('adaptive')?.palette.canvas,
-    '#faf8f3',
+    '#fafafa',
     'adaptive previews under the OS scheme',
   );
   assertEqual(
     themeCardViews('dark').find((card) => card.key === 'system')?.palette
       .canvas,
-    '#161512',
+    '#242424',
     'a dark OS flips the system card',
   );
   assert(
