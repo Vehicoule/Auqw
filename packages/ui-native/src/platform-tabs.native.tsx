@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import TabView, { useBottomTabBarHeight } from 'react-native-bottom-tabs';
 import type { AppleIcon } from 'react-native-bottom-tabs';
 import { useTheme } from './theme.tsx';
+import { StatusBarFade } from './primitives.tsx';
 import { PaneVisibleContext } from './platform-tabs.tsx';
 import type { PlatformTabsProps } from './platform-tabs.tsx';
 import type { NavItemModel } from '@auqw/ui-shared';
@@ -181,20 +182,9 @@ export function PlatformTabs({
               {sceneFor(route.key)}
             </PaneVisibleContext.Provider>
             {/* Scenes draw edge-to-edge — scrolled content passes
-                under the status bar mid-scroll and collides with the
-                clock/icons. An opaque canvas band over the inset area
-                masks it: reads as a solid inset, not chrome. */}
-            <View
-              pointerEvents="none"
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                right: 0,
-                height: insets.top,
-                backgroundColor: theme.colors.canvas,
-              }}
-            />
+                under the status bar mid-scroll; the gradient veil (not
+                a hard band) keeps the clock and icons readable. */}
+            <StatusBarFade height={insets.top + 14} />
             <TabBarHeightProbe
               onHeight={(h) => {
                 setTabBarHeight(h);

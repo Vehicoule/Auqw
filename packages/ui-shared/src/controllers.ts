@@ -805,8 +805,11 @@ export function libraryScreenView(
       }),
       countLabel: tile.note ?? t('common.trackCount', { count: tile.count }),
       onOpen: bind(onOpenCollection, tile.key),
+      // An empty collection opens its empty state — a play button
+      // there would queue nothing, so the affordance only exists
+      // while there's something to play.
       onPlay:
-        tile.enabled && onPlayCollection !== undefined
+        tile.enabled && tile.count > 0 && onPlayCollection !== undefined
           ? bind(onPlayCollection, tile.key)
           : undefined,
       playA11yLabel: t('collection.playAllA11y', { title: tile.label }),
