@@ -3011,6 +3011,21 @@
   padding-inline: 96px;
 }
 
+/* Narrow windows: the mirrored reserve exists only to center the tab
+   pill — the side carrying real caption buttons (right on
+   Windows/Linux, left on macOS) never shrinks, but the purely
+   aesthetic mirror side collapses so both control clusters keep
+   their room inside the measured caption zone. */
+@media (max-width: 960px) {
+  [data-platform='win32'] .uw-world-bar,
+  [data-platform='linux'] .uw-world-bar {
+    padding-left: var(--spacing-sm);
+  }
+  [data-platform='darwin'] .uw-chrome[data-stage='closed'] .uw-world-bar {
+    padding-right: var(--spacing-sm);
+  }
+}
+
 .uw-world-bar__start,
 .uw-world-bar__end {
   display: flex;

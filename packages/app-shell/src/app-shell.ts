@@ -567,6 +567,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const [entityFetches, setEntityFetches] = useState<
     Readonly<Record<string, EntityFetch>>
   >({});
+  // Epoch counter for entity loads — each fetch stores its minted
+  // token so a superseded request can't land on a newer entry.
+  const entityFetchSeq = useRef(0);
   const clearOverlays = useCallback(() => {
     clearOverlayStack();
     setEntityFetches({});
@@ -2918,6 +2921,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const loadEntityPage = useCallback(
     (ref: EntityRef) => {
       const key = entityRefKey(ref);
+      const req = (entityFetchSeq.current += 1);
       setEntityFetches((prev) => ({
         ...prev,
         [key]: {
@@ -2926,11 +2930,15 @@ export function useAppShell<E extends { readonly type: string } = never>(
           error: null,
           loading: true,
           loadingMore: false,
+          req,
         },
       }));
       void session.getEntityPage(ref).then((result) => {
         updateEntityFetch(key, (cur) =>
-          cur.ref !== ref
+          // A later load of the same ref (a history restore, a
+          // re-open) supersedes this response — ref identity alone
+          // can't tell them apart since routes reuse ref objects.
+          cur.req !== req
             ? null
             : {
                 ...cur,
@@ -3030,7 +3038,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     }));
     void session.getEntityPage(more).then((result) => {
       updateEntityFetch(key, (latest) => {
-        if (latest.ref !== cur.ref || latest.page === null) {
+        if (latest.req !== cur.req || latest.page === null) {
           return null;
         }
         if (!result.ok) {
