@@ -1,4 +1,5 @@
 import {
+  collectionTiles,
   downloadIconState,
   entityIdForRef,
   formatClock,
@@ -7,6 +8,7 @@ import {
   toCorrectionsModel,
   toEntityModel,
   toHomeModel,
+  toLibraryModel,
   pickArtworkUrl,
   toLyricsModel,
   toPlayerModel,
@@ -21,6 +23,7 @@ import {
   skipPeekFor,
 } from '@auqw/ui-shared';
 import type {
+  DownloadProgress,
   LyricsSheet,
   PlaylistEntry,
   Recording,
@@ -618,6 +621,110 @@ function testQueueMapper(): void {
     failed.items.find((i) => i.occurrenceId === 'occ-5')?.row.state,
     'error',
     'a failed occurrence marks its row',
+  );
+}
+
+function testCollectionTiles(): void {
+  // Tile counts mirror the collection row lists on every surface —
+  // home and library can never disagree, and unresolvable ids drop
+  // honestly on both.
+  const downloads: DownloadProgress[] = [
+    {
+      downloadId: 'dl-1',
+      recordingId: 'rec-dracula',
+      state: 'available',
+      transferredBytes: 10,
+      totalBytes: 10,
+    },
+    {
+      downloadId: 'dl-2',
+      recordingId: 'rec-petit',
+      state: 'requested',
+      transferredBytes: 0,
+      totalBytes: null,
+    },
+    // Unresolvable recording — dropped honestly.
+    {
+      downloadId: 'dl-3',
+      recordingId: 'rec-ghost',
+      state: 'available',
+      transferredBytes: 4,
+      totalBytes: 4,
+    },
+    // Already leaving — counts nowhere.
+    {
+      downloadId: 'dl-4',
+      recordingId: 'rec-self-aware',
+      state: 'removing',
+      transferredBytes: 1,
+      totalBytes: 1,
+    },
+  ];
+  const input = {
+    recordings: fixtureRecordings,
+    likes: fixtureLikes,
+    playlists: fixturePlaylists,
+    playlistEntries: fixturePlaylistEntries,
+    playHistory: fixturePlayHistory,
+    playCounts: fixturePlayCounts,
+    entities: fixtureEntities,
+    entitySourceRefs: fixtureEntitySourceRefs,
+    downloads,
+  };
+  const tiles = new Map(collectionTiles(input).map((c) => [c.key, c]));
+  const library = toLibraryModel(input);
+  const libraryTiles = new Map(library.collections.map((c) => [c.key, c]));
+  for (const key of ['liked', 'downloads', 'top50', 'history'] as const) {
+    assertEqual(
+      tiles.get(key)?.count,
+      libraryTiles.get(key)?.count,
+      `${key} tile count disagrees between surfaces`,
+    );
+    assertEqual(
+      tiles.get(key)?.count,
+      library.collectionRows[key].length,
+      `${key} tile count must match its row list`,
+    );
+  }
+  assertEqual(
+    tiles.get('downloads')?.count,
+    2,
+    'downloads tile counts kept rows only — ghost + removing dropped',
+  );
+  assertEqual(
+    tiles.get('top50')?.count,
+    fixturePlayCounts.length - 1,
+    'pc-ghost counts a deleted recording — topPlayed drops it',
+  );
+  // An unresolvable like or play event never counts.
+  const haunted = new Map(
+    collectionTiles({
+      ...input,
+      likes: [
+        ...fixtureLikes,
+        { entityKind: 'track', targetId: 'rec-ghost', likedAtMs: 1 },
+      ],
+      playHistory: [
+        ...fixturePlayHistory,
+        {
+          eventId: 'pev-ghost',
+          recordingId: 'rec-ghost',
+          occurrenceId: null,
+          playedMs: 2_000_000_000_000,
+          listenedMs: 60_000,
+        },
+      ],
+    }).map((c) => [c.key, c]),
+  );
+  assertEqual(
+    haunted.get('liked')?.count,
+    tiles.get('liked')?.count,
+    'a like on a missing recording counts nowhere',
+  );
+  assertEqual(
+    haunted.get('history')?.count,
+    tiles.get('history')?.count,
+    'a play on a missing recording counts nowhere',
   );
 }
 
@@ -1629,6 +1736,7 @@ testTrackRowMapper();
 testSearchRowMapper();
 testPlayerMapper();
 testQueueMapper();
+testCollectionTiles();
 testLibraryAndSettings();
 testLibraryCards();
 testCollections();
