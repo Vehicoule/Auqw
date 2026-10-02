@@ -286,6 +286,110 @@ assertEqual(
   'current missing from the deal: canonical partitioning',
 );
 
+// ---- autoplay section ----------------------------------------------------
+// Radio-tail occurrences split out of up-next into their own trailing
+// section; the seed names its header.
+const tailedQueue = toQueueModel({
+  queue: fixtureQueue,
+  recordings: fixtureRecordings,
+  radioOccurrenceIds: new Set(['occ-6', 'occ-7', 'occ-8']),
+  radio: {
+    seedRef: {
+      provider: 'youtube-music',
+      kind: 'track',
+      id: 'youtube-music-rec-dracula',
+    },
+    providerId: 'youtube-music',
+    status: 'growing',
+    fetching: false,
+  },
+});
+assertEqual(
+  tailedQueue.sections.map((section) => section.key).join(','),
+  'nowPlaying,upNext,autoplay',
+  'tail-minted rows leave up-next for autoplay',
+);
+assertEqual(
+  tailedQueue.sections
+    .find((s) => s.key === 'autoplay')
+    ?.items.map((i) => i.occurrenceId)
+    .join(','),
+  'occ-6,occ-7,occ-8',
+);
+assertEqual(
+  tailedQueue.sections.find((s) => s.key === 'upNext')?.heading,
+  `${t('queue.upNext')} · 4`,
+  'the up-next heading carries its count',
+);
+assertEqual(
+  tailedQueue.sections.find((s) => s.key === 'autoplay')?.heading,
+  t('queue.autoplaySimilar', { name: 'Dracula' }),
+  'a track seed resolves to its recording title',
+);
+
+// An entity seed names its entity instead.
+const entitySeeded = toQueueModel({
+  queue: fixtureQueue,
+  recordings: fixtureRecordings,
+  radioOccurrenceIds: new Set(['occ-6']),
+  radio: {
+    seedRef: { provider: 'deezer', kind: 'album', id: 'dz-album-deadbeat' },
+    providerId: 'deezer',
+    status: 'growing',
+    fetching: false,
+  },
+  entities: fixtureEntities,
+  entitySourceRefs: fixtureEntitySourceRefs,
+});
+assertEqual(
+  entitySeeded.sections.find((s) => s.key === 'autoplay')?.heading,
+  t('queue.autoplaySimilar', { name: 'Deadbeat' }),
+  'an entity seed resolves to the entity title',
+);
+
+// A seed that resolves to nothing known keeps the bare label; so does
+// a tail reported without its arm record.
+const unknownSeed = toQueueModel({
+  queue: fixtureQueue,
+  recordings: fixtureRecordings,
+  radioOccurrenceIds: new Set(['occ-6']),
+  radio: {
+    seedRef: { provider: 'deezer', kind: 'track', id: 'dz-gone' },
+    providerId: 'deezer',
+    status: 'growing',
+    fetching: false,
+  },
+});
+assertEqual(
+  unknownSeed.sections.find((s) => s.key === 'autoplay')?.heading,
+  t('queue.autoplay'),
+  'an unresolvable seed falls back to the bare autoplay label',
+);
+
+// A suggestion already behind the cursor is history, not autoplay;
+// under shuffle the dealt walk decides.
+const dealtTail = toQueueModel({
+  queue: {
+    ...fixtureQueue,
+    currentOccurrenceId: 'occ-4',
+    mode: 'paused',
+    positionMs: 0,
+  },
+  recordings: fixtureRecordings,
+  dealtOrder: ['occ-2', 'occ-4', 'occ-7', 'occ-1', 'occ-8'],
+  radioOccurrenceIds: new Set(['occ-2', 'occ-7', 'occ-8']),
+});
+assertEqual(
+  dealtTail.sections.find((s) => s.key === 'autoplay')?.items.map((i) => i.occurrenceId).join(','),
+  'occ-7,occ-8',
+  'only dealt-ahead suggestions count as autoplay',
+);
+assertEqual(
+  dealtTail.sections.find((s) => s.key === 'history')?.items.map((i) => i.occurrenceId).join(','),
+  'occ-2',
+  'a dealt-behind suggestion lands in history',
+);
+
 // ---- nextQueueDestination ----------------------------------------------
 // Mirrors the engine's mark-skipping walk so offline/availability gates
 // test the row the cursor actually plays, not the next walk slot.

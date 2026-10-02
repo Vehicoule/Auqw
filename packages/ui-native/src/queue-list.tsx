@@ -3,7 +3,7 @@ import { useRef } from 'react';
 import { FlatList, View } from 'react-native';
 import type { ViewToken } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { Text } from './primitives.tsx';
+import { Pressable, Text } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EmptyState } from './states.tsx';
 import type { QueueItemModel, QueueModel } from '@auqw/ui-shared';
@@ -14,24 +14,58 @@ import { queueSectionLabel } from '@auqw/ui-shared/controllers';
 export function QueueRowChrome({
   item,
   sectionStart,
+  sectionHeading,
+  clear,
   children,
 }: {
   readonly item: QueueItemModel;
   readonly sectionStart: boolean;
+  /** The model's localized section header — falls back to the key's base label. */
+  readonly sectionHeading?: string | undefined;
+  /**
+   * Section-scoped Clear — the up-next header carries it; the ids the
+   * caller pre-bound are that section's items.
+   */
+  readonly clear?:
+    | { readonly label: string; readonly onPress: () => void }
+    | undefined;
   readonly children: ReactNode;
 }) {
   const theme = useTheme();
   return (
     <View>
       {sectionStart && (
-        <Text
-          variant="label"
-          color={item.section === 'nowPlaying' ? 'accent' : 'secondary'}
-          style={{ paddingHorizontal: theme.spacing.sm, marginBottom: 2 }}
-          uppercase
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'baseline',
+            justifyContent: 'space-between',
+            paddingHorizontal: theme.spacing.sm,
+            gap: theme.spacing.sm,
+          }}
         >
-          {queueSectionLabel(item.section)}
-        </Text>
+          <Text
+            variant="label"
+            color={item.section === 'nowPlaying' ? 'accent' : 'secondary'}
+            style={{ marginBottom: 2 }}
+            uppercase
+          >
+            {sectionHeading ?? queueSectionLabel(item.section)}
+          </Text>
+          {clear !== undefined && (
+            <Pressable
+              onPress={clear.onPress}
+              accessibilityRole="button"
+              accessibilityLabel={clear.label}
+              compact
+              feedback="opacity"
+            >
+              <Text variant="label" color="secondary">
+                {clear.label}
+              </Text>
+            </Pressable>
+          )}
+        </View>
       )}
       {item.duplicate && (
         <View
@@ -50,7 +84,10 @@ export function QueueRowChrome({
           </Text>
         </View>
       )}
-      {children}
+      {/* Radio suggestions sit one step dimmer than user-minted rows. */}
+      <View style={{ opacity: item.section === 'autoplay' ? 0.75 : 1 }}>
+        {children}
+      </View>
     </View>
   );
 }
@@ -83,6 +120,13 @@ export type QueueListProps = {
   readonly onMoveItemTo?:
   | ((occurrenceId: string, toIndex: number) => void)
   | undefined;
+  /**
+   * Up-next section Clear — that header's action; the list hands the
+   * section's occurrence ids for a batch remove.
+   */
+  readonly onClearUpcoming?:
+    | ((occurrenceIds: readonly string[]) => void)
+    | undefined;
 };
 
 export function QueueList({
@@ -96,6 +140,7 @@ export function QueueList({
   onRemoveItem,
   onMoveItem,
   onMoveItemTo,
+  onClearUpcoming,
 }: QueueListProps) {
   // FlatList requires a stable onViewableItemsChanged — rebind it
   // per render and the list throws, so the latest callback lives in
@@ -124,6 +169,9 @@ export function QueueList({
   // session's move contract indexes — under shuffle it is the dealt
   // walk, so display slots, not canonical `item.index`, drive moves.
   const items = queue.sections.flatMap((section) => section.items);
+  const sectionByKey = new Map(queue.sections.map((s) => [s.key, s]));
+  const upNextIds =
+    sectionByKey.get('upNext')?.items.map((item) => item.occurrenceId) ?? [];
   const canMove = onMoveItem !== undefined || onMoveItemTo !== undefined;
   const move = (item: QueueItemModel, from: number, neighborIndex: number) => {
     const neighbor = items[neighborIndex];
@@ -153,6 +201,17 @@ export function QueueList({
         <QueueRowChrome
           item={item}
           sectionStart={items[index - 1]?.section !== item.section}
+          sectionHeading={sectionByKey.get(item.section)?.heading}
+          clear={
+            item.section === 'upNext' &&
+            onClearUpcoming !== undefined &&
+            !reordering
+              ? {
+                  label: t('queue.clearSection'),
+                  onPress: () => onClearUpcoming(upNextIds),
+                }
+              : undefined
+          }
         >
           <TrackRow
             row={item.row}
@@ -168,7 +227,10 @@ export function QueueList({
                 : () => onRowIntent(item.occurrenceId)
             }
             onRemove={
-              onRemoveItem === undefined || item.current || reordering
+              onRemoveItem === undefined ||
+              item.current ||
+              reordering ||
+              item.section === 'autoplay'
                 ? undefined
                 : () => onRemoveItem(item.occurrenceId)
             }

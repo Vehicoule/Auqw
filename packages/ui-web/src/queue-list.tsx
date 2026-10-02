@@ -81,6 +81,14 @@ export type QueueListProps = {
   readonly onMoveItemTo?:
     | ((occurrenceId: string, toIndex: number) => void)
     | undefined;
+  /**
+   * Up-next section Clear — the list hands that section's occurrence
+   * ids to the caller for a batch remove. Suggestion rows (autoplay)
+   * live in their own section and are outside the set by contract.
+   */
+  readonly onClearUpcoming?:
+    | ((occurrenceIds: readonly string[]) => void)
+    | undefined;
 };
 
 // Web reordering is button-driven: Alt+ArrowUp/ArrowDown moves the
@@ -95,6 +103,7 @@ export function QueueList({
   onRemoveItem,
   onMoveItem,
   onMoveItemTo,
+  onClearUpcoming,
 }: QueueListProps) {
   // Optimistic reorder bookkeeping: queue.items is controlled by the
   // caller, so each intended move is kept as a pending op. Publishes
@@ -235,6 +244,9 @@ export function QueueList({
   }
   const canReorder = onMoveItem !== undefined || onMoveItemTo !== undefined;
   const orderedIds = pendingIds.current ?? displayIds;
+  const sectionByKey = new Map(queue.sections.map((s) => [s.key, s]));
+  const upNextIds =
+    sectionByKey.get('upNext')?.items.map((item) => item.occurrenceId) ?? [];
   // Rows render in the optimistic order too, so the roving index and
   // DOM focus never index into different sequences mid-persist.
   const itemById = new Map(queue.items.map((item) => [item.occurrenceId, item]));
@@ -315,16 +327,29 @@ export function QueueList({
           orderedItems[index + dir]?.section === 'upNext';
         const moveCtl = (dir: -1 | 1) => () => moveItem(item.occurrenceId, dir);
         return (
-        <div key={item.occurrenceId}>
+        <div key={item.occurrenceId} data-section={item.section}>
           {orderedItems[index - 1]?.section !== item.section && (
-            <Text
-              variant="label"
-              color={item.section === 'nowPlaying' ? 'accent' : 'secondary'}
-              uppercase
-              className="uw-now-playing-label"
-            >
-              {queueSectionLabel(item.section)}
-            </Text>
+            <div className="uw-queue-section">
+              <Text
+                variant="label"
+                color={item.section === 'nowPlaying' ? 'accent' : 'secondary'}
+                uppercase
+                className="uw-now-playing-label"
+              >
+                {sectionByKey.get(item.section)?.heading ??
+                  queueSectionLabel(item.section)}
+              </Text>
+              {item.section === 'upNext' &&
+                onClearUpcoming !== undefined &&
+                !reordering && (
+                  <button
+                    className="uw-queue-section__clear"
+                    onClick={() => onClearUpcoming(upNextIds)}
+                  >
+                    {t('queue.clearSection')}
+                  </button>
+                )}
+            </div>
           )}
           {item.duplicate && (
             <span className="uw-dup-badge">{t('queue.badge.repeat')}</span>
@@ -352,7 +377,10 @@ export function QueueList({
                 : () => onRowIntent(item.occurrenceId)
             }
             onRemove={
-              onRemoveItem === undefined || item.current || reordering
+              onRemoveItem === undefined ||
+              item.current ||
+              reordering ||
+              item.section === 'autoplay'
                 ? undefined
                 : () => onRemoveItem(item.occurrenceId)
             }

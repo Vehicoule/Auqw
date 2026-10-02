@@ -3323,6 +3323,81 @@ async function clearQueueEmptiesDead(): Promise<void> {
   await r.session.dispose();
 }
 
+async function removeOccurrencesBatchClears(): Promise<void> {
+  // The queue's section Clear hands up-next occurrence ids for a batch
+  // remove: the cursor and unknown ids are skipped, and suggestion
+  // ids prune out of radioOccurrenceIds. An empty selection is a
+  // no-op ok.
+  const r = rig(
+    persisted({
+      recordings: ['A', 'B', 'C', 'D'].map((id) =>
+        recording(`r${id}`, [ref('youtube-music', `y${id}`)]),
+      ),
+      queue: {
+        revision: 2,
+        occurrences: ['A', 'B', 'C'].map((id) => occurrence(`o${id}`, `r${id}`)),
+        currentOccurrenceId: 'oA',
+        positionMs: 4_200,
+        mode: 'paused',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await pump();
+  // Arm a tail so one pending row is suggestion-minted.
+  const radio = r.session.startRadio(ref('youtube-music', 'yA'));
+  await pump();
+  assert(
+    r.ytm.settleRadio(
+      ok({
+        candidates: [
+          meta('youtube-music', 'yR1', 'R1', 'Artist', 200_000),
+        ],
+        continuation: null,
+      }),
+    ),
+    'radio seed pending',
+  );
+  assert((await radio).ok, 'startRadio failed');
+  await pump();
+  const armed = readyOf(r);
+  const suggested =
+    armed.queue.occurrences[armed.queue.occurrences.length - 1]
+      ?.occurrenceId;
+  assert(suggested !== undefined);
+  assert(
+    armed.radioOccurrenceIds.has(suggested),
+    'the tail occurrence is radio-minted',
+  );
+  assert(
+    (
+      await r.session.removeOccurrences([
+        'oB',
+        'oC',
+        suggested,
+        'oA',
+        'o-ghost',
+      ])
+    ).ok,
+  );
+  const snap = readyOf(r);
+  assertDeepEqual(
+    snap.queue.occurrences.map((o) => o.occurrenceId),
+    ['oA'],
+    'user rows and the suggestion all left; the cursor stayed',
+  );
+  assertEqual(snap.queue.currentOccurrenceId, 'oA');
+  assert(
+    !snap.radioOccurrenceIds.has(suggested),
+    'removed suggestions prune out of the mint set',
+  );
+  assert(
+    (await r.session.removeOccurrences([])).ok,
+    'an empty selection is a no-op',
+  );
+  await r.session.dispose();
+}
+
 async function playBatchStartAtCursor(): Promise<void> {
   // Context play: tapping row N queues the whole list — rows above
   // the tap stay as history and the tapped row owns the cursor.
@@ -7370,6 +7445,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['addOnDeadCursorParksPaused', addOnDeadCursorParksPaused],
   ['clearQueueKeepsCurrent', clearQueueKeepsCurrent],
   ['clearQueueEmptiesDead', clearQueueEmptiesDead],
+  ['removeOccurrencesBatchClears', removeOccurrencesBatchClears],
   ['shuffleToggleOffRestoresCanonical', shuffleToggleOffRestoresCanonical],
   ['shuffleEndedFallbackFollowsDeal', shuffleEndedFallbackFollowsDeal],
   ['shuffleStaleProjectionEdge', shuffleStaleProjectionEdge],

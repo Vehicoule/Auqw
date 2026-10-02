@@ -198,6 +198,13 @@ export type ReadySession = {
    * queue occurrences it appended are ordinary persisted rows.
    */
   readonly radio: RadioTail | null;
+  /**
+   * Occurrence ids the tail minted — the suggestion boundary the
+   * queue pane renders as its 'autoplay' section (and the boundary
+   * manual enqueues land ahead of). Session-scoped, never persisted;
+   * stale ids intersect out against the live queue.
+   */
+  readonly radioOccurrenceIds: ReadonlySet<string>;
   readonly persistenceError?: AppError;
 };
 
@@ -365,6 +372,22 @@ type PublishSource = {
  * re-keys under the same play (dedup-safe), and post-restart loops
  * count past it rather than collide.
  */
+/** Elementwise equality for two string sets (radioIds reuse). */
+function sameStringSet(
+  a: ReadonlySet<string>,
+  b: ReadonlySet<string>,
+): boolean {
+  if (a.size !== b.size) {
+    return false;
+  }
+  for (const value of a) {
+    if (!b.has(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function listenCycleBaseline(
   occurrences: readonly QueueOccurrence[],
   history: readonly PlayEvent[],
@@ -848,6 +871,11 @@ export class Session {
         prev !== undefined && samePublishedRadio(radio, prev.radio)
           ? prev.radio
           : radio,
+      radioOccurrenceIds:
+        prev !== undefined &&
+        sameStringSet(ready.radioIds, prev.radioOccurrenceIds)
+          ? prev.radioOccurrenceIds
+          : Object.freeze(new Set(ready.radioIds)),
       // The published error is a clone sealed by the same freeze —
       // a subscriber must never mutate the mirror's own error.
       ...(ready.persistenceError === undefined
@@ -2965,6 +2993,45 @@ export class Session {
     ) {
       return this.#playback.startAttempt(snap.currentOccurrenceId);
     }
+    this.#publish();
+    return ok(undefined);
+  }
+
+  /**
+   * Batch remove — the queue pane's section Clear hands the ids it
+   * shows. Each listed occurrence drops inside one commit; a listed
+   * current or unknown id is skipped (a stale render's row can be
+   * gone — or current — by tap time). Radio-minted ids prune their
+   * suggestion mark with the row; an empty hit list is a no-op.
+   */
+  async removeOccurrences(
+    occurrenceIds: readonly string[],
+  ): Promise<Result<void>> {
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    const r = ready.value;
+    const snap = r.queue.snapshot();
+    const live = new Set(snap.occurrences.map((o) => o.occurrenceId));
+    const doomed = occurrenceIds.filter(
+      (id) => live.has(id) && id !== snap.currentOccurrenceId,
+    );
+    if (doomed.length === 0) {
+      return ok(undefined);
+    }
+    const persisted = await this.#mutateQueue(r, (q) => {
+      for (const id of doomed) {
+        q.remove(id);
+      }
+    });
+    if (!persisted.ok) {
+      return persisted;
+    }
+    for (const id of doomed) {
+      r.radioIds.delete(id);
+    }
+    this.#derived();
     this.#publish();
     return ok(undefined);
   }

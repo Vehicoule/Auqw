@@ -118,9 +118,12 @@ export type PlayerModel = {
 /**
  * Display section of a queue row: the current track first, then the
  * pending entries it leads into, then what already played — the
- * standard player queue anatomy.
+ * standard player queue anatomy. 'autoplay' is the radio tail's
+ * suggestion band: those rows sit at up-next positions but are
+ * provider-minted, so they section apart — dimmed, no per-row
+ * remove, untouched by the up-next Clear.
  */
-export type QueueSectionKey = 'nowPlaying' | 'upNext' | 'history';
+export type QueueSectionKey = 'nowPlaying' | 'upNext' | 'autoplay' | 'history';
 
 export type QueueItemModel = {
   readonly occurrenceId: string;
@@ -135,6 +138,12 @@ export type QueueItemModel = {
 
 export type QueueSection = {
   readonly key: QueueSectionKey;
+  /**
+   * Localized header text — 'up next' counts its rows ('up next ·
+   * N'), 'autoplay' names its seed ('autoplay · similar to {title}')
+   * when the tail's seed resolves to a known title.
+   */
+  readonly heading: string;
   readonly items: readonly QueueItemModel[];
 };
 
@@ -142,9 +151,9 @@ export type QueueModel = {
   /** Canonical occurrence order — the order the engine walks. */
   readonly items: readonly QueueItemModel[];
   /**
-   * Display order, grouped: nowPlaying, upNext, history — only
-   * non-empty sections appear. Reorder interactions are confined to
-   * `upNext` items.
+   * Display order, grouped: nowPlaying, upNext, autoplay, history —
+   * only non-empty sections appear. Reorder interactions are
+   * confined to `upNext` items.
    */
   readonly sections: readonly QueueSection[];
   readonly mode: QueueSnapshot['mode'];
@@ -1146,6 +1155,19 @@ type QueueModelInput = {
    * back to canonical partitioning.
    */
   readonly dealtOrder?: readonly string[] | undefined;
+  /**
+   * Occurrence ids the radio tail minted — rows in this set that
+   * land after the cursor section as 'autoplay' instead of 'upNext'.
+   */
+  readonly radioOccurrenceIds?: ReadonlySet<string> | undefined;
+  /**
+   * The armed tail — its `seedRef` names the autoplay section
+   * ('autoplay · similar to {title}'). A seed that resolves to no
+   * known title keeps the bare 'autoplay' header.
+   */
+  readonly radio?: RadioTail | null;
+  readonly entities?: readonly Entity[] | undefined;
+  readonly entitySourceRefs?: readonly EntitySourceRef[] | undefined;
 };
 
 export function toQueueModel(input: QueueModelInput): QueueModel {
@@ -1183,19 +1205,25 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
     failed.add(queue.currentOccurrenceId);
   }
   const occurrencesByRecording = countByRecordingId(queue.occurrences);
+  const radioIds = input.radioOccurrenceIds ?? new Set<string>();
   const items: QueueItemModel[] = queue.occurrences.map(
     (occurrence, index) => {
       const recording = byId.get(occurrence.recordingId);
       const current = occurrence.occurrenceId === queue.currentOccurrenceId;
       const isFailed = failed.has(occurrence.occurrenceId);
       const pos = walkPos(occurrence.occurrenceId, index);
+      const suggested = radioIds.has(occurrence.occurrenceId);
       const section: QueueSectionKey =
         currentIndex === -1
-          ? 'upNext'
+          ? suggested
+            ? 'autoplay'
+            : 'upNext'
           : current
             ? 'nowPlaying'
             : pos > currentWalk
-              ? 'upNext'
+              ? suggested
+                ? 'autoplay'
+                : 'upNext'
               : 'history';
       const row: TrackRowModel =
         recording === undefined
@@ -1231,6 +1259,24 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
       };
     },
   );
+  // The seed that armed the tail: a track seed names its recording's
+  // title, an entity seed its entity's title — either may be gone
+  // from the library by read time (bare 'autoplay' then).
+  const seed = input.radio?.seedRef ?? null;
+  const autoplaySeed =
+    seed === null
+      ? null
+      : seed.kind === 'track'
+        ? (recordings.find((recording) =>
+            recording.sourceRefs.some((ref) => refKey(ref) === refKey(seed)),
+          )?.title ?? null)
+        : ((input.entities ?? []).find(
+            (entity) =>
+              entity.entityId ===
+              (input.entitySourceRefs ?? []).find(
+                (entry) => refKey(entry.ref) === refKey(seed),
+              )?.entityId,
+          )?.title ?? null);
   let totalDurationMs = 0;
   for (const occurrence of queue.occurrences) {
     const durationMs = byId.get(occurrence.recordingId)?.durationMs;
@@ -1241,7 +1287,7 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
     totalDurationMs += durationMs;
   }
   const sections: QueueSection[] = (
-    ['nowPlaying', 'upNext', 'history'] as const
+    ['nowPlaying', 'upNext', 'autoplay', 'history'] as const
   ).flatMap((key) => {
     // Within a section rows follow the playback walk — under shuffle
     // the dealt order, otherwise canonical.
@@ -1251,7 +1297,18 @@ export function toQueueModel(input: QueueModelInput): QueueModel {
         (a, b) =>
           walkPos(a.occurrenceId, a.index) - walkPos(b.occurrenceId, b.index),
       );
-    return sectionItems.length === 0 ? [] : [{ key, items: sectionItems }];
+    if (sectionItems.length === 0) {
+      return [];
+    }
+    const heading =
+      key === 'upNext'
+        ? `${t('queue.upNext')} · ${sectionItems.length}`
+        : key === 'autoplay'
+          ? autoplaySeed === null
+            ? t('queue.autoplay')
+            : t('queue.autoplaySimilar', { name: autoplaySeed })
+          : t(`queue.${key}`);
+    return [{ key, heading, items: sectionItems }];
   });
   return {
     items,

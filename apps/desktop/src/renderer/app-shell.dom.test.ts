@@ -91,6 +91,7 @@ export async function run(): Promise<void> {
       shuffle: false,
       shuffleOrder: null,
       radio: null,
+      radioOccurrenceIds: new Set(),
     };
     // Only the members the hook touches while idle are real — the op
     // surface is callback-invoked and never fires in this test.
