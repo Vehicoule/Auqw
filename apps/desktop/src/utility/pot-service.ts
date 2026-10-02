@@ -45,7 +45,11 @@ import {
  * `lanOptIn` (the `AUQW_POT_LAN` env knob) + `lanReady` (device
  * custody lists a paired device) together select `0.0.0.0`. An opt-
  * in without a pairing falls back to loopback, never a refusal to
- * serve the local host. Sessions are IP-bound and shared: one
+ * serve the local host. The choice is re-evaluated live: pairing-
+ * custody transitions call `reevaluateBind()`, which re-reads
+ * `lanReady` and swaps the listener between loopback and the
+ * wildcard as keys come and go — a wildcard bind never outlives its
+ * last pairing. Sessions are IP-bound and shared: one
  * integrity session mints every content binding until
  * `estimatedTtlSecs` minus a margin, and a single in-flight
  * promise dedupes concurrent cold starts.
@@ -182,11 +186,11 @@ type PotServiceDeps = {
 
 type PotService = {
   /**
-   * Binds the listener once — `127.0.0.1:ephemeral`, or `0.0.0.0`
-   * when the LAN opt-in holds a live pairing — and resolves the
-   * bound port, or null when the bind failed — callers degrade to
-   * "no provider" instead of throwing. A failed bind stays
-   * retryable on the next call.
+   * Binds the listener — `127.0.0.1:ephemeral`, or `0.0.0.0` when
+   * the LAN opt-in holds a live pairing — and resolves the bound
+   * port, or null when the bind failed — callers degrade to "no
+   * provider" instead of throwing. A failed bind stays retryable
+   * on the next call.
    */
   bind(): Promise<number | null>;
   /** Bound port once bind() has resolved, else null. */
@@ -195,6 +199,23 @@ type PotService = {
   host(): string | null;
   /** `http://127.0.0.1:<port>` once bound, else null. */
   loopbackUrl(): string | null;
+  /**
+   * Custody-transition re-evaluation — the wiring calls this after
+   * a pairing-record write lands so the listener follows the
+   * pairing it exists for: gaining the first pairing key widens a
+   * loopback bind to the wildcard a LAN-paired device dials, and
+   * losing the last one narrows a wildcard bind back to loopback.
+   * The replacement binds before the superseded socket drains —
+   * no listening gap — and in-flight requests on the old socket
+   * finish honestly. A failed widening rebind stays on loopback
+   * (always justified); a failed narrowing rebind tears the
+   * wildcard down to the retryable unbound state rather than keep
+   * serving the LAN without a pairing key. Calls serialize, and
+   * without `lanOptIn` (or before any `bind()`) this is a no-op —
+   * the bind host can't leave loopback / the next `bind()`
+   * evaluates custody fresh anyway.
+   */
+  reevaluateBind(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -1436,6 +1457,172 @@ export function createPotService(opts: PotServiceDeps): PotService {
     });
   }
 
+  const requestHandler = (
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): void => {
+    handle(req, res).catch((thrown) => {
+      if (res.headersSent) {
+        res.end();
+      } else {
+        fail(res, thrown);
+      }
+    });
+  };
+
+  /**
+   * The wildcard is opt-in AND pairing-gated: an unauthenticated
+   * mint endpoint on the LAN is only justified by a device that
+   * paired under this host's public IP. Opt-in without pairing
+   * still serves — loopback, never the LAN. Evaluated per bind and
+   * per custody transition; a custody failure reads as not-ready —
+   * the wildcard is never the default answer.
+   */
+  async function bindHost(): Promise<'0.0.0.0' | '127.0.0.1'> {
+    const lanReady =
+      opts.lanOptIn === true &&
+      (await (opts.lanReady?.() ?? Promise.resolve(false)).catch(
+        () => false,
+      ));
+    if (opts.lanOptIn === true && !lanReady) {
+      log('pot: LAN bind refused — no paired device; serving loopback');
+    }
+    return lanReady ? '0.0.0.0' : '127.0.0.1';
+  }
+
+  /**
+   * One listen attempt — resolves the bound port on success, null
+   * on failure. Pure: it never writes the service's bound state;
+   * the caller commits via `commitBound` only once it knows the
+   * socket stays — that keeps `server` naming the one live
+   * listener (or its predecessor) at every await, so a close()
+   * interleaving mid-rebind can never lose track of a socket.
+   * Both the pre-listen and post-listen sides re-check `closing`:
+   * a close() landing mid-attempt must not open a socket the
+   * teardown already walked past.
+   */
+  function listenOn(srv: Server, host: string): Promise<number | null> {
+    return new Promise<number | null>((resolve) => {
+      if (closing) {
+        resolve(null);
+        return;
+      }
+      srv.once('error', (thrown) => {
+        log(
+          `pot: bind failed (${
+            thrown instanceof Error ? thrown.message : 'unknown'
+          })`,
+        );
+        resolve(null);
+      });
+      srv.listen({ host, port: 0 }, () => {
+        if (closing) {
+          srv.close();
+          resolve(null);
+          return;
+        }
+        const address = srv.address();
+        resolve(
+          address !== null && typeof address === 'object'
+            ? address.port
+            : null,
+        );
+      });
+    });
+  }
+
+  /**
+   * Move the service's bound state onto a socket listenOn already
+   * proved — called only after every bail-out check passed, so
+   * `server` jumps straight from the old listener to the new.
+   */
+  function commitBound(srv: Server, host: string, port: number): void {
+    boundPort = port;
+    boundHost = host;
+    server = srv;
+  }
+
+  /**
+   * Graceful retirement of a superseded listener — the replacement
+   * already serves, so the old socket just stops accepting: close()
+   * refuses new connections and drops idle keep-alives while
+   * in-flight requests finish on it honestly.
+   */
+  function retire(srv: Server): void {
+    srv.close(() => undefined);
+    srv.closeIdleConnections();
+  }
+
+  /**
+   * Hard teardown — the shape close() uses: stop accepting and cut
+   * every connection, in-flight or not. For a listener that has no
+   * lawful answer left to give (a wildcard bind whose narrowing
+   * rebind failed).
+   */
+  function cutDown(srv: Server): void {
+    srv.close(() => undefined);
+    srv.closeAllConnections();
+  }
+
+  async function reevaluatePass(): Promise<void> {
+    // A first bind still in flight resolves its own custody read —
+    // wait it out, then evaluate against the latest state anyway.
+    await binding;
+    if (closing || server === null || boundHost === null) {
+      return;
+    }
+    const desired = await bindHost();
+    if (closing || server === null || boundHost === null) {
+      return;
+    }
+    if (desired === boundHost) {
+      return;
+    }
+    const previous = server;
+    const replacement = createServer(requestHandler);
+    const port = await listenOn(replacement, desired);
+    if (closing) {
+      // close() parked on this pass — the replacement never joined
+      // `server`, so dropping it here loses no bound state;
+      // `previous` still is `server`, and close() takes it down.
+      cutDown(replacement);
+      return;
+    }
+    if (port === null) {
+      if (desired === '0.0.0.0') {
+        // Staying loopback is always justified — the pairing just
+        // doesn't widen until the next transition or bind retry.
+        log('pot: pairing rebind failed; staying on loopback');
+        return;
+      }
+      // Narrowing must not fail open: a wildcard listener whose
+      // loopback rebind failed has no pairing key to justify it —
+      // cut it down to the retryable unbound state a failed bind
+      // leaves, so the retry path can rebuild.
+      log('pot: unpair rebind failed; closing the listener');
+      server = null;
+      boundHost = null;
+      boundPort = null;
+      binding = null;
+      cutDown(previous);
+      return;
+    }
+    // The swap commits atomically — `server` never points at a
+    // socket a racing close() could then miss — and the memoized
+    // bind follows it, so a later bind() hands callers the live
+    // port, not the superseded one.
+    commitBound(replacement, desired, port);
+    binding = Promise.resolve(port);
+    log(
+      `pot: pairing custody changed — rebound to ${
+        desired === '0.0.0.0' ? 'wildcard' : 'loopback'
+      }`,
+    );
+    retire(previous);
+  }
+
+  let reevaluating: Promise<void> | null = null;
+
   return {
     bind(): Promise<number | null> {
       if (closing) {
@@ -1444,66 +1631,22 @@ export function createPotService(opts: PotServiceDeps): PotService {
       if (binding !== null) {
         return binding;
       }
-      const srv = createServer((req, res) => {
-        handle(req, res).catch((thrown) => {
-          if (res.headersSent) {
-            res.end();
-          } else {
-            fail(res, thrown);
-          }
-        });
-      });
+      const srv = createServer(requestHandler);
       binding = (async () => {
-        // The wildcard is opt-in AND pairing-gated: an
-        // unauthenticated mint endpoint on the LAN is only
-        // justified by a device that paired under this host's
-        // public IP. Opt-in without pairing still serves —
-        // loopback, never the LAN.
-        const lanReady =
-          opts.lanOptIn === true &&
-          (await (opts.lanReady?.() ?? Promise.resolve(false)).catch(
-            () => false,
-          ));
-        if (opts.lanOptIn === true && !lanReady) {
-          log(
-            'pot: LAN bind refused — no paired device; serving loopback',
-          );
+        const host = await bindHost();
+        const bound = await listenOn(srv, host);
+        if (closing) {
+          // close() landed before the commit — the socket either
+          // never opened or was closed inside listenOn; drop it.
+          srv.close();
+          return null;
         }
-        const host = lanReady ? '0.0.0.0' : '127.0.0.1';
-        return await new Promise<number | null>((resolve) => {
-          // close() can land while lanReady was pending — don't
-          // open a socket we're about to tear down.
-          if (closing) {
-            resolve(null);
-            return;
-          }
-          srv.once('error', (thrown) => {
-            log(
-              `pot: bind failed (${
-                thrown instanceof Error ? thrown.message : 'unknown'
-              })`,
-            );
-            binding = null; // a failed bind stays retryable
-            resolve(null);
-          });
-          srv.listen({ host, port: 0 }, () => {
-            // close() can land while listen is still pending —
-            // don't resurrect a listener into post-shutdown state.
-            if (closing) {
-              srv.close();
-              resolve(null);
-              return;
-            }
-            const address = srv.address();
-            boundPort =
-              address !== null && typeof address === 'object'
-                ? address.port
-                : null;
-            boundHost = host;
-            server = srv;
-            resolve(boundPort);
-          });
-        });
+        if (bound === null) {
+          binding = null; // a failed bind stays retryable
+          return null;
+        }
+        commitBound(srv, host, bound);
+        return bound;
       })();
       return binding;
     },
@@ -1518,8 +1661,27 @@ export function createPotService(opts: PotServiceDeps): PotService {
         ? null
         : `http://127.0.0.1:${boundPort}`;
     },
+    reevaluateBind(): Promise<void> {
+      // Without the LAN opt-in the bind is permanently loopback —
+      // custody can't change the host, so skip the read entirely
+      // (a pointless deviceList would still cost a custody round
+      // trip, and on macOS a Keychain prompt). Passes serialize:
+      // each re-reads custody after the prior settles, so a
+      // put/delete burst lands on the latest state.
+      if (opts.lanOptIn !== true || closing) {
+        return Promise.resolve();
+      }
+      reevaluating = (reevaluating ?? Promise.resolve())
+        .then(reevaluatePass)
+        .catch(() => undefined);
+      return reevaluating;
+    },
     async close() {
       closing = true;
+      // Settle a mid-flight custody rebind first — its `closing`
+      // checks short-circuit it, and whatever it left bound is the
+      // socket torn down below.
+      await (reevaluating ?? Promise.resolve());
       if (session !== null) {
         disposeWhenIdle(session);
       }

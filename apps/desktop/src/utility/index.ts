@@ -12,7 +12,7 @@ import { createLocalGrants } from './local-grants.ts';
 import { createLocalService } from './local.ts';
 import { createStorageService } from './storage.ts';
 import { createStreamHandlers } from './stream.ts';
-import { createServiceKeys } from './sync-keys.ts';
+import { createServiceKeys, type SyncKeys } from './sync-keys.ts';
 import {
   createBonjourAdvertise,
   createBonjourBrowse,
@@ -137,6 +137,10 @@ if (port === null) {
   // QR minted early can't advertise a dead endpoint.
   // An empty override reads as "unset" — `VAR=` in a launch env must
   // not suppress the bundled minter into a provider-less state.
+  // `custody` is the one shared sync:keys client — the pot custody
+  // check below and the notifying `syncKeys` wrapper further down
+  // both ride it.
+  const custody = createServiceKeys(serviceClient.request);
   const potOverrideEnv = process.env['AUQW_POT_PROVIDER_URL'];
   const potOverride =
     potOverrideEnv !== undefined && potOverrideEnv.trim() !== ''
@@ -147,9 +151,7 @@ if (port === null) {
     lanOptIn: process.env['AUQW_POT_LAN'] === '1',
     lanReady: async () => {
       try {
-        const { devices } = await createServiceKeys(
-          serviceClient.request,
-        ).deviceList();
+        const { devices } = await custody.deviceList();
         return devices.length > 0;
       } catch {
         return false;
@@ -294,6 +296,41 @@ if (port === null) {
           });
           return built.ok ? built.value : null;
         });
+  // Pairing-custody membership writes are the transitions the POT
+  // bind must re-evaluate on — the wildcard is justified only while
+  // a pairing key exists (decisions.md). Every device-record write
+  // in this process funnels through `syncKeys` (the responder's
+  // custody puts, the dialer's puts/deletes, sync:unpair's delete),
+  // so the wrapper signals after each lands and then pushes the
+  // possibly-rebound endpoint into a live host — the same heal the
+  // bind-retry path does. `identityReplace` is included: restoring
+  // custody from the mirror over a corrupt blob can resurrect
+  // pairings. `deviceTouch` can't change membership — it only
+  // updates a record that still exists — so it doesn't signal.
+  const custodyChanged = async (): Promise<void> => {
+    await pot.reevaluateBind();
+    // AUQW_POT_PROVIDER_URL owns the provider slot — under it the
+    // bundled service never binds, so its URL would only push null
+    // over the configured provider.
+    if (potOverride === undefined) {
+      runtime.hostIfLoaded()?.setPotProvider(pot.loopbackUrl());
+    }
+  };
+  const syncKeys: SyncKeys = {
+    ...custody,
+    async devicePut(record) {
+      await custody.devicePut(record);
+      await custodyChanged();
+    },
+    async deviceDelete(id) {
+      await custody.deviceDelete(id);
+      await custodyChanged();
+    },
+    async identityReplace(identity) {
+      await custody.identityReplace(identity);
+      await custodyChanged();
+    },
+  };
   // The LAN sync service: listener + pairing + device registry +
   // engine seam.
   const syncPort = syncPortEnv();
@@ -329,13 +366,13 @@ if (port === null) {
     // runs; unset env keeps the eager default for standalone runs.
     armed: process.env['AUQW_SYNC_ARMED'] !== '0',
     ...(syncName !== undefined ? { deviceName: syncName } : {}),
-    keys: createServiceKeys(serviceClient.request),
+    keys: syncKeys,
     // The caller half — pair TO a phone's offer. Shares the custody
     // channel + the sync-log deviceId; the bound-port getter comes
     // from the service so the hello advertises a dialable endpoint.
     dialer: ({ listenPort, listenEndpoints, deviceName }) =>
       createSyncDialer({
-        keys: createServiceKeys(serviceClient.request),
+        keys: syncKeys,
         ownDeviceId: async () =>
           (await syncLogOpened)?.deviceId ?? null,
         engine: async () =>

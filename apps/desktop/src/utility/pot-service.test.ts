@@ -1,3 +1,4 @@
+import { networkInterfaces } from 'node:os';
 import { isRecord } from '@auqw/application';
 import { assert, assertEqual } from '@auqw/application/testing';
 import type { FetchResponse } from './pot-service.ts';
@@ -891,4 +892,226 @@ export async function run(): Promise<void> {
     'wildcard bind still advertises loopback locally',
   );
   await paired.close();
+
+  /* ------- custody transitions re-evaluate the bind host ------- */
+
+  // A real LAN address, if the box has one — the wildcard proof is
+  // stronger than host()'s word.
+  const lanIp = Object.values(networkInterfaces())
+    .flat()
+    .find(
+      (iface) =>
+        iface !== undefined &&
+        iface.family === 'IPv4' &&
+        !iface.internal,
+    )?.address;
+  const probe = async (url: string): Promise<number | null> =>
+    fetch(url, { signal: AbortSignal.timeout(2_000) })
+      .then((res) => res.status)
+      .catch(() => null);
+
+  // Loopback → wildcard: the app started unpaired; a later pairing
+  // widens the live listener — no restart, no dead advertised port.
+  let custodyA = false;
+  const latePair = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    session: stubSession,
+    lanOptIn: true,
+    lanReady: async () => custodyA,
+  });
+  const latePort = await latePair.bind();
+  assert(latePort !== null);
+  assertEqual(latePair.host(), '127.0.0.1');
+  assertEqual(
+    (
+      await post(
+        `http://127.0.0.1:${latePort}`,
+        JSON.stringify({ content_binding: 'x' }),
+      )
+    ).status,
+    200,
+  );
+  custodyA = true;
+  await latePair.reevaluateBind();
+  assertEqual(
+    latePair.host(),
+    '0.0.0.0',
+    'a pairing left the bind on loopback',
+  );
+  const widePort = latePair.port();
+  assert(
+    widePort !== null && widePort !== latePort,
+    'widening kept the superseded port',
+  );
+  // The superseded socket is retired — only the rebound port serves.
+  assertEqual(
+    await probe(`http://127.0.0.1:${latePort}/ping`),
+    null,
+    'superseded loopback listener still answering',
+  );
+  assertEqual(
+    await probe(`http://127.0.0.1:${widePort}/ping`),
+    200,
+    'rebound listener not serving',
+  );
+  if (lanIp !== undefined) {
+    assertEqual(
+      await probe(`http://${lanIp}:${widePort}/ping`),
+      200,
+      'widened bind unreachable on the LAN interface',
+    );
+  }
+  // bind() callers after the rebind get the live port, not the dead one.
+  assertEqual(await latePair.bind(), widePort);
+  await latePair.close();
+
+  // Wildcard → loopback: losing the last pairing narrows the live
+  // listener — an unauthenticated LAN endpoint keeps no key to
+  // justify the wildcard.
+  let custodyB = true;
+  const lastUnpair = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    session: stubSession,
+    lanOptIn: true,
+    lanReady: async () => custodyB,
+  });
+  const openPort = await lastUnpair.bind();
+  assert(openPort !== null);
+  assertEqual(lastUnpair.host(), '0.0.0.0');
+  custodyB = false;
+  await lastUnpair.reevaluateBind();
+  assertEqual(
+    lastUnpair.host(),
+    '127.0.0.1',
+    'last unpair left the wildcard bound',
+  );
+  const narrowPort = lastUnpair.port();
+  assert(
+    narrowPort !== null && narrowPort !== openPort,
+    'narrowing kept the exposed port',
+  );
+  assertEqual(
+    await probe(`http://127.0.0.1:${openPort}/ping`),
+    null,
+    'unpaired wildcard still answering',
+  );
+  assertEqual(
+    await probe(`http://127.0.0.1:${narrowPort}/ping`),
+    200,
+    'narrowed listener not serving loopback',
+  );
+  if (lanIp !== undefined) {
+    assertEqual(
+      await probe(`http://${lanIp}:${narrowPort}/ping`),
+      null,
+      'narrowed bind still reachable on the LAN interface',
+    );
+  }
+  await lastUnpair.close();
+
+  // No-op: custody unchanged across the write — same host, same
+  // port, nothing rebound.
+  let custodyC = true;
+  let readsC = 0;
+  const steady = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    session: stubSession,
+    lanOptIn: true,
+    lanReady: async () => {
+      readsC += 1;
+      return custodyC;
+    },
+  });
+  const steadyPort = await steady.bind();
+  assert(steadyPort !== null);
+  assertEqual(steady.host(), '0.0.0.0');
+  await steady.reevaluateBind();
+  assert(readsC > 0, 're-evaluation never consulted custody');
+  assertEqual(steady.host(), '0.0.0.0');
+  assertEqual(steady.port(), steadyPort, 'a no-op re-eval rebound');
+  await steady.close();
+
+  // Never bound: a custody write before the first bind() doesn't
+  // conjure a listener — the bind itself evaluates custody fresh.
+  const unbound = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    session: stubSession,
+    lanOptIn: true,
+    lanReady: async () => true,
+  });
+  await unbound.reevaluateBind();
+  assertEqual(
+    unbound.port(),
+    null,
+    're-eval bound a service that never bind()ed',
+  );
+  const freshPort = await unbound.bind();
+  assert(freshPort !== null);
+  assertEqual(unbound.host(), '0.0.0.0');
+  await unbound.close();
+
+  // No LAN opt-in: the bind can't leave loopback, so re-evaluation
+  // never spends a custody read.
+  let consulted = 0;
+  const noOpt = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    session: stubSession,
+    lanReady: async () => {
+      consulted += 1;
+      return true;
+    },
+  });
+  await noOpt.bind();
+  await noOpt.reevaluateBind();
+  assertEqual(
+    consulted,
+    0,
+    're-eval read custody without the opt-in',
+  );
+  await noOpt.close();
+
+  // In-flight requests on the superseded socket finish — the
+  // retirement drains rather than decapitates.
+  let custodyD = true;
+  let releaseMint: (() => void) | undefined;
+  const mintGate = new Promise<PotSession>((resolve) => {
+    releaseMint = () =>
+      resolve({
+        mint: async () => 'tok-inflight',
+        expiresAtMs: now.ms + 60_000,
+      });
+  });
+  const draining = createPotService({
+    nowMs: () => now.ms,
+    log: () => {},
+    session: () => mintGate,
+    lanOptIn: true,
+    lanReady: async () => custodyD,
+  });
+  const drainPort = await draining.bind();
+  assert(drainPort !== null);
+  const inflight = post(
+    `http://127.0.0.1:${drainPort}`,
+    JSON.stringify({ content_binding: 'x' }),
+  );
+  // Let the request land so its socket is mid-response, not idle.
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  custodyD = false;
+  await draining.reevaluateBind();
+  assertEqual(draining.host(), '127.0.0.1');
+  releaseMint?.();
+  const landed = await inflight;
+  assertEqual(
+    landed.status,
+    200,
+    'in-flight request died with the superseded bind',
+  );
+  assert(isRecord(landed.body));
+  assertEqual(landed.body['poToken'], 'tok-inflight');
+  await draining.close();
 }
