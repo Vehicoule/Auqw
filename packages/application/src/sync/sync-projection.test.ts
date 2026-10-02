@@ -45,6 +45,7 @@ import {
   unsyncedWrites,
 } from './sync-projection.ts';
 import type {
+  SyncEmitEvidence,
   SyncEmitInput,
   SyncProjectionInput,
 } from './sync-projection.ts';
@@ -230,6 +231,9 @@ function projInput(
     localFiles: partial.localFiles ?? [],
     queue: partial.queue ?? queueEmpty(),
     settings: partial.settings ?? SETTINGS,
+    ...(partial.deviceId !== undefined
+      ? { deviceId: partial.deviceId }
+      : {}),
   };
 }
 
@@ -1278,6 +1282,218 @@ function testSnapshotCountAbsolute(): void {
   );
 }
 
+// `count - ourComponent - loggedRemote` is exactly the plays the
+// log never saw — a remote share deleted inside the page folds
+// away, while the unsent surplus above the live components survives.
+function testSnapshotCountFloorHonorsTombstone(): void {
+  const current = projInput({
+    recordings: [recording('r-1', [ref('itunes', 't-1')])],
+    playCounts: [
+      { recordingId: 'r-1', count: 10, lastMs: 100, loggedRemote: 10 },
+    ],
+    deviceId: 'dev-us',
+  });
+  const outcome = applied(
+    fieldEntry('playCount', 'r-1', 'count', 2),
+    [],
+    {
+      kind: 'playCount',
+      recordId: 'r-1',
+      fields: { count: 7, lastMs: 900 },
+      // All-remote baseline, peer's component deleted in-page.
+      sumComponents: { count: { 'peer-x': 7 } },
+    },
+  );
+  const projected = projectAppliedEntries([outcome], current);
+  const folded = projected.batch.playCounts?.[0];
+  assertEqual(
+    folded?.count,
+    7,
+    'a deleted logged component folds to the page',
+  );
+  assertEqual(
+    folded?.loggedRemote,
+    7,
+    'the page restamps the remote baseline',
+  );
+}
+
+// Delivered plays stop counting as unsent: our live component
+// reads out of the page, so a successfully emitted play doesn't
+// double — and replaying the same page can't regrow it.
+function testSnapshotCountFloorDeliveredPlays(): void {
+  const current = projInput({
+    recordings: [recording('r-1', [ref('itunes', 't-1')])],
+    playCounts: [
+      { recordingId: 'r-1', count: 11, lastMs: 100, loggedRemote: 0 },
+    ],
+    deviceId: 'dev-us',
+  });
+  const outcome = applied(
+    fieldEntry('playCount', 'r-1', 'count', 2),
+    [],
+    {
+      kind: 'playCount',
+      recordId: 'r-1',
+      fields: { count: 11, lastMs: 900 },
+      sumComponents: { count: { 'dev-us': 11 } },
+    },
+  );
+  const projected = projectAppliedEntries([outcome], current);
+  const folded = projected.batch.playCounts?.[0];
+  assertEqual(
+    folded?.count,
+    11,
+    'a delivered play folds once, not twice',
+  );
+  assertEqual(
+    projectAppliedEntries([outcome], {
+      ...current,
+      playCounts: folded === undefined ? [] : [folded],
+    }).batch.playCounts?.[0]?.count,
+    11,
+    'replaying the same page does not inflate',
+  );
+}
+
+// A tombstone removing OUR component stays deleted: `loggedOurs`
+// marks the share that already delivered, so the page's shrink
+// reads as deletion — not stranded plays to resurrect.
+function testSnapshotCountFloorHonorsOurTombstone(): void {
+  const current = projInput({
+    recordings: [recording('r-1', [ref('itunes', 't-1')])],
+    playCounts: [
+      {
+        recordingId: 'r-1',
+        count: 10,
+        lastMs: 100,
+        loggedRemote: 7,
+        loggedOurs: 3,
+      },
+    ],
+    deviceId: 'dev-us',
+  });
+  const outcome = applied(
+    fieldEntry('playCount', 'r-1', 'count', 2),
+    [],
+    {
+      kind: 'playCount',
+      recordId: 'r-1',
+      fields: { count: 7, lastMs: 900 },
+      // Our 3 is gone from the log; the peer's 7 remains.
+      sumComponents: { count: { 'peer-x': 7 } },
+    },
+  );
+  const folded = projectAppliedEntries([outcome], current).batch
+    .playCounts?.[0];
+  assertEqual(
+    folded?.count,
+    7,
+    'our tombstoned component stays deleted',
+  );
+  assertEqual(
+    folded?.loggedOurs,
+    0,
+    'the stamp re-anchors at the live share',
+  );
+  assertEqual(
+    projectAppliedEntries([outcome], {
+      ...current,
+      playCounts: folded === undefined ? [] : [folded],
+    }).batch.playCounts?.[0]?.count,
+    7,
+    'replay does not resurrect the deleted share',
+  );
+  // Delete-then-new-play before any fold: the page carries our new
+  // delivered component, so BOTH the old stamp and the new share
+  // come out — stored 11 (10 + the new play), page ours 1 + peer 7
+  // = 8, nothing unsent.
+  const regrown = projInput({
+    recordings: current.recordings,
+    playCounts: [
+      {
+        recordingId: 'r-1',
+        count: 11,
+        lastMs: 100,
+        loggedRemote: 7,
+        loggedOurs: 3,
+      },
+    ],
+    deviceId: 'dev-us',
+  });
+  const regrownOutcome = applied(
+    fieldEntry('playCount', 'r-1', 'count', 3),
+    [],
+    {
+      kind: 'playCount',
+      recordId: 'r-1',
+      fields: { count: 8, lastMs: 950 },
+      sumComponents: { count: { 'dev-us': 1, 'peer-x': 7 } },
+    },
+  );
+  const refolded = projectAppliedEntries([regrownOutcome], regrown)
+    .batch.playCounts?.[0];
+  assertEqual(
+    refolded?.count,
+    8,
+    'a delivered new play does not duplicate over the tombstone',
+  );
+  assertEqual(refolded?.loggedOurs, 1, 'the stamp re-anchors live');
+}
+
+// The baseline keeps plays the log never saw — stranded increments
+// and imported totals — and remote growth between pages can't eat
+// them: stored 300, baseline remote 70, page ours 30 + remote 120.
+function testSnapshotCountFloorsAtLoggedRemote(): void {
+  const current = projInput({
+    recordings: [recording('r-1', [ref('itunes', 't-1')])],
+    playCounts: [
+      { recordingId: 'r-1', count: 300, lastMs: 100, loggedRemote: 70 },
+    ],
+    deviceId: 'dev-us',
+  });
+  const outcome = applied(
+    fieldEntry('playCount', 'r-1', 'count', 3),
+    [],
+    {
+      kind: 'playCount',
+      recordId: 'r-1',
+      fields: { count: 150, lastMs: 900 },
+      sumComponents: { count: { 'dev-us': 30, 'peer-x': 120 } },
+    },
+  );
+  const projected = projectAppliedEntries([outcome], current);
+  const folded = projected.batch.playCounts?.[0];
+  // unsent = 300 - 30 - 70 = 200; merged = 150 + 200 = 350.
+  assertEqual(folded?.count, 350, 'the unsent surplus survives');
+  assertEqual(folded?.loggedRemote, 120, 'the baseline re-anchors');
+  // A row that never stamped a baseline falls back to the
+  // local-count floor — conservative, never over-claims.
+  const legacy = projInput({
+    recordings: current.recordings,
+    playCounts: [
+      { recordingId: 'r-1', count: 11, lastMs: 100, localCount: 5 },
+    ],
+    deviceId: 'dev-us',
+  });
+  const page = applied(
+    fieldEntry('playCount', 'r-1', 'count', 2),
+    [],
+    {
+      kind: 'playCount',
+      recordId: 'r-1',
+      fields: { count: 10, lastMs: 900 },
+      sumComponents: { count: { 'dev-us': 5, 'peer-x': 5 } },
+    },
+  );
+  assertEqual(
+    projectAppliedEntries([page], legacy).batch.playCounts?.[0]
+      ?.count,
+    11,
+    'baseline-less rows keep the bounded local surplus',
+  );
+}
+
 // W98I — several applied outcomes may snapshot the same record; the
 // LAST one in canonical order is the merge truth. Picking the first
 // rewinds the row to a stale generation.
@@ -1545,8 +1761,34 @@ function testUnsyncedWrites(): void {
     return map;
   };
   const synced = syncedMap(allWrites);
-  const none = unsyncedWrites(input, synced);
+  const DEV = 'dev-us';
+  const evidence = (
+    components: Record<
+      string,
+      Record<string, Record<string, number>>
+    > = {},
+    winners: Record<string, Record<string, string>> = {},
+  ): SyncEmitEvidence => ({
+    deviceId: DEV,
+    components: new Map(Object.entries(components)),
+    winners: new Map(Object.entries(winners)),
+  });
+  const none = unsyncedWrites(
+    input,
+    synced,
+    evidence({ 'playCount\u001fr-1': { count: { [DEV]: 5 } } }),
+  );
   assertEqual(none.length, 0, 'fully synced domain emits nothing');
+  // Without per-device evidence a 'sum' write can't prove delivery —
+  // the merged total might be a coincidental remote match — so it
+  // re-emits rather than trusting aggregate equality.
+  assert(
+    unsyncedWrites(input, synced).some(
+      (w) =>
+        w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'a sum write without component evidence re-emits',
+  );
 
   // Recording absent → its field + presence writes re-emit; the
   // still-synced like/playlist/review/count do not.
@@ -1554,7 +1796,10 @@ function testUnsyncedWrites(): void {
   for (const w of recordingUpsertWrites(rec)) {
     withoutRec.delete(`${w.kind}\u001f${w.recordId}`);
   }
-  const onlyRec = unsyncedWrites(input, withoutRec);
+  const coveredEvidence = evidence({
+    'playCount\u001fr-1': { count: { [DEV]: 5 } },
+  });
+  const onlyRec = unsyncedWrites(input, withoutRec, coveredEvidence);
   assert(
     onlyRec.length > 0 && onlyRec.every((w) => !('tombstone' in w)),
     'recovery emits upserts only',
@@ -1580,7 +1825,7 @@ function testUnsyncedWrites(): void {
   const recFields = staleTitle.get(`recording\u001fr-1`);
   assert(recFields !== undefined, 'recording record present');
   recFields['title'] = 'old name';
-  const titleWrites = unsyncedWrites(input, staleTitle);
+  const titleWrites = unsyncedWrites(input, staleTitle, coveredEvidence);
   assertEqual(titleWrites.length, 1, 'one stale field emits one write');
   assert(
     titleWrites[0]?.kind === 'recording' &&
@@ -1600,9 +1845,10 @@ function testUnsyncedWrites(): void {
     'a field the record lacks re-emits',
   );
 
-  // 'sum' delivery can't be proven inside the merged total — remote
-  // coverage above ours hides a lost increment, so only an exact
-  // match suppresses; 'max' still suppresses provably-dead writes.
+  // 'sum' delivery is per-device evidence, not merged equality —
+  // remote coverage above ours hides a lost increment either way,
+  // so an evidence-less pass re-emits; 'max' still suppresses
+  // provably-dead writes.
   const remoteAhead = syncedMap(allWrites);
   remoteAhead.get(`playCount\u001fr-1`)!['count'] = 9;
   assert(
@@ -1621,6 +1867,315 @@ function testUnsyncedWrites(): void {
         w.kind === 'playCount' && 'field' in w && w.field === 'count',
     ),
     'local-ahead sum re-emits the gap',
+  );
+
+  // BUG_0002 — per-device component evidence: a peer component
+  // coincidentally equal to our domain value can't hide a lost
+  // local component, and the re-emit asserts our recovered
+  // component plus the remote share (stamps our plays — never a
+  // sumComponentFor-clamped 0).
+  const countValue = (writes: readonly LocalWrite[]): unknown =>
+    writes.find(
+      (w): w is Extract<LocalWrite, { field: string }> =>
+        w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    )?.value;
+  const fiveEvents = [
+    playEvent('ev-a', 'r-1'),
+    playEvent('ev-b', 'r-1'),
+    playEvent('ev-c', 'r-1'),
+    playEvent('ev-d', 'r-1'),
+    playEvent('ev-e', 'r-1'),
+  ];
+  const playInput = emitInput({
+    playHistory: fiveEvents,
+    playCounts: [{ recordingId: 'r-1', count: 5, lastMs: 9 }],
+  });
+  // Peer-equal: synced total 5 is the peer's, our 5 plays never
+  // reached the log — the 5 domain events carry no synced playEvent
+  // record, so the recovery target is 5 and the emit asserts
+  // 5 + remoteShare(5) = 10 (stamps our 5).
+  const lostPeerEqual = unsyncedWrites(
+    playInput,
+    new Map([['playCount\u001fr-1', { count: 5 }]]),
+    evidence({ 'playCount\u001fr-1': { count: { 'peer-x': 5 } } }),
+  );
+  assertEqual(
+    countValue(lostPeerEqual),
+    10,
+    'peer-equal loss re-emits our component plus the remote share',
+  );
+  // Peer-ahead: synced 9 is the peer's against a stale domain 5 —
+  // the emit asserts 5 + 9 = 14, stamping our 5 rather than the
+  // domain total's clamped 0.
+  const lostPeerAhead = unsyncedWrites(
+    playInput,
+    new Map([['playCount\u001fr-1', { count: 9 }]]),
+    evidence({ 'playCount\u001fr-1': { count: { 'peer-x': 9 } } }),
+  );
+  assertEqual(
+    countValue(lostPeerAhead),
+    14,
+    'peer-ahead loss re-emits the recovered aggregate',
+  );
+  // Covered: our component already accounts for all five of our
+  // events plus the peer's five — nothing re-emits.
+  const covered = unsyncedWrites(
+    emitInput({
+      playHistory: fiveEvents,
+      playCounts: [{ recordingId: 'r-1', count: 10, lastMs: 9 }],
+    }),
+    new Map<string, Record<string, unknown>>([
+      ['playCount\u001fr-1', { count: 10 }],
+      ...fiveEvents.map(
+        (e) => [`playEvent\u001f${e.eventId}`, { event: e }] as const,
+      ),
+    ]),
+    evidence(
+      { 'playCount\u001fr-1': { count: { [DEV]: 5, 'peer-x': 5 } } },
+      Object.fromEntries(
+        fiveEvents.map((e) => [
+          `playEvent\u001f${e.eventId}`,
+          { event: DEV },
+        ]),
+      ),
+    ),
+  );
+  assert(
+    !covered.some(
+      (w) =>
+        w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'a covered component stays suppressed',
+  );
+  // Partial loss: three of our five events delivered (winner is us),
+  // two never emitted — the recovery target outgrows our stamped 3
+  // and the re-emit asserts the true 5.
+  const partial = unsyncedWrites(
+    emitInput({
+      playHistory: fiveEvents,
+      playCounts: [{ recordingId: 'r-1', count: 3, lastMs: 9 }],
+    }),
+    new Map<string, Record<string, unknown>>([
+      ['playCount\u001fr-1', { count: 3 }],
+      ...fiveEvents
+        .slice(0, 3)
+        .map(
+          (e) => [`playEvent\u001f${e.eventId}`, { event: e }] as const,
+        ),
+    ]),
+    evidence(
+      { 'playCount\u001fr-1': { count: { [DEV]: 3 } } },
+      Object.fromEntries(
+        fiveEvents
+          .slice(0, 3)
+          .map((e) => [`playEvent\u001f${e.eventId}`, { event: DEV }]),
+      ),
+    ),
+  );
+  assertEqual(
+    countValue(partial),
+    5,
+    'a partially lost component re-emits the recovered total',
+  );
+
+  // Durable baseline: the event window expired (no playHistory
+  // rows), so events can't prove our lost increment — the
+  // committed localCount still can. Our live component is 4 but
+  // localCount says 5, so the target is 5 and the emit asserts
+  // 5 + remoteShare(9) = 14.
+  const expired = unsyncedWrites(
+    emitInput({
+      playCounts: [
+        { recordingId: 'r-1', count: 13, lastMs: 9, localCount: 5 },
+      ],
+    }),
+    new Map([['playCount\u001fr-1', { count: 13 }]]),
+    evidence({
+      'playCount\u001fr-1': { count: { [DEV]: 4, 'peer-x': 9 } },
+    }),
+  );
+  assertEqual(
+    countValue(expired),
+    14,
+    'a lost increment past the event window re-emits via localCount',
+  );
+
+  // The aggregate-side baseline: count − loggedRemote is our full
+  // intended component — an imported total whose emission failed
+  // re-emits above OUR live share, not just the pending delta
+  // (ours 30 + unsent 200 = 230 > domainEstimate 180 → emit 350).
+  const pending = unsyncedWrites(
+    emitInput({
+      playCounts: [
+        { recordingId: 'r-1', count: 300, lastMs: 9, loggedRemote: 70 },
+      ],
+    }),
+    new Map([['playCount\u001fr-1', { count: 150 }]]),
+    evidence({
+      'playCount\u001fr-1': { count: { [DEV]: 30, 'peer-x': 120 } },
+    }),
+  );
+  assertEqual(
+    countValue(pending),
+    350,
+    'an unsent aggregate re-emits the complete component',
+  );
+
+  // A tombstoned local component is not ours to recover: loggedOurs
+  // above the live share was delivered, then deleted — every
+  // ours-side leg discounts it, so the count write stays
+  // suppressed instead of resurrecting the deleted plays.
+  const deleted = unsyncedWrites(
+    emitInput({
+      playCounts: [
+        {
+          recordingId: 'r-1',
+          count: 10,
+          lastMs: 9,
+          localCount: 3,
+          loggedRemote: 7,
+          loggedOurs: 3,
+        },
+      ],
+    }),
+    new Map([['playCount\u001fr-1', { count: 7 }]]),
+    evidence({
+      'playCount\u001fr-1': { count: { 'peer-x': 7 } },
+    }),
+  );
+  assert(
+    !deleted.some(
+      (w) => w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'a deleted local component does not re-emit',
+  );
+
+  // Delete-then-new-delivered: every leg discounts the old stamp
+  // and the new share is already in the log — target 1, ours 1,
+  // suppressed instead of asserting a duplicated component.
+  const regrownDelivered = unsyncedWrites(
+    emitInput({
+      playCounts: [
+        {
+          recordingId: 'r-1',
+          count: 11,
+          lastMs: 9,
+          localCount: 4,
+          loggedRemote: 7,
+          loggedOurs: 3,
+        },
+      ],
+    }),
+    new Map([['playCount\u001fr-1', { count: 8 }]]),
+    evidence({
+      'playCount\u001fr-1': { count: { [DEV]: 1, 'peer-x': 7 } },
+    }),
+  );
+  assert(
+    !regrownDelivered.some(
+      (w) => w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'a delivered new play does not double-emit over the tombstone',
+  );
+
+  // Same ordering but the new play never delivered: the emit
+  // recovers exactly the stranded share (1) plus the remote 7 = 8.
+  const regrownStranded = unsyncedWrites(
+    emitInput({
+      playCounts: [
+        {
+          recordingId: 'r-1',
+          count: 11,
+          lastMs: 9,
+          localCount: 4,
+          loggedRemote: 7,
+          loggedOurs: 3,
+        },
+      ],
+    }),
+    new Map([['playCount\u001fr-1', { count: 7 }]]),
+    evidence({
+      'playCount\u001fr-1': { count: { 'peer-x': 7 } },
+    }),
+  );
+  assertEqual(
+    countValue(regrownStranded),
+    8,
+    'a stranded new play re-emits over the tombstone',
+  );
+
+  // A remote share at the wire bound fills it — the merge can't
+  // represent any further component, so the write is delivered.
+  const saturatedRemote = unsyncedWrites(
+    playInput,
+    new Map([
+      ['playCount\u001fr-1', { count: Number.MAX_SAFE_INTEGER }],
+    ]),
+    evidence({
+      'playCount\u001fr-1': {
+        count: { 'peer-x': Number.MAX_SAFE_INTEGER },
+      },
+    }),
+  );
+  assert(
+    !saturatedRemote.some(
+      (w) =>
+        w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'a saturated remote share stays suppressed',
+  );
+
+  // target + remoteShare past the bound emits the saturated
+  // aggregate the merge itself would compute.
+  const saturatingEmit = unsyncedWrites(
+    emitInput({
+      playHistory: fiveEvents,
+      playCounts: [{ recordingId: 'r-1', count: 5, lastMs: 9 }],
+    }),
+    new Map([
+      ['playCount\u001fr-1', { count: Number.MAX_SAFE_INTEGER }],
+    ]),
+    evidence({
+      'playCount\u001fr-1': {
+        count: { 'peer-x': Number.MAX_SAFE_INTEGER - 4 },
+      },
+    }),
+  );
+  assertEqual(
+    countValue(saturatingEmit),
+    Number.MAX_SAFE_INTEGER,
+    'target plus remote share saturates at the wire bound',
+  );
+
+  // Near-saturated: once our component is stamped to the headroom
+  // the wire bound leaves, it is delivered — the raw target is
+  // unreachable and the check must not replay it on every boot.
+  const nearSaturated = unsyncedWrites(
+    emitInput({
+      playCounts: [
+        {
+          recordingId: 'r-1',
+          count: Number.MAX_SAFE_INTEGER,
+          lastMs: 9,
+          localCount: 5,
+        },
+      ],
+    }),
+    new Map([
+      ['playCount\u001fr-1', { count: Number.MAX_SAFE_INTEGER }],
+    ]),
+    evidence({
+      'playCount\u001fr-1': {
+        count: { [DEV]: 2, 'peer-x': Number.MAX_SAFE_INTEGER - 2 },
+      },
+    }),
+  );
+  assert(
+    !nearSaturated.some(
+      (w) =>
+        w.kind === 'playCount' && 'field' in w && w.field === 'count',
+    ),
+    'a component stamped to the headroom stays delivered',
   );
 
   // A tombstoned synced record (empty fields) counts as absent —
@@ -1660,7 +2215,7 @@ function testUnsyncedWrites(): void {
   staleSettings.get(`settings\u001f${SETTINGS_RECORD_ID}`)!['theme'] =
     'other';
   assertEqual(
-    unsyncedWrites(input, staleSettings).length,
+    unsyncedWrites(input, staleSettings, coveredEvidence).length,
     1,
     'stale settings field re-emits alone',
   );
@@ -1786,6 +2341,10 @@ export function run(): void {
   testSnapshotSurvivesTombstone();
   testSnapshotEmptyDeletes();
   testSnapshotCountAbsolute();
+  testSnapshotCountFloorHonorsTombstone();
+  testSnapshotCountFloorDeliveredPlays();
+  testSnapshotCountFloorHonorsOurTombstone();
+  testSnapshotCountFloorsAtLoggedRemote();
   testSnapshotNewestWins();
   testProjectMaterialized();
   testProjectMaterializedPending();

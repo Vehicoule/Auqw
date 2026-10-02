@@ -418,6 +418,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
       sessions: 0,
       lastSyncAt,
       engine: engine === undefined ? 'absent' : 'ready',
+      deviceId: engine?.deviceId ?? null,
       name: deviceName,
       fingerprint,
     };
@@ -977,6 +978,7 @@ export function createSyncService(deps: SyncServiceDeps): SyncService {
             sessions: 0,
             lastSyncAt,
             engine: engine === undefined ? 'absent' : 'ready',
+            deviceId: engine?.deviceId ?? null,
             name: deviceName,
             fingerprint,
           };

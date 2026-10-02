@@ -106,6 +106,7 @@ import {
   recordingDeleteWrites,
   recordingUpsertWrites,
 } from '../sync/sync-projection.ts';
+import type { SyncEmitEvidence } from '../sync/sync-projection.ts';
 import type {
   LocalWrite,
   MaterializedRecord,
@@ -1369,8 +1370,13 @@ export class Session {
   applySyncedEntries(
     outcomes: readonly MergeOutcome[],
     signal?: CancellationSignal,
+    deviceId?: string,
   ): Promise<Result<SyncApplyReport>> {
-    return this.#syncIngress.applySyncedEntries(outcomes, signal);
+    return this.#syncIngress.applySyncedEntries(
+      outcomes,
+      signal,
+      deviceId,
+    );
   }
 
   /**
@@ -1384,8 +1390,13 @@ export class Session {
   applyMaterializedEntries(
     records: readonly MaterializedRecord[],
     signal?: CancellationSignal,
+    deviceId?: string,
   ): Promise<Result<SyncApplyReport>> {
-    return this.#syncIngress.applyMaterializedEntries(records, signal);
+    return this.#syncIngress.applyMaterializedEntries(
+      records,
+      signal,
+      deviceId,
+    );
   }
 
   /**
@@ -1400,8 +1411,9 @@ export class Session {
    */
   emitUnsynced(
     synced: ReadonlyMap<string, Record<string, unknown>>,
+    evidence?: SyncEmitEvidence,
   ): Promise<void> {
-    return this.#syncIngress.emitUnsynced(synced);
+    return this.#syncIngress.emitUnsynced(synced, evidence);
   }
 
   // ---- restore ----------------------------------------------------

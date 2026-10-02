@@ -382,6 +382,60 @@ async function playCountMerge(): Promise<void> {
   );
 }
 
+async function materializeEvidence(): Promise<void> {
+  const a = await makeEngine('a');
+  // Materialize carries per-device 'sum' components + 'lww' winner
+  // attribution next to the merged fields — the evidence unsyncedWrites
+  // needs to prove (or disprove) that our share reached the log.
+  await mustWrite(a.engine, {
+    kind: 'playCount',
+    recordId: 'r1',
+    field: 'count',
+    value: 5,
+  });
+  await mustWrite(a.engine, {
+    kind: 'recording',
+    recordId: 'r1',
+    field: 'title',
+    value: 'ours',
+  });
+  await mustApply(
+    a.engine,
+    delta(
+      [
+        rawEntry('playCount', 'r1', 'count', 9, { l: 9_000, c: 0 }, 'b'),
+        rawEntry('recording', 'r1', 'title', 'theirs', { l: 9_000, c: 1 }, 'b'),
+      ],
+      'b',
+    ),
+  );
+  const count = a.engine
+    .materialize()
+    .find((r) => r.kind === 'playCount' && r.recordId === 'r1');
+  assertDeepEqual(count?.fields, { count: 14 });
+  assertDeepEqual(count?.sumComponents, { count: { a: 5, b: 9 } });
+  // 'sum' fields carry no winner attribution — the key stays absent.
+  assertEqual(count?.winnerDeviceIds, undefined);
+  const rec = a.engine
+    .materialize()
+    .find((r) => r.kind === 'recording' && r.recordId === 'r1');
+  // No 'sum' fields → no components key; 'lww' winners attribute.
+  assertEqual(rec?.sumComponents, undefined);
+  assertDeepEqual(rec?.winnerDeviceIds, { title: 'b' });
+  // A tombstoned record materializes with no attribution at all.
+  const gone = await makeEngine('gone');
+  await mustApply(
+    gone.engine,
+    delta([rawTombstone('recording', 'x', { l: 5, c: 0 })]),
+  );
+  const tombstoned = gone.engine
+    .materialize()
+    .find((r) => r.kind === 'recording' && r.recordId === 'x');
+  assertDeepEqual(tombstoned?.fields, {});
+  assertEqual(tombstoned?.sumComponents, undefined);
+  assertEqual(tombstoned?.winnerDeviceIds, undefined);
+}
+
 async function tombstoneRules(): Promise<void> {
   const b = await makeEngine('b');
   const write = rawEntry('recording', 'r1', 'title', 'Song', {
@@ -1222,7 +1276,13 @@ function expectedTombstones(
 /** Reference materialize straight from the entry set. */
 function expectedMaterialize(
   entries: readonly ChangeEntry[],
-): { kind: string; recordId: string; fields: Record<string, unknown> }[] {
+): {
+  kind: string;
+  recordId: string;
+  fields: Record<string, unknown>;
+  sumComponents?: Record<string, Record<string, number>>;
+  winnerDeviceIds?: Record<string, string>;
+}[] {
   const partitionWinners = expectedLiveWinners(entries);
   const slotWinners = new Map<string, ChangeEntry[]>();
   for (const winner of partitionWinners.values()) {
@@ -1236,7 +1296,13 @@ function expectedMaterialize(
   }
   const byRecord = new Map<
     string,
-    { kind: string; recordId: string; fields: Record<string, unknown> }
+    {
+      kind: string;
+      recordId: string;
+      fields: Record<string, unknown>;
+      sumComponents?: Record<string, Record<string, number>>;
+      winnerDeviceIds?: Record<string, string>;
+    }
   >();
   // materialize() reports every record the merge ever saw — a winning
   // tombstone leaves an empty-field row that means 'synced then
@@ -1271,6 +1337,20 @@ function expectedMaterialize(
       byRecord.set(key, rec);
     }
     rec.fields[first.field] = value;
+    // The evidence keys the engine carries next to the merged
+    // fields: per-device components for 'sum', the winning device
+    // for 'lww' — absent entirely when a record has neither.
+    if (merge === 'sum') {
+      rec.sumComponents ??= {};
+      const cell: Record<string, number> = {};
+      for (const winner of parts) {
+        cell[winner.deviceId] = winner.value as number;
+      }
+      rec.sumComponents[first.field] = cell;
+    } else if (merge === 'lww') {
+      rec.winnerDeviceIds ??= {};
+      rec.winnerDeviceIds[first.field] = first.deviceId;
+    }
   }
   const out = [...byRecord.values()];
   const grouped = new Set([
@@ -1593,7 +1673,12 @@ async function sumWriteAssertsAggregate(): Promise<void> {
   );
   assertDeepEqual(
     baseOutcome?.type === 'applied' ? baseOutcome.record : undefined,
-    { kind: 'playCount', recordId: 'r1', fields: { count: 5 } },
+    {
+      kind: 'playCount',
+      recordId: 'r1',
+      fields: { count: 5 },
+      sumComponents: { count: { a: 5 } },
+    },
     'applied outcome carries materialized snapshot',
   );
   // b merged a's 5. b asserts aggregate 8 → its component stamps 3.
@@ -1807,6 +1892,44 @@ async function materializedFieldValidation(): Promise<void> {
       ),
     ),
     'a wire __proto__ field misses the whitelist, not crashes',
+  );
+  // Optional evidence keys: valid shapes pass, malformed ones fail.
+  assert(
+    isMaterializedRecord({
+      kind: 'playCount',
+      recordId: 'r1',
+      fields: { count: 14 },
+      sumComponents: { count: { a: 5, b: 9 } },
+      winnerDeviceIds: { lastMs: 'b' },
+    }),
+    'well-formed evidence keys pass',
+  );
+  assert(
+    !isMaterializedRecord({
+      kind: 'recording',
+      recordId: 'r1',
+      fields: { title: 'ok' },
+      sumComponents: 'not-an-object',
+    }),
+    'a non-object sumComponents is rejected',
+  );
+  assert(
+    !isMaterializedRecord({
+      kind: 'recording',
+      recordId: 'r1',
+      fields: { title: 'ok' },
+      sumComponents: { title: { a: -1 } },
+    }),
+    'a negative component value is rejected',
+  );
+  assert(
+    !isMaterializedRecord({
+      kind: 'recording',
+      recordId: 'r1',
+      fields: { title: 'ok' },
+      winnerDeviceIds: { title: 42 },
+    }),
+    'a non-string winner device is rejected',
   );
 }
 
@@ -2736,6 +2859,46 @@ async function peerMarkSenderNamedProto(): Promise<void> {
   assertDeepEqual(a.store.storedPeerMarks['__proto__'], { a: 1 });
 }
 
+async function materializeProtoNamedDeviceComponents(): Promise<void> {
+  const a = await makeEngine('a');
+  // Prototype-named device ids must accumulate as DATA — a plain-
+  // record read on '__proto__' returns the inherited prototype and
+  // NaNs the component, and the legacy setter silently drops it.
+  await mustApply(
+    a.engine,
+    delta(
+      [
+        rawEntry('playCount', 'r1', 'count', 9, { l: 9_000, c: 0 }, '__proto__'),
+      ],
+      '__proto__',
+    ),
+  );
+  await mustApply(
+    a.engine,
+    delta(
+      [
+        rawEntry(
+          'playCount',
+          'r1',
+          'count',
+          4,
+          { l: 9_001, c: 0 },
+          'constructor',
+        ),
+      ],
+      'constructor',
+    ),
+  );
+  const count = a.engine
+    .materialize()
+    .find((r) => r.kind === 'playCount' && r.recordId === 'r1');
+  const expected = Object.create(null) as Record<string, number>;
+  expected['__proto__'] = 9;
+  expected['constructor'] = 4;
+  assertDeepEqual(count?.sumComponents, { count: expected });
+  assertDeepEqual(count?.fields, { count: 13 });
+}
+
 async function forgedSenderDeviceIdRejected(): Promise<void> {
   const a = await makeEngine('a', 1_000);
   // The doc's sender stamp is the sender's claim; the transport id
@@ -2970,6 +3133,7 @@ export async function run(): Promise<void> {
   await materializeIncludesTombstones();
   await materializeParentsFirst();
   await materializedFieldValidation();
+  await materializeEvidence();
   await restoreLoserSumComponent();
   await expiredHistoryPagination();
   await relayedSkipListing();
@@ -3000,6 +3164,7 @@ export async function run(): Promise<void> {
   await livePeerRegressionReplacesRow();
   await peerMarkClaimOnlyDeltaNoops();
   await peerMarkSenderNamedProto();
+  await materializeProtoNamedDeviceComponents();
   await forgedSenderDeviceIdRejected();
   await propertyHarness();
 }

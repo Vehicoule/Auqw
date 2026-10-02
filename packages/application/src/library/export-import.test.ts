@@ -169,7 +169,16 @@ const SEEDED: PersistedState = persisted({
       listenedMs: 200_000,
     },
   ],
-  playCounts: [{ recordingId: 'r1', count: 3, lastMs: 50 }],
+  playCounts: [
+    {
+      recordingId: 'r1',
+      count: 3,
+      lastMs: 50,
+      localCount: 3,
+      loggedRemote: 2,
+      loggedOurs: 1,
+    },
+  ],
   matchReviews: [],
 });
 
@@ -317,6 +326,54 @@ async function applyReplaces(): Promise<void> {
   assertDeepEqual(loaded.value.likes, SEEDED.likes);
   assertDeepEqual(loaded.value.playlists, SEEDED.playlists);
   assertDeepEqual(loaded.value.playlistEntries, SEEDED.playlistEntries);
+  // An imported document's plays were committed elsewhere — the
+  // doc's baseline never transfers, or the importer would claim
+  // foreign plays as its own 'sum' component.
+  assertDeepEqual(loaded.value.playCounts, [
+    { recordingId: 'r1', count: 3, lastMs: 50 },
+  ]);
+
+  // The baseline this device already holds survives the import —
+  // re-importing our own export (or any doc naming a recording we
+  // committed plays for) keeps the honest component; only foreign
+  // counts are stripped.
+  const rebased = new FakeStorage(
+    persisted({
+      playCounts: [
+        {
+          recordingId: 'r1',
+          count: 9,
+          lastMs: 1,
+          localCount: 4,
+          loggedRemote: 5,
+          loggedOurs: 1,
+        },
+      ],
+    }),
+  );
+  const reapplied = await applyImport(
+    rebased,
+    exported.value.doc,
+    ctx().context,
+  );
+  assert(reapplied.ok, 'rebase apply resolves');
+  const reloaded = await rebased.load(ctx().context);
+  assert(reloaded.ok);
+  // The imported merged count can't sit below the retained
+  // component — the log still carries our stamped 4, so the floor
+  // is max(doc count, baseline), not the doc's 3.
+  // Both baselines are this device's own — the log side survives
+  // alongside the local side; foreign values strip either way.
+  assertDeepEqual(reloaded.value.playCounts, [
+    {
+      recordingId: 'r1',
+      count: 4,
+      lastMs: 50,
+      localCount: 4,
+      loggedRemote: 5,
+      loggedOurs: 1,
+    },
+  ]);
 }
 
 // 5. Session import: valid document applies and rehydrates the session.

@@ -17,6 +17,12 @@ import type { Result } from '../errors.ts';
  */
 export interface SyncEnginePort {
   /**
+   * The engine's own device identity — the attribution id its locally
+   * committed entries carry. Recovery passes it to consumers that must
+   * tell "our share landed" apart from a coincidental merged value.
+   */
+  readonly deviceId: string;
+  /**
    * Emit the delta document covering everything the engine knows after
    * `since`; an empty `since` means a full snapshot.
    */

@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 12;
+export const CURRENT_SCHEMA_VERSION = 14;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -414,6 +414,38 @@ const MIGRATION_12: readonly string[] = [
 )`,
 ];
 
+/**
+ * v12 -> v13: `play_counts.local_count` — this device's own committed
+ * play total, durable next to the merged `count`. Emit recovery reads
+ * it as the intended sync component: the merged total and the bounded
+ * play-event window both fail to prove a lost local increment once
+ * events expire or a remote share lands ahead of projection. NULL on
+ * rows written before the column existed — the baseline is unknown
+ * there, not zero.
+ */
+const MIGRATION_13: readonly string[] = [
+  `ALTER TABLE play_counts ADD COLUMN local_count INTEGER CHECK (local_count >= 0)`,
+];
+
+/**
+ * v13 -> v14: `play_counts.logged_remote` + `play_counts.logged_ours`
+ * — the remote devices' combined share and this device's own
+ * component the sync log last materialized for the row.
+ * `count - max(ourComponent, logged_ours) - logged_remote` is the
+ * device's unsent play evidence (stranded local plays, imported
+ * totals), durable beside `count`: projection preserves exactly
+ * that surplus on absolute writes instead of losing it,
+ * double-counting plays that already delivered, or resurrecting
+ * components a tombstone deleted — the `logged_ours` leg keeps a
+ * deleted local component from masquerading as unsent. NULL on
+ * rows that never took an absolute count write — the baselines are
+ * unknown there, not zero.
+ */
+const MIGRATION_14: readonly string[] = [
+  `ALTER TABLE play_counts ADD COLUMN logged_remote INTEGER CHECK (logged_remote >= 0)`,
+  `ALTER TABLE play_counts ADD COLUMN logged_ours INTEGER CHECK (logged_ours >= 0)`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
@@ -428,6 +460,8 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_10]),
   Object.freeze([...MIGRATION_11]),
   Object.freeze([...MIGRATION_12]),
+  Object.freeze([...MIGRATION_13]),
+  Object.freeze([...MIGRATION_14]),
 ]);
 
 const CREATED_OBJECT_NAME =

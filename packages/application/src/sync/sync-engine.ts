@@ -13,6 +13,7 @@ import type {
 } from '../domain.ts';
 import {
   hasExactKeys,
+  hasKeys,
   isEntityRef,
   isFiniteNumber,
   isLike,
@@ -429,6 +430,21 @@ export type MaterializedRecord = {
   readonly kind: SyncRecordKind;
   readonly recordId: string;
   readonly fields: Readonly<Record<string, unknown>>;
+  /**
+   * 'sum' fields only: the live per-device components the merged
+   * `fields` value flattens — field → deviceId → that device's
+   * largest live value. The merged total can't separate our share
+   * from remote coverage, so delivery evidence (boot-emit recovery)
+   * has to be read out of this breakdown.
+   */
+  readonly sumComponents?: Readonly<
+    Record<string, Readonly<Record<string, number>>>
+  >;
+  /**
+   * field → the winning entry's deviceId — mint attribution for
+   * event-shaped records (which device a `playEvent` came from).
+   */
+  readonly winnerDeviceIds?: Readonly<Record<string, string>>;
 };
 
 // ---- persistence seam -----------------------------------------------------
@@ -916,10 +932,43 @@ export function isMaterializedRecord(
 ): value is MaterializedRecord {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ['kind', 'recordId', 'fields']) ||
+    !hasKeys(
+      value,
+      ['kind', 'recordId', 'fields'],
+      ['sumComponents', 'winnerDeviceIds'],
+    ) ||
     !isSyncRecordKind(value['kind']) ||
     !isString(value['recordId'], MAX_RECORD_ID) ||
     !isRecord(value['fields'])
+  ) {
+    return false;
+  }
+  const sumComponents = value['sumComponents'];
+  if (sumComponents !== undefined) {
+    if (!isRecord(sumComponents)) {
+      return false;
+    }
+    const perDeviceOk = Object.entries(sumComponents).every(
+      ([field, perDevice]) =>
+        field.length <= MAX_FIELD &&
+        isRecord(perDevice) &&
+        Object.entries(perDevice).every(
+          ([dev, component]) =>
+            isString(dev, MAX_DEVICE_ID) && isSafeNonNegative(component),
+        ),
+    );
+    if (!perDeviceOk) {
+      return false;
+    }
+  }
+  const winnerDeviceIds = value['winnerDeviceIds'];
+  if (
+    winnerDeviceIds !== undefined &&
+    (!isRecord(winnerDeviceIds) ||
+      !Object.entries(winnerDeviceIds).every(
+        ([field, dev]) =>
+          field.length <= MAX_FIELD && isString(dev, MAX_DEVICE_ID),
+      ))
   ) {
     return false;
   }
@@ -2690,7 +2739,10 @@ export async function createSyncEngine(
   function fieldsOf(
     record: RecordState | undefined,
   ): Record<string, unknown> {
-    const fields: Record<string, unknown> = {};
+    // Null-prototype maps: field names and device ids come from log
+    // entries, and a '__proto__' key must store, not invoke the
+    // legacy prototype setter or read an inherited member.
+    const fields: Record<string, unknown> = Object.create(null);
     if (record !== undefined) {
       for (const [field, cell] of record.fields) {
         fields[field] = cell.value;
@@ -2699,12 +2751,74 @@ export async function createSyncEngine(
     return fields;
   }
 
+  /**
+   * Live per-device components of 'sum' fields — the per-partition
+   * frontier `fields` flattens into the merged total.
+   */
+  function sumComponentsOf(
+    record: RecordState,
+  ): Record<string, Record<string, number>> | undefined {
+    let out: Record<string, Record<string, number>> | undefined;
+    for (const [field, cell] of record.fields) {
+      if (syncFieldRule(record.kind, field)?.merge !== 'sum') {
+        continue;
+      }
+      const perDevice: Record<string, number> = Object.create(null);
+      for (const entry of cell.live) {
+        if (typeof entry.value !== 'number') {
+          continue;
+        }
+        const cur = perDevice[entry.deviceId];
+        perDevice[entry.deviceId] =
+          cur === undefined ? entry.value : Math.max(cur, entry.value);
+      }
+      if (Object.keys(perDevice).length > 0) {
+        (out ??= Object.create(null))[field] = perDevice;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The full materialized shape for one record — merged fields plus
+   * the per-device evidence views (`undefined` record is the
+   * not-yet-synced shape: fields only, all empty).
+   */
+  function materializedOf(
+    kind: ChangeEntry['kind'],
+    record: RecordState | undefined,
+  ): {
+    readonly fields: Record<string, unknown>;
+    readonly sumComponents?: Record<string, Record<string, number>>;
+    readonly winnerDeviceIds?: Record<string, string>;
+  } {
+    const fields = fieldsOf(record);
+    if (record === undefined) {
+      return { fields };
+    }
+    const winnerDeviceIds: Record<string, string> = Object.create(null);
+    for (const [field, cell] of record.fields) {
+      if (syncFieldRule(kind, field)?.merge === 'lww') {
+        winnerDeviceIds[field] = cell.winner.deviceId;
+      }
+    }
+    const sumComponents = sumComponentsOf(record);
+    return {
+      fields,
+      ...(sumComponents !== undefined ? { sumComponents } : {}),
+      ...(Object.keys(winnerDeviceIds).length > 0
+        ? { winnerDeviceIds }
+        : {}),
+    };
+  }
+
   /** The record's surviving field set as the merge currently sees it. */
   function recordSnapshot(entry: ChangeEntry): MaterializedRecord {
     return {
       kind: entry.kind,
       recordId: entry.recordId,
-      fields: fieldsOf(
+      ...materializedOf(
+        entry.kind,
         records.get(`${entry.kind}${KEY_SEP}${entry.recordId}`),
       ),
     };
@@ -2760,7 +2874,7 @@ export async function createSyncEngine(
       out.push({
         kind: record.kind,
         recordId: record.recordId,
-        fields: fieldsOf(record),
+        ...materializedOf(record.kind, record),
       });
     }
     out.sort((a, b) => {

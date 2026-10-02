@@ -128,6 +128,7 @@ export function run(): void {
   assertEqual(s.playHistory[0]?.listenedMs, 150_000);
   assertEqual(s.playCounts.length, 1);
   assertEqual(s.playCounts[0]?.count, 1);
+  assertEqual(s.playCounts[0]?.localCount, 1);
   assertEqual(s.playCounts[0]?.lastMs, 1_000);
   assertPersistable(s, [recording('rA')]);
 
@@ -138,7 +139,22 @@ export function run(): void {
   );
   assert(s.recorded);
   assertEqual(s.playCounts[0]?.count, 2);
+  assertEqual(s.playCounts[0]?.localCount, 2);
   assertEqual(s.playCounts[0]?.lastMs, 2_000);
+
+  // A row folded from remote plays (no localCount yet) starts the
+  // baseline at our first committed play — not at the merged count.
+  const folded: PlaySections = {
+    playHistory: [],
+    playCounts: [{ recordingId: 'rF', count: 9, lastMs: 8_000 }],
+  };
+  const firstLocal = recordPlay(
+    folded,
+    input('ev-f1', 'rF', 'occ-f1', 150_000, 300_000, 9_000),
+  );
+  assert(firstLocal.recorded);
+  assertEqual(firstLocal.playCounts[0]?.count, 10);
+  assertEqual(firstLocal.playCounts[0]?.localCount, 1);
 
   // The same occurrence never counts twice.
   const dup = recordPlay(

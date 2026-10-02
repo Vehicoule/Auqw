@@ -569,6 +569,8 @@ export const isSyncStatusResult = v.object({
   sessions: v.int(),
   lastSyncAt: v.nullable(v.finite()),
   engine: v.literals('ready', 'absent'),
+  /** The local device's sync identity — null while the engine is absent. */
+  deviceId: v.nullable(v.boundedString(128)),
   name: v.boundedString(128),
   fingerprint: v.nullable(v.boundedString(128)),
 });

@@ -15,7 +15,10 @@ import {
   projectMaterialized,
   unsyncedWrites,
 } from '../sync/sync-projection.ts';
-import type { SyncProjectionInput } from '../sync/sync-projection.ts';
+import type {
+  SyncEmitEvidence,
+  SyncProjectionInput,
+} from '../sync/sync-projection.ts';
 import { utf8ByteLength } from '../utf8.ts';
 import type { ProviderCapability } from '../ports/provider.ts';
 import type { StorageBatch, StoragePort } from '../ports/storage.ts';
@@ -422,8 +425,9 @@ export class SyncIngress {
   async applySyncedEntries(
     outcomes: readonly MergeOutcome[],
     signal?: CancellationSignal,
+    deviceId?: string,
   ): Promise<Result<SyncApplyReport>> {
-    return this.#runSyncApply(outcomes, APPLIED_LANE, signal);
+    return this.#runSyncApply(outcomes, APPLIED_LANE, signal, deviceId);
   }
 
   /**
@@ -437,8 +441,9 @@ export class SyncIngress {
   async applyMaterializedEntries(
     records: readonly MaterializedRecord[],
     signal?: CancellationSignal,
+    deviceId?: string,
   ): Promise<Result<SyncApplyReport>> {
-    return this.#runSyncApply(records, MATERIALIZED_LANE, signal);
+    return this.#runSyncApply(records, MATERIALIZED_LANE, signal, deviceId);
   }
 
   /**
@@ -452,6 +457,7 @@ export class SyncIngress {
     fresh: readonly T[],
     lane: SyncApplyLane<T>,
     signal?: CancellationSignal,
+    deviceId?: string,
   ): Promise<Result<SyncApplyReport>> {
     const ready = this.#host.requireReady();
     if (!ready.ok) {
@@ -509,6 +515,7 @@ export class SyncIngress {
               localFiles: input.localFiles,
               queue: r.queue.snapshot(),
               settings: r.settings,
+              deviceId,
             });
           let projection = project(loaded.value);
           // Spread lifts the readonly section map — the settings
@@ -585,6 +592,7 @@ export class SyncIngress {
    */
   async emitUnsynced(
     synced: ReadonlyMap<string, Record<string, unknown>>,
+    evidence?: SyncEmitEvidence,
   ): Promise<void> {
     const r = this.#host.ready();
     if (r === null || this.#sync === undefined) {
@@ -608,6 +616,7 @@ export class SyncIngress {
         unsyncedWrites(
           { ...syncEmitInput(r), matchReviews },
           synced,
+          evidence,
         ),
       );
       // Survivors of a ready generation swap still owe tombstones —

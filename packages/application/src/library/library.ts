@@ -86,6 +86,38 @@ export type PlayCount = {
   recordingId: string;
   count: number;
   lastMs: number;
+  /**
+   * This device's own committed play total — `count` merges remote
+   * plays in, `localCount` counts only what this device committed.
+   * Emit recovery uses it as the durable intended 'sum' component:
+   * the merged total can't attribute shares, and the play-event
+   * window expires, so neither proves a lost local increment.
+   * Absent on rows written before the baseline existed (and on rows
+   * folded from remote plays the device never committed locally).
+   */
+  localCount?: number;
+  /**
+   * The remote devices' combined share the sync log last
+   * materialized for this row. `count - ourComponent - loggedRemote`
+   * is exactly this device's unsent play evidence: local plays
+   * stranded before emission, imported totals the wire never saw —
+   * while the same surplus over the raw count alone couldn't be
+   * told apart from components a tombstone deleted or plays that
+   * already delivered. Absolute pages stamp it and delta folds
+   * advance it by the remote increment. Absent on rows that never
+   * took an absolute count write.
+   */
+  loggedRemote?: number;
+  /**
+   * This device's own component the sync log last materialized.
+   * Pairing it with `loggedRemote` splits a tombstoned local
+   * component from unsent evidence: when the log shrinks our share
+   * below this stamp the deleted plays were already delivered —
+   * `max(ourComponent, loggedOurs)` keeps them out of the unsent
+   * surplus instead of resurrecting them on every reconcile.
+   * Stamped beside `loggedRemote`; absent on the same rows.
+   */
+  loggedOurs?: number;
 };
 
 /** A candidate frozen at review time for later confirmation. */
@@ -325,12 +357,20 @@ export function isPlayEvent(value: unknown): value is PlayEvent {
 
 export function isPlayCount(value: unknown): value is PlayCount {
   if (!isRecord(value)) return false;
-  const { recordingId, count, lastMs } = value;
+  const { recordingId, count, lastMs, localCount, loggedRemote, loggedOurs } =
+    value;
   return (
-    hasExactKeys(value, ['recordingId', 'count', 'lastMs']) &&
+    hasKeys(
+      value,
+      ['recordingId', 'count', 'lastMs'],
+      ['localCount', 'loggedRemote', 'loggedOurs'],
+    ) &&
     isString(recordingId, 64) &&
     isSafeNonNegative(count) &&
-    isSafeNonNegative(lastMs)
+    isSafeNonNegative(lastMs) &&
+    (localCount === undefined || isSafeNonNegative(localCount)) &&
+    (loggedRemote === undefined || isSafeNonNegative(loggedRemote)) &&
+    (loggedOurs === undefined || isSafeNonNegative(loggedOurs))
   );
 }
 
