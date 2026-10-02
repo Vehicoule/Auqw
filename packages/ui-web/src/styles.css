@@ -21,8 +21,9 @@
   color-scheme: dark;
   /* Matches titleBarOverlay.height in apps/desktop main/index.ts —
      reserves the strip the window-control overlay draws over (and the
-     macOS traffic lights inset into). */
-  --uw-titlebar-h: 40px;
+     macOS traffic lights inset into). Taller than a toolbar — the
+     strip is the shell's header, so the controls get air. */
+  --uw-titlebar-h: 56px;
   -webkit-user-select: none;
   /* Hover affordance — a faint wash at roughly half the accentSoft
      selected fill, derived from the SAME source so hover always reads
@@ -3019,7 +3020,11 @@
   display: flex;
   height: 100%;
   min-height: 0;
-  background: var(--canvas);
+  /* The shell sits a step below the world's canvas so the world card
+     reads as raised even with no art bleed — the depth comes from the
+     surface ramp, not shadows. OLED keeps both black (its language is
+     outlined, not elevated). */
+  background: var(--deep);
   position: relative;
   /* the stage column's narrow-overlay breakpoint queries this width */
   container-type: inline-size;
@@ -3036,7 +3041,6 @@
   flex-direction: column;
   min-height: 0;
   background: var(--deep);
-  border-right: var(--stroke-hairline) solid var(--hairline);
 }
 .uw-chrome[data-stage='closed'] .uw-stage-col {
   display: none;
@@ -3067,12 +3071,11 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* The world is a floating card inset from the shell — the art
+  /* The world is a floating card framed on all four sides — the art
      bleed frames it; the card edge is what the stage art dissolves
      under. */
   position: relative;
   margin: var(--spacing-sm);
-  margin-left: 0;
   border-radius: var(--radius-float);
   background: var(--canvas);
   border: var(--stroke-hairline) solid var(--hairline);
@@ -3099,15 +3102,14 @@
 .uw-wintint {
   position: absolute;
   inset: 0;
-  background: color-mix(in srgb, var(--canvas) 52%, transparent);
+  background: color-mix(in srgb, var(--deep) 52%, transparent);
   pointer-events: none;
 }
 .ui-web.t-oled .uw-wintint {
-  background: color-mix(in srgb, var(--canvas) 74%, transparent);
+  background: color-mix(in srgb, var(--deep) 74%, transparent);
 }
 .uw-chrome[data-bleed='art'] .uw-stage-col {
   background: transparent;
-  border-right-color: transparent;
 }
 .uw-chrome[data-bleed='art'] .uw-stage--immersive {
   background: transparent;
@@ -3176,7 +3178,7 @@
 /* One control height across the strip — field, icon buttons, chips
    (design.md's header-bar rule). */
 .uw-world-bar {
-  --uw-bar-control-h: 32px;
+  --uw-bar-control-h: 34px;
 }
 
 .uw-world-bar .uw-chip {
