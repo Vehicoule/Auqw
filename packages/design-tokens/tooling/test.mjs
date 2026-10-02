@@ -81,7 +81,7 @@ const SPACING = {
   xxxl: 32,
   display: 48,
 };
-const RADIUS = { frame: 0, control: 8, float: 16, thumb: 5, pill: 999 };
+const RADIUS = { frame: 0, control: 8, card: 12, float: 16, thumb: 5, pill: 999 };
 const SIZES = {
   trackRow: 50,
   touch: 44,
@@ -97,14 +97,14 @@ const FAMILIES = {
   bold: 'Inter_700Bold',
 };
 const STYLES = {
-  display: { fontSize: 20, lineHeight: 24, fontFamily: 'bold' },
-  title: { fontSize: 16, lineHeight: 20, fontFamily: 'bold' },
-  heading: { fontSize: 13, lineHeight: 17, fontFamily: 'bold' },
-  body: { fontSize: 12, lineHeight: 17, fontFamily: 'medium' },
-  metadata: { fontSize: 10, lineHeight: 14, fontFamily: 'regular' },
+  display: { fontSize: 22, lineHeight: 26, fontFamily: 'bold' },
+  title: { fontSize: 17, lineHeight: 22, fontFamily: 'bold' },
+  heading: { fontSize: 15, lineHeight: 19, fontFamily: 'bold' },
+  body: { fontSize: 14, lineHeight: 19, fontFamily: 'medium' },
+  metadata: { fontSize: 12.5, lineHeight: 17, fontFamily: 'regular' },
   label: {
-    fontSize: 10,
-    lineHeight: 14,
+    fontSize: 12.5,
+    lineHeight: 17,
     fontFamily: 'bold',
     letterSpacing: 1.2,
   },
