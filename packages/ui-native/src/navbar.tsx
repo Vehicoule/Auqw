@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Platform, View } from 'react-native';
 import type { LayoutChangeEvent } from 'react-native';
 import { BlurView } from 'expo-blur';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
@@ -82,6 +83,7 @@ export function FloatingNavbar({
   onSelect,
 }: NavbarProps) {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   // One selection mark, not per-slot fills — the accent pill is a
   // single element that glides between slots (the seg indicator's
   // treatment on the dock). Equal flex:1 slots make the target x a
@@ -120,7 +122,9 @@ export function FloatingNavbar({
           backgroundColor: theme.colors.deep,
           flexDirection: 'row',
           paddingTop: theme.spacing.sm,
-          paddingBottom: 10,
+          // The bar is an overlay, not a layout slot — it must carry
+          // the gesture-nav inset itself (the deep surface runs under it).
+          paddingBottom: 10 + insets.bottom,
         }}
       >
         {rowW > 0 && pillW > 0 && foundIndex >= 0 && (
