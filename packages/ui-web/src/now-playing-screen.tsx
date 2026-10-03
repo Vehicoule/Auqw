@@ -167,6 +167,7 @@ export function ModeSegment({
       ariaLabel={t('stage.modeTabsA11y')}
       tabs={tabs}
       iconSize={12}
+      numberOfLines={1}
     />
   );
 }

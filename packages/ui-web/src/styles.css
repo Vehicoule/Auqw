@@ -2884,6 +2884,8 @@
   position: relative;
   z-index: 1;
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;

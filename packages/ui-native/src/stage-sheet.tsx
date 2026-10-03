@@ -383,6 +383,9 @@ function ModeSegmentPill({
           <Text
             variant="metadata"
             color={tab.active ? (m3e ? 'accent' : 'bright') : 'secondary'}
+            numberOfLines={1}
+            adjustsFontSizeToFit
+            minimumFontScale={0.8}
             style={[tab.active && { fontFamily: theme.fontFamilies.bold }]}
           >
             {tab.label}
