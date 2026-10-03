@@ -147,7 +147,7 @@ export function run(): void {
   assert(!isTrackMetadata({ ...META, storefront: 'USA' }));
   assert(!isTrackMetadata({ ...META, storefront: 'U1' }));
 
-  // ABI 0.3.0 optional evidence: entity refs and isrc may be absent
+  // ABI 0.1.0 optional evidence: entity refs and isrc may be absent
   // or null, but a malformed value rejects the record.
   const artistRef = { provider: 'deezer', kind: 'artist' as const, id: 'x' };
   assert(

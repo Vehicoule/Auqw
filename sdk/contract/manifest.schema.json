@@ -24,9 +24,7 @@
     },
     "abi": {
       "enum": [
-        "0.1.0",
-        "0.2.0",
-        "0.3.0"
+        "0.1.0"
       ]
     },
     "capabilities": {
@@ -73,57 +71,5 @@
         }
       }
     }
-  },
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "abi": {
-            "const": "0.1.0"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "capabilities": {
-            "items": {
-              "enum": [
-                "playback.resolve"
-              ]
-            }
-          },
-          "permissions": {
-            "items": {
-              "type": "string",
-              "pattern": "^(network:(\\*\\.)?[a-z0-9.-]+|pot-provider)$"
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "abi": {
-            "const": "0.2.0"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "capabilities": {
-            "items": {
-              "enum": [
-                "catalog.search",
-                "catalog.metadata",
-                "catalog.artwork",
-                "playback.resolve",
-                "playback.candidates"
-              ]
-            }
-          }
-        }
-      }
-    }
-  ]
+  }
 }

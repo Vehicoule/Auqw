@@ -51,9 +51,9 @@ fn manifest_for_abi(wasm: &[u8], abi: &str, permissions: &[&str]) -> Manifest {
     ok(Manifest::from_json(&text))
 }
 
-/// ABI 0.2 manifest.
+/// Default manifest — the one shipped ABI.
 fn manifest_for(wasm: &[u8], permissions: &[&str]) -> Manifest {
-    manifest_for_abi(wasm, "0.2.0", permissions)
+    manifest_for_abi(wasm, "0.1.0", permissions)
 }
 
 struct CannedHttp {
@@ -413,7 +413,7 @@ async fn resume_relays_206_body() {
     let clock = FixedClock(0);
     let plugin = ok(load(
         SCENARIO_WASM,
-        manifest_for_abi(SCENARIO_WASM, "0.3.0", &["network:allowed.test"]),
+        manifest_for_abi(SCENARIO_WASM, "0.1.0", &["network:allowed.test"]),
         &Budgets::default(),
     ));
     let Invocation { result, attempt } = invoke(
@@ -445,7 +445,7 @@ async fn resume_rejects_mismatched_range() {
     let clock = FixedClock(0);
     let plugin = ok(load(
         SCENARIO_WASM,
-        manifest_for_abi(SCENARIO_WASM, "0.3.0", &["network:allowed.test"]),
+        manifest_for_abi(SCENARIO_WASM, "0.1.0", &["network:allowed.test"]),
         &Budgets::default(),
     ));
     let Invocation { result, .. } = invoke(
@@ -473,7 +473,7 @@ async fn resume_denied_without_permission() {
     let clock = FixedClock(0);
     let plugin = ok(load(
         SCENARIO_WASM,
-        manifest_for_abi(SCENARIO_WASM, "0.3.0", &[]),
+        manifest_for_abi(SCENARIO_WASM, "0.1.0", &[]),
         &Budgets::default(),
     ));
     let Invocation { result, .. } = invoke(
@@ -502,7 +502,7 @@ async fn resume_passes_non_206_through() {
     let clock = FixedClock(0);
     let plugin = ok(load(
         SCENARIO_WASM,
-        manifest_for_abi(SCENARIO_WASM, "0.3.0", &["network:allowed.test"]),
+        manifest_for_abi(SCENARIO_WASM, "0.1.0", &["network:allowed.test"]),
         &Budgets::default(),
     ));
     let Invocation { result, .. } = invoke(

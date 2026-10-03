@@ -55,7 +55,7 @@ export function run(): void {
     writeFileSync(
       join(dir, 'plugins', 'deezer.manifest.json'),
       JSON.stringify({
-        abi: '0.3.0',
+        abi: '0.1.0',
         capabilities: ['catalog.search'],
         id: 'deezer',
         permissions: ['network:api.deezer.com'],
@@ -66,7 +66,7 @@ export function run(): void {
     writeFileSync(
       join(dir, 'plugins', 'youtube-music.manifest.json'),
       JSON.stringify({
-        abi: '0.3.0',
+        abi: '0.1.0',
         capabilities: ['playback.resolve'],
         id: 'youtube-music',
         permissions: [

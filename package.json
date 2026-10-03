@@ -8,7 +8,6 @@
     "modules/*"
   ],
   "scripts": {
-    "sync-plugins": "node tooling/sync-plugins.mjs",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test"
   },

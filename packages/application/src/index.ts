@@ -48,6 +48,7 @@ export * from './sync/delta-docs.ts';
 export * from './library/playlists.ts';
 export * from './library/history.ts';
 export * from './library/lyrics.ts';
+export * from './providers/feed-sync.ts';
 export * from './providers/provider-router.ts';
 export * from './providers/provider-wire.ts';
 export * from './auth/oauth.ts';

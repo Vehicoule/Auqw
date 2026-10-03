@@ -62,14 +62,12 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 
 ### Provider artifacts
 
-`pnpm sync-plugins` bundles the pinned provider artifacts from
-`providers.lock.json` into `apps/mobile/assets/plugins/`. Each lock
-`source` is a `release:` path into a signed release directory inside a
-sibling `auqw-plugins` checkout — clone it next to this repository,
-then sync. The digest, manifest, provenance, and ed25519 signature are
-all verified against the lock's pinned key before anything is copied.
-(`local-build:` sources also exist for the dev loop — digest and
-manifest checks only.)
+Provider plugins are not bundled: the app fetches signed releases
+over-the-air from `releases/feed.json` on the `auqw-plugins` repo
+(first open and periodic check), verifies each artifact's ed25519
+signature + digests against the embedded release key, and caches the
+verified `<id>.wasm` + `<id>.manifest.json` pairs under its plugin
+dir. The decision row lives in `docs/decisions.md` (Plugin guests).
 
 ### Layout
 
@@ -85,8 +83,7 @@ manifest checks only.)
 | `packages/storage-sqlite` | Platform-neutral SQLite `StoragePort` with injected drivers |
 | `sdk/contract` | ABI v0 specification and message/manifest schemas |
 | `sdk/conformance` | Minimal conformance guests (`echo`, `spin`) |
-| `providers.lock.json` | Pin of known plugin artifact digests |
-| `tooling` | `build-android-bindings.sh`, `build-ios-bindings.sh`, `sync-plugins.mjs`, `checksums.mjs`, `stamp-version.mjs`, `version-code.mjs` |
+| `tooling` | `build-android-bindings.sh`, `build-ios-bindings.sh`, `gen-kinds.mjs`, `checksums.mjs`, `stamp-version.mjs`, `version-code.mjs` |
 
 ### Smoke test
 

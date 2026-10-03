@@ -10,7 +10,7 @@ import type {
 } from '../domain.ts';
 
 /**
- * The manifest-declared capabilities of ABI 0.3.0 — the union of
+ * The manifest-declared capabilities of ABI 0.1.0 — the union of
  * wire capability names a provider may serve. The port carries the
  * union of operations; a provider declares the subset it implements
  * and an operation routed to a provider that never declared it is a

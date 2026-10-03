@@ -59,25 +59,9 @@ jobs:
         # scripts are bash, and Git Bash is on the runner image.
         shell: bash
     steps:
-      # providers.lock.json resolves `release:../auqw-plugins/...` —
-      # the plugins repo must sit as a sibling of the Auqw checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: auqw
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: Vehicoule/Auqw-plugins
-          path: auqw-plugins
-          # Same-org public repos read fine under GITHUB_TOKEN; a
-          # private plugins repo needs a PAT in PLUGINS_CHECKOUT_TOKEN.
-          token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
-      # Git for Windows checks out text files CRLF — sync-plugins then
-      # hashes manifest bytes that no longer match provenance. Both
-      # repos carry `* text=auto eol=lf` .gitattributes (this one,
-      # and Auqw-plugins#5), which pins LF checkouts on every platform
-      # without a renormalize step.
-      # Pinned rustup over a toolchain action — one less node-runtime
-      # dep, identical result.
       - run: rustup toolchain install 1.98.0 --profile minimal && rustup default 1.98.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -141,7 +125,6 @@ jobs:
           pnpm install --frozen-lockfile
           node tooling/stamp-version.mjs "$VERSION"
           node tooling/stamp-version.mjs --check "${VERSION#v}"
-          node tooling/sync-plugins.mjs apps/desktop/plugins --release
           pnpm --dir apps/desktop run dist
       # sha256sum is not on the macOS runner image — the node tool
       # emits the same `<hex>  <name>` format the publish job verifies
@@ -187,11 +170,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: auqw
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: Vehicoule/Auqw-plugins
-          path: auqw-plugins
-          token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
       - run: |
           rustup toolchain install 1.98.0 --profile minimal \
             --target aarch64-linux-android --target x86_64-linux-android
@@ -263,7 +241,6 @@ jobs:
           pnpm install --frozen-lockfile
           node tooling/stamp-version.mjs "$VERSION"
           node tooling/stamp-version.mjs --check "${VERSION#v}"
-          node tooling/sync-plugins.mjs --release
           pnpm --dir apps/mobile exec expo prebuild --platform android
       - name: build release APK
         working-directory: auqw/apps/mobile

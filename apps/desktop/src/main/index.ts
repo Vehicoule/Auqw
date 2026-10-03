@@ -141,6 +141,7 @@ function utilityEnv(userDataPath: string): Record<string, string> {
   const auqwAllowlist = [
     'AUQW_NODE_BINDINGS',
     'AUQW_PLUGIN_DIR',
+    'AUQW_PLUGIN_FEED',
     'AUQW_STREAM_DIR',
     'AUQW_USER_DATA',
     'AUQW_REPO_ROOT',
@@ -195,17 +196,10 @@ function utilityEnv(userDataPath: string): Record<string, string> {
     // may arm the dev-gate channel; packaged runs use resourcesPath.
     env['AUQW_REPO_ROOT'] = join(here, '../../../..');
     env['AUQW_DEV_GATE'] = '1';
-    // The sync tool stages released providers in apps/desktop/plugins —
-    // without it AUQW_PLUGIN_DIR is unset and boot fails with 'no
-    // plugin providers available'.
-    env['AUQW_PLUGIN_DIR'] ??= join(here, '../../plugins');
-  } else {
-    // Packaged installs carry the locked provider set under
-    // resources/plugins (electron-builder.yml extraResources). An
-    // explicit AUQW_PLUGIN_DIR still wins — dev loops and harnesses
-    // point at their own sets.
-    env['AUQW_PLUGIN_DIR'] ??= join(process.resourcesPath, 'plugins');
   }
+  // No plugin dir is defaulted: plugins ship OTA (decision log) — the
+  // utility syncs the signed feed into <userData>/plugins. An explicit
+  // AUQW_PLUGIN_DIR passed through above still wins for dev sets.
   return env;
 }
 
@@ -264,11 +258,6 @@ async function main(): Promise<void> {
   // through to the default loader — and the file:// origin is kept,
   // since Chrome refuses non-file subresources into a file-less
   // parent scheme (local media playback rides media-src file:).
-  const pluginDir =
-    process.env['AUQW_PLUGIN_DIR'] ??
-    (app.isPackaged
-      ? join(process.resourcesPath, 'plugins')
-      : join(here, '../../plugins'));
   session.defaultSession.protocol.handle('file', (request) => {
     let filePath: string;
     try {
@@ -289,7 +278,10 @@ async function main(): Promise<void> {
       return new Response(
         rewriteCsp(
           readFileSync(RENDERER, 'utf8'),
-          imgSrcSources(pluginDir),
+          imgSrcSources(
+            process.env['AUQW_PLUGIN_DIR'] ??
+              join(app.getPath('userData'), 'plugins'),
+          ),
         ),
         { headers: { 'content-type': 'text/html; charset=utf-8' } },
       );

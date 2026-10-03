@@ -28,7 +28,7 @@ export type TrackMetadata = {
   genre: string | null;
   storefront: string | null;
   /**
-   * ABI 0.3.0 catalog evidence: entity refs into the provider's own
+   * ABI 0.1.0 catalog evidence: entity refs into the provider's own
    * catalog plus the recording's ISRC when the provider reports one
    * (deezer does, feeding MatchEvidence.exactIsrc). Absent on
    * pre-0.3 providers — the key may be missing or null.

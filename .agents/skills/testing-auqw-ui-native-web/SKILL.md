@@ -56,8 +56,8 @@ The app boots and the full domain stack runs in Chrome via an `expo export --pla
 ## Cleanup (from repo root)
 
 ```sh
-git checkout -- apps/mobile/metro.config.js apps/mobile/package.json pnpm-lock.yaml pnpm-workspace.yaml
-rm -rf apps/mobile/web-harness apps/mobile/dist apps/mobile/assets/plugins
+git checkout -- apps/mobile/metro.config.cjs apps/mobile/package.json pnpm-lock.yaml pnpm-workspace.yaml
+rm -rf apps/mobile/web-harness apps/mobile/dist
 fuser -k 8087/tcp 8088/tcp 2>/dev/null || true
 ```
 

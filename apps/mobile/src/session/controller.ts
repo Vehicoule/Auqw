@@ -1,4 +1,3 @@
-import { Asset } from 'expo-asset';
 import { File } from 'expo-file-system';
 import { Platform } from 'react-native';
 import {
@@ -70,25 +69,9 @@ import {
   createLog,
   createRandom,
 } from '@auqw/application';
+import { loadFeedPlugins } from './feed.ts';
 import { createSyncEmit } from './sync-emit.ts';
 
-// Metro asset requires must be static literals. All pairs are
-// produced by tooling/sync-plugins.mjs per providers.lock.json.
-const ITUNES_WASM: number = require('../../assets/plugins/itunes.wasm');
-const ITUNES_MANIFEST: unknown = require('../../assets/plugins/itunes.manifest.json');
-const YOUTUBE_MUSIC_WASM: number = require('../../assets/plugins/youtube-music.wasm');
-const YOUTUBE_MUSIC_MANIFEST: unknown = require('../../assets/plugins/youtube-music.manifest.json');
-const DEEZER_WASM: number = require('../../assets/plugins/deezer.wasm');
-const DEEZER_MANIFEST: unknown = require('../../assets/plugins/deezer.manifest.json');
-const LYRICS_LRCLIB_WASM: number = require('../../assets/plugins/lyrics-lrclib.wasm');
-const LYRICS_LRCLIB_MANIFEST: unknown = require('../../assets/plugins/lyrics-lrclib.manifest.json');
-
-const BUNDLED_PLUGINS = [
-  ['itunes', ITUNES_WASM, ITUNES_MANIFEST],
-  ['youtube-music', YOUTUBE_MUSIC_WASM, YOUTUBE_MUSIC_MANIFEST],
-  ['deezer', DEEZER_WASM, DEEZER_MANIFEST],
-  ['lyrics-lrclib', LYRICS_LRCLIB_WASM, LYRICS_LRCLIB_MANIFEST],
-] as const;
 
 // The decided per-surface container pick: webm-first on Android
 // (higher bitrate, Matroska Cues seek verified on-device); iOS is
@@ -191,22 +174,6 @@ export type SessionController = {
   dispose(): Promise<void>;
 };
 
-async function loadBundledPlugin(
-  host: AuqwExpoHostModuleLike,
-  wasmRef: number,
-  manifest: unknown,
-): Promise<string> {
-  const asset = Asset.fromModule(wasmRef);
-  await asset.downloadAsync();
-  if (!asset.localUri) {
-    throw new Error('asset has no localUri after download');
-  }
-  return host.loadPlugin(
-    await new File(asset.localUri).base64(),
-    JSON.stringify(manifest),
-  );
-}
-
 export type SessionControllerOptions = {
   readonly potProviderUrl?: string | undefined;
   readonly databasePath?: string;
@@ -252,24 +219,18 @@ export async function createSessionController(
   // Two phases, not one interleave: a rejected load must leave zero
   // providers constructed — each adapter registers a native listener at
   // construction and a half-built set has no controller to dispose it.
-  const loaded = await Promise.all(
-    BUNDLED_PLUGINS.map(([providerId, wasm, manifest]) =>
-      loadBundledPlugin(host, wasm, manifest).then((pluginId) => ({
-        providerId,
-        manifest,
-        pluginId,
-      })),
-    ),
-  );
+  const loaded = await loadFeedPlugins(host);
   const providers: PluginProvider[] = loaded.map(
-    ({ providerId, manifest, pluginId }) =>
-      createPluginProvider(
+    ({ providerId, manifestJson, pluginId }) => {
+      const manifest: unknown = JSON.parse(manifestJson);
+      return createPluginProvider(
         host,
         pluginId,
         providerId,
         manifestCapabilities(manifest),
         manifestVersion(manifest),
-      ),
+      );
+    },
   );
   const defaults = defaultSettings(providers);
   // Ahead of the storage ctor: decode-drop reports ride the session
