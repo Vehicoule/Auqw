@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import {
   assert,
   assertDeepEqual,
@@ -290,6 +291,43 @@ export async function run(): Promise<void> {
     // cancel is idempotent on a dead tx
     const cancelDead = await call(CHANNELS.storageCancel, { txId: doomed });
     assert(cancelDead.ok, 'cancel on a closed tx still resolves');
+
+    // a begin whose local_sources snapshot can't be read must not
+    // strand an untracked IMMEDIATE transaction on the one connection —
+    // the same begin retries with the same typed error, and it
+    // recovers once the schema is repaired
+    const schemaBreak = await begin();
+    await execute(
+      schemaBreak,
+      'CREATE TABLE local_sources (id INTEGER PRIMARY KEY)',
+    );
+    await call(CHANNELS.storageCommit, { txId: schemaBreak });
+    const brokeBegin = await call(CHANNELS.storageBegin, undefined);
+    assert(
+      !brokeBegin.ok &&
+        brokeBegin.error.kind === 'io-error' &&
+        brokeBegin.error.message === 'local_sources read failed',
+      'begin fails when the snapshot cannot be read',
+    );
+    const retryBegin = await call(CHANNELS.storageBegin, undefined);
+    assert(
+      !retryBegin.ok &&
+        retryBegin.error.kind === 'io-error' &&
+        retryBegin.error.message === 'local_sources read failed',
+      'retry fails the same way — no orphaned tx wedged the connection',
+    );
+    const repair = new DatabaseSync(dbPath);
+    try {
+      repair.exec('DROP TABLE local_sources');
+    } finally {
+      repair.close();
+    }
+    const healed = await call(CHANNELS.storageBegin, undefined);
+    assert(
+      healed.ok && isStorageBeginResult(healed.result),
+      'begin recovers once the snapshot can be read',
+    );
+    await call(CHANNELS.storageRollback, { txId: healed.result.txId });
 
     // unknown tx ids are invalid requests
     for (const channel of [

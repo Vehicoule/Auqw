@@ -2569,10 +2569,31 @@ function testAnimatedIcons(): void {
   );
 }
 
+function testSearchFabFocusGuard(): void {
+  // The focusSignal effect must only fire when the signal CHANGES —
+  // the fab unmounts when the dev gallery covers the stack, and a
+  // remount with a live tick would reopen the field and route the
+  // app to explore unprompted. The guard is hook wiring (no mount
+  // harness for react-native here), so the check reads the mount
+  // sentinel directly: a ref seeded with the mount-time signal that
+  // the effect compares before opening — the same shape the web
+  // twin (search-field.tsx) carries.
+  const fab = readFileSync(new URL('./search-fab.tsx', import.meta.url), 'utf8');
+  assert(
+    fab.includes('useRef(focusSignal)'),
+    'search-fab seeds a ref with the mount-time focusSignal',
+  );
+  assert(
+    fab.includes('focusSignal !== lastSignal.current'),
+    'search-fab only opens on a focusSignal change, never on mount',
+  );
+}
+
 testGallerySafeArea();
 testStageMotion();
 testSkipPeek();
 testAnimatedIcons();
+testSearchFabFocusGuard();
 
 console.log('ui-native tests passed');
 import { readdirSync, readFileSync } from 'node:fs';

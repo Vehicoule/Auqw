@@ -20,7 +20,16 @@
 // no change here.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
 const run = (args) => {
@@ -52,10 +61,13 @@ export function sealAppBundle(appPath) {
     console.log(`after-pack: ${appPath} already carries a real signature — leaving it alone`);
   } else {
     // --deep signs the nested helpers and frameworks along with the
-    // bundle. It is safe here precisely because this branch only runs
-    // for an unsealed bundle (nothing to clobber) and the gate below
-    // proves the outer seal does cover the nested code.
-    const signed = run(['--force', '--deep', '--sign', '-', appPath]);
+    // bundle. No --force: the loose binaries under Resources/ were
+    // signed to their final bytes before writeUtilityIntegrity hashed
+    // them, so the seal must keep those signatures — rewriting them
+    // here would ship bytes the runtime digest check refuses. Nested
+    // code that is still unsigned gets signed regardless, and the
+    // outer seal covers the manifest in CodeResources either way.
+    const signed = run(['--deep', '--sign', '-', appPath]);
     if (signed.status !== 0) {
       throw new Error(`after-pack: codesign failed for ${appPath}\n${signed.stderr}`);
     }
@@ -78,7 +90,11 @@ export function sealAppBundle(appPath) {
 // tooling/checksums.mjs uses ("<hex>  <relpath>", POSIX separators,
 // rel against the resources dir); main verifies every entry before
 // each utilityProcess.fork (src/main/utility-integrity.ts).
-export function writeUtilityIntegrity(resourcesDir) {
+// The files utility-integrity.sha256 covers: everything asarUnpack
+// put outside app.asar plus the loose napi artifacts at resources
+// root. Signing and hashing must enumerate the identical set, so
+// both read from here.
+function coveredUtilityFiles(resourcesDir) {
   const files = [];
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -100,6 +116,54 @@ export function writeUtilityIntegrity(resourcesDir) {
       files.push(abs);
     }
   }
+  return files;
+}
+
+// First four bytes, big-endian, for every Mach-O container: thin
+// 32/64-bit in both byte orders, plus fat and fat-64 universal
+// headers.
+const MACHO_MAGICS = new Set([
+  0xfeedface, 0xcefaedfe,
+  0xfeedfacf, 0xcffaedfe,
+  0xcafebabe, 0xbebafeca, 0xcafebabf,
+]);
+
+function isMachO(abs) {
+  const head = Buffer.alloc(4);
+  const fd = openSync(abs, 'r');
+  try {
+    if (readSync(fd, head, 0, 4, 0) < 4) {
+      return false;
+    }
+    return MACHO_MAGICS.has(head.readUInt32BE(0));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// Signing rewrites a Mach-O's bytes — the arm64 linker already
+// ad-hoc signed every binary electron-builder packed. Covered
+// binaries are therefore signed to their final signature FIRST, so
+// the manifest hashes the bytes that actually ship; the bundle seal
+// then runs without --force and leaves them untouched. Non-Mach-O
+// files (the unpacked utility js) pass through unchanged.
+export function signCoveredMachOs(resourcesDir) {
+  for (const abs of coveredUtilityFiles(resourcesDir)) {
+    if (!isMachO(abs)) {
+      continue;
+    }
+    const signed = run(['--force', '--sign', '-', abs]);
+    if (signed.status !== 0) {
+      throw new Error(
+        `after-pack: codesign failed for ${abs}\n${signed.stderr}`,
+      );
+    }
+    console.log(`after-pack: ad-hoc signed ${abs}`);
+  }
+}
+
+export function writeUtilityIntegrity(resourcesDir) {
+  const files = coveredUtilityFiles(resourcesDir);
   if (files.length === 0) {
     throw new Error(
       `after-pack: no loose utility files under ${resourcesDir} — the integrity manifest would cover nothing`,
@@ -134,10 +198,16 @@ function resourcesDirOf(context) {
 
 export default async function afterPack(context) {
   const resourcesDir = resourcesDirOf(context);
-  // The manifest must land before sealAppBundle on macOS: codesign
-  // --deep seals Contents/Resources/, so writing it after the seal
-  // would ship a manifest the signature doesn't cover.
+  if (context.electronPlatformName !== 'darwin') {
+    writeUtilityIntegrity(resourcesDir);
+    return;
+  }
+  // Ordering on macOS: covered Mach-Os get their final signature
+  // first (signing rewrites their bytes), the manifest hashes those
+  // shipped bytes, and the bundle seal lands last — its --deep pass
+  // preserves the nested signatures and writes a CodeResources seal
+  // that covers the manifest.
+  signCoveredMachOs(resourcesDir);
   writeUtilityIntegrity(resourcesDir);
-  if (context.electronPlatformName !== 'darwin') return;
   sealAppBundle(join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`));
 }

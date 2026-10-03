@@ -147,7 +147,8 @@ result may carry `entities` (entity hits in provider order),
 `top_hit` — the provider's single best hit, tagged
 `{type:'track'|'entity', item}` because `source_ref.kind:'album'` is
 ambiguous between a track row and an entity row — and `continuation`
-(null = no next page). `catalog.entity` results may carry `related`: related
+(null = no next page).
+`catalog.entity` results may carry `related`: related
 entities in provider order (an artist's albums, similar artists,
 appears-on playlists), each optionally tagged with a `group`
 (`'discography'|'related'|'featured'|'appears-on'`) so hosts can
@@ -157,6 +158,15 @@ playlists and mixes are first-class entities — own page, own
 artwork, likeable like an album. All new fields are optional: a
 provider emits only what it serves, and undeclared fields simply
 aren't produced.
+
+Because `kinds`/`continuation` widen the `catalog.search` payload's
+key set, a provider opts into them by declaring the
+`catalog.search.kinds` capability flag in its manifest (a 0.3.0
+manifest value; it names no payload of its own and is never an
+invoke target). Hosts forward the extension keys only to declaring
+providers — a non-declaring provider receives the base
+`{query, limit, storefront}` payload and answers an unscoped first
+page rather than failing on unknown keys.
 
 ## ErrorKind
 
@@ -196,7 +206,8 @@ guest running under a `0.1.0` manifest that emits the 0.2-only
 `invalid-message`. `0.2.0` accepts `catalog.search`,
 `catalog.metadata`, `catalog.artwork`, `playback.resolve`, and
 `playback.candidates`. `0.3.0` accepts the full 0.2 set plus
-`catalog.entity`, `catalog.suggest`, `lyrics.plain`, `lyrics.synced`, and `radio.seed`,
+`catalog.entity`, `catalog.suggest`, `lyrics.plain`, `lyrics.synced`, `radio.seed`,
+and the `catalog.search.kinds` declaration flag,
 and unlocks the `resume` host-request kind — emitting `resume` under a
 pre-0.3.0 manifest fails `invalid-message`, the same rule as the
 0.1→0.2 service kinds.

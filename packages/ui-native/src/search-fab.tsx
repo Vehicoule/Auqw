@@ -72,9 +72,18 @@ export function SearchFab({
     return undefined;
   }, [open, openT, ring, ringOn]);
 
+  // The signal must *change* to open — the fab unmounts when the dev
+  // gallery covers the stack (and on any future conditional mount), so
+  // a remount with a live tick would otherwise reopen the field and
+  // route the app to explore unprompted. Same mount guard the web
+  // field (search-field.tsx) carries.
+  const lastSignal = useRef(focusSignal);
   useEffect(() => {
-    if (focusSignal !== undefined && focusSignal > 0) {
-      onOpenChange(true);
+    if (focusSignal !== lastSignal.current) {
+      lastSignal.current = focusSignal;
+      if (focusSignal !== undefined && focusSignal > 0) {
+        onOpenChange(true);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusSignal]);

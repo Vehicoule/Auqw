@@ -128,6 +128,7 @@ import {
   searchRowTarget,
   stageDownloadChip,
   stageReopenMode,
+  suggestionCardMetas,
   suggestionMetaMap,
 } from './types.ts';
 import type {
@@ -1931,14 +1932,15 @@ export function useAppShell<E extends { readonly type: string } = never>(
     if (searchState.type === 'content') {
       // ports.homeSuggestionLimit: desktop bounded the card lookup to
       // the first 12 results; mobile searched the whole page (unset).
-      const items =
-        ports.homeSuggestionLimit === undefined
-          ? searchState.page.items
-          : searchState.page.items.slice(0, ports.homeSuggestionLimit);
+      // The bound lands on the dedupe the model keys cards off — a raw
+      // slice can push a rendered group's rep out of the map.
       // Mobile's lookup used page-order find() — first duplicate wins;
       // desktop's map overwrote — last wins.
       return suggestionMetaMap(
-        items,
+        suggestionCardMetas(
+          searchState.page.items,
+          ports.homeSuggestionLimit,
+        ),
         ports.strictHomeCardKeys === true ? 'firstWins' : 'lastWins',
       );
     }

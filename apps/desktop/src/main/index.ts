@@ -80,6 +80,7 @@ import {
 } from './sync-keys.ts';
 import { createAuthCustodyHandler } from './auth-custody.ts';
 import { imgSrcSources, rewriteCsp } from './csp.ts';
+import { isRendererDocument } from './renderer-document.ts';
 import type { WindowState } from './window-state.ts';
 import {
   loadWindowState,
@@ -277,7 +278,10 @@ async function main(): Promise<void> {
       // A malformed request URL is not ours to answer for.
       return net.fetch(request, { bypassCustomProtocolHandlers: true });
     }
-    if (filePath !== RENDERER) {
+    // Canonicalized identity, not spelling: `file:////…`, interior
+    // `//`, `.` segments and case variants all name the same document
+    // and must not slip past the rewrite under the loose static CSP.
+    if (!isRendererDocument(filePath, RENDERER)) {
       return net.fetch(request, { bypassCustomProtocolHandlers: true });
     }
     // The renderer document never falls through: the static bytes carry

@@ -93,6 +93,7 @@ impl Manifest {
         ];
         const CAPS_0_3: &[&str] = &[
             "catalog.search",
+            "catalog.search.kinds",
             "catalog.metadata",
             "catalog.artwork",
             "catalog.entity",

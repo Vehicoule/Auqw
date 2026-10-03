@@ -438,13 +438,20 @@ export function DesktopChrome({
         </header>
         <main
           className="uw-world__content"
-          // Scroll doesn't bubble — capture reaches every pane's own
-          // scroller; the target is whichever element scrolled.
+          // Scroll doesn't bubble — capture reaches every descendant
+          // scroller; the target is whichever element scrolled. Only
+          // the pane's own vertical scroller (.uw-screen) drives the
+          // fold — the horizontal rails inside it report scrollTop 0
+          // and would reopen the field mid-page.
           onScrollCapture={(event) => {
             if (search === undefined) {
               return;
             }
-            const top = (event.target as HTMLElement).scrollTop;
+            const target = event.target as HTMLElement;
+            if (!target.classList.contains('uw-screen')) {
+              return;
+            }
+            const top = target.scrollTop;
             lastScrollTop.current = top;
             // A focused field stays open — collapsing it would drop
             // the caret mid-typing; the blur re-applies the scroll.
