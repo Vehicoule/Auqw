@@ -266,7 +266,7 @@ export function HomeScreen({
         {tiles.map((tile) => (
           <View
             key={tile.tile.key}
-            style={{ flexBasis: '47.5%', flexGrow: 1 }}
+            style={{ flexBasis: '47.5%' }}
           >
             <CollectionTile view={tile} />
           </View>
