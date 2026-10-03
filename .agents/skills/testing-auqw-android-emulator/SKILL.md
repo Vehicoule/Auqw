@@ -949,9 +949,11 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   swallows taps until handled — Allow ~x540,y1312.
 - 'Maximum update depth exceeded' resurfaced post-#312-fix (artist
   entity page + over search results, playback re-renders active) —
-  writer NAMED: `VirtualizedList._updateCellsToRender`, fixed in #356
-  (stable `data` refs + session `#statePending`). If a new fire lands,
-  capture its stack per the hunt section below before dismissing.
+  writer NAMED: `VirtualizedList._updateCellsToRender`, fix shipped in
+  #356 (stable `data` refs + session `#statePending`; verify at that
+  PR's merge state before relying on it on an older checkout). If a
+  new fire lands, capture its stack per the hunt section below before
+  dismissing.
 
 ## Update-depth storm hunt (post-#355 — writer NAMED)
 
@@ -986,7 +988,7 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   WITHOUT notifying listeners. A `[TLOG]` section-diff inside
   `#syncState` before `return true` exposes ~1Hz 'queue,playback'
   syncs the `session.publish` counter never sees — instrument SECTION
-  diffs, not just publish calls. Fixed in #356: `#statePending` marks
+  diffs, not just publish calls. #356 fixes it: `#statePending` marks
   the undelivered install so the next publish can't dedupe it away
   (a queue write mutates the engine before its commit await — a tick
   in that window installs the change unseen).
