@@ -438,10 +438,13 @@ export function createHostRuntime(opts: {
             opts.env.AUQW_PLUGIN_FEED ?? PLUGIN_RELEASE_TRUST.feedUrl,
           ));
       let feedFailure: unknown;
-      let compatibleCount = 0;
+      // Present only when the feed answered — the feed is the
+      // authority on which plugin ids may load while it is reachable;
+      // an unreachable feed leaves the whole cache usable as
+      // last-known-good.
+      let synced: { ready: readonly string[]; compatible: readonly string[] } | undefined;
       try {
-        const res = await sync(cacheDir);
-        compatibleCount = res.compatible.length;
+        synced = await sync(cacheDir);
       } catch (thrown) {
         feedFailure = thrown;
       }
@@ -465,7 +468,10 @@ export function createHostRuntime(opts: {
               verify,
             },
           );
-          if (pair === null) {
+          if (
+            pair === null ||
+            (synced !== undefined && !synced.compatible.includes(pair.id))
+          ) {
             continue;
           }
           const pluginId = await h.loadPlugin(
@@ -489,10 +495,12 @@ export function createHostRuntime(opts: {
       if (loaded.length === 0 && feedFailure !== undefined) {
         throw feedFailure;
       }
-      // A feed sync that produced FEWER ready plugins than the feed
-      // listed stays retriable: the next `ready()` re-syncs and the
-      // host's id-keyed insert hot-swaps the refreshed pairs.
-      lastLoadIncomplete = loaded.length < compatibleCount;
+      // A feed sync that left any listed plugin below its current
+      // release stays retriable (an outdated LKG pair still loads —
+      // the gate tracks ready, not loaded): the next `ready()`
+      // re-syncs and the host's id-keyed insert hot-swaps the pair.
+      lastLoadIncomplete =
+        synced !== undefined && synced.ready.length < synced.compatible.length;
       return loaded;
     }
     const manifests = fs
