@@ -189,6 +189,7 @@ export function FloatingNavbar({
                 adjustsFontSizeToFit
                 minimumFontScale={0.8}
                 style={[
+                  { flexShrink: 1, minWidth: 0 },
                   active && { fontFamily: theme.fontFamilies.bold },
                 ]}
               >
@@ -272,6 +273,7 @@ export function IosGlassNavbar({
                   adjustsFontSizeToFit
                   minimumFontScale={0.8}
                   style={[
+                    { flexShrink: 1, minWidth: 0 },
                     active && { fontFamily: theme.fontFamilies.bold },
                   ]}
                 >
