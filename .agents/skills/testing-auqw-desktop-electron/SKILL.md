@@ -250,11 +250,12 @@ while hidden).
 - youtube-music `playback.resolve` takes an 11-char video ID as `source_ref`
   (e.g. `kJQP7kiw5Fk`), not a URL.
 - `sync-plugins.mjs` can fail `ENOENT … releases/<id>/<version>` when the
-  sibling plugins checkout is stale or miscased — `release:../auqw-plugins/…`
-  resolves literally against `~/repos/auqw-plugins` (lowercase) on Linux,
-  not `~/repos/Auqw-plugins`. Fix: keep a real clone at the lowercase path
-  current (`git -C ~/repos/auqw-plugins pull --ff-only`), or
-  `ln -sfn <clone-with-the-releases> ~/repos/auqw-plugins`, then re-run.
+  sibling plugins checkout is STALE (the lock pins releases the clone
+  lacks). `resolveSourcePath` already case-insensitively matches each
+  segment when EXACTLY ONE lookalike exists — `../auqw-plugins` resolves
+  to an `Auqw-plugins` clone — so casing alone is never the cause;
+  multiple lookalike checkouts refuse the fallback as ambiguous. Fix:
+  `git -C ~/repos/<the-one-plugins-checkout> pull --ff-only`, then re-run.
 - youtube-music CAN resolve on this box — a bot-check on datacenter IPs is
   a possible failure, not a guaranteed one. A deezer search row pressed
   with no active queue starts a `radio · growing · youtube-music` session
