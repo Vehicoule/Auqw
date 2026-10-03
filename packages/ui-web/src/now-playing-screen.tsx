@@ -14,7 +14,6 @@ import {
 import type { IconButtonProps } from './primitives.tsx';
 import { WaveformSeek } from './progress.tsx';
 import { useOverlayDismiss, useOverlayFocus } from './stack.tsx';
-import { useTheme } from './theme.tsx';
 import { QueueList } from './queue-list.tsx';
 import { QueueScreen } from './queue-screen.tsx';
 import type { QueueScreenProps } from './queue-screen.tsx';
@@ -158,14 +157,13 @@ export function ModeSegment({
   readonly onSelect?: ((mode: StageMode) => void) | undefined;
 }) {
   const tabs = stageModeTabs(STAGE_MODE_ORDER, mode, onSelect);
-  // The floating segment follows the app theme — it re-scopes itself
-  // to the app's scheme class so the immersive stage's own t-dark
-  // doesn't pull it dark over artwork.
-  const scheme = useTheme().scheme;
+  // The floating segment follows the app theme — it stays under the
+  // provider's palette (an adaptive theme's derived vars included);
+  // the immersive stage darkens its own children, not the root, so
+  // nothing pulls this bar dark.
   return (
     <Segment
       variant="float"
-      className={`t-${scheme}`}
       ariaLabel={t('stage.modeTabsA11y')}
       tabs={tabs}
       iconSize={16}
@@ -216,7 +214,10 @@ function StageBackdrop({
     setSrc(scaledArtworkUrl(url, 1024));
   }, [url]);
   return (
-    <div className="uw-stage__backdrop" aria-hidden="true">
+    // The art's own overlays (masks, the --deep scrim) resolve dark
+    // scheme vars — the backdrop carries the dark scope itself so it
+    // stays valid under an app-scoped stage root.
+    <div className="uw-stage__backdrop t-dark" aria-hidden="true">
       {['art', 'frost'].map((layer) => (
         <img
           key={layer}
@@ -400,9 +401,13 @@ export function NowPlayingScreen({
 
   return (
     <div
-      className={`uw-stage${immersive ? ' uw-stage--immersive t-dark' : ''}`}
+      className={`uw-stage${immersive ? ' uw-stage--immersive' : ''}`}
       data-mode={activeMode}
     >
+      {/* Immersion darkens the art's chrome children (backdrop, pane
+          body, corner buttons) element by element — not the root —
+          so the mode segment keeps the provider's palette (the app
+          scheme, or an adaptive theme's derived vars). */}
       {liveArtwork !== null && (
         <StageBackdrop
           url={liveArtwork}
@@ -414,7 +419,7 @@ export function NowPlayingScreen({
           }
         />
       )}
-      <div className="uw-stage__body">
+      <div className={`uw-stage__body${immersive ? ' t-dark' : ''}`}>
         <div style={paneHidden('player')}>
             {/*
              * The live radio element: a seed affordance when no tail is
@@ -657,7 +662,7 @@ export function NowPlayingScreen({
           color="var(--text-secondary)"
           ariaLabel={t('track.a11y.rowActions')}
           onPress={onTrackMenu}
-          className="uw-stage__menu"
+          className={`uw-stage__menu${immersive ? ' t-dark' : ''}`}
         />
       )}
       {onStopPlayback !== undefined && (
@@ -668,7 +673,7 @@ export function NowPlayingScreen({
           color="var(--text-secondary)"
           ariaLabel={t('player.a11y.stopDismiss')}
           onPress={onStopPlayback}
-          className="uw-stage__stop"
+          className={`uw-stage__stop${immersive ? ' t-dark' : ''}`}
         />
       )}
       {/* The mode segment floats over the stage's bottom safe zone —
