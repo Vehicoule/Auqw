@@ -73,9 +73,9 @@ export type NavbarProps = {
 };
 
 /**
- * The Android dock — the player's segment control as the bottom bar:
- * a tonal capsule whose [icon][label] segments share one gliding
- * accent plate, matching the stage foot's queue·player·lyrics.
+ * The Android dock — a floating capsule of icon-over-label tabs; one
+ * accent chip wraps the active glyph and glides between slots (the
+ * traveling-pill treatment, kept after the segment-bar experiment).
  */
 export function FloatingNavbar({
   items,
@@ -84,18 +84,19 @@ export function FloatingNavbar({
 }: NavbarProps) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
-  // One selection mark, not per-slot fills — the plate glides between
-  // slots and covers its segment cell whole, like the seg's `.ind`.
-  // Equal flex:1 slots make the target x a pure function of slot
-  // width; reduced motion snaps it.
+  // One selection mark, not per-slot fills — the chip is a single
+  // element that glides between slots and wraps just the icon, with
+  // the label sitting below it. Equal flex:1 slots make the target x
+  // a pure function of slot width; reduced motion snaps it.
   const [rowW, setRowW] = useState(0);
   const placed = useRef(false);
   const slotW = rowW / Math.max(1, items.length);
+  const pillW = Math.max(0, Math.min(56, slotW - theme.spacing.xs));
   const foundIndex = items.findIndex((item) => item.key === activeKey);
-  const targetX = Math.max(0, foundIndex) * slotW;
+  const targetX = Math.max(0, foundIndex) * slotW + (slotW - pillW) / 2;
   const pillX = useSharedValue(0);
   useEffect(() => {
-    if (rowW === 0 || slotW === 0) {
+    if (rowW === 0 || pillW === 0) {
       return;
     }
     if (!placed.current || theme.reducedMotion) {
@@ -104,7 +105,7 @@ export function FloatingNavbar({
       return;
     }
     pillX.value = withSpring(targetX, { stiffness: 260, damping: 26 });
-  }, [pillX, targetX, rowW, slotW, theme.reducedMotion]);
+  }, [pillX, targetX, rowW, pillW, theme.reducedMotion]);
   const pillStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: pillX.value }],
   }));
@@ -116,7 +117,7 @@ export function FloatingNavbar({
       style={{
         marginHorizontal: theme.spacing.screen,
         marginBottom: insets.bottom + theme.spacing.sm,
-        borderRadius: theme.radius.float,
+        borderRadius: theme.radius.pill,
         borderWidth: theme.strokes.hairline,
         borderColor: theme.colors.hairline,
         backgroundColor: theme.colors.raised,
@@ -126,28 +127,31 @@ export function FloatingNavbar({
         shadowOpacity: 0.28,
         shadowRadius: 16,
         shadowOffset: { width: 0, height: 6 },
-        padding: theme.spacing.xs,
+        padding: theme.spacing.xs + theme.spacing.xxs,
       }}
     >
       {/* The measured row stays padding-free — slot widths (and the
-          plate's target x) read straight off its layout box. */}
+          chip's target x) read straight off its layout box. The chip
+          anchors to the icon zone at the row's top; labels sit below
+          it. */}
       <View
         accessibilityRole="tablist"
         onLayout={onRowLayout}
         style={{
           flexDirection: 'row',
+          minHeight: theme.sizes.navbarIos,
         }}
       >
-        {rowW > 0 && slotW > 0 && foundIndex >= 0 && (
+        {rowW > 0 && pillW > 0 && foundIndex >= 0 && (
           <Animated.View
             pointerEvents="none"
             style={[
               {
                 position: 'absolute',
                 top: 0,
-                bottom: 0,
                 left: 0,
-                width: slotW,
+                width: pillW,
+                height: 32,
                 borderRadius: theme.radius.control,
                 borderWidth: theme.strokes.hairline,
                 borderColor: theme.colors.hairline,
@@ -169,21 +173,28 @@ export function FloatingNavbar({
               accessibilityState={{ selected: active }}
               style={{
                 flex: 1,
-                flexDirection: 'row',
                 alignItems: 'center',
-                justifyContent: 'center',
-                gap: theme.spacing.xs,
-                paddingVertical: theme.spacing.sm,
+                gap: theme.spacing.xxs,
                 minHeight: theme.sizes.touch,
               }}
             >
-              <NavIcon
-                name={iconFor(item.key, active)}
-                active={active}
-                color={
-                  active ? theme.colors.accent : theme.colors.textSecondary
-                }
-              />
+              {/* The glyph's own lane — the gliding chip's height pins
+                  to this band so it wraps the icon, never the label. */}
+              <View
+                style={{
+                  height: 32,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <NavIcon
+                  name={iconFor(item.key, active)}
+                  active={active}
+                  color={
+                    active ? theme.colors.accent : theme.colors.textSecondary
+                  }
+                />
+              </View>
               <Text
                 variant="metadata"
                 color={active ? 'accent' : 'secondary'}
@@ -191,7 +202,6 @@ export function FloatingNavbar({
                 adjustsFontSizeToFit
                 minimumFontScale={0.8}
                 style={[
-                  { flexShrink: 1, minWidth: 0 },
                   active && { fontFamily: theme.fontFamilies.bold },
                 ]}
               >
@@ -249,29 +259,38 @@ export function IosGlassNavbar({
                 accessibilityState={{ selected: active }}
                 style={{
                   flex: 1,
-                  flexDirection: 'row',
                   alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: theme.spacing.xs,
-                  paddingVertical: theme.spacing.sm,
+                  gap: theme.spacing.xxs,
                   minHeight: theme.sizes.touch,
-                  borderRadius: theme.radius.control,
-                  borderWidth: theme.strokes.hairline,
-                  borderColor: active
-                    ? theme.colors.hairline
-                    : 'transparent',
-                  backgroundColor: active
-                    ? theme.colors.accentSoft
-                    : 'transparent',
                 }}
               >
-                <NavIcon
-                  name={iconFor(item.key, active)}
-                  active={active}
-                  color={
-                    active ? theme.colors.accent : theme.colors.textSecondary
-                  }
-                />
+                {/* The active tab's icon carries the accent chip — the
+                    same wrap the Android dock's gliding chip draws. */}
+                <View
+                  style={{
+                    minWidth: 56,
+                    height: 32,
+                    borderRadius: theme.radius.control,
+                    paddingHorizontal: theme.spacing.md,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderWidth: theme.strokes.hairline,
+                    borderColor: active
+                      ? theme.colors.hairline
+                      : 'transparent',
+                    backgroundColor: active
+                      ? theme.colors.accentSoft
+                      : 'transparent',
+                  }}
+                >
+                  <NavIcon
+                    name={iconFor(item.key, active)}
+                    active={active}
+                    color={
+                      active ? theme.colors.accent : theme.colors.textSecondary
+                    }
+                  />
+                </View>
                 <Text
                   variant="metadata"
                   color={active ? 'accent' : 'secondary'}
@@ -279,7 +298,6 @@ export function IosGlassNavbar({
                   adjustsFontSizeToFit
                   minimumFontScale={0.8}
                   style={[
-                    { flexShrink: 1, minWidth: 0 },
                     active && { fontFamily: theme.fontFamilies.bold },
                   ]}
                 >

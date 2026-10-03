@@ -867,11 +867,13 @@ export function SegmentItem({
       ariaSelected={active}
       className={`uw-segment__item${active ? ' uw-segment__item--on' : ''}`}
     >
-      <Icon
-        name={icon}
-        size={iconSize}
-        color={active ? 'var(--accent)' : 'var(--text-secondary)'}
-      />
+      <span className="uw-segment__icon">
+        <Icon
+          name={icon}
+          size={iconSize}
+          color={active ? 'var(--accent)' : 'var(--text-secondary)'}
+        />
+      </span>
       <Text
         variant={textVariant}
         color={active ? 'accent' : 'secondary'}

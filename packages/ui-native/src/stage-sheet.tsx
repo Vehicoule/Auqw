@@ -34,7 +34,7 @@ import Svg, {
   Stop,
 } from 'react-native-svg';
 import { schemes } from '@auqw/design-tokens';
-import { DarkThemeScope, ThemeProvider, useTheme } from './theme.tsx';
+import { DarkThemeScope, useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
 import {
   Artwork,
@@ -276,20 +276,9 @@ export function ModeSegment({
   readonly mode: StageMode;
   readonly onSelect?: ((mode: StageMode) => void) | undefined;
 }) {
-  const outer = useTheme();
-  // The floating segment is dark in every scheme — it overlays artwork
-  // or a flat stage, where the outer scheme's fg08 pill would wash out
-  // grey-on-grey. The nested provider re-scopes colors so labels and
-  // icons keep their role names.
-  return (
-    <ThemeProvider
-      theme="dark"
-      textScale={outer.textScale}
-      reducedMotion={outer.reducedMotion}
-    >
-      <ModeSegmentPill mode={mode} onSelect={onSelect} />
-    </ThemeProvider>
-  );
+  // The mode bar follows the app theme — a raised, shadowed float
+  // stays readable over artwork in either scheme, so no dark scope.
+  return <ModeSegmentPill mode={mode} onSelect={onSelect} />;
 }
 
 function ModeSegmentPill({
@@ -394,6 +383,9 @@ function ModeSegmentPill({
           <Text
             variant="metadata"
             color={tab.active ? (m3e ? 'accent' : 'bright') : 'secondary'}
+            numberOfLines={1}
+            adjustsFontSizeToFit
+            minimumFontScale={0.8}
             style={[tab.active && { fontFamily: theme.fontFamilies.bold }]}
           >
             {tab.label}
@@ -2057,20 +2049,6 @@ export function StageSheet({
           )}
         </View>
       </View>
-      {/* The mode segment floats over the sheet's bottom safe zone —
-          it takes no layout space, so lyrics/queue rows and the
-          transport never reflow around it or hide beneath it. */}
-      <View
-        pointerEvents="box-none"
-        style={{
-          position: 'absolute',
-          left: theme.spacing.xl,
-          right: theme.spacing.xl,
-          bottom: segmentLift,
-        }}
-      >
-        <ModeSegment mode={activeMode} onSelect={selectMode} />
-      </View>
     </>
   );
 
@@ -2292,6 +2270,23 @@ export function StageSheet({
               a provider↔bare swap would remount every kept-alive pane
               on each switch to or from player mode. */}
           <DarkThemeScope on={immersive}>{content}</DarkThemeScope>
+          {/* The mode segment floats over the sheet's bottom safe
+              zone — it takes no layout space, so rows and the
+              transport never reflow around it or hide beneath it. It
+              sits outside the immersive dark scope on purpose: a
+              raised, shadowed float reads over art in either scheme,
+              so the bar follows the app theme. */}
+          <View
+            pointerEvents="box-none"
+            style={{
+              position: 'absolute',
+              left: theme.spacing.xl,
+              right: theme.spacing.xl,
+              bottom: segmentLift,
+            }}
+          >
+            <ModeSegment mode={activeMode} onSelect={selectMode} />
+          </View>
         </Animated.View>
       </Animated.View>
     </>
