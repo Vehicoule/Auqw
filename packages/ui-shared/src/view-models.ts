@@ -1485,7 +1485,47 @@ export function toEntityCard(
 
 const EMPTY_ENTRIES: readonly PlaylistEntry[] = [];
 
-/** * Memoized sorts keyed on (input array identity, comparator) — the * structural sharing upstream republishes the same array refs until * the data actually changes, so a play event that only grows history * (a new array) pays the sort, not every library-model rebuild. The * comparator rides the key so one array can never collide across * two different orderings. */const SORT_MEMO = new WeakMap<object, unknown>();function memoSorted<T>(  source: readonly T[],  compare: (a: T, b: T) => number,): readonly T[] {  let byCompare = SORT_MEMO.get(source as unknown as object) as    | WeakMap<(a: T, b: T) => number, readonly T[]>    | undefined;  if (byCompare === undefined) {    byCompare = new WeakMap();    SORT_MEMO.set(source as unknown as object, byCompare);  }  const cached = byCompare.get(compare);  if (cached !== undefined) {    return cached;  }  const sorted = [...source].sort(compare);  byCompare.set(compare, sorted);  return sorted;}
+/**
+ * Memoized sorts keyed on (input array identity, comparator) — the
+ * structural sharing upstream republishes the same array refs until
+ * the data actually changes, so a play event that only grows history
+ * (a new array) pays the sort, not every library-model rebuild. The
+ * comparator rides the key so one array can never collide across
+ * two different orderings — and callers must pass a stable
+ * module-level comparator, since a fresh inline closure would miss
+ * the cache.
+ */
+const SORT_MEMO = new WeakMap<object, unknown>();
+
+function memoSorted<T>(
+  source: readonly T[],
+  compare: (a: T, b: T) => number,
+): readonly T[] {
+  let byCompare = SORT_MEMO.get(source as unknown as object) as
+    | WeakMap<(a: T, b: T) => number, readonly T[]>
+    | undefined;
+  if (byCompare === undefined) {
+    byCompare = new WeakMap();
+    SORT_MEMO.set(source as unknown as object, byCompare);
+  }
+  const cached = byCompare.get(compare);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const sorted = [...source].sort(compare);
+  byCompare.set(compare, sorted);
+  return sorted;
+}
+
+/** Likes by recency — newest first. */
+const byLikedAtDesc = (a: Like, b: Like): number =>
+  b.likedAtMs - a.likedAtMs;
+
+/** Play events by recency — newest first. */
+const byPlayedAtDesc = (
+  a: PlayEvent,
+  b: PlayEvent,
+): number => b.playedMs - a.playedMs;
 /**
  * Memoized `line.text` projection per synced sheet — the position tick
  * rebuilds the model every ~250ms–1s, and the lines array only changes
@@ -1590,7 +1630,7 @@ export function toLibraryModel(input: {
   });
   const items: TrackRowModel[] = memoSorted(
     input.likes,
-    (a, b) => b.likedAtMs - a.likedAtMs,
+    byLikedAtDesc,
   )
     .filter((like) => like.entityKind === 'track')
     .flatMap((like) => {
@@ -1623,7 +1663,7 @@ export function toLibraryModel(input: {
   const seen = new Set<string>();
   const history: CollectionRowModel[] = memoSorted(
     input.playHistory,
-    (a, b) => b.playedMs - a.playedMs,
+    byPlayedAtDesc,
   ).flatMap((event) => {
       if (seen.has(event.recordingId)) return [];
       const recording = byId.get(event.recordingId);
