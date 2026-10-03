@@ -186,7 +186,7 @@ function App() {
     <>
       <PlatformChromeReporter />
       {boot.type === 'ready' ? (
-        <Shell controller={boot.controller} />
+        <Shell controller={boot.controller} onReboot={() => setAttempt((n) => n + 1)} />
       ) : (
         <ThemeProvider theme="system" reducedMotion={reducedMotion}>
           <BootGate boot={boot} onRetry={() => setAttempt((n) => n + 1)} />
@@ -301,7 +301,13 @@ function BootGate({
   );
 }
 
-function Shell({ controller }: { readonly controller: SessionController }) {
+function Shell({
+  controller,
+  onReboot,
+}: {
+  readonly controller: SessionController;
+  readonly onReboot: () => void;
+}) {
   // `Session.subscribe` uses instance state — pass a bound wrapper,
   // not the unbound method (an unbound `this.#listeners` throws and
   // React unmounts the tree, leaving a blank window on boot).
@@ -334,7 +340,7 @@ function Shell({ controller }: { readonly controller: SessionController }) {
       reducedMotion={reducedMotion}
     >
       {state.type === 'ready' ? (
-        <Main controller={controller} state={state} />
+        <Main controller={controller} state={state} onReboot={onReboot} />
       ) : (
         <SessionGate state={state} controller={controller} />
       )}
@@ -438,9 +444,11 @@ type Overlay =
 function Main({
   controller,
   state,
+  onReboot,
 }: {
   readonly controller: SessionController;
   readonly state: ReadySession;
+  readonly onReboot: () => void;
 }) {
   const { session } = controller;
   const importInput = useRef<HTMLInputElement | null>(null);
@@ -806,38 +814,26 @@ function Main({
       // consent dialog → persist. The renderer never touches the
       // consent store; the utility owns the write.
       installProvider: async () => {
-        const picked = await window.auqw.dialog.pickFiles(
-          'Choose a provider pair (.pair.json)',
-        );
-        const path = picked[0];
-        if (path === undefined) {
-          return { outcome: 'cancelled' };
-        }
+        // The whole consent flow (review, dialog, re-review, persist)
+        // is main's — the renderer only picks the file and reports
+        // the outcome. A picker failure is a 'failed', never an
+        // unhandled rejection.
         try {
-          const review = await window.auqw.host.reviewPair(path);
-          if (review === null) {
-            return { outcome: 'malformed' };
-          }
-          const confirmed = await window.auqw.dialog.confirmInstallProvider({
-            id: review.id,
-            version: review.version,
-            permissions: [...review.permissions],
-          });
-          if (!confirmed) {
+          const picked = await window.auqw.dialog.pickFiles(
+            'Choose a provider pair (.pair.json)',
+          );
+          const path = picked[0];
+          if (path === undefined) {
             return { outcome: 'cancelled' };
           }
-          const approved = await window.auqw.host.approvePair(path);
-          return approved
-            ? {
-                outcome: 'approved',
-                id: review.id,
-                permissions: [...review.permissions],
-              }
-            : { outcome: 'failed' };
+          return await window.auqw.dialog.installProvider({ path });
         } catch {
           return { outcome: 'failed' };
         }
       },
+      // The session reboots after an install so the new provider's
+      // adapters exist — settings and playback can use it now.
+      afterProviderInstall: onReboot,
       // Sandboxed renderers have no filesystem — the browser's
       // download path is the honest destination.
       exportJson: async (json, name) => {

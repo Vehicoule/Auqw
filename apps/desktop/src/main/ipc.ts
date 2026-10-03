@@ -4,13 +4,14 @@ import type {
   ConfirmInstallProviderArgs,
   PickFilesArgs,
   PickFolderArgs,
+  UserPairReviewPayload,
 } from '../shared/contract.ts';
 import {
   isAuthOpenUrlArgs,
   isAuthSetClientArgs,
   isConfirmInstallProviderArgs,
-  isHostApprovePairArgs,
   isHostReviewPairArgs,
+  isInstallProviderArgs,
   isLocalAddArgs,
   isLocalProbeArgs,
   isLocalReadArgs,
@@ -265,7 +266,64 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
   fwd(CHANNELS.utilityPing, isUtilityPingArgs),
   fwd(CHANNELS.hostPlugins, noArgs),
   fwd(CHANNELS.hostReviewPair, isHostReviewPairArgs),
-  fwd(CHANNELS.hostApprovePair, isHostApprovePairArgs),
+  // `host:approvePair` stays off the renderer surface — approval
+  // without main's consent gate would let a compromised renderer
+  // persist an unapproved pair. The install flow below owns it.
+  [
+    CHANNELS.dialogInstallProvider,
+    channel(isInstallProviderArgs, async (args, deps, sender) => {
+      // 1. Review the candidate in the utility process.
+      const review = await deps.utility.request(CHANNELS.hostReviewPair, {
+        path: args.path,
+      });
+      if (review === null || review === undefined) {
+        return { outcome: 'malformed' };
+      }
+      const first = review as UserPairReviewPayload;
+      // 2. Native consent dialog on exactly what the pin would be.
+      const confirmed = await deps.confirmInstallProvider(
+        {
+          id: first.id,
+          version: first.version,
+          permissions: [...first.permissions],
+        },
+        sender,
+      );
+      if (!confirmed) {
+        return { outcome: 'cancelled' };
+      }
+      // 3. Re-review — the file must still carry the exact bytes the
+      // user approved; a swap between dialog and persist is refused.
+      const recheck = await deps.utility.request(CHANNELS.hostReviewPair, {
+        path: args.path,
+      });
+      if (recheck === null || recheck === undefined) {
+        return { outcome: 'failed' };
+      }
+      const second = recheck as UserPairReviewPayload;
+      if (
+        second.id !== first.id ||
+        second.wasm_sha256 !== first.wasm_sha256 ||
+        second.manifest_sha256 !== first.manifest_sha256 ||
+        second.permissions.length !== first.permissions.length ||
+        second.permissions.some((p, i) => p !== first.permissions[i])
+      ) {
+        return { outcome: 'failed' };
+      }
+      // 4. Persist — review-to-approve is race-free in main.
+      const approved = await deps.utility.request(
+        CHANNELS.hostApprovePair,
+        { path: args.path },
+      );
+      return approved === true
+        ? {
+            outcome: 'approved',
+            id: second.id,
+            permissions: [...second.permissions],
+          }
+        : { outcome: 'failed' };
+    }),
+  ],
   fwd(CHANNELS.hostRequest, isHostRequestArgs),
   fwd(CHANNELS.hostCancel, isHostCancelArgs),
   fwd(CHANNELS.streamPrepare, isStreamPrepareArgs),

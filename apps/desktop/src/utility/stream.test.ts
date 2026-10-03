@@ -8,6 +8,7 @@ function fakeHost(overrides: Partial<PluginHostLike> = {}): PluginHostLike {
     async loadPlugin() {
       return 'id';
     },
+    async unloadPlugin() {},
     async startPrepare() {
       // The real napi outcome always carries `superseded` as an array.
       return {

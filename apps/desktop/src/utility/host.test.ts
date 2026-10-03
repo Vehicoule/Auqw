@@ -79,6 +79,7 @@ export async function run(): Promise<void> {
       loadedPlugins.push({ wasm, manifest: manifestJson });
       return 'plugin-id';
     },
+    async unloadPlugin() {},
     async startPrepare() {
       return { type: 'prepared' };
     },
@@ -448,6 +449,69 @@ export async function run(): Promise<void> {
       collisionStatus.manifests[0]?.providerId === 'deezer' &&
         collisionLoaded[0]?.wasm.toString('utf8') === 'wasm-deezer',
       'the signed guest wins its id; the user pair never replaces it',
+    );
+
+    // A consent removal unloads the guest from the live host — the
+    // registry must not keep answering for a revoked provider.
+    const unloaded: string[] = [];
+    const revokeModule: NodeBindingsModule = {
+      PluginHost: class {
+        constructor() {
+          return {
+            ...fakeHost,
+            loadPlugin: async (_w: Buffer, m: string) => {
+              return JSON.parse(m)['id'];
+            },
+            unloadPlugin: async (providerId: string) => {
+              unloaded.push(providerId);
+            },
+          } as unknown as PluginHostLike;
+        }
+      } as unknown as NodeBindingsModule['PluginHost'],
+    };
+    const revokeFiles = new Map<string, Buffer>([
+      ['/b/auqw_node_bindings.node', Buffer.from('')],
+      [join('/ud', 'plugins-user', 'foo-music.pair.json'), Buffer.from(pair)],
+      [join('/ud', 'plugins-user', 'consents.json'), Buffer.from(consentJson)],
+    ]);
+    const revokeFs = {
+      exists: (p: string) => revokeFiles.has(p) || p === userDir,
+      read: (p: string) => revokeFiles.get(p) ?? Buffer.alloc(0),
+      list: (d: string) =>
+        d === userDir
+          ? [...revokeFiles.keys()].map((p) =>
+              p.endsWith('consents.json')
+                ? 'consents.json'
+                : 'foo-music.pair.json',
+            )
+          : [],
+      mkdir: () => {},
+      copy: () => {},
+      stat: (p: string) => {
+        const b = revokeFiles.get(p);
+        return b === undefined ? null : { mtimeMs: 1, size: b.byteLength };
+      },
+      write: () => {},
+    };
+    const revokeRuntime = createHostRuntime({
+      env: {
+        AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+        AUQW_USER_DATA: '/ud',
+      },
+      feedSync: async () => ({ ready: [], compatible: [] }),
+      require: () => revokeModule,
+      fs: revokeFs,
+    });
+    const withConsent = await revokeRuntime.status();
+    assertEqual(withConsent.manifests.length, 1, 'pair loads behind consent');
+    assertEqual(unloaded.length, 0, 'nothing unloaded while consented');
+    // Revoke: drop the consent record — the next status unloads.
+    revokeFiles.delete(join('/ud', 'plugins-user', 'consents.json'));
+    const revoked = await revokeRuntime.status();
+    assertEqual(revoked.manifests.length, 0, 'revoked pair never loads');
+    assert(
+      unloaded.includes('foo-music'),
+      'revocation unloads the guest from the host',
     );
   }
 

@@ -112,6 +112,9 @@ export async function run(): Promise<void> {
     const utilityCalls: Array<{ channel: string; args: unknown }> = [];
     let txSeq = 0;
     let beginGate: Promise<void> | null = null;
+    let reviewPayload: unknown | (() => unknown) = null;
+    let approveVerdict = true;
+    let consentVerdict = false;
     const deps: ChannelDeps = {
       meta: () => ({
         version: '0.1.0',
@@ -120,7 +123,7 @@ export async function run(): Promise<void> {
       }),
       pickFolder: () => Promise.resolve('/picked/dir'),
       pickFiles: () => Promise.resolve(['/a.mp3', '/b.flac']),
-      confirmInstallProvider: () => Promise.resolve(false),
+      confirmInstallProvider: () => Promise.resolve(consentVerdict),
       net,
       theme: {
         attach: () => undefined,
@@ -183,6 +186,18 @@ export async function run(): Promise<void> {
               ? Promise.resolve(open())
               : beginGate.then(open);
           }
+          // Install-flow seams: the review payload main re-reads and
+          // the approve verdict, scriptable per test.
+          if (channel === CHANNELS.hostReviewPair) {
+            return Promise.resolve(
+              typeof reviewPayload === 'function'
+                ? reviewPayload()
+                : reviewPayload,
+            );
+          }
+          if (channel === CHANNELS.hostApprovePair) {
+            return Promise.resolve(approveVerdict);
+          }
           return Promise.resolve({ routed: channel, args });
         },
         sendToHost: () => true,
@@ -228,6 +243,95 @@ export async function run(): Promise<void> {
           `preload sends '${channel}' but main registers nothing`,
         );
       }
+    }
+
+    // dialog:installProvider — the consent-gated flow, owned by main.
+    {
+      const review = {
+        id: 'foo-music',
+        version: '1.2.3',
+        abi: '0.1.0',
+        capabilities: ['catalog.search'],
+        permissions: ['network:api.foo.com'],
+        wasm_sha256: 'a'.repeat(64),
+        manifest_sha256: 'b'.repeat(64),
+      };
+      // Malformed pair: review is null — never reaches the dialog.
+      reviewPayload = null;
+      const malformed = await invoke(CHANNELS.dialogInstallProvider, {
+        path: '/p',
+      });
+      assert(malformed.ok, 'malformed flow resolves ok');
+      assertDeepEqual(
+        malformed.result,
+        { outcome: 'malformed' },
+        'null review reports malformed',
+      );
+      // Consent refused: the dialog verdict cancels, no approve call.
+      reviewPayload = review;
+      consentVerdict = false;
+      const cancelled = await invoke(CHANNELS.dialogInstallProvider, {
+        path: '/p',
+      });
+      assert(cancelled.ok, 'cancelled flow resolves ok');
+      assertDeepEqual(
+        cancelled.result,
+        { outcome: 'cancelled' },
+        'refused consent cancels',
+      );
+      assert(
+        !utilityCalls.some((c) => c.channel === CHANNELS.hostApprovePair),
+        'no approve without consent',
+      );
+      // Approved: review → dialog → re-review → persist.
+      consentVerdict = true;
+      const callsBeforeApprove = utilityCalls.length;
+      const approved = await invoke(CHANNELS.dialogInstallProvider, {
+        path: '/p',
+      });
+      assert(approved.ok, 'approved flow resolves ok');
+      assertDeepEqual((approved as { result: unknown }).result, {
+        outcome: 'approved',
+        id: 'foo-music',
+        permissions: ['network:api.foo.com'],
+      }, 'approved install reports the review identity');
+      assertEqual(
+        utilityCalls
+          .slice(callsBeforeApprove)
+          .filter((c) => c.channel === CHANNELS.hostReviewPair).length,
+        2,
+        'main re-reviews after the dialog',
+      );
+      assert(
+        utilityCalls.some((c) => c.channel === CHANNELS.hostApprovePair),
+        'persist runs behind consent',
+      );
+      // Bytes swapped between dialog and persist: digest mismatch
+      // refuses — the user approved the OLD pair, never the new one.
+      const swapped = {
+        ...review,
+        wasm_sha256: 'c'.repeat(64),
+      };
+      const callsBeforeSwap = utilityCalls.length;
+      let reviewCall = 0;
+      reviewPayload = () => {
+        reviewCall += 1;
+        return reviewCall === 1 ? review : swapped;
+      };
+      const tampered = await invoke(CHANNELS.dialogInstallProvider, {
+        path: '/p',
+      });
+      assert(tampered.ok, 'tampered flow resolves ok');
+      assertDeepEqual(
+        (tampered as { result: unknown }).result,
+        { outcome: 'failed' },
+        'digest swap refused',
+      );
+      assertEqual(
+        utilityCalls.length,
+        callsBeforeSwap + 2,
+        'the swapped flow stops after the re-review',
+      );
     }
 
     // app:meta

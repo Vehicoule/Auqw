@@ -5,6 +5,7 @@ export const CHANNELS = {
   dialogPickFolder: 'dialog:pickFolder',
   dialogPickFiles: 'dialog:pickFiles',
   dialogConfirmInstallProvider: 'dialog:confirmInstallProvider',
+  dialogInstallProvider: 'dialog:installProvider',
   netSnapshot: 'net:snapshot',
   netEvents: 'net:events',
   netSubscribe: 'net:subscribe',

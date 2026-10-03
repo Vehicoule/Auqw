@@ -6,6 +6,7 @@ import {
   isApprovePairResult,
   isAuthSnapshot,
   isHostPluginsResult,
+  isInstallProviderOutcome,
   isLocalAddResult,
   isLocalListResult,
   isLocalPlaybackResult,
@@ -61,8 +62,8 @@ import {
 } from '../shared/contract.ts';
 import type {
   AuqwApi,
-  HostApprovePairArgs,
   HostReviewPairArgs,
+  InstallProviderArgs,
   StreamPortLike,
 } from '../shared/contract.ts';
 import { isPumpServerMessage } from '../shared/pump-protocol.ts';
@@ -254,6 +255,12 @@ const api: AuqwApi = {
         review,
         isApprovePairResult,
       ),
+    installProvider: (args) =>
+      invoke(
+        CHANNELS.dialogInstallProvider,
+        args satisfies InstallProviderArgs,
+        isInstallProviderOutcome,
+      ),
   },
   net: {
     snapshot: () => invoke(CHANNELS.netSnapshot, undefined, isNetEvent),
@@ -380,12 +387,6 @@ const api: AuqwApi = {
         CHANNELS.hostReviewPair,
         { path } satisfies HostReviewPairArgs,
         isUserPairReviewResult,
-      ),
-    approvePair: (path: string) =>
-      invoke(
-        CHANNELS.hostApprovePair,
-        { path } satisfies HostApprovePairArgs,
-        isApprovePairResult,
       ),
     request: (args) =>
       invoke(CHANNELS.hostRequest, args, isRequestOutcomePayload),

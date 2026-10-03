@@ -56,6 +56,7 @@ export type PluginHostLike = {
   // napi `load_plugin(&self, wasm: Buffer, manifest_json: String)` —
   // raw bytes, NOT the base64 string the UniFFI mobile surface takes.
   loadPlugin(wasm: Buffer, manifestJson: string): Promise<string>;
+  unloadPlugin(providerId: string): Promise<void>;
   startPrepare(
     pluginId: string,
     sourceRef: string,
@@ -412,6 +413,9 @@ export function createHostRuntime(opts: {
   // stale memoized result.
   let lastLoadIncomplete = false;
   let lastUserSignature: string | null = null;
+  // Provider ids the previous pass loaded from user pairs — the
+  // revocation set for the next reload.
+  let lastUserProviderIds: readonly string[] = [];
 
   function loadBindings(): PluginHostLike {
     const candidates = bindingsCandidates(
@@ -591,6 +595,10 @@ export function createHostRuntime(opts: {
       // Duplicate user ids among themselves double-register the same
       // way. Both are refusals, and the pair file stays untouched.
       const takenIds = new Set(loaded.map((p) => p.providerId));
+      // Only signed loads count toward the retry gate — user pairs
+      // must not mask a signed provider that failed `loadPlugin`.
+      const signedLoaded = loaded.length;
+      const userProviderIds: string[] = [];
       for (const name of fs.list(userDir).sort()) {
         if (!name.endsWith('.pair.json')) {
           continue;
@@ -635,10 +643,25 @@ export function createHostRuntime(opts: {
             permissions: manifestPermissions(JSON.parse(manifest)),
           });
           takenIds.add(fields.providerId);
+          userProviderIds.push(fields.providerId);
         } catch {
           // A malformed or unconsented pair is skipped, not fatal.
         }
       }
+      // A consent removal must revoke the guest at runtime too — the
+      // host's registry keeps the id registered otherwise. Guests the
+      // previous pass loaded as user pairs but this pass no longer
+      // carries are unloaded; a signed feed id never lands here.
+      for (const gone of lastUserProviderIds.filter(
+        (id) => !userProviderIds.includes(id),
+      )) {
+        try {
+          await h.unloadPlugin(gone);
+        } catch {
+          // The host may have dropped it already — nothing to revoke.
+        }
+      }
+      lastUserProviderIds = userProviderIds;
       // A failed feed refresh with an empty cache must not pin an empty
       // provider set: `pluginsReady` resets on rejection, so the next
       // call re-syncs — a cache hit meanwhile stays usable offline.
@@ -657,7 +680,7 @@ export function createHostRuntime(opts: {
       lastLoadIncomplete =
         synced !== undefined &&
         (synced.ready.length < synced.compatible.length ||
-          loaded.length < synced.compatible.length);
+          signedLoaded < synced.compatible.length);
       return loaded;
     }
     const manifests = fs
@@ -779,17 +802,25 @@ export function createHostRuntime(opts: {
       // The user pair file lands verbatim under the user dir — the
       // loader re-reads and re-verifies it there; the consent record
       // pins the exact digests + permissions this review showed.
+      // A replacement must never disable the working install: the
+      // previous pair + consent are captured first and restored on
+      // any failure, so a botched upgrade leaves v1 fully intact.
       const userDir = join(
         opts.env.AUQW_USER_DATA ?? process.cwd(),
         'plugins-user',
       );
+      const pairPath = join(userDir, `${review.id}.pair.json`);
+      const consentsPath = join(userDir, 'consents.json');
+      const hadPair = fs.exists(pairPath);
+      const oldPair = hadPair ? fs.read(pairPath) : undefined;
+      const oldConsents = fs.exists(consentsPath)
+        ? fs.read(consentsPath).toString('utf8')
+        : undefined;
       try {
         fs.mkdir(userDir);
-        fs.copy(path, join(userDir, `${review.id}.pair.json`));
-        const consents = fs.exists(join(userDir, 'consents.json'))
-          ? consentsFromJson(
-              fs.read(join(userDir, 'consents.json')).toString('utf8'),
-            )
+        fs.copy(path, pairPath);
+        const consents = oldConsents !== undefined
+          ? consentsFromJson(oldConsents)
           : [];
         const next = consents.filter((c) => c.id !== review.id);
         next.push({
@@ -800,8 +831,20 @@ export function createHostRuntime(opts: {
           manifest_sha256: review.manifest_sha256,
           approved_permissions: [...review.permissions],
         });
-        fs.write(join(userDir, 'consents.json'), consentsToJson(next));
+        fs.write(consentsPath, consentsToJson(next));
       } catch {
+        try {
+          if (oldPair !== undefined) {
+            fs.write(pairPath, oldPair.toString('utf8'));
+          }
+          if (oldConsents !== undefined) {
+            fs.write(consentsPath, oldConsents);
+          }
+        } catch {
+          // Best-effort restore — the loader's digest pin still
+          // refuses a mismatched pair, so the failure mode stays
+          // 'provider absent', never 'provider wrong'.
+        }
         return false;
       }
       return true;

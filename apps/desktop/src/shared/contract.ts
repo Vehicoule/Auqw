@@ -424,6 +424,29 @@ export type HostApprovePairArgs = v.Guarded<typeof isHostApprovePairArgs>;
 export const isHostApprovePairArgs = v.object({
   path: v.boundedString(4096),
 });
+/**
+ * `dialog:installProvider` — the consent-gated install flow, owned
+ * end-to-end by main: review, native consent dialog, re-review
+ * (digest match against what the user approved), then persist.
+ * The renderer can only start the flow, never skip a step.
+ */
+export type InstallProviderArgs = v.Guarded<typeof isInstallProviderArgs>;
+export const isInstallProviderArgs = v.object({
+  path: v.boundedString(4096),
+});
+export type InstallProviderOutcome = v.Guarded<
+  typeof isInstallProviderOutcome
+>;
+export const isInstallProviderOutcome = v.union(
+  v.object({ outcome: v.literal('cancelled') }),
+  v.object({ outcome: v.literal('malformed') }),
+  v.object({ outcome: v.literal('failed') }),
+  v.object({
+    outcome: v.literal('approved'),
+    id: v.boundedString(128),
+    permissions: v.array(v.boundedString(128)),
+  }),
+);
 
 /** `host:reviewPair` result — null when the pair is malformed. */
 export type UserPairReviewResult = v.Guarded<
@@ -1681,10 +1704,16 @@ export type AuqwApi = {
       multiple?: boolean,
     ) => Promise<readonly string[]>;
     /** Native consent dialog — shows the review, resolves to the
-     * user's verdict. */
+     * user's verdict. Main-internal wiring keeps its renderer surface
+     * for tests; the shipped install path is `installProvider`. */
     readonly confirmInstallProvider: (
       review: ConfirmInstallProviderArgs,
     ) => Promise<boolean>;
+    /** The consent-gated install flow — review, dialog, re-review,
+     * persist, all owned by main. The renderer only starts it. */
+    readonly installProvider: (
+      args: InstallProviderArgs,
+    ) => Promise<InstallProviderOutcome>;
   };
   readonly net: {
     readonly snapshot: () => Promise<NetSnapshot>;
@@ -1712,7 +1741,6 @@ export type AuqwApi = {
     readonly reviewPair: (
       path: string,
     ) => Promise<UserPairReviewResult>;
-    readonly approvePair: (path: string) => Promise<ApprovePairResult>;
     readonly request: (
       args: HostRequestArgs,
     ) => Promise<RequestOutcomePayload>;

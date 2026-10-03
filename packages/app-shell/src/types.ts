@@ -342,10 +342,11 @@ export interface AppShellPorts<E> {
   readonly omitSettingsRows?: readonly string[] | undefined;
   /**
    * Third-party provider install — present only where the platform
-   * exposes the consent flow (desktop `host:reviewPair`/
-   * `host:approvePair`). Absent in harnesses/mobile: the settings row
-   * omits itself. 'cancelled' = user backed out; 'malformed' = the
-   * pair failed review; 'approved' = consent persisted.
+   * exposes the consent flow (desktop `dialog:installProvider`).
+   * Absent in harnesses/mobile: the settings row omits itself.
+   * 'cancelled' = user backed out; 'malformed' = the pair failed
+   * review; 'approved' = consent persisted and the provider is
+   * installed — `afterProviderInstall` (when present) runs next.
    */
   readonly installProvider?:
     | (() => Promise<
@@ -355,6 +356,11 @@ export interface AppShellPorts<E> {
         | { outcome: 'failed' }
       >)
     | undefined;
+  /**
+   * Post-install hook — the platform reboots its session so the new
+   * provider's adapters exist. Absent where no live session exists.
+   */
+  readonly afterProviderInstall?: (() => void) | undefined;
 
   /**
    * Library export write — desktop triggers a browser download;

@@ -165,6 +165,8 @@ function fakeApi(): Rig {
         pickFolder: () => Promise.resolve(null),
         pickFiles: () => Promise.resolve([]),
         confirmInstallProvider: () => Promise.resolve(false),
+        installProvider: () =>
+          Promise.resolve({ outcome: 'cancelled' } as const),
       },
       net: {
         snapshot: () => Promise.resolve(rig.snapshotResult),
@@ -224,7 +226,6 @@ function fakeApi(): Rig {
       host: {
         plugins: () => Promise.resolve(rig.pluginsResult),
         reviewPair: () => Promise.reject(new Error('unused')),
-        approvePair: () => Promise.reject(new Error('unused')),
         request: (args: HostRequestArgs) => {
           rig.hostCalls.push(args);
           return Promise.resolve(rig.requestOutcome);

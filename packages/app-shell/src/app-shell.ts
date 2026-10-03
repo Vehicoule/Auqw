@@ -2464,21 +2464,28 @@ export function useAppShell<E extends { readonly type: string } = never>(
           if (install === undefined) {
             return;
           }
-          void install().then((outcome) => {
-            if (outcome.outcome === 'cancelled') {
-              return;
-            }
-            if (outcome.outcome === 'approved') {
-              setToast(
-                t('toast.providerInstalled', {
-                  id: outcome.id,
-                  count: outcome.permissions.length,
-                }),
-              );
-              return;
-            }
-            setToast(t('toast.providerInstallFailed'));
-          });
+          void install()
+            .then((outcome) => {
+              if (outcome.outcome === 'cancelled') {
+                return;
+              }
+              if (outcome.outcome === 'approved') {
+                setToast(
+                  t('toast.providerInstalled', {
+                    id: outcome.id,
+                    count: outcome.permissions.length,
+                  }),
+                );
+                // The session reboots so the new provider's adapters
+                // exist — settings and playback can use it now.
+                ports.afterProviderInstall?.();
+                return;
+              }
+              setToast(t('toast.providerInstallFailed'));
+            })
+            // A rejected install port (picker failure, IPC error)
+            // still owes the user the failure toast.
+            .catch(() => setToast(t('toast.providerInstallFailed')));
           return;
         }
         case 'qualityKbps':
