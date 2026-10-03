@@ -285,7 +285,7 @@ async function providerTests(): Promise<void> {
   await p1;
   assertEqual(provider2.pendingCount('search'), 0);
 
-  // The 0.3.0 ops defer and settle like the rest, per declared caps.
+  // The ABI 0.1.0 ops defer and settle like the rest, per declared caps.
   const provider3 = new FakeProvider('deezer', [
     'catalog.entity',
     'radio.seed',

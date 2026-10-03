@@ -214,31 +214,23 @@ while hidden).
 - `AUQW_DEV_HARNESS=1` in the launch env selects the dev-gate harness
   (`index.html`, the UI documented above); without it the window loads the
   product UI (`app.html`) — a different surface (search/home/settings).
-- Dev mode defaults `AUQW_PLUGIN_DIR` to `apps/desktop/plugins`
-  (`utilityEnv` in `src/main/index.ts`) — plugins fail to load when that
-  dir is EMPTY, the var points elsewhere, or the staged pairs are
-  incomplete/malformed (`loadPluginDir` skips them): `#provider` stays
-  empty and the provider path logs `prepare failed — no plugins loaded`.
-  Pass the var only to point at a different set.
+- Plugins ship OTA (decisions.md — Plugin guests): NOTHING is bundled.
+  On first load the utility syncs the signed feed
+  (`releases/feed.json` on Auqw-plugins main, fetched over HTTPS) into
+  `<userData>/plugins`, verifies ed25519 signature + sha256 digests
+  against the embedded release key, and loads the verified pairs.
+  A first boot needs outbound network to raw.githubusercontent.com —
+  an unreachable feed with an empty cache = zero providers.
+- `AUQW_PLUGIN_DIR` still wins over the feed cache when set — point it
+  at a dir of `<id>.wasm` + `<id>.manifest.json` pairs to test an
+  unsigned/local set (dev seam). `AUQW_PLUGIN_FEED` overrides the
+  feed URL for a fixture feed. When neither is set and the feed is
+  unreachable, a NON-empty cache still loads (last-known-good); an
+  empty cache + failed sync rethrows so the next call re-syncs.
 - The PRODUCT UI is stricter: `src/renderer/controller.ts` throws
-  `'no plugin providers available'` when the plugin dir is empty → boot dies
+  `'no plugin providers available'` when zero providers load → boot dies
   at `[ui] boot failed: internal` and nothing interactive ever renders.
-  Stage providers first — from the REPO ROOT (the script and
-  `providers.lock.json` are root-level):
-  `node tooling/sync-plugins.mjs apps/desktop/plugins`
-  (which is the dev-mode default — no env var needed on this checkout).
-  itunes/deezer/youtube-music/lyrics-lrclib all stage cleanly with outbound
-  HTTPS.
-- Packaged-parity staging: `node tooling/sync-plugins.mjs apps/desktop/plugins
-  --release` is what `pnpm run dist` invokes — verifies the ed25519 signature
-  + provenance on `release:` sources and fails closed on `local-build:`.
-  Expected output: one `synced <id> <ver> sha256:<12hex>…` line per lock
-  plugin and NO `synced spin` line (a positional out dir suppresses the
-  conformance guest; `--conformance` re-adds it). `--check`/`--verify`
-  verify only and take no out dir; unknown flags throw `unknown flag`.
-  Re-sync over an existing out dir goes through the atomic
-  stage→hold→publish swap — afterwards `apps/desktop/` must show no
-  `.sync-stage-*` / `.sync-hold-*` residue.
+  Offline first boot or a feed signed by a different key lands here.
 - In-UI load proof: the `host:plugins` console line is dev-harness only.
   The product-UI signal is settings → diagnostics → providers row, which
   lists the loaded providerIds (e.g. `deezer, itunes, lyrics-lrclib,
@@ -249,13 +241,11 @@ while hidden).
   provider slot shows `sheets.noProvider` in the picker sheet.
 - youtube-music `playback.resolve` takes an 11-char video ID as `source_ref`
   (e.g. `kJQP7kiw5Fk`), not a URL.
-- `sync-plugins.mjs` can fail `ENOENT … releases/<id>/<version>` when the
-  sibling plugins checkout is STALE (the lock pins releases the clone
-  lacks). `resolveSourcePath` already case-insensitively matches each
-  segment when EXACTLY ONE lookalike exists — `../auqw-plugins` resolves
-  to an `Auqw-plugins` clone — so casing alone is never the cause;
-  multiple lookalike checkouts refuse the fallback as ambiguous. Fix:
-  `git -C ~/repos/<the-one-plugins-checkout> pull --ff-only`, then re-run.
+- Dev loops that need a fixture set WITHOUT the network: stage
+  `<id>.wasm` + `<id>.manifest.json` pairs into a scratch dir and pass
+  `AUQW_PLUGIN_DIR=<dir>` — the utility skips the feed entirely and
+  loads the set unsigned-set-style (host verifies only
+  `artifact.digest` vs wasm bytes, no signature).
 - youtube-music CAN resolve on this box — a bot-check on datacenter IPs is
   a possible failure, not a guaranteed one. A deezer search row pressed
   with no active queue starts a `radio · growing · youtube-music` session

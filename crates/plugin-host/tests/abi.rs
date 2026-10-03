@@ -77,6 +77,19 @@ fn manifest_for(wasm: &[u8], permissions: &[&str]) -> Manifest {
     manifest_for_abi(wasm, "0.1.0", permissions)
 }
 
+fn manifest_text_caps(wasm: &[u8], abi: &str, caps: &[&str], permissions: &[&str]) -> String {
+    let digest = format!("sha256:{:x}", sha2::Sha256::digest(wasm));
+    let caps: Vec<String> = caps.iter().map(|c| format!("\"{c}\"")).collect();
+    let perms: Vec<String> = permissions.iter().map(|p| format!("\"{p}\"")).collect();
+    format!(
+        "{{\"id\":\"test-plugin\",\"version\":\"0.1.0\",\"abi\":\"{abi}\",\
+         \"capabilities\":[{}],\"permissions\":[{}],\
+         \"artifact\":{{\"path\":\"test.wasm\",\"digest\":\"{digest}\"}}}}",
+        caps.join(","),
+        perms.join(",")
+    )
+}
+
 fn default_budgets() -> Budgets {
     Budgets::default()
 }
@@ -404,121 +417,76 @@ fn load_rejects_digest_mismatch() {
 
 // ---------- ABI version isolation ----------
 
-/// Only `0.1.0`/`0.2.0` exist; an unknown ABI is a manifest rejection,
-/// not an implicit member of the newest capability set.
+/// The one shipped ABI is `0.1.0`; anything else — legacy tiers or a
+/// version never released — is a manifest rejection, not an implicit
+/// member of the newest capability set.
 #[test]
-fn manifest_rejects_unknown_abi() {
+fn manifest_rejects_noncanonical_abi() {
     let wasm = ok(wat::parse_str(DONE_WAT));
-    let e = err(Manifest::from_json(&manifest_text(&wasm, "0.9.9", &[])));
-    assert!(matches!(e, ManifestError::InvalidField(_)), "{e:?}");
-}
-
-/// `kv` is a 0.2 permission; a 0.1 manifest is a strict immutable
-/// subset and cannot grow it.
-#[test]
-fn manifest_0_1_rejects_kv_permission() {
-    let wasm = ok(wat::parse_str(DONE_WAT));
-    let e = err(Manifest::from_json(&manifest_text(&wasm, "0.1.0", &["kv"])));
-    assert!(matches!(e, ManifestError::InvalidField(_)), "{e:?}");
-}
-
-/// Under a 0.1 manifest the 0.2 service kinds are a protocol
-/// violation — `invalid-message`, never `permission-denied`.
-#[tokio::test]
-async fn abi_0_1_rejects_0_2_host_request_kinds() {
-    let messages = [
-        r#"{"type":"host_request","id":1,"kind":"kv_get","payload":{"key":"k"}}"#,
-        r#"{"type":"host_request","id":1,"kind":"kv_set","payload":{"key":"k","value":null}}"#,
-        r#"{"type":"host_request","id":1,"kind":"log","payload":{"level":"info","message":"m"}}"#,
-        r#"{"type":"host_request","id":1,"kind":"now_ms","payload":{}}"#,
-    ];
-    for msg in messages {
-        let wasm = ok(wat::parse_str(raw_wat(msg)));
-        let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
-        let (http, _calls) = CannedHttp::new();
-        let Invocation { result, .. } = invoke(
-            &plugin,
-            "playback.resolve",
-            serde_json::json!({}),
-            &default_budgets(),
-            CancellationToken::new(),
-            svc(&http, None),
-        )
-        .await;
-        assert!(
-            matches!(err(result), InvokeError::InvalidMessage(_)),
-            "{msg}"
-        );
+    for abi in ["0.2.0", "0.3.0", "0.9.9"] {
+        let e = err(Manifest::from_json(&manifest_text(&wasm, abi, &[])));
+        assert!(matches!(e, ManifestError::InvalidField(_)), "{abi}");
     }
 }
 
-fn manifest_text_caps(wasm: &[u8], abi: &str, caps: &[&str], permissions: &[&str]) -> String {
-    let digest = format!("sha256:{:x}", sha2::Sha256::digest(wasm));
-    let caps: Vec<String> = caps.iter().map(|c| format!("\"{c}\"")).collect();
-    let perms: Vec<String> = permissions.iter().map(|p| format!("\"{p}\"")).collect();
-    format!(
-        "{{\"id\":\"test-plugin\",\"version\":\"0.1.0\",\"abi\":\"{abi}\",\
-         \"capabilities\":[{}],\"permissions\":[{}],\
-         \"artifact\":{{\"path\":\"test.wasm\",\"digest\":\"{digest}\"}}}}",
-        caps.join(","),
-        perms.join(",")
-    )
-}
-
-/// `0.3.0` accepts the full 0.2 set plus the new capabilities.
+/// `0.1.0` serves the full capability and permission surface — the
+/// prerelease collapse (decision log) retired the tier matrix.
 #[test]
-fn manifest_accepts_0_3_capabilities() {
+fn manifest_accepts_0_1_full_surface() {
     let wasm = ok(wat::parse_str(DONE_WAT));
     let m = ok(Manifest::from_json(&manifest_text_caps(
         &wasm,
-        "0.3.0",
+        "0.1.0",
         &[
             "catalog.search",
             "catalog.metadata",
             "catalog.artwork",
             "catalog.entity",
+            "catalog.suggest",
             "playback.resolve",
             "playback.candidates",
             "lyrics.plain",
             "lyrics.synced",
             "radio.seed",
         ],
-        &["network:allowed.test"],
+        &["network:allowed.test", "pot-provider", "kv"],
     )));
-    assert_eq!(m.capabilities.len(), 9);
+    assert_eq!(m.capabilities.len(), 10);
 }
 
-/// A `0.2.0` manifest is immutable — the 0.3 capabilities are a
-/// rejection under it, not a forward-compatible surprise.
-#[test]
-fn manifest_0_2_rejects_0_3_capabilities() {
-    let wasm = ok(wat::parse_str(DONE_WAT));
-    for cap in [
-        "catalog.entity",
-        "lyrics.plain",
-        "lyrics.synced",
-        "radio.seed",
-    ] {
-        let e = err(Manifest::from_json(&manifest_text_caps(
-            &wasm,
-            "0.2.0",
-            &[cap],
-            &[],
-        )));
-        assert!(matches!(e, ManifestError::InvalidField(_)), "{cap}");
-    }
-}
-
-/// Under a pre-0.3 manifest the `resume` service kind is a protocol
-/// violation — `invalid-message`, never `permission-denied`.
+/// Every service kind is 0.1.0 surface — none is a protocol
+/// violation. `kv_*` still carries the `kv` permission gate and
+/// `resume` its `network:` gate, so a request reaching the service
+/// itself (or a denied one) is never `InvalidMessage`.
 #[tokio::test]
-async fn abi_pre_0_3_rejects_resume_kind() {
-    let msg = r#"{"type":"host_request","id":1,"kind":"resume","payload":{"url":"https://allowed.test/x","offset":5}}"#;
-    for abi in ["0.1.0", "0.2.0"] {
+async fn abi_0_1_serves_every_host_request_kind() {
+    let cases: [(&str, &[&str]); 5] = [
+        (
+            r#"{"type":"host_request","id":1,"kind":"kv_get","payload":{"key":"k"}}"#,
+            &["kv"],
+        ),
+        (
+            r#"{"type":"host_request","id":1,"kind":"kv_set","payload":{"key":"k","value":null}}"#,
+            &["kv"],
+        ),
+        (
+            r#"{"type":"host_request","id":1,"kind":"log","payload":{"level":"info","message":"m"}}"#,
+            &[],
+        ),
+        (
+            r#"{"type":"host_request","id":1,"kind":"now_ms","payload":{}}"#,
+            &[],
+        ),
+        (
+            r#"{"type":"host_request","id":1,"kind":"resume","payload":{"url":"https://allowed.test/x","offset":0,"length":4}}"#,
+            &["network:allowed.test"],
+        ),
+    ];
+    for (msg, perms) in cases {
         let wasm = ok(wat::parse_str(raw_wat(msg)));
         let plugin = ok(load(
             &wasm,
-            manifest_for_abi(&wasm, abi, &["network:allowed.test"]),
+            manifest_for_abi(&wasm, "0.1.0", perms),
             &default_budgets(),
         ));
         let (http, _calls) = CannedHttp::new();
@@ -532,8 +500,8 @@ async fn abi_pre_0_3_rejects_resume_kind() {
         )
         .await;
         assert!(
-            matches!(err(result), InvokeError::InvalidMessage(_)),
-            "{abi}"
+            !matches!(err(result), InvokeError::InvalidMessage(_)),
+            "{msg}"
         );
     }
 }
@@ -1306,7 +1274,6 @@ fn manifest_field_grammar_matches_schema() {
         manifest_json("Bad-Id", "0.1.0", caps, "p.wasm", &digest),
         manifest_json("-bad", "0.1.0", caps, "p.wasm", &digest),
         manifest_json("p", "0.1", caps, "p.wasm", &digest),
-        manifest_json("p", "0.1.0", "[\"catalog.search\"]", "p.wasm", &digest),
         manifest_json("p", "0.1.0", caps, "", &digest),
         manifest_json("p", "0.1.0", caps, "p.wasm", "sha256:xyz"),
         manifest_json("p", "0.1.0", caps, "p.wasm", "md5:000"),
@@ -1695,7 +1662,7 @@ async fn deadline_caps_kv_snapshot_leg() {
     budgets.deadline = Duration::from_millis(50);
     let plugin = ok(load(
         &wasm,
-        manifest_for_abi(&wasm, "0.2.0", &["kv"]),
+        manifest_for_abi(&wasm, "0.1.0", &["kv"]),
         &budgets,
     ));
     let release = Arc::new(AtomicBool::new(false));
@@ -2119,7 +2086,7 @@ async fn guest_log_cap_stops_logger() {
     let wasm = ok(wat::parse_str(logger_wat()));
     let plugin = ok(load(
         &wasm,
-        manifest_for_abi(&wasm, "0.2.0", &[]),
+        manifest_for_abi(&wasm, "0.1.0", &[]),
         &default_budgets(),
     ));
     let (http, _calls) = CannedHttp::new();
@@ -2206,7 +2173,7 @@ async fn access_token_is_masked_in_guest_log() {
     )));
     let plugin = ok(load(
         &wasm,
-        manifest_for_abi(&wasm, "0.2.0", &[]),
+        manifest_for_abi(&wasm, "0.1.0", &[]),
         &default_budgets(),
     ));
     let (http, _calls) = CannedHttp::new();
@@ -2262,7 +2229,7 @@ async fn pot_response_over_secret_cap_is_refused() {
     )));
     let plugin = ok(load(
         &wasm,
-        manifest_for_abi(&wasm, "0.2.0", &["pot-provider"]),
+        manifest_for_abi(&wasm, "0.1.0", &["pot-provider"]),
         &default_budgets(),
     ));
     // `poToken` sorts before `zz` in the response's key order, so the
@@ -2303,7 +2270,7 @@ async fn access_token_is_masked_in_fail() {
     )));
     let plugin = ok(load(
         &wasm,
-        manifest_for_abi(&wasm, "0.2.0", &[]),
+        manifest_for_abi(&wasm, "0.1.0", &[]),
         &default_budgets(),
     ));
     let (http, _calls) = CannedHttp::new();

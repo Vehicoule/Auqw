@@ -46,8 +46,9 @@ function manifestNetworkHosts(pluginDir: string): readonly string[] {
   try {
     entries = readdirSync(pluginDir);
   } catch {
-    // No plugin dir staged (dev without sync-plugins) — the artwork
-    // allowlist alone still keeps the bundled providers' covers live.
+    // Plugin dir absent (first boot before the feed sync lands) —
+    // the artwork allowlist alone still keeps providers' covers live
+    // once the directory appears on the next document serve.
     return [];
   }
   const hosts = new Set<string>();

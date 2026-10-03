@@ -14,8 +14,8 @@
 //!   failure.
 //! - `http`: one GET of `payload.url` through `http_request`.
 //! - `resume`: one ranged continuation of `payload.url` at
-//!   `payload.offset`/`payload.length` through the 0.3.0 `resume`
-//!   step; a `host_error` surfaces as `{"host_error": kind}`.
+//!   `payload.offset`/`payload.length` through the `resume` step; a
+//!   `host_error` surfaces as `{"host_error": kind}`.
 //!
 //! Rebuild: `cargo build --target wasm32-unknown-unknown --release -p
 //! auqw-conformance-scenario`, then copy `target/wasm32-unknown-unknown/

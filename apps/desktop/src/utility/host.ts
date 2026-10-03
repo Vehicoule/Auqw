@@ -4,9 +4,18 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
 } from 'node:fs';
+import { createPublicKey, verify } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
+import {
+  PLUGIN_RELEASE_TRUST,
+  pluginPublicKey,
+  syncPluginFeed,
+} from '@auqw/application';
 import { shellError } from '../shared/errors.ts';
 import type {
   HostPluginsResult,
@@ -101,8 +110,11 @@ const BINDINGS_CANDIDATES: readonly string[] = [
 type HostEnv = {
   /** Explicit .node artifact path — overrides the candidate scan. */
   AUQW_NODE_BINDINGS?: string | undefined;
-  /** Directory of `<id>.wasm` + `<id>.manifest.json` plugin pairs. */
+  /** Directory of `<id>.wasm` + `<id>.manifest.json` plugin pairs —
+   * when set it wins over the feed cache (dev/test seam). */
   AUQW_PLUGIN_DIR?: string | undefined;
+  /** OTA feed URL override — defaults to the embedded release feed. */
+  AUQW_PLUGIN_FEED?: string | undefined;
   /** Host state directory — stream stores live under it. */
   AUQW_USER_DATA?: string | undefined;
   AUQW_STREAM_DIR?: string | undefined;
@@ -219,12 +231,58 @@ function manifestFields(
   };
 }
 
+/** ed25519 SPKI DER is a fixed 12-byte header over the raw key. */
+const ED25519_SPKI_DER_PREFIX = Buffer.from(
+  '302a300506032b6570032100',
+  'hex',
+);
+
+/** Release feed sync over node builtins — the utility's OTA path. */
+async function defaultFeedSync(
+  dir: string,
+  feedUrl: string,
+): Promise<readonly string[]> {
+  const publicKey = createPublicKey({
+    key: Buffer.concat([ED25519_SPKI_DER_PREFIX, pluginPublicKey()]),
+    format: 'der',
+    type: 'spki',
+  });
+  return syncPluginFeed({
+    feedUrl,
+    keyId: PLUGIN_RELEASE_TRUST.keyId,
+    publicKey: pluginPublicKey(),
+    dir,
+    ports: {
+      fetchBytes: async (url) => {
+        const res = await fetch(url);
+        if (!res.ok) {
+          throw shellError('transient', `plugin feed fetch ${res.status}`);
+        }
+        return new Uint8Array(await res.arrayBuffer());
+      },
+      ed25519Verify: (message, signature) =>
+        verify(null, message, publicKey, signature),
+      list: async (d) => (existsSync(d) ? readdirSync(d) : []),
+      read: async (p) => (existsSync(p) ? readFileSync(p) : null),
+      write: async (p, bytes) => {
+        mkdirSync(dirname(p), { recursive: true });
+        const tmp = `${p}.part`;
+        writeFileSync(tmp, bytes);
+        renameSync(tmp, p);
+      },
+      remove: async (p) => rmSync(p, { force: true }),
+    },
+  });
+}
+
 export function createHostRuntime(opts: {
   env: HostEnv;
   resourcesPath?: string | undefined;
   repoRoot?: string | undefined;
   require?: RequireLike | undefined;
   fs?: FsLike | undefined;
+  /** Injectable for tests — defaults to the node OTA sync. */
+  feedSync?: ((dir: string) => Promise<readonly string[]>) | undefined;
   /**
    * Bundled POT service's loopback URL — read at PluginHost
    * construction (lazy bindings make this a thunk, not a value).
@@ -343,9 +401,25 @@ export function createHostRuntime(opts: {
   async function loadPluginDir(
     h: PluginHostLike,
   ): Promise<readonly LoadedPlugin[]> {
-    const dir = opts.env.AUQW_PLUGIN_DIR;
-    if (!dir) {
-      return [];
+    let dir = opts.env.AUQW_PLUGIN_DIR;
+    let feedFailure: unknown;
+    if (dir === undefined || dir === '') {
+      // OTA path: refresh the cache under userData, then load it.
+      // `AUQW_PLUGIN_DIR` still wins — dev loops and harnesses point
+      // at their own unsigned sets.
+      dir = join(opts.env.AUQW_USER_DATA ?? process.cwd(), 'plugins');
+      const sync =
+        opts.feedSync ??
+        ((d: string) =>
+          defaultFeedSync(
+            d,
+            opts.env.AUQW_PLUGIN_FEED ?? PLUGIN_RELEASE_TRUST.feedUrl,
+          ));
+      try {
+        await sync(dir);
+      } catch (thrown) {
+        feedFailure = thrown;
+      }
     }
     const manifests = fs
       .list(dir)
@@ -372,6 +446,12 @@ export function createHostRuntime(opts: {
       } catch {
         // A malformed pair is skipped, not fatal — other pairs still load.
       }
+    }
+    // A failed feed refresh with an empty cache must not pin an empty
+    // provider set: `pluginsReady` resets on rejection, so the next
+    // call re-syncs — a cache hit meanwhile stays usable offline.
+    if (loaded.length === 0 && feedFailure !== undefined) {
+      throw feedFailure;
     }
     return loaded;
   }

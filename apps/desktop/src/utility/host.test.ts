@@ -30,6 +30,7 @@ export async function run(): Promise<void> {
     env: {},
     resourcesPath: '/r',
     repoRoot: '/repo',
+    feedSync: async () => [],
     require: () => {
       throw new Error('unreachable');
     },
@@ -223,6 +224,7 @@ export async function run(): Promise<void> {
         AUQW_NODE_BINDINGS: '/repo/target/debug/libauqw_node_bindings.so',
         AUQW_USER_DATA: '/ud',
       },
+      feedSync: async () => [],
       require: (path) => {
         assertEqual(
           path,
@@ -260,6 +262,7 @@ export async function run(): Promise<void> {
     let requireCalls = 0;
     const retryRuntime = createHostRuntime({
       env: { AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node' },
+      feedSync: async () => [],
       require: () => {
         requireCalls++;
         if (requireCalls === 1) {

@@ -1,0 +1,271 @@
+import { appError } from '../errors.ts';
+import { createSha256 } from '../downloads/sha256.ts';
+import { utf8Decode, utf8Encode } from '../utf8.ts';
+
+/**
+ * OTA plugin delivery (decision log, Plugin guests): the app embeds
+ * only the release-signing public key + feed URL and downloads signed
+ * artifacts at runtime — nothing is bundled. `releases/feed.json` on
+ * Auqw-plugins main is a plain index ({keyId, plugins[]}); each
+ * artifact still carries its own ed25519 signature over the canonical
+ * `auqw-release-v1` payload, so the feed needs no signature of its
+ * own. The per-plugin `<id>.wasm` + `<id>.manifest.json` pair lands
+ * under the app's plugin cache dir; loaders scan it verbatim.
+ *
+ * Failure posture: a fetch or verification failure never destroys the
+ * on-disk set — last-known-good stays loadable. A half-written pair
+ * can't smuggle through: the host pins `artifact.digest` == sha256 of
+ * the wasm at load, so a torn pair fails loudly and self-heals on the
+ * next successful sync.
+ */
+
+/** One plugin entry in `releases/feed.json`. */
+export type PluginFeedEntry = {
+  readonly id: string;
+  readonly version: string;
+  readonly abi: string;
+  /** `sha256:<64 lowercase hex>` of the wasm bytes. */
+  readonly wasm_sha256: string;
+  /** `sha256:<64 lowercase hex>` of `plugin.manifest.json`. */
+  readonly manifest_sha256: string;
+  /** Base64 ed25519 signature over the canonical release payload. */
+  readonly signature: string;
+};
+
+export type PluginFeed = {
+  readonly keyId: string;
+  readonly plugins: readonly PluginFeedEntry[];
+};
+
+/** Platform seam — desktop wires node fs + node:crypto, mobile wires
+ * expo-file-system + @noble/curves. */
+export type FeedSyncPorts = {
+  /** GET url → body bytes; rejects on non-2xx or transport error. */
+  fetchBytes(url: string): Promise<Uint8Array>;
+  /** ed25519 verify: 64-byte signature, message, raw 32-byte key. */
+  ed25519Verify(
+    message: Uint8Array,
+    signature: Uint8Array,
+    publicKey: Uint8Array,
+  ): boolean;
+  /** File names in `dir`; `[]` when the dir doesn't exist. */
+  list(dir: string): Promise<readonly string[]>;
+  /** File bytes, or null when absent. */
+  read(path: string): Promise<Uint8Array | null>;
+  /** Atomic write (tmp + rename). */
+  write(path: string, bytes: Uint8Array): Promise<void>;
+  /** Remove a file when present. */
+  remove(path: string): Promise<void>;
+};
+
+/** The shipped ABI — manifests pinning anything else never load. */
+export const PLUGIN_ABI = '0.1.0';
+
+/**
+ * Trust root, embedded at build time. `publicKey` is the raw 32-byte
+ * ed25519 key (SPKI DER is `<12-byte prefix>‖raw` on targets that need
+ * it); `keyId` is the first 16 hex of sha256(SPKI DER) and must match
+ * `feed.keyId` — a feed signed by any other key is refused wholesale.
+ * `feedUrl` points at raw.githubusercontent on the public plugins
+ * repo; dev loops override with a local file server.
+ */
+export const PLUGIN_RELEASE_TRUST = {
+  keyId: '42d8cac606f16c04',
+  publicKeyHex:
+    'a1dd9fc1169be5ac2950bf55e2bcc4589774453ca935fb54f2991e5b3cc43420',
+  feedUrl:
+    'https://raw.githubusercontent.com/Vehicoule/Auqw-plugins/main/releases/feed.json',
+} as const;
+
+// Bounded reads — feed is ~KBs, manifests ~1KB, wasms today ~200KB.
+const FEED_MAX_BYTES = 256 * 1024;
+const MANIFEST_MAX_BYTES = 64 * 1024;
+const WASM_MAX_BYTES = 16 * 1024 * 1024;
+
+function sha256Hex(bytes: Uint8Array): string {
+  const h = createSha256();
+  h.update(bytes);
+  return `sha256:${h.digest()}`;
+}
+
+/** The embedded release-signing public key as raw 32 bytes. */
+export function pluginPublicKey(): Uint8Array {
+  const hex = PLUGIN_RELEASE_TRUST.publicKeyHex;
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+const B64 =
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+/** Strict base64 → bytes (no `Uint8Array.fromBase64` — Hermes lacks it). */
+function base64Bytes(b64: string): Uint8Array | null {
+  if (b64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(b64)) {
+    return null;
+  }
+  const pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+  const s = b64.slice(0, b64.length - pad).padEnd(b64.length, 'A');
+  const out = new Uint8Array((b64.length / 4) * 3 - pad);
+  for (let i = 0, j = 0; i < s.length; i += 4) {
+    const n =
+      (B64.indexOf(s.charAt(i)) << 18) |
+      (B64.indexOf(s.charAt(i + 1)) << 12) |
+      (B64.indexOf(s.charAt(i + 2)) << 6) |
+      B64.indexOf(s.charAt(i + 3));
+    if (j < out.length) {
+      out[j++] = n >> 16;
+    }
+    if (j < out.length) {
+      out[j++] = n >> 8;
+    }
+    if (j < out.length) {
+      out[j++] = n;
+    }
+  }
+  return out;
+}
+
+function isEntry(raw: unknown): raw is PluginFeedEntry {
+  if (typeof raw !== 'object' || raw === null) {
+    return false;
+  }
+  const e = raw as Record<string, unknown>;
+  return (
+    typeof e['id'] === 'string' &&
+    /^[a-z0-9][a-z0-9-]*$/.test(e['id']) &&
+    typeof e['version'] === 'string' &&
+    /^\d+\.\d+\.\d+$/.test(e['version']) &&
+    typeof e['abi'] === 'string' &&
+    typeof e['wasm_sha256'] === 'string' &&
+    /^sha256:[0-9a-f]{64}$/.test(e['wasm_sha256']) &&
+    typeof e['manifest_sha256'] === 'string' &&
+    /^sha256:[0-9a-f]{64}$/.test(e['manifest_sha256']) &&
+    typeof e['signature'] === 'string' &&
+    base64Bytes(e['signature']) !== null
+  );
+}
+
+/** Parse + shape-check a feed body. Throws `invalid-response`. */
+export function parsePluginFeed(
+  text: string,
+  expectedKeyId: string,
+): PluginFeed {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw appError('invalid-response', 'plugin feed is not JSON');
+  }
+  const body = raw as Record<string, unknown>;
+  const plugins = body?.['plugins'];
+  if (
+    body === null ||
+    body['keyId'] !== expectedKeyId ||
+    !Array.isArray(plugins) ||
+    plugins.length === 0 ||
+    !plugins.every(isEntry) ||
+    new Set(plugins.map((p) => p.id)).size !== plugins.length
+  ) {
+    throw appError('invalid-response', 'plugin feed failed shape check');
+  }
+  return { keyId: expectedKeyId, plugins };
+}
+
+/**
+ * Refresh the on-disk plugin set to the feed's: fetch → sha-check →
+ * signature-verify → write, per plugin. Entries whose on-disk pair
+ * already matches the feed digest are skipped; entries the feed drops
+ * are swept; a per-plugin failure keeps last-known-good.
+ *
+ * Returns the ids whose pair is now current — feed-level failures
+ * (unreachable, malformed, wrong keyId) throw so the caller can fall
+ * back to the cache as-is.
+ */
+export async function syncPluginFeed(opts: {
+  readonly feedUrl: string;
+  readonly keyId: string;
+  /** Raw 32-byte ed25519 public key. */
+  readonly publicKey: Uint8Array;
+  /** Cache dir holding `<id>.wasm` + `<id>.manifest.json` pairs. */
+  readonly dir: string;
+  readonly ports: FeedSyncPorts;
+}): Promise<readonly string[]> {
+  const { ports, dir } = opts;
+  const feedBytes = await ports.fetchBytes(opts.feedUrl);
+  if (feedBytes.byteLength > FEED_MAX_BYTES) {
+    throw appError('invalid-response', 'plugin feed over size cap');
+  }
+  const feed = parsePluginFeed(utf8Decode(feedBytes), opts.keyId);
+  const base = opts.feedUrl.slice(0, opts.feedUrl.lastIndexOf('/') + 1);
+  const current = new Set<string>();
+  const ready: string[] = [];
+  for (const entry of feed.plugins) {
+    if (entry.abi !== PLUGIN_ABI) {
+      continue;
+    }
+    current.add(entry.id);
+    const manifestPath = `${dir}/${entry.id}.manifest.json`;
+    const wasmPath = `${dir}/${entry.id}.wasm`;
+    const [haveManifest, haveWasm] = await Promise.all([
+      ports.read(manifestPath),
+      ports.read(wasmPath),
+    ]);
+    const cached =
+      haveManifest !== null &&
+      haveWasm !== null &&
+      sha256Hex(haveManifest) === entry.manifest_sha256 &&
+      sha256Hex(haveWasm) === entry.wasm_sha256;
+    if (cached) {
+      ready.push(entry.id);
+      continue;
+    }
+    try {
+      const dirUrl = `${base}${entry.id}/${entry.version}/`;
+      const [manifest, wasm] = await Promise.all([
+        ports.fetchBytes(`${dirUrl}plugin.manifest.json`),
+        ports.fetchBytes(`${dirUrl}${entry.id}-${entry.version}.wasm`),
+      ]);
+      if (
+        manifest.byteLength > MANIFEST_MAX_BYTES ||
+        wasm.byteLength > WASM_MAX_BYTES ||
+        sha256Hex(manifest) !== entry.manifest_sha256 ||
+        sha256Hex(wasm) !== entry.wasm_sha256
+      ) {
+        continue;
+      }
+      const signature = base64Bytes(entry.signature);
+      const payload = utf8Encode(
+        `auqw-release-v1\n${entry.id}\n${entry.version}\n${entry.abi}\n` +
+          `${entry.wasm_sha256}\n${entry.manifest_sha256}\n${opts.keyId}\n`,
+      );
+      if (
+        signature === null ||
+        !ports.ed25519Verify(payload, signature, opts.publicKey)
+      ) {
+        continue;
+      }
+      // Wasm first, manifest last — a manifest-less wasm is inert, and
+      // a torn pair fails the host's artifact.digest pin at load.
+      await ports.write(wasmPath, wasm);
+      await ports.write(manifestPath, manifest);
+      ready.push(entry.id);
+    } catch {
+      // Per-plugin failure keeps last-known-good on disk.
+    }
+  }
+  // Sweep artifacts no longer in the feed.
+  for (const name of await ports.list(dir)) {
+    const stem = name.endsWith('.manifest.json')
+      ? name.slice(0, -'.manifest.json'.length)
+      : name.endsWith('.wasm')
+        ? name.slice(0, -'.wasm'.length)
+        : null;
+    if (stem !== null && !current.has(stem)) {
+      await ports.remove(`${dir}/${name}`);
+    }
+  }
+  return ready;
+}

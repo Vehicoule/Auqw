@@ -38,7 +38,6 @@
 //                                  CURSOR occurrence bind + MediaMetadata
 // Self-contained (own logger + listeners) so App.tsx stays a one-block
 // diff for the s1 merge. Dev-gate only — no shipped semantics.
-import { Asset } from 'expo-asset';
 import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
 import { File, FileMode, Paths } from 'expo-file-system';
 import {
@@ -60,10 +59,12 @@ import {
   addWaveformPeaksCoarseListener,
   type PrepareOutcomeEvent,
 } from 'auqw-expo';
+import { pluginPairFromCache, syncPluginCache } from './src/session/feed.ts';
 
 const POT_PROVIDER_URL = process.env.EXPO_PUBLIC_POT_PROVIDER_URL || undefined;
-const PLUGIN_WASM = require('./assets/plugins/youtube-music.wasm');
-const PLUGIN_MANIFEST = require('./assets/plugins/youtube-music.manifest.json');
+// Dev-gate plugin comes from the same OTA cache the app uses — the
+// feed sync runs on first use (also product boot).
+const SEAM_PLUGIN_ID = 'youtube-music';
 
 let logHandle: ReturnType<File['open']> | null = null;
 function slog(line: string): void {
@@ -191,15 +192,13 @@ async function ensureHost(): Promise<void> {
 async function ensureSeam(): Promise<string> {
   await ensureHost();
   if (!pluginId) {
-    const asset = Asset.fromModule(PLUGIN_WASM);
-    await asset.downloadAsync();
-    if (!asset.localUri) {
-      throw new Error('wasm asset has no localUri');
+    const pair = (await pluginPairFromCache(SEAM_PLUGIN_ID)) ??
+      (await syncPluginCache(),
+      await pluginPairFromCache(SEAM_PLUGIN_ID));
+    if (!pair) {
+      throw new Error(`${SEAM_PLUGIN_ID} not in feed cache — sync unreachable`);
     }
-    pluginId = await loadPlugin(
-      await new File(asset.localUri).base64(),
-      JSON.stringify(PLUGIN_MANIFEST),
-    );
+    pluginId = await loadPlugin(pair.wasmBase64, pair.manifestJson);
   }
   return pluginId;
 }

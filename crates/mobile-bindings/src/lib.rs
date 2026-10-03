@@ -1027,7 +1027,7 @@ mod tests {
         };
         let digest = format!("sha256:{:x}", sha2::Sha256::digest(ECHO_WASM));
         let manifest = format!(
-            "{{\"id\":\"echo2\",\"version\":\"0.1.0\",\"abi\":\"0.2.0\",\
+            "{{\"id\":\"echo2\",\"version\":\"0.1.0\",\"abi\":\"0.1.0\",\
              \"capabilities\":[\"playback.resolve\",\"catalog.search\"],\
              \"permissions\":[],\"artifact\":{{\"path\":\"echo.wasm\",\"digest\":\"{digest}\"}}}}"
         );
