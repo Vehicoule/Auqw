@@ -78,20 +78,15 @@ impl Manifest {
                 "capabilities must not be empty".into(),
             ));
         }
-        // The schema enumerates the capabilities the host serves;
-        // `0.1.0` manifests may only declare `playback.resolve`, and
-        // `0.2.0` may not declare the 0.3 additions — revisions are
+        // The schema enumerates the capabilities the host serves.
+        // Signed releases collapsed the 0.1/0.2/0.3 tier matrix onto a
+        // single `0.1.0` ABI that serves the full set — the tiers only
+        // ever described an installed base the prerelease never
+        // shipped (Vehicoule/Auqw-plugins@1dac6a8). `0.2.0` keeps its
+        // frozen subset for staged dev manifests — revisions are
         // immutable, a newer capability under an older ABI is a
         // rejection, not a forward-compatible surprise.
-        const CAPS_0_1: &[&str] = &["playback.resolve"];
-        const CAPS_0_2: &[&str] = &[
-            "catalog.search",
-            "catalog.metadata",
-            "catalog.artwork",
-            "playback.resolve",
-            "playback.candidates",
-        ];
-        const CAPS_0_3: &[&str] = &[
+        const CAPS_FULL: &[&str] = &[
             "catalog.search",
             "catalog.metadata",
             "catalog.artwork",
@@ -103,10 +98,16 @@ impl Manifest {
             "lyrics.synced",
             "radio.seed",
         ];
+        const CAPS_0_2: &[&str] = &[
+            "catalog.search",
+            "catalog.metadata",
+            "catalog.artwork",
+            "playback.resolve",
+            "playback.candidates",
+        ];
         let allowed = match self.abi.as_str() {
-            "0.1.0" => CAPS_0_1,
+            "0.1.0" | "0.3.0" => CAPS_FULL,
             "0.2.0" => CAPS_0_2,
-            "0.3.0" => CAPS_0_3,
             _ => return Err(bad("abi must be \"0.1.0\", \"0.2.0\", or \"0.3.0\"")),
         };
         if self
@@ -121,11 +122,6 @@ impl Manifest {
                 continue;
             }
             if p == "kv" {
-                // `kv` is a 0.2 permission — a 0.1 manifest is a strict
-                // immutable subset and cannot grow permissions.
-                if self.abi == "0.1.0" {
-                    return Err(bad("permission \"kv\" requires abi \"0.2.0\""));
-                }
                 continue;
             }
             let rest = p

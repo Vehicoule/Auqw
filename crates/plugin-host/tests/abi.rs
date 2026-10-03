@@ -413,19 +413,22 @@ fn manifest_rejects_unknown_abi() {
     assert!(matches!(e, ManifestError::InvalidField(_)), "{e:?}");
 }
 
-/// `kv` is a 0.2 permission; a 0.1 manifest is a strict immutable
-/// subset and cannot grow it.
+/// `kv` is an ordinary permission on the release ABI — the tier
+/// matrix that restricted it to 0.2+ collapsed upstream
+/// (Vehicoule/Auqw-plugins@1dac6a8), so a `0.1.0` manifest may
+/// declare it like any network grant.
 #[test]
-fn manifest_0_1_rejects_kv_permission() {
+fn manifest_0_1_accepts_kv_permission() {
     let wasm = ok(wat::parse_str(DONE_WAT));
-    let e = err(Manifest::from_json(&manifest_text(&wasm, "0.1.0", &["kv"])));
-    assert!(matches!(e, ManifestError::InvalidField(_)), "{e:?}");
+    ok(Manifest::from_json(&manifest_text(&wasm, "0.1.0", &["kv"])));
 }
 
-/// Under a 0.1 manifest the 0.2 service kinds are a protocol
-/// violation — `invalid-message`, never `permission-denied`.
+/// Under the collapsed release ABI `0.1.0` serves every service kind
+/// — none is a protocol violation. Each guest re-emits its request
+/// on every step, so a served run ends on a budget, never an ABI
+/// rejection.
 #[tokio::test]
-async fn abi_0_1_rejects_0_2_host_request_kinds() {
+async fn abi_0_1_serves_all_host_request_kinds() {
     let messages = [
         r#"{"type":"host_request","id":1,"kind":"kv_get","payload":{"key":"k"}}"#,
         r#"{"type":"host_request","id":1,"kind":"kv_set","payload":{"key":"k","value":null}}"#,
@@ -434,7 +437,11 @@ async fn abi_0_1_rejects_0_2_host_request_kinds() {
     ];
     for msg in messages {
         let wasm = ok(wat::parse_str(raw_wat(msg)));
-        let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+        let plugin = ok(load(
+            &wasm,
+            manifest_for(&wasm, &["kv"]),
+            &default_budgets(),
+        ));
         let (http, _calls) = CannedHttp::new();
         let Invocation { result, .. } = invoke(
             &plugin,
@@ -446,7 +453,7 @@ async fn abi_0_1_rejects_0_2_host_request_kinds() {
         )
         .await;
         assert!(
-            matches!(err(result), InvokeError::InvalidMessage(_)),
+            matches!(err(result), InvokeError::BudgetExceeded { .. }),
             "{msg}"
         );
     }
@@ -465,27 +472,31 @@ fn manifest_text_caps(wasm: &[u8], abi: &str, caps: &[&str], permissions: &[&str
     )
 }
 
-/// `0.3.0` accepts the full 0.2 set plus the new capabilities.
+/// `0.3.0` accepts the full capability set; the collapsed release
+/// ABI `0.1.0` serves the identical set.
 #[test]
-fn manifest_accepts_0_3_capabilities() {
+fn manifest_accepts_full_capability_set() {
     let wasm = ok(wat::parse_str(DONE_WAT));
-    let m = ok(Manifest::from_json(&manifest_text_caps(
-        &wasm,
-        "0.3.0",
-        &[
-            "catalog.search",
-            "catalog.metadata",
-            "catalog.artwork",
-            "catalog.entity",
-            "playback.resolve",
-            "playback.candidates",
-            "lyrics.plain",
-            "lyrics.synced",
-            "radio.seed",
-        ],
-        &["network:allowed.test"],
-    )));
-    assert_eq!(m.capabilities.len(), 9);
+    for abi in ["0.1.0", "0.3.0"] {
+        let m = ok(Manifest::from_json(&manifest_text_caps(
+            &wasm,
+            abi,
+            &[
+                "catalog.search",
+                "catalog.metadata",
+                "catalog.artwork",
+                "catalog.entity",
+                "catalog.suggest",
+                "playback.resolve",
+                "playback.candidates",
+                "lyrics.plain",
+                "lyrics.synced",
+                "radio.seed",
+            ],
+            &["network:allowed.test"],
+        )));
+        assert_eq!(m.capabilities.len(), 10, "{abi}");
+    }
 }
 
 /// A `0.2.0` manifest is immutable — the 0.3 capabilities are a
@@ -509,10 +520,12 @@ fn manifest_0_2_rejects_0_3_capabilities() {
     }
 }
 
-/// Under a pre-0.3 manifest the `resume` service kind is a protocol
-/// violation — `invalid-message`, never `permission-denied`.
+/// `0.2.0` is a frozen tier — `resume` never entered its service
+/// surface, so emitting one is a protocol violation. The release ABI
+/// `0.1.0` serves it: the same request clears the ABI gate and only
+/// fails payload authorization (`length` is missing).
 #[tokio::test]
-async fn abi_pre_0_3_rejects_resume_kind() {
+async fn abi_0_2_rejects_resume_kind() {
     let msg = r#"{"type":"host_request","id":1,"kind":"resume","payload":{"url":"https://allowed.test/x","offset":5}}"#;
     for abi in ["0.1.0", "0.2.0"] {
         let wasm = ok(wat::parse_str(raw_wat(msg)));
@@ -531,10 +544,14 @@ async fn abi_pre_0_3_rejects_resume_kind() {
             svc(&http, None),
         )
         .await;
-        assert!(
-            matches!(err(result), InvokeError::InvalidMessage(_)),
-            "{abi}"
-        );
+        let InvokeError::InvalidMessage(detail) = err(result) else {
+            panic!("{abi}: expected invalid-message");
+        };
+        if abi == "0.2.0" {
+            assert!(detail.contains("requires ABI"), "{detail}");
+        } else {
+            assert!(detail.contains("length"), "{detail}");
+        }
     }
 }
 
@@ -1306,7 +1323,7 @@ fn manifest_field_grammar_matches_schema() {
         manifest_json("Bad-Id", "0.1.0", caps, "p.wasm", &digest),
         manifest_json("-bad", "0.1.0", caps, "p.wasm", &digest),
         manifest_json("p", "0.1", caps, "p.wasm", &digest),
-        manifest_json("p", "0.1.0", "[\"catalog.search\"]", "p.wasm", &digest),
+        manifest_json("p", "0.1.0", "[\"telemetry.write\"]", "p.wasm", &digest),
         manifest_json("p", "0.1.0", caps, "", &digest),
         manifest_json("p", "0.1.0", caps, "p.wasm", "sha256:xyz"),
         manifest_json("p", "0.1.0", caps, "p.wasm", "md5:000"),

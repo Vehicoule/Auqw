@@ -818,27 +818,16 @@ async fn host_request_step(
         .and_then(|v| u32::try_from(v).ok())
         .ok_or_else(|| InvokeError::InvalidMessage("host_request.id missing".into()))?;
     // Host-local kinds never reach the HTTP counters; they still cost
-    // the step that carried them. A 0.1 manifest predates the 0.2
-    // service kinds — emitting one is a protocol violation, not a
-    // permission question.
-    match msg.get("kind").and_then(Value::as_str) {
-        Some(kind)
-            if ctx.plugin.manifest.abi == "0.1.0"
-                && matches!(kind, "kv_get" | "kv_set" | "log" | "now_ms") =>
-        {
-            return Err(InvokeError::InvalidMessage(format!(
-                "host_request kind {:?} requires ABI 0.2.0",
-                redact_text(kind, &attempt.secrets)
-            )));
-        }
-        // `resume` is the 0.3.0 service kind — an older manifest is an
-        // immutable contract and cannot grow host services either.
-        Some("resume") if ctx.plugin.manifest.abi != "0.3.0" => {
-            return Err(InvokeError::InvalidMessage(
-                "host_request kind \"resume\" requires ABI 0.3.0".into(),
-            ));
-        }
-        _ => {}
+    // the step that carried them. The release ABI is `0.1.0` serving
+    // the full service surface (Vehicoule/Auqw-plugins@1dac6a8
+    // collapsed the tier matrix); `resume` stays refused only under
+    // the frozen `0.2.0` tier, which never grew it.
+    if matches!(msg.get("kind").and_then(Value::as_str), Some("resume"))
+        && ctx.plugin.manifest.abi == "0.2.0"
+    {
+        return Err(InvokeError::InvalidMessage(
+            "host_request kind \"resume\" requires ABI 0.1.0 or 0.3.0".into(),
+        ));
     }
     match msg.get("kind").and_then(Value::as_str) {
         Some("kv_get") => {
