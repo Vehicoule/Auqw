@@ -48,6 +48,10 @@ import {
 import { fromTag, t, type Locale, type MessageId } from './i18n.ts';
 import { errorText } from './error-text.ts';
 
+// Surfaces type their entity-navigation props against the domain ref
+// without taking an @auqw/application dependency edge.
+export type { EntityRef } from '@auqw/application';
+
 export type PlatformVariant = 'android' | 'ios';
 
 type TrackRowState = 'available' | 'unavailable' | 'error';
@@ -95,6 +99,12 @@ export type PlayerModel = {
   readonly title: string;
   readonly artist: string | null;
   readonly albumLabel: string | null;
+  /** The provider's own entity refs for the playing recording —
+   *  the meta cluster's artist/album links resolve through them;
+   *  null while the recording carries none (pre-v16 rows, synced
+   *  peers, ref-less providers). */
+  readonly artistRef: EntityRef | null;
+  readonly albumRef: EntityRef | null;
   readonly artworkUrl: string | null;
   readonly positionMs: number;
   readonly durationMs: number | null;
@@ -1156,6 +1166,8 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
     recordingId,
     artist: recording?.artist ?? null,
     albumLabel: recording === undefined ? null : albumLabel(recording),
+    artistRef: recording?.artistRef ?? null,
+    albumRef: recording?.albumRef ?? null,
     artworkUrl:
       // The player model feeds surfaces from the 52 px mini-player up to
       // the full-bleed stage backdrop — pick at backdrop size; smaller
@@ -1473,36 +1485,7 @@ export function toEntityCard(
 
 const EMPTY_ENTRIES: readonly PlaylistEntry[] = [];
 
-/**
- * Memoized sorts keyed on (input array identity, comparator) — the
- * structural sharing upstream republishes the same array refs until
- * the data actually changes, so a play event that only grows history
- * (a new array) pays the sort, not every library-model rebuild. The
- * comparator rides the key so one array can never collide across
- * two different orderings.
- */
-function memoSorted<T>(
-  source: readonly T[],
-  compare: (a: T, b: T) => number,
-): readonly T[] {
-  let byCompare = SORT_MEMO.get(source as unknown as object) as
-    | WeakMap<(a: T, b: T) => number, readonly T[]>
-    | undefined;
-  if (byCompare === undefined) {
-    byCompare = new WeakMap();
-    SORT_MEMO.set(source as unknown as object, byCompare);
-  }
-  const cached = byCompare.get(compare);
-  if (cached !== undefined) {
-    return cached;
-  }
-  const sorted = [...source].sort(compare);
-  byCompare.set(compare, sorted);
-  return sorted;
-}
-
-const SORT_MEMO = new WeakMap<object, unknown>();
-
+/** * Memoized sorts keyed on (input array identity, comparator) — the * structural sharing upstream republishes the same array refs until * the data actually changes, so a play event that only grows history * (a new array) pays the sort, not every library-model rebuild. The * comparator rides the key so one array can never collide across * two different orderings. */const SORT_MEMO = new WeakMap<object, unknown>();function memoSorted<T>(  source: readonly T[],  compare: (a: T, b: T) => number,): readonly T[] {  let byCompare = SORT_MEMO.get(source as unknown as object) as    | WeakMap<(a: T, b: T) => number, readonly T[]>    | undefined;  if (byCompare === undefined) {    byCompare = new WeakMap();    SORT_MEMO.set(source as unknown as object, byCompare);  }  const cached = byCompare.get(compare);  if (cached !== undefined) {    return cached;  }  const sorted = [...source].sort(compare);  byCompare.set(compare, sorted);  return sorted;}
 /**
  * Memoized `line.text` projection per synced sheet — the position tick
  * rebuilds the model every ~250ms–1s, and the lines array only changes
@@ -2567,8 +2550,10 @@ export function toUpdateBanner(
   }
   switch (apply.state) {
     case 'downloading':
+      // Apply-phase surfaces carry the RUN's version — a newer
+      // checked release must not relabel the in-flight pipeline.
       return {
-        version,
+        version: apply.version,
         label: downloadProgressText(
           apply,
           'update.banner.downloading',
@@ -2579,7 +2564,7 @@ export function toUpdateBanner(
       };
     case 'verifying':
       return {
-        version,
+        version: apply.version,
         label: t('update.banner.verifying'),
         actionLabel: t('update.action.cancel'),
         cancelable: true,
@@ -2588,12 +2573,18 @@ export function toUpdateBanner(
       // The installer already holds the file — nothing honest to
       // abort into, so no action affordance at all.
       return {
-        version,
+        version: apply.version,
         label: t('update.banner.applying'),
         actionLabel: null,
         cancelable: false,
       };
     case 'ready-to-restart':
+      // Same supersede gate as the card: 'restart to vY' would
+      // relaunch into the staged X, so a newer checked release
+      // renders the ordinary offer below instead.
+      if (apply.version !== version) {
+        break;
+      }
       if (version === dismissedVersion) {
         return null;
       }
@@ -2620,7 +2611,7 @@ export function toUpdateBanner(
         return null;
       }
       return {
-        version,
+        version: apply.version,
         label: t('update.banner.failed'),
         actionLabel: t('update.action.retry'),
         cancelable: false,
@@ -2687,8 +2678,10 @@ export function toUpdateCard(
   const dismissed = version === dismissedVersion;
   switch (apply.state) {
     case 'downloading':
+      // Apply-phase cards carry the RUN's version — a newer checked
+      // release must not relabel the in-flight pipeline's surface.
       return {
-        version,
+        version: apply.version,
         title: t('update.card.downloading'),
         detail: downloadProgressText(
           apply,
@@ -2706,7 +2699,7 @@ export function toUpdateCard(
       };
     case 'verifying':
       return {
-        version,
+        version: apply.version,
         title: t('update.banner.verifying'),
         detail: '',
         progress: null,
@@ -2718,7 +2711,7 @@ export function toUpdateCard(
     case 'applying':
       // The OS surface is already firing — nothing honest to abort.
       return {
-        version,
+        version: apply.version,
         title: t('update.banner.applying'),
         detail: '',
         progress: null,
@@ -2728,6 +2721,12 @@ export function toUpdateCard(
         dismissible: false,
       };
     case 'ready-to-restart':
+      // Same gate as 'applied': a newer checked release owns the
+      // card — 'restart to vY' would relaunch into the staged X, so
+      // it renders the ordinary offer for the newer release below.
+      if (apply.version !== version) {
+        break;
+      }
       return dismissed
         ? null
         : {
@@ -2788,7 +2787,7 @@ export function toUpdateCard(
       return dismissed
         ? null
         : {
-            version,
+            version: apply.version,
             title: t('update.card.failed'),
             detail: errorText(apply.error) ?? '',
             progress: null,

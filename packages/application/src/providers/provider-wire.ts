@@ -492,13 +492,17 @@ function toEntityMetadata(value: unknown): EntityMetadata | null {
   };
 }
 
+/** The schema's `maxItems` on `entities`/`related`. */
+const MAX_ENTITY_ITEMS = 200;
+
 /**
  * `entities`/`related` field decode: every entry must be a well-formed
  * entityMetadata — a malformed one poisons the page exactly like a
- * malformed track row does `items`.
+ * malformed track row does `items`. An over-cap array is invalid,
+ * not truncated — the same poison rule as the artwork/suggestions caps.
  */
 function toEntityItems(value: unknown): EntityMetadata[] | null {
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(value) || value.length > MAX_ENTITY_ITEMS) {
     return null;
   }
   const out: EntityMetadata[] = [];
@@ -815,6 +819,12 @@ export function createProviderWirePort(
     capabilities,
     version,
     search(input, context) {
+      // `kinds`/`continuation` widen the base search payload — a
+      // guest built before the extension rejects the extra keys
+      // outright, so they go only to providers declaring
+      // `catalog.search.kinds`. Everyone else gets the original
+      // exact-key payload: an unscoped first page, not a guest error.
+      const scoped = capabilities.includes('catalog.search.kinds');
       return call(
         'catalog.search',
         {
@@ -823,10 +833,11 @@ export function createProviderWirePort(
           storefront: input.storefront,
           // Optional fields stay absent when unset — guests enforce
           // exact key sets, and an empty kinds set has no meaning.
-          ...(input.kinds !== undefined && input.kinds.length > 0
+          ...(scoped && input.kinds !== undefined && input.kinds.length > 0
             ? { kinds: [...input.kinds] }
             : {}),
-          ...(input.continuation !== undefined &&
+          ...(scoped &&
+          input.continuation !== undefined &&
           input.continuation.length > 0
             ? { continuation: input.continuation }
             : {}),

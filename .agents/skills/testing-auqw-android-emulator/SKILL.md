@@ -921,3 +921,37 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
 - **Native M3E dock pixel recipe (post-#344):** bar surface = `mixHex(deep, accent, .08)` — the fixed values below cover the named light/dark schemes only (OLED has different `deep`/`accent`, adaptive derives per-source — recompute `mixHex` from the theme's tokens there): light `#d6cccc` (214,204,204) / dark `#2b221c` (43,34,28), edge-to-edge under the gesture pill (a separate ~10px dash over it). Active tab = filled PNG glyph tinted accent inside the ~64dp platform indicator pill (accentSoft-over-mix composite — light ~(211,189,183) / dark ~(77,51,33), pixel-exact); idle = outlined glyph in textSecondary. Mini-player accessory band ends the row immediately above the bar's top edge (`bottom: tabBarHeight` anchoring — no gap, no overlap).
 - **Dev-mode PNG decode pop-in (cosmetic):** dock `<Image>` glyphs decode on FIRST mount — a tab's "active" variant mounts on its first activation, so a screencap <1 s after a first-visit tap can catch a blank glyph. Re-capture before flagging; release builds bundle the asset.
 - **Dock test shortcuts:** stage-sheet expand without the flaky mini-player morph — `auqw://open?tab=queue` deep link opens queue mode directly. Keyboard-hide check — explore loupe ~device (995,190) expands the field and opens the IME; wait ~1.5 s before screencapping.
+
+## Entity pages + stage meta links (post-#347, verified 2026-10-03)
+
+- Hero reads the kind: artist art is a CIRCLE (`cornerRadius:80` on the
+  160px tile), album/playlist SQUARE — playlist shares the album branch
+  so a square-corner check covers it by code-identity. Blurred backdrop
+  (RN `Image` blurRadius 40 + Svg gradient fade to canvas) sits behind
+  art+title; accent 'play' pill left of '≡ shuffle' plays ordered from
+  track 1 (header 'playing from <entity> · N tracks').
+- Stage-sheet meta links (title→album, artist→artist, album→album)
+  FOLD the sheet on navigate (`closeStageOnContextNav`) — unlike the
+  desktop stage column, which stays open. Fold + pushed page is the
+  assert; player keeps playing underneath. Meta lines sit ~y1450
+  (title)/1570 (artist)/1678 (album) device-px on the 1080x2400 AVD.
+- Back chevron on pushed entity overlays spans [42,149][105,212] —
+  tap x~73, not the icon's visual ~134.
+- Inert-recording recipe ON DEVICE: `auqw://local-add` deep link opens
+  the SAF picker (folder tile → USE THIS FOLDER → ALLOW); a local file
+  gets provenance `local` → NULL artist/album refs → meta lines render
+  plain text and taps no-op. itunes rows are NOT inert — they emit
+  `artist_ref`/`album_ref` now. sqlite ground truth: 53 provider rows
+  carried `*_ref_json` post-v17; the local row NULL.
+- `auqw://search?q=...` commits still apply under pushed overlays —
+  back-nav surfaces the result list, not lost state.
+- `POST_NOTIFICATIONS` dialog can fire ANYTIME (not just on play) and
+  swallows taps until handled — Allow ~x540,y1312.
+- 'Maximum update depth exceeded' resurfaced TWICE post-#312-fix on
+  this build (artist entity page + over search results, playback
+  re-renders active) — dismissed via its X, app stayed functional.
+  Per the hunt notes above this is a possible fresh render-loop, NOT
+  noise: the #312 fix covered the uSES/position-channel tear, and any
+  new storm needs the App.tsx/uSES blame check. Whether #347's new
+  artwork-resolver subscription contributes is UNCONFIRMED — record
+  the surface + active playback state before dismissing.

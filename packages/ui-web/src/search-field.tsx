@@ -30,8 +30,8 @@ export type WorldSearchProps = {
 
 /**
  * The compact world-toolbar search field. Collapsed it is a bare loupe;
- * expanded it is a pill field whose accent ring does one comet lap on
- * focus, then the head extends to close the border (`.uw-wsearch__ring`).
+ * expanded it is a pill field whose focus emphasis is a plain accent
+ * hairline (`.uw-wsearch:focus-within`) — no comet ring.
  */
 export function WorldSearch({
   field,
@@ -166,13 +166,6 @@ export function WorldSearch({
       <kbd className="uw-wsearch__hint" aria-hidden="true">
         /
       </kbd>
-      {/* Comet ring — laps the border once on focus, then the head
-          extends until the entry is ringed. Pure CSS on focus-within;
-          reduced-motion paints the settled ring. */}
-      <svg className="uw-wsearch__ring" aria-hidden="true">
-        <rect className="halo" x="0.8" y="0.8" pathLength="100" />
-        <rect className="core" x="0.8" y="0.8" pathLength="100" />
-      </svg>
     </div>
   );
 }

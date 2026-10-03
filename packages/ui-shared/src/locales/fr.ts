@@ -261,6 +261,7 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'entity.kind.album': 'album',
   'entity.kind.artist': 'artiste',
   'entity.kind.fallback': 'élément',
+  'entity.play': 'lecture',
   'entity.shuffle': 'aléatoire',
   'entity.errorTitle': 'impossible de charger cette page',
   'entity.partial':
@@ -603,6 +604,7 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'error.importInvalid': "ce fichier n'est pas un export de bibliothèque valide",
 
   // ---- reported operation names ------------------------------------------
+  'action.playAll': 'tout lire',
   'action.playResult': 'lire le résultat',
   'action.playCollection': 'lire la collection',
   'action.playPlaylist': 'lire la playlist',

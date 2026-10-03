@@ -2445,6 +2445,28 @@ function testStageMotion(): void {
   // The commit edge mirrors the drag direction.
   assertEqual(skipCommitEdge(-10, 400), -400);
   assertEqual(skipCommitEdge(10, 400), 400);
+
+  // ---- dismiss→reopen race guards (source scan) -------------------
+  // The slide-off's completion must check the live tokens: every
+  // reopen path either cancels the spring by rewriting `gone` or
+  // flips the expanded mirror — and the collapsed-row tap's JS
+  // commit reclaims the dismiss axis like every other reopen.
+  const sheet = readFileSync(
+    new URL('./stage-sheet.tsx', import.meta.url),
+    'utf8',
+  );
+  assert(
+    sheet.includes('!expandedShared.value || anchor.value === 0'),
+    'slide-off completion is gated on the live reopen tokens',
+  );
+  const rowTap = sheet.slice(
+    sheet.indexOf('onPress={() => {'),
+    sheet.indexOf('onExpandCommit={() =>'),
+  );
+  assert(
+    rowTap.includes('gone.value'),
+    'the row tap reclaims the dismiss axis on reopen',
+  );
 }
 
 function testSkipPeek(): void {
@@ -2569,10 +2591,31 @@ function testAnimatedIcons(): void {
   );
 }
 
+function testSearchFabFocusGuard(): void {
+  // The focusSignal effect must only fire when the signal CHANGES —
+  // the fab unmounts when the dev gallery covers the stack, and a
+  // remount with a live tick would reopen the field and route the
+  // app to explore unprompted. The guard is hook wiring (no mount
+  // harness for react-native here), so the check reads the mount
+  // sentinel directly: a ref seeded with the mount-time signal that
+  // the effect compares before opening — the same shape the web
+  // twin (search-field.tsx) carries.
+  const fab = readFileSync(new URL('./search-fab.tsx', import.meta.url), 'utf8');
+  assert(
+    fab.includes('useRef(focusSignal)'),
+    'search-fab seeds a ref with the mount-time focusSignal',
+  );
+  assert(
+    fab.includes('focusSignal !== lastSignal.current'),
+    'search-fab only opens on a focusSignal change, never on mount',
+  );
+}
+
 testGallerySafeArea();
 testStageMotion();
 testSkipPeek();
 testAnimatedIcons();
+testSearchFabFocusGuard();
 
 console.log('ui-native tests passed');
 import { readdirSync, readFileSync } from 'node:fs';

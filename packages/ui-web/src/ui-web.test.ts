@@ -662,7 +662,10 @@ function render(node: ReactNode): string {
     }),
   );
   check('expanded search renders the input', expanded.includes('uw-wsearch__input'));
-  check('expanded search draws the comet ring', expanded.includes('uw-wsearch__ring'));
+  check(
+    'expanded search carries no comet ring',
+    !expanded.includes('uw-wsearch__ring'),
+  );
 }
 
 // ---- markup: world panes (keep-alive tab host) --------------------------------
@@ -1004,6 +1007,40 @@ function render(node: ReactNode): string {
   check('styles.css: no hex colors', !/#[0-9a-fA-F]{3,8}\b/.test(styles));
   check('styles.css: no rgb() literals', !/\brgba?\(/.test(styles));
   check('styles.css: consumes token vars', styles.includes('var(--accent)'));
+
+  // The frameless drag surface inside the <860px overlay: the
+  // floating column + scrim cover the world bar there, so the
+  // chrome's grip element must declare the region itself — with the
+  // stage reserving the strip and its floating stop control opting
+  // back out (parsed by hand; the blocks live inside the container
+  // query only).
+  const overlayBlock = styles.slice(
+    styles.indexOf('@container (max-width: 860px)'),
+  );
+  check(
+    'overlay block styles the stage drag grip',
+    overlayBlock.includes('.uw-stage-drag'),
+  );
+  const gripRule = overlayBlock.slice(
+    overlayBlock.indexOf('.uw-stage-drag'),
+    overlayBlock.indexOf('}', overlayBlock.indexOf('.uw-stage-drag')),
+  );
+  check(
+    'stage drag grip declares the app region',
+    gripRule.includes('-webkit-app-region: drag'),
+  );
+  check(
+    'overlay stage reserves the drag strip',
+    overlayBlock.includes('padding-top: var(--uw-titlebar-h)'),
+  );
+  const stopRule = overlayBlock.slice(
+    overlayBlock.indexOf('.uw-stage__stop'),
+    overlayBlock.indexOf('}', overlayBlock.indexOf('.uw-stage__stop')),
+  );
+  check(
+    'stage stop control opts out of the drag strip',
+    stopRule.includes('-webkit-app-region: no-drag'),
+  );
 
   // Reduced-motion contract for the animated icons: every transition /
   // keyframe sits behind the same `:not([data-reduced-motion='true'])`

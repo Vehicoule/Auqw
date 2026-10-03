@@ -669,8 +669,9 @@ export interface UpdateApplier {
   /** Change feed — fires once per state transition (and per progress
       tick while 'downloading'). */
   subscribe(listener: () => void): () => void;
-  /** Start the pipeline; no-op while a run is live or already
-      terminal ('ready-to-restart', 'applied'). */
+  /** Start the pipeline; no-op while a run is live or the SAME
+      version already finished ('ready-to-restart', 'applied') — a
+      different-version begin is the supersede path. */
   begin(target: UpdateApplyTarget): void;
   /** Abort the live run — publishes 'idle' so the affordance returns
       to its install label. */
@@ -793,6 +794,35 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
     // the same staging path its successor may have just claimed).
     const stale = (): boolean => gen !== generation || signal.aborted;
     const { version, artifact, checksums } = target;
+    // Download progress fans a full snapshot out per network chunk —
+    // ~64 KiB 'data' ticks are hundreds of IPC pushes plus shell
+    // re-renders a second on a fast mirror. Publish on a ~MiB step,
+    // always letting a newly-known total and the completion tick
+    // through so the bar still opens and lands honestly.
+    const PROGRESS_STEP = 1024 * 1024;
+    let progressBytes = 0;
+    let progressTotal: number | null = null;
+    const publishProgress = (
+      receivedBytes: number,
+      totalBytes: number | null,
+    ): void => {
+      const complete = totalBytes !== null && receivedBytes === totalBytes;
+      if (
+        !complete &&
+        totalBytes === progressTotal &&
+        receivedBytes - progressBytes < PROGRESS_STEP
+      ) {
+        return;
+      }
+      progressBytes = receivedBytes;
+      progressTotal = totalBytes;
+      publishIfCurrent({
+        state: 'downloading',
+        version,
+        receivedBytes,
+        totalBytes,
+      });
+    };
     // The staged file — removed whenever this run dies before the
     // apply leg consumed it (failed download, rejected checksum,
     // apply throw, or a cancel between stages): an unconsumed
@@ -820,6 +850,12 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       if (checksums === null) {
         throw appError('unavailable', 'release ships no checksums for this platform');
       }
+      // The sums fetch can stall arbitrarily (net.fetch carries no
+      // timeout — a dead socket or a held-open response hangs it):
+      // publish the run BEFORE it so the surface offers an abortable
+      // busy phase — an 'idle' card here is a dead verb whose re-taps
+      // no-op on the running latch with no cancel affordance.
+      publishIfCurrent({ state: 'verifying', version });
       const body = await ports.fetchText(checksums.url, signal);
       if (stale()) {
         return;
@@ -842,8 +878,7 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       await ports.download(
         artifact.url,
         path,
-        (receivedBytes, totalBytes) =>
-          publishIfCurrent({ state: 'downloading', version, receivedBytes, totalBytes }),
+        publishProgress,
         signal,
       );
       if (stale()) {
@@ -935,10 +970,14 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       if (
         running ||
         live() ||
-        state.state === 'ready-to-restart' ||
-        // 'applied'/'needs-permission' guard the SAME version's staged
-        // run — a begin for a different release is the supersede path,
-        // not a re-tap (reapply owns the same-version affordance).
+        // The terminal guards are per-VERSION: a same-version re-tap
+        // stays inert ('ready-to-restart' retries through the restart
+        // affordance, 'applied'/'needs-permission' through reapply),
+        // while a different release's begin is the supersede path —
+        // a newer check owns the pipeline instead of freezing behind
+        // a pending restart or a staged run.
+        (state.state === 'ready-to-restart' &&
+          state.version === target.version) ||
         (state.state === 'applied' && state.version === target.version) ||
         (state.state === 'needs-permission' &&
           state.version === target.version)

@@ -83,6 +83,7 @@ impl Manifest {
         // forward-compatible surprise.
         const CAPS: &[&str] = &[
             "catalog.search",
+            "catalog.search.kinds",
             "catalog.metadata",
             "catalog.artwork",
             "catalog.entity",

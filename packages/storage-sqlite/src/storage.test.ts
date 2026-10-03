@@ -79,6 +79,8 @@ function recording(
     genre: null,
     isrc: null,
     versionLabels: [],
+    artistRef: null,
+    albumRef: null,
     sourceRefs: refs,
     mappings,
     provenance: 'provider',
@@ -270,6 +272,11 @@ async function fullRoundtrip(): Promise<void> {
       message: 'deadline exceeded',
       retryable: true,
       retryAfterMs: 30_000,
+    },
+    origin: {
+      kind: 'playlist',
+      playlistId: 'pl-1',
+      name: 'Evening mix',
     },
   };
   const settings: Settings = {
@@ -536,6 +543,24 @@ async function malformedRows(): Promise<void> {
         assertEqual(state.queue.currentOccurrenceId, null);
         assertEqual(state.queue.positionMs, 0);
         assertEqual(state.queue.mode, 'stopped');
+      },
+    ],
+    // A malformed or doc-invalid origin drops to absent too — the
+    // queue itself still restores.
+    [
+      'bad origin_json',
+      `UPDATE queue_state SET origin_json = '{oops' WHERE id = 1`,
+      (state) => {
+        assertDeepEqual(state.recordings, base().recordings);
+        assertDeepEqual(state.queue, base().queue);
+      },
+    ],
+    [
+      'invalid origin shape',
+      `UPDATE queue_state SET origin_json = '{"kind":"search","query":"${'q'.repeat(300)}"}' WHERE id = 1`,
+      (state) => {
+        assertDeepEqual(state.recordings, base().recordings);
+        assertDeepEqual(state.queue, base().queue);
       },
     ],
   ];
@@ -2253,6 +2278,7 @@ async function importResetsExcluded(): Promise<void> {
     currentOccurrenceId: 'o1',
     positionMs: 800,
     mode: 'playing',
+    origin: { kind: 'collection', collection: 'liked' },
   };
   const committed = await storage.commit(
     {
@@ -2667,6 +2693,58 @@ async function migrationV14toV15(): Promise<void> {
   driver.close();
 }
 
+// v15 -> v17: recordings gain local-only artist/album ref columns
+// (v16's queue origin_json rides along on the same seed). Rows that
+// predate the columns decode with null refs, a ref-carrying write
+// round-trips, and the export document keeps its pre-v17 shape.
+async function migrationV15toV17(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  for (const step of MIGRATIONS.slice(0, 15)) {
+    driver.execScript(`${step.join(';\n')};`);
+  }
+  driver.execScript(`
+    INSERT INTO schema_version (id, version) VALUES (1, 15);
+    INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered, language)
+      VALUES (1, 'a', 'b', NULL, 256, 'dark', 1, NULL, NULL, NULL, 0, NULL);
+    INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+      VALUES (1, 0, NULL, 0, 'stopped', NULL);
+    INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json, provenance)
+      VALUES ('r1', 'Roads', 'Portishead', 'Dummy', 302000, 1994, '[]', NULL, NULL, NULL, '[]', 'provider');
+    INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
+      VALUES ('r1', 0, 'itunes', 'track', 'i1');
+  `);
+  const storage = new SqliteStorage(driver, SETTINGS);
+  assert((await storage.initialize(ctx().context)).ok, 'v15 -> v17 runs');
+  const state = await loadOk(storage);
+  assertEqual(state.recordings.length, 1, 'row migrated');
+  assertEqual(state.recordings[0]?.artistRef, null, 'no ref column content');
+  assertEqual(state.recordings[0]?.albumRef, null, 'no ref column content');
+
+  const refs = {
+    artistRef: { provider: 'deezer', kind: 'artist' as const, id: 'a-1' },
+    albumRef: { provider: 'deezer', kind: 'album' as const, id: 'b-1' },
+  };
+  const committed = await storage.commit(
+    { recordings: [recording('r2', [ref('itunes', 'i2')], [], refs)] },
+    ctx().context,
+  );
+  assert(committed.ok, 'ref-carrying recording commits');
+  const next = await loadOk(storage);
+  const r2 = next.recordings.find((r) => r.id === 'r2');
+  assertDeepEqual(r2?.artistRef, refs.artistRef, 'artist ref round-trips');
+  assertDeepEqual(r2?.albumRef, refs.albumRef, 'album ref round-trips');
+
+  // Refs are catalog evidence local to this device — the export
+  // document keeps its pre-v17 shape.
+  const exported = await storage.exportOwned(5_000, ctx().context);
+  assert(exported.ok, 'export resolves');
+  for (const doc of exported.value.recordings) {
+    assert(!('artistRef' in doc), 'artist ref stripped from export');
+    assert(!('albumRef' in doc), 'album ref stripped from export');
+  }
+  driver.close();
+}
+
 // 18. `recordingsMerge` applies to the transaction's fresh read —
 // rows written between a caller's snapshot and its commit survive.
 async function recordingsMergeCommit(): Promise<void> {
@@ -3016,6 +3094,49 @@ async function duplicateLyricsRejected(): Promise<void> {
   driver.close();
 }
 
+// 28b. v15 -> v16: queue_state gains origin_json — a pre-column row
+// loads originless, and a stamped origin then round-trips through
+// commit/load on the migrated schema.
+async function migrationV12toV16(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  for (const m of MIGRATIONS.slice(0, 12)) {
+    driver.execScript(`${m.join(';\n')};`);
+  }
+  driver.execScript(`
+    INSERT INTO schema_version (id, version) VALUES (1, 12);
+    INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered, language)
+      VALUES (1, 'itunes', 'youtube-music', 'US', 256, 'system', 1, NULL, NULL, NULL, 0, NULL);
+    INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+      VALUES (1, 0, NULL, 0, 'stopped', NULL);
+    INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json, provenance)
+      VALUES ('r1', 'Song r1', 'Artist', NULL, NULL, NULL, '[]', NULL, NULL, NULL, '[]', 'provider');
+    INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
+      VALUES ('r1', 0, 'itunes', 'track', 'i1');
+  `);
+  const storage = new SqliteStorage(driver, SETTINGS);
+  assert((await storage.initialize(ctx().context)).ok, 'v12 migrates through to v16');
+  const state = await loadOk(storage);
+  assertEqual(
+    state.queue.origin,
+    undefined,
+    'a pre-column queue carries no origin',
+  );
+  const queue: QueueSnapshot = {
+    revision: 1,
+    occurrences: [occurrence('o1', 'r1', ref('itunes', 'i1'))],
+    currentOccurrenceId: 'o1',
+    positionMs: 0,
+    mode: 'playing',
+    origin: { kind: 'collection', collection: 'liked' },
+  };
+  assert(
+    (await storage.commit({ queue }, ctx().context)).ok,
+    'a stamped origin commits on the migrated schema',
+  );
+  assertDeepEqual((await loadOk(storage)).queue, queue, 'origin round-trips');
+  driver.close();
+}
+
 // Cold-restart proof at the file level: write every section, close the
 // driver, reopen the same file on a fresh driver, and load — a dead
 // connection (the mobile dead-handle class) must never lose a row.
@@ -3139,6 +3260,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['migrationV2toV3', migrationV2toV3],
   ['migrationV3toV4', migrationV3toV4],
   ['migrationV14toV15', migrationV14toV15],
+  ['migrationV15toV17', migrationV15toV17],
   ['downloadLocalRoundtrip', downloadLocalRoundtrip],
   ['recordingsMergeCommit', recordingsMergeCommit],
   ['backupRetryAfterFailure', backupRetryAfterFailure],
@@ -3163,6 +3285,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['largeRemovalCommits', largeRemovalCommits],
   ['duplicateLyricsRejected', duplicateLyricsRejected],
   ['recordingsMergeUndefined', recordingsMergeUndefined],
+  ['migrationV12toV16', migrationV12toV16],
   ['fileReopen', fileReopen],
 ];
 

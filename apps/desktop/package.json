@@ -18,14 +18,14 @@
     "@auqw/storage-sqlite": "workspace:*",
     "@auqw/ui-shared": "workspace:*",
     "@fontsource-variable/inter": "5.3.0",
-    "@types/node": "26.6.2",
+    "@types/node": "26.6.3",
     "@types/react": "~19.2.2",
     "@types/react-dom": "~19.2.3",
     "bonjour-service": "1.4.4",
     "electron": "44.4.5",
     "electron-builder": "26.16.1",
     "esbuild": "0.28.2",
-    "music-metadata": "11.16.0",
+    "music-metadata": "11.16.1",
     "typescript": "~6.0.3"
   },
   "dependencies": {
@@ -36,6 +36,6 @@
     "jsdom": "^30.1.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "undici": "^8.11.0"
+    "undici": "^8.11.2"
   }
 }

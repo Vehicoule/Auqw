@@ -2566,13 +2566,17 @@ export class PlaybackEngine {
         if (parked.ok && this.#active === null) {
           this.#parkEndedAttempt(r, active);
         } else {
-          // Rolled back or superseded — drop the kept handle and go
-          // idle, the same honesty the failed-advance path reports.
+          // Rolled back or superseded — drop the kept handle. A
+          // superseding attempt already owns the published state, so
+          // only go idle when nothing took over — the same honesty
+          // the failed-advance path reports.
           if (active.handle !== undefined) {
             await this.#releaseHandle(active.handle, event.identity);
           }
-          r.playback = { type: 'idle' };
-          this.#host.publish();
+          if (this.#active === null) {
+            r.playback = { type: 'idle' };
+            this.#host.publish();
+          }
         }
         return;
       }

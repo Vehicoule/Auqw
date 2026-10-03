@@ -439,6 +439,7 @@ fn manifest_accepts_0_1_full_surface() {
         "0.1.0",
         &[
             "catalog.search",
+            "catalog.search.kinds",
             "catalog.metadata",
             "catalog.artwork",
             "catalog.entity",
@@ -451,7 +452,7 @@ fn manifest_accepts_0_1_full_surface() {
         ],
         &["network:allowed.test", "pot-provider", "kv"],
     )));
-    assert_eq!(m.capabilities.len(), 10);
+    assert_eq!(m.capabilities.len(), 11);
 }
 
 /// Every service kind is 0.1.0 surface — none is a protocol
@@ -1698,6 +1699,59 @@ async fn deadline_caps_kv_snapshot_leg() {
     assert!(
         started.elapsed() < Duration::from_secs(10),
         "wedged snapshot outlived the deadline"
+    );
+}
+
+/// A panic inside the kv snapshot leg surfaces as a typed host-service
+/// error, not a process abort — the leg runs on `spawn_blocking` and
+/// `race_blocking` maps the `JoinError` to `HostService`. This is the
+/// containment the release profile preserves by keeping panic=unwind.
+struct PanickingSnapshotKv;
+
+impl KeyValueStore for PanickingSnapshotKv {
+    fn snapshot(&self, _plugin_id: &str) -> Result<BTreeMap<String, Vec<u8>>, KvError> {
+        panic!("injected snapshot panic")
+    }
+
+    fn commit_admitting(
+        &self,
+        _plugin_id: &str,
+        _writes: BTreeMap<String, Option<Vec<u8>>>,
+        _admit: &(dyn Fn() -> bool + Send + Sync),
+        _secrets: &[String],
+    ) -> Result<(), KvError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn panicking_kv_snapshot_reports_host_service() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    let budgets = default_budgets();
+    let plugin = ok(load(
+        &wasm,
+        manifest_for_abi(&wasm, "0.1.0", &["kv"]),
+        &budgets,
+    ));
+    let kv: Arc<dyn KeyValueStore> = Arc::new(PanickingSnapshotKv);
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        HostServices {
+            http: &http,
+            kv,
+            clock: &CLOCK,
+            pot_provider: None,
+        },
+    )
+    .await;
+    assert!(
+        matches!(err(result), InvokeError::HostService(_)),
+        "expected HostService on a panicked snapshot leg"
     );
 }
 
