@@ -268,8 +268,8 @@ export function IosGlassNavbar({
                   style={{
                     alignSelf: 'stretch',
                     borderRadius: theme.radius.float,
-                    paddingVertical: theme.spacing.xs,
-                    paddingHorizontal: theme.spacing.md,
+                    paddingVertical: theme.spacing.xxs,
+                    paddingHorizontal: theme.spacing.xxs,
                     alignItems: 'center',
                     justifyContent: 'center',
                     gap: theme.spacing.xxs,
