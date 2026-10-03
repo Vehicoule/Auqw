@@ -662,7 +662,10 @@ function render(node: ReactNode): string {
     }),
   );
   check('expanded search renders the input', expanded.includes('uw-wsearch__input'));
-  check('expanded search draws the comet ring', expanded.includes('uw-wsearch__ring'));
+  check(
+    'expanded search carries no comet ring',
+    !expanded.includes('uw-wsearch__ring'),
+  );
 }
 
 // ---- markup: world panes (keep-alive tab host) --------------------------------

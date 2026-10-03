@@ -1204,6 +1204,10 @@ export function StageSheet({
     );
     return {
       opacity: stageContentAlpha(progress.value),
+      // The grow's pivot sits on the sheet's top edge — a center
+      // pivot shrank the full-bleed artwork off the top during the
+      // morph and read as a black gap closing as the sheet rose.
+      transformOrigin: '50% 0%',
       transform: [{ scale: 0.96 + 0.04 * p }],
       borderTopLeftRadius: radius,
       borderTopRightRadius: radius,
