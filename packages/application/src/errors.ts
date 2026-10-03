@@ -139,6 +139,27 @@ export function isBotCheckWall(error: AppError): boolean {
 }
 
 /**
+ * A capped-mint wall — every ladder rung resolved but each minted
+ * stream URL refused its boundary probe: `transient` carrying the
+ * guest's `streams-capped` detail (same last-segment carry as the
+ * legacy bot-check shape). Like the bot wall the verdict is
+ * per-mint stochastic, not a verdict on the video: the serving edge
+ * refused this visitor/IP's mints. Unlike the bot wall it keeps its
+ * auto-retry — redrawing the same ref's ladder mints fresh URLs —
+ * and the attempt's alternate-ref hop still treats it as worth one
+ * fresh ladder on a different video. The detail may also arrive
+ * typed — `streams-capped` is itself a fail kind — and both shapes
+ * name the same weather.
+ */
+export function isStreamsCappedTransient(error: AppError): boolean {
+  return (
+    error.kind === 'streams-capped' ||
+    (error.kind === 'transient' &&
+      error.message.split(':').at(-1)?.trim() === 'streams-capped')
+  );
+}
+
+/**
  * Verdicts that condemn the row itself — the source is gone,
  * unplayable, or gated. Only these earn the forward-skip flag;
  * every other failure still pauses the queue on its typed verdict

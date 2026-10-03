@@ -5,6 +5,7 @@ import {
   fromUnknown,
   isBotCheckWall,
   isPermanentFailure,
+  isStreamsCappedTransient,
   ok,
 } from './errors.ts';
 import type { ErrorKind } from './errors.ts';
@@ -113,6 +114,44 @@ export function run(): void {
     assert(
       !isBotCheckWall(appError(kind, message)),
       `not a wall: ${kind} / ${message}`,
+    );
+  }
+
+  // isStreamsCappedTransient: the guest's fully-capped ladder wears
+  // `transient` + a trailing 'streams-capped' detail through the same
+  // prefix-wrap — mint weather, not a bot wall.
+  const capped = [
+    'streams-capped',
+    'transient: streams-capped',
+    'transient: streams-capped ',
+    'guest failure (transient): transient: streams-capped',
+  ];
+  for (const message of capped) {
+    assert(
+      isStreamsCappedTransient(appError('transient', message)),
+      `capped recognized: ${message}`,
+    );
+    assert(
+      !isBotCheckWall(appError('transient', message)),
+      `capped is not a bot wall: ${message}`,
+    );
+  }
+  // The typed shape: the kind itself is the verdict — the message is
+  // free detail.
+  assert(
+    isStreamsCappedTransient(appError('streams-capped', 'provider capped')),
+    'typed capped kind recognized',
+  );
+  const notCapped: readonly [ErrorKind, string][] = [
+    ['transient', 'socket hangup'],
+    ['transient', 'transient: bot-check'],
+    ['transient', 'streams-capped tomorrow'],
+    ['timeout', 'streams-capped'],
+  ];
+  for (const [kind, message] of notCapped) {
+    assert(
+      !isStreamsCappedTransient(appError(kind, message)),
+      `not capped: ${kind} / ${message}`,
     );
   }
 }

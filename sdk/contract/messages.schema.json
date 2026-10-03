@@ -35,7 +35,8 @@
         "permission-denied",
         "invalid-response",
         "timeout",
-        "cancelled"
+        "cancelled",
+        "streams-capped"
       ]
     },
     "hostErrorKind": {

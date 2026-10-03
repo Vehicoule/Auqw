@@ -88,6 +88,7 @@ pub(crate) const GUEST_FAIL_KINDS: &[&str] = &[
     "invalid-response",
     "timeout",
     "cancelled",
+    "streams-capped",
 ];
 
 /// Classification of an [`HttpClient`] failure.
