@@ -739,10 +739,22 @@ export function playlistDownloadPlan(input: {
   };
 }
 
-// ---- queue provenance navigation -----------------------------------
+// ---- queue provenance ----------------------------------------------
 // "playing from …" navigates back to the surface that minted the
 // queue. A source already in the overlay stack is unwound to instead
 // of pushed again — Back should leave the source, not walk copies.
+
+/** The search-origin stamp: `query` is contract-bounded at 256 UTF-16
+    units (isQueueOrigin) — a committed query past the cap still
+    plays, its provenance label clipped on a code-point boundary so
+    no lone surrogate is stored. An empty query mints no origin. */
+export const searchOrigin = (query: string): QueueOrigin | undefined => {
+  const clipped = query.slice(0, 256);
+  const tail = clipped.charCodeAt(clipped.length - 1);
+  const bounded =
+    tail >= 0xd800 && tail <= 0xdbff ? clipped.slice(0, -1) : clipped;
+  return bounded.length === 0 ? undefined : { kind: 'search', query: bounded };
+};
 
 /** The overlay route a queue origin navigates to — null for kinds
     that are world tabs (search/library), not overlays. */

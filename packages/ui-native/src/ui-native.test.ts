@@ -2445,6 +2445,28 @@ function testStageMotion(): void {
   // The commit edge mirrors the drag direction.
   assertEqual(skipCommitEdge(-10, 400), -400);
   assertEqual(skipCommitEdge(10, 400), 400);
+
+  // ---- dismiss→reopen race guards (source scan) -------------------
+  // The slide-off's completion must check the live tokens: every
+  // reopen path either cancels the spring by rewriting `gone` or
+  // flips the expanded mirror — and the collapsed-row tap's JS
+  // commit reclaims the dismiss axis like every other reopen.
+  const sheet = readFileSync(
+    new URL('./stage-sheet.tsx', import.meta.url),
+    'utf8',
+  );
+  assert(
+    sheet.includes('!expandedShared.value || anchor.value === 0'),
+    'slide-off completion is gated on the live reopen tokens',
+  );
+  const rowTap = sheet.slice(
+    sheet.indexOf('onPress={() => {'),
+    sheet.indexOf('onExpandCommit={() =>'),
+  );
+  assert(
+    rowTap.includes('gone.value'),
+    'the row tap reclaims the dismiss axis on reopen',
+  );
 }
 
 function testSkipPeek(): void {

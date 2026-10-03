@@ -91,14 +91,22 @@ export function useResolvedArtworkUri(
   readonly markSourceError: () => void;
 } {
   const resolve = useArtworkResolver();
-  // The url whose scaled variant already failed to paint — a scaled
-  // request the CDN can't serve retries once at the provider's
-  // original size, the same retry the web <img> onError path makes.
-  const [originalFor, setOriginalFor] = useState<string | null>(null);
-  const requested =
-    url !== null && targetPx !== undefined && originalFor !== url
+  // The scaled variant that failed to paint — a scaled request the
+  // CDN can't serve retries at the provider's original size, the same
+  // retry the web <img> onError path makes. The latch lifts once the
+  // original's own lookup lands a file, so one transient scaled-URL
+  // failure doesn't pin every later paint to the full-size asset for
+  // the rest of the mount.
+  const [scaledFailed, setScaledFailed] = useState<string | null>(null);
+  // The url whose scaled re-attempt was already granted — a second
+  // scaled failure keeps the latch instead of bouncing between
+  // variants forever.
+  const [retriedFor, setRetriedFor] = useState<string | null>(null);
+  const scaled =
+    url !== null && targetPx !== undefined
       ? scaledArtworkUrl(url, targetPx)
       : url;
+  const requested = scaled === scaledFailed ? url : scaled;
   // Tag the outcome with the url it was made for — a late landing
   // from a superseded url is ignored without a state reset effect.
   const [outcome, setOutcome] = useState<{
@@ -135,6 +143,16 @@ export function useResolvedArtworkUri(
         } else {
           resolvedUriMemo.delete(requested);
         }
+        // The original landing a file while a scaled variant sat
+        // latched proves the fallback servable — the variant gets its
+        // one re-attempt. Guarded by the variant itself: a latch set
+        // for a different shape since isn't this one's to lift. A url
+        // whose re-attempt already ran keeps its latch — the next
+        // failure is the re-attempt's, not a fresh transient.
+        if (fileUri !== null && scaled === scaledFailed && retriedFor !== url) {
+          setScaledFailed((cur) => (cur === scaled ? null : cur));
+          setRetriedFor(url);
+        }
         // The verdict is in: a `broken` marker for this url is stale —
         // leaving it would suppress the refreshed memo on the next
         // revisit and paint a placeholder over a cache-ready file.
@@ -170,13 +188,8 @@ export function useResolvedArtworkUri(
       // fresh one the memo drop triggers) is already retrying at the
       // same small size, and switching to the original here would pay
       // a full-size download for a cache fault.
-      if (
-        url !== null &&
-        shown === requested &&
-        requested !== url &&
-        originalFor !== url
-      ) {
-        setOriginalFor(url);
+      if (url !== null && shown === requested && requested !== url) {
+        setScaledFailed(requested);
         return;
       }
       resolvedUriMemo.delete(requested);

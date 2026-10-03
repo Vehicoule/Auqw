@@ -741,6 +741,7 @@ const queueStateRow = (queue: QueueSnapshot): SqlValue[] => [
   queue.blockedError === undefined
     ? null
     : JSON.stringify(queue.blockedError),
+  queue.origin === undefined ? null : JSON.stringify(queue.origin),
 ];
 
 const settingsRow = (settings: Settings): SqlValue[] => [
@@ -765,6 +766,7 @@ const QUEUE_STATE_COLUMNS = [
   'position_ms',
   'mode',
   'blocked_error_json',
+  'origin_json',
 ];
 
 const SETTINGS_COLUMNS = [

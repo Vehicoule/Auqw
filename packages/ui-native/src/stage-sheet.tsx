@@ -798,6 +798,17 @@ export function StageSheet({
   const lyricsChromeDragStart = useSharedValue(0);
   const queueChromeDragStart = useSharedValue(0);
   const playerPaneDragStart = useSharedValue(0);
+  // `expanded` mirrored onto the UI thread — the gesture worklets and
+  // the risenOn reaction must read a shared value; a captured ref
+  // only snapshots at worklet creation and would pin a sheet
+  // mounted-expanded forever. Synced in a layout effect so the write
+  // lands inside the same commit as the expanded flip: a passive
+  // effect would leave a window where the gates still read stale and
+  // taps leak underneath.
+  const expandedShared = useSharedValue(expanded);
+  useLayoutEffect(() => {
+    expandedShared.value = expanded;
+  }, [expanded, expandedShared]);
   // True only when the player pane's content actually overflows its
   // viewport — a scrollable pane keeps its scroll gesture, a fitting
   // one (the common case) is drag chrome for dismiss.
@@ -1058,7 +1069,16 @@ export function StageSheet({
                   velocity: e.velocityY / collapsed,
                 },
                 (finished) => {
-                  if (finished === true) {
+                  // Only a slide-off the surface still owns emits:
+                  // reopen paths rewrite `gone` (arriving here with
+                  // finished=false) or flip the expanded token —
+                  // either drops the stale completion. The anchor
+                  // token covers the window where the collapse
+                  // commit is still queued on the JS thread.
+                  if (
+                    finished === true &&
+                    (!expandedShared.value || anchor.value === 0)
+                  ) {
                     scheduleOnRN(emitDismiss);
                   }
                 },
@@ -1119,6 +1139,7 @@ export function StageSheet({
       commitAnchor,
       emitDismiss,
       expanded,
+      expandedShared,
     ],
   );
   const pan = useMemo(
@@ -1213,16 +1234,6 @@ export function StageSheet({
   // and unmounts only once the morph is fully back at the pill — the
   // settle-back path still gets its backdrop.
   const [risenOn, setRisenOn] = useState(expanded);
-  // `expanded` mirrored onto the UI thread — the reaction below must
-  // read a shared value; a captured ref only snapshots at worklet
-  // creation and would pin a sheet mounted-expanded forever. Synced
-  // in a layout effect so the write lands inside the same commit as
-  // the expanded flip: a passive effect would leave a window where
-  // the gate still reads stale and taps leak underneath.
-  const expandedShared = useSharedValue(expanded);
-  useLayoutEffect(() => {
-    expandedShared.value = expanded;
-  }, [expanded, expandedShared]);
   useAnimatedReaction(
     // `expandedShared` is a tracked input, not just a fire-time read:
     // a drag that parks the surface at progress 0 while still expanded
@@ -2223,6 +2234,12 @@ export function StageSheet({
                 progress.value = theme.reducedMotion
                   ? 1
                   : withSpring(1, SHEET_SETTLE_SPRING);
+                // Reclaim the dismiss axis too — a slide-off still
+                // in flight unwinds home with the reopen instead of
+                // firing its stale dismiss on completion.
+                gone.value = theme.reducedMotion
+                  ? 0
+                  : withSpring(0, SHEET_SETTLE_SPRING);
                 onExpandChangeRef.current?.(true);
               }}
               onExpandCommit={() => commitAnchor(1)}

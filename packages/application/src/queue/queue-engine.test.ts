@@ -1,5 +1,5 @@
 import { QueueEngine } from './queue-engine.ts';
-import type { QueueOccurrence } from '../domain.ts';
+import type { QueueOccurrence, QueueOrigin } from '../domain.ts';
 import { appError } from '../errors.ts';
 import { assert, assertEqual, assertDeepEqual } from '../testing/assert.ts';
 
@@ -109,6 +109,54 @@ function directTests(): void {
     blockedError: appError('expired-resource', 'gone'),
   });
   assertEqual(legalBlocked.snapshot().blockedError?.kind, 'expired-resource');
+
+  // The constructor's origin contract.
+  assert(
+    throws(
+      () =>
+        new QueueEngine({
+          ...base,
+          origin: { kind: 'search', query: 'q'.repeat(257) },
+        }),
+    ),
+    'out-of-bounds origin must throw',
+  );
+
+  // setOrigin holds the same contract — a rejected stamp mutates
+  // nothing, otherwise every later snapshot fails isQueueSnapshot.
+  {
+    const e = engineWith(['a']);
+    const lib: QueueOrigin = { kind: 'library' };
+    e.setOrigin(lib);
+    assertDeepEqual(e.snapshot().origin, lib, 'the origin stamps');
+    const rev = e.snapshot().revision;
+    assert(
+      throws(() => e.setOrigin({ kind: 'search', query: 'q'.repeat(257) })),
+      'setOrigin rejects an out-of-bounds query',
+    );
+    assert(
+      throws(
+        () => e.setOrigin({ kind: 'nonsense' } as unknown as QueueOrigin),
+      ),
+      'setOrigin rejects an unknown kind',
+    );
+    assertDeepEqual(
+      e.snapshot().origin,
+      lib,
+      'a rejected stamp leaves the stored origin untouched',
+    );
+    assertEqual(
+      e.snapshot().revision,
+      rev,
+      'a rejected stamp does not tick',
+    );
+    e.setOrigin(undefined);
+    assertEqual(
+      e.snapshot().origin,
+      undefined,
+      'setOrigin(undefined) clears the stamp',
+    );
+  }
 
   // next selects once, stops at the end with no wrap.
   {

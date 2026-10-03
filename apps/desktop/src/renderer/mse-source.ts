@@ -783,13 +783,18 @@ function runSession(
     // Journal coverage first — bytes already appended map exactly. A
     // target still buffered needs no pump work: re-anchoring would
     // refetch media the buffer already holds — and past EOF the append
-    // on the ended source would fail.
+    // on the ended source would fail. Mid-eviction `buffered` still
+    // reports spans a queued or in-flight remove() is about to take —
+    // it only shrinks at the remove's updateend — so coverage isn't
+    // trusted until the chain drains; falling through re-anchors the
+    // pump where the hole is about to open.
     const hit = journal.find(
       (j) => mediaMs >= j.mediaStart && mediaMs < j.mediaEnd,
     );
     if (
       hit !== undefined &&
       buffer !== null &&
+      !evicting &&
       isBuffered(mediaMs / 1000)
     ) {
       return;
