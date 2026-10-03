@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { errorCode } from '../shared/check.ts';
 import { shellError } from '../shared/errors.ts';
@@ -132,17 +132,42 @@ export function createSecureStore(opts: {
       // back corrupt-state forever — publish only complete files. The
       // staging name is unique per call: two overlapping sets would
       // share one tmp path and a rename could publish the other's
-      // half-written bytes.
+      // half-written bytes. The durability chain matches the plugin
+      // KV and the sync journal — fsync the staged bytes, atomic
+      // rename, then best-effort parent-dir fsync — so a crash right
+      // after a credential write cannot silently lose it.
       stagingSeq += 1;
       const staging = `${target}.${process.pid}.${stagingSeq}.tmp`;
       await serialize(key, async () => {
+        let handle;
         try {
           await mkdir(dir, { recursive: true });
-          await writeFile(staging, encrypted.toString('base64'), 'utf8');
+          handle = await open(staging, 'w');
+          await handle.writeFile(encrypted.toString('base64'), 'utf8');
+          // 'r+' not needed — the handle is already write-capable, and
+          // Windows refuses FlushFileBuffers on a read-only handle.
+          await handle.sync();
+          await handle.close();
+          handle = undefined;
           await rename(staging, target);
         } catch {
+          if (handle !== undefined) {
+            await handle.close().catch(() => undefined);
+          }
           await unlink(staging).catch(() => undefined);
           throw shellError('io-error', 'secure entry could not be written');
+        }
+        // Best-effort dir fsync — the rename is already committed.
+        try {
+          const parent = await open(dir, 'r');
+          try {
+            await parent.sync();
+          } finally {
+            await parent.close();
+          }
+        } catch {
+          // Directory fsync is unsupported on some platforms — the
+          // rename has landed; only the dir entry ordering is soft.
         }
         cache.set(key, Promise.resolve(value));
       });

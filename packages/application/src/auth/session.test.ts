@@ -1577,7 +1577,48 @@ async function testApplyThrowFailsHonestly(): Promise<void> {
   assertEqual(session.snapshot().bearerLive, false);
 }
 
+/**
+ * Locks `realAuthClock.sleep`'s cancel-safety contract: a signal
+ * cancelled at ANY point — before the call, between the initial
+ * `cancelled` check and `subscribe`, or mid-sleep — must resolve
+ * `false`, never `true`. The subscribe-replay behavior of
+ * `CancellationSource` is what makes the check-then-subscribe window
+ * safe; this test pins it so a future signal implementation that
+ * drops the replay cannot silently un-cancel a sleep.
+ */
+async function testRealClockSleepCancelSafety(): Promise<void> {
+  const { CancellationSource } = await import('../cancellation.ts');
+  const { realAuthClock } = await import('./session.ts');
+  const clock = realAuthClock();
+  // Pre-cancelled: false immediately.
+  {
+    const source = new CancellationSource();
+    source.cancel();
+    const slept = await clock.sleep(5, source.signal);
+    assert(!slept, 'pre-cancelled sleep must resolve false');
+  }
+  // Cancelled mid-sleep: false, not the full wait.
+  {
+    const source = new CancellationSource();
+    const p = clock.sleep(10_000, source.signal);
+    source.cancel();
+    const slept = await p;
+    assert(!slept, 'mid-sleep cancel must resolve false');
+  }
+  // Un-cancelled short sleep resolves true.
+  {
+    const slept = await clock.sleep(1);
+    assert(slept, 'uninterrupted sleep must resolve true');
+  }
+  // No signal: resolves true.
+  {
+    const slept = await clock.sleep(1);
+    assert(slept, 'signal-less sleep must resolve true');
+  }
+}
+
 export async function run(): Promise<void> {
+  await testRealClockSleepCancelSafety();
   testCustodyValidator();
   await testRestoreEmpty();
   await testRestoreCorrupt();
