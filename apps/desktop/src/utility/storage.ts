@@ -323,6 +323,12 @@ export function createStorageService(
     if (shutdown) {
       throw shellError('released', 'storage service is closed');
     }
+    // The diff baseline is read before BEGIN rather than inside the
+    // tx: the read sees the same committed state either way (every
+    // writer arrives through this serialized begin path), and a
+    // throwing snapshot must not strand an untracked IMMEDIATE
+    // transaction on the one connection.
+    const localSourcesBefore = sourceTreeUris(database());
     try {
       database().exec('BEGIN IMMEDIATE');
     } catch (thrown) {
@@ -331,9 +337,8 @@ export function createStorageService(
     const txId = randomUUID();
     openTxs.set(txId, {
       cancelled: false,
-      // Inside the write tx, the snapshot is the diff baseline — a
-      // renderer DELETE inside this tx is what commit() un-grants.
-      localSourcesBefore: sourceTreeUris(database()),
+      // A renderer DELETE inside this tx is what commit() un-grants.
+      localSourcesBefore,
     });
     activeTx = txId;
     txClosed = new Promise<void>((resolve) => {

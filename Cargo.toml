@@ -35,8 +35,13 @@ unsafe_code = "forbid"
 
 # Release artifacts ship as FFI cdylibs inside the desktop package and
 # the Android APK — size is the constraint there. thin LTO +
-# codegen-units=1 + strip take ~36% off each .so; panic=abort drops the
-# landing pads the FFI boundary could never unwind across anyway.
+# codegen-units=1 + strip take ~36% off each .so. panic stays unwind:
+# plugin-host runs guest calls and kv snapshot/commit legs inside
+# tokio spawn_blocking and maps a panicked leg's JoinError to
+# GuestTrap/HostService — panic=abort would turn any panic reachable
+# via remote-delivered wasm into a host-process abort, and a panic
+# escaping an extern "C" export still aborts at the FFI boundary
+# anyway, so abort buys size only.
 # Exception: auqw-mobile-bindings must keep .symtab — uniffi-bindgen
 # reads the UniFFI metadata out of it — so tooling/build-android-bindings.sh
 # overrides strip to "debuginfo" for that one build (AGP strips it
@@ -45,5 +50,4 @@ unsafe_code = "forbid"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
-panic = "abort"
 opt-level = "z"

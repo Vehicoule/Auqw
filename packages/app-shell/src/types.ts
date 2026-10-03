@@ -36,6 +36,7 @@ import type {
   UpdateSnapshot,
 } from '@auqw/application';
 import {
+  dedupeTrackListings,
   entityRefKey,
   nextQueueDestination,
   reportResult,
@@ -660,6 +661,25 @@ export function reportStoredDownloadError(
  * is platform behavior: mobile's activateHomeCard scanned the page in
  * order (first match wins), desktop's Map.set overwrote (last wins).
  */
+/**
+ * The metas a rendered home suggestion card can key on. The home
+ * model keys cards off `dedupeTrackListings(...).slice(0, 12)` group
+ * reps, and a rep keeps its raw page index — a same-song duplicate
+ * collapsing inside the bound pushes a rendered rep past a raw
+ * `items.slice(0, limit)`, so the bound lands on the dedupe. Group
+ * members come along: a hidden duplicate's own key still resolves to
+ * its own listing — the same song the card displays.
+ */
+export function suggestionCardMetas(
+  items: readonly TrackMetadata[],
+  limit: number | undefined,
+): readonly TrackMetadata[] {
+  const deduped = dedupeTrackListings(items);
+  const bounded =
+    limit === undefined ? deduped : deduped.slice(0, limit);
+  return bounded.flatMap((entry) => entry.group);
+}
+
 export function suggestionMetaMap(
   items: readonly TrackMetadata[],
   collisionOrder: 'firstWins' | 'lastWins',
