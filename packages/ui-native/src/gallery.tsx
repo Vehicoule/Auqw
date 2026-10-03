@@ -28,6 +28,14 @@ import {
   UnavailableState,
 } from './states.tsx';
 import { AndroidNavbar, AppNavbar, IosGlassNavbar } from './navbar.tsx';
+import iconHome from '../assets/tab-icons/home.png';
+import iconExplore from '../assets/tab-icons/explore.png';
+import iconLibrary from '../assets/tab-icons/library.png';
+import iconSettings from '../assets/tab-icons/settings.png';
+import iconHomeOutline from '../assets/tab-icons/home_outline.png';
+import iconExploreOutline from '../assets/tab-icons/explore_outline.png';
+import iconLibraryOutline from '../assets/tab-icons/library_outline.png';
+import iconSettingsOutline from '../assets/tab-icons/settings_outline.png';
 import { MiniPlayer } from './mini-player.tsx';
 import { StageSheet, TransportControls } from './stage-sheet.tsx';
 import { SearchScreen } from './search-screen.tsx';
@@ -606,7 +614,25 @@ function GalleryBody({
       </Section>
 
       <Section title="navbars" note="flat m3e bar · gliding chip">
-        <AndroidNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} />
+        <AndroidNavbar
+          items={fixtureNavItems}
+          activeKey={nav}
+          onSelect={setNav}
+          tabIcons={{
+            active: {
+              home: iconHome,
+              explore: iconExplore,
+              library: iconLibrary,
+              settings: iconSettings,
+            },
+            idle: {
+              home: iconHomeOutline,
+              explore: iconExploreOutline,
+              library: iconLibraryOutline,
+              settings: iconSettingsOutline,
+            },
+          }}
+        />
         <View style={{ height: theme.spacing.md }} />
         <IosGlassNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} />
       </Section>
