@@ -268,6 +268,7 @@ export function PlatformTabs({
             items={items}
             activeKey={activeKey}
             onSelect={onSelect}
+            tabIcons={{ active: PNG_ICONS, idle: PNG_ICONS_OUTLINE }}
           />
         </View>
       )}

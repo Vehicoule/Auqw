@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Platform, View } from 'react-native';
-import type { LayoutChangeEvent } from 'react-native';
+import { Image, Platform, View } from 'react-native';
+import type { ImageSourcePropType, LayoutChangeEvent } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
@@ -37,16 +37,20 @@ function iconFor(key: string, active: boolean): IconName {
   );
 }
 
+
+
 /** Tab glyph with a subtle activation lift — one worklet transform;
     reduced motion snaps straight to the end scale. */
 function NavIcon({
   name,
   active,
   color,
+  png,
 }: {
   readonly name: IconName;
   readonly active: boolean;
   readonly color: string;
+  readonly png?: ImageSourcePropType | undefined;
 }) {
   const theme = useTheme();
   const lift = useSharedValue(active ? 1.08 : 1);
@@ -61,7 +65,15 @@ function NavIcon({
   }));
   return (
     <Animated.View style={liftStyle}>
-      <Icon name={name} size={14} color={color} />
+      {png != null ? (
+        <Image
+          source={png}
+          tintColor={color}
+          style={{ width: 20, height: 20 }}
+        />
+      ) : (
+        <Icon name={name} size={14} color={color} />
+      )}
     </Animated.View>
   );
 }
@@ -70,6 +82,13 @@ export type NavbarProps = {
   readonly items: readonly NavItemModel[];
   readonly activeKey: string;
   readonly onSelect: (key: string) => void;
+  /** Alpha-24's PNG glyph pairs (filled/idle) — the same raster set the
+      native M3 bar rendered; items without a pair fall back to the icon
+      family. */
+  readonly tabIcons?: {
+    readonly active: Record<string, ImageSourcePropType>;
+    readonly idle: Record<string, ImageSourcePropType>;
+  };
 };
 
 /**
@@ -81,6 +100,7 @@ export function AndroidNavbar({
   items,
   activeKey,
   onSelect,
+  tabIcons,
 }: NavbarProps) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -174,6 +194,9 @@ export function AndroidNavbar({
                 <NavIcon
                   name={iconFor(item.key, active)}
                   active={active}
+                  png={(active ? tabIcons?.active : tabIcons?.idle)?.[
+                    item.key
+                  ]}
                   color={
                     active ? theme.colors.accent : theme.colors.textSecondary
                   }
