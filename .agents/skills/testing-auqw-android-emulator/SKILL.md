@@ -946,7 +946,12 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
 - `auqw://search?q=...` commits still apply under pushed overlays —
   back-nav surfaces the result list, not lost state.
 - `POST_NOTIFICATIONS` dialog can fire ANYTIME (not just on play) and
-  swallows taps until handled — Allow ~x540,y1312. The 'Maximum update
-  depth exceeded' LogBox also surfaced twice on this build (artist
-  page + search results, playback re-renders active) — dev-build noise
-  per the #312 notes, dismissed via its X, app stayed functional.
+  swallows taps until handled — Allow ~x540,y1312.
+- 'Maximum update depth exceeded' resurfaced TWICE post-#312-fix on
+  this build (artist entity page + over search results, playback
+  re-renders active) — dismissed via its X, app stayed functional.
+  Per the hunt notes above this is a possible fresh render-loop, NOT
+  noise: the #312 fix covered the uSES/position-channel tear, and any
+  new storm needs the App.tsx/uSES blame check. Whether #347's new
+  artwork-resolver subscription contributes is UNCONFIRMED — record
+  the surface + active playback state before dismissing.
