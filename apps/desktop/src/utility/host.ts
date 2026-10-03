@@ -495,12 +495,17 @@ export function createHostRuntime(opts: {
       if (loaded.length === 0 && feedFailure !== undefined) {
         throw feedFailure;
       }
-      // A feed sync that left any listed plugin below its current
-      // release stays retriable (an outdated LKG pair still loads —
-      // the gate tracks ready, not loaded): the next `ready()`
-      // re-syncs and the host's id-keyed insert hot-swaps the pair.
+      // The retry gate stays armed while the feed's compatible set is
+      // not fully available — either because a listed plugin is below
+      // its feed release (stale LKG loads, ready tracks currency) or
+      // because a current pair failed to load into the host (loadPlugin
+      // rejects skip it, so loaded counts only compatible pairs: dropped
+      // ids were filtered above). The next `ready()` re-syncs and the
+      // host's id-keyed insert hot-swaps the pair.
       lastLoadIncomplete =
-        synced !== undefined && synced.ready.length < synced.compatible.length;
+        synced !== undefined &&
+        (synced.ready.length < synced.compatible.length ||
+          loaded.length < synced.compatible.length);
       return loaded;
     }
     const manifests = fs
