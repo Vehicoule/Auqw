@@ -251,7 +251,12 @@ while hidden).
 - ALWAYS `cargo build --locked -p auqw-node-bindings` after branch
   switches — a stale debug `.so` rejects current manifests
   ('capabilities outside the set this ABI serves') even when bytes are
-  perfect. If the worktree gains commits mid-run, check `git log` +
+  perfect. Post-#340 (ABI 0.1.0 collapse) the failure is sharper: a
+  pre-#340 `.so` rejects EVERY synced plugin → zero providers →
+  `[ui] boot failed: internal` at `controller.ts:154`, thrown BEFORE
+  storage init so the DB stays on the old schema_version — a boot
+  that dies before migrations, not a playback fault. Rebuild fixes it.
+  If the worktree gains commits mid-run, check `git log` +
   `stat dist/utility/index.cjs` mtime — dist may be behind HEAD.
 - youtube-music resolve bot-walls on datacenter egress — typed
   `provider-wall` is weather, not a defect; the diagnostics
@@ -796,6 +801,25 @@ None — the napi artifact is a local cargo build output.
 Fastest like→library closed loop: heart a playlist on its entity page,
 open the 'in your library' chip — shows exactly that card, head
 'in your library · 1' (persistence AND local filtering in one screen).
+
+## Entity pages + stage meta links (verified 2026-10-03, PR #347)
+
+- Hero tells kind at a glance: artist art is a CIRCLE, album/playlist
+  square; blurred backdrop wash behind art+title; accent 'play' pill
+  sits left of '≡ shuffle'. Play pill → ordered playback (queue
+  replaced, starts at track 1, origin 'playing from <entity>').
+- Full-player meta links are ~8px text bands — re-zoom before
+  clicking; a few-px slip lands on the adjacent line and a click on
+  the album line while that album page is already open is an
+  invisible no-op (looks like a dead link — verify at ink).
+- Inert-recording recipe: seed a LOCAL file (counted-play recipe
+  works) — provenance `local` means NULL artist/album refs → meta
+  lines render plain text, clicks navigate nowhere. itunes rows are
+  NOT an inert case: itunes emits `artist_ref`/`album_ref` on its
+  track rows (links render live).
+- sqlite: recordings carry `artist_ref_json`/`album_ref_json`
+  (schema v17) — provider rows filled (e.g.
+  `{"id":"27","kind":"artist","provider":"deezer"}`), local row NULL.
 
 ## Misc legs
 
