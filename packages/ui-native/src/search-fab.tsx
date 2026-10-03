@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { TextInput, View } from 'react-native';
 import Animated, {
+  interpolateColor,
   useAnimatedStyle,
   useSharedValue,
   withSpring,
@@ -80,13 +81,15 @@ export function SearchFab({
       [0, 1],
       [FAB / 2, theme.radius.float],
     ),
-  }));
-
-  // Focus emphasis — the accent hairline fades in over the resting
-  // border: two stacked outlines cross-faded by `focusT`, no color
-  // string interpolation.
-  const focusEdge = useAnimatedStyle(() => ({
-    opacity: focusT.value,
+    // Focus emphasis — the field's own hairline cross-fades to the
+    // accent tone. Animating the parent's border in place keeps the
+    // stroke inside its clipping bounds (an inset overlay was clipped
+    // away by overflow:hidden and never showed).
+    borderColor: interpolateColor(
+      focusT.value,
+      [0, 1],
+      [theme.colors.hairline, theme.colors.accent],
+    ),
   }));
 
   const loupeStyle = useAnimatedStyle(() => ({
@@ -120,22 +123,6 @@ export function SearchFab({
         box,
       ]}
     >
-      <Animated.View
-        pointerEvents="none"
-        style={[
-          {
-            position: 'absolute',
-            top: -theme.strokes.hairline,
-            left: -theme.strokes.hairline,
-            right: -theme.strokes.hairline,
-            bottom: -theme.strokes.hairline,
-            borderWidth: theme.strokes.hairline,
-            borderColor: theme.colors.accent,
-            borderRadius: theme.radius.float,
-          },
-          focusEdge,
-        ]}
-      />
       <Pressable
         compact
         accessibilityLabel={field.label}
@@ -181,11 +168,15 @@ export function SearchFab({
           onChangeText={(text) => field.onChange?.(text)}
           onSubmitEditing={() => field.onSubmit?.()}
           onFocus={() => {
-            focusT.value = withTiming(1, { duration: theme.motion.state });
+            focusT.value = theme.reducedMotion
+              ? 1
+              : withTiming(1, { duration: theme.motion.state });
             onNavigateToSearch?.();
           }}
           onBlur={() => {
-            focusT.value = withTiming(0, { duration: theme.motion.state });
+            focusT.value = theme.reducedMotion
+              ? 0
+              : withTiming(0, { duration: theme.motion.state });
           }}
           placeholder={field.label}
           placeholderTextColor={theme.colors.textSecondary}
