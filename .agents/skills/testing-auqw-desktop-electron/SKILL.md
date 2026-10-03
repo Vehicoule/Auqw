@@ -41,6 +41,10 @@ those merge, this skill has nothing to run against.
   `libauqw_node_bindings.so` (cargo debug build). The host stages it to
   `userData/node-bindings/auqw_node_bindings.node` before `require()`.
   Missing/broken → `host:plugins: unavailable` in diagnostics.
+- Branch switches touching `crates/plugin-host` need a bindings rebuild
+  (`cargo build -p auqw-node-bindings`): a stale .so built against an old
+  ABI silently rejects EVERY plugin → zero providers → `[ui] boot failed:
+  internal` before storage init (sqlite `user_version` stays behind).
 - `AUQW_DEV_GATE` needs no setup: main sets it to `'1'` whenever
   `app.isPackaged` is false (`src/main/index.ts` `utilityEnv`). Utility env
   is filtered to `AUQW_*` + platform vars — parent credentials never reach it.
@@ -232,6 +236,13 @@ while hidden).
   log every request's path + `accept-encoding`. The request log is the
   ground truth for cache-hit vs refetch (hit = feed.json only; miss =
   feed.json + `<id>/<ver>/plugin.manifest.json` + `<id>-<ver>.wasm`).
+- Dev staging (`tooling/sync-plugins.mjs apps/desktop/plugins`):
+  `providers.lock.json` `release:../auqw-plugins/...` sources resolve
+  case-sensitively against a sibling literally named `~/repos/auqw-plugins`
+  (lowercase). If that clone is stale or another clone owns the releases
+  (`~/repos/auqw-plugins-*`), sync fails `ENOENT … releases/<id>/<ver>` —
+  `git -C ~/repos/Auqw-plugins pull --ff-only` or `ln -sfn <clone> ~/repos/auqw-plugins`,
+  then re-run sync (one `synced <id> <ver>` line per plugin, no `synced spin`).
 - Feed entry digests are `sha256:<64hex>` — a bare-hex tamper fails the
   WHOLE-feed shape check (all-or-nothing → LKG), not a per-plugin skip.
 - Observable semantics: feed reachable = authority — a valid cached doc
@@ -833,3 +844,7 @@ open the 'in your library' chip — shows exactly that card, head
 - The settings menu (≡) rows sit ~6px lower than first-glance
   coordinates on this display scale — zoom the popover before
   clicking; a click on the row's top edge dead-zones.
+- sqlite only keeps the LATEST queue — `queue_occurrences` is replaced
+  wholesale per queue write. Grab 'playing from {entity}' origins and
+  ordered up-next lists visually before playing something else; the db
+  can't reproduce prior queue state.
