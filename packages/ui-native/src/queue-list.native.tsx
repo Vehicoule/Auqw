@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { FlatList } from 'react-native';
 import type { ViewToken } from 'react-native';
 import DraggableFlatList, {
@@ -68,7 +68,18 @@ export function QueueList({
   // Display order (nowPlaying → upNext → history) is not the canonical
   // order the engine indexes — move calls translate through
   // `item.index` / the displaced neighbor's slot.
-  const items = queue.sections.flatMap((section) => section.items);
+  // The flattened rows are memoized on the (shared, frozen) sections:
+  // a fresh `data` ref per render re-arms VirtualizedList's batched
+  // cell-update setState every pass, which chains nested updates past
+  // the 'Maximum update depth exceeded' cap under playback ticking.
+  const items = useMemo(
+    () => queue.sections.flatMap((section) => section.items),
+    [queue.sections],
+  );
+  // The draggable list mutates its data in place for the drag preview —
+  // it needs a private copy, still stable per render so the same
+  // re-arming chain stays broken.
+  const dragItems = useMemo(() => items.slice(), [items]);
   const sectionByKey = new Map(queue.sections.map((s) => [s.key, s]));
   const upNextIds =
     sectionByKey.get('upNext')?.items.map((item) => item.occurrenceId) ?? [];
@@ -143,7 +154,7 @@ export function QueueList({
     return (
       <DraggableFlatList
         key={dragRemount}
-        data={items.slice()}
+        data={dragItems}
         keyExtractor={(item) => item.occurrenceId}
         scrollEnabled={scrollEnabled}
         scrollEventThrottle={64}

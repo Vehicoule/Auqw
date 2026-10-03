@@ -872,6 +872,77 @@ async function seekKeepsPublishedDuration(): Promise<void> {
   assertEqual(readyOf(r).queue.positionMs, 90_000);
 }
 
+// A position tick refreshes the snapshot without waking whole-state
+// subscribers — but a queue write mutates the engine before its
+// commit awaits, so a tick landing in that window installs the change
+// unseen; the write's own publish then diffs identical and would
+// dedupe into silence. Hold the write's commit so a status tick
+// interleaves exactly between the mutation and its publish.
+async function positionTickCantSwallowPublish(): Promise<void> {
+  const r = rig(
+    persisted({
+      recordings: [
+        recording('t1', [ref('itunes', 'x')]),
+        recording('t2', [ref('itunes', 'y')]),
+      ],
+      queue: {
+        ...emptyQueue(),
+        revision: 1,
+        occurrences: [
+          occurrence('o1', 't1', ref('itunes', 'x')),
+          occurrence('o2', 't2', ref('itunes', 'y')),
+        ],
+        currentOccurrenceId: 'o1',
+        positionMs: 0,
+        mode: 'playing',
+      },
+    }),
+  );
+  await restoreOk(r);
+  await playThrough(r, 'o1');
+  assert((await r.session.pause()).ok, 'pause failed');
+  const snapP = readyOf(r);
+  const idP =
+    'identity' in snapP.playback ? snapP.playback.identity : undefined;
+  assert(idP !== undefined);
+  const settled = r.states.length;
+
+  // The removal mutates the engine synchronously; its commit stays
+  // held so a position tick interleaves and installs the change
+  // silently — pull readers see it, the channel was never woken.
+  r.storage.holdNextCommit();
+  const removed = r.session.removeOccurrence('o2');
+  await pump();
+  r.player.emit(statusEvent(idP, 'h-o1', 'paused', 4_500));
+  await pump();
+  assertEqual(
+    readyOf(r).queue.occurrences.length,
+    1,
+    'silent install shows the removal',
+  );
+  assertEqual(r.states.length, settled, 'position tick woke subscribers');
+
+  // Resolving the commit fires the write's own publish: identical to
+  // what the tick installed, so only the undelivered-install flag can
+  // still wake the channel.
+  assert(r.storage.settleCommit(ok(undefined)), 'expected a held commit');
+  await pump();
+  assert((await removed).ok, 'remove failed');
+  await pump();
+  assertEqual(
+    r.states.length,
+    settled + 1,
+    'publish swallowed by the silent install',
+  );
+  const last = r.states.at(-1);
+  assert(last !== undefined && last.type === 'ready');
+  assertEqual(
+    last.queue.occurrences.length,
+    1,
+    'delivered state lacks the removal',
+  );
+}
+
 // A paused stream can outlive its registry session — detached
 // streams are reaped past the TTL (or superseded while detached), so
 // resume's transport call lands on a dead handle. That failure must
@@ -8023,6 +8094,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['endedFallback', endedFallback],
   ['pauseResumeSeek', pauseResumeSeek],
   ['seekKeepsPublishedDuration', seekKeepsPublishedDuration],
+  ['positionTickCantSwallowPublish', positionTickCantSwallowPublish],
   ['resumeDeadHandleRePrepares', resumeDeadHandleRePrepares],
   ['deadHandleFailedStatusRePrepares', deadHandleFailedStatusRePrepares],
   [
