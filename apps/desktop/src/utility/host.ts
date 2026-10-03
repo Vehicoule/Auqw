@@ -254,7 +254,12 @@ async function defaultFeedSync(
     dir,
     ports: {
       fetchBytes: async (url) => {
-        const res = await fetch(url);
+        // The utility's fetch advertises gzip but does NOT
+        // transparently decode it (unlike undici) — GitHub's edge
+        // gzips feed.json, so ask for identity explicitly.
+        const res = await fetch(url, {
+          headers: { 'accept-encoding': 'identity' },
+        });
         if (!res.ok) {
           throw shellError('transient', `plugin feed fetch ${res.status}`);
         }
