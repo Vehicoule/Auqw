@@ -31,23 +31,24 @@ export function CollectionTile({
       style={{
         minHeight: 62,
         flexDirection: 'row',
-        alignItems: 'center',
-        gap: theme.spacing.sm,
-        padding: theme.spacing.md,
-        borderRadius: theme.radius.control,
-        borderWidth: theme.strokes.hairline,
-        borderColor: view.enabled ? theme.colors.hairline : theme.colors.fg08,
-        backgroundColor: view.enabled ? theme.colors.raised : 'transparent',
+        alignItems: 'stretch',
+        gap: theme.spacing.xs,
         opacity: view.enabled ? 1 : 0.58,
       }}
     >
+      {/* The icon zone is its own rounded surface beside the body
+          card — a small echo of the shell seam between the stage and
+          the floating world card. */}
       <View
         style={{
-          width: 30,
-          height: 30,
-          borderRadius: theme.radius.control,
+          width: 56,
           alignItems: 'center',
           justifyContent: 'center',
+          borderRadius: theme.radius.control,
+          borderWidth: theme.strokes.hairline,
+          borderColor: view.enabled
+            ? theme.colors.hairline
+            : theme.colors.fg08,
           backgroundColor: view.enabled
             ? theme.colors.accentSoft
             : theme.colors.fg08,
@@ -55,37 +56,54 @@ export function CollectionTile({
       >
         <Icon
           name={view.icon}
-          size={15}
+          size={20}
           color={
             view.enabled ? theme.colors.accent : theme.colors.textSecondary
           }
         />
       </View>
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text variant="body" color={view.enabled ? 'bright' : 'primary'}>
-          {tile.label}
-        </Text>
-        <Text variant="metadata" color="secondary" numberOfLines={2}>
-          {view.countLabel}
-        </Text>
+      <View
+        style={{
+          flex: 1,
+          minWidth: 0,
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: theme.spacing.sm,
+          paddingHorizontal: theme.spacing.md,
+          borderRadius: theme.radius.control,
+          borderWidth: theme.strokes.hairline,
+          borderColor: view.enabled
+            ? theme.colors.hairline
+            : theme.colors.fg08,
+          backgroundColor: view.enabled ? theme.colors.raised : 'transparent',
+        }}
+      >
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text variant="body" color={view.enabled ? 'bright' : 'primary'}>
+            {tile.label}
+          </Text>
+          <Text variant="metadata" color="secondary" numberOfLines={2}>
+            {view.countLabel}
+          </Text>
+        </View>
+        {view.onPlay !== undefined && (
+          <Pressable
+            compact
+            onPress={view.onPlay}
+            accessibilityLabel={view.playA11yLabel}
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: 14,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: theme.colors.accentSoft,
+            }}
+          >
+            <Icon name="play" size={12} color={theme.colors.accent} />
+          </Pressable>
+        )}
       </View>
-      {view.onPlay !== undefined && (
-        <Pressable
-          compact
-          onPress={view.onPlay}
-          accessibilityLabel={view.playA11yLabel}
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: 14,
-            alignItems: 'center',
-            justifyContent: 'center',
-            backgroundColor: theme.colors.accentSoft,
-          }}
-        >
-          <Icon name="play" size={12} color={theme.colors.accent} />
-        </Pressable>
-      )}
     </Pressable>
   );
 }

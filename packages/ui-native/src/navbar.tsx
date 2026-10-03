@@ -61,7 +61,7 @@ function NavIcon({
   }));
   return (
     <Animated.View style={liftStyle}>
-      <Icon name={name} size={14} color={color} />
+      <Icon name={name} size={20} color={color} />
     </Animated.View>
   );
 }
@@ -75,8 +75,9 @@ export type NavbarProps = {
 /**
  * The Android dock — a floating capsule (the iOS-26 style bar): own
  * raised surface + shadow instead of the flat native strip, which had
- * too little contrast against the canvas. Keeps the one traveling
- * accent pill.
+ * too little contrast against the canvas. One neutral plate glides
+ * between slots and wraps icon + label; the accent stays on the
+ * active glyph only.
  */
 export function FloatingNavbar({
   items,
@@ -85,14 +86,16 @@ export function FloatingNavbar({
 }: NavbarProps) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
-  // One selection mark, not per-slot fills — the accent pill is a
-  // single element that glides between slots (the seg indicator's
-  // treatment on the dock). Equal flex:1 slots make the target x a
-  // pure function of slot width; reduced motion snaps it.
+  // One selection mark, not per-slot fills — the plate is a single
+  // element that glides between slots. Equal flex:1 slots make the
+  // target x a pure function of slot width; reduced motion snaps it.
   const [rowW, setRowW] = useState(0);
   const placed = useRef(false);
   const slotW = rowW / Math.max(1, items.length);
-  const pillW = Math.max(0, Math.min(56, slotW - theme.spacing.xs));
+  const pillW = Math.max(
+    0,
+    Math.min(Math.round(slotW * 0.78), slotW - theme.spacing.xxs),
+  );
   const foundIndex = items.findIndex((item) => item.key === activeKey);
   const targetX = Math.max(0, foundIndex) * slotW + (slotW - pillW) / 2;
   const pillX = useSharedValue(0);
@@ -128,17 +131,17 @@ export function FloatingNavbar({
         shadowOpacity: 0.28,
         shadowRadius: 16,
         shadowOffset: { width: 0, height: 6 },
-        padding: theme.spacing.xs + theme.spacing.xxs,
+        padding: theme.spacing.xs,
       }}
     >
       {/* The measured row stays padding-free — slot widths (and the
-          pill's target x) read straight off its layout box. */}
+          plate's target x) read straight off its layout box. The plate
+          stretches top:0/bottom:0 so it wraps the glyph and the label. */}
       <View
         accessibilityRole="tablist"
         onLayout={onRowLayout}
         style={{
           flexDirection: 'row',
-          minHeight: theme.sizes.navbarIos,
         }}
       >
         {rowW > 0 && pillW > 0 && foundIndex >= 0 && (
@@ -148,11 +151,13 @@ export function FloatingNavbar({
               {
                 position: 'absolute',
                 top: 0,
+                bottom: 0,
                 left: 0,
                 width: pillW,
-                height: 30,
-                borderRadius: theme.radius.control,
-                backgroundColor: theme.colors.accentSoft,
+                borderRadius: theme.radius.float,
+                borderWidth: theme.strokes.hairline,
+                borderColor: theme.colors.hairline,
+                backgroundColor: theme.colors.fg18,
               },
               pillStyle,
             ]}
@@ -171,26 +176,18 @@ export function FloatingNavbar({
               style={{
                 flex: 1,
                 alignItems: 'center',
-                gap: theme.spacing.xs,
+                gap: theme.spacing.xxs,
+                paddingVertical: theme.spacing.sm,
                 minHeight: theme.sizes.touch,
               }}
             >
-              <View
-                style={{
-                  minWidth: 56,
-                  height: 30,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <NavIcon
-                  name={iconFor(item.key, active)}
-                  active={active}
-                  color={
-                    active ? theme.colors.accent : theme.colors.textSecondary
-                  }
-                />
-              </View>
+              <NavIcon
+                name={iconFor(item.key, active)}
+                active={active}
+                color={
+                  active ? theme.colors.accent : theme.colors.textSecondary
+                }
+              />
               <Text
                 variant="metadata"
                 color={active ? 'accent' : 'secondary'}
@@ -258,19 +255,24 @@ export function IosGlassNavbar({
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: theme.spacing.xxs,
+                  paddingVertical: theme.spacing.xs,
                   minHeight: theme.sizes.touch,
                 }}
               >
                 <View
                   style={{
-                    minWidth: 44,
-                    height: 26,
-                    borderRadius: theme.radius.control,
-                    paddingHorizontal: 10,
                     alignItems: 'center',
                     justifyContent: 'center',
+                    gap: theme.spacing.xxs,
+                    paddingVertical: theme.spacing.xs,
+                    paddingHorizontal: theme.spacing.md,
+                    borderRadius: theme.radius.float,
+                    borderWidth: theme.strokes.hairline,
+                    borderColor: active
+                      ? theme.colors.hairline
+                      : 'transparent',
                     backgroundColor: active
-                      ? theme.colors.accentSoft
+                      ? theme.colors.fg18
                       : 'transparent',
                   }}
                 >
@@ -281,19 +283,19 @@ export function IosGlassNavbar({
                       active ? theme.colors.accent : theme.colors.textSecondary
                     }
                   />
+                  <Text
+                    variant="metadata"
+                    color={active ? 'accent' : 'secondary'}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.8}
+                    style={[
+                      active && { fontFamily: theme.fontFamilies.bold },
+                    ]}
+                  >
+                    {item.label}
+                  </Text>
                 </View>
-                <Text
-                  variant="metadata"
-                  color={active ? 'accent' : 'secondary'}
-                  numberOfLines={1}
-                  adjustsFontSizeToFit
-                  minimumFontScale={0.8}
-                  style={[
-                    active && { fontFamily: theme.fontFamilies.bold },
-                  ]}
-                >
-                  {item.label}
-                </Text>
               </Pressable>
             );
           })}
