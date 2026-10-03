@@ -474,6 +474,7 @@ fn manifest_accepts_0_3_capabilities() {
         "0.3.0",
         &[
             "catalog.search",
+            "catalog.search.kinds",
             "catalog.metadata",
             "catalog.artwork",
             "catalog.entity",
@@ -485,7 +486,7 @@ fn manifest_accepts_0_3_capabilities() {
         ],
         &["network:allowed.test"],
     )));
-    assert_eq!(m.capabilities.len(), 9);
+    assert_eq!(m.capabilities.len(), 10);
 }
 
 /// A `0.2.0` manifest is immutable — the 0.3 capabilities are a
@@ -494,6 +495,7 @@ fn manifest_accepts_0_3_capabilities() {
 fn manifest_0_2_rejects_0_3_capabilities() {
     let wasm = ok(wat::parse_str(DONE_WAT));
     for cap in [
+        "catalog.search.kinds",
         "catalog.entity",
         "lyrics.plain",
         "lyrics.synced",

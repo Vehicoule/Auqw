@@ -262,6 +262,7 @@ type ProviderMethod =
 
 export const ALL_CAPABILITIES: readonly ProviderCapability[] = [
   'catalog.search',
+  'catalog.search.kinds',
   'catalog.metadata',
   'catalog.artwork',
   'catalog.entity',

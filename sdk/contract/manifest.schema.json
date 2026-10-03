@@ -36,6 +36,7 @@
         "type": "string",
         "enum": [
           "catalog.search",
+          "catalog.search.kinds",
           "catalog.metadata",
           "catalog.artwork",
           "catalog.entity",
