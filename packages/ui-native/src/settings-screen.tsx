@@ -1,7 +1,7 @@
-import { useContext, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { NavFootprintContext, usePaneVisible } from './platform-tabs.tsx';
+import { usePaneVisible } from './platform-tabs.tsx';
 import {
   bind,
   Hairline,
@@ -208,7 +208,6 @@ export function SettingsScreen({
   onOpenCorrections,
 }: SettingsScreenProps) {
   const theme = useTheme();
-  const navPad = useContext(NavFootprintContext);
   const diagnostics = model.diagnostics;
   const persistenceColor =
     diagnostics.persistence === 'ok' ? 'secondary' : 'warn';
@@ -220,7 +219,7 @@ export function SettingsScreen({
         paddingTop: topInset,
         // Clears the floating miniplayer's strip.
         paddingBottom:
-          theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md + navPad,
+          theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
       }}
     >
       <Text

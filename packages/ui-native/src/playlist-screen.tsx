@@ -1,7 +1,6 @@
-import { useContext, useState } from 'react';
+import { useState } from 'react';
 import { FlatList, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { NavFootprintContext } from './platform-tabs.tsx';
 import {
   Artwork,
   BackButton,
@@ -77,7 +76,6 @@ export function PlaylistScreen({
   onMoveEntry,
 }: PlaylistScreenProps) {
   const theme = useTheme();
-  const navPad = useContext(NavFootprintContext);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState('');
   const [confirming, setConfirming] = useState(false);
@@ -238,7 +236,7 @@ export function PlaylistScreen({
           scrollEnabled={scrollEnabled}
           contentContainerStyle={{
             paddingHorizontal: theme.spacing.sm,
-            paddingBottom: theme.spacing.xxl + navPad,
+            paddingBottom: theme.spacing.xxl,
           }}
           renderItem={({ item, index }) => (
             <TrackRow

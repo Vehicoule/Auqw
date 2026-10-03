@@ -20,15 +20,6 @@ export function usePaneVisible(): boolean {
 
 export { PaneVisibleContext };
 
-/**
- * The strip a floating nav bar overlays at the bottom of the scenes —
- * panes add it to their scroll padding so the last rows clear the bar.
- * 0 on iOS (the native bar reserves its own layout slot) and on the
- * fallback renderer (its bar sits in flow).
- */
-const NavFootprintContext = createContext(0);
-export { NavFootprintContext };
-
 export type PlatformTabsProps = {
   readonly items: readonly NavItemModel[];
   readonly activeKey: string;

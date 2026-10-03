@@ -1,7 +1,5 @@
-import { useContext } from 'react';
 import { FlatList, ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { NavFootprintContext } from './platform-tabs.tsx';
 import { Artwork, bind, Icon, PillButton, Pressable, Text } from './primitives.tsx';
 import { EmptyState } from './states.tsx';
 import { CollectionTile } from './collection-screen.tsx';
@@ -212,7 +210,6 @@ export function HomeScreen({
   onResume,
 }: HomeScreenProps) {
   const theme = useTheme();
-  const navPad = useContext(NavFootprintContext);
   const tiles = collectionTileViews(
     model.collections,
     onOpenCollection,
@@ -227,7 +224,7 @@ export function HomeScreen({
         // The floating miniplayer overlays the last rows — the extra
         // strip lets them scroll clear of the pill.
         paddingBottom:
-          theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md + navPad,
+          theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
       }}
     >
       <Text
