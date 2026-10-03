@@ -186,7 +186,7 @@ impl StreamServer {
 
 impl Drop for StreamServer {
     fn drop(&mut self) {
-        self.shared.shutdown.store(true, Ordering::Relaxed);
+        self.shared.shutdown.store(true, Ordering::Release);
         if let Ok(mut a) = self.accept.lock() {
             if let Some(h) = a.take() {
                 let _ = h.join();
@@ -221,7 +221,7 @@ fn conn_permit(shared: &Shared) -> Option<ConnPermit> {
                 slots: Arc::clone(&shared.conn_slots),
             });
         }
-        if shared.shutdown.load(Ordering::Relaxed) {
+        if shared.shutdown.load(Ordering::Acquire) {
             return None;
         }
         let (guard, _) = match shared.conn_slots.1.wait_timeout(n, ACCEPT_POLL) {
@@ -240,7 +240,7 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
                 // it — the client retries. A full conn pool just parks
                 // the accept loop until a slot drains (or shutdown).
                 let Some(permit) = conn_permit(&shared) else {
-                    if shared.shutdown.load(Ordering::Relaxed) {
+                    if shared.shutdown.load(Ordering::Acquire) {
                         return;
                     }
                     continue;
@@ -259,7 +259,7 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => {
-                if shared.shutdown.load(Ordering::Relaxed) {
+                if shared.shutdown.load(Ordering::Acquire) {
                     return;
                 }
                 // Nonblocking accept polls; the interval is the

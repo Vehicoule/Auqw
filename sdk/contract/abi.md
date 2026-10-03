@@ -148,7 +148,8 @@ result may carry `entities` (entity hits in provider order),
 `top_hit` — the provider's single best hit, tagged
 `{type:'track'|'entity', item}` because `source_ref.kind:'album'` is
 ambiguous between a track row and an entity row — and `continuation`
-(null = no next page). `catalog.entity` results may carry `related`: related
+(null = no next page).
+`catalog.entity` results may carry `related`: related
 entities in provider order (an artist's albums, similar artists,
 appears-on playlists), each optionally tagged with a `group`
 (`'discography'|'related'|'featured'|'appears-on'`) so hosts can
@@ -158,6 +159,15 @@ playlists and mixes are first-class entities — own page, own
 artwork, likeable like an album. All new fields are optional: a
 provider emits only what it serves, and undeclared fields simply
 aren't produced.
+
+Because `kinds`/`continuation` widen the `catalog.search` payload's
+key set, a provider opts into them by declaring the
+`catalog.search.kinds` capability flag in its manifest (a
+manifest value; it names no payload of its own and is never an
+invoke target). Hosts forward the extension keys only to declaring
+providers — a non-declaring provider receives the base
+`{query, limit, storefront}` payload and answers an unscoped first
+page rather than failing on unknown keys.
 
 ## ErrorKind
 
@@ -192,7 +202,9 @@ step input, a response id that matches no outstanding request — fails
 `abi` is `0.1.0` — any other value is rejected (the host [unconditionally
 rejects](../../crates/plugin-host/src/invoke.rs) a manifest pinning anything
 else). A manifest must declare a non-empty subset of the capabilities
-above (`capabilities: []` is rejected);
+above (`capabilities: []` is rejected), plus at most the
+`catalog.search.kinds` declaration flag (a manifest value; it names no
+payload of its own and is never an invoke target);
 `host_request` kinds are gated by permission, not by capability set.
 
 Permission grammar: `network:<host>` exact match; `network:*.<domain>`

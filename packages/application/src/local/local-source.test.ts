@@ -1206,6 +1206,240 @@ async function runArtworkProviderEmptyFillsOnJoin(): Promise<void> {
   assertEqual(rec.artwork[0]?.url, 'file:///art/ddd.png', 'cover filled');
 }
 
+/**
+ * A per-doc tag read failure is not 'no art': when the changed file's
+ * re-read comes back null the merge must keep the recording's stored
+ * artwork instead of wiping it to [].
+ */
+async function runTagReadFailureKeepsArtwork(): Promise<void> {
+  const { tagReader, source } = rig({
+    localSources: [
+      {
+        sourceId: 's1',
+        treeUri: TREE,
+        label: 'Music',
+        addedMs: 1,
+        lastScanMs: 1,
+      },
+    ],
+    localFiles: [
+      {
+        fileId: 'lf-1',
+        sourceId: 's1',
+        docId: 'd1',
+        size: 100,
+        fingerprint: 'fpa',
+        modifiedMs: 1_700_000_000_000,
+        title: 'Alpha',
+        artist: 'A',
+        album: null,
+        durationMs: 9000,
+        genre: null,
+        recordingId: 'rec-1',
+      },
+    ],
+    recordings: [
+      {
+        id: 'rec-1',
+        title: 'Alpha',
+        artist: 'A',
+        album: null,
+        durationMs: 9000,
+        releaseYear: null,
+        artwork: [{ url: 'file:///art/keep.png', width: null, height: null }],
+        explicit: null,
+        genre: null,
+        isrc: null,
+        versionLabels: [],
+        sourceRefs: [{ provider: 'local', kind: 'track', id: 'lf-1' }],
+        mappings: [],
+        provenance: 'local',
+      },
+    ],
+  });
+  // New bytes at the same docId: size changed → fingerprint batch →
+  // replacement row. The tag read then fails per-doc (null), which
+  // must not read as the file having no cover.
+  tagReader.entries.set(TREE, [entry('d1', 140)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpb'));
+  // No `tags` entry → the batched read answers null for 'd1'.
+
+  must(await source.rescan('s1', signal()));
+  const rec = source.recordings().find((r) => r.id === 'rec-1')!;
+  assertEqual(
+    rec.artwork[0]?.url,
+    'file:///art/keep.png',
+    'failed tag read keeps stored art',
+  );
+  const files = source.filesFor('s1');
+  assert(
+    rec.sourceRefs.some(
+      (s) => s.provider === 'local' && s.id === files[0]!.fileId,
+    ),
+    'replacement ref still lands',
+  );
+  assert(
+    rec.sourceRefs.some((s) => s.id === 'fp:fpa'),
+    'dead ref tombstoned',
+  );
+}
+
+/**
+ * The fillOnly leg has the same hole: the recording reads as artless
+ * in the scan-start snapshot, so it rejoins the tag batch — but a
+ * session write lands art before the commit's fresh-read merge. A
+ * failed re-read must keep that landed art, not wipe it.
+ */
+async function runTagReadFailureBackfillKeepsLandedArt(): Promise<void> {
+  const { storage, tagReader, ids, source } = rig({
+    localSources: [
+      {
+        sourceId: 's1',
+        treeUri: TREE,
+        label: 'Music',
+        addedMs: 1,
+        lastScanMs: 1,
+      },
+    ],
+    localFiles: [
+      {
+        fileId: 'lf-1',
+        sourceId: 's1',
+        docId: 'd1',
+        size: 100,
+        fingerprint: 'fpa',
+        modifiedMs: 1_700_000_000_000,
+        title: 'Alpha',
+        artist: 'A',
+        album: null,
+        durationMs: 9000,
+        genre: null,
+        recordingId: 'rec-1',
+      },
+    ],
+    recordings: [
+      {
+        id: 'rec-1',
+        title: 'Alpha',
+        artist: 'A',
+        album: null,
+        durationMs: 9000,
+        releaseYear: null,
+        artwork: [],
+        explicit: null,
+        genre: null,
+        isrc: null,
+        versionLabels: [],
+        sourceRefs: [{ provider: 'local', kind: 'track', id: 'lf-1' }],
+        mappings: [],
+        provenance: 'local',
+      },
+    ],
+  });
+  // Art lands between the boot snapshot and the scan commit — the
+  // merge reads the freshest rows, which now carry a cover.
+  must(
+    await storage.commit(
+      {
+        recordings: [
+          {
+            id: 'rec-1',
+            title: 'Alpha',
+            artist: 'A',
+            album: null,
+            durationMs: 9000,
+            releaseYear: null,
+            artwork: [
+              { url: 'file:///art/landed.png', width: null, height: null },
+            ],
+            explicit: null,
+            genre: null,
+            isrc: null,
+            versionLabels: [],
+            sourceRefs: [
+              { provider: 'local', kind: 'track', id: 'lf-1' },
+            ],
+            mappings: [],
+            provenance: 'local',
+          },
+        ],
+      },
+      { requestId: ids.next('w'), deadlineMs: 0, signal: signal() },
+    ),
+  );
+  tagReader.entries.set(TREE, [entry('d1', 100)]);
+  // No `tags` entry → the backfill re-read fails.
+
+  must(await source.rescan('s1', signal()));
+  const rec = must(
+    await storage.load({ requestId: 't', deadlineMs: 0, signal: signal() }),
+  ).recordings.find((r) => r.id === 'rec-1')!;
+  assertEqual(
+    rec.artwork[0]?.url,
+    'file:///art/landed.png',
+    'failed backfill read keeps art that landed mid-scan',
+  );
+}
+
+/**
+ * The counterpart: a SUCCESSFUL read reporting no cover still clears
+ * stored art — 'the file has no embedded art' is real tracking.
+ */
+async function runTagReadHonestNoneClearsArtwork(): Promise<void> {
+  const { tagReader, source } = rig({
+    localSources: [
+      {
+        sourceId: 's1',
+        treeUri: TREE,
+        label: 'Music',
+        addedMs: 1,
+        lastScanMs: 1,
+      },
+    ],
+    localFiles: [
+      {
+        fileId: 'lf-1',
+        sourceId: 's1',
+        docId: 'd1',
+        size: 100,
+        fingerprint: 'fpa',
+        modifiedMs: 1_700_000_000_000,
+        title: 'Alpha',
+        artist: 'A',
+        album: null,
+        durationMs: 9000,
+        genre: null,
+        recordingId: 'rec-1',
+      },
+    ],
+    recordings: [
+      {
+        id: 'rec-1',
+        title: 'Alpha',
+        artist: 'A',
+        album: null,
+        durationMs: 9000,
+        releaseYear: null,
+        artwork: [{ url: 'file:///art/old.png', width: null, height: null }],
+        explicit: null,
+        genre: null,
+        isrc: null,
+        versionLabels: [],
+        sourceRefs: [{ provider: 'local', kind: 'track', id: 'lf-1' }],
+        mappings: [],
+        provenance: 'local',
+      },
+    ],
+  });
+  tagReader.entries.set(TREE, [entry('d1', 140)]);
+  tagReader.fingerprints.set('d1', fp('d1', 'fpb'));
+  tagReader.tags.set('d1', tags('d1', 'Alpha')); // read ok, no cover
+
+  must(await source.rescan('s1', signal()));
+  const rec = source.recordings().find((r) => r.id === 'rec-1')!;
+  assertEqual(rec.artwork.length, 0, 'honest-none clears stored art');
+}
+
 export async function run(): Promise<void> {
   await runAddFolderScan();
   await runUntaggedTitleFromName();
@@ -1236,4 +1470,7 @@ export async function run(): Promise<void> {
   await runArtworkHonestNoneReadsOncePerBoot();
   await runArtworkProviderJoinKeepsCatalogArt();
   await runArtworkProviderEmptyFillsOnJoin();
+  await runTagReadFailureKeepsArtwork();
+  await runTagReadFailureBackfillKeepsLandedArt();
+  await runTagReadHonestNoneClearsArtwork();
 }

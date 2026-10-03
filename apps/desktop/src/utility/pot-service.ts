@@ -1508,11 +1508,13 @@ export function createPotService(opts: PotServiceDeps): PotService {
         return;
       }
       srv.once('error', (thrown) => {
-        log(
-          `pot: bind failed (${
-            thrown instanceof Error ? thrown.message : 'unknown'
-          })`,
-        );
+        // Errno `code` is a fixed enum — the only printable detail;
+        // a raw message can carry socket/FS detail (see session build).
+        const code =
+          thrown instanceof Error
+            ? (thrown as NodeJS.ErrnoException).code
+            : undefined;
+        log(`pot: bind failed${code === undefined ? '' : ` (${code})`}`);
         resolve(null);
       });
       srv.listen({ host, port: 0 }, () => {

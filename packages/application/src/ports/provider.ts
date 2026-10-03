@@ -11,13 +11,18 @@ import type {
 
 /**
  * The manifest-declared capabilities of ABI 0.1.0 — the union of
- * wire capability names a provider may serve. The port carries the
- * union of operations; a provider declares the subset it implements
+ * wire capability names a provider may serve, plus declaration
+ * flags that widen an existing capability's contract:
+ * `catalog.search.kinds` marks a `catalog.search` declarer as
+ * accepting the scoped-search payload keys `kinds`/`continuation`
+ * and is never itself an invoke target. The port carries the union
+ * of operations; a provider declares the subset it implements
  * and an operation routed to a provider that never declared it is a
  * typed `unsupported`, never a guest invocation.
  */
 export type ProviderCapability =
   | 'catalog.search'
+  | 'catalog.search.kinds'
   | 'catalog.metadata'
   | 'catalog.artwork'
   | 'catalog.entity'
@@ -30,6 +35,7 @@ export type ProviderCapability =
 
 const PROVIDER_CAPABILITIES: ReadonlySet<string> = new Set([
   'catalog.search',
+  'catalog.search.kinds',
   'catalog.metadata',
   'catalog.artwork',
   'catalog.entity',

@@ -428,9 +428,14 @@ export class QueueEngine {
    * Provenance for the queue — the context-switching play verbs set
    * it after `clear()` (which resets it); every other verb leaves it
    * alone so an enqueue or a cursor jump can't rewrite where the
-   * queue "came from".
+   * queue "came from". The contract the constructor enforces applies
+   * here too: an out-of-bounds origin must not enter the engine and
+   * then fail `isQueueSnapshot` on every snapshot afterwards.
    */
   setOrigin(origin: QueueOrigin | undefined): void {
+    if (origin !== undefined && !isQueueOrigin(origin)) {
+      throw new TypeError('origin must be a valid QueueOrigin');
+    }
     if (sameOrigin(this.#origin, origin)) {
       return;
     }

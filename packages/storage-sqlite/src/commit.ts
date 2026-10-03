@@ -5,6 +5,7 @@ import type {
   CancellationSignal,
   DownloadRecord,
   Entity,
+  EntityRef,
   EntitySourceRef,
   Like,
   LocalFile,
@@ -207,6 +208,16 @@ export function decodeRecordingRows(
       versionLabels: t.json(
         row['version_labels_json'],
       ) as Recording['versionLabels'],
+      artistRef:
+        row['artist_ref_json'] === null ||
+        row['artist_ref_json'] === undefined
+          ? null
+          : (t.json(row['artist_ref_json']) as EntityRef),
+      albumRef:
+        row['album_ref_json'] === null ||
+        row['album_ref_json'] === undefined
+          ? null
+          : (t.json(row['album_ref_json']) as EntityRef),
       sourceRefs: [],
       mappings: [],
       provenance: row['provenance'] as Recording['provenance'],
@@ -338,6 +349,8 @@ const RECORDINGS: TableDef = {
     'isrc',
     'version_labels_json',
     'provenance',
+    'artist_ref_json',
+    'album_ref_json',
   ],
   key: ['id'],
   reinsert: false,
@@ -571,6 +584,8 @@ const recordingRow = (r: Recording): SqlValue[] => [
   r.isrc,
   JSON.stringify(r.versionLabels),
   r.provenance,
+  r.artistRef == null ? null : JSON.stringify(r.artistRef),
+  r.albumRef == null ? null : JSON.stringify(r.albumRef),
 ];
 
 const sourceRefRow = (
@@ -741,6 +756,7 @@ const queueStateRow = (queue: QueueSnapshot): SqlValue[] => [
   queue.blockedError === undefined
     ? null
     : JSON.stringify(queue.blockedError),
+  queue.origin === undefined ? null : JSON.stringify(queue.origin),
 ];
 
 const settingsRow = (settings: Settings): SqlValue[] => [
@@ -765,6 +781,7 @@ const QUEUE_STATE_COLUMNS = [
   'position_ms',
   'mode',
   'blocked_error_json',
+  'origin_json',
 ];
 
 const SETTINGS_COLUMNS = [

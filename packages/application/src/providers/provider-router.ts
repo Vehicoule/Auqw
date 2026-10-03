@@ -48,6 +48,7 @@ function configuredId(
 ): string | null {
   switch (capability) {
     case 'catalog.search':
+    case 'catalog.search.kinds':
     case 'catalog.metadata':
     case 'catalog.artwork':
     case 'catalog.entity':

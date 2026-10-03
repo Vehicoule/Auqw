@@ -13,7 +13,7 @@
  * condition). A `client_secret` may accompany a user-supplied
  * confidential client; the default public client sends none.
  */
-import { appError, err, ok } from '../errors.ts';
+import { appError, cancelledError, err, ok } from '../errors.ts';
 import type { AppError, Result } from '../errors.ts';
 import { isRecord } from '../domain.ts';
 import type { CancellationSignal } from '../cancellation.ts';
@@ -77,7 +77,7 @@ const OAUTH_BODY_CAP = 64 * 1024;
  * runtime-impls.ts (this package's own typecheck is lib-free; every
  * shipped runtime supplies `fetch`).
  */
-type OAuthFetch = (
+export type OAuthFetch = (
   url: string,
   init: {
     readonly method: string;
@@ -92,8 +92,16 @@ type OAuthFetch = (
 
 declare const fetch: OAuthFetch;
 
-/** Minimal abort surface — lib-free like the fetch declaration. */
-type AbortSignalLike = { readonly aborted: boolean };
+/**
+ * Minimal abort surface — lib-free like the fetch declaration. A
+ * runtime `AbortSignal` carries `addEventListener('abort', ...)`;
+ * naming it here lets the fetch seam (and tests) observe the abort
+ * instead of only polling `aborted`.
+ */
+export type AbortSignalLike = {
+  readonly aborted: boolean;
+  addEventListener?(name: 'abort', listener: () => void): void;
+};
 declare const AbortController: {
   new (): { readonly signal: AbortSignalLike; abort(): void };
 };
@@ -116,16 +124,27 @@ export function createFetchOAuthHttp(
         )
         .join('&');
       // One controller per request — the deadline and the caller's
-      // cancellation signal both abort the same fetch.
+      // cancellation signal both abort the same fetch, and the first
+      // one to fire owns the cause: a deadline lapse is a timeout, a
+      // caller dismissal is a cancellation — neither may wear the
+      // network-failure kind the retry ladder treats as available.
       const timeoutMs = req?.timeoutMs;
       const ctrl =
         timeoutMs !== undefined || req?.signal !== undefined
           ? new AbortController()
           : null;
-      const off = req?.signal?.subscribe(() => ctrl?.abort()) ?? null;
+      let abortCause: 'timeout' | 'cancelled' | null = null;
+      const off =
+        req?.signal?.subscribe(() => {
+          abortCause ??= 'cancelled';
+          ctrl?.abort();
+        }) ?? null;
       const timer =
         timeoutMs !== undefined
-          ? setTimeout(() => ctrl?.abort(), timeoutMs)
+          ? setTimeout(() => {
+              abortCause ??= 'timeout';
+              ctrl?.abort();
+            }, timeoutMs)
           : null;
       try {
         let resp: { readonly status: number; text(): Promise<string> };
@@ -139,6 +158,12 @@ export function createFetchOAuthHttp(
             ...(ctrl !== null ? { signal: ctrl.signal } : {}),
           });
         } catch {
+          if (abortCause === 'timeout') {
+            return err(appError('timeout', 'oauth: request timed out'));
+          }
+          if (abortCause === 'cancelled') {
+            return err(cancelledError());
+          }
           return err(appError('unavailable', 'oauth: network failure'));
         }
         // The deadline must cover the BODY too — fetch resolves on

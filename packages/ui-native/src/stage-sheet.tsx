@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   Image,
   PixelRatio,
@@ -62,6 +63,7 @@ import { WaveformSeek } from './progress.tsx';
 import { QueueList } from './queue-list';
 import { EmptyState, StateFor } from './states.tsx';
 import type {
+  EntityRef,
   LyricsModel,
   PlatformVariant,
   PlayerModel,
@@ -575,6 +577,33 @@ function PlayerBackdrop({
   );
 }
 
+/** Meta text that links into an entity page — a null ref or absent
+ *  handler renders the plain text exactly as before. */
+function MetaEntityLink({
+  entityRef,
+  onOpenEntity,
+  a11yTitle,
+  children,
+}: {
+  readonly entityRef: EntityRef | null;
+  readonly onOpenEntity?: ((ref: EntityRef) => void) | undefined;
+  readonly a11yTitle: string;
+  readonly children: ReactNode;
+}) {
+  if (entityRef === null || onOpenEntity === undefined) {
+    return <>{children}</>;
+  }
+  return (
+    <Pressable
+      onPress={() => onOpenEntity(entityRef)}
+      accessibilityLabel={t('entity.cardA11y', { title: a11yTitle })}
+      style={{ alignSelf: 'flex-start' }}
+    >
+      {children}
+    </Pressable>
+  );
+}
+
 export type StageSheetProps = {
   readonly player: PlayerModel;
   readonly expanded: boolean;
@@ -643,6 +672,13 @@ export type StageSheetProps = {
    * plain error line exactly as before.
    */
   readonly onRecovery?: (() => void) | undefined;
+  /**
+   * Entity navigation from the meta cluster — title and album line
+   * open the recording's `albumRef`, the artist line its `artistRef`.
+   * The shell binds it to its entity-page opener (and folds the
+   * sheet so the route shows); a null ref renders the text inert.
+   */
+  readonly onOpenEntity?: ((ref: EntityRef) => void) | undefined;
   readonly shuffle?: boolean | undefined;
   readonly onToggleShuffle?: (() => void) | undefined;
   readonly repeat?: 'off' | 'all' | 'one' | undefined;
@@ -729,6 +765,7 @@ export function StageSheet({
   onAddToPlaylist,
   onTrackMenu,
   onRecovery,
+  onOpenEntity,
   shuffle = false,
   onToggleShuffle,
   repeat = 'off',
@@ -798,6 +835,17 @@ export function StageSheet({
   const lyricsChromeDragStart = useSharedValue(0);
   const queueChromeDragStart = useSharedValue(0);
   const playerPaneDragStart = useSharedValue(0);
+  // `expanded` mirrored onto the UI thread — the gesture worklets and
+  // the risenOn reaction must read a shared value; a captured ref
+  // only snapshots at worklet creation and would pin a sheet
+  // mounted-expanded forever. Synced in a layout effect so the write
+  // lands inside the same commit as the expanded flip: a passive
+  // effect would leave a window where the gates still read stale and
+  // taps leak underneath.
+  const expandedShared = useSharedValue(expanded);
+  useLayoutEffect(() => {
+    expandedShared.value = expanded;
+  }, [expanded, expandedShared]);
   // True only when the player pane's content actually overflows its
   // viewport — a scrollable pane keeps its scroll gesture, a fitting
   // one (the common case) is drag chrome for dismiss.
@@ -1058,7 +1106,16 @@ export function StageSheet({
                   velocity: e.velocityY / collapsed,
                 },
                 (finished) => {
-                  if (finished === true) {
+                  // Only a slide-off the surface still owns emits:
+                  // reopen paths rewrite `gone` (arriving here with
+                  // finished=false) or flip the expanded token —
+                  // either drops the stale completion. The anchor
+                  // token covers the window where the collapse
+                  // commit is still queued on the JS thread.
+                  if (
+                    finished === true &&
+                    (!expandedShared.value || anchor.value === 0)
+                  ) {
                     scheduleOnRN(emitDismiss);
                   }
                 },
@@ -1119,6 +1176,7 @@ export function StageSheet({
       commitAnchor,
       emitDismiss,
       expanded,
+      expandedShared,
     ],
   );
   const pan = useMemo(
@@ -1183,6 +1241,10 @@ export function StageSheet({
     );
     return {
       opacity: stageContentAlpha(progress.value),
+      // The grow's pivot sits on the sheet's top edge — a center
+      // pivot shrank the full-bleed artwork off the top during the
+      // morph and read as a black gap closing as the sheet rose.
+      transformOrigin: '50% 0%',
       transform: [{ scale: 0.96 + 0.04 * p }],
       borderTopLeftRadius: radius,
       borderTopRightRadius: radius,
@@ -1213,16 +1275,6 @@ export function StageSheet({
   // and unmounts only once the morph is fully back at the pill — the
   // settle-back path still gets its backdrop.
   const [risenOn, setRisenOn] = useState(expanded);
-  // `expanded` mirrored onto the UI thread — the reaction below must
-  // read a shared value; a captured ref only snapshots at worklet
-  // creation and would pin a sheet mounted-expanded forever. Synced
-  // in a layout effect so the write lands inside the same commit as
-  // the expanded flip: a passive effect would leave a window where
-  // the gate still reads stale and taps leak underneath.
-  const expandedShared = useSharedValue(expanded);
-  useLayoutEffect(() => {
-    expandedShared.value = expanded;
-  }, [expanded, expandedShared]);
   useAnimatedReaction(
     // `expandedShared` is a tracked input, not just a fire-time read:
     // a drag that parks the surface at progress 0 while still expanded
@@ -1805,26 +1857,46 @@ export function StageSheet({
               }}
             >
               <View style={{ flex: 1, minWidth: 0 }}>
-                <Text variant="display" color="bright" numberOfLines={1}>
-                  {meta.title}
-                </Text>
-                <Text
-                  variant="body"
-                  color="primary"
-                  numberOfLines={1}
-                  style={{ marginTop: theme.spacing.xs }}
+                {/* Title and album line both open the album page — a
+                    track's own page is its album's tracklist. */}
+                <MetaEntityLink
+                  entityRef={meta.albumRef}
+                  onOpenEntity={onOpenEntity}
+                  a11yTitle={meta.title}
                 >
-                  {meta.artistLabel}
-                </Text>
-                {meta.albumLabel !== null && (
-                  <Text
-                    variant="metadata"
-                    color="secondary"
-                    numberOfLines={1}
-                    style={{ marginTop: theme.spacing.xxs }}
-                  >
-                    {meta.albumLabel}
+                  <Text variant="display" color="bright" numberOfLines={1}>
+                    {meta.title}
                   </Text>
+                </MetaEntityLink>
+                <MetaEntityLink
+                  entityRef={meta.artistRef}
+                  onOpenEntity={onOpenEntity}
+                  a11yTitle={meta.artistLabel}
+                >
+                  <Text
+                    variant="body"
+                    color="primary"
+                    numberOfLines={1}
+                    style={{ marginTop: theme.spacing.xs }}
+                  >
+                    {meta.artistLabel}
+                  </Text>
+                </MetaEntityLink>
+                {meta.albumLabel !== null && (
+                  <MetaEntityLink
+                    entityRef={meta.albumRef}
+                    onOpenEntity={onOpenEntity}
+                    a11yTitle={meta.albumLabel}
+                  >
+                    <Text
+                      variant="metadata"
+                      color="secondary"
+                      numberOfLines={1}
+                      style={{ marginTop: theme.spacing.xxs }}
+                    >
+                      {meta.albumLabel}
+                    </Text>
+                  </MetaEntityLink>
                 )}
                 {meta.errorMessage !== null && (
                   <Text
@@ -2223,6 +2295,12 @@ export function StageSheet({
                 progress.value = theme.reducedMotion
                   ? 1
                   : withSpring(1, SHEET_SETTLE_SPRING);
+                // Reclaim the dismiss axis too — a slide-off still
+                // in flight unwinds home with the reopen instead of
+                // firing its stale dismiss on completion.
+                gone.value = theme.reducedMotion
+                  ? 0
+                  : withSpring(0, SHEET_SETTLE_SPRING);
                 onExpandChangeRef.current?.(true);
               }}
               onExpandCommit={() => commitAnchor(1)}

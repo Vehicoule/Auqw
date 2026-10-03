@@ -134,7 +134,30 @@ export function createDesktopUpdate(api: AuqwApi): UpdateShellPort {
     },
     act() {
       const applyState = snap.apply.state;
-      if (applyState === 'ready-to-restart') {
+      if (
+        applyState === 'ready-to-restart' &&
+        snap.apply.state === 'ready-to-restart'
+      ) {
+        const status = snap.status;
+        // The staged restart only owns the verb while the checked
+        // release IS the run's — a newer release's offer supersedes
+        // it, routing like 'applied' below (its tap begins the new
+        // pipeline, or opens the page on a build that can't install).
+        if (
+          status.state === 'available' &&
+          status.version !== snap.apply.version
+        ) {
+          if (
+            capability !== 'open' &&
+            status.artifact !== null &&
+            status.checksums !== null
+          ) {
+            void api.update.apply().catch(() => undefined);
+          } else {
+            void api.update.open().catch(() => undefined);
+          }
+          return;
+        }
         void api.update.restart().catch(() => undefined);
         return;
       }

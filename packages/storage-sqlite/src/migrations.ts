@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 15;
+export const CURRENT_SCHEMA_VERSION = 17;
 
 /**
  * Every table this schema owns, all versions. A database opened at
@@ -493,6 +493,31 @@ const MIGRATION_15: readonly string[] = [
   `ALTER TABLE likes_new RENAME TO likes`,
 ];
 
+/**
+ * v15 -> v16: `queue_state.origin_json` — the queue's play-context
+ * provenance, persisted inside the snapshot it describes
+ * (docs/decisions.md). Nullable with no default: NULL means a
+ * contextless queue, and only a snapshot minted by a
+ * context-switching play verb ever writes a document — every stored
+ * value re-validates as QueueOrigin on load.
+ */
+const MIGRATION_16: readonly string[] = [
+  `ALTER TABLE queue_state ADD COLUMN origin_json TEXT`,
+];
+
+/**
+ * v16 -> v17: `recordings` gains `artist_ref_json` + `album_ref_json` —
+ * the provider's own entity refs carried over from the catalog row
+ * that minted the recording (stage meta links resolve through them).
+ * Local-only evidence: never in sync field writes or export docs;
+ * NULL on every pre-existing row until a local materialization
+ * refills it.
+ */
+const MIGRATION_17: readonly string[] = [
+  `ALTER TABLE recordings ADD COLUMN artist_ref_json TEXT`,
+  `ALTER TABLE recordings ADD COLUMN album_ref_json TEXT`,
+];
+
 /** Read-only migration index for driver/release inspection. */
 export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_1]),
@@ -510,6 +535,8 @@ export const MIGRATIONS: readonly (readonly string[])[] = Object.freeze([
   Object.freeze([...MIGRATION_13]),
   Object.freeze([...MIGRATION_14]),
   Object.freeze([...MIGRATION_15]),
+  Object.freeze([...MIGRATION_16]),
+  Object.freeze([...MIGRATION_17]),
 ]);
 
 const CREATED_OBJECT_NAME =

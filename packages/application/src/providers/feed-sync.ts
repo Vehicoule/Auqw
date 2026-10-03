@@ -245,20 +245,65 @@ export function parsePluginPair(
   };
 }
 
+/**
+ * Decode table — one slot per ASCII byte, -1 marks an invalid char.
+ * Built once from B64 so the decode is a table read per char, not a
+ * linear alphabet scan (the wasm body runs through here by the
+ * megabyte on plugin downloads).
+ */
+const B64_DECODE = (() => {
+  const table = new Int8Array(128).fill(-1);
+  for (let i = 0; i < B64.length; i++) {
+    table[B64.charCodeAt(i)] = i;
+  }
+  return table;
+})();
+
 /** Strict base64 → bytes (no `Uint8Array.fromBase64` — Hermes lacks it). */
 function base64Bytes(b64: string): Uint8Array | null {
-  if (b64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(b64)) {
+  if (b64.length % 4 !== 0) {
     return null;
   }
-  const pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
-  const s = b64.slice(0, b64.length - pad).padEnd(b64.length, 'A');
+  // Padding lives only on the final quad — strict shape: pad 1 must
+  // end "xy=", pad 2 must end "xy==", and nothing else may repeat.
+  const finalQuad = b64.length - 4;
+  const c2 = b64.charCodeAt(finalQuad + 2);
+  const c3 = b64.charCodeAt(finalQuad + 3);
+  const pad = c3 === 61 ? (c2 === 61 ? 2 : 1) : 0;
+  if (pad === 1 && c2 === 61) {
+    return null;
+  }
   const out = new Uint8Array((b64.length / 4) * 3 - pad);
-  for (let i = 0, j = 0; i < s.length; i += 4) {
+  const len = b64.length - pad;
+  let j = 0;
+  for (let i = 0; i < len; i += 4) {
+    const c0 = b64.charCodeAt(i);
+    const c1 = b64.charCodeAt(i + 1);
+    const q2 = b64.charCodeAt(i + 2);
+    const q3 = b64.charCodeAt(i + 3);
+    const v0 = c0 < 128 ? (B64_DECODE[c0] ?? -1) : -1;
+    const v1 = c1 < 128 ? (B64_DECODE[c1] ?? -1) : -1;
+    const v2 = q2 < 128 ? (B64_DECODE[q2] ?? -1) : -1;
+    const v3 = q3 < 128 ? (B64_DECODE[q3] ?? -1) : -1;
+    // Interior quads carry no padding; the final quad keeps its tail
+    // chars strictly alphabet-only.
+    const last = i === finalQuad;
+    if (
+      v0 < 0 ||
+      v1 < 0 ||
+      (!last && (v2 < 0 || v3 < 0)) ||
+      (last &&
+        ((pad === 0 && (v2 < 0 || v3 < 0)) ||
+          (pad === 1 && (v2 < 0 || q3 !== 61)) ||
+          (pad === 2 && (q2 !== 61 || q3 !== 61))))
+    ) {
+      return null;
+    }
     const n =
-      (B64.indexOf(s.charAt(i)) << 18) |
-      (B64.indexOf(s.charAt(i + 1)) << 12) |
-      (B64.indexOf(s.charAt(i + 2)) << 6) |
-      B64.indexOf(s.charAt(i + 3));
+      (v0 << 18) |
+      (v1 << 12) |
+      (i + 2 < len ? v2 << 6 : 0) |
+      (i + 3 < len ? v3 : 0);
     if (j < out.length) {
       out[j++] = n >> 16;
     }

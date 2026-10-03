@@ -246,6 +246,25 @@ async function exportRoundtrip(): Promise<void> {
   assertDeepEqual(parsed.value.playlistEntries, SEEDED.playlistEntries);
   assertDeepEqual(parsed.value.playCounts, SEEDED.playCounts);
   assert(isExportDocument(parsed.value), 'valid export document');
+
+  // A recordings row's key set is exact: device-local evidence
+  // (artistRef/albumRef) never belongs to the document format, and
+  // neither does any other foreign key — the row rejects outright
+  // rather than importing minus the extra field.
+  const foreign = JSON.parse(exported.value.json) as {
+    recordings: Record<string, unknown>[];
+  };
+  foreign.recordings[0]!['artistRef'] = {
+    provider: 'deezer',
+    kind: 'artist',
+    id: 'a-1',
+  };
+  assert(!isExportDocument(foreign), 'device-local ref rejects');
+  delete foreign.recordings[0]!['artistRef'];
+  foreign.recordings[0]!['foreignKey'] = 1;
+  assert(!isExportDocument(foreign), 'any foreign key rejects');
+  delete foreign.recordings[0]!['foreignKey'];
+  assert(isExportDocument(foreign), 'cleaned row validates again');
 }
 
 // 2. Malformed inputs are typed failures, never partials.
