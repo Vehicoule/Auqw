@@ -1970,7 +1970,10 @@ export function useAppShell<E extends { readonly type: string } = never>(
       providerIds: controller.providers.map((p) => p.id),
       providerPermissions: new Map(
         controller.providers.flatMap((p) =>
-          p.permissions !== undefined && p.permissions.length > 0
+          // `permissions: []` is a declared empty grant — the settings
+          // screens render its 'none' row; only an absent surface
+          // (undefined) omits the provider.
+          p.permissions !== undefined
             ? [[p.id, p.permissions] as const]
             : [],
         ),

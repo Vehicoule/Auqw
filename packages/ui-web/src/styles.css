@@ -2738,8 +2738,8 @@
 /* Meta text that opens an entity page — same ink, the affordance is
    the hover underline + pointer (buttons get no pill chrome here). */
 .uw-stage__link {
-  display: inline-flex;
-  align-self: flex-start;
+  display: flex;
+  align-self: stretch;
   max-width: 100%;
   text-align: left;
   border-radius: var(--radius-control);

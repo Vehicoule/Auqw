@@ -257,10 +257,11 @@ function manifestFields(
         (c): c is string => typeof c === 'string' && c.length <= 64,
       )
     : [];
+  // The host validator's permission grammar is length-unbounded —
+  // verbatim carriage, non-empty strings only.
   const permissions = Array.isArray(record['permissions'])
     ? (record['permissions'] as unknown[]).filter(
-        (p): p is string =>
-          typeof p === 'string' && p.length > 0 && p.length <= 128,
+        (p): p is string => typeof p === 'string' && p.length > 0,
       )
     : [];
   return {
