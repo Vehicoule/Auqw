@@ -10,7 +10,12 @@
 import { useMemo, useState } from 'react';
 import type { ThemeName } from '@auqw/design-tokens';
 import { LOCAL_PROVIDER } from '@auqw/application';
-import type { QueueOrigin, RepeatMode, SourceRef } from '@auqw/application';
+import type {
+  EntityRef,
+  QueueOrigin,
+  RepeatMode,
+  SourceRef,
+} from '@auqw/application';
 import { t } from './i18n.ts';
 import type { MessageId } from './i18n.ts';
 import { formatClock, formatLongDuration } from './view-models.ts';
@@ -941,6 +946,9 @@ export function useLibraryScreenController({
 
 export type EntityScreenHandlers = {
   readonly onBack?: MaybeFn;
+  /** Ordered play of the page's whole listing — the primary action
+   *  beside Shuffle. */
+  readonly onPlayAll?: MaybeFn;
   readonly onShuffleAll?: MaybeFn;
   readonly onToggleLike?: MaybeFn;
   readonly onPressItem?: MaybeFn<[row: TrackRowModel]>;
@@ -1005,6 +1013,7 @@ export type EntityScreenView =
       readonly kindLabel: string;
       /** Discography / related / featured / appears-on rails. */
       readonly rails: readonly EntityRailView[];
+      readonly play: EntityPillView;
       readonly shuffle: EntityPillView;
       readonly like: {
         readonly icon: 'heart-filled' | 'heart';
@@ -1035,6 +1044,7 @@ export type EntityScreenView =
 
 export function useEntityScreenController({
   model,
+  onPlayAll,
   onShuffleAll,
   onToggleLike,
   onPressItem,
@@ -1086,6 +1096,15 @@ export function useEntityScreenController({
       model.kind === null
         ? t('entity.kind.fallback')
         : t(`entity.kind.${model.kind}`),
+    play: {
+      label: t('entity.play'),
+      icon: 'play',
+      accent: true,
+      // Ordered play draws from the same listing shuffle does — a
+      // rails-only page keeps the pill dead-honest disabled.
+      disabled: model.items.length === 0,
+      onPress: onPlayAll,
+    },
     shuffle: {
       label: t('entity.shuffle'),
       icon: 'shuffle',
@@ -1598,6 +1617,13 @@ export type StageScreenHandlers = StageQueueHandlers & {
    * plain error line exactly as before.
    */
   readonly onRecovery?: MaybeFn;
+  /**
+   * Entity navigation from the meta cluster — title and album line
+   * open the recording's `albumRef`, the artist line its `artistRef`.
+   * The shell binds it to its entity-page opener; a null ref renders
+   * the text inert regardless (no page exists to open).
+   */
+  readonly onOpenEntity?: MaybeFn<[ref: EntityRef]>;
 };
 
 /** Stage tab order — shared by both platforms. */
@@ -1997,6 +2023,11 @@ export type StageMetaView = {
   readonly title: string;
   readonly artistLabel: string;
   readonly albumLabel: string | null;
+  /** Entity-page targets for the meta cluster — title and album
+   *  line open `albumRef`, the artist line opens `artistRef`; null
+   *  renders the text inert (no page exists to open). */
+  readonly artistRef: EntityRef | null;
+  readonly albumRef: EntityRef | null;
   readonly errorMessage: string | null;
   /**
    * The provider-wall recovery affordance — 'sign-in' offers the OAuth
@@ -2014,6 +2045,8 @@ export function stageMetaView(player: PlayerModel): StageMetaView {
     title: player.title,
     artistLabel: player.artist ?? '—',
     albumLabel: player.albumLabel,
+    artistRef: player.artistRef,
+    albumRef: player.albumRef,
     errorMessage: player.errorMessage,
     recovery: player.recovery,
     trackKey: player.occurrenceId,

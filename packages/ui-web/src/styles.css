@@ -1895,12 +1895,37 @@
 /* ---- entity / collection / playlist -------------------------------------- */
 
 .uw-entity__hero {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: var(--spacing-xs);
-  padding: 0 var(--spacing-xl);
   text-align: center;
+  overflow: hidden;
+  /* Negative margins bleed the wash to the screen's edge padding; the
+     inner padding keeps the content aligned with the siblings. */
+  margin: 0 calc(-1 * var(--spacing-xl));
+  padding: var(--spacing-md) var(--spacing-xl);
+}
+
+/* Positioned children paint in DOM order — the backdrop sits first,
+   so the artwork/title stack above it without a z-index dance. */
+.uw-entity__hero > * {
+  position: relative;
+}
+
+/* The artwork's own wash behind the hero — heavily blurred and
+   gradient-masked so it fades into the canvas. */
+.uw-entity__backdrop {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  filter: blur(42px) saturate(1.4);
+  opacity: 0.3;
+  transform: scale(1.6);
+  mask-image: linear-gradient(to bottom, black 35%, transparent 95%);
+  pointer-events: none;
 }
 
 .uw-entity__kind {
@@ -2708,6 +2733,20 @@
 
 .uw-stage__recovery:hover {
   background: var(--uw-hover);
+}
+
+/* Meta text that opens an entity page — same ink, the affordance is
+   the hover underline + pointer (buttons get no pill chrome here). */
+.uw-stage__link {
+  display: inline-flex;
+  align-self: flex-start;
+  max-width: 100%;
+  text-align: left;
+  border-radius: var(--radius-control);
+}
+
+.uw-stage__link:hover {
+  text-decoration: underline;
 }
 
 .uw-stage__meta--lyrics {

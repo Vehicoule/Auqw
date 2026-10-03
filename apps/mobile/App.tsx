@@ -969,6 +969,7 @@ function Main({
     playLibraryItem,
     playPlaylistEntry,
     playRefFor,
+    entityPlayAll,
     entityShuffleAll,
     onEntityRowPress,
     entityRowMeta,
@@ -1059,6 +1060,7 @@ function Main({
     reviewOp,
     loadEntityPage,
     openEntity,
+    openEntityFromStage,
     onLoadMore,
     onExport,
     beginImportRead,
@@ -2438,6 +2440,7 @@ function Main({
             model={entityModelFor(fetch)}
             topInset={topInset}
             onBack={closeOverlay}
+            onPlayAll={() => entityPlayAll(fetch, entry.key)}
             onShuffleAll={() => entityShuffleAll(fetch, entry.key)}
             onToggleLike={
               entityId === null
@@ -2633,6 +2636,7 @@ function Main({
             <StageSheet
               player={sheetPlayer}
               expanded={expanded}
+              onOpenEntity={openEntityFromStage}
               progress={stageProgress}
               travel={stageTravel}
               anchor={stageAnchor}

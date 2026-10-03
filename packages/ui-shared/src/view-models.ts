@@ -48,6 +48,10 @@ import {
 import { fromTag, t, type Locale, type MessageId } from './i18n.ts';
 import { errorText } from './error-text.ts';
 
+// Surfaces type their entity-navigation props against the domain ref
+// without taking an @auqw/application dependency edge.
+export type { EntityRef } from '@auqw/application';
+
 export type PlatformVariant = 'android' | 'ios';
 
 type TrackRowState = 'available' | 'unavailable' | 'error';
@@ -95,6 +99,12 @@ export type PlayerModel = {
   readonly title: string;
   readonly artist: string | null;
   readonly albumLabel: string | null;
+  /** The provider's own entity refs for the playing recording —
+   *  the meta cluster's artist/album links resolve through them;
+   *  null while the recording carries none (pre-v16 rows, synced
+   *  peers, ref-less providers). */
+  readonly artistRef: EntityRef | null;
+  readonly albumRef: EntityRef | null;
   readonly artworkUrl: string | null;
   readonly positionMs: number;
   readonly durationMs: number | null;
@@ -1156,6 +1166,8 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
     recordingId,
     artist: recording?.artist ?? null,
     albumLabel: recording === undefined ? null : albumLabel(recording),
+    artistRef: recording?.artistRef ?? null,
+    albumRef: recording?.albumRef ?? null,
     artworkUrl:
       // The player model feeds surfaces from the 52 px mini-player up to
       // the full-bleed stage backdrop — pick at backdrop size; smaller
