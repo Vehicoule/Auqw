@@ -250,9 +250,11 @@ while hidden).
 - youtube-music `playback.resolve` takes an 11-char video ID as `source_ref`
   (e.g. `kJQP7kiw5Fk`), not a URL.
 - `sync-plugins.mjs` can fail `ENOENT … releases/<id>/<version>` when the
-  sibling `~/repos/Auqw-plugins` checkout is stale (the lock pins releases
-  the clone doesn't have). Fix: `git -C ~/repos/Auqw-plugins pull --ff-only`
-  then re-run the sync.
+  sibling plugins checkout is stale or miscased — `release:../auqw-plugins/…`
+  resolves literally against `~/repos/auqw-plugins` (lowercase) on Linux,
+  not `~/repos/Auqw-plugins`. Fix: keep a real clone at the lowercase path
+  current (`git -C ~/repos/auqw-plugins pull --ff-only`), or
+  `ln -sfn <clone-with-the-releases> ~/repos/auqw-plugins`, then re-run.
 - youtube-music CAN resolve on this box — a bot-check on datacenter IPs is
   a possible failure, not a guaranteed one. A deezer search row pressed
   with no active queue starts a `radio · growing · youtube-music` session
@@ -738,6 +740,42 @@ None — the napi artifact is a local cargo build output.
   `N attempt · last: wreq-<n> · <steps> steps · <http> http · <dur>`
   after any playback resolve — cheap proof a resolve ran without
   scraping logs. Adjacent `last failure` reads `none` after success.
+
+
+## Typed discovery/search UI (verified 2026-10-03, deezer catalog)
+
+- Chips row `.uw-search__chips` tops the explore pane (~y28 tool-px
+  maximized; all, songs, artists, albums, playlists, 'in your library').
+  Chips are ~25 px apart — re-zoom before clicking; a 2-3 px slip hits
+  the neighbor.
+- Kind chips re-query scoped (`kinds=artist` etc.): results head
+  becomes `<kind> · N`, entity rails only. 'all'/'in your library' do
+  NOT refetch — 'in your library' narrows the live page locally.
+- Hero (`uw-topres`) tracks the scoped kind — a kind chip can swap a
+  track hero for an entity hero.
+- Entity pages push as overlays (back chevron ≈ x396,y9). Artist page:
+  'discography' + 'related' rails sit BELOW a long top-songs list —
+  scroll the world pane. A 'partial page — some sections are
+  unavailable upstream' warn banner is the designed honesty notice.
+- Pagination is an EXPLICIT 'load more' button (`uw-load-more`) at the
+  bottom of the track list, not scroll-append. Small target
+  (~x709,y736); a few-px miss silently no-ops. Verify append via
+  results-head growth (55 → 104) + row indices past SEARCH_LIMIT=25;
+  base rows stay mounted, no skeleton.
+
+## sqlite ground truth for entity likes/pages
+
+`~/.config/auqw-desktop/auqw.db`:
+- `entities(entity_id, kind, title, artist_name, artwork_json)` — one
+  row per materialized entity page/like.
+- `entity_source_refs(entity_id, provider, ref_json)` — ref_json
+  carries `{"id","kind","provider"}`.
+- `likes(entity_kind, target_id, liked_ms)` — entity_kind in
+  track/album/artist/playlist; target_id = entity_id for entity likes.
+
+Fastest like→library closed loop: heart a playlist on its entity page,
+open the 'in your library' chip — shows exactly that card, head
+'in your library · 1' (persistence AND local filtering in one screen).
 
 ## Misc legs
 
