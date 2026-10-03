@@ -14,6 +14,7 @@ import {
 import type { IconButtonProps } from './primitives.tsx';
 import { WaveformSeek } from './progress.tsx';
 import { useOverlayDismiss, useOverlayFocus } from './stack.tsx';
+import { useTheme } from './theme.tsx';
 import { QueueList } from './queue-list.tsx';
 import { QueueScreen } from './queue-screen.tsx';
 import type { QueueScreenProps } from './queue-screen.tsx';
@@ -157,11 +158,14 @@ export function ModeSegment({
   readonly onSelect?: ((mode: StageMode) => void) | undefined;
 }) {
   const tabs = stageModeTabs(STAGE_MODE_ORDER, mode, onSelect);
-  // The floating segment follows the app theme — a frosted raised
-  // float stays readable over artwork in either scheme.
+  // The floating segment follows the app theme — it re-scopes itself
+  // to the app's scheme class so the immersive stage's own t-dark
+  // doesn't pull it dark over artwork.
+  const scheme = useTheme().scheme;
   return (
     <Segment
       variant="float"
+      className={`t-${scheme}`}
       ariaLabel={t('stage.modeTabsA11y')}
       tabs={tabs}
       iconSize={16}
