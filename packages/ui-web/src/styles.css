@@ -2484,7 +2484,13 @@
    (lyrics/queue) put it inside their scroll area instead, so rows and
    lines glide beneath the segment. */
 .uw-stage {
-  --uw-segment-reserve: calc(var(--size-touch) + 8px + var(--spacing-lg) + var(--spacing-lg));
+  /* The pill block is the icon lane (32) + gap + the scaled metadata
+     line, floored at touch — it tracks text scale instead of
+     assuming a 44px slot. */
+  --uw-segment-reserve: calc(
+    max(var(--size-touch), 32px + var(--spacing-xxs) + var(--font-metadata-line) * var(--uw-scale))
+    + 8px + var(--spacing-lg) + var(--spacing-lg)
+  );
   position: relative;
   display: flex;
   flex-direction: column;

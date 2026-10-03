@@ -933,7 +933,7 @@ export function Segment({
       // variant keeps the full-cell plate.
       const w =
         variant === 'float'
-          ? Math.min(56, item.offsetWidth - 8)
+          ? Math.max(0, Math.min(56, item.offsetWidth - 8))
           : item.offsetWidth;
       setThumb({
         x: item.offsetLeft + (item.offsetWidth - w) / 2,

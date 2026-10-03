@@ -312,7 +312,7 @@ function ModeSegmentPill({
   const gap = theme.spacing.xxs;
   const itemW =
     width > 0 ? (width - 6 - gap * (tabs.length - 1)) / tabs.length : 0;
-  const chipW = itemW > 0 ? Math.min(56, itemW - 8) : 0;
+  const chipW = itemW > 0 ? Math.max(0, Math.min(56, itemW - 8)) : 0;
   useEffect(() => {
     if (activeIdx < 0 || itemW <= 0) return undefined;
     const x = 3 + activeIdx * (itemW + gap) + (itemW - chipW) / 2;
@@ -1217,8 +1217,17 @@ export function StageSheet({
   // reserve pinned content keeps clear of — scrollable modes put the
   // same reserve inside their content so rows/lines glide beneath it.
   const segmentLift = bottomInset + theme.spacing.sm;
+  // The mode bar's real height — the icon lane (32) + gap + the scaled
+  // metadata line, floored at touch — so the reserve tracks text
+  // scale instead of assuming a 44px slot.
+  const segmentItemH = Math.max(
+    theme.sizes.touch,
+    32 +
+      theme.spacing.xxs +
+      theme.typography.metadata.lineHeight * theme.textScale,
+  );
   const segmentReserve =
-    segmentLift + theme.sizes.touch + 8 + theme.spacing.lg;
+    segmentLift + segmentItemH + 8 + theme.spacing.lg;
 
   const immersive = activeMode === 'player' && player.artworkUrl !== null;
   // StageSheet's own inline colors must follow the sheet's surface —
