@@ -1580,8 +1580,8 @@
   padding-right: calc(var(--spacing-lg) + 28px + var(--spacing-sm));
 }
 
-/* The collection's own play affordance — the accent-soft circle the
-   mobile tile carries, floated over the body card's right edge. */
+/* The collection's play affordance — hover-only on desktop, matching
+   the mock's grid covers (mobile tiles carry no play affordance). */
 .uw-collection__play {
   position: absolute;
   right: var(--spacing-lg);
@@ -1590,10 +1590,14 @@
   width: 28px;
   height: 28px;
   border-radius: 14px;
-  display: flex;
+  display: none;
   align-items: center;
   justify-content: center;
   background: var(--accent-soft);
+}
+
+.uw-collection:hover .uw-collection__play {
+  display: flex;
 }
 
 .uw-collection__play:hover {
