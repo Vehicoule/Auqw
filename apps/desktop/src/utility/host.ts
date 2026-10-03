@@ -4,9 +4,23 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
 } from 'node:fs';
+import {
+  createPublicKey,
+  verify as verifySignature,
+} from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
+import {
+  PLUGIN_RELEASE_TRUST,
+  parsePluginPair,
+  pluginPublicKey,
+  syncPluginFeed,
+} from '@auqw/application';
+import type { FeedSyncPorts } from '@auqw/application';
 import { shellError } from '../shared/errors.ts';
 import type {
   HostPluginsResult,
@@ -101,8 +115,11 @@ const BINDINGS_CANDIDATES: readonly string[] = [
 type HostEnv = {
   /** Explicit .node artifact path — overrides the candidate scan. */
   AUQW_NODE_BINDINGS?: string | undefined;
-  /** Directory of `<id>.wasm` + `<id>.manifest.json` plugin pairs. */
+  /** Directory of `<id>.wasm` + `<id>.manifest.json` plugin pairs —
+   * when set it wins over the feed cache (dev/test seam). */
   AUQW_PLUGIN_DIR?: string | undefined;
+  /** OTA feed URL override — defaults to the embedded release feed. */
+  AUQW_PLUGIN_FEED?: string | undefined;
   /** Host state directory — stream stores live under it. */
   AUQW_USER_DATA?: string | undefined;
   AUQW_STREAM_DIR?: string | undefined;
@@ -219,12 +236,68 @@ function manifestFields(
   };
 }
 
+/** ed25519 SPKI DER is a fixed 12-byte header over the raw key. */
+const ED25519_SPKI_DER_PREFIX = Buffer.from(
+  '302a300506032b6570032100',
+  'hex',
+);
+
+/** Release feed sync over node builtins — the utility's OTA path. */
+async function defaultFeedSync(
+  dir: string,
+  feedUrl: string,
+): Promise<{ ready: readonly string[]; compatible: readonly string[] }> {
+  const publicKey = createPublicKey({
+    key: Buffer.concat([ED25519_SPKI_DER_PREFIX, pluginPublicKey()]),
+    format: 'der',
+    type: 'spki',
+  });
+  return syncPluginFeed({
+    feedUrl,
+    keyId: PLUGIN_RELEASE_TRUST.keyId,
+    publicKey: pluginPublicKey(),
+    dir,
+    ports: {
+      fetchBytes: async (url) => {
+        // The utility's fetch advertises gzip but does NOT
+        // transparently decode it (unlike undici) — GitHub's edge
+        // gzips feed.json, so ask for identity explicitly.
+        const res = await fetch(url, {
+          headers: { 'accept-encoding': 'identity' },
+        });
+        if (!res.ok) {
+          throw shellError('transient', `plugin feed fetch ${res.status}`);
+        }
+        return new Uint8Array(await res.arrayBuffer());
+      },
+      ed25519Verify: (message, signature) =>
+        verifySignature(null, message, publicKey, signature),
+      list: async (d) => (existsSync(d) ? readdirSync(d) : []),
+      read: async (p) => (existsSync(p) ? readFileSync(p) : null),
+      write: async (p, bytes) => {
+        mkdirSync(dirname(p), { recursive: true });
+        const tmp = `${p}.part`;
+        writeFileSync(tmp, bytes);
+        renameSync(tmp, p);
+      },
+      remove: async (p) => rmSync(p, { force: true }),
+    },
+  });
+}
+
 export function createHostRuntime(opts: {
   env: HostEnv;
   resourcesPath?: string | undefined;
   repoRoot?: string | undefined;
   require?: RequireLike | undefined;
   fs?: FsLike | undefined;
+  /** Injectable for tests — defaults to the node OTA sync. */
+  feedSync?:
+    | ((dir: string) => Promise<{
+        ready: readonly string[];
+        compatible: readonly string[];
+      }>)
+    | undefined;
   /**
    * Bundled POT service's loopback URL — read at PluginHost
    * construction (lazy bindings make this a thunk, not a value).
@@ -258,6 +331,10 @@ export function createHostRuntime(opts: {
   let host: PluginHostLike | null = null;
   let bindingsError: string | undefined;
   let pluginsReady: Promise<readonly LoadedPlugin[]> | null = null;
+  // Set when the last load left the registry short of the feed's
+  // compatible set — the next ready() re-syncs instead of serving the
+  // stale memoized result.
+  let lastLoadIncomplete = false;
 
   function loadBindings(): PluginHostLike {
     const candidates = bindingsCandidates(
@@ -343,15 +420,98 @@ export function createHostRuntime(opts: {
   async function loadPluginDir(
     h: PluginHostLike,
   ): Promise<readonly LoadedPlugin[]> {
-    const dir = opts.env.AUQW_PLUGIN_DIR;
-    if (!dir) {
-      return [];
+    const dir =
+      opts.env.AUQW_PLUGIN_DIR === undefined || opts.env.AUQW_PLUGIN_DIR === ''
+        ? undefined
+        : opts.env.AUQW_PLUGIN_DIR;
+    const loaded: LoadedPlugin[] = [];
+    if (dir === undefined) {
+      // OTA path: refresh the cache under userData, then load it.
+      // `AUQW_PLUGIN_DIR` still wins — dev loops and harnesses point
+      // at their own unsigned sets.
+      const cacheDir = join(opts.env.AUQW_USER_DATA ?? process.cwd(), 'plugins');
+      const sync =
+        opts.feedSync ??
+        ((d: string) =>
+          defaultFeedSync(
+            d,
+            opts.env.AUQW_PLUGIN_FEED ?? PLUGIN_RELEASE_TRUST.feedUrl,
+          ));
+      let feedFailure: unknown;
+      // Present only when the feed answered — the feed is the
+      // authority on which plugin ids may load while it is reachable;
+      // an unreachable feed leaves the whole cache usable as
+      // last-known-good.
+      let synced: { ready: readonly string[]; compatible: readonly string[] } | undefined;
+      try {
+        synced = await sync(cacheDir);
+      } catch (thrown) {
+        feedFailure = thrown;
+      }
+      const spki = createPublicKey({
+        key: Buffer.concat([ED25519_SPKI_DER_PREFIX, pluginPublicKey()]),
+        format: 'der',
+        type: 'spki',
+      });
+      const verify: FeedSyncPorts['ed25519Verify'] = (message, signature) =>
+        verifySignature(null, message, spki, signature);
+      for (const name of fs.list(cacheDir).sort()) {
+        if (!name.endsWith('.json')) {
+          continue;
+        }
+        try {
+          const pair = parsePluginPair(
+            fs.read(join(cacheDir, name)).toString('utf8'),
+            {
+              keyId: PLUGIN_RELEASE_TRUST.keyId,
+              publicKey: pluginPublicKey(),
+              verify,
+            },
+          );
+          if (
+            pair === null ||
+            (synced !== undefined && !synced.compatible.includes(pair.id))
+          ) {
+            continue;
+          }
+          const pluginId = await h.loadPlugin(
+            Buffer.from(pair.wasmB64, 'base64'),
+            pair.manifestJson,
+          );
+          const fields = manifestFields(pair.manifestJson, pair.id);
+          loaded.push({
+            pluginId,
+            providerId: fields.providerId,
+            capabilities: fields.capabilities,
+            version: fields.version,
+          });
+        } catch {
+          // A malformed pair is skipped, not fatal — other pairs still load.
+        }
+      }
+      // A failed feed refresh with an empty cache must not pin an empty
+      // provider set: `pluginsReady` resets on rejection, so the next
+      // call re-syncs — a cache hit meanwhile stays usable offline.
+      if (loaded.length === 0 && feedFailure !== undefined) {
+        throw feedFailure;
+      }
+      // The retry gate stays armed while the feed's compatible set is
+      // not fully available — either because a listed plugin is below
+      // its feed release (stale LKG loads, ready tracks currency) or
+      // because a current pair failed to load into the host (loadPlugin
+      // rejects skip it, so loaded counts only compatible pairs: dropped
+      // ids were filtered above). The next `ready()` re-syncs and the
+      // host's id-keyed insert hot-swaps the pair.
+      lastLoadIncomplete =
+        synced !== undefined &&
+        (synced.ready.length < synced.compatible.length ||
+          loaded.length < synced.compatible.length);
+      return loaded;
     }
     const manifests = fs
       .list(dir)
       .filter((name) => name.endsWith('.manifest.json'))
       .sort();
-    const loaded: LoadedPlugin[] = [];
     for (const manifestName of manifests) {
       const stem = manifestName.slice(0, -'.manifest.json'.length);
       const wasmPath = join(dir, `${stem}.wasm`);
@@ -377,7 +537,8 @@ export function createHostRuntime(opts: {
   }
 
   async function ready(): Promise<readonly LoadedPlugin[]> {
-    if (pluginsReady === null) {
+    if (pluginsReady === null || lastLoadIncomplete) {
+      lastLoadIncomplete = false;
       const pending = loadPluginDir(ensureHost());
       pluginsReady = pending;
       // A rejected init stays retriable — the artifact may appear

@@ -119,7 +119,7 @@ export function appError(
 
 /**
  * A provider-side bot wall — the upstream refused the session's
- * visitor/IP itself. Guests on ABI ≥0.3.0 emit the `provider-wall`
+ * visitor/IP itself. Guests on ABI 0.1.0 emit the `provider-wall`
  * kind directly; earlier guests wore `transient` plus a `bot-check`
  * detail, and `AppError` carries no detail field — but every leg
  * between the guest and the engine prepends its own `{kind}: ` prefix

@@ -32,13 +32,9 @@ asarUnpack:
 # The napi cdylib name is per-OS (.so/.dylib/.dll) — the packaged
 # utility host scans process.resourcesPath for auqw_node_bindings.node
 # (see src/utility/host.ts bindingsCandidates), so each platform
-# section ships its own artifact under the shared name. `plugins/` is
-# the synced provider set (tooling/sync-plugins.mjs
-# apps/desktop/plugins) — the fork env defaults AUQW_PLUGIN_DIR to it
-# in packaged mode (src/main/index.ts utilityEnv).
-extraResources:
-  - from: plugins
-    to: plugins
+# section ships its own artifact under the shared name. Plugins are
+# NOT packaged: they ship OTA through the signed feed
+# (decisions.md — Plugin guests) into <userData>/plugins.
 
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 

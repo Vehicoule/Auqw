@@ -888,7 +888,7 @@ async function undeclaredCapability(): Promise<void> {
   assertEqual(host.requests.length, 0, 'no host request started');
 }
 
-// 16. Track metadata carries the 0.3.0 entity refs and isrc through.
+// 16. Track metadata carries the ABI 0.1.0 entity refs and isrc through.
 async function trackEntityEvidence(): Promise<void> {
   const host = new FakeHost();
   const p = provider(host);

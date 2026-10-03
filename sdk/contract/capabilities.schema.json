@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://auqw.dev/contract/capabilities.schema.json",
-  "title": "Auqw plugin capability payloads and results (ABI 0.3.0)",
+  "title": "Auqw plugin capability payloads and results (ABI 0.1.0)",
   "description": "Wire types for the declared manifest capabilities. The top-level oneOf validates a named {capability, payload} or {capability, result} envelope so fixtures can pin a capability and direction without guessing.",
   "$defs": {
     "sourceRef": {
@@ -247,7 +247,7 @@
             "appears-on",
             null
           ],
-          "description": "Section tag on `related[]` entries — which upstream shelf the entity came from; null/absent elsewhere."
+          "description": "Section tag on `related[]` entries \u2014 which upstream shelf the entity came from; null/absent elsewhere."
         }
       }
     },

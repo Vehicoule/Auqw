@@ -26,10 +26,5 @@ pub use manifest::{ArtifactRef, Manifest};
 pub use redact::{redact_text, redact_url};
 pub use services::{HostClock, HostServices, SystemClock};
 
-/// ABI version implemented by this crate.
-pub const ABI_VERSION: &str = "0.3.0";
-
-/// ABI versions this host loads. `0.1.0` and `0.2.0` message shapes
-/// are strict subsets of their successors, so legacy manifests keep
-/// working.
-pub const SUPPORTED_ABI_VERSIONS: &[&str] = &["0.1.0", "0.2.0", "0.3.0"];
+/// ABI version implemented by this crate — the only ABI shipped.
+pub const ABI_VERSION: &str = "0.1.0";

@@ -12,7 +12,7 @@ pub struct Manifest {
     pub id: String,
     /// Plugin semver version.
     pub version: String,
-    /// ABI version the artifact was built against (`0.1.0` or `0.2.0`).
+    /// ABI version the artifact was built against (`0.1.0`).
     pub abi: String,
     /// Capabilities the plugin declares.
     pub capabilities: Vec<String>,
@@ -78,20 +78,10 @@ impl Manifest {
                 "capabilities must not be empty".into(),
             ));
         }
-        // The schema enumerates the capabilities the host serves;
-        // `0.1.0` manifests may only declare `playback.resolve`, and
-        // `0.2.0` may not declare the 0.3 additions — revisions are
-        // immutable, a newer capability under an older ABI is a
-        // rejection, not a forward-compatible surprise.
-        const CAPS_0_1: &[&str] = &["playback.resolve"];
-        const CAPS_0_2: &[&str] = &[
-            "catalog.search",
-            "catalog.metadata",
-            "catalog.artwork",
-            "playback.resolve",
-            "playback.candidates",
-        ];
-        const CAPS_0_3: &[&str] = &[
+        // The schema enumerates the capabilities the one shipped ABI
+        // serves — an undeclared name is a rejection, not a
+        // forward-compatible surprise.
+        const CAPS: &[&str] = &[
             "catalog.search",
             "catalog.search.kinds",
             "catalog.metadata",
@@ -104,29 +94,18 @@ impl Manifest {
             "lyrics.synced",
             "radio.seed",
         ];
-        let allowed = match self.abi.as_str() {
-            "0.1.0" => CAPS_0_1,
-            "0.2.0" => CAPS_0_2,
-            "0.3.0" => CAPS_0_3,
-            _ => return Err(bad("abi must be \"0.1.0\", \"0.2.0\", or \"0.3.0\"")),
-        };
+        if self.abi != "0.1.0" {
+            return Err(bad("abi must be \"0.1.0\""));
+        }
         if self
             .capabilities
             .iter()
-            .any(|c| !allowed.contains(&c.as_str()))
+            .any(|c| !CAPS.contains(&c.as_str()))
         {
             return Err(bad("capabilities outside the set this ABI serves"));
         }
         for p in &self.permissions {
-            if p == "pot-provider" {
-                continue;
-            }
-            if p == "kv" {
-                // `kv` is a 0.2 permission — a 0.1 manifest is a strict
-                // immutable subset and cannot grow permissions.
-                if self.abi == "0.1.0" {
-                    return Err(bad("permission \"kv\" requires abi \"0.2.0\""));
-                }
+            if p == "pot-provider" || p == "kv" {
                 continue;
             }
             let rest = p

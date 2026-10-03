@@ -183,7 +183,7 @@ function toTrackMetadata(value: unknown): TrackMetadata | null {
   if (!isRecord(value)) {
     return null;
   }
-  // ABI 0.3.0 optional catalog evidence; absent and null normalize
+  // ABI 0.1.0 optional catalog evidence; absent and null normalize
   // to null, a malformed value rejects the whole track.
   const artistRef = value['artist_ref'];
   const albumRef = value['album_ref'];

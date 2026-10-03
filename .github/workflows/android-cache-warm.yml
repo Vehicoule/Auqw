@@ -23,11 +23,9 @@ on:
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
-      - 'providers.lock.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'tooling/build-android-bindings.sh'
-      - 'tooling/sync-plugins.mjs'
       - '.github/workflows/android-cache-warm.yml'
       - '.github/workflows/release.yml'
   workflow_dispatch:
@@ -53,16 +51,9 @@ jobs:
       run:
         shell: bash
     steps:
-      # Same sibling layout as release.yml — providers.lock.json
-      # resolves `release:../auqw-plugins/...`.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: auqw
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: Vehicoule/Auqw-plugins
-          path: auqw-plugins
-          token: ${{ secrets.PLUGINS_CHECKOUT_TOKEN || github.token }}
       - run: |
           rustup toolchain install 1.98.0 --profile minimal \
             --target aarch64-linux-android --target x86_64-linux-android
@@ -100,7 +91,6 @@ jobs:
           export ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME"/ndk/* | sort -V | tail -1)"
           ./tooling/build-android-bindings.sh
           pnpm install --frozen-lockfile
-          node tooling/sync-plugins.mjs --release
           pnpm --dir apps/mobile exec expo prebuild --platform android
       - name: warm assembleRelease
         working-directory: auqw/apps/mobile

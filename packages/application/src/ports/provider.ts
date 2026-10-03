@@ -10,7 +10,7 @@ import type {
 } from '../domain.ts';
 
 /**
- * The manifest-declared capabilities of ABI 0.3.0 — the union of
+ * The manifest-declared capabilities of ABI 0.1.0 — the union of
  * wire capability names a provider may serve, plus declaration
  * flags that widen an existing capability's contract:
  * `catalog.search.kinds` marks a `catalog.search` declarer as

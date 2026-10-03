@@ -9,7 +9,7 @@
   "scripts": {
     "build": "node esbuild.config.mjs",
     "dev": "pnpm build && electron .",
-    "dist": "pnpm run build && node ../../tooling/sync-plugins.mjs apps/desktop/plugins --release && cargo build --locked --release -p auqw-node-bindings && electron-builder --publish never",
+    "dist": "pnpm run build && cargo build --locked --release -p auqw-node-bindings && electron-builder --publish never",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types src/desktop.test.ts"
   },

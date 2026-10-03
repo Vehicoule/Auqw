@@ -40,19 +40,18 @@ staging a sibling's whole `java/` tree clobbers the PR's own Kotlin.
 ```bash
 cd <worktree>
 pnpm install --frozen-lockfile        # once per worktree
-pnpm sync-plugins                     # REQUIRED on a fresh worktree — see below
 (cd apps/mobile && pnpm exec expo prebuild --platform android --no-install)
 cd apps/mobile/android && ./gradlew assembleDebug   # ~5-10 min cold
 adb install -r app/build/outputs/apk/debug/app-x86_64-debug.apk
 ```
 
-`apps/mobile/assets/plugins/*.wasm` and `apps/desktop/plugins/` are
-gitignored build outputs — a brand-new worktree lacks them and the
-Gradle bundle fails with missing-asset errors (desktop shell starts but
-providers never load). `pnpm sync-plugins` rebuilds them, BUT it fails
-when `~/wt/auqw-plugins/releases/<plugin>/<pinned-version>` is absent —
-then stage the asset set by copying `apps/mobile/assets/plugins/` (and
-`apps/desktop/plugins/` for desktop) from `~/repos/Auqw` instead.
+Plugins ship OTA — nothing is bundled into the APK or assets. On first
+open the app syncs the signed `releases/feed.json` from Auqw-plugins
+main into `<documents>/plugins` (ed25519 verify against the embedded
+release key), so a first boot needs the emulator to reach
+raw.githubusercontent.com; an unreachable feed with an empty cache =
+zero providers. `EXPO_PUBLIC_PLUGIN_FEED` overrides the feed URL for a
+fixture feed.
 Fresh worktrees may also lack `node_modules/<rn-module>/android/build/
 generated/` codegen dirs — the set includes `react-native-bottom-tabs`
 (post-mmkv); if Gradle fails on missing generated code, re-run
@@ -305,22 +304,6 @@ cd apps/mobile/android && ./gradlew assembleDebug  # incremental ~10 s
 adb install -r app/build/outputs/apk/debug/app-x86_64-debug.apk
 ```
 
-## sync-plugins: sibling releases can lag origin/main (post-#215)
-
-`pnpm sync-plugins` fails `ENOENT ... releases/<plugin>/<pinned>` when
-the releases checkout that sits NEXT to the worktree is behind the
-lock's pinned version (`~/wt/auqw-plugins` for `~/wt/*` worktrees,
-`~/repos/Auqw-plugins` for the main clone). Stage the pinned dirs into
-that sibling without switching its branch:
-
-```bash
-# Sibling checkout — the script's lookup is case-insensitive but the
-# shell is not (~/repos/Auqw-plugins vs ~/wt/auqw-plugins).
-PLUGINS=$(compgen -G '../[Aa]uqw-plugins' | head -1)
-git -C "$PLUGINS" fetch
-git -C "$PLUGINS" checkout origin/main -- releases/<plugin>/<version>
-pnpm sync-plugins
-```
 
 ## Local recordings + stage-sheet tricks (post-#215)
 
@@ -858,7 +841,7 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   faked files needed. `appops set … REQUEST_INSTALL_PACKAGES deny`
   before install lands needs-permission deterministically.
 - Fresh checkout needs, in order: `pnpm install --frozen-lockfile`,
-  `pnpm sync-plugins`, `rustup target add x86_64-linux-android` +
+  `rustup target add x86_64-linux-android` +
   `tooling/build-android-bindings.sh` when
   `modules/auqw-expo/android/src/main/jniLibs/<abi>/libauqw_mobile_bindings.so`
   is absent, then `(cd apps/mobile && pnpm exec expo prebuild

@@ -214,31 +214,52 @@ while hidden).
 - `AUQW_DEV_HARNESS=1` in the launch env selects the dev-gate harness
   (`index.html`, the UI documented above); without it the window loads the
   product UI (`app.html`) — a different surface (search/home/settings).
-- Dev mode defaults `AUQW_PLUGIN_DIR` to `apps/desktop/plugins`
-  (`utilityEnv` in `src/main/index.ts`) — plugins fail to load when that
-  dir is EMPTY, the var points elsewhere, or the staged pairs are
-  incomplete/malformed (`loadPluginDir` skips them): `#provider` stays
-  empty and the provider path logs `prepare failed — no plugins loaded`.
-  Pass the var only to point at a different set.
+- Plugins ship OTA (decisions.md — Plugin guests): NOTHING is bundled.
+  The utility fetches `releases/feed.json` (default
+  `https://raw.githubusercontent.com/Vehicoule/Auqw-plugins/main/releases/feed.json`),
+  verifies the ed25519 sig + `sha256:<hex>` digests per artifact, and
+  caches ONE self-describing `<id>.json` pair doc per plugin under
+  `<userData>/plugins` (default `~/.config/auqw-desktop/plugins`) —
+  every load re-verifies sig+digests offline, so no .wasm/.manifest.json
+  files exist on disk anymore. A first boot needs outbound network to
+  raw.githubusercontent.com — an unreachable feed with an empty cache
+  fails closed at BootGate.
+- Env seams: `AUQW_PLUGIN_FEED` (feed URL override — point at a local
+  mirror for tamper legs), `AUQW_PLUGIN_DIR` (unsigned dev set, LEGACY
+  two-file `<id>.wasm`+`<id>.manifest.json` format only), `AUQW_USER_DATA`
+  (cache root). `AUQW_DEV_HARNESS=1` shares the same OTA plugin path.
+- Local mirror recipe: node static file server under a `releases/` tree,
+  log every request's path + `accept-encoding`. The request log is the
+  ground truth for cache-hit vs refetch (hit = feed.json only; miss =
+  feed.json + `<id>/<ver>/plugin.manifest.json` + `<id>-<ver>.wasm`).
+- Feed entry digests are `sha256:<64hex>` — a bare-hex tamper fails the
+  WHOLE-feed shape check (all-or-nothing → LKG), not a per-plugin skip.
+- Observable semantics: feed reachable = authority — a valid cached doc
+  for a feed-dropped id is refused + swept. The retry gate arms when
+  `ready < compatible` (undeliverable newer release) → the NEXT
+  pluginsReady/status call re-syncs → a SECOND feed.json fetch in the
+  mirror request log is the armed-gate proof.
+- Dead-feed legs: `AUQW_PLUGIN_FEED=http://127.0.0.1:1/x.json` — port 1
+  refuses instantly. Empty cache → BootGate; populated cache → LKG boot,
+  stale files NOT swept (sweep only runs on a successful sync).
+- Pair-doc tamper that discriminates sig-vs-digest: edit `"version"` in
+  a cached `<id>.json` — digests+manifest stay valid so only the
+  sig-over-payload re-verify catches it → that provider is skipped.
+- Electron utility-process `fetch` advertises gzip but does NOT decode
+  it (plain node does). Feed fetch sends `accept-encoding: identity`;
+  verify via mirror request log `ae=`.
+- ALWAYS `cargo build --locked -p auqw-node-bindings` after branch
+  switches — a stale debug `.so` rejects current manifests
+  ('capabilities outside the set this ABI serves') even when bytes are
+  perfect. If the worktree gains commits mid-run, check `git log` +
+  `stat dist/utility/index.cjs` mtime — dist may be behind HEAD.
+- youtube-music resolve bot-walls on datacenter egress — typed
+  `provider-wall` is weather, not a defect; the diagnostics
+  `attempt trace` (steps/http) is proof the wasm guest ran.
 - The PRODUCT UI is stricter: `src/renderer/controller.ts` throws
-  `'no plugin providers available'` when the plugin dir is empty → boot dies
+  `'no plugin providers available'` when zero providers load → boot dies
   at `[ui] boot failed: internal` and nothing interactive ever renders.
-  Stage providers first — from the REPO ROOT (the script and
-  `providers.lock.json` are root-level):
-  `node tooling/sync-plugins.mjs apps/desktop/plugins`
-  (which is the dev-mode default — no env var needed on this checkout).
-  itunes/deezer/youtube-music/lyrics-lrclib all stage cleanly with outbound
-  HTTPS.
-- Packaged-parity staging: `node tooling/sync-plugins.mjs apps/desktop/plugins
-  --release` is what `pnpm run dist` invokes — verifies the ed25519 signature
-  + provenance on `release:` sources and fails closed on `local-build:`.
-  Expected output: one `synced <id> <ver> sha256:<12hex>…` line per lock
-  plugin and NO `synced spin` line (a positional out dir suppresses the
-  conformance guest; `--conformance` re-adds it). `--check`/`--verify`
-  verify only and take no out dir; unknown flags throw `unknown flag`.
-  Re-sync over an existing out dir goes through the atomic
-  stage→hold→publish swap — afterwards `apps/desktop/` must show no
-  `.sync-stage-*` / `.sync-hold-*` residue.
+  Offline first boot or a feed signed by a different key lands here.
 - In-UI load proof: the `host:plugins` console line is dev-harness only.
   The product-UI signal is settings → diagnostics → providers row, which
   lists the loaded providerIds (e.g. `deezer, itunes, lyrics-lrclib,
@@ -249,10 +270,11 @@ while hidden).
   provider slot shows `sheets.noProvider` in the picker sheet.
 - youtube-music `playback.resolve` takes an 11-char video ID as `source_ref`
   (e.g. `kJQP7kiw5Fk`), not a URL.
-- `sync-plugins.mjs` can fail `ENOENT … releases/<id>/<version>` when the
-  sibling `~/repos/Auqw-plugins` checkout is stale (the lock pins releases
-  the clone doesn't have). Fix: `git -C ~/repos/Auqw-plugins pull --ff-only`
-  then re-run the sync.
+- Dev loops that need a fixture set WITHOUT the network: stage
+  `<id>.wasm` + `<id>.manifest.json` pairs (legacy two-file format) into
+  a scratch dir and pass `AUQW_PLUGIN_DIR=<dir>` — the utility skips the
+  feed entirely and loads the set unsigned-set-style (host verifies only
+  `artifact.digest` vs wasm bytes, no signature).
 - youtube-music CAN resolve on this box — a bot-check on datacenter IPs is
   a possible failure, not a guaranteed one. A deezer search row pressed
   with no active queue starts a `radio · growing · youtube-music` session
@@ -738,6 +760,42 @@ None — the napi artifact is a local cargo build output.
   `N attempt · last: wreq-<n> · <steps> steps · <http> http · <dur>`
   after any playback resolve — cheap proof a resolve ran without
   scraping logs. Adjacent `last failure` reads `none` after success.
+
+
+## Typed discovery/search UI (verified 2026-10-03, deezer catalog)
+
+- Chips row `.uw-search__chips` tops the explore pane (~y28 tool-px
+  maximized; all, songs, artists, albums, playlists, 'in your library').
+  Chips are ~25 px apart — re-zoom before clicking; a 2-3 px slip hits
+  the neighbor.
+- Kind chips re-query scoped (`kinds=artist` etc.): results head
+  becomes `<kind> · N`, entity rails only. 'all'/'in your library' do
+  NOT refetch — 'in your library' narrows the live page locally.
+- Hero (`uw-topres`) tracks the scoped kind — a kind chip can swap a
+  track hero for an entity hero.
+- Entity pages push as overlays (back chevron ≈ x396,y9). Artist page:
+  'discography' + 'related' rails sit BELOW a long top-songs list —
+  scroll the world pane. A 'partial page — some sections are
+  unavailable upstream' warn banner is the designed honesty notice.
+- Pagination is an EXPLICIT 'load more' button (`uw-load-more`) at the
+  bottom of the track list, not scroll-append. Small target
+  (~x709,y736); a few-px miss silently no-ops. Verify append via
+  results-head growth (55 → 104) + row indices past SEARCH_LIMIT=25;
+  base rows stay mounted, no skeleton.
+
+## sqlite ground truth for entity likes/pages
+
+`~/.config/auqw-desktop/auqw.db`:
+- `entities(entity_id, kind, title, artist_name, artwork_json)` — one
+  row per materialized entity page/like.
+- `entity_source_refs(entity_id, provider, ref_json)` — ref_json
+  carries `{"id","kind","provider"}`.
+- `likes(entity_kind, target_id, liked_ms)` — entity_kind in
+  track/album/artist/playlist; target_id = entity_id for entity likes.
+
+Fastest like→library closed loop: heart a playlist on its entity page,
+open the 'in your library' chip — shows exactly that card, head
+'in your library · 1' (persistence AND local filtering in one screen).
 
 ## Misc legs
 

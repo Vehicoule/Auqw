@@ -2589,7 +2589,18 @@ function Main({
             field={fabFieldView}
             live={query !== ''}
             open={searchFabOpen}
-            onOpenChange={setSearchFabOpen}
+            onOpenChange={(next) => {
+              setSearchFabOpen(next);
+              // The field restores the committed query, not '' — an
+              // empty draft cancels the session (suggest effect) and
+              // dumps the committed results surface. Unsubmitted
+              // keystrokes still drop, so stale text can't append.
+              if (!next) {
+                setQuery(
+                  searchState.type === 'idle' ? '' : searchState.query,
+                );
+              }
+            }}
             focusSignal={searchFocusTick}
             onNavigateToSearch={
               tab === 'explore' ? undefined : focusSearch

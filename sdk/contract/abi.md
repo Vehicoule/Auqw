@@ -161,7 +161,7 @@ aren't produced.
 
 Because `kinds`/`continuation` widen the `catalog.search` payload's
 key set, a provider opts into them by declaring the
-`catalog.search.kinds` capability flag in its manifest (a 0.3.0
+`catalog.search.kinds` capability flag in its manifest (a
 manifest value; it names no payload of its own and is never an
 invoke target). Hosts forward the extension keys only to declaring
 providers — a non-declaring provider receives the base
