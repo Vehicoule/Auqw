@@ -2344,18 +2344,11 @@ function Main({
       libraryModel,
     ],
   );
-  if (galleryActive) {
-    return (
-      <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
-        <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
-        <GalleryScreen />
-      </View>
-    );
-  }
   // Per-entry memo: pushed overlays render at playback tick rate, and
   // a rebuilt model feeds a fresh `data` ref into VirtualizedList —
   // its batched cell-update setState is the 'Maximum update depth
-  // exceeded' chain.
+  // exceeded' chain. Above the gallery early return: a dev-link
+  // gallery toggle must not change the hook order.
   const collectionModels = useMemo(() => {
     const map = new Map<string, ReturnType<typeof toCollectionModel>>();
     for (const entry of overlayStack) {
@@ -2368,6 +2361,14 @@ function Main({
     }
     return map;
   }, [overlayStack, libraryModel]);
+  if (galleryActive) {
+    return (
+      <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
+        <StatusBar style={theme.scheme === 'light' ? 'dark' : 'light'} />
+        <GalleryScreen />
+      </View>
+    );
+  }
 
   const renderTabScreen = (key: string) => {
     switch (key) {

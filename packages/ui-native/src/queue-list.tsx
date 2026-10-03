@@ -156,15 +156,6 @@ export function QueueList({
       viewportRows.current?.(ids);
     },
   );
-  if (queue.items.length === 0) {
-    return (
-      <EmptyState
-        title={t('queue.empty')}
-        hint={t('queue.emptyHint')}
-        icon="queue"
-      />
-    );
-  }
   // Display order (nowPlaying → upNext → history) is the order the
   // session's move contract indexes — under shuffle it is the dealt
   // walk, so display slots, not canonical `item.index`, drive moves.
@@ -176,6 +167,15 @@ export function QueueList({
     () => queue.sections.flatMap((section) => section.items),
     [queue.sections],
   );
+  if (queue.items.length === 0) {
+    return (
+      <EmptyState
+        title={t('queue.empty')}
+        hint={t('queue.emptyHint')}
+        icon="queue"
+      />
+    );
+  }
   const sectionByKey = new Map(queue.sections.map((s) => [s.key, s]));
   const upNextIds =
     sectionByKey.get('upNext')?.items.map((item) => item.occurrenceId) ?? [];

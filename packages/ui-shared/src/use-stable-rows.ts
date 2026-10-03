@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useCallback, useRef } from 'react';
 
 /**
  * Referential stability for list `data`: controllers re-map their
@@ -28,4 +28,22 @@ export function useStableRows<T, C>(
     ref.current = rows;
   }
   return ref.current;
+}
+
+/**
+ * The other half of serving retained rows: a stale wrapper still
+ * carries callbacks bound at its own render — a handler whose
+ * semantics moved since (a useCallback re-keyed on connectivity,
+ * library membership, ...) would keep firing the old closure. A
+ * ref-trampoline stays one instance forever and calls through to
+ * whatever the latest render handed it, so retained wrappers act
+ * fresh while `data` itself never changes identity. Pass the PROP,
+ * not a wrapper around it.
+ */
+export function useLatestCallback<A extends readonly unknown[]>(
+  fn: ((...args: A) => void) | undefined,
+): (...args: A) => void {
+  const ref = useRef(fn);
+  ref.current = fn;
+  return useCallback((...args: A) => ref.current?.(...args), []);
 }

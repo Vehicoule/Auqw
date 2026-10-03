@@ -56,15 +56,6 @@ export function QueueList({
   // list variants feed the ref and mount at it, so offset survives
   // mode switches too.
   const listScrollY = useRef(0);
-  if (queue.items.length === 0) {
-    return (
-      <EmptyState
-        title={t('queue.empty')}
-        hint={t('queue.emptyHint')}
-        icon="queue"
-      />
-    );
-  }
   // Display order (nowPlaying → upNext → history) is not the canonical
   // order the engine indexes — move calls translate through
   // `item.index` / the displaced neighbor's slot.
@@ -80,6 +71,15 @@ export function QueueList({
   // it needs a private copy, still stable per render so the same
   // re-arming chain stays broken.
   const dragItems = useMemo(() => items.slice(), [items]);
+  if (queue.items.length === 0) {
+    return (
+      <EmptyState
+        title={t('queue.empty')}
+        hint={t('queue.emptyHint')}
+        icon="queue"
+      />
+    );
+  }
   const sectionByKey = new Map(queue.sections.map((s) => [s.key, s]));
   const upNextIds =
     sectionByKey.get('upNext')?.items.map((item) => item.occurrenceId) ?? [];
