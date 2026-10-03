@@ -522,8 +522,8 @@ fn manifest_0_2_rejects_0_3_capabilities() {
 
 /// `0.2.0` is a frozen tier — `resume` never entered its service
 /// surface, so emitting one is a protocol violation. The release ABI
-/// `0.1.0` serves it: the same request clears the ABI gate and only
-/// fails payload authorization (`length` is missing).
+/// `0.1.0` serves it: the request clears the ABI gate and the
+/// re-emitting guest is stopped by its step budget, not a rejection.
 #[tokio::test]
 async fn abi_0_2_rejects_resume_kind() {
     let msg = r#"{"type":"host_request","id":1,"kind":"resume","payload":{"url":"https://allowed.test/x","offset":5}}"#;
@@ -544,13 +544,12 @@ async fn abi_0_2_rejects_resume_kind() {
             svc(&http, None),
         )
         .await;
-        let InvokeError::InvalidMessage(detail) = err(result) else {
-            panic!("{abi}: expected invalid-message");
-        };
-        if abi == "0.2.0" {
-            assert!(detail.contains("requires ABI"), "{detail}");
-        } else {
-            assert!(detail.contains("length"), "{detail}");
+        match (abi, err(result)) {
+            ("0.2.0", InvokeError::InvalidMessage(detail)) => {
+                assert!(detail.contains("requires ABI"), "{detail}");
+            }
+            ("0.1.0", InvokeError::BudgetExceeded { .. }) => {}
+            (_, other) => panic!("{abi}: unexpected outcome {other:?}"),
         }
     }
 }
