@@ -428,6 +428,15 @@ export type SettingsRowModel = {
 
 export type DiagnosticsModel = {
   readonly providerIds: readonly string[];
+  /**
+   * Manifest-declared permissions per provider id — network hosts,
+   * `kv`, `pot-provider` — order preserved from the manifest. Empty
+   * where the platform exposes no manifest surface.
+   */
+  readonly providerPermissions: ReadonlyMap<
+    string,
+    readonly string[]
+  >;
   readonly attemptCount: number;
   readonly lastAttemptLabel: string | null;
   /**

@@ -1951,6 +1951,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const diagnostics: DiagnosticsModel = useMemo(
     () => ({
       providerIds: controller.providers.map((p) => p.id),
+      providerPermissions: new Map(
+        controller.providers.flatMap((p) =>
+          p.permissions !== undefined && p.permissions.length > 0
+            ? [[p.id, p.permissions] as const]
+            : [],
+        ),
+      ),
       attemptCount: attempts.length,
       lastAttemptLabel:
         attempts[0] === undefined ? null : attemptLabel(attempts[0]),

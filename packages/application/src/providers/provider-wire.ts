@@ -104,6 +104,27 @@ export function manifestVersion(manifest: unknown): string | null {
     : null;
 }
 
+/**
+ * The manifest's `permissions` strings — `network:` hosts, `kv`,
+ * * `pot-provider` — as declared, order preserved. The settings
+ * surface renders them verbatim so what the user reads is what the
+ * host enforces; parsing/filtering stays in the host validator.
+ */
+export function manifestPermissions(
+  manifest: unknown,
+): readonly string[] {
+  if (!isRecord(manifest)) {
+    return [];
+  }
+  const raw = manifest['permissions'];
+  return Array.isArray(raw)
+    ? [...new Set(raw)].filter(
+        (p): p is string =>
+          typeof p === 'string' && p.length > 0 && p.length <= 128,
+      )
+    : [];
+}
+
 export function providerCancelledError(): AppError {
   return cancelledError();
 }
@@ -791,6 +812,7 @@ export function createProviderWirePort(
   capabilities: readonly ProviderCapability[],
   version: string | null,
   transport: ProviderRequestTransport,
+  permissions: readonly string[] = [],
 ): ProviderPort {
   /** An op the manifest never declared never reaches the host. */
   function guard(capability: ProviderCapability): AppError | null {
@@ -818,6 +840,7 @@ export function createProviderWirePort(
     id: providerId,
     capabilities,
     version,
+    permissions,
     search(input, context) {
       // `kinds`/`continuation` widen the base search payload — a
       // guest built before the extension rejects the extra keys

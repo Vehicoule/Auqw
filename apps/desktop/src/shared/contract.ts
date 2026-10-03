@@ -159,6 +159,8 @@ const isPluginManifestPayload = v.object({
   capabilities: v.array(v.boundedString(64)),
   /** Manifest `version`; null when the manifest omits it. */
   version: v.nullable(v.boundedString(64)),
+  /** Manifest `permissions` as declared (`network:` hosts, `kv`, ...). */
+  permissions: v.array(v.boundedString(128)),
 });
 
 export type HostPluginsResult = v.Guarded<typeof isHostPluginsResult>;

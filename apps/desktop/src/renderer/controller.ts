@@ -41,6 +41,7 @@ import { browserMse } from './mse-source.ts';
 import {
   createPluginProvider,
   manifestCapabilities,
+  manifestPermissions,
 } from './provider.ts';
 import type { PluginProvider } from './provider.ts';
 import { createSqliteDriver } from './sqlite-driver.ts';
@@ -144,6 +145,7 @@ export async function createSessionController(
               manifest.providerId,
               manifestCapabilities(manifest),
               manifest.version,
+              manifestPermissions(manifest),
             ),
           )
         : [];

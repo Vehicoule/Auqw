@@ -16,7 +16,7 @@ import {
 import type { AuqwApi, RequestOutcomePayload } from '../shared/contract.ts';
 import { rawToAppError } from './ipc-errors.ts';
 
-export { manifestCapabilities } from '@auqw/application';
+export { manifestCapabilities, manifestPermissions } from '@auqw/application';
 
 /**
  * ProviderPort over the desktop `host:*` IPC surface. The
@@ -40,6 +40,7 @@ export function createPluginProvider(
   providerId: string,
   capabilities: readonly ProviderCapability[],
   version: string | null = null,
+  permissions: readonly string[] = [],
 ): PluginProvider {
   const ids = createIds();
   /** requestId → abort: in-flight calls a dispose() must settle. */
@@ -144,7 +145,13 @@ export function createPluginProvider(
   }
 
   return {
-    ...createProviderWirePort(providerId, capabilities, version, request),
+    ...createProviderWirePort(
+      providerId,
+      capabilities,
+      version,
+      request,
+      permissions,
+    ),
     dispose() {
       if (disposed) {
         return;
