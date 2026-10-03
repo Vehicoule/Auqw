@@ -1513,7 +1513,7 @@
   display: grid;
   /* GTK quick-access dashboard: always the four tiles, 2x2. */
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--spacing-md);
+  gap: var(--spacing-lg);
   margin-bottom: var(--spacing-lg);
 }
 .uw-collections__cell {

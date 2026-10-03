@@ -248,14 +248,14 @@ export function LibraryScreen({
         style={{
           flexDirection: 'row',
           flexWrap: 'wrap',
-          rowGap: theme.spacing.md,
+          rowGap: theme.spacing.lg,
           justifyContent: 'space-between',
         }}
       >
         {view.collections.map((tile) => (
           <View
             key={tile.tile.key}
-            style={{ flexBasis: '48.5%', flexGrow: 1 }}
+            style={{ flexBasis: '47.5%', flexGrow: 1 }}
           >
             <CollectionTile view={tile} />
           </View>
