@@ -440,6 +440,20 @@ export function SettingsScreen({
                 : diagnostics.providerIds.join(', ')}
             </DiagV>
           </DiagRow>
+          {[...diagnostics.providerPermissions.entries()].map(
+            ([providerId, permissions]) => (
+              <div key={providerId}>
+                <Hairline />
+                <DiagRow k={providerId}>
+                  <DiagV>
+                    {permissions.length === 0
+                      ? t('settings.diag.none')
+                      : permissions.join(' \u00b7 ')}
+                  </DiagV>
+                </DiagRow>
+              </div>
+            ),
+          )}
           <Hairline />
           <DiagRow k={t('settings.diag.attemptTrace')}>
             <DiagV numeric>

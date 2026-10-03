@@ -21,7 +21,7 @@ import type {
 } from './auqw-expo-surface.ts';
 import { appErrorKind, nativeError } from './auqw-expo-surface.ts';
 
-export { manifestCapabilities, manifestVersion } from '@auqw/application';
+export { manifestCapabilities, manifestPermissions, manifestVersion } from '@auqw/application';
 
 /**
  * ProviderPort over the auqw-expo generic-request surface. The
@@ -55,6 +55,7 @@ export function createPluginProvider(
   providerId: string,
   capabilities: readonly ProviderCapability[],
   version: string | null = null,
+  permissions: readonly string[] = [],
 ): PluginProvider {
   const pending = new Map<string, Pending>();
   /** Outcomes that arrived before their pending entry existed. */
@@ -277,7 +278,13 @@ export function createPluginProvider(
   }
 
   return {
-    ...createProviderWirePort(providerId, capabilities, version, request),
+    ...createProviderWirePort(
+      providerId,
+      capabilities,
+      version,
+      request,
+      permissions,
+    ),
     dispose() {
       if (disposed) {
         return;

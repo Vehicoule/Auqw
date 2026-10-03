@@ -195,6 +195,8 @@ type LoadedPlugin = {
   readonly capabilities: readonly string[];
   /** Manifest `version`; null when the manifest omits it. */
   readonly version: string | null;
+  /** Manifest `permissions` strings, order preserved. */
+  readonly permissions: readonly string[];
 };
 
 /** Manifest `id` + `capabilities` extraction — bounded-shape read, no
@@ -209,6 +211,7 @@ function manifestFields(
   providerId: string;
   capabilities: readonly string[];
   version: string | null;
+  permissions: readonly string[];
 } {
   let raw: unknown;
   try {
@@ -229,10 +232,17 @@ function manifestFields(
         (c): c is string => typeof c === 'string' && c.length <= 64,
       )
     : [];
+  const permissions = Array.isArray(record['permissions'])
+    ? (record['permissions'] as unknown[]).filter(
+        (p): p is string =>
+          typeof p === 'string' && p.length > 0 && p.length <= 128,
+      )
+    : [];
   return {
     providerId: str(record['id'], 128) ?? stem,
     capabilities,
     version: str(record['version'], 64),
+    permissions,
   };
 }
 
@@ -484,6 +494,7 @@ export function createHostRuntime(opts: {
             providerId: fields.providerId,
             capabilities: fields.capabilities,
             version: fields.version,
+            permissions: fields.permissions,
           });
         } catch {
           // A malformed pair is skipped, not fatal — other pairs still load.
@@ -528,6 +539,7 @@ export function createHostRuntime(opts: {
           providerId: fields.providerId,
           capabilities: fields.capabilities,
           version: fields.version,
+          permissions: fields.permissions,
         });
       } catch {
         // A malformed pair is skipped, not fatal — other pairs still load.
@@ -570,6 +582,7 @@ export function createHostRuntime(opts: {
           providerId: p.providerId,
           capabilities: p.capabilities,
           version: p.version,
+          permissions: p.permissions,
         }));
         return {
           bindings: 'loaded',

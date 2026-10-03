@@ -49,6 +49,7 @@ import type { PluginProvider } from '../adapters/plugin-provider.ts';
 import {
   createPluginProvider,
   manifestCapabilities,
+  manifestPermissions,
   manifestVersion,
 } from '../adapters/plugin-provider.ts';
 import {
@@ -229,6 +230,7 @@ export async function createSessionController(
         providerId,
         manifestCapabilities(manifest),
         manifestVersion(manifest),
+        manifestPermissions(manifest),
       );
     },
   );

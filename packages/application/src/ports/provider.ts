@@ -244,6 +244,12 @@ export interface ProviderPort {
    * must re-fetch rather than serve a stale pick.
    */
   readonly version: string | null;
+  /**
+   * The manifest-declared permission strings (`network:` hosts, `kv`,
+   * `pot-provider`), order preserved — read-only surface material
+   * for the settings screen; the host validator owns enforcement.
+   */
+  readonly permissions?: readonly string[];
   search(
     input: {
       query: string;

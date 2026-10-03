@@ -399,12 +399,14 @@ const MANIFESTS: readonly PluginManifestPayload[] = [
     providerId: 'itunes',
     capabilities: ['catalog.search', 'catalog.metadata', 'bogus-cap'],
     version: '1.0.0',
+    permissions: ['network:itunes.apple.com'],
   },
   {
     pluginId: 'plugin-ytm',
     providerId: 'youtube-music',
     capabilities: ['playback.candidates', 'playback.resolve'],
     version: null,
+    permissions: ['network:music.youtube.com', 'kv'],
   },
 ];
 
