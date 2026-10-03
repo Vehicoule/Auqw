@@ -31,6 +31,7 @@ import { run as runDownloadManager } from './downloads/download-manager.test.ts'
 import { run as runProviderRouter } from './providers/provider-router.test.ts';
 import { run as runProviderWire } from './providers/provider-wire.test.ts';
 import { run as runFeedSync } from './providers/feed-sync.test.ts';
+import { run as runUserInstalled } from './providers/user-installed.test.ts';
 import { run as runLocalSource } from './local/local-source.test.ts';
 import { run as runTransferPolicy } from './downloads/transfer-policy.test.ts';
 import { run as runOAuth } from './auth/oauth.test.ts';
@@ -70,6 +71,7 @@ await runDownloadManager();
 await runProviderRouter();
 await runProviderWire();
 await runFeedSync();
+await runUserInstalled();
 await runLocalSource();
 await runTransferPolicy();
 await runOAuth();

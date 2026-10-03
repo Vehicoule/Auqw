@@ -16,6 +16,10 @@ import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import {
   PLUGIN_RELEASE_TRUST,
+  consentAllows,
+  consentsFromJson,
+  describeCandidate,
+  manifestPermissions,
   parsePluginPair,
   pluginPublicKey,
   syncPluginFeed,
@@ -517,6 +521,59 @@ export function createHostRuntime(opts: {
         synced !== undefined &&
         (synced.ready.length < synced.compatible.length ||
           loaded.length < synced.compatible.length);
+      // User-installed third-party pairs (decision log, Plugin guests):
+      // `<userData>/plugins-user/<id>.pair.json` documents carry
+      // `{manifest, wasm}` without a release signature — they load
+      // only behind the persisted consent record in
+      // `<userData>/plugins-user/consents.json`, which pins the exact
+      // digests and the approved permission set. Any drift is a skip,
+      // never a silent accept; the pair file itself stays untouched.
+      const userDir = join(
+        opts.env.AUQW_USER_DATA ?? process.cwd(),
+        'plugins-user',
+      );
+      const consents = existsSync(join(userDir, 'consents.json'))
+        ? consentsFromJson(
+            readFileSync(join(userDir, 'consents.json'), 'utf8'),
+          )
+        : [];
+      for (const name of fs.list(userDir).sort()) {
+        if (!name.endsWith('.pair.json')) {
+          continue;
+        }
+        try {
+          const doc: unknown = JSON.parse(
+            fs.read(join(userDir, name)).toString('utf8'),
+          );
+          if (typeof doc !== 'object' || doc === null) {
+            continue;
+          }
+          const d = doc as Record<string, unknown>;
+          const manifest = d['manifest'];
+          const wasm = d['wasm'];
+          if (typeof manifest !== 'string' || typeof wasm !== 'string') {
+            continue;
+          }
+          const candidate = describeCandidate({ manifestJson: manifest, wasmB64: wasm });
+          if (!consentAllows(candidate, consents)) {
+            continue;
+          }
+          const pluginId = await h.loadPlugin(
+            Buffer.from(wasm, 'base64'),
+            manifest,
+          );
+          const fields = manifestFields(manifest, name.replace(/\.pair\.json$/, ''));
+          loaded.push({
+            pluginId,
+            providerId: fields.providerId,
+            capabilities: fields.capabilities,
+            version: fields.version,
+            permissions: manifestPermissions(JSON.parse(manifest)),
+          });
+        } catch {
+          // A malformed or unconsented pair is skipped, not fatal.
+        }
+      }
       return loaded;
     }
     const manifests = fs
