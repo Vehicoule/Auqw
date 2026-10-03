@@ -28,22 +28,24 @@ export function CollectionTile({
             color={view.enabled ? 'var(--accent)' : 'var(--text-secondary)'}
           />
         </span>
-        <Text
-          variant="title"
-          color={view.enabled ? 'bright' : 'primary'}
-          numberOfLines={1}
-          className="uw-collection__label"
-        >
-          {tile.label}
-        </Text>
-        <Text
-          variant="body"
-          color="secondary"
-          numberOfLines={1}
-          className="uw-collection__count"
-        >
-          {view.countLabel}
-        </Text>
+        <span className="uw-collection__body">
+          <Text
+            variant="title"
+            color={view.enabled ? 'bright' : 'primary'}
+            numberOfLines={1}
+            className="uw-collection__label"
+          >
+            {tile.label}
+          </Text>
+          <Text
+            variant="body"
+            color="secondary"
+            numberOfLines={1}
+            className="uw-collection__count"
+          >
+            {view.countLabel}
+          </Text>
+        </span>
       </Pressable>
       {/* The tile's own play affordance — a sibling, not a child: the
           tile is a <button> and nested buttons aren't valid HTML. */}

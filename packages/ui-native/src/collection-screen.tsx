@@ -31,61 +31,61 @@ export function CollectionTile({
       style={{
         minHeight: 62,
         flexDirection: 'row',
-        alignItems: 'center',
-        gap: theme.spacing.sm,
-        padding: theme.spacing.md,
+        alignItems: 'stretch',
         borderRadius: theme.radius.control,
         borderWidth: theme.strokes.hairline,
-        borderColor: view.enabled ? theme.colors.hairline : theme.colors.fg08,
-        backgroundColor: view.enabled ? theme.colors.raised : 'transparent',
+        borderColor: view.enabled
+          ? theme.colors.hairline
+          : theme.colors.fg08,
+        backgroundColor: view.enabled
+          ? theme.colors.accentSoft
+          : theme.colors.fg08,
         opacity: view.enabled ? 1 : 0.58,
+        overflow: 'hidden',
       }}
     >
+      {/* The tile is a small shell: the icon sits on the accent stage
+          side and the body card anchors to the tile's right edges
+          with only its seam side rounded — the world card's seam. */}
       <View
         style={{
-          width: 30,
-          height: 30,
-          borderRadius: theme.radius.control,
+          width: 50,
           alignItems: 'center',
           justifyContent: 'center',
-          backgroundColor: view.enabled
-            ? theme.colors.accentSoft
-            : theme.colors.fg08,
         }}
       >
         <Icon
           name={view.icon}
-          size={15}
+          size={20}
           color={
             view.enabled ? theme.colors.accent : theme.colors.textSecondary
           }
         />
       </View>
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text variant="body" color={view.enabled ? 'bright' : 'primary'}>
-          {tile.label}
-        </Text>
-        <Text variant="metadata" color="secondary" numberOfLines={2}>
-          {view.countLabel}
-        </Text>
+      <View
+        style={{
+          flex: 1,
+          minWidth: 0,
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: theme.spacing.sm,
+          paddingHorizontal: theme.spacing.md,
+          borderTopLeftRadius: theme.radius.float,
+          borderBottomLeftRadius: theme.radius.float,
+          borderLeftWidth: theme.strokes.hairline,
+          borderLeftColor: theme.colors.hairline,
+          backgroundColor: view.enabled ? theme.colors.raised : 'transparent',
+        }}
+      >
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text variant="body" color={view.enabled ? 'bright' : 'primary'}>
+            {tile.label}
+          </Text>
+          <Text variant="metadata" color="secondary" numberOfLines={2}>
+            {view.countLabel}
+          </Text>
+        </View>
       </View>
-      {view.onPlay !== undefined && (
-        <Pressable
-          compact
-          onPress={view.onPlay}
-          accessibilityLabel={view.playA11yLabel}
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: 14,
-            alignItems: 'center',
-            justifyContent: 'center',
-            backgroundColor: theme.colors.accentSoft,
-          }}
-        >
-          <Icon name="play" size={12} color={theme.colors.accent} />
-        </Pressable>
-      )}
     </Pressable>
   );
 }

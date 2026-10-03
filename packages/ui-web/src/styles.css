@@ -1513,7 +1513,7 @@
   display: grid;
   /* GTK quick-access dashboard: always the four tiles, 2x2. */
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--spacing-md);
+  gap: var(--spacing-lg);
   margin-bottom: var(--spacing-lg);
 }
 .uw-collections__cell {
@@ -1527,42 +1527,61 @@
 }
 .uw-collection {
   display: flex;
-  align-items: center;
-  gap: var(--spacing-md);
-  padding: var(--spacing-lg);
+  align-items: stretch;
   text-align: left;
   border-radius: var(--radius-control);
   border: var(--stroke-hairline) solid var(--hairline);
-  background: var(--raised);
+  background: var(--accent-soft);
+  overflow: hidden;
 }
 
-.uw-collection:hover:not(:disabled) {
-  border-color: var(--fg40);
-  background: var(--uw-hover);
-}
-
+/* The tile is a small shell: the icon sits on the accent stage side
+   and the body card anchors to the tile's right edges with only
+   its seam side rounded — the world card's seam. */
 .uw-collection__icon {
-  width: 44px;
-  height: 44px;
+  width: 50px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-control);
+}
+
+.uw-collection__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-md) var(--spacing-lg);
+  border-left: var(--stroke-hairline) solid var(--hairline);
+  border-top-left-radius: var(--radius-float);
+  border-bottom-left-radius: var(--radius-float);
+  background: var(--raised);
+}
+
+/* The shared pressable hover wash must not repaint the tile itself —
+   the accent stage side keeps its tone; only the border deepens. */
+.uw-collection:hover:not(:disabled) {
   background: var(--accent-soft);
+  border-color: var(--fg40);
 }
 
-.uw-collection.uw-off .uw-collection__icon {
+.uw-collection.uw-off {
   background: var(--fg08);
+  border-color: var(--fg08);
 }
 
-/* Reserve the play circle's slot at the tile's right edge. */
-.uw-collection--playable {
+.uw-collection.uw-off .uw-collection__body {
+  background: transparent;
+}
+
+/* Reserve the play circle's slot at the body card's right edge. */
+.uw-collection--playable .uw-collection__body {
   padding-right: calc(var(--spacing-lg) + 28px + var(--spacing-sm));
 }
 
-/* The collection's own play affordance — the same accent-soft circle
-   the mobile tile carries, floated over the tile's right edge. */
+/* The collection's play affordance — hover-only on desktop, matching
+   the mock's grid covers (mobile tiles carry no play affordance). */
 .uw-collection__play {
   position: absolute;
   right: var(--spacing-lg);
@@ -1571,10 +1590,17 @@
   width: 28px;
   height: 28px;
   border-radius: 14px;
-  display: flex;
+  display: none;
   align-items: center;
   justify-content: center;
   background: var(--accent-soft);
+}
+
+/* The play button is the tile's sibling inside the grid cell, not a
+   descendant — reveal it from the cell's hover/focus-within instead. */
+.uw-collections__cell:hover .uw-collection__play,
+.uw-collections__cell:focus-within .uw-collection__play {
+  display: flex;
 }
 
 .uw-collection__play:hover {
