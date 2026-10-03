@@ -2319,7 +2319,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
         ports.entityPlayRequiresCanPlay === true || online === false
           ? items.filter(canPlayMeta)
           : items;
-      const startAt = metas.indexOf(tapped);
+      // Match by ref, not object identity — a declared top hit is a
+      // separately decoded object that may repeat a listed row.
+      const tappedKey = refKey(tapped.sourceRef);
+      const startAt = metas.findIndex(
+        (m) => refKey(m.sourceRef) === tappedKey,
+      );
       if (startAt < 0) {
         return;
       }
