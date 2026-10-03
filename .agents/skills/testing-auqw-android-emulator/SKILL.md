@@ -947,11 +947,73 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   back-nav surfaces the result list, not lost state.
 - `POST_NOTIFICATIONS` dialog can fire ANYTIME (not just on play) and
   swallows taps until handled — Allow ~x540,y1312.
-- 'Maximum update depth exceeded' resurfaced TWICE post-#312-fix on
-  this build (artist entity page + over search results, playback
-  re-renders active) — dismissed via its X, app stayed functional.
-  Per the hunt notes above this is a possible fresh render-loop, NOT
-  noise: the #312 fix covered the uSES/position-channel tear, and any
-  new storm needs the App.tsx/uSES blame check. Whether #347's new
-  artwork-resolver subscription contributes is UNCONFIRMED — record
-  the surface + active playback state before dismissing.
+- 'Maximum update depth exceeded' resurfaced post-#312-fix (artist
+  entity page + over search results, playback re-renders active) —
+  writer NAMED: `VirtualizedList._updateCellsToRender`, fix shipped in
+  #356 (stable `data` refs + session `#statePending`; verify at that
+  PR's merge state before relying on it on an older checkout). If a
+  new fire lands, capture its stack per the hunt section below before
+  dismissing.
+
+## Update-depth storm hunt (post-#355 — writer NAMED)
+
+- **screencap ≠ device px:** `adb exec-out screencap` PNGs are
+  ~706×1568 while the AVD is 1080×2400 — multiply screencap coords by
+  ~1.525 before `input tap` (chip taps land wrong otherwise).
+- **a11y hit-area proof:** `uiautomator dump` while paused — a
+  stretched Pressable's bounds span the full row (~right edge 807
+  device px) regardless of text ink; `flex-start` hugs the ink.
+- **TLOG method that worked:** temporary `console.warn('[TLOG] …')`
+  + `adb logcat -d -v threadtime | grep TLOG` windows — render markers
+  show burst structure, publish markers prove/disprove uSES churn,
+  useState counters show convergence. Strip with
+  `git checkout HEAD -- <files>` right after legs — a lead-side
+  `git add -A` can sweep them.
+- **Capturing the LogBox stack:** the error's component stack reaches
+  NEITHER logcat NOR metro — the on-device LogBox pill is the only
+  path to 'in <Component>' lines. It auto-dismisses but reappears per
+  fire (~1/15-70s under deezer playback, ANY content surface — home
+  fires too): tap fast, 'Collapse all N frames' is already expanded,
+  app-side frames sit at the bottom of Call Stack.
+- **The named writer:** `setState` → `StateSafePureComponent.js:40` →
+  `VirtualizedList.js:1909 _updateCellsToRender` ← `setTimeout`
+  VL.js:1806 — the ~50ms `updateCellsBatchingPeriod` timer
+  `componentDidUpdate` arms on each `data` prop change. It trips
+  inside an already-nested ticking flush — class-component setState,
+  so ui-web CANNOT produce it (desktop: 0 fires / ~1500 identical
+  silent syncs under the same ticks).
+- **Why the publish path looked clean:** `#publishPosition()` calls
+  `#syncState()` too — silently swaps `this.#state` (queue+playback
+  refs rebuild per tick — `queue.snapshot()` embeds positionMs)
+  WITHOUT notifying listeners. A `[TLOG]` section-diff inside
+  `#syncState` before `return true` exposes ~1Hz 'queue,playback'
+  syncs the `session.publish` counter never sees — instrument SECTION
+  diffs, not just publish calls. #356 fixes it: `#statePending` marks
+  the undelivered install so the next publish can't dedupe it away
+  (a queue write mutates the engine before its commit await — a tick
+  in that window installs the change unseen).
+- **Fresh-`data` churn (the fix's other half):** every ui-native
+  FlatList got a new `data` array each render — queue list built
+  `queue.sections.flatMap` inline, DraggableFlatList sliced per pass,
+  entity/search/home lists fed view-model rows remapped per render.
+  #356 memoizes on the (frozen, shared) source: `queue.sections`
+  deps, `useScopedMap` model caches, `useStableRows(rows, pick)` for
+  controller-mapped wrappers + `useLatestCallback` so retained
+  wrappers still hit the latest handlers.
+- **Storms need LIVE playback ticks:** a 'radio · growing' queue with
+  a refused stream produced zero TLOG lines — no position publishes,
+  no renders. Check stream health first ('provider is refusing
+  requests' in the player pane = youtube-music bot-wall on this IP —
+  retries DO eventually succeed: keep tapping play, watch for
+  `request succeeded` + media_session PLAYING).
+- **Why local files don't reproduce:** local playback ticks
+  identically but emits ~0 whole-state publishes (autoplay can't
+  seed a local track — no radio growth — and no remote prepare/
+  buffering transitions) → VL timers fire into empty flushes → no
+  cap. Deezer catalog tracks resolve audio through youtube-music;
+  remote playback is required for repro.
+- **#312 disease class:** `app-shell.ts` documents the prior fix
+  (ticking store marking itself mutated mid-render → synchronous
+  retries → nested-update cap). Any new ticking-path setState —
+  `bumpLyricLayout` in lyric-row onLayout, effects whose deps rebuild
+  per render — is the same class.

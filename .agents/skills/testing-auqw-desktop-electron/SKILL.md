@@ -41,6 +41,10 @@ those merge, this skill has nothing to run against.
   `libauqw_node_bindings.so` (cargo debug build). The host stages it to
   `userData/node-bindings/auqw_node_bindings.node` before `require()`.
   Missing/broken → `host:plugins: unavailable` in diagnostics.
+- Branch switches touching `crates/plugin-host` need a bindings rebuild
+  (`cargo build -p auqw-node-bindings`): a stale .so built against an old
+  ABI silently rejects EVERY plugin → zero providers → `[ui] boot failed:
+  internal` before storage init (sqlite `schema_version` stays behind).
 - `AUQW_DEV_GATE` needs no setup: main sets it to `'1'` whenever
   `app.isPackaged` is false (`src/main/index.ts` `utilityEnv`). Utility env
   is filtered to `AUQW_*` + platform vars — parent credentials never reach it.
@@ -833,3 +837,7 @@ open the 'in your library' chip — shows exactly that card, head
 - The settings menu (≡) rows sit ~6px lower than first-glance
   coordinates on this display scale — zoom the popover before
   clicking; a click on the row's top edge dead-zones.
+- sqlite only keeps the LATEST queue — `queue_occurrences` is replaced
+  wholesale per queue write. Grab 'playing from {entity}' origins and
+  ordered up-next lists visually before playing something else; the db
+  can't reproduce prior queue state.
