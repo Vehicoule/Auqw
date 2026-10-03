@@ -2591,9 +2591,15 @@ function Main({
             open={searchFabOpen}
             onOpenChange={(next) => {
               setSearchFabOpen(next);
-              // The collapsed field drops its draft — reopening used
-              // to append new keystrokes onto the old text.
-              if (!next) setQuery('');
+              // The field restores the committed query, not '' — an
+              // empty draft cancels the session (suggest effect) and
+              // dumps the committed results surface. Unsubmitted
+              // keystrokes still drop, so stale text can't append.
+              if (!next) {
+                setQuery(
+                  searchState.type === 'idle' ? '' : searchState.query,
+                );
+              }
             }}
             focusSignal={searchFocusTick}
             onNavigateToSearch={
