@@ -1459,6 +1459,10 @@ export function DownloadIcon({
   const draw = useSharedValue(initial.draw);
   const spin = useSharedValue(0);
   const run = animated && !theme.reducedMotion;
+  // The busy spin is the live progress affordance — it turns even
+  // where the morphs snap (`animated={false}` dense lists), or a
+  // mid-download row reads frozen off the stage.
+  const spinRun = !theme.reducedMotion;
   useEffect(() => {
     const target = DOWNLOAD_TARGETS[phase];
     morph.value = run
@@ -1467,7 +1471,7 @@ export function DownloadIcon({
     draw.value = run
       ? withTiming(target.draw, { duration: theme.motion.state * 1.6 })
       : target.draw;
-    if (run && target.spin) {
+    if (spinRun && target.spin) {
       spin.value = withRepeat(
         withTiming(360, { duration: 900, easing: Easing.linear }),
         -1,
@@ -1478,7 +1482,7 @@ export function DownloadIcon({
     cancelAnimation(spin);
     spin.value = 0;
     return undefined;
-  }, [morph, draw, spin, phase, run, theme.motion.state]);
+  }, [morph, draw, spin, phase, run, spinRun, theme.motion.state]);
   const paint = color ?? theme.colors.textPrimary;
   const sw = strokeWidth ?? theme.strokes.icon;
   const box = {
