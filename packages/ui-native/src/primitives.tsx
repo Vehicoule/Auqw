@@ -29,7 +29,14 @@ import Animated, {
   withSequence,
   withTiming,
 } from 'react-native-reanimated';
-import Svg, { Circle, Path, Rect } from 'react-native-svg';
+import Svg, {
+  Circle,
+  Defs,
+  LinearGradient,
+  Path,
+  Rect,
+  Stop,
+} from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from './theme.tsx';
 import type { Theme } from './theme.tsx';
@@ -181,12 +188,13 @@ export function Hairline({
 
 /**
  * The edge-to-edge cover: content scrolls under the status bar and a
- * flat canvas strip keeps the clock and icons readable. One unified
- * tone with the canvas — a gradient band read as a separate zone.
+ * soft canvas ramp — not a hard band — keeps the clock and icons
+ * readable. The ramp covers the inset plus a short tail below it.
  */
 export function StatusBarCover() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const height = insets.top + 14;
   return (
     <View
       pointerEvents="none"
@@ -195,10 +203,32 @@ export function StatusBarCover() {
         top: 0,
         left: 0,
         right: 0,
-        height: insets.top,
-        backgroundColor: theme.colors.canvas,
+        height,
       }}
-    />
+    >
+      <Svg width="100%" height={height}>
+        <Defs>
+          <LinearGradient id="uw-sbfade" x1="0" y1="0" x2="0" y2="1">
+            <Stop
+              offset="0"
+              stopColor={theme.colors.canvas}
+              stopOpacity={0.85}
+            />
+            <Stop
+              offset="0.55"
+              stopColor={theme.colors.canvas}
+              stopOpacity={0.4}
+            />
+            <Stop
+              offset="1"
+              stopColor={theme.colors.canvas}
+              stopOpacity={0}
+            />
+          </LinearGradient>
+        </Defs>
+        <Rect x={0} y={0} width="100%" height={height} fill="url(#uw-sbfade)" />
+      </Svg>
+    </View>
   );
 }
 
