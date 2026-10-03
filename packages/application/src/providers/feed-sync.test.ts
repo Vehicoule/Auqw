@@ -1,9 +1,11 @@
 import { appError } from '../errors.ts';
 import { createSha256 } from '../downloads/sha256.ts';
-import { utf8Encode } from '../utf8.ts';
+import { utf8Decode, utf8Encode } from '../utf8.ts';
 import {
   PLUGIN_ABI,
+  b64Encode,
   parsePluginFeed,
+  parsePluginPair,
   syncPluginFeed,
 } from './feed-sync.ts';
 import type { FeedSyncPorts, PluginFeedEntry } from './feed-sync.ts';
@@ -42,6 +44,25 @@ function entry(
     manifest_sha256: sha256Hex(manifest),
     signature,
   };
+}
+
+function pairDoc(
+  id: string,
+  version: string,
+  wasm: Uint8Array,
+  manifest: Uint8Array,
+  signature = 'c2ln',
+): string {
+  return JSON.stringify({
+    id,
+    version,
+    abi: PLUGIN_ABI,
+    wasm_sha256: sha256Hex(wasm),
+    manifest_sha256: sha256Hex(manifest),
+    signature,
+    manifest: utf8Decode(manifest),
+    wasm: b64Encode(wasm),
+  });
 }
 
 const FEED_BODY = JSON.stringify({
@@ -104,7 +125,7 @@ export async function run(): Promise<void> {
   // Fresh sync downloads + writes every feed entry.
   {
     const { ports, files } = fakePorts({ fetch: feedUrls() });
-    const ready = await syncPluginFeed({
+    const { ready } = await syncPluginFeed({
       feedUrl: 'https://feed.test/releases/feed.json',
       keyId: KEY_ID,
       publicKey: PUB,
@@ -112,21 +133,23 @@ export async function run(): Promise<void> {
       ports,
     });
     assertDeepEqualSorted(ready, ['alpha', 'beta']);
-    assertEqual(files.get('/plug/alpha.wasm'), WASM_A);
-    assertEqual(files.get('/plug/alpha.manifest.json'), MANIFEST_A);
-    assertEqual(files.get('/plug/beta.wasm'), WASM_B);
+    const alphaPair = JSON.parse(utf8Decode(files.get('/plug/alpha.json') ?? new Uint8Array())) as Record<string, unknown>;
+    assertEqual(alphaPair['id'], 'alpha');
+    assertEqual(alphaPair['wasm_sha256'], sha256Hex(WASM_A));
+    assert(
+      !files.has('/plug/alpha.wasm') && !files.has('/plug/alpha.manifest.json'),
+      'single pair doc, no two-file residue',
+    );
   }
 
   // Matching on-disk digests are a cache hit — no artifact fetches.
   {
     const files = new Map([
-      ['/plug/alpha.wasm', WASM_A],
-      ['/plug/alpha.manifest.json', MANIFEST_A],
-      ['/plug/beta.wasm', WASM_B],
-      ['/plug/beta.manifest.json', MANIFEST_B],
+      ['/plug/alpha.json', utf8Encode(pairDoc('alpha', '0.2.0', WASM_A, MANIFEST_A))],
+      ['/plug/beta.json', utf8Encode(pairDoc('beta', '1.0.0', WASM_B, MANIFEST_B))],
     ]);
     const { ports, fetched } = fakePorts({ files, fetch: feedUrls() });
-    const ready = await syncPluginFeed({
+    const { ready } = await syncPluginFeed({
       feedUrl: 'https://feed.test/releases/feed.json',
       keyId: KEY_ID,
       publicKey: PUB,
@@ -141,10 +164,8 @@ export async function run(): Promise<void> {
   {
     const stale = new Uint8Array([1, 2, 3]);
     const files = new Map([
-      ['/plug/alpha.wasm', stale],
-      ['/plug/alpha.manifest.json', stale],
-      ['/plug/beta.wasm', WASM_B],
-      ['/plug/beta.manifest.json', MANIFEST_B],
+      ['/plug/alpha.json', utf8Encode(pairDoc('alpha', '0.2.0', stale, stale))],
+      ['/plug/beta.json', utf8Encode(pairDoc('beta', '1.0.0', WASM_B, MANIFEST_B))],
     ]);
     const urls = feedUrls();
     urls.set(
@@ -152,7 +173,7 @@ export async function run(): Promise<void> {
       utf8Encode('corrupted'),
     );
     const { ports } = fakePorts({ files, fetch: urls });
-    const ready = await syncPluginFeed({
+    const { ready } = await syncPluginFeed({
       feedUrl: 'https://feed.test/releases/feed.json',
       keyId: KEY_ID,
       publicKey: PUB,
@@ -160,33 +181,42 @@ export async function run(): Promise<void> {
       ports,
     });
     assertDeepEqualSorted(ready, ['beta']);
-    assertEqual(files.get('/plug/alpha.wasm'), stale, 'stale kept');
+    assertEqual(
+      utf8Decode(files.get('/plug/alpha.json') ?? new Uint8Array()),
+      pairDoc('alpha', '0.2.0', stale, stale),
+      'stale kept',
+    );
   }
 
-  // A bad signature refuses the write.
+  // A bad signature refuses the write — and with nothing cached
+  // that is a feed-level failure (compatible>0, ready=0).
   {
     const { ports, files } = fakePorts({
       fetch: feedUrls(),
       verify: () => false,
     });
-    const ready = await syncPluginFeed({
-      feedUrl: 'https://feed.test/releases/feed.json',
-      keyId: KEY_ID,
-      publicKey: PUB,
-      dir: '/plug',
-      ports,
-    });
-    assertEqual(ready.length, 0);
+    let threw = false;
+    try {
+      await syncPluginFeed({
+        feedUrl: 'https://feed.test/releases/feed.json',
+        keyId: KEY_ID,
+        publicKey: PUB,
+        dir: '/plug',
+        ports,
+      });
+    } catch {
+      threw = true;
+    }
+    assert(threw, 'zero ready with compatible entries throws');
     assertEqual(files.size, 0);
   }
 
   // Artifacts absent from the feed are swept.
   {
     const files = new Map([
-      ['/plug/alpha.wasm', WASM_A],
-      ['/plug/alpha.manifest.json', MANIFEST_A],
-      ['/plug/beta.wasm', WASM_B],
-      ['/plug/beta.manifest.json', MANIFEST_B],
+      ['/plug/alpha.json', utf8Encode(pairDoc('alpha', '0.2.0', WASM_A, MANIFEST_A))],
+      ['/plug/beta.json', utf8Encode(pairDoc('beta', '1.0.0', WASM_B, MANIFEST_B))],
+      ['/plug/dead.json', utf8Encode(pairDoc('dead', '0.1.0', WASM_A, MANIFEST_A))],
       ['/plug/dead.wasm', new Uint8Array([9])],
       ['/plug/dead.manifest.json', new Uint8Array([9])],
       ['/plug/keep.txt', new Uint8Array([1])],
@@ -199,23 +229,22 @@ export async function run(): Promise<void> {
       dir: '/plug',
       ports,
     });
-    assert(!files.has('/plug/dead.wasm'));
-    assert(!files.has('/plug/dead.manifest.json'));
+    assert(!files.has('/plug/dead.json'));
+    assert(!files.has('/plug/dead.wasm'), 'legacy wasm swept');
+    assert(!files.has('/plug/dead.manifest.json'), 'legacy manifest swept');
     assert(files.has('/plug/keep.txt'), 'non-artifact files survive');
   }
 
   // A fetch failure for one plugin keeps its last-known-good pair.
   {
     const files = new Map([
-      ['/plug/alpha.wasm', WASM_A],
-      ['/plug/alpha.manifest.json', MANIFEST_A],
-      ['/plug/beta.wasm', new Uint8Array([8])],
-      ['/plug/beta.manifest.json', new Uint8Array([8])],
+      ['/plug/alpha.json', utf8Encode(pairDoc('alpha', '0.2.0', WASM_A, MANIFEST_A))],
+      ['/plug/beta.json', utf8Encode(pairDoc('beta', '9.9.9', new Uint8Array([8]), new Uint8Array([8])))],
     ]);
     const urls = feedUrls();
     urls.delete('https://feed.test/releases/beta/1.0.0/beta-1.0.0.wasm');
     const { ports } = fakePorts({ files, fetch: urls });
-    const ready = await syncPluginFeed({
+    const { ready } = await syncPluginFeed({
       feedUrl: 'https://feed.test/releases/feed.json',
       keyId: KEY_ID,
       publicKey: PUB,
@@ -223,7 +252,7 @@ export async function run(): Promise<void> {
       ports,
     });
     assertDeepEqualSorted(ready, ['alpha']);
-    assert(files.has('/plug/beta.wasm'), 'lkg survives fetch failure');
+    assert(files.has('/plug/beta.json'), 'lkg survives fetch failure');
   }
 
   // Feed-level failure throws — the caller keeps the whole cache.
@@ -266,6 +295,38 @@ export async function run(): Promise<void> {
     const parsed = parsePluginFeed(FEED_BODY, KEY_ID);
     assertEqual(parsed.plugins.length, 2);
     assertEqual(parsed.keyId, KEY_ID);
+  }
+
+  // parsePluginPair re-verifies offline: tampered bytes, forged
+  // digests, bad signatures, and wrong abi all refuse.
+  {
+    const verify = {
+      keyId: KEY_ID,
+      publicKey: PUB,
+      verify: ((..._args: unknown[]) => true) as FeedSyncPorts['ed25519Verify'],
+    };
+    const good = pairDoc('alpha', '0.2.0', WASM_A, MANIFEST_A);
+    const pair = parsePluginPair(good, verify);
+    assert(pair !== null && pair.id === 'alpha');
+    const tampered = JSON.parse(good) as Record<string, unknown>;
+    tampered['wasm'] = b64Encode(new Uint8Array([0]));
+    assertEqual(parsePluginPair(JSON.stringify(tampered), verify), null);
+    const forged = JSON.parse(good) as Record<string, unknown>;
+    forged['wasm_sha256'] = sha256Hex(new Uint8Array([0]));
+    forged['wasm'] = b64Encode(new Uint8Array([0]));
+    // digests now self-consistent — only the signature can refuse it,
+    // and 'c2ln' still verifies under the fake; the real path re-verifies.
+    assert(
+      parsePluginPair(JSON.stringify(forged), {
+        ...verify,
+        verify: () => false,
+      }) === null,
+      'forged pair rejected when signature fails',
+    );
+    const wrongAbi = JSON.parse(good) as Record<string, unknown>;
+    wrongAbi['abi'] = '0.2.0';
+    assertEqual(parsePluginPair(JSON.stringify(wrongAbi), verify), null);
+    assertEqual(parsePluginPair('not json', verify), null);
   }
 }
 

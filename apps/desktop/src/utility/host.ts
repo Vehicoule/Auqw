@@ -8,14 +8,19 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { createPublicKey, verify } from 'node:crypto';
+import {
+  createPublicKey,
+  verify as verifySignature,
+} from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import {
   PLUGIN_RELEASE_TRUST,
+  parsePluginPair,
   pluginPublicKey,
   syncPluginFeed,
 } from '@auqw/application';
+import type { FeedSyncPorts } from '@auqw/application';
 import { shellError } from '../shared/errors.ts';
 import type {
   HostPluginsResult,
@@ -241,7 +246,7 @@ const ED25519_SPKI_DER_PREFIX = Buffer.from(
 async function defaultFeedSync(
   dir: string,
   feedUrl: string,
-): Promise<readonly string[]> {
+): Promise<{ ready: readonly string[]; compatible: readonly string[] }> {
   const publicKey = createPublicKey({
     key: Buffer.concat([ED25519_SPKI_DER_PREFIX, pluginPublicKey()]),
     format: 'der',
@@ -266,7 +271,7 @@ async function defaultFeedSync(
         return new Uint8Array(await res.arrayBuffer());
       },
       ed25519Verify: (message, signature) =>
-        verify(null, message, publicKey, signature),
+        verifySignature(null, message, publicKey, signature),
       list: async (d) => (existsSync(d) ? readdirSync(d) : []),
       read: async (p) => (existsSync(p) ? readFileSync(p) : null),
       write: async (p, bytes) => {
@@ -287,7 +292,12 @@ export function createHostRuntime(opts: {
   require?: RequireLike | undefined;
   fs?: FsLike | undefined;
   /** Injectable for tests — defaults to the node OTA sync. */
-  feedSync?: ((dir: string) => Promise<readonly string[]>) | undefined;
+  feedSync?:
+    | ((dir: string) => Promise<{
+        ready: readonly string[];
+        compatible: readonly string[];
+      }>)
+    | undefined;
   /**
    * Bundled POT service's loopback URL — read at PluginHost
    * construction (lazy bindings make this a thunk, not a value).
@@ -321,6 +331,10 @@ export function createHostRuntime(opts: {
   let host: PluginHostLike | null = null;
   let bindingsError: string | undefined;
   let pluginsReady: Promise<readonly LoadedPlugin[]> | null = null;
+  // Set when the last load left the registry short of the feed's
+  // compatible set — the next ready() re-syncs instead of serving the
+  // stale memoized result.
+  let lastLoadIncomplete = false;
 
   function loadBindings(): PluginHostLike {
     const candidates = bindingsCandidates(
@@ -406,13 +420,16 @@ export function createHostRuntime(opts: {
   async function loadPluginDir(
     h: PluginHostLike,
   ): Promise<readonly LoadedPlugin[]> {
-    let dir = opts.env.AUQW_PLUGIN_DIR;
-    let feedFailure: unknown;
-    if (dir === undefined || dir === '') {
+    const dir =
+      opts.env.AUQW_PLUGIN_DIR === undefined || opts.env.AUQW_PLUGIN_DIR === ''
+        ? undefined
+        : opts.env.AUQW_PLUGIN_DIR;
+    const loaded: LoadedPlugin[] = [];
+    if (dir === undefined) {
       // OTA path: refresh the cache under userData, then load it.
       // `AUQW_PLUGIN_DIR` still wins — dev loops and harnesses point
       // at their own unsigned sets.
-      dir = join(opts.env.AUQW_USER_DATA ?? process.cwd(), 'plugins');
+      const cacheDir = join(opts.env.AUQW_USER_DATA ?? process.cwd(), 'plugins');
       const sync =
         opts.feedSync ??
         ((d: string) =>
@@ -420,17 +437,68 @@ export function createHostRuntime(opts: {
             d,
             opts.env.AUQW_PLUGIN_FEED ?? PLUGIN_RELEASE_TRUST.feedUrl,
           ));
+      let feedFailure: unknown;
+      let compatibleCount = 0;
       try {
-        await sync(dir);
+        const res = await sync(cacheDir);
+        compatibleCount = res.compatible.length;
       } catch (thrown) {
         feedFailure = thrown;
       }
+      const spki = createPublicKey({
+        key: Buffer.concat([ED25519_SPKI_DER_PREFIX, pluginPublicKey()]),
+        format: 'der',
+        type: 'spki',
+      });
+      const verify: FeedSyncPorts['ed25519Verify'] = (message, signature) =>
+        verifySignature(null, message, spki, signature);
+      for (const name of fs.list(cacheDir).sort()) {
+        if (!name.endsWith('.json')) {
+          continue;
+        }
+        try {
+          const pair = parsePluginPair(
+            fs.read(join(cacheDir, name)).toString('utf8'),
+            {
+              keyId: PLUGIN_RELEASE_TRUST.keyId,
+              publicKey: pluginPublicKey(),
+              verify,
+            },
+          );
+          if (pair === null) {
+            continue;
+          }
+          const pluginId = await h.loadPlugin(
+            Buffer.from(pair.wasmB64, 'base64'),
+            pair.manifestJson,
+          );
+          const fields = manifestFields(pair.manifestJson, pair.id);
+          loaded.push({
+            pluginId,
+            providerId: fields.providerId,
+            capabilities: fields.capabilities,
+            version: fields.version,
+          });
+        } catch {
+          // A malformed pair is skipped, not fatal — other pairs still load.
+        }
+      }
+      // A failed feed refresh with an empty cache must not pin an empty
+      // provider set: `pluginsReady` resets on rejection, so the next
+      // call re-syncs — a cache hit meanwhile stays usable offline.
+      if (loaded.length === 0 && feedFailure !== undefined) {
+        throw feedFailure;
+      }
+      // A feed sync that produced FEWER ready plugins than the feed
+      // listed stays retriable: the next `ready()` re-syncs and the
+      // host's id-keyed insert hot-swaps the refreshed pairs.
+      lastLoadIncomplete = loaded.length < compatibleCount;
+      return loaded;
     }
     const manifests = fs
       .list(dir)
       .filter((name) => name.endsWith('.manifest.json'))
       .sort();
-    const loaded: LoadedPlugin[] = [];
     for (const manifestName of manifests) {
       const stem = manifestName.slice(0, -'.manifest.json'.length);
       const wasmPath = join(dir, `${stem}.wasm`);
@@ -452,17 +520,12 @@ export function createHostRuntime(opts: {
         // A malformed pair is skipped, not fatal — other pairs still load.
       }
     }
-    // A failed feed refresh with an empty cache must not pin an empty
-    // provider set: `pluginsReady` resets on rejection, so the next
-    // call re-syncs — a cache hit meanwhile stays usable offline.
-    if (loaded.length === 0 && feedFailure !== undefined) {
-      throw feedFailure;
-    }
     return loaded;
   }
 
   async function ready(): Promise<readonly LoadedPlugin[]> {
-    if (pluginsReady === null) {
+    if (pluginsReady === null || lastLoadIncomplete) {
+      lastLoadIncomplete = false;
       const pending = loadPluginDir(ensureHost());
       pluginsReady = pending;
       // A rejected init stays retriable — the artifact may appear

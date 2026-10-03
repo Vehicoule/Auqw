@@ -101,6 +101,150 @@ export function pluginPublicKey(): Uint8Array {
 const B64 =
   'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
+/** Bytes → standard base64 (btoa is not universal on Hermes). */
+export function b64Encode(bytes: Uint8Array): string {
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = ((bytes[i] ?? 0) << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
+    const tail = bytes.length - i;
+    out +=
+      B64.charAt((n >> 18) & 63) +
+      B64.charAt((n >> 12) & 63) +
+      (tail > 1 ? B64.charAt((n >> 6) & 63) : '=') +
+      (tail > 2 ? B64.charAt(n & 63) : '=');
+  }
+  return out;
+}
+
+/** The canonical sign payload — same byte shape sign.mjs emits. */
+function releasePayload(
+  id: string,
+  version: string,
+  abi: string,
+  wasmSha256: string,
+  manifestSha256: string,
+  keyId: string,
+): Uint8Array {
+  return utf8Encode(
+    `auqw-release-v1\n${id}\n${version}\n${abi}\n${wasmSha256}\n${manifestSha256}\n${keyId}\n`,
+  );
+}
+
+function verifyRelease(
+  entry: PluginFeedEntry,
+  manifest: Uint8Array,
+  wasm: Uint8Array,
+  opts: {
+    keyId: string;
+    publicKey: Uint8Array;
+    verify: FeedSyncPorts['ed25519Verify'];
+  },
+): boolean {
+  const signature = base64Bytes(entry.signature);
+  return (
+    signature !== null &&
+    opts.verify(
+      releasePayload(
+        entry.id,
+        entry.version,
+        entry.abi,
+        entry.wasm_sha256,
+        entry.manifest_sha256,
+        opts.keyId,
+      ),
+      signature,
+      opts.publicKey,
+    )
+  );
+}
+
+/** One verified cached plugin, decoded for a host `loadPlugin`. */
+export type VerifiedPluginPair = {
+  readonly id: string;
+  readonly version: string;
+  readonly wasmSha256: string;
+  readonly manifestSha256: string;
+  readonly wasmB64: string;
+  readonly manifestJson: string;
+};
+
+/**
+ * Offline authentication for the cache: re-verifies the stored
+ * release signature and both digests, so a pair document that was
+ * forged, truncated, or tampered with can never load. Returns the
+ * verified pair, or null when anything fails.
+ */
+export function parsePluginPair(
+  text: string,
+  opts: {
+    keyId: string;
+    publicKey: Uint8Array;
+    verify: FeedSyncPorts['ed25519Verify'];
+  },
+): VerifiedPluginPair | null {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof doc !== 'object' || doc === null) {
+    return null;
+  }
+  const d = doc as Record<string, unknown>;
+  const id = d['id'];
+  const version = d['version'];
+  const abi = d['abi'];
+  const wasmSha = d['wasm_sha256'];
+  const manifestSha = d['manifest_sha256'];
+  const signature = d['signature'];
+  const manifest = d['manifest'];
+  const wasm = d['wasm'];
+  if (
+    typeof id !== 'string' ||
+    typeof version !== 'string' ||
+    typeof abi !== 'string' ||
+    typeof wasmSha !== 'string' ||
+    typeof manifestSha !== 'string' ||
+    typeof signature !== 'string' ||
+    typeof manifest !== 'string' ||
+    typeof wasm !== 'string'
+  ) {
+    return null;
+  }
+  const wasmBytes = base64Bytes(wasm);
+  const sigBytes = base64Bytes(signature);
+  const manifestBytes = utf8Encode(manifest);
+  if (
+    wasmBytes === null ||
+    sigBytes === null ||
+    wasmBytes.byteLength > WASM_MAX_BYTES ||
+    manifestBytes.byteLength > MANIFEST_MAX_BYTES ||
+    sha256Hex(wasmBytes) !== wasmSha ||
+    sha256Hex(manifestBytes) !== manifestSha ||
+    abi !== PLUGIN_ABI
+  ) {
+    return null;
+  }
+  if (
+    !opts.verify(
+      releasePayload(id, version, abi, wasmSha, manifestSha, opts.keyId),
+      sigBytes,
+      opts.publicKey,
+    )
+  ) {
+    return null;
+  }
+  return {
+    id,
+    version,
+    wasmSha256: wasmSha,
+    manifestSha256: manifestSha,
+    wasmB64: wasm,
+    manifestJson: manifest,
+  };
+}
+
 /** Strict base64 → bytes (no `Uint8Array.fromBase64` — Hermes lacks it). */
 function base64Bytes(b64: string): Uint8Array | null {
   if (b64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(b64)) {
@@ -189,10 +333,10 @@ export async function syncPluginFeed(opts: {
   readonly keyId: string;
   /** Raw 32-byte ed25519 public key. */
   readonly publicKey: Uint8Array;
-  /** Cache dir holding `<id>.wasm` + `<id>.manifest.json` pairs. */
+  /** Cache dir holding signed `<id>.json` pair documents. */
   readonly dir: string;
   readonly ports: FeedSyncPorts;
-}): Promise<readonly string[]> {
+}): Promise<{ readonly ready: readonly string[]; readonly compatible: readonly string[] }> {
   const { ports, dir } = opts;
   const feedBytes = await ports.fetchBytes(opts.feedUrl);
   if (feedBytes.byteLength > FEED_MAX_BYTES) {
@@ -201,24 +345,31 @@ export async function syncPluginFeed(opts: {
   const feed = parsePluginFeed(utf8Decode(feedBytes), opts.keyId);
   const base = opts.feedUrl.slice(0, opts.feedUrl.lastIndexOf('/') + 1);
   const current = new Set<string>();
+  const compatible: string[] = [];
   const ready: string[] = [];
   for (const entry of feed.plugins) {
     if (entry.abi !== PLUGIN_ABI) {
       continue;
     }
     current.add(entry.id);
-    const manifestPath = `${dir}/${entry.id}.manifest.json`;
-    const wasmPath = `${dir}/${entry.id}.wasm`;
-    const [haveManifest, haveWasm] = await Promise.all([
-      ports.read(manifestPath),
-      ports.read(wasmPath),
-    ]);
-    const cached =
-      haveManifest !== null &&
-      haveWasm !== null &&
-      sha256Hex(haveManifest) === entry.manifest_sha256 &&
-      sha256Hex(haveWasm) === entry.wasm_sha256;
-    if (cached) {
+    compatible.push(entry.id);
+    // Cache hit: the stored pair re-verifies offline (signature +
+    // both digests), so cached bytes are never loaded unverified.
+    const cached = await ports.read(`${dir}/${entry.id}.json`);
+    const pair =
+      cached === null
+        ? null
+        : parsePluginPair(utf8Decode(cached), {
+            keyId: opts.keyId,
+            publicKey: opts.publicKey,
+            verify: ports.ed25519Verify,
+          });
+    if (
+      pair !== null &&
+      pair.id === entry.id &&
+      pair.wasmSha256 === entry.wasm_sha256 &&
+      pair.manifestSha256 === entry.manifest_sha256
+    ) {
       ready.push(entry.id);
       continue;
     }
@@ -232,40 +383,59 @@ export async function syncPluginFeed(opts: {
         manifest.byteLength > MANIFEST_MAX_BYTES ||
         wasm.byteLength > WASM_MAX_BYTES ||
         sha256Hex(manifest) !== entry.manifest_sha256 ||
-        sha256Hex(wasm) !== entry.wasm_sha256
+        sha256Hex(wasm) !== entry.wasm_sha256 ||
+        !verifyRelease(entry, manifest, wasm, {
+          keyId: opts.keyId,
+          publicKey: opts.publicKey,
+          verify: ports.ed25519Verify,
+        })
       ) {
         continue;
       }
-      const signature = base64Bytes(entry.signature);
-      const payload = utf8Encode(
-        `auqw-release-v1\n${entry.id}\n${entry.version}\n${entry.abi}\n` +
-          `${entry.wasm_sha256}\n${entry.manifest_sha256}\n${opts.keyId}\n`,
+      // One self-describing document — a single atomic write per
+      // plugin, so no torn pair can ever strand a provider.
+      await ports.write(
+        `${dir}/${entry.id}.json`,
+        utf8Encode(
+          JSON.stringify({
+            id: entry.id,
+            version: entry.version,
+            abi: entry.abi,
+            wasm_sha256: entry.wasm_sha256,
+            manifest_sha256: entry.manifest_sha256,
+            signature: entry.signature,
+            manifest: utf8Decode(manifest),
+            wasm: b64Encode(wasm),
+          }),
+        ),
       );
-      if (
-        signature === null ||
-        !ports.ed25519Verify(payload, signature, opts.publicKey)
-      ) {
-        continue;
-      }
-      // Wasm first, manifest last — a manifest-less wasm is inert, and
-      // a torn pair fails the host's artifact.digest pin at load.
-      await ports.write(wasmPath, wasm);
-      await ports.write(manifestPath, manifest);
       ready.push(entry.id);
     } catch {
       // Per-plugin failure keeps last-known-good on disk.
     }
   }
-  // Sweep artifacts no longer in the feed.
+  // Sweep artifact-shaped files the feed does not name (legacy
+  // two-file sets from earlier builds, dropped plugins, stray
+  // staging) — non-artifact names in the dir are left alone.
   for (const name of await ports.list(dir)) {
-    const stem = name.endsWith('.manifest.json')
-      ? name.slice(0, -'.manifest.json'.length)
-      : name.endsWith('.wasm')
-        ? name.slice(0, -'.wasm'.length)
-        : null;
-    if (stem !== null && !current.has(stem)) {
-      await ports.remove(`${dir}/${name}`);
+    const isArtifact =
+      name.endsWith('.json') ||
+      name.endsWith('.wasm') ||
+      name.endsWith('.manifest.json') ||
+      name.endsWith('.part');
+    if (!isArtifact || name === 'feed.json') {
+      continue;
+    }
+    const stem = name.endsWith('.json') ? name.slice(0, -'.json'.length) : null;
+    if (stem === null || !current.has(stem)) {
+      await ports.remove(`${dir}/${name}`).catch(() => {});
     }
   }
-  return ready;
+  // Every compatible entry failed while the cache produced nothing —
+  // treat it like a feed-level failure so callers retry instead of
+  // pinning an empty provider set.
+  if (compatible.length > 0 && ready.length === 0) {
+    throw appError('transient', 'no feed plugins became ready');
+  }
+  return { ready, compatible };
 }
