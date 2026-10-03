@@ -21,6 +21,7 @@ import { EmptyState, ErrorState, LoadingState } from './states.tsx';
 import { scaledArtworkUrl, t } from '@auqw/ui-shared';
 import type {
   DownloadChip,
+  EntityRef,
   LyricsModel,
   PlayerModel,
   QueueModel,
@@ -256,6 +257,33 @@ function RadioAction({
   );
 }
 
+/** Meta text that links into an entity page — a null ref or absent
+ *  handler renders the plain text exactly as before. */
+function MetaEntityLink({
+  entityRef,
+  onOpenEntity,
+  a11yTitle,
+  children,
+}: {
+  readonly entityRef: EntityRef | null;
+  readonly onOpenEntity?: ((ref: EntityRef) => void) | undefined;
+  readonly a11yTitle: string;
+  readonly children: ReactNode;
+}) {
+  if (entityRef === null || onOpenEntity === undefined) {
+    return <>{children}</>;
+  }
+  return (
+    <Pressable
+      onPress={() => onOpenEntity(entityRef)}
+      ariaLabel={t('entity.cardA11y', { title: a11yTitle })}
+      className="uw-stage__link"
+    >
+      {children}
+    </Pressable>
+  );
+}
+
 export function NowPlayingScreen({
   player,
   mode,
@@ -270,6 +298,7 @@ export function NowPlayingScreen({
   onTrackMenu,
   onStopPlayback,
   onRecovery,
+  onOpenEntity,
   onSeek,
   peaks,
   onRetryLyrics,
@@ -477,16 +506,36 @@ export function NowPlayingScreen({
               )}
               <div className="uw-stage__meta-row">
                 <div className="uw-stage__meta">
-                  <Text variant="display" color="bright" numberOfLines={1}>
-                    {meta.title}
-                  </Text>
-                  <Text variant="body" color="primary" numberOfLines={1}>
-                    {meta.artistLabel}
-                  </Text>
-                  {meta.albumLabel !== null && (
-                    <Text variant="metadata" color="secondary" numberOfLines={1}>
-                      {meta.albumLabel}
+                  {/* Title and album line both open the album page — a
+                      track's own page is its album's tracklist. */}
+                  <MetaEntityLink
+                    entityRef={meta.albumRef}
+                    onOpenEntity={onOpenEntity}
+                    a11yTitle={meta.title}
+                  >
+                    <Text variant="display" color="bright" numberOfLines={1}>
+                      {meta.title}
                     </Text>
+                  </MetaEntityLink>
+                  <MetaEntityLink
+                    entityRef={meta.artistRef}
+                    onOpenEntity={onOpenEntity}
+                    a11yTitle={meta.artistLabel}
+                  >
+                    <Text variant="body" color="primary" numberOfLines={1}>
+                      {meta.artistLabel}
+                    </Text>
+                  </MetaEntityLink>
+                  {meta.albumLabel !== null && (
+                    <MetaEntityLink
+                      entityRef={meta.albumRef}
+                      onOpenEntity={onOpenEntity}
+                      a11yTitle={meta.albumLabel}
+                    >
+                      <Text variant="metadata" color="secondary" numberOfLines={1}>
+                        {meta.albumLabel}
+                      </Text>
+                    </MetaEntityLink>
                   )}
                   {meta.errorMessage !== null && (
                     <Text variant="metadata" color="warn" numberOfLines={2}>

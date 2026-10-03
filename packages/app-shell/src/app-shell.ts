@@ -3144,6 +3144,20 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [overlay, pushOverlay, loadEntityPage],
   );
 
+  // Entity nav from the stage's meta cluster — mobile's sheet covers
+  // the world, so it folds for the pushed route to show (same rule
+  // the queue-context nav follows); desktop's stage is a column and
+  // stays put.
+  const openEntityFromStage = useCallback(
+    (ref: EntityRef) => {
+      if (ports.closeStageOnContextNav === true) {
+        setStageOpen(false);
+      }
+      openEntity(ref);
+    },
+    [openEntity, ports.closeStageOnContextNav],
+  );
+
   const onEntityCardLike = useCallback(
     (card: EntityCardModel) => {
       // Ref-scoped like — an unvisited card materializes through a
@@ -3707,6 +3721,30 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [entityModelFor, canPlayMeta, online, ports.entityPlayRequiresCanPlay],
   );
 
+  // Ordered play of the entity's whole context — the header's
+  // primary action: album pages play top-down, playlists in order.
+  const entityPlayAll = useCallback(
+    (fetch: EntityFetch | null, entryKey: string) => {
+      const metas = entityContextMetas(fetch, entryKey);
+      if (metas.length === 0) {
+        return;
+      }
+      void dispatchPlay(
+        'action.playAll',
+        session.playMetadata(metas, {
+          startAt: 0,
+          origin: entityOriginFor(fetch),
+        }),
+      );
+    },
+    [
+      session,
+      entityContextMetas,
+      dispatchPlay,
+      ports.entityPlayRequiresCanPlay,
+    ],
+  );
+
   // Shuffle-play the entity's whole context — the one header action
   // row taps can't express.
   const entityShuffleAll = useCallback(
@@ -4102,6 +4140,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     playLibraryItem,
     playPlaylistEntry,
     playRefFor,
+    entityPlayAll,
     entityShuffleAll,
     onEntityRowPress,
     reportPlay,
@@ -4219,6 +4258,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     // entity fetches
     loadEntityPage,
     openEntity,
+    openEntityFromStage,
     onLoadMore,
     // transfer
     onExport,

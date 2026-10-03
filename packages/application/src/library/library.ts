@@ -174,8 +174,15 @@ export type ArtworkCacheEntry = {
   lastAccessedMs: number;
 };
 
-/** Recording rows export flat; refs and mappings export as junctions. */
-type ExportRecording = Omit<Recording, 'sourceRefs' | 'mappings'>;
+/**
+ * Recording rows export flat; refs and mappings export as junctions.
+ * `artistRef`/`albumRef` stay off the export too — device-local catalog
+ * evidence, re-derivable on import, never part of a portable document.
+ */
+type ExportRecording = Omit<
+  Recording,
+  'sourceRefs' | 'mappings' | 'artistRef' | 'albumRef'
+>;
 
 type RecordingSourceRef = { recordingId: string; ref: SourceRef };
 

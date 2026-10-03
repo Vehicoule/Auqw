@@ -840,7 +840,15 @@ function toExportDocument(
     formatVersion: 1,
     exportedAtMs,
     recordings: state.recordings.map(
-      ({ sourceRefs: _refs, mappings: _mappings, ...core }) => core,
+      ({
+        sourceRefs: _refs,
+        mappings: _mappings,
+        // Device-local catalog evidence — export docs keep the
+        // pre-v16 shape; refs re-derive on re-materialization.
+        artistRef: _artistRef,
+        albumRef: _albumRef,
+        ...core
+      }) => core,
     ),
     sourceRefs: state.recordings.flatMap((recording) =>
       recording.sourceRefs.map((ref) => ({ recordingId: recording.id, ref })),

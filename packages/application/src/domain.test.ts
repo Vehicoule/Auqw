@@ -10,6 +10,7 @@ import {
   isSourceRef,
   isTrackMetadata,
   isTrackRef,
+  mergeRecordingMetadata,
   portableArtwork,
   recordingFromMetadata,
 } from './domain.ts';
@@ -198,6 +199,43 @@ export function run(): void {
     'rec-2',
   );
   assertEqual(withIsrc.isrc, 'USRC17607839');
+
+  // Provider-supplied entity refs land on the recording; like the
+  // ISRC a merge only ever fills them in, never removes one.
+  const refMeta: TrackMetadata = {
+    ...META,
+    artistRef: { provider: 'deezer', kind: 'artist', id: 'a-1' },
+    albumRef: { provider: 'deezer', kind: 'album', id: 'b-1' },
+  };
+  const withRefs = recordingFromMetadata(refMeta, 'rec-refs');
+  assert(isRecording(withRefs));
+  assertEqual(withRefs.artistRef?.id, 'a-1');
+  assertEqual(withRefs.albumRef?.id, 'b-1');
+  const refMerged = mergeRecordingMetadata(withRefs, META);
+  assertEqual(refMerged.artistRef?.id, 'a-1', 'ref is fill-only');
+  assertEqual(refMerged.albumRef?.id, 'b-1', 'ref is fill-only');
+
+  // The ref keys are optional on the persisted document: a row
+  // written before v16 has no ref columns, and it still validates;
+  // malformed refs and unrelated keys still reject.
+  const { artistRef: _dropA, albumRef: _dropB, ...legacyDoc } = withRefs;
+  assert(isRecording(legacyDoc), 'ref-less document validates');
+  assert(
+    !isRecording({ ...legacyDoc, artistRef: { bad: 1 } }),
+    'malformed ref rejects',
+  );
+  assert(
+    isRecording({
+      ...legacyDoc,
+      artistRef: { provider: 'deezer', kind: 'album', id: 'x' },
+      albumRef: null,
+    }),
+    'explicit refs still validate',
+  );
+  assert(
+    !isRecording({ ...legacyDoc, unrelated: 1 }),
+    'unrelated extra keys still reject',
+  );
 
   // Settings optional provider overrides: absent or null, otherwise
   // a provider id; malformed values reject.

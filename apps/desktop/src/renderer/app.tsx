@@ -868,6 +868,7 @@ function Main({
     playLibraryItem,
     playPlaylistEntry,
     playRefFor,
+    entityPlayAll,
     entityShuffleAll,
     onEntityRowPress,
     entityRowMeta,
@@ -954,6 +955,7 @@ function Main({
     reviewOp,
     loadEntityPage,
     openEntity,
+    openEntityFromStage,
     onLoadMore,
     onExport,
     beginImportRead,
@@ -1440,6 +1442,7 @@ function Main({
           <EntityScreen
             model={entityModelFor(fetch)}
             onBack={closeOverlay}
+            onPlayAll={() => entityPlayAll(fetch, entry.key)}
             onShuffleAll={() => entityShuffleAll(fetch, entry.key)}
             onToggleLike={
               entityId === null
@@ -1625,6 +1628,7 @@ function Main({
                 <NowPlayingScreen
                   player={player}
                   mode={stageMode}
+                  onOpenEntity={openEntityFromStage}
                   onModeChange={setStageMode}
                   queue={queueModel}
                   queueReordering={reordering}

@@ -262,6 +262,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'entity.kind.album': 'album',
   'entity.kind.artist': 'künstler',
   'entity.kind.fallback': 'eintrag',
+  'entity.play': 'abspielen',
   'entity.shuffle': 'zufällig',
   'entity.errorTitle': 'diese seite konnte nicht geladen werden',
   'entity.partial':
@@ -602,6 +603,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'error.importInvalid': 'diese datei ist kein gültiger bibliotheks-export',
 
   // ---- reported operation names ------------------------------------------
+  'action.playAll': 'alle abspielen',
   'action.playResult': 'ergebnis abspielen',
   'action.playCollection': 'sammlung abspielen',
   'action.playPlaylist': 'playlist abspielen',

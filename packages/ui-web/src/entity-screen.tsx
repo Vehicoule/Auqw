@@ -111,7 +111,21 @@ export function EntityScreen({
 
       {/* Hero: centered artwork + title block, then the action pills. */}
       <div className="uw-entity__hero">
-        <Artwork url={model.artworkUrl} size={160} />
+        {/* Blurred artwork wash behind the hero — pure decoration,
+            absent entirely when the page has no cover. */}
+        {model.artworkUrl !== null && (
+          <div
+            className="uw-entity__backdrop"
+            style={{ backgroundImage: `url("${model.artworkUrl}")` }}
+          />
+        )}
+        {/* Artist pages conventionally round the portrait; album and
+            playlist covers stay square. */}
+        <Artwork
+          url={model.artworkUrl}
+          size={160}
+          cornerRadius={model.kind === 'artist' ? 80 : undefined}
+        />
         <Text
           variant="metadata"
           color="secondary"
@@ -131,6 +145,7 @@ export function EntityScreen({
       </div>
 
       <div className="uw-entity__actions">
+        <HeaderPill view={view.play} />
         <HeaderPill view={view.shuffle} />
         {/*
          * Like only binds to a materialized entity (canLike); an
