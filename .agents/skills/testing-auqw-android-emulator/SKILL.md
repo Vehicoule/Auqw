@@ -1017,3 +1017,34 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   retries → nested-update cap). Any new ticking-path setState —
   `bumpLyricLayout` in lyric-row onLayout, effects whose deps rebuild
   per render — is the same class.
+
+## Phase-6 notes (Android emulator — leaf-tick fix verified, #358)
+
+- **The storm died at the leaves, not at the data:** per-tick position
+  state was deleted from `useAppShell` entirely — the leaves
+  (`LiveWaveformSeek`, `LiveLyricsPane`, embedded `MiniPlayer` ring)
+  subscribe via `usePositionMs(session)`/`useLiveLyricsModel`.
+  Verified 0 fires / ~31.5min ticking under radio growth + rapid
+  provider skips — provisional, emulator-measured (baseline ~2.5/min,
+  post-#356 ~1.6/min). Stable
+  `data` alone only halved it — VL re-arms on ANY prop diff, so only
+  removing the ticking render wins.
+- **Leaf contracts to check when touching position surfaces:** the
+  leaves' `session` is gated on a live player (`player === null →
+  undefined`) — the held ended pose freezes at the model's retained
+  position; `skipPeeksFor(ms)` is a publish-stable factory the
+  position-subscribed leaf re-evaluates per tick so the >3s
+  previous-restart boundary tracks the live read.
+- **Held-pose recipe:** single-track queue + seek-to-end → the pane
+  holds the end position through the end transition, then settles to
+  the replay-ready 0:00 pose (the model's own ended publish — the
+  leaf is frozen once `player` is null).
+- **Timing floors:** ring/progress-leaf verification needs ≥60s
+  deltas at this thumb size (~17%→51% arc over ~95s was the readable
+  swing); 'radio · stop' chip freezes tail growth without killing
+  playback — useful to stabilize a ticking-but-static queue.
+- **Watch item:** 'couldn't start — sqlite driver unavailable' NPE
+  hit 3× in one night (~10min into deezer ticking, both branches);
+  Retry never recovers, force-stop+relaunch does. Possibly
+  emulator-only execAsync-under-load, but flag it if it reproduces
+  elsewhere.
