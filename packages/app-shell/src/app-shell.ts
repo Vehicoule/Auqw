@@ -105,6 +105,7 @@ import type {
   ReviewFetch,
   SearchFilter,
   SkipPeek,
+  SkipPeeks,
   StageMode,
   TrackRowModel,
   TransferModel,
@@ -1431,53 +1432,60 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // previous-restart) plus the same attachability gate, so the card
   // under your finger is the row the skip actually lands on — and a
   // target that would be gated away is a dead edge, not a false
-  // promise.
-  const skipPreview = useMemo(() => {
-    const { occurrences, currentOccurrenceId, blockedError } = state.queue;
-    const failed = failedSkipIds(failedQueueErrors.current);
-    const targets = skipTargetIds({
-      occurrences,
-      currentOccurrenceId,
-      dealtOrder: state.shuffleOrder,
-      failedIds: failed,
-      repeat: state.repeat,
-      positionMs: state.queue.positionMs,
-      blocked: blockedError !== undefined,
-    });
-    const peek = (targetId: string | null): SkipPeek | null => {
-      if (targetId === null) {
-        return null;
-      }
-      const target = occurrences.find(
-        (o) => o.occurrenceId === targetId,
-      );
-      if (target === undefined) {
-        return null;
-      }
-      const blocked =
-        ports.gateAdvanceAlways === true
-          ? !canPlay(target.recordingId)
-          : online === false && !localPlayable(target.recordingId);
-      if (blocked) {
-        return null;
-      }
-      return skipPeekFor(queueModel, targetId);
-    };
-    return {
-      next: peek(targets.next),
-      previous: peek(targets.previous),
-      nextEndsQueue: targets.nextEndsQueue,
-    };
-  }, [
-    state.queue,
-    state.shuffleOrder,
-    state.repeat,
-    queueModel,
-    online,
-    canPlay,
-    localPlayable,
-    ports.gateAdvanceAlways,
-  ]);
+  // promise. A factory, not a resolved value: the restart/step
+  // boundary reads the LIVE position (advance decides on
+  // session.positionMs at press time), so the position-subscribed
+  // leaf re-evaluates per tick rather than trusting the publish-time
+  // position frozen into the snapshot.
+  const skipPeeksFor = useCallback(
+    (positionMs: number): SkipPeeks => {
+      const { occurrences, currentOccurrenceId, blockedError } = state.queue;
+      const failed = failedSkipIds(failedQueueErrors.current);
+      const targets = skipTargetIds({
+        occurrences,
+        currentOccurrenceId,
+        dealtOrder: state.shuffleOrder,
+        failedIds: failed,
+        repeat: state.repeat,
+        positionMs,
+        blocked: blockedError !== undefined,
+      });
+      const peek = (targetId: string | null): SkipPeek | null => {
+        if (targetId === null) {
+          return null;
+        }
+        const target = occurrences.find(
+          (o) => o.occurrenceId === targetId,
+        );
+        if (target === undefined) {
+          return null;
+        }
+        const blocked =
+          ports.gateAdvanceAlways === true
+            ? !canPlay(target.recordingId)
+            : online === false && !localPlayable(target.recordingId);
+        if (blocked) {
+          return null;
+        }
+        return skipPeekFor(queueModel, targetId);
+      };
+      return {
+        next: peek(targets.next),
+        previous: peek(targets.previous),
+        nextEndsQueue: targets.nextEndsQueue,
+      };
+    },
+    [
+      state.queue,
+      state.shuffleOrder,
+      state.repeat,
+      queueModel,
+      online,
+      canPlay,
+      localPlayable,
+      ports.gateAdvanceAlways,
+    ],
+  );
 
   // An ended queue surfaces itself: when playback goes idle with the
   // queue's occurrences still listed, the stage rides queue mode so
@@ -4179,7 +4187,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     stagePlayer,
     heldOccurrenceId,
     queueModel,
-    skipPreview,
+    skipPeeksFor,
     libraryModel,
     playlistModelFor,
     entityModelFor,

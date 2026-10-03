@@ -1663,7 +1663,10 @@ function Main({
               player !== null ? (
                 <NowPlayingScreen
                   player={player}
-                  session={session}
+                  // No live player = ended pose — the leaves freeze
+                  // at publish-time position (matches the native
+                  // sheet's held-mount gate).
+                  session={player === null ? undefined : session}
                   mode={stageMode}
                   onOpenEntity={openEntityFromStage}
                   onModeChange={setStageMode}

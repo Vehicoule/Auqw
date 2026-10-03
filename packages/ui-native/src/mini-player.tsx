@@ -42,6 +42,7 @@ import type {
   PlayerModel,
   PositionSource,
   SkipPeek,
+  SkipPeeks,
 } from '@auqw/ui-shared';
 
 export type MiniPlayerProps = {
@@ -113,6 +114,13 @@ export type MiniPlayerProps = {
       the queue running out, and release commits onNext like any
       landing. Distinct from a dead edge, which only rubber-bands. */
   readonly nextEndsQueue?: boolean | undefined;
+  /** Live peek resolution — re-evaluated per position tick (with
+      `session`) so the >3s previous-restart boundary tracks the
+      position the commit actually reads, not the last publish's.
+      Wins over the frozen trio when both are present. */
+  readonly peeksFor?:
+    | ((positionMs: number) => SkipPeeks)
+    | undefined;
 };
 
 /** The incoming row inside the conveyor — art + meta mirroring the
@@ -184,6 +192,7 @@ export function MiniPlayer({
   skipNext,
   skipPrevious,
   nextEndsQueue,
+  peeksFor,
 }: MiniPlayerProps) {
   const theme = useTheme();
   const ios = platform === 'ios';
@@ -204,16 +213,27 @@ export function MiniPlayer({
   // are fresh objects every position tick and reading them inside the
   // worklet would either go stale or force a gesture rebuild (a fresh
   // Pan() cancels an in-flight swipe).
-  const nextLive = useSharedValue(skipNext != null ? 1 : 0);
-  const prevLive = useSharedValue(skipPrevious != null ? 1 : 0);
-  const nextDrains = useSharedValue(nextEndsQueue === true ? 1 : 0);
-  useEffect(() => {
-    nextLive.value = skipNext != null ? 1 : 0;
-    prevLive.value = skipPrevious != null ? 1 : 0;
-    nextDrains.value = nextEndsQueue === true ? 1 : 0;
-  }, [skipNext, skipPrevious, nextEndsQueue, nextLive, prevLive, nextDrains]);
   const liveMs = usePositionMs(session);
   const positionMs = session === undefined ? player.positionMs : liveMs;
+  const peeks = useMemo(
+    (): SkipPeeks =>
+      peeksFor === undefined
+        ? {
+            next: skipNext ?? null,
+            previous: skipPrevious ?? null,
+            nextEndsQueue: nextEndsQueue === true,
+          }
+        : peeksFor(positionMs),
+    [peeksFor, positionMs, skipNext, skipPrevious, nextEndsQueue],
+  );
+  const nextLive = useSharedValue(peeks.next != null ? 1 : 0);
+  const prevLive = useSharedValue(peeks.previous != null ? 1 : 0);
+  const nextDrains = useSharedValue(peeks.nextEndsQueue ? 1 : 0);
+  useEffect(() => {
+    nextLive.value = peeks.next != null ? 1 : 0;
+    prevLive.value = peeks.previous != null ? 1 : 0;
+    nextDrains.value = peeks.nextEndsQueue ? 1 : 0;
+  }, [peeks, nextLive, prevLive, nextDrains]);
   const progress =
     player.durationMs === null || player.durationMs <= 0
       ? 0
@@ -232,7 +252,7 @@ export function MiniPlayer({
     onExpandCommit,
     onCollapse,
   });
-  const skipData = useRef({ next: skipNext, previous: skipPrevious });
+  const skipData = useRef({ next: peeks.next, previous: peeks.previous });
   const occurrenceId = useRef(player.occurrenceId);
   useEffect(() => {
     callbacks.current = {
@@ -243,7 +263,7 @@ export function MiniPlayer({
       onExpandCommit,
       onCollapse,
     };
-    skipData.current = { next: skipNext, previous: skipPrevious };
+    skipData.current = { next: peeks.next, previous: peeks.previous };
     occurrenceId.current = player.occurrenceId;
   });
   const emit = useCallback(
@@ -790,24 +810,24 @@ export function MiniPlayer({
             </View>
           </Pressable>
         </Animated.View>
-        {skipPrevious != null && (
+        {peeks.previous != null && (
           <Animated.View
             pointerEvents="none"
             accessibilityElementsHidden
             importantForAccessibility="no-hide-descendants"
             style={[StyleSheet.absoluteFill, prevPeekStyle]}
           >
-            <SkipPeekRow peek={skipPrevious} />
+            <SkipPeekRow peek={peeks.previous} />
           </Animated.View>
         )}
-        {skipNext != null && (
+        {peeks.next != null && (
           <Animated.View
             pointerEvents="none"
             accessibilityElementsHidden
             importantForAccessibility="no-hide-descendants"
             style={[StyleSheet.absoluteFill, nextPeekStyle]}
           >
-            <SkipPeekRow peek={skipNext} />
+            <SkipPeekRow peek={peeks.next} />
           </Animated.View>
         )}
       </View>

@@ -73,6 +73,7 @@ import type {
   QueueModel,
   RadioModel,
   SkipPeek,
+  SkipPeeks,
   StageMode,
   WaveformPeak,
 } from '@auqw/ui-shared';
@@ -619,8 +620,10 @@ export type StageSheetProps = {
   readonly mode?: StageMode | undefined;
   readonly queue?: QueueModel | undefined;
   /** The live position channel the position-drawing leaves subscribe
-      — omitting it (standalone hosts) freezes the scrubber and the
-      synced-lyric clock at the publish-time values the models carry. */
+      — omitting it freezes the scrubber and the synced-lyric clock
+      at the publish-time values the models carry. Hosts also omit it
+      when no live playback remains (the held ended pose): the queue's
+      cleared position would reset the pose to 0:00 otherwise. */
   readonly session?: PositionSource | undefined;
   /** Publish-stable lyrics fetch inputs — the leaf rebuilds the model
       on its smoothed clock; null renders the empty pane. */
@@ -675,6 +678,12 @@ export type StageSheetProps = {
   readonly skipNext?: SkipPeek | null | undefined;
   readonly skipPrevious?: SkipPeek | null | undefined;
   readonly nextEndsQueue?: boolean | undefined;
+  /** Live peek resolution forwarded to the embedded MiniPlayer —
+      re-evaluated per position tick so the >3s restart boundary
+      tracks the live engine position. */
+  readonly peeksFor?:
+    | ((positionMs: number) => SkipPeeks)
+    | undefined;
   /** Swipe-down dismiss on the collapsed surface — the pill's
       slide-off settles, then this fires (the host stops playback). */
   readonly onDismiss?: (() => void) | undefined;
@@ -781,6 +790,7 @@ export function StageSheet({
   skipNext,
   skipPrevious,
   nextEndsQueue,
+  peeksFor,
   onDismiss,
   onPlayPause,
   onNext,
@@ -2160,6 +2170,7 @@ export function StageSheet({
               skipNext={skipNext}
               skipPrevious={skipPrevious}
               nextEndsQueue={nextEndsQueue}
+              peeksFor={peeksFor}
             />
           </Animated.View>
         </Animated.View>

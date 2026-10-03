@@ -947,7 +947,7 @@ function Main({
     stagePlayer: sheetPlayer,
     heldOccurrenceId,
     queueModel,
-    skipPreview,
+    skipPeeksFor,
     peaks,
     onPlayPause,
     onToggleLike,
@@ -2655,7 +2655,10 @@ function Main({
           {sheetPlayer !== null ? (
             <StageSheet
               player={sheetPlayer}
-              session={session}
+              // No live player = held ended pose — the leaves
+              // freeze at the model's retained position rather
+              // than resetting on the queue's cleared position.
+              session={player === null ? undefined : session}
               expanded={expanded}
               onOpenEntity={openEntityFromStage}
               progress={stageProgress}
@@ -2665,9 +2668,7 @@ function Main({
               collapsedHeight={stageCollapsedHeight}
               onExpandChange={setStageOpenFor}
               onDismiss={() => void session.stop()}
-              skipNext={skipPreview.next}
-              skipPrevious={skipPreview.previous}
-              nextEndsQueue={skipPreview.nextEndsQueue}
+              peeksFor={skipPeeksFor}
               mode={stageMode}
               onModeChange={setStageMode}
               restMode={stageReopenMode}
