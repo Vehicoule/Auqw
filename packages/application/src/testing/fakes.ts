@@ -855,7 +855,15 @@ export class FakeStorage implements StoragePort {
       formatVersion: 1,
       exportedAtMs,
       recordings: state.recordings.map(
-        ({ sourceRefs: _refs, mappings: _mappings, ...core }) => core,
+        ({
+          sourceRefs: _refs,
+          mappings: _mappings,
+          // Device-local catalog evidence — the real port keeps it
+          // off the document too; refs re-derive on import.
+          artistRef: _artistRef,
+          albumRef: _albumRef,
+          ...core
+        }) => core,
       ),
       sourceRefs: state.recordings.flatMap((recording) =>
         recording.sourceRefs.map((ref) => ({
