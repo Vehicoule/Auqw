@@ -191,7 +191,8 @@ step input, a response id that matches no outstanding request — fails
 
 `abi` is `0.1.0` — any other value is rejected (the host [unconditionally
 rejects](../../crates/plugin-host/src/invoke.rs) a manifest pinning anything
-else). A manifest may declare any subset of the capabilities above;
+else). A manifest must declare a non-empty subset of the capabilities
+above (`capabilities: []` is rejected);
 `host_request` kinds are gated by permission, not by capability set.
 
 Permission grammar: `network:<host>` exact match; `network:*.<domain>`
