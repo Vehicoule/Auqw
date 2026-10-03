@@ -266,6 +266,9 @@ export function IosGlassNavbar({
                     gap: theme.spacing.xxs,
                     paddingVertical: theme.spacing.xs,
                     paddingHorizontal: theme.spacing.md,
+                    // Bound to the slot or long translations widen the
+                    // plate past its neighbor's edge.
+                    maxWidth: '100%',
                     borderRadius: theme.radius.float,
                     borderWidth: theme.strokes.hairline,
                     borderColor: active

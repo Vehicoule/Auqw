@@ -1557,6 +1557,12 @@
   background: var(--raised);
 }
 
+/* The shared pressable hover wash must not paint the tile itself —
+   it would fill the seam between the two surfaces. */
+.uw-collection:hover:not(:disabled) {
+  background: transparent;
+}
+
 .uw-collection:hover:not(:disabled) .uw-collection__icon,
 .uw-collection:hover:not(:disabled) .uw-collection__body {
   border-color: var(--fg40);
