@@ -36,6 +36,7 @@ import type {
   UpdateSnapshot,
 } from '@auqw/application';
 import {
+  dedupeTrackListings,
   entityRefKey,
   nextQueueDestination,
   reportResult,
@@ -660,6 +661,25 @@ export function reportStoredDownloadError(
  * is platform behavior: mobile's activateHomeCard scanned the page in
  * order (first match wins), desktop's Map.set overwrote (last wins).
  */
+/**
+ * The metas a rendered home suggestion card can key on. The home
+ * model keys cards off `dedupeTrackListings(...).slice(0, 12)` group
+ * reps, and a rep keeps its raw page index — a same-song duplicate
+ * collapsing inside the bound pushes a rendered rep past a raw
+ * `items.slice(0, limit)`, so the bound lands on the dedupe. Group
+ * members come along: a hidden duplicate's own key still resolves to
+ * its own listing — the same song the card displays.
+ */
+export function suggestionCardMetas(
+  items: readonly TrackMetadata[],
+  limit: number | undefined,
+): readonly TrackMetadata[] {
+  const deduped = dedupeTrackListings(items);
+  const bounded =
+    limit === undefined ? deduped : deduped.slice(0, limit);
+  return bounded.flatMap((entry) => entry.group);
+}
+
 export function suggestionMetaMap(
   items: readonly TrackMetadata[],
   collisionOrder: 'firstWins' | 'lastWins',
@@ -739,10 +759,22 @@ export function playlistDownloadPlan(input: {
   };
 }
 
-// ---- queue provenance navigation -----------------------------------
+// ---- queue provenance ----------------------------------------------
 // "playing from …" navigates back to the surface that minted the
 // queue. A source already in the overlay stack is unwound to instead
 // of pushed again — Back should leave the source, not walk copies.
+
+/** The search-origin stamp: `query` is contract-bounded at 256 UTF-16
+    units (isQueueOrigin) — a committed query past the cap still
+    plays, its provenance label clipped on a code-point boundary so
+    no lone surrogate is stored. An empty query mints no origin. */
+export const searchOrigin = (query: string): QueueOrigin | undefined => {
+  const clipped = query.slice(0, 256);
+  const tail = clipped.charCodeAt(clipped.length - 1);
+  const bounded =
+    tail >= 0xd800 && tail <= 0xdbff ? clipped.slice(0, -1) : clipped;
+  return bounded.length === 0 ? undefined : { kind: 'search', query: bounded };
+};
 
 /** The overlay route a queue origin navigates to — null for kinds
     that are world tabs (search/library), not overlays. */

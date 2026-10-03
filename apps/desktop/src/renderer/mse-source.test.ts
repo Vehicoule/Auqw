@@ -651,6 +651,51 @@ export async function run(): Promise<void> {
     assert(media.ended, 'the source re-ends once eviction drains');
   }
 
+  // A seek into coverage a pending eviction has already claimed must
+  // not trust `buffered`: the span still reports covered until its
+  // remove() commits at updateend, so believing the report parks the
+  // playhead in the hole the removal opens. While the chain is in
+  // flight the seek re-anchors instead — the pump refetches the span.
+  {
+    const { attach, media, port } = beginAttach('h-4d5');
+    await settle();
+    media.fireSourceopen();
+    // 14 feeds → buffered media through ~260s (10s per append).
+    for (let i = 0; i < 14; i++) {
+      feedData(port, webmFixture(), i * 63);
+    }
+    const source = await (await attach).ready;
+    await settle();
+    const sb = media.sourceBuffer;
+    assert(sb !== null);
+    // Playhead at 250s queues every range below 130s: [0,10) removes
+    // first while [10,20)…[120,130) sit queued — and still report
+    // buffered until their own updateends.
+    source.notePosition(250_000);
+    assertDeepEqual(sb.removes, [[0, 10]], 'first remove in flight');
+    source.seekTo(15_000);
+    const seek = port.sent.find(
+      (m) => (m as { kind?: string }).kind === 'seek',
+    ) as { position: number; epoch: number } | undefined;
+    assert(seek !== undefined, 'seek into queued eviction re-anchored');
+    assertEqual(seek.position, 29, 'byte start of the covering unit');
+    await settle();
+    assert(
+      sb.removes.length > 1,
+      'the queued evictions still committed',
+    );
+    // The re-anchored pump refills the hole the removal opened.
+    const appendsBefore = sb.appends.length;
+    feedData(
+      port,
+      webmFixture().subarray(29, 48),
+      seek.position,
+      seek.epoch,
+    );
+    await settle();
+    assert(sb.appends.length > appendsBefore, 'refetched media appended');
+  }
+
   // abort() settles `ready` with MseAborted — a killed attach must
   // not leave a caller suspended on first.settle forever.
   {

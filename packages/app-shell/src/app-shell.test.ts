@@ -34,10 +34,12 @@ import {
   rowActionsModel,
   sameNavLocation,
   sameOverlayRoute,
+  searchOrigin,
   searchRowTarget,
   skipTargetIds,
   stageDownloadChip,
   stageReopenMode,
+  suggestionCardMetas,
   suggestionMetaMap,
 } from './types.ts';
 import type { SourceRef } from '@auqw/application';
@@ -527,6 +529,56 @@ const entry = (recordingId: string) => ({ recordingId, selectedRef: null });
   assertEqual(first.size, 2);
 }
 
+// ---- suggestionCardMetas --------------------------------------------
+// Cards key off the dedupe's group reps, and a rep keeps its raw page
+// index — a same-song duplicate collapsing inside the bound pushes a
+// rendered rep past a raw items.slice(0, limit), and its card key then
+// misses the lookup entirely. The bound lands on the dedupe instead.
+{
+  const meta = (title: string, id: string): TrackMetadata => ({
+    sourceRef: { provider: 'ytm', kind: 'track', id },
+    title,
+    artist: 'a',
+    album: null,
+    durationMs: 60_000,
+    releaseYear: null,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    storefront: null,
+  });
+  const page: TrackMetadata[] = [
+    meta('Sunset', 'g0a'),
+    meta('Sunset', 'g0b'), // same-song duplicate of g0a — one group
+    ...Array.from({ length: 11 }, (_, i) => meta(`Song ${i + 2}`, `s${i + 2}`)),
+  ];
+  // 13 raw rows → 12 groups; the 12th group's rep is raw item s12 at
+  // index 12 — outside a raw slice(0,12).
+  assert(
+    page.slice(0, 12).every((m) => m.sourceRef.id !== 's12'),
+    'the pre-fix raw bound misses the last rendered rep',
+  );
+  const bounded = suggestionCardMetas(page, 12);
+  const keys = new Set(
+    bounded.map((m) => `${m.sourceRef.provider}:${m.sourceRef.id}`),
+  );
+  assert(
+    keys.has('ytm:s12'),
+    'every rendered card key resolves under the dedupe bound',
+  );
+  assert(
+    keys.has('ytm:g0b'),
+    "a hidden duplicate's own key still resolves to its listing",
+  );
+  const map = suggestionMetaMap(bounded, 'lastWins');
+  assertEqual(map.get('ytm:s12')?.title, 'Song 12');
+  assertEqual(
+    suggestionCardMetas(page, undefined).length,
+    page.length,
+    'an unset bound keeps the whole page (mobile)',
+  );
+}
+
 // ---- reportStoredDownloadError --------------------------------------
 const toasts: string[] = [];
 setToastSink((text) => {
@@ -569,6 +621,31 @@ assert(
     { type: 'entity', ref: { ...albumRef } },
   ),
   'entity routes match by ref identity, not object identity',
+);
+
+// The search-origin stamp holds the QueueOrigin contract bound
+// (query <= 256 UTF-16 units) — an over-cap committed query still
+// plays, its label clipped on a code-point boundary.
+assertDeepEqual(
+  searchOrigin('what a query'),
+  { kind: 'search', query: 'what a query' },
+  'a query inside the bound mints verbatim',
+);
+const clippedOrigin = searchOrigin('q'.repeat(300));
+assert(
+  clippedOrigin?.kind === 'search' &&
+    clippedOrigin.query === 'q'.repeat(256),
+  'an over-cap query clips to the contract bound',
+);
+assertEqual(
+  searchOrigin(''),
+  undefined,
+  'an empty query mints no origin',
+);
+const astralClipped = searchOrigin(`${'a'.repeat(255)}\u{1f600}`);
+assert(
+  astralClipped?.kind === 'search' && astralClipped.query.length === 255,
+  'the clip drops a split surrogate pair — no lone surrogate stored',
 );
 assert(
   !sameOverlayRoute(

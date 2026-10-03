@@ -174,8 +174,15 @@ export type ArtworkCacheEntry = {
   lastAccessedMs: number;
 };
 
-/** Recording rows export flat; refs and mappings export as junctions. */
-type ExportRecording = Omit<Recording, 'sourceRefs' | 'mappings'>;
+/**
+ * Recording rows export flat; refs and mappings export as junctions.
+ * `artistRef`/`albumRef` stay off the export too — device-local catalog
+ * evidence, re-derivable on import, never part of a portable document.
+ */
+type ExportRecording = Omit<
+  Recording,
+  'sourceRefs' | 'mappings' | 'artistRef' | 'albumRef'
+>;
 
 type RecordingSourceRef = { recordingId: string; ref: SourceRef };
 
@@ -725,6 +732,24 @@ const EXPORT_KEYS = [
   'settings',
 ];
 
+// A recordings row carries the flat fields only — source refs and
+// mappings live in their junctions, and device-local evidence
+// (`artistRef`/`albumRef`) never crosses the document boundary.
+// `provenance` is optional: pre-slice-3 exports predate it.
+const EXPORT_RECORDING_REQUIRED = [
+  'id',
+  'title',
+  'artist',
+  'album',
+  'durationMs',
+  'releaseYear',
+  'artwork',
+  'explicit',
+  'genre',
+  'isrc',
+  'versionLabels',
+];
+
 /**
  * Whole-document validation for the owned-data export: every section
  * validates and every junction row resolves before anything commits.
@@ -751,6 +776,7 @@ export function isExportDocument(value: unknown): value is ExportDocument {
   for (const rec of v['recordings']) {
     if (
       !isRecord(rec) ||
+      !hasKeys(rec, EXPORT_RECORDING_REQUIRED, ['provenance']) ||
       !isString(rec['id'], 64) ||
       recordingIds.has(rec['id'])
     ) {

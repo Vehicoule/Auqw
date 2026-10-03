@@ -26,6 +26,15 @@ object AuqwTagReader {
   /** Sampled bytes at head and tail of the file for the fingerprint. */
   private const val SAMPLE = 4096
 
+  /**
+   * Embedded art is trusted to be picture-sized: a cover past this
+   * bound is refused before hashing/storing. perDoc's catch isolates
+   * throws, not heap exhaustion — and the bytes ride the app's own
+   * heap, so an unbounded picture can kill the whole process, not
+   * just this batch entry.
+   */
+  private const val MAX_ART_BYTES = 32 * 1024 * 1024
+
   private fun docUri(treeUri: Uri, docId: String): Uri =
     DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
 
@@ -250,7 +259,7 @@ object AuqwTagReader {
    * directly — the artwork LRU cache is https-only and skips them.
    */
   private fun artworkUri(ctx: Context, bytes: ByteArray?): String? {
-    if (bytes == null || bytes.isEmpty()) return null
+    if (bytes == null || bytes.isEmpty() || bytes.size > MAX_ART_BYTES) return null
     val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
     val name = digest.joinToString("") { "%02x".format(it) }
     val dir = java.io.File(ctx.filesDir, "art")

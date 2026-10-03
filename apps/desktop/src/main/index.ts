@@ -80,6 +80,7 @@ import {
 } from './sync-keys.ts';
 import { createAuthCustodyHandler } from './auth-custody.ts';
 import { imgSrcSources, rewriteCsp } from './csp.ts';
+import { isRendererDocument } from './renderer-document.ts';
 import type { WindowState } from './window-state.ts';
 import {
   loadWindowState,
@@ -266,7 +267,10 @@ async function main(): Promise<void> {
       // A malformed request URL is not ours to answer for.
       return net.fetch(request, { bypassCustomProtocolHandlers: true });
     }
-    if (filePath !== RENDERER) {
+    // Canonicalized identity, not spelling: `file:////…`, interior
+    // `//`, `.` segments and case variants all name the same document
+    // and must not slip past the rewrite under the loose static CSP.
+    if (!isRendererDocument(filePath, RENDERER)) {
       return net.fetch(request, { bypassCustomProtocolHandlers: true });
     }
     // The renderer document never falls through: the static bytes carry
@@ -696,9 +700,12 @@ async function main(): Promise<void> {
           relaunch: () => {
             // The AppImage apply already renamed the new bytes over
             // $APPIMAGE — the restart must exec THAT file, not
-            // process.execPath inside the dying FUSE mount.
+            // process.execPath inside the dying FUSE mount. The quit
+            // runs the will-quit chain — supervisor kill + service
+            // stops — so the relaunched build doesn't inherit live
+            // ports (mDNS, LAN sync) from the dying process.
             app.relaunch(appImageRelaunchOptions(process.argv, appimagePath));
-            app.exit(0);
+            app.quit();
           },
         }
       : {}),
@@ -795,9 +802,14 @@ async function main(): Promise<void> {
         await supervisor
           .request(CHANNELS.localPicks, { paths: result.filePaths })
           .catch((thrown) => {
+            // Raw rejections can carry fs paths — only a typed
+            // ShellError's safe text is printable.
             console.warn(
-              '[dialog] local:picks attestation failed:',
-              thrown instanceof Error ? thrown.message : thrown,
+              `[dialog] local:picks attestation failed: ${
+                isShellError(thrown)
+                  ? `${thrown.kind}: ${thrown.message}`
+                  : 'unexpected failure'
+              }`,
             );
           });
       }
@@ -819,8 +831,11 @@ async function main(): Promise<void> {
           .request(CHANNELS.localPicks, { paths: result.filePaths })
           .catch((thrown) => {
             console.warn(
-              '[dialog] local:picks attestation failed:',
-              thrown instanceof Error ? thrown.message : thrown,
+              `[dialog] local:picks attestation failed: ${
+                isShellError(thrown)
+                  ? `${thrown.kind}: ${thrown.message}`
+                  : 'unexpected failure'
+              }`,
             );
           });
       }

@@ -9,7 +9,9 @@
  */
 import { appError, err, ok } from '../errors.ts';
 import { assert, assertEqual } from '../testing/assert.ts';
-import { createOAuthClient } from './oauth.ts';
+import { CancellationSource } from '../cancellation.ts';
+import { createFetchOAuthHttp, createOAuthClient } from './oauth.ts';
+import type { OAuthFetch } from './oauth.ts';
 import type { OAuthHttpResponse } from './oauth.ts';
 import type { OAuthHttp } from './oauth.ts';
 
@@ -281,7 +283,92 @@ async function testClientSecret(): Promise<void> {
   assertEqual(calls[1]?.pairs['client_id'], 'custom');
 }
 
+/**
+ * A fetch seam whose rejection carries the abort signal's state —
+ * the minimum a real runtime's fetch provides: an aborted request
+ * rejects, and `signal.aborted` reads true at rejection time.
+ */
+type RealAbortSignal = {
+  readonly aborted: boolean;
+  addEventListener?(name: 'abort', listener: () => void): void;
+};
+function abortingFetch(onCall: (signal: RealAbortSignal) => void): OAuthFetch {
+  const fn: OAuthFetch = (url, init) =>
+    new Promise((_resolve, reject) => {
+      const signal = init.signal as RealAbortSignal | undefined;
+      if (signal === undefined) {
+        reject(new Error('network down'));
+        return;
+      }
+      onCall(signal);
+      if (signal.aborted) {
+        reject(new Error('aborted'));
+        return;
+      }
+      signal.addEventListener?.('abort', () => reject(new Error('aborted')));
+      void url;
+    });
+  return fn;
+}
+
+async function testFetchHttpAbortCause(): Promise<void> {
+  // A caller dismissal aborts the fetch — the result is a
+  // 'cancelled' error, never 'unavailable' (which the retry ladder
+  // and the failed-state publish would treat as a network fault).
+  {
+    const source = new CancellationSource();
+    source.cancel();
+    const http = createFetchOAuthHttp(
+      abortingFetch(() => {
+        /* pre-cancelled: the seam subscribes a fired source */
+      }),
+    );
+    const res = await http.postForm('https://x/y', {}, {
+      signal: source.signal,
+    });
+    assert(!res.ok, 'pre-cancelled request must fail');
+    assertEqual(res.error.kind, 'cancelled');
+  }
+  {
+    const source = new CancellationSource();
+    const http = createFetchOAuthHttp(
+      abortingFetch((signal) => {
+        void source;
+        assert(!signal.aborted, 'must not be aborted before the deadline');
+        source.cancel();
+      }),
+    );
+    const res = await http.postForm('https://x/y', {}, {
+      signal: source.signal,
+    });
+    assert(!res.ok, 'cancelled request must fail');
+    assertEqual(res.error.kind, 'cancelled');
+  }
+  // The deadline lapst the fetch — 'timeout', not 'unavailable'.
+  {
+    const http = createFetchOAuthHttp(
+      abortingFetch(() => {
+        /* the timer fires first */
+      }),
+    );
+    const res = await http.postForm('https://x/y', {}, { timeoutMs: 5 });
+    assert(!res.ok, 'timed-out request must fail');
+    assertEqual(res.error.kind, 'timeout');
+    assert(res.error.retryable, 'timeout must stay retryable');
+  }
+  // No deadline, no signal, a raw rejection — the genuine network
+  // failure keeps its historical kind.
+  {
+    const http = createFetchOAuthHttp((() =>
+      Promise.reject(new Error('down'))) as unknown as OAuthFetch);
+    const res = await http.postForm('https://x/y', {});
+    assert(!res.ok, 'rejected request must fail');
+    assertEqual(res.error.kind, 'unavailable');
+  }
+}
+
 export async function run(): Promise<void> {
+  await testFetchHttpAbortCause();
   await testDeviceBegin();
   await testDeviceBeginFallbackUrl();
   await testDeviceBeginMalformed();

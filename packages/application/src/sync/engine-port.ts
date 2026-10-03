@@ -65,7 +65,9 @@ export function createSyncEnginePort(engine: SyncEngine): SyncEnginePort {
       if (!fitted.ok) {
         return fitted;
       }
-      return ok(JSON.parse(JSON.stringify(fitted.value)));
+      // The fitted doc is freshly built per call — the JSON round-trip
+      // clone added a full serialize+parse per page for nothing.
+      return ok(fitted.value);
     },
     async applyDelta(
       delta: unknown,
@@ -79,10 +81,14 @@ export function createSyncEnginePort(engine: SyncEngine): SyncEnginePort {
       if (!applied.ok) {
         return applied;
       }
-      return ok(JSON.parse(JSON.stringify(applied.value)));
+      // Outcomes and per-record snapshots are rebuilt per apply —
+      // skipping the clone halves the allocation on every round.
+      return ok(applied.value);
     },
     materialize(): readonly unknown[] {
-      return JSON.parse(JSON.stringify(engine.materialize()));
+      // Fresh array of freshly built records per call; consumers
+      // treat it read-only.
+      return engine.materialize();
     },
   };
 }

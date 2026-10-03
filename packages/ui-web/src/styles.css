@@ -1895,12 +1895,37 @@
 /* ---- entity / collection / playlist -------------------------------------- */
 
 .uw-entity__hero {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: var(--spacing-xs);
-  padding: 0 var(--spacing-xl);
   text-align: center;
+  overflow: hidden;
+  /* Negative margins bleed the wash to the screen's edge padding; the
+     inner padding keeps the content aligned with the siblings. */
+  margin: 0 calc(-1 * var(--spacing-xl));
+  padding: var(--spacing-md) var(--spacing-xl);
+}
+
+/* Positioned children paint in DOM order — the backdrop sits first,
+   so the artwork/title stack above it without a z-index dance. */
+.uw-entity__hero > * {
+  position: relative;
+}
+
+/* The artwork's own wash behind the hero — heavily blurred and
+   gradient-masked so it fades into the canvas. */
+.uw-entity__backdrop {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  filter: blur(42px) saturate(1.4);
+  opacity: 0.3;
+  transform: scale(1.6);
+  mask-image: linear-gradient(to bottom, black 35%, transparent 95%);
+  pointer-events: none;
 }
 
 .uw-entity__kind {
@@ -2710,6 +2735,20 @@
   background: var(--uw-hover);
 }
 
+/* Meta text that opens an entity page — same ink, the affordance is
+   the hover underline + pointer (buttons get no pill chrome here). */
+.uw-stage__link {
+  display: flex;
+  align-self: stretch;
+  max-width: 100%;
+  text-align: left;
+  border-radius: var(--radius-control);
+}
+
+.uw-stage__link:hover {
+  text-decoration: underline;
+}
+
 .uw-stage__meta--lyrics {
   margin-top: var(--spacing-md);
 }
@@ -3377,9 +3416,9 @@
 }
 
 .uw-wsearch:focus-within {
-  /* The comet ring owns the accent edge — the field border stays at
-     hairline or it draws a second accent circle outside the stroke. */
-  border-color: var(--hairline);
+  /* The one focus emphasis — the accent hairline itself; the border
+     transition above carries the fade. */
+  border-color: var(--accent);
   background: var(--fg12);
 }
 
@@ -3475,77 +3514,6 @@
   color: var(--accent);
 }
 
-/* The comet ring — on focus a short accent arc laps the border once
-   (tail keeps drifting), then the head extends to close the ring.
-   Drawn as two strokes: a soft halo under a crisp core. The stroke
-   centerline sits on the border line itself (0.8px inset) so the arc
-   traces the entry's edge instead of orbiting a hair outside it. */
-.uw-wsearch__ring {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  overflow: visible;
-  opacity: 0;
-  transition: opacity var(--motion-state) var(--ease-out);
-}
-
-.uw-wsearch__ring rect {
-  width: calc(100% - 1.6px);
-  height: calc(100% - 1.6px);
-  /* rx percent would resolve against WIDTH — a pill's corner radius is
-     half its HEIGHT minus the inset, else the caps merge into an oval. */
-  rx: calc(var(--uw-bar-control-h, 32px) / 2 - 0.8px);
-  fill: none;
-  stroke: var(--accent);
-  stroke-linecap: round;
-  stroke-dasharray: 5 95;
-  stroke-dashoffset: 0;
-}
-
-.uw-wsearch__ring .halo {
-  stroke-width: 4.5px;
-  opacity: 0.28;
-}
-
-.uw-wsearch__ring .core {
-  stroke-width: 1.6px;
-}
-
-.uw-wsearch:focus-within .uw-wsearch__ring {
-  opacity: 1;
-}
-
-.uw-wsearch:focus-within .uw-wsearch__ring rect {
-  animation: uw-ringdraw 1.5s linear 0.1s 1 forwards;
-}
-
-@keyframes uw-ringdraw {
-  0% {
-    stroke-dasharray: 5 95;
-    stroke-dashoffset: 0;
-    animation-timing-function: cubic-bezier(0.5, 0.05, 0.4, 0.95);
-  }
-  30% {
-    stroke-dasharray: 24 76;
-    stroke-dashoffset: -42;
-  }
-  58% {
-    stroke-dasharray: 13 87;
-    stroke-dashoffset: -100;
-    animation-timing-function: cubic-bezier(0.25, 0.6, 0.15, 1);
-  }
-  100% {
-    stroke-dasharray: 114 0.01;
-    stroke-dashoffset: -114;
-  }
-}
-
-.ui-web[data-reduced-motion='true'] .uw-wsearch:focus-within .uw-wsearch__ring rect {
-  animation: none;
-  stroke-dasharray: 100 0.01;
-}
 
 .uw-tabs {
   min-width: 0;
@@ -3637,6 +3605,29 @@
     min-width: 0;
     max-width: none;
     z-index: 20;
+  }
+
+  /* The overlaying column + scrim cover the world bar — frameless
+     builds lose their only drag surface. The chrome's grip div
+     takes the strip over: the stage reserves it outright so no
+     control sits under a drag rect (same reserve macOS's traffic
+     lights get), and the floating stop control opts out like the
+     world bar's own children. */
+  .uw-stage-col__body > .uw-stage {
+    padding-top: var(--uw-titlebar-h);
+  }
+
+  .uw-stage-drag {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--uw-titlebar-h);
+    -webkit-app-region: drag;
+  }
+
+  .uw-stage__stop {
+    -webkit-app-region: no-drag;
   }
 }
 

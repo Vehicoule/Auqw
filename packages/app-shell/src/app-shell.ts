@@ -125,9 +125,11 @@ import {
   reportStoredDownloadError,
   rowActionsModel,
   sameNavLocation,
+  searchOrigin,
   searchRowTarget,
   stageDownloadChip,
   stageReopenMode,
+  suggestionCardMetas,
   suggestionMetaMap,
 } from './types.ts';
 import type {
@@ -1931,14 +1933,15 @@ export function useAppShell<E extends { readonly type: string } = never>(
     if (searchState.type === 'content') {
       // ports.homeSuggestionLimit: desktop bounded the card lookup to
       // the first 12 results; mobile searched the whole page (unset).
-      const items =
-        ports.homeSuggestionLimit === undefined
-          ? searchState.page.items
-          : searchState.page.items.slice(0, ports.homeSuggestionLimit);
+      // The bound lands on the dedupe the model keys cards off — a raw
+      // slice can push a rendered group's rep out of the map.
       // Mobile's lookup used page-order find() — first duplicate wins;
       // desktop's map overwrote — last wins.
       return suggestionMetaMap(
-        items,
+        suggestionCardMetas(
+          searchState.page.items,
+          ports.homeSuggestionLimit,
+        ),
         ports.strictHomeCardKeys === true ? 'firstWins' : 'lastWins',
       );
     }
@@ -2345,7 +2348,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         'action.playResult',
         session.playMetadata(metas, {
           startAt,
-          origin: { kind: 'search', query: committedQuery },
+          origin: searchOrigin(committedQuery),
         }),
       );
     },
@@ -3151,6 +3154,20 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [overlay, pushOverlay, loadEntityPage],
   );
 
+  // Entity nav from the stage's meta cluster — mobile's sheet covers
+  // the world, so it folds for the pushed route to show (same rule
+  // the queue-context nav follows); desktop's stage is a column and
+  // stays put.
+  const openEntityFromStage = useCallback(
+    (ref: EntityRef) => {
+      if (ports.closeStageOnContextNav === true) {
+        setStageOpen(false);
+      }
+      openEntity(ref);
+    },
+    [openEntity, ports.closeStageOnContextNav],
+  );
+
   const onEntityCardLike = useCallback(
     (card: EntityCardModel) => {
       // Ref-scoped like — an unvisited card materializes through a
@@ -3714,14 +3731,36 @@ export function useAppShell<E extends { readonly type: string } = never>(
     [entityModelFor, canPlayMeta, online, ports.entityPlayRequiresCanPlay],
   );
 
+  // Ordered play of the entity's whole context — the header's
+  // primary action: album pages play top-down, playlists in order.
+  // An empty playable context (offline + stream-only listing) is not
+  // silent: playMetadata's typed 'empty play list' verdict reports
+  // through the same funnel a failed play does.
+  const entityPlayAll = useCallback(
+    (fetch: EntityFetch | null, entryKey: string) => {
+      const metas = entityContextMetas(fetch, entryKey);
+      void dispatchPlay(
+        'action.playAll',
+        session.playMetadata(metas, {
+          startAt: 0,
+          origin: entityOriginFor(fetch),
+        }),
+      );
+    },
+    [
+      session,
+      entityContextMetas,
+      dispatchPlay,
+      ports.entityPlayRequiresCanPlay,
+    ],
+  );
+
   // Shuffle-play the entity's whole context — the one header action
-  // row taps can't express.
+  // row taps can't express. Same empty-context rule as ordered play:
+  // the typed verdict reports instead of silently doing nothing.
   const entityShuffleAll = useCallback(
     (fetch: EntityFetch | null, entryKey: string) => {
       const metas = entityContextMetas(fetch, entryKey);
-      if (metas.length === 0) {
-        return;
-      }
       void dispatchPlay(
         'action.shuffleAll',
         session.playMetadata(metas, {
@@ -4109,6 +4148,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     playLibraryItem,
     playPlaylistEntry,
     playRefFor,
+    entityPlayAll,
     entityShuffleAll,
     onEntityRowPress,
     reportPlay,
@@ -4226,6 +4266,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     // entity fetches
     loadEntityPage,
     openEntity,
+    openEntityFromStage,
     onLoadMore,
     // transfer
     onExport,

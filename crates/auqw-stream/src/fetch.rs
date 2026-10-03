@@ -162,11 +162,19 @@ fn follow_target<'a>(status: u16, location: Option<&'a str>, mint_url: &str) -> 
     let target = location?;
     let target_host = https_host(target)?.to_ascii_lowercase();
     let mint_host = https_host(mint_url)?.to_ascii_lowercase();
-    if redirect_in_scope(&target_host, &mint_host) {
-        Some(target)
-    } else {
-        None
+    if !redirect_in_scope(&target_host, &mint_host) {
+        return None;
     }
+    // A `Location` naming the URL already being fetched is a
+    // self-redirect — re-issuing it would burn the hop budget and
+    // surface `Internal { "redirect loop exhausted" }` (a 500-class
+    // verdict for a transient server quirk). Answer it verbatim
+    // instead: the caller sees the same response a redirect-blind
+    // fetch would have returned.
+    if target == mint_url {
+        return None;
+    }
+    Some(target)
 }
 
 /// Parent zones whose sibling hosts form one operator trust zone —
@@ -213,12 +221,19 @@ fn redirect_in_scope(target_host: &str, mint_host: &str) -> bool {
     if target_host == mint_host || target_host.ends_with(&format!(".{mint_host}")) {
         return true;
     }
-    match mint_host.split_once('.') {
-        Some((_, parent)) => {
-            EDGE_PARENT_ZONES.contains(&parent) && target_host.ends_with(&format!(".{parent}"))
+    // Walk to the last label pair — a mint nested deeper than one
+    // level under an edge parent (`foo.bar.dzcdn.net`) must still
+    // find its `dzcdn.net` ancestor, not the cut `bar.dzcdn.net`
+    // sibling zone that would silently refuse legitimate
+    // edge-balancing.
+    let mut parent = mint_host;
+    while let Some((_, rest)) = parent.split_once('.') {
+        parent = rest;
+        if EDGE_PARENT_ZONES.contains(&parent) && target_host.ends_with(&format!(".{parent}")) {
+            return true;
         }
-        None => false,
     }
+    false
 }
 
 impl Fetch for ReqwestFetch {
@@ -775,6 +790,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn follow_target_answers_self_redirect_verbatim() {
+        // A `Location` naming the mint URL itself must not re-issue —
+        // answering verbatim keeps the hop budget for real siblings
+        // and avoids the 500-class "redirect loop exhausted".
+        assert_eq!(follow_target(302, Some(MINT), MINT), None);
+    }
+    #[test]
+    fn follow_target_finds_edge_parent_under_nested_mint_host() {
+        // A mint nested two levels under the edge parent must still
+        // follow a sibling — the ancestor walk finds `dzcdn.net`.
+        const NESTED: &str = "https://edge1.fr.dzcdn.net/stream";
+        assert_eq!(
+            follow_target(302, Some("https://edge2.fr.dzcdn.net/stream"), NESTED),
+            Some("https://edge2.fr.dzcdn.net/stream")
+        );
+        // Outside the parent zone it still refuses.
+        assert_eq!(
+            follow_target(302, Some("https://fr.dzcdn.net.evil.net/x"), NESTED),
+            None
+        );
+    }
     #[test]
     fn follow_target_refuses_foreign_host_downgrade_and_non_3xx() {
         assert_eq!(

@@ -1872,6 +1872,39 @@ const tap = (s: string) => {
     ),
     null,
   );
+
+  // apply-phase cards carry the RUN's version — a newer checked
+  // release must not relabel the in-flight pipeline's surface
+  const newerStatus = {
+    state: 'available',
+    version: '9.9.9',
+    url: 'https://example/releases',
+    artifact: null,
+    checksums: null,
+  } as const;
+  const runningOlder = toUpdateCard(
+    snap(newerStatus, {
+      state: 'downloading',
+      version: '0.0.1-alpha.22',
+      receivedBytes: 1,
+      totalBytes: 4,
+    }),
+    'install',
+    null,
+  );
+  assertEqual(runningOlder?.version, '0.0.1-alpha.22');
+  assertEqual(runningOlder?.actionLabel, 'cancel');
+
+  // 'ready-to-restart' gates on apply.version like 'applied' — a
+  // newer release supersedes into its ordinary offer rather than
+  // showing 'restart to vY' (which would boot the staged X)
+  const newerRestart = toUpdateCard(
+    snap(newerStatus, { state: 'ready-to-restart', version: '0.0.1-alpha.22' }),
+    'install',
+    null,
+  );
+  assertEqual(newerRestart?.version, '9.9.9');
+  assertEqual(newerRestart?.actionLabel, 'install');
 }
 
 // ---- artwork URL scaling ----------------------------------------------------------
@@ -1913,6 +1946,23 @@ const tap = (s: string) => {
     scaledArtworkUrl('https://yt3.googleusercontent.com/a=s900-c', 200),
     'https://yt3.googleusercontent.com/a=s256-c',
     'google s-suffix shrinks in place',
+  );
+  // A `=wN-hN`/`=sN` tail is only a size knob on Google's CDNs — the
+  // same suffix on another host is an opaque token (a signed query
+  // value, a tracking param); rewriting it corrupts the URL.
+  assertEqual(
+    scaledArtworkUrl(
+      'https://img.example/art/600x600.jpg?sig==w1000-h1000',
+      40,
+    ),
+    'https://img.example/art/64x64.jpg?sig==w1000-h1000',
+    'non-google =wN-hN tail is not rewritten — the sized path shrinks with the signature kept',
+  );
+  const tracked = 'https://cdn.example/cover.jpg?track=s500';
+  assertEqual(
+    scaledArtworkUrl(tracked, 40),
+    tracked,
+    'non-google =sN tail passes through untouched',
   );
   assertEqual(
     scaledArtworkUrl(

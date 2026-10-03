@@ -1,8 +1,7 @@
 /**
  * WorldPanes keep-alive regression. The world-tab switch used to be a
  * conditional mount — every navigation paid a full screen inflation
- * (measured 8–48ms per switch on a grown library; see
- * packages/ui-web/probe-world-tabs.mjs). The keep-alive host must hold
+ * (measured 8–48ms per switch on a grown library). The keep-alive host must hold
  * every visited pane mounted: a switch is a display flip, never a
  * DOM remove. This mounts it under jsdom, drives tab changes, and
  * asserts mount counts, freeze semantics, and the hidden-state

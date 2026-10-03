@@ -353,6 +353,28 @@ export async function run(): Promise<void> {
       'coverless file reads null art',
     );
 
+    // A cover past the art bound is refused before hashing/storing —
+    // the doc still reads, the batch survives: oversize art must not
+    // be worth the utility process's heap.
+    const hugeCover = Buffer.alloc(32 * 1024 * 1024 + 1, 9);
+    await writeFile(
+      join(music, 'huge.mp3'),
+      id3Fixture({ title: 'Huge', cover: hugeCover }),
+    );
+    const hugeRead = await call(CHANNELS.tagreadRead, {
+      treeUri: dirTreeUri(music),
+      docIds: ['huge.mp3'],
+    });
+    assert(hugeRead.ok, 'oversize-art read resolves');
+    const hugeTags = (hugeRead.result as {
+      tags: ({ title: string | null; artworkUri: string | null } | null)[];
+    }).tags;
+    assert(
+      hugeTags[0]?.artworkUri === null,
+      'oversize embedded cover reads null art',
+    );
+    assertEqual(hugeTags[0]?.title, 'Huge', 'other fields still read');
+
     // The batch bound is enforced at the seam.
     const overBatch = await call(CHANNELS.tagreadFingerprint, {
       treeUri: dirTreeUri(music),

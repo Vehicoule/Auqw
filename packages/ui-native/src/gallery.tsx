@@ -323,6 +323,8 @@ function GalleryBody({
   };
   const entityHandlers = {
     onBack: noop,
+    onPlayAll: noop,
+    onShuffleAll: noop,
     onToggleLike: noop,
     onPressItem: noop,
     onContext: noop,
