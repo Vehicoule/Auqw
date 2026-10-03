@@ -8,6 +8,7 @@ import {
   Text,
 } from './primitives.tsx';
 import { TrackRow, indexAdapter, useTrackList } from './track-row.tsx';
+import { EntityRail } from './entity-rail.tsx';
 import { EmptyState, ErrorState } from './states.tsx';
 import type { EntityScreenModel } from '@auqw/ui-shared';
 import {
@@ -203,6 +204,11 @@ export function EntityScreen({
           )}
         </div>
       )}
+
+      {/* Related shelves — discography, similar artists, appears-on. */}
+      {view.rails.map((rail) => (
+        <EntityRail key={rail.key} rail={rail} />
+      ))}
     </div>
   );
 }

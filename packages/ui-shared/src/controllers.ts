@@ -21,6 +21,7 @@ import type {
   CorrectionsFilter,
   CorrectionsModel,
   DownloadChip,
+  EntityCardModel,
   EntityScreenModel,
   ImportPreviewModel,
   LibraryCardModel,
@@ -949,6 +950,23 @@ export type EntityScreenHandlers = {
   readonly onContext?: MaybeFn<[row: TrackRowModel]>;
   readonly onLoadMore?: MaybeFn;
   readonly onRetry?: MaybeFn;
+  readonly onEntityCardPress?: MaybeFn<[card: EntityCardModel]>;
+  readonly onEntityCardLike?: MaybeFn<[card: EntityCardModel]>;
+};
+
+export type EntityCardView = {
+  readonly card: EntityCardModel;
+  readonly kindLabel: string;
+  readonly a11yLabel: string;
+  readonly likeA11yLabel: string;
+  readonly onPress: MaybeFn;
+  readonly onToggleLike: MaybeFn;
+};
+
+export type EntityRailView = {
+  readonly key: string;
+  readonly title: string;
+  readonly cards: readonly EntityCardView[];
 };
 
 export type EntityPillView = {
@@ -985,6 +1003,8 @@ export type EntityScreenView =
       readonly model: EntityScreenModel;
       readonly backA11yLabel: string;
       readonly kindLabel: string;
+      /** Discography / related / featured / appears-on rails. */
+      readonly rails: readonly EntityRailView[];
       readonly shuffle: EntityPillView;
       readonly like: {
         readonly icon: 'heart-filled' | 'heart';
@@ -1023,6 +1043,8 @@ export function useEntityScreenController({
   onContext,
   onLoadMore,
   onRetry,
+  onEntityCardPress,
+  onEntityCardLike,
 }: {
   readonly model: EntityScreenModel;
 } & Omit<EntityScreenHandlers, 'onBack'>): EntityScreenView {
@@ -1042,10 +1064,23 @@ export function useEntityScreenController({
       onRetry,
     };
   }
-  const empty = model.items.length === 0;
+  const empty = model.items.length === 0 && model.rails.length === 0;
+  const cardView = (card: EntityCardModel): EntityCardView => ({
+    card,
+    kindLabel: t(`entity.kind.${card.kind}`),
+    a11yLabel: t('entity.cardA11y', { title: card.title }),
+    likeA11yLabel: card.liked ? t('common.unlike') : t('common.like'),
+    onPress: bind(onEntityCardPress, card),
+    onToggleLike: card.canLike ? bind(onEntityCardLike, card) : undefined,
+  });
   return {
     kind: 'ready',
     model,
+    rails: model.rails.map((rail) => ({
+      key: rail.key,
+      title: rail.title,
+      cards: rail.cards.map(cardView),
+    })),
     backA11yLabel: t('common.back'),
     kindLabel:
       model.kind === null
@@ -1055,7 +1090,9 @@ export function useEntityScreenController({
       label: t('entity.shuffle'),
       icon: 'shuffle',
       accent: false,
-      disabled: empty,
+      // Shuffle draws from the track listing — a rails-only page
+      // still renders, but the button stays dead-honest disabled.
+      disabled: model.items.length === 0,
       onPress: onShuffleAll,
     },
     like: {
@@ -1115,6 +1152,9 @@ export type SearchScreenHandlers = {
   readonly onRecentPress?: MaybeFn<[query: string]>;
   readonly onSuggestionPress?: MaybeFn<[query: string]>;
   readonly onFilterPress?: MaybeFn<[filter: SearchFilter]>;
+  readonly onEntityCardPress?: MaybeFn<[card: EntityCardModel]>;
+  readonly onEntityCardLike?: MaybeFn<[card: EntityCardModel]>;
+  readonly onLoadMore?: MaybeFn;
 };
 
 export type SearchFieldView = {
@@ -1153,10 +1193,18 @@ export type SearchFilterChip = {
   readonly onPress: MaybeFn;
 };
 
-export type SearchHeroView = SearchRowView & {
-  readonly metaLabel: string;
-  readonly a11yLabel: string;
-};
+/** 'top result' — a playable track row or an entity card,
+    whichever the provider ranked first. */
+export type SearchHeroView =
+  | (SearchRowView & {
+      readonly type: 'track';
+      readonly metaLabel: string;
+      readonly a11yLabel: string;
+    })
+  | (EntityCardView & {
+      readonly type: 'entity';
+      readonly metaLabel: string;
+    });
 
 export type SearchScreenView = {
   /** Live text vs committed query — owns the suggestions pane. */
@@ -1241,6 +1289,14 @@ export type SearchScreenView = {
     readonly a11yLabel: string;
     readonly rows: readonly SearchRowView[];
   } | null;
+  /** Typed entity hits — artist/album/playlist rails by kind. */
+  readonly rails: readonly EntityRailView[];
+  readonly loadMore: {
+    readonly busy: boolean;
+    readonly label: string;
+    readonly a11yLabel: string;
+    readonly onPress: MaybeFn;
+  } | null;
 };
 
 export function useSearchScreenController({
@@ -1260,6 +1316,9 @@ export function useSearchScreenController({
   suggestions = [],
   onSuggestionPress,
   onFilterPress,
+  onEntityCardPress,
+  onEntityCardLike,
+  onLoadMore,
 }: {
   readonly state: SearchStateModel;
   readonly query?: string | undefined;
@@ -1280,6 +1339,18 @@ export function useSearchScreenController({
     onAddToPlaylist: bind(onAddToPlaylist, row),
     onContext: bind(onContext, row),
   });
+  const cardView = (card: EntityCardModel): EntityCardView => ({
+    card,
+    kindLabel: t(`entity.kind.${card.kind}`),
+    a11yLabel: t('entity.cardA11y', { title: card.title }),
+    likeA11yLabel: card.liked ? t('common.unlike') : t('common.like'),
+    onPress: bind(onEntityCardPress, card),
+    onToggleLike: card.canLike ? bind(onEntityCardLike, card) : undefined,
+  });
+  // A standalone top hit is content too — an entity/track hero must
+  // never coexist with the "nothing" empty state.
+  const hasContent =
+    state.results.length > 0 || state.rails.length > 0 || state.hero !== null;
   const listed =
     !draft &&
     (state.phase === 'ready' || state.phase === 'loading') &&
@@ -1291,13 +1362,22 @@ export function useSearchScreenController({
   const chipsVisible =
     !draft &&
     (state.phase === 'ready' ||
-      (state.phase === 'loading' && state.results.length > 0));
+      (state.phase === 'loading' && hasContent));
   return {
     draft,
     filters: chipsVisible
       ? {
           a11yLabel: t('search.a11y.filters'),
-          chips: (['all', 'songs', 'library'] as const).map((key) => ({
+          chips: (
+            [
+              'all',
+              'songs',
+              'artists',
+              'albums',
+              'playlists',
+              'library',
+            ] as const
+          ).map((key) => ({
             key,
             label: t(`search.filters.${key}`),
             active: state.filter === key,
@@ -1309,13 +1389,21 @@ export function useSearchScreenController({
       !draft && state.phase === 'ready' && state.hero !== null
         ? {
             topResultTitle: t('search.topResult'),
-            hero: {
-              ...rowView(state.hero.row),
-              metaLabel: state.hero.metaLabel,
-              a11yLabel: t('search.a11y.hero', {
-                title: state.hero.row.title,
-              }),
-            },
+            hero:
+              state.hero.type === 'entity'
+                ? {
+                    type: 'entity' as const,
+                    ...cardView(state.hero.card),
+                    metaLabel: state.hero.metaLabel,
+                  }
+                : {
+                    type: 'track' as const,
+                    ...rowView(state.hero.row),
+                    metaLabel: state.hero.metaLabel,
+                    a11yLabel: t('search.a11y.hero', {
+                      title: state.hero.row.title,
+                    }),
+                  },
             songsTitle: t('search.songsHead'),
             songsA11yLabel: t('search.a11y.songsColumn'),
             songs: state.results.slice(0, 4).map(rowView),
@@ -1365,10 +1453,12 @@ export function useSearchScreenController({
         }
       : null,
     resultsHead:
-      !draft && state.phase === 'ready' && state.results.length > 0
+      !draft && state.phase === 'ready' && hasContent
         ? {
             title: t(`search.section.${state.filter}`, {
-              count: state.results.length,
+              count:
+                state.results.length +
+                state.rails.reduce((n, rail) => n + rail.cards.length, 0),
             }),
             metaLabel: state.providerId ?? t('search.providerFallback'),
           }
@@ -1394,7 +1484,7 @@ export function useSearchScreenController({
             }
         : null,
     status:
-      !draft && state.phase === 'ready' && state.results.length === 0
+      !draft && state.phase === 'ready' && !hasContent
         ? {
             // Only a filter can empty a ready phase — the library chip
             // with no owned matches.
@@ -1423,7 +1513,7 @@ export function useSearchScreenController({
                 title: t('search.unavailableTitle'),
                 hint: state.message,
               }
-            : !draft && state.phase === 'loading' && state.results.length === 0
+            : !draft && state.phase === 'loading' && !hasContent
               ? {
                   kind: 'loading' as const,
                   title: t('search.loading'),
@@ -1436,6 +1526,25 @@ export function useSearchScreenController({
           rows: state.results.map(rowView),
         }
       : null,
+    rails:
+      !draft && (state.phase === 'ready' || state.phase === 'loading')
+        ? state.rails.map((rail) => ({
+            key: rail.key,
+            title: rail.title,
+            cards: rail.cards.map(cardView),
+          }))
+        : [],
+    loadMore:
+      !draft && state.phase === 'ready' && state.hasMore
+        ? {
+            busy: state.loadingMore,
+            label: state.loadingMore
+              ? t('state.loading')
+              : t('entity.loadMore'),
+            a11yLabel: t('entity.loadMore'),
+            onPress: state.loadingMore ? undefined : onLoadMore,
+          }
+        : null,
   };
 }
 

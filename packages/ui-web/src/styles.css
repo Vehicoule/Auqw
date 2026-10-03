@@ -1346,6 +1346,36 @@
   box-shadow: inset 0 0 0 var(--stroke-hairline) var(--fg25);
 }
 
+/* Entity hero — the open affordance is the whole artwork+text block;
+   the like heart and chevron sit as trailing siblings (buttons can't
+   nest inside a button). */
+.uw-topres__open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  text-align: left;
+}
+
+/* Entity card — the rail card's pressable plus an overlaid like
+   heart at the artwork's top-right corner. */
+.uw-ecard {
+  position: relative;
+  width: 136px;
+  flex-shrink: 0;
+}
+.uw-ecard__like {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: var(--deep);
+  border-radius: var(--radius-pill);
+}
+.uw-ecard__like:hover:not(:disabled) {
+  background: var(--hairline);
+}
+
 /* 'All results' table — the head row shadows the row cells. */
 .uw-search__thead {
   display: flex;

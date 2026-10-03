@@ -28,6 +28,7 @@ import type {
   LyricsSheet,
   PlaylistEntry,
   Recording,
+  SearchPage,
   SourceRef,
   TrackMetadata,
 } from '@auqw/application';
@@ -1605,7 +1606,7 @@ function testSearchFilters(): void {
   assertEqual(all.filter, 'all');
   assert(all.hero !== null, 'ready-with-results earns a hero');
   assertEqual(
-    all.hero?.row.key,
+    all.hero?.type === 'track' ? all.hero.row.key : undefined,
     all.results[0]?.key,
     'the hero is the provider #1 result',
   );
@@ -1633,7 +1634,8 @@ function testSearchFilters(): void {
     "a hidden group member's owned ref keeps the deduped row",
   );
   assert(
-    library.hero?.row.key === 'youtube-music:ytm-lib:0',
+    library.hero?.type === 'track' &&
+      library.hero.row.key === 'youtube-music:ytm-lib:0',
     'the hero re-centers on the filtered #1',
   );
   assertEqual(
@@ -1665,6 +1667,198 @@ function testSearchFilters(): void {
     all.results[0]?.album,
     'Dummy',
     'search rows surface the album column',
+  );
+}
+
+/**
+ * Typed discovery: entity hits group into kind rails in canonical
+ * order, the tagged top-hit picks the hero variant, kind-scoped chips
+ * isolate their rail, and the entity page groups `related` into
+ * shelf rails while never re-listing itself.
+ */
+function testDiscoveryModel(): void {
+  const meta = (id: string, title: string): TrackMetadata => ({
+    sourceRef: { provider: 'deezer', kind: 'track', id },
+    title,
+    artist: 'Portishead',
+    album: 'Dummy',
+    durationMs: 302_000,
+    releaseYear: 1994,
+    artwork: [],
+    explicit: null,
+    genre: null,
+    storefront: null,
+  });
+  const ent = (
+    kind: 'artist' | 'album' | 'playlist',
+    id: string,
+    title: string,
+    subtitle: string | null = null,
+    group: 'discography' | 'related' | 'featured' | 'appears-on' | null = null,
+  ) => ({
+    sourceRef: { provider: 'deezer', kind, id },
+    kind,
+    title,
+    subtitle,
+    artwork: [],
+    group,
+  });
+  const page = (
+    entities: ReturnType<typeof ent>[],
+    topHit: SearchPage['topHit'],
+    items: TrackMetadata[] = [],
+    continuation: string | null = null,
+  ) => ({
+    type: 'content' as const,
+    revision: 1,
+    query: 'portishead',
+    page: { items, entities, topHit, continuation, storefront: null },
+  });
+
+  // 'all' — rails group by kind in canonical order; the entity top
+  // hit is the hero; tracks list below.
+  const mixed = toSearchModel(
+    page(
+      [
+        ent('playlist', 'dz-p-1', 'Trip Hop Essentials'),
+        ent('artist', 'dz-artist-portishead', 'Portishead'),
+        ent('album', 'dz-album-deadbeat', 'Deadbeat', 'Tame Impala'),
+      ],
+      { type: 'entity', item: ent('artist', 'dz-artist-portishead', 'Portishead') },
+      [meta('dz-t-1', 'Roads')],
+      'tok-2',
+    ),
+    null,
+    [],
+    [],
+    'all',
+    fixtureLikes,
+    fixtureEntitySourceRefs,
+    true,
+  );
+  assertEqual(
+    mixed.rails.map((r) => r.key).join(','),
+    'artist,album,playlist',
+    'rails follow the canonical kind order',
+  );
+  assertEqual(mixed.rails[0]?.cards[0]?.kind, 'artist');
+  assert(
+    mixed.hero?.type === 'entity' &&
+      mixed.hero.card.ref.id === 'dz-artist-portishead',
+    'entity top hit is the hero card',
+  );
+  assert(
+    mixed.hero?.type === 'entity' && mixed.hero.card.liked === true,
+    'a liked entity carries its state into the hero',
+  );
+  assertEqual(mixed.hasMore, true, 'pending token exposes load-more');
+  assertEqual(mixed.loadingMore, true, 'busy flag carries through');
+
+  // A scoped chip shows only its kind's rail — tracks stay hidden.
+  const scoped = toSearchModel(
+    page(
+      [ent('artist', 'dz-a-1', 'Portishead'), ent('artist', 'dz-a-2', 'Massive Attack')],
+      null,
+      [meta('dz-t-1', 'Roads')],
+    ),
+    null,
+    [],
+    [],
+    'artists',
+  );
+  assertEqual(scoped.results.length, 0, 'entity chips hide tracks');
+  assertEqual(scoped.rails.length, 1);
+  assertEqual(scoped.rails[0]?.cards.length, 2);
+
+  // 'songs' scope hides every entity rail.
+  const songs = toSearchModel(
+    page([ent('artist', 'dz-a-1', 'Portishead')], null, [meta('dz-t-1', 'Roads')]),
+    null,
+    [],
+    [],
+    'songs',
+  );
+  assertEqual(songs.rails.length, 0, 'songs chip drops entity rails');
+  assertEqual(songs.results.length, 1);
+
+  // 'library' narrows entities to liked ones — unliked cards drop.
+  const library = toSearchModel(
+    page(
+      [
+        ent('album', 'dz-album-deadbeat', 'Deadbeat'),
+        ent('artist', 'dz-a-9', 'Unrelated Act'),
+      ],
+      null,
+    ),
+    null,
+    [],
+    [],
+    'library',
+    fixtureLikes,
+    fixtureEntitySourceRefs,
+  );
+  assertEqual(
+    library.rails.map((r) => r.key).join(','),
+    'album',
+    'library keeps only liked entity cards',
+  );
+  assertEqual(library.rails[0]?.cards[0]?.liked, true);
+
+  // A track top hit outside the page listing still hero-fies — and
+  // rides the play context first so pressing it plays it then the
+  // rest of the list.
+  const hero = toSearchModel(
+    page(
+      [],
+      { type: 'track', item: meta('dz-t-hero', 'SOS') },
+      [meta('dz-t-1', 'Roads')],
+    ),
+    null,
+    [],
+    [],
+    'all',
+  );
+  assert(
+    hero.hero?.type === 'track' && hero.hero.row.key.endsWith(':-1'),
+    'an unlisted track top hit keys at index -1',
+  );
+  assertEqual(hero.playItems[0]?.sourceRef.id, 'dz-t-hero');
+  assertEqual(hero.results.length, 1, 'hero does not double-list');
+
+  // Entity page: `related` groups into shelf rails; the page's own
+  // entity never recurs; untagged entries ride 'related'.
+  const artistPage = toEntityModel({
+    page: {
+      entity: ent('artist', 'dz-artist-tame', 'Tame Impala'),
+      items: [],
+      related: [
+        ent('album', 'dz-album-deadbeat', 'Deadbeat', null, 'discography'),
+        ent('album', 'dz-album-deadbeat', 'Deadbeat', null, 'discography'),
+        ent('artist', 'dz-artist-tame', 'Tame Impala', null, 'related'),
+        ent('playlist', 'dz-p-1', 'Psych Mix', null, 'appears-on'),
+        ent('artist', 'dz-a-pond', 'Pond'),
+      ],
+      continuation: null,
+      complete: true,
+    },
+    error: null,
+    likes: fixtureLikes,
+    entitySourceRefs: fixtureEntitySourceRefs,
+  });
+  assertEqual(
+    artistPage.rails.map((r) => r.key).join(','),
+    'discography,related,appears-on',
+    'related groups into shelf rails in canonical order',
+  );
+  assertEqual(
+    artistPage.rails[0]?.cards.length,
+    1,
+    'duplicate related refs dedupe',
+  );
+  assertEqual(
+    artistPage.rails[1]?.cards.map((c) => c.title).join(','),
+    'Pond',
+    'the page entity never recurs in its own rails',
   );
 }
 
@@ -2124,6 +2318,7 @@ testSearchStates();
 testListingDedupe();
 testLocalRecordingDedupe();
 testSearchFilters();
+testDiscoveryModel();
 testLyricsModel();
 testRadioModel();
 testCorrectionsModel();

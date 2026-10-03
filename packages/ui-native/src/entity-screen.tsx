@@ -14,6 +14,7 @@ import {
   Text,
 } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
+import { EntityRail } from './entity-rail.tsx';
 import { EmptyState, StateFor } from './states.tsx';
 import type { EntityScreenModel } from '@auqw/ui-shared';
 import {
@@ -54,6 +55,8 @@ export function EntityScreen({
   onContext,
   onLoadMore,
   onRetry,
+  onEntityCardPress,
+  onEntityCardLike,
 }: EntityScreenProps) {
   const theme = useTheme();
   const navPad = useContext(NavFootprintContext);
@@ -66,6 +69,8 @@ export function EntityScreen({
     onContext,
     onLoadMore,
     onRetry,
+    onEntityCardPress,
+    onEntityCardLike,
   });
   if (view.kind !== 'ready') {
     return (
@@ -222,40 +227,45 @@ export function EntityScreen({
             />
           )}
           ListFooterComponent={
-            view.body.loadMore !== null ? (
-              <Pressable
-                onPress={view.body.loadMore.onPress}
-                accessibilityLabel={view.body.loadMore.a11yLabel}
-                accessibilityState={{ busy: view.body.loadMore.busy }}
-                style={({ pressed }) => [
-                  {
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: theme.spacing.sm,
-                    minHeight: theme.sizes.touch,
-                    marginTop: theme.spacing.sm,
-                    borderRadius: theme.radius.control,
-                    borderWidth: theme.strokes.hairline,
-                    borderColor: theme.colors.hairline,
-                  },
-                  pressed && { backgroundColor: theme.colors.fg08 },
-                ]}
-              >
-                {view.body.loadMore.busy ? (
-                  <Spinner size={13} />
-                ) : (
-                  <Icon
-                    name="chevron-down"
-                    size={13}
-                    color={theme.colors.textSecondary}
-                  />
-                )}
-                <Text variant="metadata" color="secondary">
-                  {view.body.loadMore.label}
-                </Text>
-              </Pressable>
-            ) : null
+            <>
+              {view.body.loadMore !== null && (
+                <Pressable
+                  onPress={view.body.loadMore.onPress}
+                  accessibilityLabel={view.body.loadMore.a11yLabel}
+                  accessibilityState={{ busy: view.body.loadMore.busy }}
+                  style={({ pressed }) => [
+                    {
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: theme.spacing.sm,
+                      minHeight: theme.sizes.touch,
+                      marginTop: theme.spacing.sm,
+                      borderRadius: theme.radius.control,
+                      borderWidth: theme.strokes.hairline,
+                      borderColor: theme.colors.hairline,
+                    },
+                    pressed && { backgroundColor: theme.colors.fg08 },
+                  ]}
+                >
+                  {view.body.loadMore.busy ? (
+                    <Spinner size={13} />
+                  ) : (
+                    <Icon
+                      name="chevron-down"
+                      size={13}
+                      color={theme.colors.textSecondary}
+                    />
+                  )}
+                  <Text variant="metadata" color="secondary">
+                    {view.body.loadMore.label}
+                  </Text>
+                </Pressable>
+              )}
+              {view.rails.map((rail) => (
+                <EntityRail key={rail.key} rail={rail} />
+              ))}
+            </>
           }
         />
       )}

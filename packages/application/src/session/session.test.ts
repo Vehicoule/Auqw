@@ -6904,6 +6904,47 @@ async function entityPageFlow(): Promise<void> {
   );
 }
 
+async function entityLikeByRefFlow(): Promise<void> {
+  const deezer = new FakeProvider('deezer');
+  const r = rig(persisted(), [deezer]);
+  await restoreOk(r);
+  const refAlbum: EntityRef = { provider: 'deezer', kind: 'album', id: 'a1' };
+  // A never-visited ref materializes through the entity fetch before
+  // the like lands — the toggle is also the attach.
+  const toggle = r.session.toggleEntityLikeByRef(refAlbum);
+  await pump();
+  assertEqual(deezer.pendingCount('entity'), 1, 'unbound ref fetches');
+  deezer.settleEntity(ok(ALBUM_PAGE));
+  assert((await toggle).ok, 'like-by-ref failed');
+  const snap = readyOf(r);
+  assertEqual(snap.entities.length, 1, 'like materialized the entity');
+  const entityId = snap.entities[0]?.entityId;
+  assert(
+    snap.likes.some((l) => l.entityKind === 'album' && l.targetId === entityId),
+    'like bound to the materialized entity',
+  );
+  // A bound ref toggles without another fetch.
+  const calls = deezer.pendingCount('entity');
+  assert((await r.session.toggleEntityLikeByRef(refAlbum)).ok);
+  assert(
+    !readyOf(r).likes.some((l) => l.targetId === entityId),
+    'second toggle unlikes',
+  );
+  assertEqual(
+    deezer.pendingCount('entity'),
+    calls,
+    'a bound ref never refetches',
+  );
+  // A materialize failure surfaces the typed error and attaches nothing.
+  const ghost = await r.session.toggleEntityLikeByRef({
+    provider: 'tidal',
+    kind: 'album',
+    id: 't1',
+  });
+  assert(!ghost.ok && ghost.error.kind === 'unsupported');
+  assertEqual(readyOf(r).entities.length, 1, 'failed like attaches nothing');
+}
+
 async function ensureRecordingFlow(): Promise<void> {
   const r = rig(persisted());
   await restoreOk(r);
@@ -8093,6 +8134,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['disposeCleanup', disposeCleanup],
   ['rapidSequenceProperty', rapidSequenceProperty],
   ['entityPageFlow', entityPageFlow],
+  ['entityLikeByRefFlow', entityLikeByRefFlow],
   ['ensureRecordingFlow', ensureRecordingFlow],
   ['playRecordingsFlow', playRecordingsFlow],
   ['playMetadataShuffleDraws', playMetadataShuffleDraws],

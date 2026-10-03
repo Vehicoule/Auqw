@@ -14,6 +14,8 @@ import type {
   AttemptTrace,
   EntityPage,
   EntityRef,
+  EntitySourceRef,
+  Like,
   LyricsSheet,
   MatchReview,
   ProviderCapability,
@@ -33,11 +35,15 @@ import type { ThemeSource } from '@auqw/design-tokens/adaptive';
 import { t, type MessageId } from './i18n.ts';
 import { errorText } from './error-text.ts';
 import {
+  dedupeEntitiesByRef,
   dedupeTrackListings,
+  entityIdForRef,
   formatClock,
   librarySourceRefs,
+  likedEntityIds,
   playlistSourceRefs,
   refKey,
+  toEntityCard,
   toSearchRowModel,
 } from './view-models.ts';
 import type {
@@ -54,6 +60,10 @@ declare const performance: { now(): number };
 
 export const SEARCH_LIMIT = 25;
 export const DIAGNOSTICS_LIMIT = 20;
+
+/** Search rails group by entity kind in this order — artist, album,
+    playlist matches how discovery reads. */
+const SEARCH_ENTITY_ORDER = ['artist', 'album', 'playlist'] as const;
 
 const NAV_KEYS = ['home', 'explore', 'library', 'settings'] as const;
 
@@ -183,17 +193,31 @@ export function toSearchModel(
   playlistEntries: readonly PlaylistEntry[] = [],
   recordings: readonly Recording[] = [],
   filter: SearchFilter = 'all',
+  likes: readonly Like[] = [],
+  entitySourceRefs: readonly EntitySourceRef[] = [],
+  loadingMore = false,
 ): SearchStateModel {
   const inPlaylist = playlistSourceRefs(playlistEntries, recordings);
   // 'In your library' = the result's ref is one the library owns.
   const library =
     filter === 'library' ? librarySourceRefs(recordings) : null;
+  const entityLikes = likedEntityIds(likes);
   const playingKey = refKey(playingRef);
+  // Kind-scoped chips ('artists'/'albums'/'playlists') show only
+  // their entity rail — the provider call is already scoped to that
+  // kind, so a stray track row still doesn't leak through.
+  const entityFilter =
+    filter === 'artists' || filter === 'albums' || filter === 'playlists'
+      ? filter
+      : null;
   const base = {
     query: state.type === 'idle' ? '' : state.query,
     results: [],
     filter,
     hero: null,
+    rails: [],
+    hasMore: false,
+    loadingMore,
     playItems: [],
     providerId: null,
     message: null,
@@ -207,11 +231,13 @@ export function toSearchModel(
     case 'content': {
       const deduped = dedupeTrackListings(state.page.items);
       const items =
-        library === null
-          ? deduped
-          : deduped.filter(({ group }) =>
-              group.some((m) => library.has(refKey(m.sourceRef) ?? '')),
-            );
+        entityFilter !== null
+          ? []
+          : library === null
+            ? deduped
+            : deduped.filter(({ group }) =>
+                group.some((m) => library.has(refKey(m.sourceRef) ?? '')),
+              );
       const results = items.map(({ meta, index, group }) => ({
         ...toSearchRowModel(
           meta,
@@ -223,18 +249,130 @@ export function toSearchModel(
           playingKey !== null &&
           group.some((m) => refKey(m.sourceRef) === playingKey),
       }));
-      const first = items[0];
-      const heroRow = results[0];
+      const entityKind =
+        entityFilter === 'artists'
+          ? 'artist'
+          : entityFilter === 'albums'
+            ? 'album'
+            : entityFilter === 'playlists'
+              ? 'playlist'
+              : null;
+      const entityCards = dedupeEntitiesByRef(state.page.entities)
+        .filter((entity) => {
+          if (entityKind !== null) {
+            return entity.kind === entityKind;
+          }
+          if (filter === 'songs') {
+            return false;
+          }
+          // 'library' scope for entities = liked entities — their
+          // materialized ids carry the like target.
+          if (library !== null) {
+            const entityId = entityIdForRef(
+              entitySourceRefs,
+              entity.sourceRef,
+            );
+            return (
+              entityId !== null &&
+              entityLikes.has(`${entity.kind} ${entityId}`)
+            );
+          }
+          return true;
+        })
+        .map((entity) => toEntityCard(entity, entitySourceRefs, entityLikes));
+      // Search rails group by entity kind — a scoped page lands
+      // wholly on its one rail.
+      const rails = SEARCH_ENTITY_ORDER.map((kind) => ({
+        key: kind,
+        title: t(`entity.kind.${kind}`),
+        cards: entityCards.filter((card) => card.kind === kind),
+      })).filter((rail) => rail.cards.length > 0);
+      // The hero is the provider's declared top hit; an undeclared
+      // hit falls back to the first visible track row.
+      const top = state.page.topHit;
+      let hero: SearchStateModel['hero'] = null;
+      if (top?.type === 'entity') {
+        const visible =
+          filter !== 'songs' &&
+          (entityKind === null || top.item.kind === entityKind) &&
+          (library === null ||
+            (() => {
+              const entityId = entityIdForRef(
+                entitySourceRefs,
+                top.item.sourceRef,
+              );
+              return (
+                entityId !== null &&
+                entityLikes.has(`${top.item.kind} ${entityId}`)
+              );
+            })());
+        if (visible) {
+          hero = {
+            type: 'entity',
+            card: toEntityCard(top.item, entitySourceRefs, entityLikes),
+            metaLabel: [
+              t(`entity.kind.${top.item.kind}`),
+              top.item.subtitle,
+            ]
+              .filter((part): part is string => part !== null)
+              .join(' · '),
+          };
+        }
+      } else if (top?.type === 'track' && entityFilter === null) {
+        const meta = top.item;
+        const key = refKey(meta.sourceRef);
+        const visible =
+          library === null || (key !== null && library.has(key));
+        if (visible) {
+          hero = {
+            type: 'track',
+            row: {
+              ...toSearchRowModel(
+                meta,
+                -1,
+                null,
+                key !== null && inPlaylist.has(key),
+              ),
+              playing: playingKey !== null && key === playingKey,
+            },
+            metaLabel: searchHeroMeta(meta),
+          };
+        }
+      }
+      if (hero === null && top === null) {
+        const first = items[0];
+        const heroRow = results[0];
+        hero =
+          first === undefined || heroRow === undefined
+            ? null
+            : {
+                type: 'track',
+                row: heroRow,
+                metaLabel: searchHeroMeta(first.meta),
+              };
+      }
+      // A hero track that isn't part of the listing leads the play
+      // context — the hero press queues it ahead of the rest.
+      const heroMeta = top?.type === 'track' && hero?.type === 'track' ? top.item : null;
+      const playItems = items.map(({ meta }) => meta);
+      if (heroMeta !== null) {
+        const heroKey = refKey(heroMeta.sourceRef);
+        const dup = playItems.findIndex(
+          (m) => refKey(m.sourceRef) === heroKey,
+        );
+        if (dup < 0) {
+          playItems.unshift(heroMeta);
+        }
+      }
       return {
         ...base,
         // Entity-only pages (no track rows) are still content.
         phase: searchPageHasContent(state.page) ? 'ready' : 'empty',
         results,
-        playItems: items.map(({ meta }) => meta),
-        hero:
-          first === undefined || heroRow === undefined
-            ? null
-            : { row: heroRow, metaLabel: searchHeroMeta(first.meta) },
+        rails,
+        hero,
+        hasMore: state.page.continuation !== null,
+        playItems,
         message: errorText(state.refreshError),
       };
     }
@@ -275,8 +413,7 @@ export type OverlayEntry<O> = {
   readonly overlay: O;
 };
 
-export const entityRefKey = (ref: EntityRef): string =>
-  `${ref.provider}:${ref.kind}:${ref.id}`;
+export { entityRefKey } from './view-models.ts';
 
 export type EntityFetch = {
   readonly ref: EntityRef;

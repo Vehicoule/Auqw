@@ -958,7 +958,9 @@ function Main({
     searchSession: search,
     query,
     setQuery,
-    setSearchFilter,
+    onSearchFilterPress,
+    onSearchLoadMore,
+    onEntityCardLike,
     submitSearch,
     retrySearch,
     cancelSearch,
@@ -2208,7 +2210,10 @@ function Main({
         onRecentPress={applySearchText}
         suggestions={suggestions}
         onSuggestionPress={applySearchText}
-        onFilterPress={setSearchFilter}
+        onFilterPress={onSearchFilterPress}
+        onLoadMore={onSearchLoadMore}
+        onEntityCardPress={(card) => openEntity(card.ref)}
+        onEntityCardLike={onEntityCardLike}
       />
     ),
     [
@@ -2225,7 +2230,10 @@ function Main({
       searchRecents,
       applySearchText,
       suggestions,
-      setSearchFilter,
+      onSearchFilterPress,
+      onSearchLoadMore,
+      onEntityCardLike,
+      openEntity,
     ],
   );
   const libraryEl = useMemo(
@@ -2431,6 +2439,8 @@ function Main({
             }}
             onLoadMore={onLoadMore}
             onRetry={() => loadEntityPage(current.ref)}
+            onEntityCardPress={(card) => openEntity(card.ref)}
+            onEntityCardLike={onEntityCardLike}
           />
         );
       }
