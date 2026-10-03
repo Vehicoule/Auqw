@@ -215,6 +215,32 @@ export function run(): void {
   assertEqual(refMerged.artistRef?.id, 'a-1', 'ref is fill-only');
   assertEqual(refMerged.albumRef?.id, 'b-1', 'ref is fill-only');
 
+  // The ref describes the entity behind the displayed name: a merge
+  // that renames the label without its own ref drops the stale one —
+  // the stage can never link the new name to the old entity.
+  const renamed = mergeRecordingMetadata(withRefs, {
+    ...META,
+    artist: 'Someone Else',
+    album: 'Another Record',
+  });
+  assertEqual(renamed.artistRef, null, 'renamed artist drops its ref');
+  assertEqual(renamed.albumRef, null, 'renamed album drops its ref');
+  const swapped = mergeRecordingMetadata(withRefs, {
+    ...META,
+    album: 'Another Record',
+    albumRef: { provider: 'itunes', kind: 'album', id: 'i-9' },
+  });
+  assertEqual(
+    swapped.albumRef?.id,
+    'i-9',
+    'an incoming ref wins outright',
+  );
+  assertEqual(
+    swapped.artistRef?.id,
+    'a-1',
+    'unchanged artist keeps its ref',
+  );
+
   // The ref keys are optional on the persisted document: a row
   // written before v16 has no ref columns, and it still validates;
   // malformed refs and unrelated keys still reject.

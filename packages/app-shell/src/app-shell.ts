@@ -3723,12 +3723,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   // Ordered play of the entity's whole context — the header's
   // primary action: album pages play top-down, playlists in order.
+  // An empty playable context (offline + stream-only listing) is not
+  // silent: playMetadata's typed 'empty play list' verdict reports
+  // through the same funnel a failed play does.
   const entityPlayAll = useCallback(
     (fetch: EntityFetch | null, entryKey: string) => {
       const metas = entityContextMetas(fetch, entryKey);
-      if (metas.length === 0) {
-        return;
-      }
       void dispatchPlay(
         'action.playAll',
         session.playMetadata(metas, {
@@ -3746,13 +3746,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
   );
 
   // Shuffle-play the entity's whole context — the one header action
-  // row taps can't express.
+  // row taps can't express. Same empty-context rule as ordered play:
+  // the typed verdict reports instead of silently doing nothing.
   const entityShuffleAll = useCallback(
     (fetch: EntityFetch | null, entryKey: string) => {
       const metas = entityContextMetas(fetch, entryKey);
-      if (metas.length === 0) {
-        return;
-      }
       void dispatchPlay(
         'action.shuffleAll',
         session.playMetadata(metas, {

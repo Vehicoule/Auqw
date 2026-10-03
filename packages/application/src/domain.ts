@@ -782,8 +782,20 @@ export function mergeRecordingMetadata(
     ...recording,
     ...audioFields(metadata),
     isrc: metadata.isrc ?? recording.isrc,
-    artistRef: metadata.artistRef ?? recording.artistRef ?? null,
-    albumRef: metadata.albumRef ?? recording.albumRef ?? null,
+    // A ref describes the entity behind the displayed name — keep the
+    // stored one only while the incoming row still shows that name.
+    // A renamed label without a ref of its own would otherwise link
+    // the new name to the old entity.
+    artistRef:
+      metadata.artistRef ??
+      (metadata.artist === recording.artist
+        ? (recording.artistRef ?? null)
+        : null),
+    albumRef:
+      metadata.albumRef ??
+      (metadata.album === recording.album
+        ? (recording.albumRef ?? null)
+        : null),
   };
 }
 

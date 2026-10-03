@@ -1,5 +1,13 @@
-import { FlatList, Image, StyleSheet, View } from 'react-native';
+import {
+  FlatList,
+  Image,
+  PixelRatio,
+  StyleSheet,
+  View,
+  useWindowDimensions,
+} from 'react-native';
 import { Defs, LinearGradient, Rect, Stop, Svg } from 'react-native-svg';
+import { useResolvedArtworkUri } from './artwork.tsx';
 import { useTheme } from './theme.tsx';
 import {
   Artwork,
@@ -27,6 +35,58 @@ export type EntityScreenProps = EntityScreenHandlers & {
   readonly topInset?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
 };
+
+/** Blurred artwork wash behind the hero — resolved through the
+ *  artwork cache like every other surface (a screen-wide scaled
+ *  variant, not the provider's full-size URL), decode-time blur like
+ *  the stage backdrop, and an Svg gradient fading it into the canvas
+ *  before the tracklist. Absent while resolution is pending. */
+function HeroBackdrop({ url }: { readonly url: string }) {
+  const theme = useTheme();
+  const { width: windowWidth } = useWindowDimensions();
+  const { uri, markSourceError } = useResolvedArtworkUri(
+    url,
+    Math.ceil(windowWidth * PixelRatio.get()),
+  );
+  if (uri === null) {
+    return null;
+  }
+  return (
+    <>
+      <Image
+        source={{ uri }}
+        blurRadius={40}
+        style={[StyleSheet.absoluteFill, { opacity: 0.3 }]}
+        resizeMode="cover"
+        onError={markSourceError}
+        accessibilityIgnoresInvertColors
+      />
+      <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
+        <Defs>
+          <LinearGradient id="uw-entity-fade" x1="0" y1="0" x2="0" y2="1">
+            <Stop
+              offset="0"
+              stopColor={theme.colors.canvas}
+              stopOpacity="0"
+            />
+            <Stop
+              offset="0.95"
+              stopColor={theme.colors.canvas}
+              stopOpacity="1"
+            />
+          </LinearGradient>
+        </Defs>
+        <Rect
+          x="0"
+          y="0"
+          width="100%"
+          height="100%"
+          fill="url(#uw-entity-fade)"
+        />
+      </Svg>
+    </>
+  );
+}
 
 function HeaderPill({ view }: { readonly view: EntityPillView }) {
   return (
@@ -131,50 +191,9 @@ export function EntityScreen({
           overflow: 'hidden',
         }}
       >
-        {/* Blurred artwork wash behind the hero — decode-time blur
-            like the stage backdrop; the gradient fades it into the
-            canvas before the tracklist. Pure decoration — absent
-            entirely when the page has no cover. */}
-        {model.artworkUrl !== null && (
-          <>
-            <Image
-              source={{ uri: model.artworkUrl }}
-              blurRadius={40}
-              style={[StyleSheet.absoluteFill, { opacity: 0.3 }]}
-              resizeMode="cover"
-              accessibilityIgnoresInvertColors
-            />
-            <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
-              <Defs>
-                <LinearGradient
-                  id="uw-entity-fade"
-                  x1="0"
-                  y1="0"
-                  x2="0"
-                  y2="1"
-                >
-                  <Stop
-                    offset="0"
-                    stopColor={theme.colors.canvas}
-                    stopOpacity="0"
-                  />
-                  <Stop
-                    offset="0.95"
-                    stopColor={theme.colors.canvas}
-                    stopOpacity="1"
-                  />
-                </LinearGradient>
-              </Defs>
-              <Rect
-                x="0"
-                y="0"
-                width="100%"
-                height="100%"
-                fill="url(#uw-entity-fade)"
-              />
-            </Svg>
-          </>
-        )}
+        {/* Pure decoration — absent entirely when the page has no
+            cover. */}
+        {model.artworkUrl !== null && <HeroBackdrop url={model.artworkUrl} />}
         {/* Artist pages conventionally round the portrait; album and
             playlist covers stay square. */}
         <Artwork
