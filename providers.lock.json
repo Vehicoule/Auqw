@@ -13,11 +13,11 @@
     },
     {
       "id": "youtube-music",
-      "version": "0.4.12",
+      "version": "0.4.13",
       "abi": "0.3.0",
-      "digest": "sha256:af24c3138f7acc8e5abbf3783708ae5b8649bc23b94176d0e7bd64d87bf56fd5",
-      "manifest_digest": "sha256:b835ab4298da14fb41857f31710bb39ce15417b2f767200dec0eb32f685ff090",
-      "source": "release:../auqw-plugins/releases/youtube-music/0.4.12"
+      "digest": "sha256:1a8772ea54c31c723dab025e1f7df3f866ff5b06eb494c94b2b10ed841b87fce",
+      "manifest_digest": "sha256:b5067d631d876a1d8c4c52b415228fa0ccb6cca132bbe912e973350f8748717e",
+      "source": "release:../auqw-plugins/releases/youtube-music/0.4.13"
     },
     {
       "id": "deezer",
