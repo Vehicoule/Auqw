@@ -1528,21 +1528,22 @@
 .uw-collection {
   display: flex;
   align-items: stretch;
-  gap: var(--spacing-xs);
   text-align: left;
+  border-radius: var(--radius-control);
+  border: var(--stroke-hairline) solid var(--hairline);
+  background: var(--raised);
+  overflow: hidden;
 }
 
-/* The icon zone is its own rounded surface beside the body card — a
-   small echo of the shell seam between the stage and the world card. */
+/* The tile is a small shell: the icon sits on the flat stage side
+   and the body panel anchors to the tile's right edges with only
+   its seam side rounded — the world card's seam. */
 .uw-collection__icon {
-  width: 56px;
+  width: 50px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-control);
-  border: var(--stroke-hairline) solid var(--hairline);
-  background: var(--accent-soft);
 }
 
 .uw-collection__body {
@@ -1552,33 +1553,29 @@
   align-items: center;
   gap: var(--spacing-md);
   padding: var(--spacing-md) var(--spacing-lg);
-  border-radius: var(--radius-control);
-  border: var(--stroke-hairline) solid var(--hairline);
-  background: var(--raised);
+  border-left: var(--stroke-hairline) solid var(--hairline);
+  border-top-left-radius: var(--radius-float);
+  border-bottom-left-radius: var(--radius-float);
+  background: var(--accent-soft);
 }
 
 /* The shared pressable hover wash must not paint the tile itself —
    it would fill the seam between the two surfaces. */
 .uw-collection:hover:not(:disabled) {
-  background: transparent;
+  background: var(--raised);
 }
 
-.uw-collection:hover:not(:disabled) .uw-collection__icon,
-.uw-collection:hover:not(:disabled) .uw-collection__body {
+.uw-collection:hover:not(:disabled) {
   border-color: var(--fg40);
 }
 
-.uw-collection:hover:not(:disabled) .uw-collection__body {
-  background: var(--uw-hover);
-}
-
-.uw-collection.uw-off .uw-collection__icon {
-  background: var(--fg08);
+.uw-collection.uw-off {
+  background: transparent;
+  border-color: var(--fg08);
 }
 
 .uw-collection.uw-off .uw-collection__body {
-  background: transparent;
-  border-color: var(--fg08);
+  background: var(--fg08);
 }
 
 /* Reserve the play circle's slot at the body card's right edge. */
@@ -1586,8 +1583,8 @@
   padding-right: calc(var(--spacing-lg) + 28px + var(--spacing-sm));
 }
 
-/* The collection's own play affordance — the same accent-soft circle
-   the mobile tile carries, floated over the tile's right edge. */
+/* The collection's own play affordance — a raised circle over the
+   accent panel, floated at the tile's right edge. */
 .uw-collection__play {
   position: absolute;
   right: var(--spacing-lg);
@@ -1599,7 +1596,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--accent-soft);
+  background: var(--raised);
+  border: var(--stroke-hairline) solid var(--hairline);
 }
 
 .uw-collection__play:hover {

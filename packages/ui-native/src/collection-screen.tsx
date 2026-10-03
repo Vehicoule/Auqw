@@ -32,26 +32,24 @@ export function CollectionTile({
         minHeight: 62,
         flexDirection: 'row',
         alignItems: 'stretch',
-        gap: theme.spacing.xs,
+        borderRadius: theme.radius.control,
+        borderWidth: theme.strokes.hairline,
+        borderColor: view.enabled
+          ? theme.colors.hairline
+          : theme.colors.fg08,
+        backgroundColor: view.enabled ? theme.colors.raised : 'transparent',
         opacity: view.enabled ? 1 : 0.58,
+        overflow: 'hidden',
       }}
     >
-      {/* The icon zone is its own rounded surface beside the body
-          card — a small echo of the shell seam between the stage and
-          the floating world card. */}
+      {/* The tile is a small shell: the icon sits on the flat stage
+          side and the body panel anchors to the tile's right edges
+          with only its seam side rounded — the world card's seam. */}
       <View
         style={{
-          width: 56,
+          width: 50,
           alignItems: 'center',
           justifyContent: 'center',
-          borderRadius: theme.radius.control,
-          borderWidth: theme.strokes.hairline,
-          borderColor: view.enabled
-            ? theme.colors.hairline
-            : theme.colors.fg08,
-          backgroundColor: view.enabled
-            ? theme.colors.accentSoft
-            : theme.colors.fg08,
         }}
       >
         <Icon
@@ -70,12 +68,13 @@ export function CollectionTile({
           alignItems: 'center',
           gap: theme.spacing.sm,
           paddingHorizontal: theme.spacing.md,
-          borderRadius: theme.radius.control,
-          borderWidth: theme.strokes.hairline,
-          borderColor: view.enabled
-            ? theme.colors.hairline
+          borderTopLeftRadius: theme.radius.float,
+          borderBottomLeftRadius: theme.radius.float,
+          borderLeftWidth: theme.strokes.hairline,
+          borderLeftColor: theme.colors.hairline,
+          backgroundColor: view.enabled
+            ? theme.colors.accentSoft
             : theme.colors.fg08,
-          backgroundColor: view.enabled ? theme.colors.raised : 'transparent',
         }}
       >
         <View style={{ flex: 1, minWidth: 0 }}>
@@ -97,7 +96,7 @@ export function CollectionTile({
               borderRadius: 14,
               alignItems: 'center',
               justifyContent: 'center',
-              backgroundColor: theme.colors.accentSoft,
+              backgroundColor: theme.colors.raised,
             }}
           >
             <Icon name="play" size={12} color={theme.colors.accent} />
