@@ -597,7 +597,7 @@ function MetaEntityLink({
     <Pressable
       onPress={() => onOpenEntity(entityRef)}
       accessibilityLabel={t('entity.cardA11y', { title: a11yTitle })}
-      style={{ alignSelf: 'flex-start' }}
+      style={{ alignSelf: 'stretch' }}
     >
       {children}
     </Pressable>
