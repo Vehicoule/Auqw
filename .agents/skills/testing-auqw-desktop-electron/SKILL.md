@@ -215,18 +215,47 @@ while hidden).
   (`index.html`, the UI documented above); without it the window loads the
   product UI (`app.html`) — a different surface (search/home/settings).
 - Plugins ship OTA (decisions.md — Plugin guests): NOTHING is bundled.
-  On first load the utility syncs the signed feed
-  (`releases/feed.json` on Auqw-plugins main, fetched over HTTPS) into
-  `<userData>/plugins`, verifies ed25519 signature + sha256 digests
-  against the embedded release key, and loads the verified pairs.
-  A first boot needs outbound network to raw.githubusercontent.com —
-  an unreachable feed with an empty cache = zero providers.
-- `AUQW_PLUGIN_DIR` still wins over the feed cache when set — point it
-  at a dir of `<id>.wasm` + `<id>.manifest.json` pairs to test an
-  unsigned/local set (dev seam). `AUQW_PLUGIN_FEED` overrides the
-  feed URL for a fixture feed. When neither is set and the feed is
-  unreachable, a NON-empty cache still loads (last-known-good); an
-  empty cache + failed sync rethrows so the next call re-syncs.
+  The utility fetches `releases/feed.json` (default
+  `https://raw.githubusercontent.com/Vehicoule/Auqw-plugins/main/releases/feed.json`),
+  verifies the ed25519 sig + `sha256:<hex>` digests per artifact, and
+  caches ONE self-describing `<id>.json` pair doc per plugin under
+  `<userData>/plugins` (default `~/.config/auqw-desktop/plugins`) —
+  every load re-verifies sig+digests offline, so no .wasm/.manifest.json
+  files exist on disk anymore. A first boot needs outbound network to
+  raw.githubusercontent.com — an unreachable feed with an empty cache
+  fails closed at BootGate.
+- Env seams: `AUQW_PLUGIN_FEED` (feed URL override — point at a local
+  mirror for tamper legs), `AUQW_PLUGIN_DIR` (unsigned dev set, LEGACY
+  two-file `<id>.wasm`+`<id>.manifest.json` format only), `AUQW_USER_DATA`
+  (cache root). `AUQW_DEV_HARNESS=1` shares the same OTA plugin path.
+- Local mirror recipe: node static file server under a `releases/` tree,
+  log every request's path + `accept-encoding`. The request log is the
+  ground truth for cache-hit vs refetch (hit = feed.json only; miss =
+  feed.json + `<id>/<ver>/plugin.manifest.json` + `<id>-<ver>.wasm`).
+- Feed entry digests are `sha256:<64hex>` — a bare-hex tamper fails the
+  WHOLE-feed shape check (all-or-nothing → LKG), not a per-plugin skip.
+- Observable semantics: feed reachable = authority — a valid cached doc
+  for a feed-dropped id is refused + swept. The retry gate arms when
+  `ready < compatible` (undeliverable newer release) → the NEXT
+  pluginsReady/status call re-syncs → a SECOND feed.json fetch in the
+  mirror request log is the armed-gate proof.
+- Dead-feed legs: `AUQW_PLUGIN_FEED=http://127.0.0.1:1/x.json` — port 1
+  refuses instantly. Empty cache → BootGate; populated cache → LKG boot,
+  stale files NOT swept (sweep only runs on a successful sync).
+- Pair-doc tamper that discriminates sig-vs-digest: edit `"version"` in
+  a cached `<id>.json` — digests+manifest stay valid so only the
+  sig-over-payload re-verify catches it → that provider is skipped.
+- Electron utility-process `fetch` advertises gzip but does NOT decode
+  it (plain node does). Feed fetch sends `accept-encoding: identity`;
+  verify via mirror request log `ae=`.
+- ALWAYS `cargo build --locked -p auqw-node-bindings` after branch
+  switches — a stale debug `.so` rejects current manifests
+  ('capabilities outside the set this ABI serves') even when bytes are
+  perfect. If the worktree gains commits mid-run, check `git log` +
+  `stat dist/utility/index.cjs` mtime — dist may be behind HEAD.
+- youtube-music resolve bot-walls on datacenter egress — typed
+  `provider-wall` is weather, not a defect; the diagnostics
+  `attempt trace` (steps/http) is proof the wasm guest ran.
 - The PRODUCT UI is stricter: `src/renderer/controller.ts` throws
   `'no plugin providers available'` when zero providers load → boot dies
   at `[ui] boot failed: internal` and nothing interactive ever renders.
@@ -242,9 +271,9 @@ while hidden).
 - youtube-music `playback.resolve` takes an 11-char video ID as `source_ref`
   (e.g. `kJQP7kiw5Fk`), not a URL.
 - Dev loops that need a fixture set WITHOUT the network: stage
-  `<id>.wasm` + `<id>.manifest.json` pairs into a scratch dir and pass
-  `AUQW_PLUGIN_DIR=<dir>` — the utility skips the feed entirely and
-  loads the set unsigned-set-style (host verifies only
+  `<id>.wasm` + `<id>.manifest.json` pairs (legacy two-file format) into
+  a scratch dir and pass `AUQW_PLUGIN_DIR=<dir>` — the utility skips the
+  feed entirely and loads the set unsigned-set-style (host verifies only
   `artifact.digest` vs wasm bytes, no signature).
 - youtube-music CAN resolve on this box — a bot-check on datacenter IPs is
   a possible failure, not a guaranteed one. A deezer search row pressed
