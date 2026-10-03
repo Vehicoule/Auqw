@@ -659,18 +659,35 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // ---- toast bus ---------------------------------------------------
   // reportResult routes its text through the module sink; the pill
   // self-clears.
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToastText] = useState<string | null>(null);
+  const [toastSeq, setToastSeq] = useState(0);
+  // Actions that must start their clock from a toast's committed
+  // display — not from the state write (the install reboot waits out
+  // the toast's own window, and a delayed commit must not eat it).
+  const postToastAction = useRef<(() => void) | null>(null);
+  // Every setToast bumps the sequence — React bails on identical
+  // state, and a repeat of the visible text must still commit so a
+  // queued post-toast action is never stranded.
+  const setToast = useCallback((text: string | null) => {
+    setToastSeq((n) => n + 1);
+    setToastText(text);
+  }, []);
   useEffect(() => {
     setToastSink(setToast);
     return () => setToastSink(null);
-  }, []);
+  }, [setToast]);
   useEffect(() => {
     if (toast === null) {
       return undefined;
     }
     const timer = setTimeout(() => setToast(null), 4_000);
+    const pending = postToastAction.current;
+    if (pending !== null) {
+      postToastAction.current = null;
+      pending();
+    }
     return () => clearTimeout(timer);
-  }, [toast]);
+  }, [toast, toastSeq, setToast]);
 
   // ---- downloads ledger + usage probes -----------------------------
   // Live ledger — chips, the downloads collection, and the stage
@@ -2024,6 +2041,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
               apply: updateSnapshot.apply,
               currentVersion: updateSnapshot.currentVersion,
             },
+      installProviderSupported: ports.installProvider !== undefined,
     });
     // Row omits are the platform's — desktop drops the artwork-cache
     // budget row: the renderer has no application artwork cache
@@ -2458,6 +2476,41 @@ export function useAppShell<E extends { readonly type: string } = never>(
           open(storefrontEpoch, setStorefrontSheetOpen);
           setStorefrontDraft(state.settings.storefront ?? '');
           return;
+        case 'installProvider': {
+          // The consent flow lives in the port — the shell only
+          // reports the outcome. 'cancelled' is the user backing out
+          // and stays silent, same as the export pick.
+          const install = ports.installProvider;
+          if (install === undefined) {
+            return;
+          }
+          void install()
+            .then((outcome) => {
+              if (outcome.outcome === 'cancelled') {
+                return;
+              }
+              if (outcome.outcome === 'approved') {
+                setToast(
+                  t('toast.providerInstalled', {
+                    id: outcome.id,
+                    count: outcome.permissions.length,
+                  }),
+                );
+                // The session reboots so the new provider's adapters
+                // exist — the port starts its clock when the toast
+                // commits, so the confirmation gets its full window
+                // even under a delayed render.
+                postToastAction.current =
+                  ports.afterProviderInstall ?? null;
+                return;
+              }
+              setToast(t('toast.providerInstallFailed'));
+            })
+            // A rejected install port (picker failure, IPC error)
+            // still owes the user the failure toast.
+            .catch(() => setToast(t('toast.providerInstallFailed')));
+          return;
+        }
         case 'qualityKbps':
           open(qualityEpoch, setQualityPickerOpen);
           return;

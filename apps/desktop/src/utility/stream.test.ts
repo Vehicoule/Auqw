@@ -8,6 +8,7 @@ function fakeHost(overrides: Partial<PluginHostLike> = {}): PluginHostLike {
     async loadPlugin() {
       return 'id';
     },
+    async unloadPlugin() {},
     async startPrepare() {
       // The real napi outcome always carries `superseded` as an array.
       return {
@@ -78,6 +79,8 @@ function fakeRuntime(host: PluginHostLike, devGateEnabled = true) {
           plugins: ['a', 'b'],
           manifests: [],
         }),
+      reviewUserPair: () => null,
+      approveUserPair: () => false,
       devGateEnabled,
     }),
   };

@@ -6,11 +6,13 @@ import type {
 import { CancellationSource } from '@auqw/application';
 import { assert, assertDeepEqual, assertEqual } from '@auqw/application/testing';
 import type {
+  ApprovePairResult,
   AttemptSummaryPayload,
   HostPluginsResult,
   HostRequestArgs,
   HostCancelArgs,
   RequestOutcomePayload,
+  UserPairReviewResult,
 } from '../shared/contract.ts';
 import type { AuqwHost } from './provider.ts';
 import { createPluginProvider } from './provider.ts';
@@ -107,6 +109,14 @@ class FakeHost implements AuqwHost {
 
   plugins(): Promise<HostPluginsResult> {
     return Promise.resolve({ bindings: 'loaded', plugins: [], manifests: [] });
+  }
+
+  reviewPair(_path: string): Promise<UserPairReviewResult> {
+    return Promise.resolve(null);
+  }
+
+  approvePair(_path: string): Promise<ApprovePairResult> {
+    return Promise.resolve(false);
   }
 
   request(args: HostRequestArgs): Promise<RequestOutcomePayload> {

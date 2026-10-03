@@ -1,12 +1,17 @@
 import { CHANNELS } from '../shared/channels.ts';
 import type {
   AppMeta,
+  ConfirmInstallProviderArgs,
   PickFilesArgs,
   PickFolderArgs,
+  UserPairReviewPayload,
 } from '../shared/contract.ts';
 import {
   isAuthOpenUrlArgs,
   isAuthSetClientArgs,
+  isConfirmInstallProviderArgs,
+  isHostReviewPairArgs,
+  isInstallProviderArgs,
   isLocalAddArgs,
   isLocalProbeArgs,
   isLocalReadArgs,
@@ -146,6 +151,11 @@ export interface ChannelDeps {
     args: PickFilesArgs,
     sender: NetSender,
   ) => Promise<readonly string[]>;
+  /** Native consent dialog for a reviewed provider install. */
+  readonly confirmInstallProvider: (
+    args: ConfirmInstallProviderArgs,
+    sender: NetSender,
+  ) => Promise<boolean>;
   readonly net: NetService;
   /** `theme:events` push registry — same refcounted sender pattern as
       `net`; attach starts the OS palette watchers. */
@@ -226,6 +236,12 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     ),
   ],
   [
+    CHANNELS.dialogConfirmInstallProvider,
+    channel(isConfirmInstallProviderArgs, (args, deps, sender) =>
+      deps.confirmInstallProvider(args, sender),
+    ),
+  ],
+  [
     CHANNELS.netSnapshot,
     channel(noArgs, (_args, deps) =>
       Promise.resolve(deps.net.snapshot()),
@@ -249,6 +265,70 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
   ],
   fwd(CHANNELS.utilityPing, isUtilityPingArgs),
   fwd(CHANNELS.hostPlugins, noArgs),
+  fwd(CHANNELS.hostReviewPair, isHostReviewPairArgs),
+  // `host:approvePair` stays off the renderer surface — approval
+  // without main's consent gate would let a compromised renderer
+  // persist an unapproved pair. The install flow below owns it.
+  [
+    CHANNELS.dialogInstallProvider,
+    channel(isInstallProviderArgs, async (args, deps, sender) => {
+      // 1. Review the candidate in the utility process.
+      const review = await deps.utility.request(CHANNELS.hostReviewPair, {
+        path: args.path,
+      });
+      if (review === null || review === undefined) {
+        return { outcome: 'malformed' };
+      }
+      const first = review as UserPairReviewPayload;
+      // 2. Native consent dialog on exactly what the pin would be.
+      const confirmed = await deps.confirmInstallProvider(
+        {
+          id: first.id,
+          version: first.version,
+          permissions: [...first.permissions],
+        },
+        sender,
+      );
+      if (!confirmed) {
+        return { outcome: 'cancelled' };
+      }
+      // 3. Re-review — the file must still carry the exact bytes the
+      // user approved; a swap between dialog and persist is refused.
+      const recheck = await deps.utility.request(CHANNELS.hostReviewPair, {
+        path: args.path,
+      });
+      if (recheck === null || recheck === undefined) {
+        return { outcome: 'failed' };
+      }
+      const second = recheck as UserPairReviewPayload;
+      if (
+        second.id !== first.id ||
+        second.wasm_sha256 !== first.wasm_sha256 ||
+        second.manifest_sha256 !== first.manifest_sha256 ||
+        second.permissions.length !== first.permissions.length ||
+        second.permissions.some((p, i) => p !== first.permissions[i])
+      ) {
+        return { outcome: 'failed' };
+      }
+      // 4. Persist — the approved digests ride the call so a pair
+      // swapped after the re-review is refused at the write too.
+      const approved = await deps.utility.request(
+        CHANNELS.hostApprovePair,
+        {
+          path: args.path,
+          wasm_sha256: second.wasm_sha256,
+          manifest_sha256: second.manifest_sha256,
+        },
+      );
+      return approved === true
+        ? {
+            outcome: 'approved',
+            id: second.id,
+            permissions: [...second.permissions],
+          }
+        : { outcome: 'failed' };
+    }),
+  ],
   fwd(CHANNELS.hostRequest, isHostRequestArgs),
   fwd(CHANNELS.hostCancel, isHostCancelArgs),
   fwd(CHANNELS.streamPrepare, isStreamPrepareArgs),

@@ -79,6 +79,16 @@ const pickFolderArgs = v.object({ title: v.optional(v.string()) });
 const pickFilesArgs = v.object({
   title: v.optional(v.string()),
   multiple: v.optional(v.boolean()),
+});/** `dialog:confirmInstallProvider` — the consent dialog's review
+ * payload: exactly what the approval would pin. */
+export type ConfirmInstallProviderArgs = v.Guarded<
+  typeof isConfirmInstallProviderArgs
+>;
+
+export const isConfirmInstallProviderArgs = v.object({
+  id: v.boundedString(128),
+  version: v.boundedString(64),
+  permissions: v.array(v.boundedString(128)),
 });
 
 export type PickFolderArgs = v.Guarded<typeof pickFolderArgs>;
@@ -386,6 +396,79 @@ export type StreamCancelArgs = v.Guarded<typeof isStreamCancelArgs>;
 export const isStreamCancelArgs = v.object({
   requestId: v.boundedString(128),
 });
+
+/**
+ * `host:reviewPair` — describe a candidate user pair file for the
+ * consent review surface. Null when the file is malformed/oversized.
+ */
+export type HostReviewPairArgs = v.Guarded<typeof isHostReviewPairArgs>;
+
+export const isHostReviewPairArgs = v.object({
+  path: v.boundedString(4096),
+});
+
+/** What a candidate pair review shows — identity + exact pin. */
+export type UserPairReviewPayload = v.Guarded<
+  typeof isUserPairReviewPayload
+>;
+
+export const isUserPairReviewPayload = v.object({
+  id: v.boundedString(128),
+  version: v.boundedString(64),
+  abi: v.boundedString(32),
+  capabilities: v.array(v.boundedString(64)),
+  permissions: v.array(v.boundedString(128)),
+  wasm_sha256: v.boundedString(80),
+  manifest_sha256: v.boundedString(80),
+});
+
+/**
+ * `host:approvePair` — persist the reviewed pair + consent record.
+ * The digest fields pin the exact candidate the consent dialog
+ * approved; a pair that drifted since is refused.
+ */
+export type HostApprovePairArgs = v.Guarded<typeof isHostApprovePairArgs>;
+
+export const isHostApprovePairArgs = v.object({
+  path: v.boundedString(4096),
+  wasm_sha256: v.boundedString(80),
+  manifest_sha256: v.boundedString(80),
+});
+/**
+ * `dialog:installProvider` — the consent-gated install flow, owned
+ * end-to-end by main: review, native consent dialog, re-review
+ * (digest match against what the user approved), then persist.
+ * The renderer can only start the flow, never skip a step.
+ */
+export type InstallProviderArgs = v.Guarded<typeof isInstallProviderArgs>;
+export const isInstallProviderArgs = v.object({
+  path: v.boundedString(4096),
+});
+export type InstallProviderOutcome = v.Guarded<
+  typeof isInstallProviderOutcome
+>;
+export const isInstallProviderOutcome = v.union(
+  v.object({ outcome: v.literal('cancelled') }),
+  v.object({ outcome: v.literal('malformed') }),
+  v.object({ outcome: v.literal('failed') }),
+  v.object({
+    outcome: v.literal('approved'),
+    id: v.boundedString(128),
+    permissions: v.array(v.boundedString(128)),
+  }),
+);
+
+/** `host:reviewPair` result — null when the pair is malformed. */
+export type UserPairReviewResult = v.Guarded<
+  typeof isUserPairReviewResult
+>;
+
+export const isUserPairReviewResult = v.nullable(isUserPairReviewPayload);
+
+/** `host:approvePair` result — whether the pair + consent persisted. */
+export type ApprovePairResult = v.Guarded<typeof isApprovePairResult>;
+
+export const isApprovePairResult = v.boolean();
 
 /**
  * `host:request` — any declared capability with a JSON object payload,
@@ -1630,6 +1713,17 @@ export type AuqwApi = {
       title?: string,
       multiple?: boolean,
     ) => Promise<readonly string[]>;
+    /** Native consent dialog — shows the review, resolves to the
+     * user's verdict. Main-internal wiring keeps its renderer surface
+     * for tests; the shipped install path is `installProvider`. */
+    readonly confirmInstallProvider: (
+      review: ConfirmInstallProviderArgs,
+    ) => Promise<boolean>;
+    /** The consent-gated install flow — review, dialog, re-review,
+     * persist, all owned by main. The renderer only starts it. */
+    readonly installProvider: (
+      args: InstallProviderArgs,
+    ) => Promise<InstallProviderOutcome>;
   };
   readonly net: {
     readonly snapshot: () => Promise<NetSnapshot>;
@@ -1654,6 +1748,9 @@ export type AuqwApi = {
   };
   readonly host: {
     readonly plugins: () => Promise<HostPluginsResult>;
+    readonly reviewPair: (
+      path: string,
+    ) => Promise<UserPairReviewResult>;
     readonly request: (
       args: HostRequestArgs,
     ) => Promise<RequestOutcomePayload>;

@@ -2353,6 +2353,11 @@ export function toSettingsModel(
           readonly currentVersion: string;
         }
       | undefined;
+    /**
+     * True where the platform exposes the third-party provider
+     * install consent flow — the settings row omits itself otherwise.
+     */
+    readonly installProviderSupported?: boolean;
   } = {},
 ): SettingsModel {
   const nav = (
@@ -2393,6 +2398,11 @@ export function toSettingsModel(
       nav('playbackProvider', t('settings.playbackProvider'), settings.playbackProvider),
       nav('lyricsProvider', t('settings.lyricsProvider'), settings.lyricsProvider ?? t('settings.value.auto')),
       nav('radioProvider', t('settings.radioProvider'), settings.radioProvider ?? t('settings.value.auto')),
+      // Third-party install — only where the platform carries the
+      // consent flow; the row routes through the install port.
+      ...(media.installProviderSupported === true
+        ? [nav('installProvider', t('settings.installProvider'), null)]
+        : []),
       nav('storefront', t('settings.storefront'), settings.storefront ?? t('settings.value.notSet')),
       // OAuth session trust — the sign-in sheet opens off 'googleAuth';
       // 'authSignOut' shows only while linked, and 'authClientId' is the

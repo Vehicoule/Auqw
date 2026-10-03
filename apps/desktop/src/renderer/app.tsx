@@ -186,7 +186,7 @@ function App() {
     <>
       <PlatformChromeReporter />
       {boot.type === 'ready' ? (
-        <Shell controller={boot.controller} />
+        <Shell controller={boot.controller} onReboot={() => setAttempt((n) => n + 1)} />
       ) : (
         <ThemeProvider theme="system" reducedMotion={reducedMotion}>
           <BootGate boot={boot} onRetry={() => setAttempt((n) => n + 1)} />
@@ -301,7 +301,13 @@ function BootGate({
   );
 }
 
-function Shell({ controller }: { readonly controller: SessionController }) {
+function Shell({
+  controller,
+  onReboot,
+}: {
+  readonly controller: SessionController;
+  readonly onReboot: () => void;
+}) {
   // `Session.subscribe` uses instance state — pass a bound wrapper,
   // not the unbound method (an unbound `this.#listeners` throws and
   // React unmounts the tree, leaving a blank window on boot).
@@ -334,7 +340,7 @@ function Shell({ controller }: { readonly controller: SessionController }) {
       reducedMotion={reducedMotion}
     >
       {state.type === 'ready' ? (
-        <Main controller={controller} state={state} />
+        <Main controller={controller} state={state} onReboot={onReboot} />
       ) : (
         <SessionGate state={state} controller={controller} />
       )}
@@ -438,9 +444,11 @@ type Overlay =
 function Main({
   controller,
   state,
+  onReboot,
 }: {
   readonly controller: SessionController;
   readonly state: ReadySession;
+  readonly onReboot: () => void;
 }) {
   const { session } = controller;
   const importInput = useRef<HTMLInputElement | null>(null);
@@ -802,6 +810,32 @@ function Main({
       // renderer has no application artwork cache — Chromium's image
       // cache owns artwork memory — so the row would dead-end.
       omitSettingsRows: ['artworkCacheBytes'],
+      // Third-party provider install — pick → host review → native
+      // consent dialog → persist. The renderer never touches the
+      // consent store; the utility owns the write.
+      installProvider: async () => {
+        // The whole consent flow (review, dialog, re-review, persist)
+        // is main's — the renderer only picks the file and reports
+        // the outcome. A picker failure is a 'failed', never an
+        // unhandled rejection.
+        try {
+          const picked = await window.auqw.dialog.pickFiles(
+            'Choose a provider pair (.pair.json)',
+          );
+          const path = picked[0];
+          if (path === undefined) {
+            return { outcome: 'cancelled' };
+          }
+          return await window.auqw.dialog.installProvider({ path });
+        } catch {
+          return { outcome: 'failed' };
+        }
+      },
+      // The session reboots after an install so the new provider's
+      // adapters exist — settings and playback can use it now. The
+      // reboot unmounts this shell, so it waits out the toast's
+      // 4-second window first: the confirmation must be seen.
+      afterProviderInstall: () => setTimeout(onReboot, 4_000),
       // Sandboxed renderers have no filesystem — the browser's
       // download path is the honest destination.
       exportJson: async (json, name) => {

@@ -618,6 +618,17 @@ impl PluginHost {
         Ok(id)
     }
 
+    /// Unregister a previously loaded plugin by manifest id.
+    ///
+    /// # Errors
+    /// [`HostError::UnknownPlugin`] if `provider_id` is not loaded.
+    pub fn unload_plugin(&self, provider_id: String) -> Result<(), HostError> {
+        lock(&self.plugins)?
+            .remove(&provider_id)
+            .map(|_| ())
+            .ok_or(HostError::UnknownPlugin { id: provider_id })
+    }
+
     /// Start a `playback.resolve` invocation on the runtime.
     /// `request_id` is caller-minted and passed back through `deliver`.
     ///

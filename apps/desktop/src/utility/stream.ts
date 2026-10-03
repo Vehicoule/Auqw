@@ -1,7 +1,10 @@
 import { CHANNELS } from '../shared/channels.ts';
 import {
+  isApprovePairResult,
+  isHostApprovePairArgs,
   isHostCancelArgs,
   isHostRequestArgs,
+  isHostReviewPairArgs,
   isPrepareOutcomePayload,
   isPreparedStreamPayload,
   isRequestOutcomePayload,
@@ -13,6 +16,7 @@ import {
   isStreamPrepareArgs,
   isStreamProbeArgs,
   isStreamReadArgs,
+  isUserPairReviewResult,
 } from '../shared/contract.ts';
 import { isRecord } from '../shared/check.ts';
 import {
@@ -126,6 +130,17 @@ export function createStreamHandlers(deps: {
   host(): PluginHostLike;
   pluginsReady(): Promise<readonly string[]>;
   status(): Promise<unknown>;
+  /** User-pair consent review surface (`host:reviewPair`). */
+  reviewUserPair(path: string): unknown;
+  /**
+   * User-pair approval persistence (`host:approvePair`) — the digest
+   * args pin the exact candidate the consent dialog approved.
+   */
+  approveUserPair(
+    path: string,
+    wasmSha256: string,
+    manifestSha256: string,
+  ): boolean;
   devGateEnabled?: boolean;
 }): Readonly<Record<string, UtilityHandler>> {
   /** The mapped region: run()'s throw/rejection becomes mapErr(). */
@@ -154,6 +169,18 @@ export function createStreamHandlers(deps: {
 
   return {
     [CHANNELS.hostPlugins]: () => deps.status(),
+    [CHANNELS.hostReviewPair]: async (args) => {
+      const a = validated(isHostReviewPairArgs, 'host:reviewPair')(args);
+      return checked(isUserPairReviewResult, 'host:reviewPair')(
+        deps.reviewUserPair(a.path),
+      );
+    },
+    [CHANNELS.hostApprovePair]: async (args) => {
+      const a = validated(isHostApprovePairArgs, 'host:approvePair')(args);
+      return checked(isApprovePairResult, 'host:approvePair')(
+        deps.approveUserPair(a.path, a.wasm_sha256, a.manifest_sha256),
+      );
+    },
 
     [CHANNELS.hostRequest]: async (args) => {
       const a = validated(isHostRequestArgs, 'host:request')(args);

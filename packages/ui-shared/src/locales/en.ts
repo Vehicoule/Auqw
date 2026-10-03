@@ -493,6 +493,7 @@ export const en = {
   'settings.playbackProvider': 'playback provider',
   'settings.lyricsProvider': 'lyrics provider',
   'settings.radioProvider': 'radio provider',
+  'settings.installProvider': 'install provider',
   'settings.storefront': 'storefront',
   'settings.googleAuth': 'google sign-in',
   'settings.googleAuthValue.linked': 'linked',
@@ -553,6 +554,8 @@ export const en = {
 
   // ---- toasts ------------------------------------------------------------
   'toast.failed': '{action} failed — {detail}',
+  'toast.providerInstalled': '{id} installed — {count} permissions approved',
+  'toast.providerInstallFailed': 'provider install failed — the pair is malformed or was not approved',
   'toast.updated': 'updated to v{version}',
   'toast.storefrontCode': 'storefront must be a two-letter country code',
 

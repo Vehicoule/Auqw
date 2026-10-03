@@ -340,6 +340,27 @@ export interface AppShellPorts<E> {
       artwork-cache budget row — Chromium's image cache owns artwork
       memory, so the row would dead-end). */
   readonly omitSettingsRows?: readonly string[] | undefined;
+  /**
+   * Third-party provider install — present only where the platform
+   * exposes the consent flow (desktop `dialog:installProvider`).
+   * Absent in harnesses/mobile: the settings row omits itself.
+   * 'cancelled' = user backed out; 'malformed' = the pair failed
+   * review; 'approved' = consent persisted and the provider is
+   * installed — `afterProviderInstall` (when present) runs next.
+   */
+  readonly installProvider?:
+    | (() => Promise<
+        | { outcome: 'cancelled' }
+        | { outcome: 'malformed' }
+        | { outcome: 'approved'; id: string; permissions: readonly string[] }
+        | { outcome: 'failed' }
+      >)
+    | undefined;
+  /**
+   * Post-install hook — the platform reboots its session so the new
+   * provider's adapters exist. Absent where no live session exists.
+   */
+  readonly afterProviderInstall?: (() => void) | undefined;
 
   /**
    * Library export write — desktop triggers a browser download;
