@@ -511,8 +511,10 @@ function deepFreeze<T>(value: T): T {
       return;
     }
     seen.add(node);
-    for (const child of Object.values(node)) {
-      visit(child);
+    // A key loop avoids the Object.values array allocation — the
+    // publish path walks the whole unfrozen frontier per mutation.
+    for (const key in node) {
+      visit((node as Record<string, unknown>)[key]);
     }
     Object.freeze(node);
   };
