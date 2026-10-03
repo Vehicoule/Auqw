@@ -1474,27 +1474,34 @@ export function toEntityCard(
 const EMPTY_ENTRIES: readonly PlaylistEntry[] = [];
 
 /**
- * Memoized sorts keyed on input array identity — the structural
- * sharing upstream republishes the same array refs until the data
- * actually changes, so a play event that only grows history (a new
- * array) pays the sort, not every library-model rebuild.
+ * Memoized sorts keyed on (input array identity, comparator) — the
+ * structural sharing upstream republishes the same array refs until
+ * the data actually changes, so a play event that only grows history
+ * (a new array) pays the sort, not every library-model rebuild. The
+ * comparator rides the key so one array can never collide across
+ * two different orderings.
  */
-const SORT_MEMO = new WeakMap<object, unknown>();
-
 function memoSorted<T>(
   source: readonly T[],
   compare: (a: T, b: T) => number,
 ): readonly T[] {
-  const cached = SORT_MEMO.get(source as unknown as object) as
-    | readonly T[]
+  let byCompare = SORT_MEMO.get(source as unknown as object) as
+    | WeakMap<(a: T, b: T) => number, readonly T[]>
     | undefined;
+  if (byCompare === undefined) {
+    byCompare = new WeakMap();
+    SORT_MEMO.set(source as unknown as object, byCompare);
+  }
+  const cached = byCompare.get(compare);
   if (cached !== undefined) {
     return cached;
   }
   const sorted = [...source].sort(compare);
-  SORT_MEMO.set(source as unknown as object, sorted);
+  byCompare.set(compare, sorted);
   return sorted;
 }
+
+const SORT_MEMO = new WeakMap<object, unknown>();
 
 /**
  * Memoized `line.text` projection per synced sheet — the position tick
