@@ -5,7 +5,7 @@ import TabView, { useBottomTabBarHeight } from 'react-native-bottom-tabs';
 import type { AppleIcon } from 'react-native-bottom-tabs';
 import { useTheme } from './theme.tsx';
 import { StatusBarCover } from './primitives.tsx';
-import { FloatingNavbar } from './navbar.tsx';
+import { AndroidNavbar } from './navbar.tsx';
 import { PaneVisibleContext, NavFootprintContext } from './platform-tabs.tsx';
 import type { PlatformTabsProps } from './platform-tabs.tsx';
 import type { NavItemModel } from '@auqw/ui-shared';
@@ -264,7 +264,7 @@ export function PlatformTabs({
           }}
           style={{ position: 'absolute', left: 0, right: 0, bottom: 0 }}
         >
-          <FloatingNavbar
+          <AndroidNavbar
             items={items}
             activeKey={activeKey}
             onSelect={onSelect}

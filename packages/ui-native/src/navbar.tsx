@@ -77,7 +77,7 @@ export type NavbarProps = {
  * icon-over-label items, and a small accent chip gliding over the
  * active glyph (the M3 indicator's treatment).
  */
-export function FloatingNavbar({
+export function AndroidNavbar({
   items,
   activeKey,
   onSelect,
@@ -300,6 +300,6 @@ export function AppNavbar({ platform, ...props }: AppNavbarProps) {
   return variant === 'ios' ? (
     <IosGlassNavbar {...props} />
   ) : (
-    <FloatingNavbar {...props} />
+    <AndroidNavbar {...props} />
   );
 }
