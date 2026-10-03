@@ -106,9 +106,10 @@ export function manifestVersion(manifest: unknown): string | null {
 
 /**
  * The manifest's `permissions` strings — `network:` hosts, `kv`,
- * * `pot-provider` — as declared, order preserved. The settings
+ * `pot-provider` — as declared, order preserved. The settings
  * surface renders them verbatim so what the user reads is what the
- * host enforces; parsing/filtering stays in the host validator.
+ * host enforces; parsing/filtering stays in the host validator,
+ * whose accepted grammar carries no length bound.
  */
 export function manifestPermissions(
   manifest: unknown,
@@ -119,8 +120,7 @@ export function manifestPermissions(
   const raw = manifest['permissions'];
   return Array.isArray(raw)
     ? [...new Set(raw)].filter(
-        (p): p is string =>
-          typeof p === 'string' && p.length > 0 && p.length <= 128,
+        (p): p is string => typeof p === 'string' && p.length > 0,
       )
     : [];
 }

@@ -4,8 +4,15 @@ import { appError, err, ok } from '../errors.ts';
 import type { Result } from '../errors.ts';
 import type { ProviderCapability } from '../ports/provider.ts';
 import type { ProviderDecoder } from './provider-wire.ts';
-import { createProviderWirePort } from './provider-wire.ts';
-import { assert, assertEqual } from '../testing/assert.ts';
+import {
+  createProviderWirePort,
+  manifestPermissions,
+} from './provider-wire.ts';
+import {
+  assert,
+  assertDeepEqual,
+  assertEqual,
+} from '../testing/assert.ts';
 
 function ctx(): OperationContext {
   return {
@@ -71,6 +78,36 @@ async function mintHeadersKeepProtoName(): Promise<void> {
   assertEqual(merged['__proto__'], 'mint-ua', 'spread keeps the header');
 }
 
+/** The host's permission grammar is length-unbounded — a 125-char
+ *  DNS name (133-char `network:` permission) the validator accepts
+ *  must survive extraction verbatim, alongside the literals and
+ *  dedupe; non-strings and empties still drop. */
+async function manifestPermissionsKeepLongEntries(): Promise<void> {
+  const longHost = `network:${'a'.repeat(60)}.${'b'.repeat(60)}.cd`;
+  assert(longHost.length > 128, 'fixture exceeds the old cap');
+  const perms = manifestPermissions({
+    permissions: [
+      'network:music.youtube.com',
+      'pot-provider',
+      'kv',
+      longHost,
+      'network:music.youtube.com',
+      '',
+      7,
+      null,
+    ],
+  });
+  assertDeepEqual(
+    perms,
+    ['network:music.youtube.com', 'pot-provider', 'kv', longHost],
+    'declared strings verbatim, deduped',
+  );
+  assertDeepEqual(manifestPermissions({}), [], 'absent list');
+  assertDeepEqual(manifestPermissions(null), [], 'non-record manifest');
+  assertEqual(manifestPermissions({ permissions: 'kv' }).length, 0, 'non-array');
+}
+
 export async function run(): Promise<void> {
   await mintHeadersKeepProtoName();
+  await manifestPermissionsKeepLongEntries();
 }

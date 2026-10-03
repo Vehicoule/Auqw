@@ -1,5 +1,6 @@
 import { assert } from '@auqw/application/testing';
 import {
+  isHostPluginsResult,
   isJsonValue,
   isStorageBackupArgs,
   isStorageBeginArgs,
@@ -429,5 +430,50 @@ export function run(): void {
   assert(
     !isTransferFetchBodyResult({ data: 12 }),
     'non-string body rejected',
+  );
+
+  // host:plugins — manifest payloads carry declared permissions
+  // verbatim; the host's grammar is length-unbounded, so a >128-char
+  // permission must pass the guard rather than drop the result.
+  const pluginsResult = {
+    bindings: 'loaded',
+    plugins: ['plugin-ytm'],
+    manifests: [
+      {
+        pluginId: 'plugin-ytm',
+        providerId: 'youtube-music',
+        capabilities: ['catalog.search'],
+        version: '1.0.0',
+        permissions: [
+          `network:${'a'.repeat(60)}.${'b'.repeat(60)}.cd`,
+          'kv',
+          'pot-provider',
+        ],
+      },
+    ],
+  };
+  assert(isHostPluginsResult(pluginsResult), 'plugins result passes');
+  assert(
+    isHostPluginsResult({
+      ...pluginsResult,
+      manifests: [{ ...pluginsResult.manifests[0], permissions: [] }],
+    }),
+    'declared-empty permissions pass',
+  );
+  assert(
+    !isHostPluginsResult({
+      ...pluginsResult,
+      manifests: [
+        {
+          ...pluginsResult.manifests[0],
+          permissions: ['kv', 7],
+        },
+      ],
+    }),
+    'non-string permission rejected',
+  );
+  assert(
+    !isHostPluginsResult({ ...pluginsResult, plugins: 'plugin-ytm' }),
+    'non-array plugins rejected',
   );
 }

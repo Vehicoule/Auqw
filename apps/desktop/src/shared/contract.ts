@@ -159,8 +159,12 @@ const isPluginManifestPayload = v.object({
   capabilities: v.array(v.boundedString(64)),
   /** Manifest `version`; null when the manifest omits it. */
   version: v.nullable(v.boundedString(64)),
-  /** Manifest `permissions` as declared (`network:` hosts, `kv`, ...). */
-  permissions: v.array(v.boundedString(128)),
+  /**
+   * Manifest `permissions` as declared (`network:` hosts, `kv`, ...).
+   * The host-accepted grammar has no length bound — an unbounded guard
+   * keeps the payload faithful to what the host enforces.
+   */
+  permissions: v.array(v.string()),
 });
 
 export type HostPluginsResult = v.Guarded<typeof isHostPluginsResult>;
