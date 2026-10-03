@@ -157,13 +157,11 @@ export function ModeSegment({
   readonly onSelect?: ((mode: StageMode) => void) | undefined;
 }) {
   const tabs = stageModeTabs(STAGE_MODE_ORDER, mode, onSelect);
-  // The floating segment is always dark-scoped — it overlays artwork
-  // or a flat stage in every mode, and the pane scheme's fg08 pill
-  // would wash out grey-on-grey on light stages.
+  // The floating segment follows the app theme — a frosted raised
+  // float stays readable over artwork in either scheme.
   return (
     <Segment
       variant="float"
-      className="t-dark"
       ariaLabel={t('stage.modeTabsA11y')}
       tabs={tabs}
       iconSize={16}

@@ -2879,13 +2879,12 @@
     width var(--motion-state) var(--ease-spring);
 }
 
-/* The stage's floating mode switch — dark in every scheme (the
-   component carries t-dark so roles resolve dark): a near-solid,
-   frosted pill that stays readable over artwork and flat panes alike.
-   The pane scheme's plain fg08 fill would go grey-on-grey. */
+/* The stage's floating mode switch — it follows the app theme: a
+   near-solid frosted surface (the pane's own raised tone at 88%) that
+   stays readable over artwork and flat panes alike, light or dark. */
 .uw-segment--float {
   border-radius: var(--radius-float);
-  background: color-mix(in srgb, var(--deep) 88%, transparent);
+  background: color-mix(in srgb, var(--raised) 88%, transparent);
   -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
   border: var(--stroke-hairline) solid var(--hairline);
