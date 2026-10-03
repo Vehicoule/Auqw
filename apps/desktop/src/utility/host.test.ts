@@ -589,7 +589,7 @@ export async function run(): Promise<void> {
     const cacheDirPath = join('/ud', 'plugins');
     const otaFs = (
       files: Map<string, Buffer>,
-      userNames: readonly string[],
+      userNames: () => readonly string[],
       signedNames: () => readonly string[],
       writes?: Array<{ path: string; data: string }>,
     ) => ({
@@ -600,7 +600,7 @@ export async function run(): Promise<void> {
         d === cacheDirPath
           ? [...signedNames()]
           : d === userDirPath
-            ? [...userNames]
+            ? [...userNames()]
             : [],
       mkdir: () => {},
       copy: () => {},
@@ -700,7 +700,7 @@ export async function run(): Promise<void> {
           }),
         fs: otaFs(
           colliding,
-          ['consents.json', 'foo-music.pair.json'],
+          () => ['consents.json', 'foo-music.pair.json'],
           () => ['foo-music.json'],
         ),
       });
@@ -751,7 +751,7 @@ export async function run(): Promise<void> {
           }),
         fs: otaFs(
           dispFiles,
-          ['consents.json', 'foo-music.pair.json'],
+          () => ['consents.json', 'foo-music.pair.json'],
           () => signedNames,
         ),
       });
@@ -769,6 +769,119 @@ export async function run(): Promise<void> {
         back.manifests[0]?.providerId,
         'foo-music',
         'the reloaded user provider advertises again',
+      );
+    }
+
+    // A consented pair shadowed by a signed id through a full scan
+    // must not vanish from the user set: it can't ride the cache, so
+    // only the displacement mark keeps it reachable — the mark must
+    // survive scans that happen while the feed claim stands, and the
+    // pair must reload the moment the claim lifts.
+    {
+      const barManifest =
+        '{"id":"bar-music","version":"1.0.0","capabilities":["catalog.search"],"abi":"0.1.0","permissions":[]}';
+      const barWasm = Buffer.from('wasm-bar');
+      const barPair = JSON.stringify({
+        manifest: barManifest,
+        wasm: barWasm.toString('base64'),
+      });
+      const barDesc = describeCandidate({
+        manifestJson: barManifest,
+        wasmB64: barWasm.toString('base64'),
+      });
+      assert(barDesc !== null, 'bar candidate describes');
+      const consentsBoth = [
+        {
+          id: 'foo-music',
+          version: '1.2.3',
+          abi: '0.1.0',
+          wasm_sha256: desc.wasm_sha256,
+          manifest_sha256: desc.manifest_sha256,
+          approved_permissions: ['network:api.foo.com'],
+        },
+        {
+          id: 'bar-music',
+          version: '1.0.0',
+          abi: '0.1.0',
+          wasm_sha256: barDesc.wasm_sha256,
+          manifest_sha256: barDesc.manifest_sha256,
+          approved_permissions: [],
+        },
+      ];
+      const shadowFiles = new Map<string, Buffer>([
+        ['/b/auqw_node_bindings.node', Buffer.from('')],
+        [join(userDirPath, 'foo-music.pair.json'), Buffer.from(pair)],
+        [
+          join(userDirPath, 'consents.json'),
+          Buffer.from(JSON.stringify({ consents: consentsBoth })),
+        ],
+      ]);
+      let shadowUserNames: readonly string[] = [
+        'consents.json',
+        'foo-music.pair.json',
+      ];
+      let shadowSignedNames: readonly string[] = [];
+      const shadowSeq: string[] = [];
+      const shadowRuntime = createHostRuntime({
+        env: {
+          AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+          AUQW_USER_DATA: '/ud',
+        },
+        feedSync: async () => ({
+          ready: ['x'],
+          compatible: ['foo-music', 'x'],
+        }),
+        pairVerifier: () => signedFooPair,
+        require: () =>
+          otaHost(async (w) => {
+            shadowSeq.push(w.toString('utf8'));
+            return 'p';
+          }),
+        fs: otaFs(
+          shadowFiles,
+          () => shadowUserNames,
+          () => shadowSignedNames,
+        ),
+      });
+      // 1. user foo registers; the retry gate stays armed.
+      await shadowRuntime.status();
+      // 2. signed foo arrives on a reuse pass and displaces the guest.
+      shadowSignedNames = ['foo-music.json'];
+      await shadowRuntime.status();
+      // 3. An unrelated user install rescans while signed foo stands —
+      //    bar registers, consented foo is skipped behind the feed
+      //    claim and marked shadowed.
+      shadowFiles.set(
+        join(userDirPath, 'bar-music.pair.json'),
+        Buffer.from(barPair),
+      );
+      shadowUserNames = [
+        'bar-music.pair.json',
+        'consents.json',
+        'foo-music.pair.json',
+      ];
+      await shadowRuntime.status();
+      // 4. The signed pair leaves the feed — the dir signature is
+      //    unchanged, so only the carried mark can notice. The pass
+      //    must rescan and reload the approved foo bytes.
+      shadowSignedNames = [];
+      const restored = await shadowRuntime.status();
+      assertDeepEqual(
+        shadowSeq,
+        [
+          'wasm-foo',
+          'wasm-signed',
+          'wasm-signed',
+          'wasm-bar',
+          'wasm-bar',
+          'wasm-foo',
+        ],
+        'the shadowed pair reloads once the feed claim lifts',
+      );
+      assert(
+        restored.manifests.some((m) => m.providerId === 'foo-music') &&
+          restored.manifests.some((m) => m.providerId === 'bar-music'),
+        'foo-music is absent no longer once the shadow lifts',
       );
     }
 
@@ -798,7 +911,7 @@ export async function run(): Promise<void> {
           ),
         fs: otaFs(
           revokeRetryFiles,
-          ['consents.json', 'foo-music.pair.json'],
+          () => ['consents.json', 'foo-music.pair.json'],
           () => [],
         ),
       });

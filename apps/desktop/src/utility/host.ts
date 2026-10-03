@@ -704,20 +704,24 @@ export function createHostRuntime(opts: {
       const signedLoaded = loaded.length;
       const userProviderIds: string[] = [];
       // A signed-feed retry reuses the cached user scan — unchanged
-      // guests are never re-loaded. An entry whose guest a signed
-      // load displaced can't ride the cache though: the registry
-      // holds signed bytes for that id, so the approved user pair
-      // must reload before the entry advertises again — a displaced
-      // hit drops the pass into the real scan below.
+      // guests are never re-loaded. A displaced id can't ride the
+      // cache at all: nothing is registered for it while a signed
+      // guest shadows it, so only the flag sees it — and the shadow
+      // lifting means the approved pair must reload, which drops the
+      // pass into the real scan below.
       let rescan = userScanCache === null || !reuseUserScan;
+      if (!rescan) {
+        for (const id of displacedUserIds) {
+          if (!signedIds.has(id)) {
+            rescan = true;
+            break;
+          }
+        }
+      }
       if (!rescan) {
         for (const cached of userScanCache ?? []) {
           if (takenIds.has(cached.providerId)) {
             continue;
-          }
-          if (displacedUserIds.has(cached.providerId)) {
-            rescan = true;
-            break;
           }
           loaded.push(cached);
           takenIds.add(cached.providerId);
@@ -771,6 +775,12 @@ export function createHostRuntime(opts: {
             continue;
           }
           if (takenIds.has(candidate.fields.id)) {
+            // Consented but feed-claimed: shadowed, not absent — keep
+            // the id marked so a pass reloads the pair once the feed
+            // claim lifts. It never enters the cache while shadowed.
+            if (signedIds.has(candidate.fields.id)) {
+              displacedUserIds.add(candidate.fields.id);
+            }
             continue;
           }
           const pluginId = await h.loadPlugin(
@@ -796,9 +806,15 @@ export function createHostRuntime(opts: {
       // previous pass loaded as user pairs but this pass no longer
       // carries are unloaded; a signed feed id never lands here.
       await unloadRevoked(h, userProviderIds, signedProviderIds);
-      // Origins re-derive with the scan: advertised entries and
-      // registered guests match again, so displacement flags reset.
-      displacedUserIds.clear();
+      // Origins re-derive with the scan — except ids a signed guest
+      // still shadows: those marks carry over so a later pass reloads
+      // the pair when the feed claim lifts. An unclaimed mark reloaded
+      // its pair (or found nothing left) this pass and drops.
+      for (const id of [...displacedUserIds]) {
+        if (!signedIds.has(id)) {
+          displacedUserIds.delete(id);
+        }
+      }
       userScanCache = loaded.slice(signedLoaded);
       // A failed feed refresh with an empty cache must not pin an empty
       // provider set: `pluginsReady` resets on rejection, so the next
