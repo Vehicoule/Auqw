@@ -151,6 +151,16 @@ function alphaOf(rgb: Rgb, a: number): string {
   return `rgba(${Math.round(rgb[0])},${Math.round(rgb[1])},${Math.round(rgb[2])},${a})`;
 }
 
+/** `t`-share of `b` over `a` in sRGB space; `a` on unparsable input. */
+export function mixHex(a: string, b: string, t: number): string {
+  const ra = parseHex(a);
+  const rb = parseHex(b);
+  if (ra === null || rb === null) {
+    return a;
+  }
+  return toHex(round(mix(ra, rb, t)));
+}
+
 /**
  * The contrast guard: nudge a text role toward the readable pole until
  * it clears 4.5:1 against every surface it can render on — a single

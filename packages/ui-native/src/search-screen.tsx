@@ -1,7 +1,5 @@
-import { useContext } from 'react';
 import { FlatList, ScrollView, View } from 'react-native';
 import { useTheme } from './theme.tsx';
-import { NavFootprintContext } from './platform-tabs.tsx';
 import {
   Artwork,
   Icon,
@@ -291,7 +289,6 @@ export function SearchScreen({
     onEntityCardLike,
     onLoadMore,
   });
-  const navPad = useContext(NavFootprintContext);
   // Chips stay pinned above the list (the explore contract); the
   // heading rides inside it. The pinned row carries the inset on its
   // wrapper — padding inside the horizontal scroller was what clipped
@@ -349,7 +346,7 @@ export function SearchScreen({
             paddingTop: topInset,
             // Clears the floating miniplayer's strip.
             paddingBottom:
-              theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md + navPad,
+              theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
           }}
         >
           <Text
@@ -469,7 +466,7 @@ export function SearchScreen({
                 ? 0
                 : topInset,
             paddingBottom:
-              theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md + navPad,
+              theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
           }}
         >
           {discovery}
@@ -493,7 +490,7 @@ export function SearchScreen({
             paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
             // Clears the floating miniplayer's strip.
             paddingBottom:
-              theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md + navPad,
+              theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
           }}
           renderItem={({ item }) => (
             <TrackRow

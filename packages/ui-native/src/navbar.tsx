@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { Platform, View } from 'react-native';
 import type { LayoutChangeEvent } from 'react-native';
 import { BlurView } from 'expo-blur';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
@@ -61,7 +60,7 @@ function NavIcon({
   }));
   return (
     <Animated.View style={liftStyle}>
-      <Icon name={name} size={16} color={color} />
+      <Icon name={name} size={14} color={color} />
     </Animated.View>
   );
 }
@@ -72,26 +71,20 @@ export type NavbarProps = {
   readonly onSelect: (key: string) => void;
 };
 
-/**
- * The Android dock — a floating capsule of icon-over-label tabs; one
- * accent chip wraps the active glyph and glides between slots (the
- * traveling-pill treatment, kept after the segment-bar experiment).
- */
-export function FloatingNavbar({
+export function AndroidNavbar({
   items,
   activeKey,
   onSelect,
 }: NavbarProps) {
   const theme = useTheme();
-  const insets = useSafeAreaInsets();
-  // One selection mark, not per-slot fills — a single pill glides
-  // between slots and wraps the WHOLE item (icon + label, the
-  // alpha-24 look). Equal flex:1 slots make the target x a pure
-  // function of slot width; reduced motion snaps it.
+  // One selection mark, not per-slot fills — the accent pill is a
+  // single element that glides between slots (the seg indicator's
+  // treatment on the dock). Equal flex:1 slots make the target x a
+  // pure function of slot width; reduced motion snaps it.
   const [rowW, setRowW] = useState(0);
   const placed = useRef(false);
   const slotW = rowW / Math.max(1, items.length);
-  const pillW = Math.max(0, slotW - theme.spacing.xs);
+  const pillW = Math.max(0, Math.min(56, slotW - theme.spacing.xs));
   const foundIndex = items.findIndex((item) => item.key === activeKey);
   const targetX = Math.max(0, foundIndex) * slotW + (slotW - pillW) / 2;
   const pillX = useSharedValue(0);
@@ -113,32 +106,16 @@ export function FloatingNavbar({
     setRowW(event.nativeEvent.layout.width);
   };
   return (
-    <View
-      style={{
-        marginHorizontal: theme.spacing.screen,
-        marginBottom: insets.bottom + theme.spacing.sm,
-        borderRadius: theme.radius.pill,
-        borderWidth: theme.strokes.hairline,
-        borderColor: theme.colors.hairline,
-        backgroundColor: theme.colors.raised,
-        // Separation comes from the shadow, not a tone step.
-        elevation: 8,
-        shadowColor: theme.colors.scrim,
-        shadowOpacity: 0.28,
-        shadowRadius: 16,
-        shadowOffset: { width: 0, height: 6 },
-        padding: theme.spacing.xs + theme.spacing.xxs,
-      }}
-    >
-      {/* The measured row stays padding-free — slot widths (and the
-          pill's target x) read straight off its layout box. The pill
-          spans the row's full height so the label sits inside it. */}
+    <View>
       <View
         accessibilityRole="tablist"
         onLayout={onRowLayout}
         style={{
+          // The preview's native bar sits on the deep surface.
+          backgroundColor: theme.colors.deep,
           flexDirection: 'row',
-          minHeight: theme.sizes.navbarIos,
+          paddingTop: theme.spacing.sm,
+          paddingBottom: 10,
         }}
       >
         {rowW > 0 && pillW > 0 && foundIndex >= 0 && (
@@ -147,13 +124,11 @@ export function FloatingNavbar({
             style={[
               {
                 position: 'absolute',
-                top: 0,
-                bottom: 0,
+                top: theme.spacing.sm,
                 left: 0,
                 width: pillW,
-                borderRadius: theme.radius.float,
-                borderWidth: theme.strokes.hairline,
-                borderColor: theme.colors.hairline,
+                height: 30,
+                borderRadius: theme.radius.control,
                 backgroundColor: theme.colors.accentSoft,
               },
               pillStyle,
@@ -173,13 +148,16 @@ export function FloatingNavbar({
               style={{
                 flex: 1,
                 alignItems: 'center',
-                gap: theme.spacing.xxs,
+                gap: theme.spacing.xs,
                 minHeight: theme.sizes.touch,
               }}
             >
               <View
                 style={{
-                  height: 24,
+                  minWidth: 56,
+                  height: 30,
+                  borderRadius: theme.radius.control,
+                  paddingHorizontal: theme.spacing.screen,
                   alignItems: 'center',
                   justifyContent: 'center',
                 }}
@@ -257,26 +235,19 @@ export function IosGlassNavbar({
                 style={{
                   flex: 1,
                   alignItems: 'center',
+                  justifyContent: 'center',
                   gap: theme.spacing.xxs,
                   minHeight: theme.sizes.touch,
                 }}
               >
-                {/* The active item carries the accent fill around the
-                    whole icon+label cell — the same wrap the Android
-                    dock's gliding pill draws. */}
                 <View
                   style={{
-                    alignSelf: 'stretch',
-                    borderRadius: theme.radius.float,
-                    paddingVertical: theme.spacing.xxs,
-                    paddingHorizontal: theme.spacing.xxs,
+                    minWidth: 44,
+                    height: 26,
+                    borderRadius: theme.radius.control,
+                    paddingHorizontal: 10,
                     alignItems: 'center',
                     justifyContent: 'center',
-                    gap: theme.spacing.xxs,
-                    borderWidth: theme.strokes.hairline,
-                    borderColor: active
-                      ? theme.colors.hairline
-                      : 'transparent',
                     backgroundColor: active
                       ? theme.colors.accentSoft
                       : 'transparent',
@@ -289,19 +260,19 @@ export function IosGlassNavbar({
                       active ? theme.colors.accent : theme.colors.textSecondary
                     }
                   />
-                  <Text
-                    variant="metadata"
-                    color={active ? 'accent' : 'secondary'}
-                    numberOfLines={1}
-                    adjustsFontSizeToFit
-                    minimumFontScale={0.8}
-                    style={[
-                      active && { fontFamily: theme.fontFamilies.bold },
-                    ]}
-                  >
-                    {item.label}
-                  </Text>
                 </View>
+                <Text
+                  variant="metadata"
+                  color={active ? 'accent' : 'secondary'}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.8}
+                  style={[
+                    active && { fontFamily: theme.fontFamilies.bold },
+                  ]}
+                >
+                  {item.label}
+                </Text>
               </Pressable>
             );
           })}
@@ -320,6 +291,6 @@ export function AppNavbar({ platform, ...props }: AppNavbarProps) {
   return variant === 'ios' ? (
     <IosGlassNavbar {...props} />
   ) : (
-    <FloatingNavbar {...props} />
+    <AndroidNavbar {...props} />
   );
 }
