@@ -54,7 +54,6 @@ import {
   THEME_ORDER,
   attemptLabel,
   dedupeRecordings,
-  entityIdForRef,
   downloadChipsByRecording,
   downloadLedgerCount,
   entityRefKey,
@@ -1836,7 +1835,15 @@ export function useAppShell<E extends { readonly type: string } = never>(
       state.entitySourceRefs,
       searchLoadingMore,
     );
-    if (localResults.length === 0 || base.phase === 'idle') {
+    // Local hits only join scopes that admit tracks — under an
+    // entity-kind chip a local song would reintroduce a track and
+    // steal the entity hero the chip asked for.
+    const kinds = searchKindsFor(searchFilter);
+    if (
+      localResults.length === 0 ||
+      base.phase === 'idle' ||
+      (kinds !== undefined && !kinds.includes('track'))
+    ) {
       return base;
     }
     const results = [...localResults, ...base.results];
@@ -3131,15 +3138,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   const onEntityCardLike = useCallback(
     (card: EntityCardModel) => {
-      const entityId = entityIdForRef(state.entitySourceRefs, card.ref);
-      if (entityId === null) {
-        return;
-      }
+      // Ref-scoped like — an unvisited card materializes through a
+      // real entity fetch inside the toggle.
       void session
-        .toggleEntityLike(card.kind, entityId)
+        .toggleEntityLikeByRef(card.ref)
         .then(reporter('action.toggleLike'));
     },
-    [state.entitySourceRefs, session],
+    [session],
   );
 
   // Back/forward walk the recorded log. A restore re-applies the
@@ -3225,11 +3230,20 @@ export function useAppShell<E extends { readonly type: string } = never>(
         const fresh = result.value.items.filter(
           (m) => !seen.has(refKey(m.sourceRef)),
         );
+        // Related shelves merge the same way — a continuation that
+        // omits earlier shelves must never erase them.
+        const seenRelated = new Set(
+          latest.page.related.map((e) => refKey(e.sourceRef)),
+        );
+        const freshRelated = result.value.related.filter(
+          (e) => !seenRelated.has(refKey(e.sourceRef)),
+        );
         return {
           ...latest,
           page: {
             ...result.value,
             items: [...latest.page.items, ...fresh],
+            related: [...latest.page.related, ...freshRelated],
           },
           error: null,
           loadingMore: false,

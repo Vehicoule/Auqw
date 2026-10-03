@@ -212,8 +212,8 @@ export function searchKindsFor(
 }
 
 /** A typed entity row — an artist/album/playlist hit. `ref` opens
-    its entity page; `canLike` marks that the provider ref resolved
-    to an app-side entity the like can target. */
+    its entity page and carries the like: `canLike` is unconditional
+    because an unmaterialized ref attaches on toggle (`toggleEntityLikeByRef`). */
 export type EntityCardModel = {
   readonly key: string;
   readonly ref: EntityRef;
@@ -1438,8 +1438,9 @@ export function likedEntityIds(likes: readonly Like[]): ReadonlySet<string> {
   );
 }
 
-/** The EntityCardModel for a catalog entityMetadata row — resolved
-    entityId decides `canLike`/`liked`, artwork picked at rail size. */
+/** The EntityCardModel for a catalog entityMetadata row — a resolved
+    entityId decides `liked` (unvisited entities are likable — the
+    toggle materializes the ref), artwork picked at rail size. */
 export function toEntityCard(
   entity: EntityMetadata,
   entitySourceRefs: readonly EntitySourceRef[],
@@ -1455,7 +1456,7 @@ export function toEntityCard(
     artworkUrl: pickArtworkUrl(entity.artwork, 240),
     liked:
       entityId !== null && entityLikes.has(`${entity.kind} ${entityId}`),
-    canLike: entityId !== null,
+    canLike: true,
   };
 }
 

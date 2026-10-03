@@ -2170,6 +2170,49 @@ export class Session {
   }
 
   /**
+   * A like by provider ref — a card on a search rail or a related
+   * shelf never materialized on this device. An unmatched ref first
+   * attaches through a real `catalog.entity` fetch (the same path a
+   * page open takes) so the like has its referential target; the
+   * fetch's failure is the toggle's honest failure.
+   */
+  async toggleEntityLikeByRef(ref: EntityRef): Promise<Result<void>> {
+    const byRef = (refs: readonly EntitySourceRef[], probe: EntityRef) =>
+      refs.find(
+        (s) =>
+          s.provider === probe.provider &&
+          s.ref.kind === probe.kind &&
+          s.ref.id === probe.id,
+      );
+    const ready = this.#requireReady();
+    if (!ready.ok) {
+      return ready;
+    }
+    let source = byRef(ready.value.entitySourceRefs, ref);
+    if (source === undefined) {
+      const page = await this.getEntityPage(ref);
+      if (!page.ok) {
+        return err(page.error);
+      }
+      const again = this.#requireReady();
+      if (!again.ok) {
+        return again;
+      }
+      // The attach keys on the page's own descriptor — a request ref
+      // may be an opaque continuation while `entity.source_ref` names
+      // the real entity.
+      source = byRef(
+        again.value.entitySourceRefs,
+        page.value.entity.sourceRef,
+      );
+      if (source === undefined) {
+        return err(internalError());
+      }
+    }
+    return this.#library.toggleEntityLike(source.ref.kind, source.entityId);
+  }
+
+  /**
    * `catalog.entity` pages route by provenance — the ref's minting
    * provider serves it (router `providerForRef`). Serialized on the
    * entity tail so concurrent page loads can't double-materialize an

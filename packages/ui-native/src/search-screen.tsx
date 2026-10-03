@@ -183,6 +183,52 @@ function SearchHero({ hero }: { readonly hero: SearchHeroView }) {
   );
 }
 
+// The paging control — shared by the track list footer and the
+// entities-only scroller so both branches page identically.
+function LoadMoreRow({
+  control,
+}: {
+  readonly control: {
+    readonly busy: boolean;
+    readonly label: string;
+    readonly a11yLabel: string;
+    readonly onPress?: (() => void) | undefined;
+  };
+}) {
+  const theme = useTheme();
+  return (
+    <Pressable
+      compact
+      onPress={control.onPress}
+      accessibilityLabel={control.a11yLabel}
+      accessibilityState={{ busy: control.busy }}
+      style={({ pressed }) => [
+        {
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: theme.spacing.sm,
+          minHeight: theme.sizes.touch,
+          marginTop: theme.spacing.sm,
+          borderRadius: theme.radius.control,
+          borderWidth: theme.strokes.hairline,
+          borderColor: theme.colors.hairline,
+        },
+        pressed && { backgroundColor: theme.colors.fg08 },
+      ]}
+    >
+      {control.busy ? (
+        <Spinner size={13} />
+      ) : (
+        <Icon name="chevron-down" size={13} color={theme.colors.textSecondary} />
+      )}
+      <Text variant="metadata" color="secondary">
+        {control.label}
+      </Text>
+    </Pressable>
+  );
+}
+
 export type SearchScreenProps = SearchScreenHandlers & {
   readonly state: SearchStateModel;
   /**
@@ -427,6 +473,7 @@ export function SearchScreen({
           }}
         >
           {discovery}
+          {view.loadMore !== null && <LoadMoreRow control={view.loadMore} />}
         </ScrollView>
       )}
       {view.results !== null && (
@@ -459,39 +506,7 @@ export function SearchScreen({
           )}
           ListFooterComponent={
             view.loadMore !== null ? (
-              <Pressable
-                compact
-                onPress={view.loadMore.onPress}
-                accessibilityLabel={view.loadMore.a11yLabel}
-                accessibilityState={{ busy: view.loadMore.busy }}
-                style={({ pressed }) => [
-                  {
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: theme.spacing.sm,
-                    minHeight: theme.sizes.touch,
-                    marginTop: theme.spacing.sm,
-                    borderRadius: theme.radius.control,
-                    borderWidth: theme.strokes.hairline,
-                    borderColor: theme.colors.hairline,
-                  },
-                  pressed && { backgroundColor: theme.colors.fg08 },
-                ]}
-              >
-                {view.loadMore.busy ? (
-                  <Spinner size={13} />
-                ) : (
-                  <Icon
-                    name="chevron-down"
-                    size={13}
-                    color={theme.colors.textSecondary}
-                  />
-                )}
-                <Text variant="metadata" color="secondary">
-                  {view.loadMore.label}
-                </Text>
-              </Pressable>
+              <LoadMoreRow control={view.loadMore} />
             ) : null
           }
         />

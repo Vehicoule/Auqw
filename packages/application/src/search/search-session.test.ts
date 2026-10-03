@@ -581,6 +581,42 @@ async function searchMoreFailure(): Promise<void> {
   }
 }
 
+async function searchMoreCachedAppend(): Promise<void> {
+  const { provider, clock, session } = harness();
+  // Page one at t0: [a] + tok-2.
+  const p1 = session.search(INPUT);
+  provider.settleSearch(ok({ ...page(['a']), continuation: 'tok-2' }));
+  await p1;
+
+  // Six days later the rail pages — raw [b] lands in the tok-2 entry.
+  clock.advance(6 * 24 * 60 * 60 * 1000);
+  const more = session.searchMore({ limit: 5, storefront: 'US' });
+  provider.settleSearch(ok({ ...page(['b']), continuation: 'tok-3' }));
+  const merged = await more;
+  assertEqual(merged.type, 'content');
+
+  // Two more days: the first page expires (tok-2's entry has not).
+  // The refresh returns a NEW first page under the same token.
+  clock.advance(2 * 24 * 60 * 60 * 1000);
+  const refresh = session.search(INPUT);
+  provider.settleSearch(ok({ ...page(['c']), continuation: 'tok-2' }));
+  await refresh;
+
+  // Page two serves from cache — the raw provider page merges into
+  // the LIVE base: 'c,b', never the stale merged 'a,b'.
+  const callsBefore = provider.calls.length;
+  const state = await session.searchMore({ limit: 5, storefront: 'US' });
+  assertEqual(provider.calls.length, callsBefore, 'cached page: no call');
+  assertEqual(state.type, 'content');
+  if (state.type === 'content') {
+    assertEqual(
+      state.page.items.map((m) => m.title).join(','),
+      'c,b',
+      'cached continuation merges into the refreshed base',
+    );
+  }
+}
+
 async function refreshError(): Promise<void> {
   const { provider, clock, session } = harness();
   const p1 = session.search(INPUT);
@@ -622,4 +658,5 @@ export async function run(): Promise<void> {
   await nearMaxCache();
   await searchMore();
   await searchMoreFailure();
+  await searchMoreCachedAppend();
 }

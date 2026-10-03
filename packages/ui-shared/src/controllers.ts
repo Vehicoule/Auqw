@@ -1090,7 +1090,9 @@ export function useEntityScreenController({
       label: t('entity.shuffle'),
       icon: 'shuffle',
       accent: false,
-      disabled: empty,
+      // Shuffle draws from the track listing — a rails-only page
+      // still renders, but the button stays dead-honest disabled.
+      disabled: model.items.length === 0,
       onPress: onShuffleAll,
     },
     like: {
@@ -1345,7 +1347,10 @@ export function useSearchScreenController({
     onPress: bind(onEntityCardPress, card),
     onToggleLike: card.canLike ? bind(onEntityCardLike, card) : undefined,
   });
-  const hasContent = state.results.length > 0 || state.rails.length > 0;
+  // A standalone top hit is content too — an entity/track hero must
+  // never coexist with the "nothing" empty state.
+  const hasContent =
+    state.results.length > 0 || state.rails.length > 0 || state.hero !== null;
   const listed =
     !draft &&
     (state.phase === 'ready' || state.phase === 'loading') &&

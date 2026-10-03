@@ -224,8 +224,15 @@ export class SearchSession {
       this.#cache.delete(key);
       this.#cache.set(key, cached);
       const revision = this.#state.revision + 1;
-      const state: SearchState = searchPageHasContent(cached.page)
-        ? { type: 'content', revision, query, page: cached.page }
+      // A cached next page is the provider's raw page — it merges into
+      // whichever base is live now, so a refreshed first page never
+      // sees rows merged under a superseded base.
+      const page =
+        input.appendBase === undefined
+          ? cached.page
+          : mergeSearchPage(input.appendBase, cached.page);
+      const state: SearchState = searchPageHasContent(page)
+        ? { type: 'content', revision, query, page }
         : { type: 'empty', revision, query };
       this.#publish(state);
       return Promise.resolve(state);
@@ -356,9 +363,11 @@ export class SearchSession {
       // skips caching but still publishes the content.
       const storedNow = this.#clock.nowMs();
       if (isSafeNonNegative(storedNow)) {
+        // Cache the provider's page, never the merged view — the
+        // merge replays against the live base on every hit.
         // Delete before set so a refreshed entry becomes MRU.
         this.#cache.delete(key);
-        this.#cache.set(key, { page, storedAtMs: storedNow });
+        this.#cache.set(key, { page: result.value, storedAtMs: storedNow });
       }
       while (this.#cache.size > this.#maxEntries) {
         const oldest = this.#cache.keys().next();
