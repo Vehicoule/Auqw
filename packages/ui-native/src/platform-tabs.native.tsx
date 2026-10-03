@@ -181,8 +181,8 @@ export function PlatformTabs({
               {sceneFor(route.key)}
             </PaneVisibleContext.Provider>
             {/* Scenes draw edge-to-edge — scrolled content passes
-                under the status bar mid-scroll; the gradient veil (not
-                a hard band) keeps the clock and icons readable. */}
+                under the status bar mid-scroll; the flat canvas strip
+                keeps the clock and icons readable. */}
             <StatusBarCover />
             <TabBarHeightProbe
               onHeight={(h) => {
