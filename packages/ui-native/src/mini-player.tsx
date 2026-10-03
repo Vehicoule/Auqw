@@ -36,15 +36,21 @@ import {
   Text,
 } from './primitives.tsx';
 import { ArtworkRing } from './progress.tsx';
-import { t } from '@auqw/ui-shared';
+import { t, usePositionMs } from '@auqw/ui-shared';
 import type {
   PlatformVariant,
   PlayerModel,
+  PositionSource,
   SkipPeek,
 } from '@auqw/ui-shared';
 
 export type MiniPlayerProps = {
   readonly player: PlayerModel;
+  /** The live position channel — the progress ring subscribes
+      itself so a tick re-renders only this leaf, not the shell.
+      Omitted (standalone hosts) freezes progress at the model's
+      publish-time position. */
+  readonly session?: PositionSource | undefined;
   readonly platform?: PlatformVariant | undefined;
   readonly onPress?: (() => void) | undefined;
   readonly onPlayPause?: (() => void) | undefined;
@@ -158,6 +164,7 @@ const SHEET_SETTLE_SPRING = {
 
 export function MiniPlayer({
   player,
+  session,
   platform = Platform.OS === 'ios' ? 'ios' : 'android',
   onPress,
   onPlayPause,
@@ -205,10 +212,12 @@ export function MiniPlayer({
     prevLive.value = skipPrevious != null ? 1 : 0;
     nextDrains.value = nextEndsQueue === true ? 1 : 0;
   }, [skipNext, skipPrevious, nextEndsQueue, nextLive, prevLive, nextDrains]);
+  const liveMs = usePositionMs(session);
+  const positionMs = session === undefined ? player.positionMs : liveMs;
   const progress =
     player.durationMs === null || player.durationMs <= 0
       ? 0
-      : Math.min(1, Math.max(0, player.positionMs / player.durationMs));
+      : Math.min(1, Math.max(0, positionMs / player.durationMs));
   const busy = player.status === 'preparing' || player.status === 'buffering';
   const playColor = ios ? theme.colors.textBright : theme.colors.accent;
   // Latest callbacks via ref — the parent passes fresh inline closures

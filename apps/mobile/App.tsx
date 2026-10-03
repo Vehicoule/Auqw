@@ -1000,7 +1000,9 @@ function Main({
     settingsModel,
     correctionsModel,
     radioModel,
-    lyricsModel,
+    lyricsSource,
+    lyricsLive,
+    seekGeneration,
     transfer,
     pickerItems,
     actionsFor,
@@ -2653,6 +2655,7 @@ function Main({
           {sheetPlayer !== null ? (
             <StageSheet
               player={sheetPlayer}
+              session={session}
               expanded={expanded}
               onOpenEntity={openEntityFromStage}
               progress={stageProgress}
@@ -2672,7 +2675,9 @@ function Main({
               queueReordering={reordering}
               topInset={topInset}
               bottomInset={insets.bottom}
-              lyrics={lyricsModel}
+              lyricsSource={lyricsSource}
+              lyricsLive={lyricsLive}
+              seekGeneration={seekGeneration}
               radio={radioModel}
               onPlayPause={
                 heldOccurrenceId !== null

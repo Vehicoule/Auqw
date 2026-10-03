@@ -928,7 +928,9 @@ function Main({
     settingsModel,
     correctionsModel,
     radioModel,
-    lyricsModel,
+    lyricsSource,
+    lyricsLive,
+    seekGeneration,
     transfer,
     pickerItems,
     updateCard,
@@ -1661,12 +1663,15 @@ function Main({
               player !== null ? (
                 <NowPlayingScreen
                   player={player}
+                  session={session}
                   mode={stageMode}
                   onOpenEntity={openEntityFromStage}
                   onModeChange={setStageMode}
                   queue={queueModel}
                   queueReordering={reordering}
-                  lyrics={lyricsModel}
+                  lyricsSource={lyricsSource}
+                  lyricsLive={lyricsLive}
+                  seekGeneration={seekGeneration}
                   radio={radioModel}
                   onPlayPause={onPlayPause}
                   onNext={() => advance('next')}
