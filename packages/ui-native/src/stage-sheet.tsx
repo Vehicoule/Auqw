@@ -307,30 +307,33 @@ function ModeSegmentPill({
   const thumbW = useSharedValue(0);
   const didInit = useRef(false);
   // flex:1 slots are equal, but the row's xxs gaps are NOT inside the
-  // slot widths — item i sits at 3 + i·(itemW + gap).
+  // slot widths — item i sits at 3 + i·(itemW + gap). The chip wraps
+  // the icon lane only, centered inside the slot.
   const gap = theme.spacing.xxs;
   const itemW =
     width > 0 ? (width - 6 - gap * (tabs.length - 1)) / tabs.length : 0;
+  const chipW = itemW > 0 ? Math.min(56, itemW - 8) : 0;
   useEffect(() => {
     if (activeIdx < 0 || itemW <= 0) return undefined;
-    const x = 3 + activeIdx * (itemW + gap);
+    const x = 3 + activeIdx * (itemW + gap) + (itemW - chipW) / 2;
     if (!didInit.current || theme.reducedMotion) {
       thumbX.value = x;
-      thumbW.value = itemW;
+      thumbW.value = chipW;
       didInit.current = true;
       return undefined;
     }
     thumbX.value = withSpring(x, STAGE_SETTLE_SPRING);
-    thumbW.value = withSpring(itemW, STAGE_SETTLE_SPRING);
+    thumbW.value = withSpring(chipW, STAGE_SETTLE_SPRING);
     return undefined;
-  }, [activeIdx, itemW, gap, thumbX, thumbW, theme.reducedMotion]);
+  }, [activeIdx, itemW, chipW, gap, thumbX, thumbW, theme.reducedMotion]);
   const thumbStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: thumbX.value }],
     width: thumbW.value,
   }));
-  // M3E segmented-button: the selection mark reads as a tonal
-  // (secondary-container) pill; iOS keeps the glass slab. One shared
-  // thumb glides between slots — the per-item fill is gone.
+  // The dock's treatment on the player's mode bar: icon-over-label
+  // slots and one chip that wraps the active glyph while it glides.
+  // M3E reads it as the tonal (secondary-container) chip; iOS keeps
+  // the glass slab.
   const m3e = Platform.OS === 'android';
   const activeBg = m3e ? theme.colors.accentSoft : theme.colors.glassControl;
   const activeColor = m3e ? theme.colors.accent : theme.colors.textBright;
@@ -341,9 +344,9 @@ function ModeSegmentPill({
         flexDirection: 'row',
         gap: theme.spacing.xxs,
         backgroundColor: theme.colors.raised,
-        /* 3px pad is deliberate (web parity): 44 + 2×3 + 2×hairline
-           lands the float at the 52px chrome height — the mini
-           player's. Don't pull it onto the spacing scale. */
+        /* 3px pad is deliberate (web parity): the icon lane (32) +
+           label stack lands the float near the dock's height. Don't
+           pull it onto the spacing scale. */
         padding: 3,
         borderRadius: theme.radius.float,
         borderWidth: theme.strokes.hairline,
@@ -361,7 +364,7 @@ function ModeSegmentPill({
             position: 'absolute',
             left: 0,
             top: 3,
-            bottom: 3,
+            height: 32,
             borderRadius: theme.radius.card,
             backgroundColor: activeBg,
           },
@@ -378,19 +381,27 @@ function ModeSegmentPill({
           accessibilityState={{ selected: tab.active }}
           style={{
             flex: 1,
-            flexDirection: 'row',
             alignItems: 'center',
-            justifyContent: 'center',
-            gap: 7,
+            gap: theme.spacing.xxs,
             minHeight: theme.sizes.touch,
             borderRadius: theme.radius.card,
           }}
         >
-          <Icon
-            name={tab.icon}
-            size={12}
-            color={tab.active ? activeColor : theme.colors.textSecondary}
-          />
+          {/* The glyph's lane pins the gliding chip's height — it
+              wraps the icon, never the label. */}
+          <View
+            style={{
+              height: 32,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <Icon
+              name={tab.icon}
+              size={16}
+              color={tab.active ? activeColor : theme.colors.textSecondary}
+            />
+          </View>
           <Text
             variant="metadata"
             color={tab.active ? (m3e ? 'accent' : 'bright') : 'secondary'}

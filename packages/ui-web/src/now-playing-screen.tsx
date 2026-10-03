@@ -166,7 +166,7 @@ export function ModeSegment({
       className="t-dark"
       ariaLabel={t('stage.modeTabsA11y')}
       tabs={tabs}
-      iconSize={12}
+      iconSize={16}
     />
   );
 }

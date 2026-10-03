@@ -867,11 +867,13 @@ export function SegmentItem({
       ariaSelected={active}
       className={`uw-segment__item${active ? ' uw-segment__item--on' : ''}`}
     >
-      <Icon
-        name={icon}
-        size={iconSize}
-        color={active ? 'var(--accent)' : 'var(--text-secondary)'}
-      />
+      <span className="uw-segment__icon">
+        <Icon
+          name={icon}
+          size={iconSize}
+          color={active ? 'var(--accent)' : 'var(--text-secondary)'}
+        />
+      </span>
       <Text
         variant={textVariant}
         color={active ? 'accent' : 'secondary'}
@@ -926,7 +928,17 @@ export function Segment({
       const item =
         el.querySelectorAll<HTMLElement>('.uw-segment__item')[activeIdx];
       if (item === undefined) return;
-      setThumb({ x: item.offsetLeft, w: item.offsetWidth });
+      // The float's selection mark is the dock's icon chip — it wraps
+      // the glyph lane only, centered inside the slot. The tabs
+      // variant keeps the full-cell plate.
+      const w =
+        variant === 'float'
+          ? Math.min(56, item.offsetWidth - 8)
+          : item.offsetWidth;
+      setThumb({
+        x: item.offsetLeft + (item.offsetWidth - w) / 2,
+        w,
+      });
     };
     measure();
     const observer = new ResizeObserver(measure);

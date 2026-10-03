@@ -2857,8 +2857,13 @@
   pointer-events: none;
 }
 
-/* Concentric with the float's pad — same radius the items carry. */
+/* The float's selection mark is the dock's icon chip: it wraps the
+   glyph lane only, centered inside the slot (the component sizes it
+   to the chip width and centers it under the item). */
 .uw-segment--float .uw-segment__thumb {
+  top: 3px;
+  bottom: auto;
+  height: 32px;
   border-radius: var(--radius-card);
 }
 
@@ -2893,9 +2898,22 @@
   border-radius: var(--radius-control);
 }
 
-/* Concentric with the floating segment's 3px pad (16 − 3 ≈ card). */
+/* The dock's treatment on the player's mode bar — icon-over-label
+   slots, with the glyph's own lane the chip pins its height to. */
 .uw-segment--float .uw-segment__item {
+  flex-direction: column;
+  gap: var(--spacing-xxs);
   border-radius: var(--radius-card);
+}
+
+.uw-segment__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.uw-segment--float .uw-segment__icon {
+  height: 32px;
 }
 
 .uw-segment__item:hover:not(:disabled):not(.uw-segment__item--on) {

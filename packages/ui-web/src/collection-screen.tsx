@@ -24,7 +24,7 @@ export function CollectionTile({
         <span className="uw-collection__icon">
           <Icon
             name={view.icon}
-            size={20}
+            size={22}
             color={view.enabled ? 'var(--accent)' : 'var(--text-secondary)'}
           />
         </span>

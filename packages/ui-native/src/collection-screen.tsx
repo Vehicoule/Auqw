@@ -56,7 +56,7 @@ export function CollectionTile({
       >
         <Icon
           name={view.icon}
-          size={20}
+          size={22}
           color={
             view.enabled ? theme.colors.accent : theme.colors.textSecondary
           }
