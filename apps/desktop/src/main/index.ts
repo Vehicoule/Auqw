@@ -841,6 +841,30 @@ async function main(): Promise<void> {
       }
       return result.canceled ? [] : result.filePaths;
     },
+    confirmInstallProvider: async (args, sender) => {
+      const win = BrowserWindow.fromWebContents(sender as WebContents);
+      // The consent dialog names exactly what the approval pins: the
+      // provider identity and every declared permission, verbatim.
+      const perms =
+        args.permissions.length === 0
+          ? 'none'
+          : args.permissions.join('\n');
+      const options = {
+        type: 'warning' as const,
+        title: 'Install provider',
+        message: `Install ${args.id} v${args.version}?`,
+        detail: `It requests these permissions:\n${perms}\n\nOnly approve pairs from a source you trust.`,
+        buttons: ['Cancel', 'Install'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      };
+      const result =
+        win === null
+          ? await dialog.showMessageBox(options)
+          : await dialog.showMessageBox(win, options);
+      return result.response === 1;
+    },
     net: netService,
     theme: themeMonitor,
     syncApplied: appliedPush,

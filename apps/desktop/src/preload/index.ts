@@ -3,6 +3,7 @@ import type { IpcRendererEvent } from 'electron';
 import { CHANNELS } from '../shared/channels.ts';
 import {
   isAppMeta,
+  isApprovePairResult,
   isAuthSnapshot,
   isHostPluginsResult,
   isLocalAddResult,
@@ -22,6 +23,7 @@ import {
   isStreamMarksResult,
   isStreamOpenResult,
   isStreamProbeResult,
+  isUserPairReviewResult,
   isStreamReadResult,
   isStreamServeUrlResult,
   isStringArray,
@@ -59,6 +61,8 @@ import {
 } from '../shared/contract.ts';
 import type {
   AuqwApi,
+  HostApprovePairArgs,
+  HostReviewPairArgs,
   StreamPortLike,
 } from '../shared/contract.ts';
 import { isPumpServerMessage } from '../shared/pump-protocol.ts';
@@ -244,6 +248,12 @@ const api: AuqwApi = {
         },
         isStringArray,
       ),
+    confirmInstallProvider: (review) =>
+      invoke(
+        CHANNELS.dialogConfirmInstallProvider,
+        review,
+        isApprovePairResult,
+      ),
   },
   net: {
     snapshot: () => invoke(CHANNELS.netSnapshot, undefined, isNetEvent),
@@ -365,6 +375,18 @@ const api: AuqwApi = {
   },
   host: {
     plugins: () => invoke(CHANNELS.hostPlugins, undefined, isHostPluginsResult),
+    reviewPair: (path: string) =>
+      invoke(
+        CHANNELS.hostReviewPair,
+        { path } satisfies HostReviewPairArgs,
+        isUserPairReviewResult,
+      ),
+    approvePair: (path: string) =>
+      invoke(
+        CHANNELS.hostApprovePair,
+        { path } satisfies HostApprovePairArgs,
+        isApprovePairResult,
+      ),
     request: (args) =>
       invoke(CHANNELS.hostRequest, args, isRequestOutcomePayload),
     cancelRequest: (args) =>

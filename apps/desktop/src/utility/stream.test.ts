@@ -78,6 +78,8 @@ function fakeRuntime(host: PluginHostLike, devGateEnabled = true) {
           plugins: ['a', 'b'],
           manifests: [],
         }),
+      reviewUserPair: () => null,
+      approveUserPair: () => false,
       devGateEnabled,
     }),
   };

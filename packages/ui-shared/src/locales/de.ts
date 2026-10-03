@@ -512,6 +512,7 @@ export const de: Readonly<Record<MessageId, Message>> = {
   'settings.playbackProvider': 'wiedergabe-anbieter',
   'settings.lyricsProvider': 'songtext-anbieter',
   'settings.radioProvider': 'radio-anbieter',
+  'settings.installProvider': 'Anbieter installieren',
   'settings.storefront': 'storefront',
   'settings.googleAuth': 'google-anmeldung',
   'settings.googleAuthValue.linked': 'verknüpft',
@@ -573,6 +574,8 @@ export const de: Readonly<Record<MessageId, Message>> = {
 
   // ---- toasts ------------------------------------------------------------
   'toast.failed': '{action} fehlgeschlagen — {detail}',
+  'toast.providerInstalled': '{id} installiert — {count} Berechtigungen genehmigt',
+  'toast.providerInstallFailed': 'Installation fehlgeschlagen — das Paar ist fehlerhaft oder nicht genehmigt',
   'toast.updated': 'aktualisiert auf v{version}',
   'toast.storefrontCode': 'storefront muss ein zweistelliger ländercode sein',
 

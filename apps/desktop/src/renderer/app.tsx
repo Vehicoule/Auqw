@@ -802,6 +802,42 @@ function Main({
       // renderer has no application artwork cache — Chromium's image
       // cache owns artwork memory — so the row would dead-end.
       omitSettingsRows: ['artworkCacheBytes'],
+      // Third-party provider install — pick → host review → native
+      // consent dialog → persist. The renderer never touches the
+      // consent store; the utility owns the write.
+      installProvider: async () => {
+        const picked = await window.auqw.dialog.pickFiles(
+          'Choose a provider pair (.pair.json)',
+        );
+        const path = picked[0];
+        if (path === undefined) {
+          return { outcome: 'cancelled' };
+        }
+        try {
+          const review = await window.auqw.host.reviewPair(path);
+          if (review === null) {
+            return { outcome: 'malformed' };
+          }
+          const confirmed = await window.auqw.dialog.confirmInstallProvider({
+            id: review.id,
+            version: review.version,
+            permissions: [...review.permissions],
+          });
+          if (!confirmed) {
+            return { outcome: 'cancelled' };
+          }
+          const approved = await window.auqw.host.approvePair(path);
+          return approved
+            ? {
+                outcome: 'approved',
+                id: review.id,
+                permissions: [...review.permissions],
+              }
+            : { outcome: 'failed' };
+        } catch {
+          return { outcome: 'failed' };
+        }
+      },
       // Sandboxed renderers have no filesystem — the browser's
       // download path is the honest destination.
       exportJson: async (json, name) => {

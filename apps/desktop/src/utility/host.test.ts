@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { assert, assertEqual } from '@auqw/application/testing';
+import { describeCandidate } from '@auqw/application';
 import { isRecord } from '../shared/check.ts';
 import type { NodeBindingsModule, PluginHostLike } from './host.ts';
 import { bindingsCandidates, createHostRuntime } from './host.ts';
@@ -40,6 +41,8 @@ export async function run(): Promise<void> {
       list: () => [],
       mkdir: () => {},
       copy: () => {},
+      stat: () => null,
+      write: () => {},
     },
   });
   const unavailable = await missing.status();
@@ -149,6 +152,8 @@ export async function run(): Promise<void> {
           : [],
       mkdir: () => {},
       copy: () => {},
+      stat: () => null,
+      write: () => {},
     },
   });
 
@@ -207,6 +212,8 @@ export async function run(): Promise<void> {
             : [],
         mkdir: () => {},
         copy: () => {},
+        stat: () => null,
+        write: () => {},
       },
     });
     await stemRuntime.pluginsReady();
@@ -242,6 +249,8 @@ export async function run(): Promise<void> {
         copy: (src, dst) => {
           staged.push({ src, dst });
         },
+        stat: () => null,
+        write: () => {},
       },
     });
     const soStatus = await soRuntime.status();
@@ -253,6 +262,192 @@ export async function run(): Promise<void> {
           join('/ud', 'node-bindings', 'auqw_node_bindings.node') &&
         dirs.includes(join('/ud', 'node-bindings')),
       'cdylib staged to userData .node',
+    );
+  }
+
+
+  // User-installed third-party pairs: the consent gate end-to-end
+  // through the loader (scan, refusal, collision, offline order).
+  {
+    const manifest = JSON.stringify({
+      id: 'foo-music',
+      version: '1.2.3',
+      abi: '0.1.0',
+      capabilities: ['catalog.search'],
+      permissions: ['network:api.foo.com'],
+      artifact: { path: 'foo.wasm', digest: 'sha256:' + 'a'.repeat(64) },
+    });
+    const wasm = Buffer.from('wasm-foo');
+    const pair = JSON.stringify({ manifest, wasm: wasm.toString('base64') });
+    const desc = describeCandidate({
+      manifestJson: manifest,
+      wasmB64: wasm.toString('base64'),
+    });
+    assert(desc !== null, 'candidate describes');
+    const consents = [
+      {
+        id: 'foo-music',
+        version: '1.2.3',
+        abi: '0.1.0',
+        wasm_sha256: desc.wasm_sha256,
+        manifest_sha256: desc.manifest_sha256,
+        approved_permissions: ['network:api.foo.com'],
+      },
+    ];
+    const consentJson = JSON.stringify({ consents });
+    const userFiles = new Map<string, Buffer>([
+      ['/b/auqw_node_bindings.node', Buffer.from('')],
+      [join('/ud', 'plugins-user', 'foo-music.pair.json'), Buffer.from(pair)],
+      [join('/ud', 'plugins-user', 'consents.json'), Buffer.from(consentJson)],
+    ]);
+    const userLoaded: Array<{ wasm: Buffer; manifest: string }> = [];
+    const userModule: NodeBindingsModule = {
+      PluginHost: class {
+        constructor() {
+          return {
+            ...fakeHost,
+            loadPlugin: async (w: Buffer, m: string) => {
+              userLoaded.push({ wasm: w, manifest: m });
+              return 'plugin-foo';
+            },
+          } as unknown as PluginHostLike;
+        }
+      } as unknown as NodeBindingsModule['PluginHost'],
+    };
+    const userDir = join('/ud', 'plugins-user');
+    const userFs = {
+      exists: (p: string) => userFiles.has(p) || p === userDir,
+      read: (p: string) => userFiles.get(p) ?? Buffer.alloc(0),
+      list: (d: string) =>
+        d === userDir
+          ? [...userFiles.keys()].map((p) =>
+              p.endsWith('consents.json')
+                ? 'consents.json'
+                : 'foo-music.pair.json',
+            )
+          : [],
+      mkdir: () => {},
+      copy: () => {},
+      stat: (p: string) => {
+        const b = userFiles.get(p);
+        return b === undefined ? null : { mtimeMs: 1, size: b.byteLength };
+      },
+      write: () => {},
+    };
+    const userRuntime = createHostRuntime({
+      env: {
+        AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+        AUQW_USER_DATA: '/ud',
+      },
+      feedSync: async () => ({ ready: [], compatible: [] }),
+      require: () => userModule,
+      fs: userFs,
+    });
+    const status = await userRuntime.status();
+    assertEqual(status.bindings, 'loaded', 'consented pair keeps status loaded');
+    assert(
+      userLoaded.length === 1 &&
+        userLoaded[0]?.wasm.toString('utf8') === 'wasm-foo' &&
+        userLoaded[0]?.manifest.includes('"id":"foo-music"') === true,
+      'consented pair reaches loadPlugin',
+    );
+
+    // Without the consent record the same pair is refused.
+    userFiles.delete(join('/ud', 'plugins-user', 'consents.json'));
+    const refused = await userRuntime.status();
+    assertEqual(
+      refused.manifests.length,
+      0,
+      'unconsented pair never loads',
+    );
+
+    // A collision with a signed feed id is a refusal, not a replace:
+    // the feed loads first, the user pair with the same id skips.
+    const signedFiles = new Map<string, Buffer>([
+      ['/b/auqw_node_bindings.node', Buffer.from('')],
+      [join('/plugins', 'deezer.wasm'), Buffer.from('wasm-deezer')],
+      [
+        join('/plugins', 'deezer.manifest.json'),
+        Buffer.from(
+          '{"id":"deezer","capabilities":["catalog.search"]}',
+        ),
+      ],
+    ]);
+    const collisionManifest = manifest.replace('foo-music', 'deezer');
+    const collisionDesc = describeCandidate({
+      manifestJson: collisionManifest,
+      wasmB64: wasm.toString('base64'),
+    });
+    assert(collisionDesc !== null, 'collision candidate describes');
+    const collisionConsents = [
+      {
+        id: 'deezer',
+        version: '1.2.3',
+        abi: '0.1.0',
+        wasm_sha256: collisionDesc.wasm_sha256,
+        manifest_sha256: collisionDesc.manifest_sha256,
+        approved_permissions: ['network:api.foo.com'],
+      },
+    ];
+    signedFiles.set(
+      join('/ud', 'plugins-user', 'deezer.pair.json'),
+      Buffer.from(
+        JSON.stringify({
+          manifest: collisionManifest,
+          wasm: wasm.toString('base64'),
+        }),
+      ),
+    );
+    signedFiles.set(
+      join('/ud', 'plugins-user', 'consents.json'),
+      Buffer.from(JSON.stringify({ consents: collisionConsents })),
+    );
+    const collisionLoaded: Array<{ wasm: Buffer; manifest: string }> = [];
+    const collisionModule: NodeBindingsModule = {
+      PluginHost: class {
+        constructor() {
+          return {
+            ...fakeHost,
+            loadPlugin: async (w: Buffer, m: string) => {
+              collisionLoaded.push({ wasm: w, manifest: m });
+              return 'plugin-x';
+            },
+          } as unknown as PluginHostLike;
+        }
+      } as unknown as NodeBindingsModule['PluginHost'],
+    };
+    const collisionRuntime = createHostRuntime({
+      env: {
+        AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+        AUQW_PLUGIN_DIR: '/plugins',
+        AUQW_USER_DATA: '/ud',
+      },
+      require: () => collisionModule,
+      fs: {
+        exists: (p: string) => signedFiles.has(p) || p === '/plugins',
+        read: (p: string) => signedFiles.get(p) ?? Buffer.alloc(0),
+        list: (d: string) =>
+          d === '/plugins'
+            ? ['deezer.manifest.json', 'deezer.wasm']
+            : d === join('/ud', 'plugins-user')
+              ? ['consents.json', 'deezer.pair.json']
+              : [],
+        mkdir: () => {},
+        copy: () => {},
+        stat: () => null,
+        write: () => {},
+      },
+    });
+    const collisionStatus = await collisionRuntime.status();
+    assertEqual(
+      collisionStatus.manifests.length,
+      1,
+      'collision runtime loads exactly one provider',
+    );
+    assert(
+      collisionStatus.manifests[0]?.providerId === 'deezer' &&
+        collisionLoaded[0]?.wasm.toString('utf8') === 'wasm-deezer',
+      'the signed guest wins its id; the user pair never replaces it',
     );
   }
 
@@ -276,6 +471,8 @@ export async function run(): Promise<void> {
         list: () => [],
         mkdir: () => {},
         copy: () => {},
+        stat: () => null,
+        write: () => {},
       },
     });
     const first = await retryRuntime.status();

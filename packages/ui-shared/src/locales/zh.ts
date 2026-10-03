@@ -487,6 +487,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'settings.playbackProvider': '播放来源',
   'settings.lyricsProvider': '歌词来源',
   'settings.radioProvider': '电台来源',
+  'settings.installProvider': '安装来源',
   'settings.storefront': '商店',
   'settings.googleAuth': 'google 登录',
   'settings.googleAuthValue.linked': '已关联',
@@ -547,6 +548,8 @@ export const zh: Readonly<Record<MessageId, Message>> = {
 
   // ---- toasts ------------------------------------------------------------
   'toast.failed': '{action} 失败 — {detail}',
+  'toast.providerInstalled': '{id} 已安装 — 已批准 {count} 项权限',
+  'toast.providerInstallFailed': '安装失败 — 配对文件已损坏或未批准',
   'toast.updated': '已更新至 v{version}',
   'toast.storefrontCode': '商店必须是两位字母国家代码',
 

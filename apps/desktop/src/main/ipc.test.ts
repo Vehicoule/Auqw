@@ -120,6 +120,7 @@ export async function run(): Promise<void> {
       }),
       pickFolder: () => Promise.resolve('/picked/dir'),
       pickFiles: () => Promise.resolve(['/a.mp3', '/b.flac']),
+      confirmInstallProvider: () => Promise.resolve(false),
       net,
       theme: {
         attach: () => undefined,

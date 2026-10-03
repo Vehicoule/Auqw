@@ -1,12 +1,16 @@
 import { CHANNELS } from '../shared/channels.ts';
 import type {
   AppMeta,
+  ConfirmInstallProviderArgs,
   PickFilesArgs,
   PickFolderArgs,
 } from '../shared/contract.ts';
 import {
   isAuthOpenUrlArgs,
   isAuthSetClientArgs,
+  isConfirmInstallProviderArgs,
+  isHostApprovePairArgs,
+  isHostReviewPairArgs,
   isLocalAddArgs,
   isLocalProbeArgs,
   isLocalReadArgs,
@@ -146,6 +150,11 @@ export interface ChannelDeps {
     args: PickFilesArgs,
     sender: NetSender,
   ) => Promise<readonly string[]>;
+  /** Native consent dialog for a reviewed provider install. */
+  readonly confirmInstallProvider: (
+    args: ConfirmInstallProviderArgs,
+    sender: NetSender,
+  ) => Promise<boolean>;
   readonly net: NetService;
   /** `theme:events` push registry — same refcounted sender pattern as
       `net`; attach starts the OS palette watchers. */
@@ -226,6 +235,12 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
     ),
   ],
   [
+    CHANNELS.dialogConfirmInstallProvider,
+    channel(isConfirmInstallProviderArgs, (args, deps, sender) =>
+      deps.confirmInstallProvider(args, sender),
+    ),
+  ],
+  [
     CHANNELS.netSnapshot,
     channel(noArgs, (_args, deps) =>
       Promise.resolve(deps.net.snapshot()),
@@ -249,6 +264,8 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
   ],
   fwd(CHANNELS.utilityPing, isUtilityPingArgs),
   fwd(CHANNELS.hostPlugins, noArgs),
+  fwd(CHANNELS.hostReviewPair, isHostReviewPairArgs),
+  fwd(CHANNELS.hostApprovePair, isHostApprovePairArgs),
   fwd(CHANNELS.hostRequest, isHostRequestArgs),
   fwd(CHANNELS.hostCancel, isHostCancelArgs),
   fwd(CHANNELS.streamPrepare, isStreamPrepareArgs),

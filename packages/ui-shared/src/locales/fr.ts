@@ -514,6 +514,7 @@ export const fr: Readonly<Record<MessageId, Message>> = {
   'settings.playbackProvider': 'fournisseur lecture',
   'settings.lyricsProvider': 'fournisseur paroles',
   'settings.radioProvider': 'fournisseur radio',
+  'settings.installProvider': 'installer un fournisseur',
   'settings.storefront': 'boutique',
   'settings.googleAuth': 'connexion google',
   'settings.googleAuthValue.linked': 'lié',
@@ -574,6 +575,8 @@ export const fr: Readonly<Record<MessageId, Message>> = {
 
   // ---- toasts ------------------------------------------------------------
   'toast.failed': '{action} a échoué — {detail}',
+  'toast.providerInstalled': '{id} installé — {count} permissions approuvées',
+  'toast.providerInstallFailed': "échec de l'installation — la paire est malformée ou non approuvée",
   'toast.updated': 'mis à jour en v{version}',
   'toast.storefrontCode': 'la boutique doit être un code pays à deux lettres',
 

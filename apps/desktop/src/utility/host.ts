@@ -6,6 +6,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import {
@@ -18,6 +19,7 @@ import {
   PLUGIN_RELEASE_TRUST,
   consentAllows,
   consentsFromJson,
+  consentsToJson,
   describeCandidate,
   manifestPermissions,
   parsePluginPair,
@@ -142,6 +144,8 @@ type FsLike = {
   list(dir: string): string[];
   mkdir(dir: string): void;
   copy(src: string, dst: string): void;
+  stat(path: string): { mtimeMs: number; size: number } | null;
+  write(path: string, data: string): void;
 };
 
 const defaultFs: FsLike = {
@@ -152,6 +156,19 @@ const defaultFs: FsLike = {
   copy: (src, dst) => {
     mkdirSync(dirname(dst), { recursive: true });
     copyFileSync(src, dst);
+  },
+  stat: (path) => {
+    try {
+      return statSync(path);
+    } catch {
+      return null;
+    }
+  },
+  write: (path, data) => {
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.part`;
+    writeFileSync(tmp, data);
+    renameSync(tmp, path);
   },
 };
 
@@ -256,6 +273,35 @@ const ED25519_SPKI_DER_PREFIX = Buffer.from(
   'hex',
 );
 
+/**
+ * Raw user-pair document cap, checked before any parse: manifest
+ * (64 KiB) + wasm (16 MiB) + base64 inflation (~4/3) + JSON framing.
+ */
+const PAIR_FILE_MAX_BYTES = 26 * 1024 * 1024;
+
+/**
+ * Content signature of the user-pair directory: one `name:mtimeMs:size`
+ * entry per file, sorted. A change in any pair or consent file flips
+ * the signature and re-arms the load. Absent dir signs as `''`.
+ */
+function userDirSignature(dir: string, fs: FsLike): string {
+  if (!fs.exists(dir)) {
+    return '';
+  }
+  try {
+    return fs
+      .list(dir)
+      .sort()
+      .map((name) => {
+        const st = fs.stat(join(dir, name));
+        return `${name}:${st === null ? '-' : st.mtimeMs}:${st === null ? '-' : st.size}`;
+      })
+      .join('|');
+  } catch {
+    return '';
+  }
+}
+
 /** Release feed sync over node builtins — the utility's OTA path. */
 async function defaultFeedSync(
   dir: string,
@@ -299,6 +345,18 @@ async function defaultFeedSync(
   });
 }
 
+/** What the review surface shows for a candidate pair — identity plus
+ * the exact digests an approval would pin. */
+export type UserPairReview = {
+  readonly id: string;
+  readonly version: string;
+  readonly abi: string;
+  readonly capabilities: readonly string[];
+  readonly permissions: readonly string[];
+  readonly wasm_sha256: string;
+  readonly manifest_sha256: string;
+};
+
 export function createHostRuntime(opts: {
   env: HostEnv;
   resourcesPath?: string | undefined;
@@ -335,6 +393,10 @@ export function createHostRuntime(opts: {
   hostIfLoaded(): PluginHostLike | null;
   pluginsReady(): Promise<readonly string[]>;
   status(): Promise<HostPluginsResult>;
+  /** Describe a candidate user pair for the consent review surface. */
+  reviewUserPair(path: string): UserPairReview | null;
+  /** Persist a reviewed pair + its consent record. */
+  approveUserPair(path: string): boolean;
 } {
   const fs = opts.fs ?? defaultFs;
   const requireFn: RequireLike =
@@ -349,6 +411,7 @@ export function createHostRuntime(opts: {
   // compatible set — the next ready() re-syncs instead of serving the
   // stale memoized result.
   let lastLoadIncomplete = false;
+  let lastUserSignature: string | null = null;
 
   function loadBindings(): PluginHostLike {
     const candidates = bindingsCandidates(
@@ -504,23 +567,6 @@ export function createHostRuntime(opts: {
           // A malformed pair is skipped, not fatal — other pairs still load.
         }
       }
-      // A failed feed refresh with an empty cache must not pin an empty
-      // provider set: `pluginsReady` resets on rejection, so the next
-      // call re-syncs — a cache hit meanwhile stays usable offline.
-      if (loaded.length === 0 && feedFailure !== undefined) {
-        throw feedFailure;
-      }
-      // The retry gate stays armed while the feed's compatible set is
-      // not fully available — either because a listed plugin is below
-      // its feed release (stale LKG loads, ready tracks currency) or
-      // because a current pair failed to load into the host (loadPlugin
-      // rejects skip it, so loaded counts only compatible pairs: dropped
-      // ids were filtered above). The next `ready()` re-syncs and the
-      // host's id-keyed insert hot-swaps the pair.
-      lastLoadIncomplete =
-        synced !== undefined &&
-        (synced.ready.length < synced.compatible.length ||
-          loaded.length < synced.compatible.length);
       // User-installed third-party pairs (decision log, Plugin guests):
       // `<userData>/plugins-user/<id>.pair.json` documents carry
       // `{manifest, wasm}` without a release signature — they load
@@ -528,23 +574,35 @@ export function createHostRuntime(opts: {
       // `<userData>/plugins-user/consents.json`, which pins the exact
       // digests and the approved permission set. Any drift is a skip,
       // never a silent accept; the pair file itself stays untouched.
+      // The scan runs BEFORE the feed-failure gate so an offline user
+      // keeps their approved providers when the signed cache is empty.
       const userDir = join(
         opts.env.AUQW_USER_DATA ?? process.cwd(),
         'plugins-user',
       );
-      const consents = existsSync(join(userDir, 'consents.json'))
+      const consents = fs.exists(join(userDir, 'consents.json'))
         ? consentsFromJson(
-            readFileSync(join(userDir, 'consents.json'), 'utf8'),
+            fs.read(join(userDir, 'consents.json')).toString('utf8'),
           )
         : [];
+      // Signed feed ids are load-bearing identity: a user pair that
+      // reuses one would replace the signed guest in the host's
+      // id-keyed registry — unsigned code answering for a signed id.
+      // Duplicate user ids among themselves double-register the same
+      // way. Both are refusals, and the pair file stays untouched.
+      const takenIds = new Set(loaded.map((p) => p.providerId));
       for (const name of fs.list(userDir).sort()) {
         if (!name.endsWith('.pair.json')) {
           continue;
         }
         try {
-          const doc: unknown = JSON.parse(
-            fs.read(join(userDir, name)).toString('utf8'),
-          );
+          // Size-cap the raw pair bytes BEFORE parsing — an oversized
+          // document must not transit the JSON parse at all.
+          const raw = fs.read(join(userDir, name));
+          if (raw.byteLength > PAIR_FILE_MAX_BYTES) {
+            continue;
+          }
+          const doc: unknown = JSON.parse(raw.toString('utf8'));
           if (typeof doc !== 'object' || doc === null) {
             continue;
           }
@@ -554,8 +612,14 @@ export function createHostRuntime(opts: {
           if (typeof manifest !== 'string' || typeof wasm !== 'string') {
             continue;
           }
-          const candidate = describeCandidate({ manifestJson: manifest, wasmB64: wasm });
-          if (!consentAllows(candidate, consents)) {
+          const candidate = describeCandidate({
+            manifestJson: manifest,
+            wasmB64: wasm,
+          });
+          if (candidate === null || !consentAllows(candidate, consents)) {
+            continue;
+          }
+          if (takenIds.has(candidate.fields.id)) {
             continue;
           }
           const pluginId = await h.loadPlugin(
@@ -570,10 +634,30 @@ export function createHostRuntime(opts: {
             version: fields.version,
             permissions: manifestPermissions(JSON.parse(manifest)),
           });
+          takenIds.add(fields.providerId);
         } catch {
           // A malformed or unconsented pair is skipped, not fatal.
         }
       }
+      // A failed feed refresh with an empty cache must not pin an empty
+      // provider set: `pluginsReady` resets on rejection, so the next
+      // call re-syncs — a cache hit meanwhile stays usable offline.
+      // User-approved pairs count as a loadable provider set too, so
+      // the gate fires only when BOTH sources came up empty.
+      if (loaded.length === 0 && feedFailure !== undefined) {
+        throw feedFailure;
+      }
+      // The retry gate stays armed while the feed's compatible set is
+      // not fully available — either because a listed plugin is below
+      // its feed release (stale LKG loads, ready tracks currency) or
+      // because a current pair failed to load into the host (loadPlugin
+      // rejects skip it, so loaded counts only compatible pairs: dropped
+      // ids were filtered above). The next `ready()` re-syncs and the
+      // host's id-keyed insert hot-swaps the pair.
+      lastLoadIncomplete =
+        synced !== undefined &&
+        (synced.ready.length < synced.compatible.length ||
+          loaded.length < synced.compatible.length);
       return loaded;
     }
     const manifests = fs
@@ -606,6 +690,19 @@ export function createHostRuntime(opts: {
   }
 
   async function ready(): Promise<readonly LoadedPlugin[]> {
+    // The user-installed set is file-driven state that can change under
+    // a healthy memoized load (a new pair, an approval, a removal): a
+    // directory-content signature (name + mtime + size per entry)
+    // invalidates the memo so the next `host:plugins`/`ready()` re-reads
+    // consents and pairs without a utility restart.
+    const userSignature = userDirSignature(
+      join(opts.env.AUQW_USER_DATA ?? process.cwd(), 'plugins-user'),
+      fs,
+    );
+    if (userSignature !== lastUserSignature) {
+      lastUserSignature = userSignature;
+      lastLoadIncomplete = true;
+    }
     if (pluginsReady === null || lastLoadIncomplete) {
       lastLoadIncomplete = false;
       const pending = loadPluginDir(ensureHost());
@@ -630,6 +727,84 @@ export function createHostRuntime(opts: {
     },
     pluginsReady(): Promise<readonly string[]> {
       return ready().then((loaded) => loaded.map((p) => p.pluginId));
+    },
+    reviewUserPair(path: string): UserPairReview | null {
+      // Size-cap before parse, same bound as the loader's scan.
+      let raw: Buffer;
+      try {
+        raw = fs.read(path);
+      } catch {
+        return null;
+      }
+      if (raw.byteLength > PAIR_FILE_MAX_BYTES) {
+        return null;
+      }
+      let doc: unknown;
+      try {
+        doc = JSON.parse(raw.toString('utf8'));
+      } catch {
+        return null;
+      }
+      if (typeof doc !== 'object' || doc === null) {
+        return null;
+      }
+      const d = doc as Record<string, unknown>;
+      const manifest = d['manifest'];
+      const wasm = d['wasm'];
+      if (typeof manifest !== 'string' || typeof wasm !== 'string') {
+        return null;
+      }
+      const candidate = describeCandidate({
+        manifestJson: manifest,
+        wasmB64: wasm,
+      });
+      if (candidate === null) {
+        return null;
+      }
+      return {
+        id: candidate.fields.id,
+        version: candidate.fields.version,
+        abi: candidate.fields.abi,
+        capabilities: manifestFields(manifest, '').capabilities,
+        permissions: [...candidate.fields.permissions],
+        wasm_sha256: candidate.wasm_sha256,
+        manifest_sha256: candidate.manifest_sha256,
+      };
+    },
+    approveUserPair(path: string): boolean {
+      const review = this.reviewUserPair(path);
+      if (review === null) {
+        return false;
+      }
+      // The user pair file lands verbatim under the user dir — the
+      // loader re-reads and re-verifies it there; the consent record
+      // pins the exact digests + permissions this review showed.
+      const userDir = join(
+        opts.env.AUQW_USER_DATA ?? process.cwd(),
+        'plugins-user',
+      );
+      try {
+        fs.mkdir(userDir);
+        fs.copy(path, join(userDir, `${review.id}.pair.json`));
+        const consents = fs.exists(join(userDir, 'consents.json'))
+          ? consentsFromJson(
+              fs.read(join(userDir, 'consents.json')).toString('utf8'),
+            )
+          : [];
+        const next = consents.filter((c) => c.id !== review.id);
+        next.push({
+          id: review.id,
+          version: review.version,
+          abi: review.abi,
+          wasm_sha256: review.wasm_sha256,
+          manifest_sha256: review.manifest_sha256,
+          approved_permissions: [...review.permissions],
+        });
+        fs.write(join(userDir, 'consents.json'), consentsToJson(next));
+      } catch {
+        return false;
+      }
+      return true;
     },
     async status(): Promise<HostPluginsResult> {
       try {

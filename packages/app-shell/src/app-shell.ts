@@ -2021,6 +2021,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
               apply: updateSnapshot.apply,
               currentVersion: updateSnapshot.currentVersion,
             },
+      installProviderSupported: ports.installProvider !== undefined,
     });
     // Row omits are the platform's — desktop drops the artwork-cache
     // budget row: the renderer has no application artwork cache
@@ -2455,6 +2456,31 @@ export function useAppShell<E extends { readonly type: string } = never>(
           open(storefrontEpoch, setStorefrontSheetOpen);
           setStorefrontDraft(state.settings.storefront ?? '');
           return;
+        case 'installProvider': {
+          // The consent flow lives in the port — the shell only
+          // reports the outcome. 'cancelled' is the user backing out
+          // and stays silent, same as the export pick.
+          const install = ports.installProvider;
+          if (install === undefined) {
+            return;
+          }
+          void install().then((outcome) => {
+            if (outcome.outcome === 'cancelled') {
+              return;
+            }
+            if (outcome.outcome === 'approved') {
+              setToast(
+                t('toast.providerInstalled', {
+                  id: outcome.id,
+                  count: outcome.permissions.length,
+                }),
+              );
+              return;
+            }
+            setToast(t('toast.providerInstallFailed'));
+          });
+          return;
+        }
         case 'qualityKbps':
           open(qualityEpoch, setQualityPickerOpen);
           return;
