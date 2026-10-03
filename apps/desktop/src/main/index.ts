@@ -798,9 +798,14 @@ async function main(): Promise<void> {
         await supervisor
           .request(CHANNELS.localPicks, { paths: result.filePaths })
           .catch((thrown) => {
+            // Raw rejections can carry fs paths — only a typed
+            // ShellError's safe text is printable.
             console.warn(
-              '[dialog] local:picks attestation failed:',
-              thrown instanceof Error ? thrown.message : thrown,
+              `[dialog] local:picks attestation failed: ${
+                isShellError(thrown)
+                  ? `${thrown.kind}: ${thrown.message}`
+                  : 'unexpected failure'
+              }`,
             );
           });
       }
@@ -822,8 +827,11 @@ async function main(): Promise<void> {
           .request(CHANNELS.localPicks, { paths: result.filePaths })
           .catch((thrown) => {
             console.warn(
-              '[dialog] local:picks attestation failed:',
-              thrown instanceof Error ? thrown.message : thrown,
+              `[dialog] local:picks attestation failed: ${
+                isShellError(thrown)
+                  ? `${thrown.kind}: ${thrown.message}`
+                  : 'unexpected failure'
+              }`,
             );
           });
       }
