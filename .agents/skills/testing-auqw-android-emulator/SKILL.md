@@ -1025,7 +1025,8 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   (`LiveWaveformSeek`, `LiveLyricsPane`, embedded `MiniPlayer` ring)
   subscribe via `usePositionMs(session)`/`useLiveLyricsModel`.
   Verified 0 fires / ~31.5min ticking under radio growth + rapid
-  provider skips (baseline ~2.5/min, post-#356 ~1.6/min). Stable
+  provider skips — provisional, emulator-measured (baseline ~2.5/min,
+  post-#356 ~1.6/min). Stable
   `data` alone only halved it — VL re-arms on ANY prop diff, so only
   removing the ticking render wins.
 - **Leaf contracts to check when touching position surfaces:** the
