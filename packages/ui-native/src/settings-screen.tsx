@@ -302,6 +302,23 @@ export function SettingsScreen({
               : diagnostics.providerIds.join(', ')}
           </Text>
         </View>
+        {[...diagnostics.providerPermissions.entries()].map(
+          ([providerId, permissions]) => (
+            <View key={providerId}>
+              <Hairline />
+              <View style={{ flexDirection: 'row' }}>
+                <Text variant="metadata" color="secondary" style={{ flex: 1 }}>
+                  {providerId}
+                </Text>
+                <Text variant="metadata" color="primary" style={{ flexShrink: 1 }}>
+                  {permissions.length === 0
+                    ? t('settings.diag.none')
+                    : permissions.join(' \u00b7 ')}
+                </Text>
+              </View>
+            </View>
+          ),
+        )}
         <Hairline />
         <View style={{ flexDirection: 'row' }}>
           <Text variant="metadata" color="secondary" style={{ flex: 1 }}>

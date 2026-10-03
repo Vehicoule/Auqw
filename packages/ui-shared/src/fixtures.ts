@@ -483,6 +483,10 @@ export const fixtureSettings: Settings = {
 
 export const fixtureDiagnostics: DiagnosticsModel = {
   providerIds: ['youtube-music', 'spotify'],
+  providerPermissions: new Map([
+    ['youtube-music', ['network:music.youtube.com', 'network:*.googlevideo.com']],
+    ['spotify', ['network:api.spotify.com', 'kv']],
+  ]),
   attemptCount: 14,
   lastAttemptLabel: 'ok · 212 ms',
   lastFailure: 'provider-wall · sign in to confirm you’re not a bot',
@@ -493,6 +497,9 @@ export const fixtureDiagnostics: DiagnosticsModel = {
 
 export const fixtureDiagnosticsDegraded: DiagnosticsModel = {
   providerIds: ['youtube-music'],
+  providerPermissions: new Map([
+    ['youtube-music', ['network:music.youtube.com']],
+  ]),
   attemptCount: 3,
   lastAttemptLabel: 'timeout · 15 000 ms',
   lastFailure: 'timeout · resolve timed out',

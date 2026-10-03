@@ -428,6 +428,17 @@ export type SettingsRowModel = {
 
 export type DiagnosticsModel = {
   readonly providerIds: readonly string[];
+  /**
+   * Manifest-declared permissions per provider id — network hosts,
+   * `kv`, `pot-provider` — order preserved from the manifest. A
+   * present-but-empty list is a declared `permissions: []` and its
+   * row renders 'none'; the map is empty only where the platform
+   * exposes no manifest surface.
+   */
+  readonly providerPermissions: ReadonlyMap<
+    string,
+    readonly string[]
+  >;
   readonly attemptCount: number;
   readonly lastAttemptLabel: string | null;
   /**
