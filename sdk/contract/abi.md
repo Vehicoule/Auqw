@@ -1,7 +1,8 @@
 # Plugin ABI v0
 
-Version: `0.3.0`; the host also loads `0.1.0` and `0.2.0` manifests
-(each earlier message set is a strict subset of its successor).
+Version: `0.1.0` — the one ABI the host loads. The pre-release
+0.2.0/0.3.0 ladder was collapsed into it: every capability, permission, and
+host-request kind below is available under `0.1.0`.
 Defines how the host runs a provider
 plugin guest. Machine-readable message shapes:
 [messages.schema.json](messages.schema.json);
@@ -51,7 +52,7 @@ Rejection rules (v0):
 - `{"type":"host_request","id":<u32>,"kind":"kv_set","payload":{"key":"<string>","value":"<base64 or null>"}}` — stages a write into this plugin's KV namespace; `null` deletes. Requires the `kv` permission. Answered `host_ok`, or `host_error` `permission-denied` / `invalid-response` (a size cap would be exceeded; nothing is staged).
 - `{"type":"host_request","id":<u32>,"kind":"log","payload":{"level":"debug|info|warn|error","message":"<string>"}}` — appends a redacted entry to the invocation's diagnostics. No permission needed. Answered `host_ok`.
 - `{"type":"host_request","id":<u32>,"kind":"now_ms","payload":{}}` — host wall-clock epoch milliseconds. No permission needed. Answered `now_response`.
-- `{"type":"host_request","id":<u32>,"kind":"resume","payload":{"url":"<https url>","offset":<u64>,"length":<u64, optional>}}` — **0.3.0.** Continues a fetch at a byte offset: the host issues `GET url` with `Range: bytes=<offset>-` (or `bytes=<offset>-<offset+length-1>` when `length` is given) against a destination the manifest permits. On a `206` the host verifies `Content-Range` matches the requested start (and span when `length` was given; an earlier EOF is accepted) — a mismatch fails `invalid-response` rather than handing the guest a misaligned body. Any other status passes through as `http_response` (a `200` means the upstream ignored the range; a `416` means the offset is past EOF). Costs HTTP call and byte budget exactly like `http_request`. This is the primitive behind capped-body continuation and range-resumed downloads; arbitrary-header fetches remain `http_request`'s job.
+- `{"type":"host_request","id":<u32>,"kind":"resume","payload":{"url":"<https url>","offset":<u64>,"length":<u64, optional>}}` — Continues a fetch at a byte offset: the host issues `GET url` with `Range: bytes=<offset>-` (or `bytes=<offset>-<offset+length-1>` when `length` is given) against a destination the manifest permits. On a `206` the host verifies `Content-Range` matches the requested start (and span when `length` was given; an earlier EOF is accepted) — a mismatch fails `invalid-response` rather than handing the guest a misaligned body. Any other status passes through as `http_response` (a `200` means the upstream ignored the range; a `416` means the offset is past EOF). Costs HTTP call and byte budget exactly like `http_request`. This is the primitive behind capped-body continuation and range-resumed downloads; arbitrary-header fetches remain `http_request`'s job.
 
 KV semantics: writes are staged per invocation with read-your-writes
 visibility. On a valid `done`, the staged patch applies atomically
@@ -117,7 +118,7 @@ application's job, not the plugin's. `playback.resolve` also accepts a
 bare string `source_ref`, the ABI 0.1/`startResolve` compatibility
 shape.
 
-**0.3.0 additions.** `catalog.entity` returns a composite page for an
+**Composite entities.** `catalog.entity` returns a composite page for an
 `entityRef` — an `entityMetadata` plus the `trackMetadata` items that
 belong to it (an album's tracks, an artist's top tracks). `complete`
 is `false` when the upstream page is truncated or partially degraded;
@@ -181,25 +182,17 @@ step input, a response id that matches no outstanding request — fails
 {
   "id": "youtube-music",
   "version": "0.1.0",
-  "abi": "0.2.0",
+  "abi": "0.1.0",
   "capabilities": ["playback.resolve"],
   "permissions": ["network:www.youtube.com", "network:*.googlevideo.com", "pot-provider", "kv"],
   "artifact": { "path": "dist/youtube-music.wasm", "digest": "sha256:<hex>" }
 }
 ```
 
-`abi` is `0.1.0`, `0.2.0`, or `0.3.0` — any other value is rejected.
-`0.1.0` is a strict immutable subset: it may declare only
-`playback.resolve` and may not declare the `kv` permission, and a
-guest running under a `0.1.0` manifest that emits the 0.2-only
-`host_request` kinds (`kv_get`, `kv_set`, `log`, `now_ms`) fails
-`invalid-message`. `0.2.0` accepts `catalog.search`,
-`catalog.metadata`, `catalog.artwork`, `playback.resolve`, and
-`playback.candidates`. `0.3.0` accepts the full 0.2 set plus
-`catalog.entity`, `catalog.suggest`, `lyrics.plain`, `lyrics.synced`, and `radio.seed`,
-and unlocks the `resume` host-request kind — emitting `resume` under a
-pre-0.3.0 manifest fails `invalid-message`, the same rule as the
-0.1→0.2 service kinds.
+`abi` is `0.1.0` — any other value is rejected (the host [unconditionally
+rejects](../../crates/plugin-host/src/invoke.rs) a manifest pinning anything
+else). A manifest may declare any subset of the capabilities above;
+`host_request` kinds are gated by permission, not by capability set.
 
 Permission grammar: `network:<host>` exact match; `network:*.<domain>`
 matches any single- or multi-level subdomain of `<domain>` (not the apex).
