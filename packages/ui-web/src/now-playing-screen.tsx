@@ -166,7 +166,7 @@ export function ModeSegment({
       variant="float"
       ariaLabel={t('stage.modeTabsA11y')}
       tabs={tabs}
-      iconSize={16}
+      iconSize={12}
     />
   );
 }

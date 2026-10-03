@@ -296,33 +296,30 @@ function ModeSegmentPill({
   const thumbW = useSharedValue(0);
   const didInit = useRef(false);
   // flex:1 slots are equal, but the row's xxs gaps are NOT inside the
-  // slot widths — item i sits at 3 + i·(itemW + gap). The chip wraps
-  // the icon lane only, centered inside the slot.
+  // slot widths — item i sits at 3 + i·(itemW + gap).
   const gap = theme.spacing.xxs;
   const itemW =
     width > 0 ? (width - 6 - gap * (tabs.length - 1)) / tabs.length : 0;
-  const chipW = itemW > 0 ? Math.max(0, Math.min(56, itemW - 8)) : 0;
   useEffect(() => {
     if (activeIdx < 0 || itemW <= 0) return undefined;
-    const x = 3 + activeIdx * (itemW + gap) + (itemW - chipW) / 2;
+    const x = 3 + activeIdx * (itemW + gap);
     if (!didInit.current || theme.reducedMotion) {
       thumbX.value = x;
-      thumbW.value = chipW;
+      thumbW.value = itemW;
       didInit.current = true;
       return undefined;
     }
     thumbX.value = withSpring(x, STAGE_SETTLE_SPRING);
-    thumbW.value = withSpring(chipW, STAGE_SETTLE_SPRING);
+    thumbW.value = withSpring(itemW, STAGE_SETTLE_SPRING);
     return undefined;
-  }, [activeIdx, itemW, chipW, gap, thumbX, thumbW, theme.reducedMotion]);
+  }, [activeIdx, itemW, gap, thumbX, thumbW, theme.reducedMotion]);
   const thumbStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: thumbX.value }],
     width: thumbW.value,
   }));
-  // The dock's treatment on the player's mode bar: icon-over-label
-  // slots and one chip that wraps the active glyph while it glides.
-  // M3E reads it as the tonal (secondary-container) chip; iOS keeps
-  // the glass slab.
+  // M3E segmented-button: the selection mark reads as a tonal
+  // (secondary-container) pill; iOS keeps the glass slab. One shared
+  // thumb glides between slots — the per-item fill is gone.
   const m3e = Platform.OS === 'android';
   const activeBg = m3e ? theme.colors.accentSoft : theme.colors.glassControl;
   const activeColor = m3e ? theme.colors.accent : theme.colors.textBright;
@@ -333,9 +330,9 @@ function ModeSegmentPill({
         flexDirection: 'row',
         gap: theme.spacing.xxs,
         backgroundColor: theme.colors.raised,
-        /* 3px pad is deliberate (web parity): the icon lane (32) +
-           label stack lands the float near the dock's height. Don't
-           pull it onto the spacing scale. */
+        /* 3px pad is deliberate (web parity): 44 + 2×3 + 2×hairline
+           lands the float at the 52px chrome height — the mini
+           player's. Don't pull it onto the spacing scale. */
         padding: 3,
         borderRadius: theme.radius.float,
         borderWidth: theme.strokes.hairline,
@@ -353,7 +350,7 @@ function ModeSegmentPill({
             position: 'absolute',
             left: 0,
             top: 3,
-            height: 32,
+            bottom: 3,
             borderRadius: theme.radius.card,
             backgroundColor: activeBg,
           },
@@ -370,27 +367,19 @@ function ModeSegmentPill({
           accessibilityState={{ selected: tab.active }}
           style={{
             flex: 1,
+            flexDirection: 'row',
             alignItems: 'center',
-            gap: theme.spacing.xxs,
+            justifyContent: 'center',
+            gap: 7,
             minHeight: theme.sizes.touch,
             borderRadius: theme.radius.card,
           }}
         >
-          {/* The glyph's lane pins the gliding chip's height — it
-              wraps the icon, never the label. */}
-          <View
-            style={{
-              height: 32,
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            <Icon
-              name={tab.icon}
-              size={16}
-              color={tab.active ? activeColor : theme.colors.textSecondary}
-            />
-          </View>
+          <Icon
+            name={tab.icon}
+            size={12}
+            color={tab.active ? activeColor : theme.colors.textSecondary}
+          />
           <Text
             variant="metadata"
             color={tab.active ? (m3e ? 'accent' : 'bright') : 'secondary'}
@@ -1206,17 +1195,8 @@ export function StageSheet({
   // reserve pinned content keeps clear of — scrollable modes put the
   // same reserve inside their content so rows/lines glide beneath it.
   const segmentLift = bottomInset + theme.spacing.sm;
-  // The mode bar's real height — the icon lane (32) + gap + the scaled
-  // metadata line, floored at touch — so the reserve tracks text
-  // scale instead of assuming a 44px slot.
-  const segmentItemH = Math.max(
-    theme.sizes.touch,
-    32 +
-      theme.spacing.xxs +
-      theme.typography.metadata.lineHeight * theme.textScale,
-  );
   const segmentReserve =
-    segmentLift + segmentItemH + 8 + theme.spacing.lg;
+    segmentLift + theme.sizes.touch + 8 + theme.spacing.lg;
 
   const immersive = activeMode === 'player' && player.artworkUrl !== null;
   // StageSheet's own inline colors must follow the sheet's surface —

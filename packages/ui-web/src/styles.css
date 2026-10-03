@@ -2484,13 +2484,7 @@
    (lyrics/queue) put it inside their scroll area instead, so rows and
    lines glide beneath the segment. */
 .uw-stage {
-  /* The pill block is the icon lane (32) + gap + the scaled metadata
-     line, floored at touch — it tracks text scale instead of
-     assuming a 44px slot. */
-  --uw-segment-reserve: calc(
-    max(var(--size-touch), 32px + var(--spacing-xxs) + var(--font-metadata-line) * var(--uw-scale))
-    + 8px + var(--spacing-lg) + var(--spacing-lg)
-  );
+  --uw-segment-reserve: calc(var(--size-touch) + 8px + var(--spacing-lg) + var(--spacing-lg));
   position: relative;
   display: flex;
   flex-direction: column;
@@ -2863,13 +2857,8 @@
   pointer-events: none;
 }
 
-/* The float's selection mark is the dock's icon chip: it wraps the
-   glyph lane only, centered inside the slot (the component sizes it
-   to the chip width and centers it under the item). */
+/* Concentric with the float's pad — same radius the items carry. */
 .uw-segment--float .uw-segment__thumb {
-  top: 3px;
-  bottom: auto;
-  height: 32px;
   border-radius: var(--radius-card);
 }
 
@@ -2903,11 +2892,8 @@
   border-radius: var(--radius-control);
 }
 
-/* The dock's treatment on the player's mode bar — icon-over-label
-   slots, with the glyph's own lane the chip pins its height to. */
+/* Concentric with the floating segment's 3px pad (16 − 3 ≈ card). */
 .uw-segment--float .uw-segment__item {
-  flex-direction: column;
-  gap: var(--spacing-xxs);
   border-radius: var(--radius-card);
 }
 
@@ -2915,10 +2901,6 @@
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.uw-segment--float .uw-segment__icon {
-  height: 32px;
 }
 
 .uw-segment__item:hover:not(:disabled):not(.uw-segment__item--on) {
