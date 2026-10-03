@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import { FlatList, View } from 'react-native';
 import type { ViewToken } from 'react-native';
 import { useTheme } from './theme.tsx';
@@ -156,6 +156,17 @@ export function QueueList({
       viewportRows.current?.(ids);
     },
   );
+  // Display order (nowPlaying → upNext → history) is the order the
+  // session's move contract indexes — under shuffle it is the dealt
+  // walk, so display slots, not canonical `item.index`, drive moves.
+  // The flattened rows are memoized on the (shared, frozen) sections:
+  // a fresh `data` ref per render re-arms VirtualizedList's batched
+  // cell-update setState every pass, which chains nested updates past
+  // the 'Maximum update depth exceeded' cap under playback ticking.
+  const items = useMemo(
+    () => queue.sections.flatMap((section) => section.items),
+    [queue.sections],
+  );
   if (queue.items.length === 0) {
     return (
       <EmptyState
@@ -165,10 +176,6 @@ export function QueueList({
       />
     );
   }
-  // Display order (nowPlaying → upNext → history) is the order the
-  // session's move contract indexes — under shuffle it is the dealt
-  // walk, so display slots, not canonical `item.index`, drive moves.
-  const items = queue.sections.flatMap((section) => section.items);
   const sectionByKey = new Map(queue.sections.map((s) => [s.key, s]));
   const upNextIds =
     sectionByKey.get('upNext')?.items.map((item) => item.occurrenceId) ?? [];

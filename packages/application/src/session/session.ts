@@ -562,6 +562,12 @@ export class Session {
   #positionListeners = new Set<(positionMs: number) => void>();
   /** The value position listeners were last fired with. */
   #emittedPositionMs = 0;
+  /**
+   * `#publishPosition` installed a state the whole-state channel was
+   * never woken for — the next publish must deliver it even when its
+   * own diff is identical.
+   */
+  #statePending = false;
   #publishSource: PublishSource | undefined;
   #playerUnsub: () => void;
   #disposed = false;
@@ -936,7 +942,19 @@ export class Session {
   }
 
   #publish(): void {
-    if (this.#ready !== null && !this.#syncState(this.#ready)) {
+    // A silent install from a position tick still owes the channel a
+    // wake: an identical diff may only dedupe what subscribers were
+    // already shown. Between a mutation and the publish that reports
+    // it (a queue write mutates the engine before its commit awaits),
+    // an interleaved tick can install the change unseen — dedupe
+    // there would swallow the publish outright.
+    const pending = this.#statePending;
+    this.#statePending = false;
+    if (
+      this.#ready !== null &&
+      !this.#syncState(this.#ready) &&
+      !pending
+    ) {
       return;
     }
     this.#emitPosition();
@@ -957,8 +975,10 @@ export class Session {
    * move instead.
    */
   #publishPosition(): void {
-    if (this.#ready !== null) {
-      this.#syncState(this.#ready);
+    if (this.#ready !== null && this.#syncState(this.#ready)) {
+      // The channel skipped this install — the next publish must not
+      // dedupe a diff subscribers were never shown.
+      this.#statePending = true;
     }
     this.#emitPosition();
   }

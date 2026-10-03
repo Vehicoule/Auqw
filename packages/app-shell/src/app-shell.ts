@@ -216,6 +216,29 @@ function trailing(s: ThrottleState, run: () => void): void {
   }, 1_000 - gap);
 }
 
+/**
+ * Generation-scoped scratch map: a fresh Map whenever `deps`
+ * shallow-change — the per-key memo store for `*ModelFor` builders.
+ * Overlay screens render at playback tick rate, and a rebuilt model
+ * feeds a fresh `data` ref into VirtualizedList every pass; its
+ * batched cell-update setState is the 'Maximum update depth exceeded'
+ * chain — stable models keep the prop identical between ticks.
+ */
+function useScopedMap<K, V>(deps: readonly unknown[]): Map<K, V> {
+  const ref = useRef<{ deps: readonly unknown[]; map: Map<K, V> } | null>(
+    null,
+  );
+  const prev = ref.current;
+  if (
+    prev === null ||
+    prev.deps.length !== deps.length ||
+    prev.deps.some((dep, i) => dep !== deps[i])
+  ) {
+    ref.current = { deps, map: new Map() };
+  }
+  return (ref.current as { map: Map<K, V> }).map;
+}
+
 // Epoch-tagged sheet saves (theme/language): each pick claims a fresh
 // epoch — a save resolving after a newer pick or a dismissal reports
 // nothing, applies nothing, and closes nothing.
@@ -1627,8 +1650,31 @@ export function useAppShell<E extends { readonly type: string } = never>(
     localeTick,
   ]);
 
+  // Per-playlist memo: overlay screens render at playback tick rate,
+  // and a fresh model per render re-arms VirtualizedList's batched
+  // cell-update setState — the 'Maximum update depth exceeded' chain.
+  const playlistModels = useScopedMap<
+    string,
+    ReturnType<typeof toPlaylistModel>
+  >([
+    state.playlists,
+    state.playlistEntries,
+    state.recordings,
+    state.likes,
+    activeRecordingId,
+    downloads,
+    downloadChipFor,
+    online,
+    localPlayable,
+    localTick,
+    localeTick,
+  ]);
   const playlistModelFor = useCallback(
     (playlistId: string) => {
+      const cached = playlistModels.get(playlistId);
+      if (cached !== undefined) {
+        return cached;
+      }
       const model = toPlaylistModel({
         playlistId,
         playlists: state.playlists,
@@ -1640,7 +1686,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
         return model;
       }
       const offline = online === false;
-      return {
+      const decorated = {
         ...model,
         entries: model.entries.map((entry) => {
           const download =
@@ -1663,22 +1709,12 @@ export function useAppShell<E extends { readonly type: string } = never>(
           };
         }),
       };
+      playlistModels.set(playlistId, decorated);
+      return decorated;
       // localTick re-reads local.uriMap after a folder mutation.
       // eslint-disable-next-line react-hooks/exhaustive-deps
     },
-    [
-      state.playlists,
-      state.playlistEntries,
-      state.recordings,
-      state.likes,
-      activeRecordingId,
-      downloads,
-      downloadChipFor,
-      online,
-      localPlayable,
-      localTick,
-      localeTick,
-    ],
+    [playlistModels],
   );
 
   // The ref the player actually resolved for the live attempt —
@@ -1705,9 +1741,27 @@ export function useAppShell<E extends { readonly type: string } = never>(
     return playback.ref ?? null;
   }, [state.playback, ports.markPlayingRef]);
 
+  // Per-fetch memo — same VirtualizedList cell-update chain as
+  // playlistModelFor: entity overlays render at tick rate, and a
+  // rebuilt model feeds a fresh `data` ref every pass.
+  const entityModels = useScopedMap<
+    EntityFetch | null,
+    ReturnType<typeof toEntityModel>
+  >([
+    state.likes,
+    state.playlistEntries,
+    state.recordings,
+    state.entitySourceRefs,
+    playingRef,
+    localeTick,
+  ]);
   const entityModelFor = useCallback(
-    (fetch: EntityFetch | null) =>
-      toEntityModel({
+    (fetch: EntityFetch | null) => {
+      const cached = entityModels.get(fetch);
+      if (cached !== undefined) {
+        return cached;
+      }
+      const model = toEntityModel({
         page: fetch?.page ?? null,
         error: fetch?.error ?? null,
         likes: state.likes,
@@ -1716,15 +1770,11 @@ export function useAppShell<E extends { readonly type: string } = never>(
         entitySourceRefs: state.entitySourceRefs,
         loadingMore: fetch?.loadingMore ?? false,
         playingRef,
-      }),
-    [
-      state.likes,
-      state.playlistEntries,
-      state.recordings,
-      state.entitySourceRefs,
-      playingRef,
-      localeTick,
-    ],
+      });
+      entityModels.set(fetch, model);
+      return model;
+    },
+    [entityModels],
   );
   // Row-key → TrackMetadata for entity items (resultMeta's contract)
   // — namespaced per stack entry so two entity screens never collide.

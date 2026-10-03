@@ -24,6 +24,7 @@ import { TrackRow } from './track-row.tsx';
 import { EntityRail } from './entity-rail.tsx';
 import { EmptyState, StateFor } from './states.tsx';
 import type { EntityScreenModel } from '@auqw/ui-shared';
+import { useLatestCallback, useStableRows } from '@auqw/ui-shared';
 import {
   useEntityScreenController,
   type EntityPillView,
@@ -119,19 +120,38 @@ export function EntityScreen({
   onEntityCardLike,
 }: EntityScreenProps) {
   const theme = useTheme();
+  // Handlers bound into retained rows/cards go through ref-trampolines:
+  // a stale wrapper then still calls the latest prop (e.g. a press
+  // handler re-keyed on connectivity), never its own era's closure.
+  const pressItem = useLatestCallback(onPressItem);
+  const rowIntent = useLatestCallback(onRowIntent);
+  const rowContext = useLatestCallback(onContext);
+  const cardPress = useLatestCallback(onEntityCardPress);
+  const cardLike = useLatestCallback(onEntityCardLike);
   const view = useEntityScreenController({
     model,
     onPlayAll,
     onShuffleAll,
     onToggleLike,
-    onPressItem,
-    onRowIntent,
-    onContext,
+    onPressItem: pressItem,
+    onRowIntent: rowIntent,
+    onContext: rowContext,
     onLoadMore,
     onRetry,
-    onEntityCardPress,
-    onEntityCardLike,
+    onEntityCardPress: cardPress,
+    onEntityCardLike: cardLike,
   });
+  // The controller re-maps view rows every render — serving the
+  // previous array while the wrapped items are unchanged keeps the
+  // list's `data` identical between playback ticks (fresh refs re-arm
+  // VirtualizedList's batched cell-update setState — the update-depth
+  // storm chain).
+  const bodyRows = useStableRows(
+    view.kind === 'ready' && view.body.kind === 'rows'
+      ? view.body.rows
+      : [],
+    (item) => item.row,
+  );
   if (view.kind !== 'ready') {
     return (
       <View
@@ -284,7 +304,7 @@ export function EntityScreen({
         />
       ) : (
         <FlatList
-          data={view.body.rows}
+          data={bodyRows}
           keyExtractor={(item) => item.row.key}
           scrollEnabled={scrollEnabled}
           contentContainerStyle={{

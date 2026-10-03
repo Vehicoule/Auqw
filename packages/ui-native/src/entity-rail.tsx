@@ -1,4 +1,5 @@
 import { FlatList, View } from 'react-native';
+import { useStableRows } from '@auqw/ui-shared';
 import { useTheme } from './theme.tsx';
 import { Artwork, IconButton, Pressable, Text } from './primitives.tsx';
 import type {
@@ -14,6 +15,12 @@ import type {
  */
 export function EntityRail({ rail }: { readonly rail: EntityRailView }) {
   const theme = useTheme();
+  // Controllers re-map card views every render — serving the previous
+  // array while the wrapped card models are unchanged keeps the
+  // list's `data` identical between playback ticks (fresh refs re-arm
+  // VirtualizedList's batched cell-update setState — the update-depth
+  // storm chain).
+  const cards = useStableRows(rail.cards, (view) => view.card);
   return (
     <View style={{ marginTop: theme.spacing.xl }}>
       <Text
@@ -28,7 +35,7 @@ export function EntityRail({ rail }: { readonly rail: EntityRailView }) {
       </Text>
       <FlatList
         horizontal
-        data={rail.cards}
+        data={cards}
         keyExtractor={(card) => card.card.key}
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={{
