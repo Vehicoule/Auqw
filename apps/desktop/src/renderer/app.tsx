@@ -832,8 +832,10 @@ function Main({
         }
       },
       // The session reboots after an install so the new provider's
-      // adapters exist — settings and playback can use it now.
-      afterProviderInstall: onReboot,
+      // adapters exist — settings and playback can use it now. The
+      // reboot unmounts this shell, so it waits out the toast's
+      // 4-second window first: the confirmation must be seen.
+      afterProviderInstall: () => setTimeout(onReboot, 4_000),
       // Sandboxed renderers have no filesystem — the browser's
       // download path is the honest destination.
       exportJson: async (json, name) => {

@@ -414,8 +414,11 @@ export function createHostRuntime(opts: {
   let lastLoadIncomplete = false;
   let lastUserSignature: string | null = null;
   // Provider ids the previous pass loaded from user pairs — the
-  // revocation set for the next reload.
+  // revocation set for the next reload. `userScanCache` carries the
+  // loaded entries so a signed-feed retry never rescans + reloads
+  // unchanged user guests.
   let lastUserProviderIds: readonly string[] = [];
+  let userScanCache: readonly LoadedPlugin[] | null = null;
 
   function loadBindings(): PluginHostLike {
     const candidates = bindingsCandidates(
@@ -500,6 +503,7 @@ export function createHostRuntime(opts: {
 
   async function loadPluginDir(
     h: PluginHostLike,
+    reuseUserScan: boolean,
   ): Promise<readonly LoadedPlugin[]> {
     const dir =
       opts.env.AUQW_PLUGIN_DIR === undefined || opts.env.AUQW_PLUGIN_DIR === ''
@@ -595,8 +599,26 @@ export function createHostRuntime(opts: {
       // Duplicate user ids among themselves double-register the same
       // way. Both are refusals, and the pair file stays untouched.
       const takenIds = new Set(loaded.map((p) => p.providerId));
+      // A signed-feed retry reuses the cached user scan — unchanged
+      // guests are never re-loaded. Only a user-dir signature change
+      // (or the first pass) runs the scan below.
+      if (reuseUserScan && userScanCache !== null) {
+        const cachedSigned = loaded.length;
+        for (const cached of userScanCache) {
+          if (!takenIds.has(cached.providerId)) {
+            loaded.push(cached);
+            takenIds.add(cached.providerId);
+          }
+        }
+        lastLoadIncomplete =
+          synced !== undefined &&
+          (synced.ready.length < synced.compatible.length ||
+            cachedSigned < synced.compatible.length);
+        return loaded;
+      }
       // Only signed loads count toward the retry gate — user pairs
       // must not mask a signed provider that failed `loadPlugin`.
+      const signedProviderIds = loaded.map((p) => p.providerId);
       const signedLoaded = loaded.length;
       const userProviderIds: string[] = [];
       for (const name of fs.list(userDir).sort()) {
@@ -653,7 +675,8 @@ export function createHostRuntime(opts: {
       // previous pass loaded as user pairs but this pass no longer
       // carries are unloaded; a signed feed id never lands here.
       for (const gone of lastUserProviderIds.filter(
-        (id) => !userProviderIds.includes(id),
+        (id) =>
+          !userProviderIds.includes(id) && !signedProviderIds.includes(id),
       )) {
         try {
           await h.unloadPlugin(gone);
@@ -662,6 +685,7 @@ export function createHostRuntime(opts: {
         }
       }
       lastUserProviderIds = userProviderIds;
+      userScanCache = loaded.slice(signedLoaded);
       // A failed feed refresh with an empty cache must not pin an empty
       // provider set: `pluginsReady` resets on rejection, so the next
       // call re-syncs — a cache hit meanwhile stays usable offline.
@@ -722,13 +746,16 @@ export function createHostRuntime(opts: {
       join(opts.env.AUQW_USER_DATA ?? process.cwd(), 'plugins-user'),
       fs,
     );
-    if (userSignature !== lastUserSignature) {
+    const userChanged = userSignature !== lastUserSignature;
+    if (userChanged) {
       lastUserSignature = userSignature;
       lastLoadIncomplete = true;
     }
     if (pluginsReady === null || lastLoadIncomplete) {
       lastLoadIncomplete = false;
-      const pending = loadPluginDir(ensureHost());
+      // A signed-feed retry (the only other armer) reuses the cached
+      // user scan — unchanged guests are never re-loaded.
+      const pending = loadPluginDir(ensureHost(), !userChanged);
       pluginsReady = pending;
       // A rejected init stays retriable — the artifact may appear
       // after a build — while in-flight calls still share `pending`.

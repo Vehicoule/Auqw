@@ -513,6 +513,61 @@ export async function run(): Promise<void> {
       unloaded.includes('foo-music'),
       'revocation unloads the guest from the host',
     );
+
+    // A signed feed promoting a user id never unloads the signed
+    // replacement — the id now belongs to the feed.
+    const promoteUnloaded: string[] = [];
+    const promoteModule: NodeBindingsModule = {
+      PluginHost: class {
+        constructor() {
+          return {
+            ...fakeHost,
+            loadPlugin: async (_w: Buffer, m: string) =>
+              JSON.parse(m)['id'],
+            unloadPlugin: async (providerId: string) => {
+              promoteUnloaded.push(providerId);
+            },
+          } as unknown as PluginHostLike;
+        }
+      } as unknown as NodeBindingsModule['PluginHost'],
+    };
+    const promoteFiles = new Map<string, Buffer>([
+      ['/b/auqw_node_bindings.node', Buffer.from('')],
+      [join('/plugins', 'foo-music.wasm'), Buffer.from('wasm-signed')],
+      [
+        join('/plugins', 'foo-music.manifest.json'),
+        Buffer.from('{"id":"foo-music","capabilities":["catalog.search"]}'),
+      ],
+      [join('/ud', 'plugins-user', 'foo-music.pair.json'), Buffer.from(pair)],
+      [join('/ud', 'plugins-user', 'consents.json'), Buffer.from(consentJson)],
+    ]);
+    const promoteRuntime = createHostRuntime({
+      env: {
+        AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+        AUQW_PLUGIN_DIR: '/plugins',
+        AUQW_USER_DATA: '/ud',
+      },
+      require: () => promoteModule,
+      fs: {
+        exists: (p: string) => promoteFiles.has(p) || p === '/plugins',
+        read: (p: string) => promoteFiles.get(p) ?? Buffer.alloc(0),
+        list: (d: string) =>
+          d === '/plugins'
+            ? ['foo-music.manifest.json', 'foo-music.wasm']
+            : [],
+        mkdir: () => {},
+        copy: () => {},
+        stat: () => null,
+        write: () => {},
+      },
+    });
+    const promoted = await promoteRuntime.status();
+    assertEqual(promoted.manifests.length, 1, 'signed winner loads');
+    assertEqual(
+      promoteUnloaded.length,
+      0,
+      'the signed replacement is never unloaded',
+    );
   }
 
   // A rejected init is retried on the next call — the artifact may
