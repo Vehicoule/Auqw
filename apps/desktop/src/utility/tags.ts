@@ -64,6 +64,15 @@ type TagService = {
 const FINGERPRINT_SAMPLE = 4096;
 
 /**
+ * Embedded art is trusted to be picture-sized. A cover past this
+ * bound is refused before hashing/storing: the per-doc catch
+ * isolates throws, not heap exhaustion, so a hostile or corrupt
+ * file must not make the utility process buffer unbounded image
+ * bytes (a crash would wedge the whole batch, not one entry).
+ */
+const MAX_ART_BYTES = 32 * 1024 * 1024;
+
+/**
  * Enumeration fs outcome: a genuinely-gone path enumerates empty (or
  * skips itself when it vanished mid-scan), but a permission or I/O
  * failure must not answer a partial listing — LocalFileSource diffs a
@@ -232,6 +241,7 @@ async function artworkUriFor(
     picture === undefined ||
     picture.data === undefined ||
     picture.data.length === 0 ||
+    picture.data.length > MAX_ART_BYTES ||
     userData === undefined
   ) {
     return null;
@@ -260,14 +270,19 @@ async function artworkUriFor(
   return pathToFileURL(abs).href;
 }
 
-/** Front cover wins when several pictures ride one file. */
+/** Front cover wins when several pictures ride one file — but a
+ * picture that can't produce art within the bound is never
+ * selected, so a giant payload loses to a usable cover. */
 function coverOf(pictures: readonly IPicture[] | undefined): IPicture | undefined {
   if (pictures === undefined || pictures.length === 0) {
     return undefined;
   }
+  const bounded = pictures.filter(
+    (p) => p.data !== undefined && p.data.length <= MAX_ART_BYTES,
+  );
   return (
-    pictures.find((p) => p.type?.toLowerCase().includes('front')) ??
-    pictures[0]
+    bounded.find((p) => p.type?.toLowerCase().includes('front')) ??
+    bounded[0]
   );
 }
 

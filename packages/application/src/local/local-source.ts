@@ -722,6 +722,10 @@ export class LocalFileSource {
       durationMs: number | null;
       genre: string | null;
       artworkUri: string | null;
+      /** The batched read returned a row for this doc — a per-doc
+       * failure (null) is not 'no art', so the merge must keep the
+       * recording's stored artwork rather than clearing it. */
+      tagRead: boolean;
       /** Backfill leg: fill an existing recording's art only — never
        * mint, never touch sourceRefs or fields. */
       fillOnly: boolean;
@@ -759,6 +763,7 @@ export class LocalFileSource {
         fileId: row.fileId,
         fingerprint: row.fingerprint,
         ...fields,
+        tagRead: tag !== null,
         fillOnly: false,
       });
     }
@@ -783,6 +788,7 @@ export class LocalFileSource {
         durationMs: row.durationMs,
         genre: row.genre,
         artworkUri: tag?.artworkUri ?? null,
+        tagRead: tag !== null,
         fillOnly: true,
       });
     }
@@ -878,8 +884,13 @@ export class LocalFileSource {
             s.kind === 'track' &&
             s.id === p.fileId,
         );
+        // A failed tag read carries no truth about the file's art —
+        // keep whatever the recording already holds instead of
+        // wiping it to []. Only a SUCCESSFUL read may clear art
+        // (the honest-none case still tracks).
         const artDesired =
-          existing.provenance === 'local' || existing.artwork.length === 0
+          p.tagRead &&
+          (existing.provenance === 'local' || existing.artwork.length === 0)
             ? freshArt
             : existing.artwork;
         const artChanged =
