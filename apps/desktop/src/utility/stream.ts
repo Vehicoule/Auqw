@@ -132,8 +132,15 @@ export function createStreamHandlers(deps: {
   status(): Promise<unknown>;
   /** User-pair consent review surface (`host:reviewPair`). */
   reviewUserPair(path: string): unknown;
-  /** User-pair approval persistence (`host:approvePair`). */
-  approveUserPair(path: string): boolean;
+  /**
+   * User-pair approval persistence (`host:approvePair`) — the digest
+   * args pin the exact candidate the consent dialog approved.
+   */
+  approveUserPair(
+    path: string,
+    wasmSha256: string,
+    manifestSha256: string,
+  ): boolean;
   devGateEnabled?: boolean;
 }): Readonly<Record<string, UtilityHandler>> {
   /** The mapped region: run()'s throw/rejection becomes mapErr(). */
@@ -171,7 +178,7 @@ export function createStreamHandlers(deps: {
     [CHANNELS.hostApprovePair]: async (args) => {
       const a = validated(isHostApprovePairArgs, 'host:approvePair')(args);
       return checked(isApprovePairResult, 'host:approvePair')(
-        deps.approveUserPair(a.path),
+        deps.approveUserPair(a.path, a.wasm_sha256, a.manifest_sha256),
       );
     },
 

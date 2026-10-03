@@ -1,5 +1,9 @@
 import { join } from 'node:path';
-import { assert, assertEqual } from '@auqw/application/testing';
+import {
+  assert,
+  assertDeepEqual,
+  assertEqual,
+} from '@auqw/application/testing';
 import { describeCandidate } from '@auqw/application';
 import { isRecord } from '../shared/check.ts';
 import type { NodeBindingsModule, PluginHostLike } from './host.ts';
@@ -568,6 +572,316 @@ export async function run(): Promise<void> {
       0,
       'the signed replacement is never unloaded',
     );
+
+    // OTA-path scenarios: `pairVerifier` stands in for the signed
+    // release check so the scan sees feed pairs without real
+    // signatures; `feedSync` scripts the feed's availability.
+    const signedFooPair = {
+      id: 'foo-music',
+      version: '9.9.9',
+      wasmSha256: 'sha256:' + 'f'.repeat(64),
+      manifestSha256: 'sha256:' + 'e'.repeat(64),
+      wasmB64: Buffer.from('wasm-signed').toString('base64'),
+      manifestJson:
+        '{"id":"foo-music","version":"9.9.9","capabilities":["catalog.search"],"abi":"0.1.0","permissions":[]}',
+    };
+    const userDirPath = join('/ud', 'plugins-user');
+    const cacheDirPath = join('/ud', 'plugins');
+    const otaFs = (
+      files: Map<string, Buffer>,
+      userNames: readonly string[],
+      signedNames: () => readonly string[],
+      writes?: Array<{ path: string; data: string }>,
+    ) => ({
+      exists: (p: string) =>
+        files.has(p) || p === userDirPath || p === cacheDirPath,
+      read: (p: string) => files.get(p) ?? Buffer.alloc(0),
+      list: (d: string) =>
+        d === cacheDirPath
+          ? [...signedNames()]
+          : d === userDirPath
+            ? [...userNames]
+            : [],
+      mkdir: () => {},
+      copy: () => {},
+      stat: (p: string) => {
+        const b = files.get(p);
+        return b === undefined ? null : { mtimeMs: 1, size: b.byteLength };
+      },
+      write: (p: string, data: string) => {
+        writes?.push({ path: p, data });
+      },
+    });
+    const otaHost = (
+      load: (wasm: Buffer, manifest: string) => Promise<string>,
+      unload?: (providerId: string) => Promise<void>,
+    ): NodeBindingsModule => ({
+      PluginHost: class {
+        constructor() {
+          return {
+            ...fakeHost,
+            loadPlugin: load,
+            unloadPlugin:
+              unload ?? (async () => {}),
+          } as unknown as PluginHostLike;
+        }
+      } as unknown as NodeBindingsModule['PluginHost'],
+    });
+
+    // A failed feed with an empty provider set must keep rejecting —
+    // the cached empty user scan can't swallow the failure or a
+    // recovery would never re-sync.
+    {
+      let feedCalls = 0;
+      const recoveryRuntime = createHostRuntime({
+        env: {
+          AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+          AUQW_USER_DATA: '/ud',
+        },
+        feedSync: () => {
+          feedCalls += 1;
+          return feedCalls < 3
+            ? Promise.reject(new Error('feed down'))
+            : Promise.resolve({ ready: [], compatible: [] });
+        },
+        pairVerifier: () => null,
+        require: () => fakeModule,
+        fs: {
+          exists: (p) => p === '/b/auqw_node_bindings.node',
+          read: () => Buffer.alloc(0),
+          list: () => [],
+          mkdir: () => {},
+          copy: () => {},
+          stat: () => null,
+          write: () => {},
+        },
+      });
+      const down1 = await recoveryRuntime.status();
+      const down2 = await recoveryRuntime.status();
+      assertEqual(down1.bindings, 'unavailable');
+      assertEqual(
+        down2.bindings,
+        'unavailable',
+        'a failed feed keeps rejecting while the scan is empty',
+      );
+      const up = await recoveryRuntime.status();
+      assertEqual(feedCalls, 3, 'recovery re-syncs the feed');
+      assertEqual(up.bindings, 'loaded');
+    }
+
+    // A signed pair that fails to load still owns its id — a
+    // consented user pair must not register under it.
+    {
+      const otaLoaded: string[] = [];
+      let reserveFeeds = 0;
+      const colliding = new Map<string, Buffer>([
+        ['/b/auqw_node_bindings.node', Buffer.from('')],
+        [join(cacheDirPath, 'foo-music.json'), Buffer.from('{"feed":1}')],
+        [join(userDirPath, 'foo-music.pair.json'), Buffer.from(pair)],
+        [join(userDirPath, 'consents.json'), Buffer.from(consentJson)],
+      ]);
+      const reserveRuntime = createHostRuntime({
+        env: {
+          AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+          AUQW_USER_DATA: '/ud',
+        },
+        feedSync: async () => {
+          reserveFeeds += 1;
+          return { ready: ['x'], compatible: ['foo-music', 'x'] };
+        },
+        pairVerifier: () => signedFooPair,
+        require: () =>
+          otaHost(async (w, m) => {
+            if (w.toString('utf8') === 'wasm-signed') {
+              throw new Error('signed load failed');
+            }
+            otaLoaded.push(`${w.toString('utf8')}|${m}`);
+            return 'p';
+          }),
+        fs: otaFs(
+          colliding,
+          ['consents.json', 'foo-music.pair.json'],
+          () => ['foo-music.json'],
+        ),
+      });
+      const blocked = await reserveRuntime.status();
+      assertEqual(
+        blocked.manifests.length,
+        0,
+        'a failed signed load keeps its id reserved',
+      );
+      assert(
+        !otaLoaded.some((l) => l.includes('wasm-foo')),
+        'the unsigned pair never registers under a feed-claimed id',
+      );
+      await reserveRuntime.status();
+      assertEqual(
+        reserveFeeds,
+        2,
+        'the missing signed provider keeps the retry gate armed',
+      );
+    }
+
+    // A signed load replacing a user guest displaces the cached
+    // entry: once the signed pair is gone the approved user bytes
+    // must reload before the entry advertises again — status may
+    // never describe a guest the registry no longer runs.
+    {
+      const loadSeq: string[] = [];
+      const dispFiles = new Map<string, Buffer>([
+        ['/b/auqw_node_bindings.node', Buffer.from('')],
+        [join(userDirPath, 'foo-music.pair.json'), Buffer.from(pair)],
+        [join(userDirPath, 'consents.json'), Buffer.from(consentJson)],
+      ]);
+      let signedNames: readonly string[] = [];
+      const dispRuntime = createHostRuntime({
+        env: {
+          AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+          AUQW_USER_DATA: '/ud',
+        },
+        feedSync: async () => ({
+          ready: ['x'],
+          compatible: ['foo-music', 'x'],
+        }),
+        pairVerifier: () => signedFooPair,
+        require: () =>
+          otaHost(async (w) => {
+            loadSeq.push(w.toString('utf8'));
+            return 'p';
+          }),
+        fs: otaFs(
+          dispFiles,
+          ['consents.json', 'foo-music.pair.json'],
+          () => signedNames,
+        ),
+      });
+      await dispRuntime.status();
+      signedNames = ['foo-music.json'];
+      await dispRuntime.status();
+      signedNames = [];
+      const back = await dispRuntime.status();
+      assertDeepEqual(
+        loadSeq,
+        ['wasm-foo', 'wasm-signed', 'wasm-foo'],
+        'the displaced guest reloads its approved user bytes',
+      );
+      assertEqual(
+        back.manifests[0]?.providerId,
+        'foo-music',
+        'the reloaded user provider advertises again',
+      );
+    }
+
+    // A failed revocation stays owed — reuse passes keep retrying
+    // the unload rather than leaving the guest registered.
+    {
+      let unloadCalls = 0;
+      const revokeRetryFiles = new Map<string, Buffer>([
+        ['/b/auqw_node_bindings.node', Buffer.from('')],
+        [join(userDirPath, 'foo-music.pair.json'), Buffer.from(pair)],
+        [join(userDirPath, 'consents.json'), Buffer.from(consentJson)],
+      ]);
+      const revokeRetryRuntime = createHostRuntime({
+        env: {
+          AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+          AUQW_USER_DATA: '/ud',
+        },
+        feedSync: async () => ({ ready: ['x'], compatible: ['x'] }),
+        pairVerifier: () => null,
+        require: () =>
+          otaHost(
+            async () => 'p',
+            async () => {
+              unloadCalls += 1;
+              throw new Error('unload unsupported');
+            },
+          ),
+        fs: otaFs(
+          revokeRetryFiles,
+          ['consents.json', 'foo-music.pair.json'],
+          () => [],
+        ),
+      });
+      await revokeRetryRuntime.status();
+      // Revoke: the consent removal changes the dir signature, the
+      // rescan revokes — and keeps owing the unload when it fails.
+      revokeRetryFiles.delete(join(userDirPath, 'consents.json'));
+      await revokeRetryRuntime.status();
+      await revokeRetryRuntime.status();
+      assert(
+        unloadCalls >= 2,
+        `a failed unload stays owed to later scans, got ${unloadCalls}`,
+      );
+    }
+
+    // The approve call pins the digests the consent dialog approved —
+    // a pair whose bytes drifted since is refused, and the installed
+    // file is byte-for-byte the reviewed document.
+    {
+      const writes: Array<{ path: string; data: string }> = [];
+      const approveFiles = new Map<string, Buffer>([
+        ['/b/auqw_node_bindings.node', Buffer.from('')],
+        ['/pick/foo-music.pair.json', Buffer.from(pair)],
+      ]);
+      const approveRuntime = createHostRuntime({
+        env: {
+          AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+          AUQW_USER_DATA: '/ud',
+        },
+        feedSync: async () => ({ ready: [], compatible: [] }),
+        require: () => fakeModule,
+        fs: {
+          exists: (p) => approveFiles.has(p) || p === userDirPath,
+          read: (p) => approveFiles.get(p) ?? Buffer.alloc(0),
+          list: () => [],
+          mkdir: () => {},
+          copy: () => {},
+          stat: () => null,
+          write: (p, data) => {
+            writes.push({ path: p, data });
+          },
+        },
+      });
+      const review = approveRuntime.reviewUserPair(
+        '/pick/foo-music.pair.json',
+      );
+      assert(review !== null, 'review describes the candidate');
+      assertEqual(
+        approveRuntime.approveUserPair(
+          '/pick/foo-music.pair.json',
+          'sha256:' + '9'.repeat(64),
+          review.manifest_sha256,
+        ),
+        false,
+        'a drifted pair is refused at the write',
+      );
+      assertEqual(writes.length, 0, 'a refused approve writes nothing');
+      assertEqual(
+        approveRuntime.approveUserPair(
+          '/pick/foo-music.pair.json',
+          review.wasm_sha256,
+          review.manifest_sha256,
+        ),
+        true,
+        'the approved digests persist',
+      );
+      const pairWrite = writes.find((w) =>
+        w.path.endsWith('foo-music.pair.json'),
+      );
+      assert(
+        pairWrite !== undefined && pairWrite.data === pair,
+        'the installed pair is byte-for-byte the reviewed document',
+      );
+      const consentWrite = writes.find((w) =>
+        w.path.endsWith('consents.json'),
+      );
+      assert(
+        consentWrite !== undefined &&
+          consentWrite.data.includes(review.wasm_sha256) &&
+          consentWrite.data.includes('foo-music'),
+        'the consent record pins the approved digests',
+      );
+    }
   }
 
   // A rejected init is retried on the next call — the artifact may

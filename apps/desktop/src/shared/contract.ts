@@ -418,11 +418,17 @@ export const isUserPairReviewPayload = v.object({
   manifest_sha256: v.boundedString(80),
 });
 
-/** `host:approvePair` — persist the reviewed pair + consent record. */
+/**
+ * `host:approvePair` — persist the reviewed pair + consent record.
+ * The digest fields pin the exact candidate the consent dialog
+ * approved; a pair that drifted since is refused.
+ */
 export type HostApprovePairArgs = v.Guarded<typeof isHostApprovePairArgs>;
 
 export const isHostApprovePairArgs = v.object({
   path: v.boundedString(4096),
+  wasm_sha256: v.boundedString(80),
+  manifest_sha256: v.boundedString(80),
 });
 /**
  * `dialog:installProvider` — the consent-gated install flow, owned

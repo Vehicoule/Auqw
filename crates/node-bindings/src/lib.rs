@@ -725,6 +725,14 @@ impl JsPluginHost {
             .map_err(host_err)
     }
 
+    /// Drop a registered plugin — a revoked user pair must stop
+    /// answering requests, not just vanish from the status surface.
+    /// `UnknownPlugin` when the id was never loaded (or already gone).
+    #[napi(js_name = "unloadPlugin")]
+    pub fn unload_plugin(&self, provider_id: String) -> Result<()> {
+        self.inner.unload_plugin(provider_id).map_err(host_err)
+    }
+
     /// Start a `playback.resolve` invocation on the runtime. The
     /// returned promise settles exactly once; `requestId` is echoed
     /// back on `attempt.requestId`.

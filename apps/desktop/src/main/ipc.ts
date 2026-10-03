@@ -310,10 +310,15 @@ const HANDLERS: ReadonlyArray<readonly [string, Handler]> = [
       ) {
         return { outcome: 'failed' };
       }
-      // 4. Persist — review-to-approve is race-free in main.
+      // 4. Persist — the approved digests ride the call so a pair
+      // swapped after the re-review is refused at the write too.
       const approved = await deps.utility.request(
         CHANNELS.hostApprovePair,
-        { path: args.path },
+        {
+          path: args.path,
+          wasm_sha256: second.wasm_sha256,
+          manifest_sha256: second.manifest_sha256,
+        },
       );
       return approved === true
         ? {
