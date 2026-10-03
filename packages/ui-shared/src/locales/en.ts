@@ -251,6 +251,7 @@ export const en = {
   'entity.kind.album': 'album',
   'entity.kind.artist': 'artist',
   'entity.kind.fallback': 'entity',
+  'entity.play': 'play',
   'entity.shuffle': 'shuffle',
   'entity.errorTitle': "couldn't load this page",
   'entity.partial': 'partial page — some sections are unavailable upstream',
@@ -583,6 +584,7 @@ export const en = {
   'error.importInvalid': "that file isn't a valid library export",
 
   // ---- reported operation names ------------------------------------------
+  'action.playAll': 'play all',
   'action.playResult': 'play result',
   'action.playCollection': 'play collection',
   'action.playPlaylist': 'play playlist',

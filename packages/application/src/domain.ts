@@ -76,6 +76,16 @@ export type Recording = {
   genre: string | null;
   isrc: string | null;
   versionLabels: readonly VersionLabel[];
+  /**
+   * The provider's own artist/album refs carried over from the catalog
+   * row that minted the recording — the stage meta links resolve
+   * through them. Local-only evidence: never emitted in sync field
+   * writes (meaningless off this device's catalog history) and omitted
+   * from export docs, so the keys are optional and pre-v16 documents
+   * still validate. Absent until a local materialization supplies them.
+   */
+  artistRef?: EntityRef | null;
+  albumRef?: EntityRef | null;
   sourceRefs: readonly SourceRef[];
   mappings: readonly SourceMapping[];
   /**
@@ -560,25 +570,35 @@ function hasUniqueSourceRefs(refs: readonly SourceRef[]): boolean {
 export function isRecording(value: unknown): value is Recording {
   return (
     isRecord(value) &&
-    hasExactKeys(value, [
-      'id',
-      'title',
-      'artist',
-      'album',
-      'durationMs',
-      'releaseYear',
-      'artwork',
-      'explicit',
-      'genre',
-      'isrc',
-      'versionLabels',
-      'sourceRefs',
-      'mappings',
-      'provenance',
-    ]) &&
+    hasKeys(
+      value,
+      [
+        'id',
+        'title',
+        'artist',
+        'album',
+        'durationMs',
+        'releaseYear',
+        'artwork',
+        'explicit',
+        'genre',
+        'isrc',
+        'versionLabels',
+        'sourceRefs',
+        'mappings',
+        'provenance',
+      ],
+      ['artistRef', 'albumRef'],
+    ) &&
     isString(value['id'], 64) &&
     hasAudioFields(value, isArtworkList) &&
     isOptString(value['isrc'], 64) &&
+    (value['artistRef'] === undefined ||
+      value['artistRef'] === null ||
+      isEntityRef(value['artistRef'])) &&
+    (value['albumRef'] === undefined ||
+      value['albumRef'] === null ||
+      isEntityRef(value['albumRef'])) &&
     isVersionLabelArray(value['versionLabels']) &&
     Array.isArray(value['sourceRefs']) &&
     value['sourceRefs'].length >= 1 &&
@@ -739,6 +759,8 @@ export function recordingFromMetadata(
     id,
     ...audioFields(metadata),
     isrc: metadata.isrc ?? null,
+    artistRef: metadata.artistRef ?? null,
+    albumRef: metadata.albumRef ?? null,
     sourceRefs: [metadata.sourceRef],
     mappings: [],
     provenance:
@@ -748,9 +770,9 @@ export function recordingFromMetadata(
 
 /**
  * Refreshes a recording's metadata fields from a provider record for
- * one of its own refs — version labels are re-derived and an ISRC is
- * only ever filled in, never removed. Identity fields (`id`,
- * `sourceRefs`, `mappings`) are untouched.
+ * one of its own refs — version labels are re-derived and an ISRC /
+ * entity ref is only ever filled in, never removed. Identity fields
+ * (`id`, `sourceRefs`, `mappings`) are untouched.
  */
 export function mergeRecordingMetadata(
   recording: Recording,
@@ -760,6 +782,20 @@ export function mergeRecordingMetadata(
     ...recording,
     ...audioFields(metadata),
     isrc: metadata.isrc ?? recording.isrc,
+    // A ref describes the entity behind the displayed name — keep the
+    // stored one only while the incoming row still shows that name.
+    // A renamed label without a ref of its own would otherwise link
+    // the new name to the old entity.
+    artistRef:
+      metadata.artistRef ??
+      (metadata.artist === recording.artist
+        ? (recording.artistRef ?? null)
+        : null),
+    albumRef:
+      metadata.albumRef ??
+      (metadata.album === recording.album
+        ? (recording.albumRef ?? null)
+        : null),
   };
 }
 

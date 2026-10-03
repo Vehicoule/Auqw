@@ -246,6 +246,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'entity.kind.album': '专辑',
   'entity.kind.artist': '艺人',
   'entity.kind.fallback': '条目',
+  'entity.play': '播放',
   'entity.shuffle': '随机播放',
   'entity.errorTitle': '无法加载此页面',
   'entity.partial': '页面不完整 — 部分板块在上游不可用',
@@ -575,6 +576,7 @@ export const zh: Readonly<Record<MessageId, Message>> = {
   'error.importInvalid': '该文件不是有效的曲库导出',
 
   // ---- reported operation names ------------------------------------------
+  'action.playAll': '全部播放',
   'action.playResult': '播放结果',
   'action.playCollection': '播放合集',
   'action.playPlaylist': '播放歌单',

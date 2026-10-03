@@ -48,6 +48,10 @@ import {
 import { fromTag, t, type Locale, type MessageId } from './i18n.ts';
 import { errorText } from './error-text.ts';
 
+// Surfaces type their entity-navigation props against the domain ref
+// without taking an @auqw/application dependency edge.
+export type { EntityRef } from '@auqw/application';
+
 export type PlatformVariant = 'android' | 'ios';
 
 type TrackRowState = 'available' | 'unavailable' | 'error';
@@ -95,6 +99,12 @@ export type PlayerModel = {
   readonly title: string;
   readonly artist: string | null;
   readonly albumLabel: string | null;
+  /** The provider's own entity refs for the playing recording —
+   *  the meta cluster's artist/album links resolve through them;
+   *  null while the recording carries none (pre-v16 rows, synced
+   *  peers, ref-less providers). */
+  readonly artistRef: EntityRef | null;
+  readonly albumRef: EntityRef | null;
   readonly artworkUrl: string | null;
   readonly positionMs: number;
   readonly durationMs: number | null;
@@ -501,16 +511,27 @@ export function toLyricsModel(input: {
   const provenance = `${sheet.provider}${sheet.cached ? t('lyrics.cachedSuffix') : ''}`;
   switch (sheet.kind) {
     case 'synced': {
-      const found = sheet.lines.findLastIndex(
-        (line) => line.tMs <= input.positionMs,
-      );
+      // Position ticks land every ~250ms–1s — binary-search the
+      // active line instead of a linear findLastIndex, and reuse the
+      // mapped line texts across ticks of the same sheet identity.
+      const lines = syncedLinesOf(sheet);
+      const timed = sheet.lines;
+      let lo = 0;
+      let hi = timed.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if ((timed[mid]?.tMs ?? 0) <= input.positionMs) {
+          lo = mid + 1;
+        } else {
+          hi = mid;
+        }
+      }
       // Before the first timestamp the intro still owns a highlighted
       // line — holding line 0 beats showing no highlight at all.
-      const activeIndex =
-        found === -1 ? (sheet.lines.length > 0 ? 0 : null) : found;
+      const activeIndex = lo === 0 ? (timed.length > 0 ? 0 : null) : lo - 1;
       return {
         state: 'synced',
-        lines: sheet.lines.map((line) => line.text),
+        lines,
         activeIndex,
         syncLabel: t('lyrics.synced', { provenance }),
         message: null,
@@ -1145,6 +1166,8 @@ export function toPlayerModel(input: PlayerModelInput): PlayerModel | null {
     recordingId,
     artist: recording?.artist ?? null,
     albumLabel: recording === undefined ? null : albumLabel(recording),
+    artistRef: recording?.artistRef ?? null,
+    albumRef: recording?.albumRef ?? null,
     artworkUrl:
       // The player model feeds surfaces from the 52 px mini-player up to
       // the full-bleed stage backdrop — pick at backdrop size; smaller
@@ -1463,6 +1486,52 @@ export function toEntityCard(
 const EMPTY_ENTRIES: readonly PlaylistEntry[] = [];
 
 /**
+ * Memoized sorts keyed on input array identity — the structural
+ * sharing upstream republishes the same array refs until the data
+ * actually changes, so a play event that only grows history (a new
+ * array) pays the sort, not every library-model rebuild.
+ */
+const SORT_MEMO = new WeakMap<object, unknown>();
+
+function memoSorted<T>(
+  source: readonly T[],
+  compare: (a: T, b: T) => number,
+): readonly T[] {
+  const cached = SORT_MEMO.get(source as unknown as object) as
+    | readonly T[]
+    | undefined;
+  if (cached !== undefined) {
+    return cached;
+  }
+  const sorted = [...source].sort(compare);
+  SORT_MEMO.set(source as unknown as object, sorted);
+  return sorted;
+}
+
+/**
+ * Memoized `line.text` projection per synced sheet — the position tick
+ * rebuilds the model every ~250ms–1s, and the lines array only changes
+ * when the sheet object itself does (sheets are rebuild-immutable), so
+ * a WeakMap keyed on the sheet keeps ticks allocation-free.
+ */
+const SYNCED_LINES_BY_SHEET = new WeakMap<
+  { readonly lines: readonly { readonly text: string }[] },
+  readonly string[]
+>();
+
+function syncedLinesOf(
+  sheet: { readonly lines: readonly { readonly text: string }[] },
+): readonly string[] {
+  const cached = SYNCED_LINES_BY_SHEET.get(sheet);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const lines = sheet.lines.map((line) => line.text);
+  SYNCED_LINES_BY_SHEET.set(sheet, lines);
+  return lines;
+}
+
+/**
  * All playlist entries bucketed by playlist, each bucket sorted by
  * position — one pass for models that need every playlist's entries
  * instead of a filter+sort per playlist.
@@ -1541,9 +1610,11 @@ export function toLibraryModel(input: {
       ...extra,
     }),
   });
-  const items: TrackRowModel[] = [...input.likes]
+  const items: TrackRowModel[] = memoSorted(
+    input.likes,
+    (a, b) => b.likedAtMs - a.likedAtMs,
+  )
     .filter((like) => like.entityKind === 'track')
-    .sort((a, b) => b.likedAtMs - a.likedAtMs)
     .flatMap((like) => {
       const recording = byId.get(like.targetId);
       return recording === undefined
@@ -1572,9 +1643,10 @@ export function toLibraryModel(input: {
   // History: one row per recording at its most recent counted play,
   // newest first; play events themselves stay intact.
   const seen = new Set<string>();
-  const history: CollectionRowModel[] = [...input.playHistory]
-    .sort((a, b) => b.playedMs - a.playedMs)
-    .flatMap((event) => {
+  const history: CollectionRowModel[] = memoSorted(
+    input.playHistory,
+    (a, b) => b.playedMs - a.playedMs,
+  ).flatMap((event) => {
       if (seen.has(event.recordingId)) return [];
       const recording = byId.get(event.recordingId);
       if (recording === undefined) return [];

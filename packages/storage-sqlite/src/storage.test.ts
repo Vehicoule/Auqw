@@ -79,6 +79,8 @@ function recording(
     genre: null,
     isrc: null,
     versionLabels: [],
+    artistRef: null,
+    albumRef: null,
     sourceRefs: refs,
     mappings,
     provenance: 'provider',
@@ -2691,6 +2693,58 @@ async function migrationV14toV15(): Promise<void> {
   driver.close();
 }
 
+// v15 -> v17: recordings gain local-only artist/album ref columns
+// (v16's queue origin_json rides along on the same seed). Rows that
+// predate the columns decode with null refs, a ref-carrying write
+// round-trips, and the export document keeps its pre-v17 shape.
+async function migrationV15toV17(): Promise<void> {
+  const driver = new NodeSqliteDriver();
+  for (const step of MIGRATIONS.slice(0, 15)) {
+    driver.execScript(`${step.join(';\n')};`);
+  }
+  driver.execScript(`
+    INSERT INTO schema_version (id, version) VALUES (1, 15);
+    INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered, language)
+      VALUES (1, 'a', 'b', NULL, 256, 'dark', 1, NULL, NULL, NULL, 0, NULL);
+    INSERT INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+      VALUES (1, 0, NULL, 0, 'stopped', NULL);
+    INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json, provenance)
+      VALUES ('r1', 'Roads', 'Portishead', 'Dummy', 302000, 1994, '[]', NULL, NULL, NULL, '[]', 'provider');
+    INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
+      VALUES ('r1', 0, 'itunes', 'track', 'i1');
+  `);
+  const storage = new SqliteStorage(driver, SETTINGS);
+  assert((await storage.initialize(ctx().context)).ok, 'v15 -> v17 runs');
+  const state = await loadOk(storage);
+  assertEqual(state.recordings.length, 1, 'row migrated');
+  assertEqual(state.recordings[0]?.artistRef, null, 'no ref column content');
+  assertEqual(state.recordings[0]?.albumRef, null, 'no ref column content');
+
+  const refs = {
+    artistRef: { provider: 'deezer', kind: 'artist' as const, id: 'a-1' },
+    albumRef: { provider: 'deezer', kind: 'album' as const, id: 'b-1' },
+  };
+  const committed = await storage.commit(
+    { recordings: [recording('r2', [ref('itunes', 'i2')], [], refs)] },
+    ctx().context,
+  );
+  assert(committed.ok, 'ref-carrying recording commits');
+  const next = await loadOk(storage);
+  const r2 = next.recordings.find((r) => r.id === 'r2');
+  assertDeepEqual(r2?.artistRef, refs.artistRef, 'artist ref round-trips');
+  assertDeepEqual(r2?.albumRef, refs.albumRef, 'album ref round-trips');
+
+  // Refs are catalog evidence local to this device — the export
+  // document keeps its pre-v17 shape.
+  const exported = await storage.exportOwned(5_000, ctx().context);
+  assert(exported.ok, 'export resolves');
+  for (const doc of exported.value.recordings) {
+    assert(!('artistRef' in doc), 'artist ref stripped from export');
+    assert(!('albumRef' in doc), 'album ref stripped from export');
+  }
+  driver.close();
+}
+
 // 18. `recordingsMerge` applies to the transaction's fresh read —
 // rows written between a caller's snapshot and its commit survive.
 async function recordingsMergeCommit(): Promise<void> {
@@ -3206,6 +3260,7 @@ const TESTS: readonly (readonly [string, () => Promise<void>])[] = [
   ['migrationV2toV3', migrationV2toV3],
   ['migrationV3toV4', migrationV3toV4],
   ['migrationV14toV15', migrationV14toV15],
+  ['migrationV15toV17', migrationV15toV17],
   ['downloadLocalRoundtrip', downloadLocalRoundtrip],
   ['recordingsMergeCommit', recordingsMergeCommit],
   ['backupRetryAfterFailure', backupRetryAfterFailure],
