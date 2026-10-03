@@ -605,7 +605,7 @@ function GalleryBody({
         ))}
       </Section>
 
-      <Section title="navbars" note="m3e bar · liquid glass capsule">
+      <Section title="navbars" note="fallback renderers — android ships the native m3e bar, ios the native capsule">
         <AndroidNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} />
         <View style={{ height: theme.spacing.md }} />
         <IosGlassNavbar items={fixtureNavItems} activeKey={nav} onSelect={setNav} />
