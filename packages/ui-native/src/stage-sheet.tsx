@@ -2066,20 +2066,6 @@ export function StageSheet({
           )}
         </View>
       </View>
-      {/* The mode segment floats over the sheet's bottom safe zone —
-          it takes no layout space, so lyrics/queue rows and the
-          transport never reflow around it or hide beneath it. */}
-      <View
-        pointerEvents="box-none"
-        style={{
-          position: 'absolute',
-          left: theme.spacing.xl,
-          right: theme.spacing.xl,
-          bottom: segmentLift,
-        }}
-      >
-        <ModeSegment mode={activeMode} onSelect={selectMode} />
-      </View>
     </>
   );
 
@@ -2301,6 +2287,23 @@ export function StageSheet({
               a provider↔bare swap would remount every kept-alive pane
               on each switch to or from player mode. */}
           <DarkThemeScope on={immersive}>{content}</DarkThemeScope>
+          {/* The mode segment floats over the sheet's bottom safe
+              zone — it takes no layout space, so rows and the
+              transport never reflow around it or hide beneath it. It
+              sits outside the immersive dark scope on purpose: a
+              raised, shadowed float reads over art in either scheme,
+              so the bar follows the app theme. */}
+          <View
+            pointerEvents="box-none"
+            style={{
+              position: 'absolute',
+              left: theme.spacing.xl,
+              right: theme.spacing.xl,
+              bottom: segmentLift,
+            }}
+          >
+            <ModeSegment mode={activeMode} onSelect={selectMode} />
+          </View>
         </Animated.View>
       </Animated.View>
     </>
