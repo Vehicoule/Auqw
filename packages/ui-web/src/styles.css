@@ -1596,7 +1596,10 @@
   background: var(--accent-soft);
 }
 
-.uw-collection:hover .uw-collection__play {
+/* The play button is the tile's sibling inside the grid cell, not a
+   descendant — reveal it from the cell's hover/focus-within instead. */
+.uw-collections__cell:hover .uw-collection__play,
+.uw-collections__cell:focus-within .uw-collection__play {
   display: flex;
 }
 
