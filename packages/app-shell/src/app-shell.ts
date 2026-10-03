@@ -74,7 +74,6 @@ import {
   toHomeModel,
   toImportPreviewModel,
   toLibraryModel,
-  toLyricsModel,
   toPlayerModel,
   toPlaylistModel,
   toQueueModel,
@@ -87,7 +86,6 @@ import {
   toUpdateCard,
   useOverlayStack,
   useSerializedWrite,
-  useSmoothedPosition,
   useWaveformPeaks,
 } from '@auqw/ui-shared';
 import type {
@@ -99,7 +97,7 @@ import type {
   EntityCardModel,
   EntityFetch,
   LyricsFetch,
-  LyricsModel,
+  LyricsSource,
   MessageId,
   PeaksTarget,
   PlayerModel,
@@ -107,6 +105,7 @@ import type {
   ReviewFetch,
   SearchFilter,
   SkipPeek,
+  SkipPeeks,
   StageMode,
   TrackRowModel,
   TransferModel,
@@ -301,27 +300,13 @@ export function useAppShell<E extends { readonly type: string } = never>(
   const { session } = controller;
 
   // ---- position channel ------------------------------------------
-  // Position ticks ride the session's light channel — position-only
-  // ticks skip the state publish, so the read subscribes here. A plain
-  // state read, not useSyncExternalStore: engine ticks land every
-  // ~250ms–1s, and a tick arriving mid-render marks the store mutated —
-  // React heals by re-rendering synchronously, the next tick lands
-  // mid-pass again, and on a big tree the retries hit the nested-update
-  // cap ("Maximum update depth exceeded" thrown inside the position
-  // listener). A subscription queues one normal update per tick; ticks
-  // during a render just batch into the following one.
-  const [positionMs, setPositionMs] = useState(() => session.positionMs());
-  useEffect(() => {
-    // Subscribe before re-reading: a tick between the render-time
-    // initial state and this effect would otherwise be lost for good —
-    // subscribePosition never replays the current value, and the
-    // overlay would stamp the stale number over every fresh publish.
-    // The read always lands at least as fresh as any listener fire it
-    // follows, since both run inside this same synchronous block.
-    const unsubscribe = session.subscribePosition(setPositionMs);
-    setPositionMs(session.positionMs());
-    return unsubscribe;
-  }, [session]);
+  // Per-tick position no longer has shell-level state: it ticked the
+  // whole hook — every model and every mounted list re-rendered per
+  // engine tick, and each VirtualizedList under that render re-armed
+  // its batched cell-update setState ('Maximum update depth
+  // exceeded'). The leaves that draw position (scrubber, progress
+  // bars, synced lyrics) subscribe themselves via usePositionMs; the
+  // shell only carries publish-time position inside the snapshots.
 
   // ---- shell chrome state ----------------------------------------
   const [tab, setTab] = useState('home');
@@ -910,7 +895,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // Live reads off their surfaces, not session state — each fetch is
   // keyed to its target and canceled when superseded.
   const [lyricsFetch, setLyricsFetch] = useState<LyricsFetch | null>(null);
-  const lyricsSource = useRef<CancellationSource | null>(null);
+  const lyricsCancel = useRef<CancellationSource | null>(null);
   const [reviewFetch, setReviewFetch] = useState<ReviewFetch>({
     reviews: null,
     error: null,
@@ -1300,17 +1285,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
           : authSnapshot.status.state === 'signed-in' &&
             authSnapshot.bearerLive,
     });
-    // The model's position is a publish-time read — overlay the live
-    // tick value so the transport position moves between publishes.
-    if (
-      model !== null &&
-      (model.status === 'buffering' ||
-        model.status === 'playing' ||
-        model.status === 'paused') &&
-      model.positionMs !== positionMs
-    ) {
-      return { ...model, positionMs };
-    }
     return model;
   }, [
     state.playback,
@@ -1320,7 +1294,6 @@ export function useAppShell<E extends { readonly type: string } = never>(
     state.playlistEntries,
     state.repeat,
     state.shuffleOrder,
-    positionMs,
     authSnapshot,
     localeTick,
   ]);
@@ -1459,54 +1432,60 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // previous-restart) plus the same attachability gate, so the card
   // under your finger is the row the skip actually lands on — and a
   // target that would be gated away is a dead edge, not a false
-  // promise.
-  const skipPreview = useMemo(() => {
-    const { occurrences, currentOccurrenceId, blockedError } = state.queue;
-    const failed = failedSkipIds(failedQueueErrors.current);
-    const targets = skipTargetIds({
-      occurrences,
-      currentOccurrenceId,
-      dealtOrder: state.shuffleOrder,
-      failedIds: failed,
-      repeat: state.repeat,
-      positionMs,
-      blocked: blockedError !== undefined,
-    });
-    const peek = (targetId: string | null): SkipPeek | null => {
-      if (targetId === null) {
-        return null;
-      }
-      const target = occurrences.find(
-        (o) => o.occurrenceId === targetId,
-      );
-      if (target === undefined) {
-        return null;
-      }
-      const blocked =
-        ports.gateAdvanceAlways === true
-          ? !canPlay(target.recordingId)
-          : online === false && !localPlayable(target.recordingId);
-      if (blocked) {
-        return null;
-      }
-      return skipPeekFor(queueModel, targetId);
-    };
-    return {
-      next: peek(targets.next),
-      previous: peek(targets.previous),
-      nextEndsQueue: targets.nextEndsQueue,
-    };
-  }, [
-    state.queue,
-    state.shuffleOrder,
-    state.repeat,
-    positionMs,
-    queueModel,
-    online,
-    canPlay,
-    localPlayable,
-    ports.gateAdvanceAlways,
-  ]);
+  // promise. A factory, not a resolved value: the restart/step
+  // boundary reads the LIVE position (advance decides on
+  // session.positionMs at press time), so the position-subscribed
+  // leaf re-evaluates per tick rather than trusting the publish-time
+  // position frozen into the snapshot.
+  const skipPeeksFor = useCallback(
+    (positionMs: number): SkipPeeks => {
+      const { occurrences, currentOccurrenceId, blockedError } = state.queue;
+      const failed = failedSkipIds(failedQueueErrors.current);
+      const targets = skipTargetIds({
+        occurrences,
+        currentOccurrenceId,
+        dealtOrder: state.shuffleOrder,
+        failedIds: failed,
+        repeat: state.repeat,
+        positionMs,
+        blocked: blockedError !== undefined,
+      });
+      const peek = (targetId: string | null): SkipPeek | null => {
+        if (targetId === null) {
+          return null;
+        }
+        const target = occurrences.find(
+          (o) => o.occurrenceId === targetId,
+        );
+        if (target === undefined) {
+          return null;
+        }
+        const blocked =
+          ports.gateAdvanceAlways === true
+            ? !canPlay(target.recordingId)
+            : online === false && !localPlayable(target.recordingId);
+        if (blocked) {
+          return null;
+        }
+        return skipPeekFor(queueModel, targetId);
+      };
+      return {
+        next: peek(targets.next),
+        previous: peek(targets.previous),
+        nextEndsQueue: targets.nextEndsQueue,
+      };
+    },
+    [
+      state.queue,
+      state.shuffleOrder,
+      state.repeat,
+      queueModel,
+      online,
+      canPlay,
+      localPlayable,
+      ports.gateAdvanceAlways,
+    ],
+  );
 
   // An ended queue surfaces itself: when playback goes idle with the
   // queue's occurrences still listed, the stage rides queue mode so
@@ -2781,9 +2760,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
 
   const fetchLyrics = useCallback(
     (recordingId: string) => {
-      lyricsSource.current?.cancel();
+      lyricsCancel.current?.cancel();
       const source = new CancellationSource();
-      lyricsSource.current = source;
+      lyricsCancel.current = source;
       setLyricsFetch({
         recordingId,
         sheet: null,
@@ -2852,8 +2831,8 @@ export function useAppShell<E extends { readonly type: string } = never>(
     }
   }, [currentRecordingId, ports.resetModeOnTrack]);
 
-  // Lyrics highlight rides a smoothed clock between the engine's
-  // sparse position ticks; it ticks only while the pane is on screen.
+  // The seek generation rides to the lyrics leaf — a seek re-anchors
+  // its smoothed clock even at an unchanged position.
   const [seekGeneration, bumpSeekGeneration] = useState(0);
   const seekToPosition = useCallback(
     (ms: number, expectedOccurrenceId?: string): Promise<Result<void>> => {
@@ -2862,34 +2841,27 @@ export function useAppShell<E extends { readonly type: string } = never>(
     },
     [session],
   );
-  const lyricsVisible =
-    stageOpen && stageMode === 'lyrics' && appActive;
-  const lyricsPositionMs = useSmoothedPosition(
-    stagePlayer?.positionMs ?? 0,
-    playback.type === 'playing',
-    lyricsVisible,
-    seekGeneration,
-  );
-  // Hidden panes don't show the position — dep on null while off
-  // screen so an engine tick doesn't rebuild the model; the body
-  // still reads the live value whenever the pane is visible.
-  const lyricsPositionDep = lyricsVisible ? lyricsPositionMs : null;
-  const lyricsModel: LyricsModel | undefined = useMemo(() => {
+  // The leaf showing synced lyrics gates its own smoothed clock on
+  // this — hidden panes don't tick, and the shell no longer carries
+  // the ticking state at all.
+  const lyricsLive = stageOpen && stageMode === 'lyrics' && appActive;
+  // Publish-stable lyrics fetch inputs — the leaf rebuilds the model
+  // on its smoothed clock; a position tick never reaches the shell.
+  const lyricsSource: LyricsSource | null = useMemo(() => {
     if (currentRecordingId === null) {
-      return undefined;
+      return null;
     }
     const fetch =
       lyricsFetch !== null && lyricsFetch.recordingId === currentRecordingId
         ? lyricsFetch
         : null;
-    return toLyricsModel({
+    return {
       sheet: fetch?.sheet ?? null,
       error: fetch?.error ?? null,
       loading: fetch === null ? true : fetch.loading,
-      positionMs: lyricsPositionMs,
-    });
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lyricsFetch, currentRecordingId, lyricsPositionDep, localeTick]);
+  }, [lyricsFetch, currentRecordingId, localeTick]);
 
   const onRetryLyrics = useCallback(() => {
     if (currentRecordingId !== null) {
@@ -4215,7 +4187,7 @@ export function useAppShell<E extends { readonly type: string } = never>(
     stagePlayer,
     heldOccurrenceId,
     queueModel,
-    skipPreview,
+    skipPeeksFor,
     libraryModel,
     playlistModelFor,
     entityModelFor,
@@ -4226,7 +4198,9 @@ export function useAppShell<E extends { readonly type: string } = never>(
     settingsModel,
     correctionsModel,
     radioModel,
-    lyricsModel,
+    lyricsSource,
+    lyricsLive,
+    seekGeneration,
     transfer,
     pickerItems,
     // transport / playback ops

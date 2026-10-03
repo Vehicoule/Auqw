@@ -8,7 +8,13 @@
  * injected seams in each shell — only platform-identical logic lives
  * here.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type {
   AppError,
   AttemptTrace,
@@ -44,9 +50,11 @@ import {
   playlistSourceRefs,
   refKey,
   toEntityCard,
+  toLyricsModel,
   toSearchRowModel,
 } from './view-models.ts';
 import type {
+  LyricsModel,
   NavItemModel,
   SearchFilter,
   SearchStateModel,
@@ -663,6 +671,77 @@ export function useSmoothedPosition(
     return () => clearInterval(id);
   }, [playing, visible]);
   return smoothMs;
+}
+
+/**
+ * The session's live position channel, kept structural so this file
+ * stays free of the Session type. `subscribePosition` fires only on
+ * real moves (the session dedupes publishes).
+ */
+export type PositionSource = {
+  readonly positionMs: () => number;
+  readonly subscribePosition: (
+    listener: (positionMs: number) => void,
+  ) => () => void;
+};
+
+/**
+ * Per-tick position state belongs at the leaves that draw it — the
+ * scrubber, the progress bars, the synced-lyrics highlight. Held at
+ * the shell root it re-renders the whole app per engine tick, and
+ * every VirtualizedList under that render re-arms its batched
+ * cell-update setState — the 'Maximum update depth exceeded' storm.
+ * The hook runs the same subscription the shell used to; callers
+ * are leaf components only.
+ */
+export function usePositionMs(
+  session: PositionSource | undefined,
+): number {
+  const [ms, setMs] = useState(() => session?.positionMs() ?? 0);
+  useEffect(() => {
+    if (session === undefined) {
+      return undefined;
+    }
+    setMs(session.positionMs());
+    return session.subscribePosition(setMs);
+  }, [session]);
+  return ms;
+}
+
+/** The lyrics fetch inputs `toLyricsModel` needs minus the position
+    clock — publish-stable so the leaf can rebuild the model per
+    smoothed tick without touching the shell. */
+export type LyricsSource = {
+  readonly sheet: LyricsSheet | null;
+  readonly error: AppError | null;
+  readonly loading: boolean;
+};
+
+/**
+ * The lyrics model recomputed on the smoothed position clock at the
+ * leaf that shows it — `visible`/`generation`/`playing` are the same
+ * gates the shell used to pass useSmoothedPosition.
+ */
+export function useLiveLyricsModel(
+  source: LyricsSource | null,
+  positionMs: number,
+  playing: boolean,
+  visible: boolean,
+  generation: number,
+): LyricsModel | undefined {
+  const smoothed = useSmoothedPosition(
+    positionMs,
+    playing,
+    visible,
+    generation,
+  );
+  return useMemo(
+    () =>
+      source === null
+        ? undefined
+        : toLyricsModel({ ...source, positionMs: smoothed }),
+    [source, smoothed],
+  );
 }
 
 export type SerializedWrite<T extends object> = (

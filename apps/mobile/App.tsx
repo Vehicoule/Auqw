@@ -947,7 +947,7 @@ function Main({
     stagePlayer: sheetPlayer,
     heldOccurrenceId,
     queueModel,
-    skipPreview,
+    skipPeeksFor,
     peaks,
     onPlayPause,
     onToggleLike,
@@ -1000,7 +1000,9 @@ function Main({
     settingsModel,
     correctionsModel,
     radioModel,
-    lyricsModel,
+    lyricsSource,
+    lyricsLive,
+    seekGeneration,
     transfer,
     pickerItems,
     actionsFor,
@@ -2653,6 +2655,10 @@ function Main({
           {sheetPlayer !== null ? (
             <StageSheet
               player={sheetPlayer}
+              // No live player = held ended pose — the leaves
+              // freeze at the model's retained position rather
+              // than resetting on the queue's cleared position.
+              session={player === null ? undefined : session}
               expanded={expanded}
               onOpenEntity={openEntityFromStage}
               progress={stageProgress}
@@ -2662,9 +2668,7 @@ function Main({
               collapsedHeight={stageCollapsedHeight}
               onExpandChange={setStageOpenFor}
               onDismiss={() => void session.stop()}
-              skipNext={skipPreview.next}
-              skipPrevious={skipPreview.previous}
-              nextEndsQueue={skipPreview.nextEndsQueue}
+              peeksFor={skipPeeksFor}
               mode={stageMode}
               onModeChange={setStageMode}
               restMode={stageReopenMode}
@@ -2672,7 +2676,9 @@ function Main({
               queueReordering={reordering}
               topInset={topInset}
               bottomInset={insets.bottom}
-              lyrics={lyricsModel}
+              lyricsSource={lyricsSource}
+              lyricsLive={lyricsLive}
+              seekGeneration={seekGeneration}
               radio={radioModel}
               onPlayPause={
                 heldOccurrenceId !== null

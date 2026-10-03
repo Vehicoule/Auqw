@@ -1464,6 +1464,16 @@ export function skipPeekFor(
   };
 }
 
+/** The conveyor's three edge answers for one position read. A
+    position-aware leaf re-evaluates the factory behind these per
+    position tick, so the >3s restart/step boundary tracks the live
+    engine position rather than the last publish's. */
+export type SkipPeeks = {
+  readonly next: SkipPeek | null;
+  readonly previous: SkipPeek | null;
+  readonly nextEndsQueue: boolean;
+};
+
 export function likedEntityIds(likes: readonly Like[]): ReadonlySet<string> {
   return new Set(
     likes

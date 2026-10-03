@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { ComponentProps, ReactNode } from 'react';
 import {
   Image,
   PixelRatio,
@@ -60,20 +60,28 @@ import {
 } from './stage-motion';
 import { MiniPlayer } from './mini-player.tsx';
 import { WaveformSeek } from './progress.tsx';
+import type { WaveformSeekProps } from './progress.tsx';
 import { QueueList } from './queue-list';
 import { EmptyState, StateFor } from './states.tsx';
 import type {
   EntityRef,
   LyricsModel,
+  LyricsSource,
   PlatformVariant,
   PlayerModel,
+  PositionSource,
   QueueModel,
   RadioModel,
   SkipPeek,
+  SkipPeeks,
   StageMode,
   WaveformPeak,
 } from '@auqw/ui-shared';
-import { t } from '@auqw/ui-shared';
+import {
+  t,
+  useLiveLyricsModel,
+  usePositionMs,
+} from '@auqw/ui-shared';
 import {
   downloadButtonView,
   lyricsHeaderView,
@@ -611,7 +619,24 @@ export type StageSheetProps = {
   readonly platform?: PlatformVariant | undefined;
   readonly mode?: StageMode | undefined;
   readonly queue?: QueueModel | undefined;
+  /** The live position channel the position-drawing leaves subscribe
+      — omitting it freezes the scrubber and the synced-lyric clock
+      at the publish-time values the models carry. Hosts also omit it
+      when no live playback remains (the held ended pose): the queue's
+      cleared position would reset the pose to 0:00 otherwise. */
+  readonly session?: PositionSource | undefined;
+  /** Publish-stable lyrics fetch inputs — the leaf rebuilds the model
+      on its smoothed clock; null renders the empty pane. */
+  readonly lyricsSource?: LyricsSource | null | undefined;
+  /** A frozen lyrics model for standalone hosts (the gallery) —
+      shown verbatim only when `session` is absent. */
   readonly lyrics?: LyricsModel | undefined;
+  /** The shell's lyrics-visibility gate — the leaf's smoothed clock
+      ticks only while the pane is actually on screen. */
+  readonly lyricsLive?: boolean | undefined;
+  /** Seek generation — a seek re-anchors the leaf's smoothed clock
+      even at an unchanged position. */
+  readonly seekGeneration?: number | undefined;
   readonly radio?: RadioModel | undefined;
   readonly queueReordering?: boolean | undefined;
   readonly queueScrollEnabled?: boolean | undefined;
@@ -653,6 +678,12 @@ export type StageSheetProps = {
   readonly skipNext?: SkipPeek | null | undefined;
   readonly skipPrevious?: SkipPeek | null | undefined;
   readonly nextEndsQueue?: boolean | undefined;
+  /** Live peek resolution forwarded to the embedded MiniPlayer —
+      re-evaluated per position tick so the >3s restart boundary
+      tracks the live engine position. */
+  readonly peeksFor?:
+    | ((positionMs: number) => SkipPeeks)
+    | undefined;
   /** Swipe-down dismiss on the collapsed surface — the pill's
       slide-off settles, then this fires (the host stops playback). */
   readonly onDismiss?: (() => void) | undefined;
@@ -740,7 +771,11 @@ export function StageSheet({
   platform = Platform.OS === 'ios' ? 'ios' : 'android',
   mode,
   queue,
+  session,
+  lyricsSource,
   lyrics,
+  lyricsLive = false,
+  seekGeneration = 0,
   radio,
   queueReordering = false,
   queueScrollEnabled = true,
@@ -755,6 +790,7 @@ export function StageSheet({
   skipNext,
   skipPrevious,
   nextEndsQueue,
+  peeksFor,
   onDismiss,
   onPlayPause,
   onNext,
@@ -883,11 +919,6 @@ export function StageSheet({
     style: [{ flex: 1 }, activeMode !== m && { display: 'none' }],
   });
   const meta = stageMetaView(player);
-  const lyricsHeader = lyricsHeaderView(player, lyrics);
-  const lyricsPane = useMemo(
-    () => lyricsPaneView(lyrics, onRetryLyrics),
-    [lyrics, onRetryLyrics],
-  );
   const radioRow = radioRowView(
     radio,
     onStartRadio,
@@ -1480,115 +1511,6 @@ export function StageSheet({
     [commitSeekTap, seekTapAtOccurrence, seekTapOccurrence],
   );
 
-  // Lyrics auto-scroll — the synced active line stays in view. A
-  // scroll is owed whenever (occurrence, activeIndex) differs from the
-  // pair last scrolled to: a song swap with an unchanged index still
-  // owes one, and a line change settles it. Between those, a manual
-  // scroll is never yanked back.
-  const lyricsScrollRef = useRef<ScrollView>(null);
-  const lyricsScrollH = useRef(0);
-  const lyricLayouts = useRef<({ y: number; height: number } | undefined)[]>(
-    [],
-  );
-  const lyricScrolledKey = useRef<string | null>(null);
-  // The row geometry the stored lyric measurements belong to —
-  // invalidated on re-entry when width/font-scale moved while
-  // hidden. The scroller stamps its own viewport geometry so a
-  // scroll only settles against a height measured for the current
-  // window.
-  const lyricMeasuredGeom = useRef<string | null>(null);
-  const lyricViewMeasuredGeom = useRef<string | null>(null);
-  // Layouts live in refs — a counter re-runs the owed-scroll effect
-  // when the active row or the scroller itself first measures in.
-  const [lyricLayoutTick, bumpLyricLayout] = useState(0);
-  const lyricActiveIndex =
-    lyricsPane.kind === 'lines' ? lyricsPane.activeIndex : null;
-  const lyricScrollKey =
-    lyricActiveIndex === null
-      ? null
-      : `${player.occurrenceId ?? ''}:${lyricActiveIndex}`;
-  // A song swap re-measures every line — the previous song's y offsets
-  // would otherwise satisfy the owed scroll at stale positions.
-  const lyricOccurrenceRef = useRef(player.occurrenceId);
-  if (lyricOccurrenceRef.current !== player.occurrenceId) {
-    lyricOccurrenceRef.current = player.occurrenceId;
-    lyricLayouts.current = [];
-  }
-  const scrollToLyricLine = useCallback(
-    (index: number) => {
-      const line = lyricLayouts.current[index];
-      // A zero scroller height means its own layout has not landed —
-      // scrollTo against uncommitted content clamps and loses, so
-      // the owed key must stay unsettled rather than mark a miss.
-      if (
-        line === undefined ||
-        lyricsScrollH.current <= 0 ||
-        lyricViewMeasuredGeom.current !== lyricViewGeom
-      ) {
-        return false;
-      }
-      lyricsScrollRef.current?.scrollTo({
-        y: Math.max(0, line.y + line.height / 2 - lyricsScrollH.current / 2),
-        animated: !theme.reducedMotion,
-      });
-      return true;
-    },
-    [theme.reducedMotion, lyricViewGeom],
-  );
-  useEffect(() => {
-    if (
-      activeMode === 'lyrics' &&
-      lyricMeasuredGeom.current !== lyricRowGeom
-    ) {
-      // The pane was hidden while row geometry moved — mounted
-      // rows still hold pre-change frames until the next layout
-      // pass refires them, so their stored offsets must not
-      // settle the owed scroll.
-      lyricMeasuredGeom.current = lyricRowGeom;
-      lyricLayouts.current = [];
-    }
-    if (lyricScrollKey === null || activeMode !== 'lyrics') {
-      // Re-entry owes the active line a scroll — the kept-alive
-      // measurements are still valid (mounted rows only refire
-      // onLayout when geometry actually changes), so only the owed
-      // key resets.
-      lyricScrolledKey.current = null;
-      return;
-    }
-    if (
-      lyricScrolledKey.current !== lyricScrollKey &&
-      lyricActiveIndex !== null &&
-      scrollToLyricLine(lyricActiveIndex)
-    ) {
-      lyricScrolledKey.current = lyricScrollKey;
-    }
-  }, [
-    activeMode,
-    lyricActiveIndex,
-    lyricScrollKey,
-    scrollToLyricLine,
-    lyricLayoutTick,
-    lyricRowGeom,
-  ]);
-
-  // The lyrics-mode header rides the pane chrome — the same element
-  // sits above the lines list or the state block.
-  const lyricsHeaderEl = (
-    <View style={{ marginTop: theme.spacing.md }}>
-      <Text variant="title" color="bright" numberOfLines={1}>
-        {lyricsHeader.title}
-      </Text>
-      <Text
-        variant="metadata"
-        color="secondary"
-        numberOfLines={1}
-        style={{ marginTop: theme.spacing.xxs }}
-      >
-        {lyricsHeader.subtitle}
-      </Text>
-    </View>
-  );
-
   // The two heavy subtrees get element-level memoization: an identical
   // element bails out of reconciliation, so a mode switch or a
   // position tick leaves the kept-alive rows/lines untouched.
@@ -1621,56 +1543,6 @@ export function StageSheet({
       onClearUpcoming,
       onMoveQueueItem,
       onMoveQueueItemTo,
-    ],
-  );
-
-  const lyricLineEls = useMemo(
-    () =>
-      lyricsPane.kind === 'lines'
-        ? lyricsPane.lines.map((line, i) => (
-            // Occurrence-keyed: a song swap remounts every row so
-            // unchanged geometries still emit fresh onLayout —
-            // the owed-scroll retry in onLayout depends on it.
-            <View
-              key={`${player.occurrenceId ?? ''}:${i}`}
-              onLayout={(e) => {
-                lyricLayouts.current[i] = {
-                  y: e.nativeEvent.layout.y,
-                  height: e.nativeEvent.layout.height,
-                };
-                // Layout arriving after the scroll effect ran —
-                // first open mid-song, or a swap clearing the
-                // measurements — bumps the owed-scroll effect
-                // once the active line's own measurement exists.
-                if (i === lyricActiveIndex) {
-                  bumpLyricLayout((tick) => tick + 1);
-                }
-              }}
-            >
-              <Text
-                variant="body"
-                color={line.color}
-                style={[
-                  {
-                    paddingVertical: 9,
-                    paddingHorizontal: theme.spacing.sm,
-                    borderRadius: theme.radius.control,
-                  },
-                  line.active && {
-                    fontFamily: theme.fontFamilies.bold,
-                  },
-                ]}
-              >
-                {line.text}
-              </Text>
-            </View>
-          ))
-        : null,
-    [
-      lyricsPane,
-      player.occurrenceId,
-      lyricActiveIndex,
-      theme,
     ],
   );
 
@@ -1968,8 +1840,9 @@ export function StageSheet({
                 seekTapMeta.current.width = e.nativeEvent.layout.width;
               }}
             >
-              <WaveformSeek
-                positionMs={player.positionMs}
+              <LiveWaveformSeek
+                session={session}
+                publishMs={player.positionMs}
                 durationMs={player.durationMs}
                 onSeek={onSeek}
                 trackKey={meta.trackKey}
@@ -2001,37 +1874,20 @@ export function StageSheet({
         </GestureDetector>
         </View>
       <View {...paneProps('lyrics')}>
-        {lyricsPane.kind === 'lines' ? (
-          <>
-            {/* The header chrome carries the sheet's dismiss drag —
-                only the lines list keeps a scroll gesture. */}
-            <GestureDetector gesture={lyricsChromePan}>
-              {lyricsHeaderEl}
-            </GestureDetector>
-            <ScrollView
-              ref={lyricsScrollRef}
-              onLayout={(e) => {
-                lyricsScrollH.current = e.nativeEvent.layout.height;
-                lyricViewMeasuredGeom.current = lyricViewGeom;
-                bumpLyricLayout((tick) => tick + 1);
-              }}
-              style={{ flex: 1, marginTop: theme.spacing.sm }}
-              // Lines glide beneath the floating segment; the pad lets
-              // the last line scroll fully clear of it.
-              contentContainerStyle={{ paddingBottom: segmentReserve }}
-            >
-              {lyricLineEls}
-            </ScrollView>
-          </>
-        ) : (
-          // No list to scroll — the whole pane is drag chrome.
-          <GestureDetector gesture={lyricsChromePan}>
-            <View style={{ flex: 1 }}>
-              {lyricsHeaderEl}
-              <StateFor view={lyricsPane} />
-            </View>
-          </GestureDetector>
-        )}
+        <LiveLyricsPane
+          session={session}
+          source={lyricsSource ?? null}
+          frozen={lyrics}
+          player={player}
+          playing={player.status === 'playing'}
+          visible={lyricsLive && activeMode === 'lyrics'}
+          generation={seekGeneration}
+          onRetryLyrics={onRetryLyrics}
+          chromePan={lyricsChromePan}
+          segmentReserve={segmentReserve}
+          rowGeom={lyricRowGeom}
+          viewGeom={lyricViewGeom}
+        />
       </View>
       <View {...paneProps('queue')}>
         <View style={{ flex: 1, marginTop: theme.spacing.md }}>
@@ -2273,6 +2129,7 @@ export function StageSheet({
             <MiniPlayer
               embedded
               player={player}
+              session={session}
               platform={platform}
               progress={progress}
               travel={travelPx}
@@ -2313,6 +2170,7 @@ export function StageSheet({
               skipNext={skipNext}
               skipPrevious={skipPrevious}
               nextEndsQueue={nextEndsQueue}
+              peeksFor={peeksFor}
             />
           </Animated.View>
         </Animated.View>
@@ -2368,5 +2226,259 @@ export function StageSheet({
         </Animated.View>
       </Animated.View>
     </>
+  );
+}
+
+/** The live seek bar — owns its own position subscription so an
+    engine tick re-renders only this leaf, never the sheet (a
+    re-rendered sheet re-arms VirtualizedList's batched cell-update
+    setState — the update-depth storm). No `session` (standalone
+    hosts) falls back to the publish-time position the player model
+    carries. */
+function LiveWaveformSeek({
+  session,
+  publishMs,
+  ...rest
+}: Omit<WaveformSeekProps, 'positionMs'> & {
+  readonly session: PositionSource | undefined;
+  readonly publishMs: number;
+}) {
+  const liveMs = usePositionMs(session);
+  return (
+    <WaveformSeek
+      {...rest}
+      positionMs={session === undefined ? publishMs : liveMs}
+    />
+  );
+}
+
+/** The synced-lyrics pane — owns the position subscription, the
+    smoothed highlight clock, and the owed-scroll bookkeeping so its
+    ~5 Hz line updates never reach the sheet's lists. `visible` is the
+    sheet's active-pane gate folded with the shell's lyrics-live gate;
+    `generation` re-anchors the clock on every seek. */
+function LiveLyricsPane({
+  session,
+  source,
+  frozen,
+  player,
+  playing,
+  visible,
+  generation,
+  onRetryLyrics,
+  chromePan,
+  segmentReserve,
+  rowGeom,
+  viewGeom,
+}: {
+  readonly session: PositionSource | undefined;
+  readonly source: LyricsSource | null;
+  readonly frozen: LyricsModel | undefined;
+  readonly player: PlayerModel;
+  readonly playing: boolean;
+  readonly visible: boolean;
+  readonly generation: number;
+  readonly onRetryLyrics: (() => void) | undefined;
+  readonly chromePan: ComponentProps<typeof GestureDetector>['gesture'];
+  readonly segmentReserve: number;
+  readonly rowGeom: string;
+  readonly viewGeom: string;
+}) {
+  const theme = useTheme();
+  const positionMs = usePositionMs(session);
+  const liveLyrics = useLiveLyricsModel(
+    session === undefined ? null : source,
+    positionMs,
+    playing,
+    visible,
+    generation,
+  );
+  // Standalone hosts render the frozen fixture model verbatim.
+  const lyrics = session === undefined ? frozen : liveLyrics;
+  const lyricsHeader = lyricsHeaderView(player, lyrics);
+  const lyricsPane = useMemo(
+    () => lyricsPaneView(lyrics, onRetryLyrics),
+    [lyrics, onRetryLyrics],
+  );
+
+  // Lyrics auto-scroll — the synced active line stays in view. A
+  // scroll is owed whenever (occurrence, activeIndex) differs from the
+  // pair last scrolled to: a song swap with an unchanged index still
+  // owes one, and a line change settles it. Between those, a manual
+  // scroll is never yanked back.
+  const lyricsScrollRef = useRef<ScrollView>(null);
+  const lyricsScrollH = useRef(0);
+  const lyricLayouts = useRef<({ y: number; height: number } | undefined)[]>(
+    [],
+  );
+  const lyricScrolledKey = useRef<string | null>(null);
+  // The row geometry the stored lyric measurements belong to —
+  // invalidated on re-entry when width/font-scale moved while
+  // hidden. The scroller stamps its own viewport geometry so a
+  // scroll only settles against a height measured for the current
+  // window.
+  const lyricMeasuredGeom = useRef<string | null>(null);
+  const lyricViewMeasuredGeom = useRef<string | null>(null);
+  // Layouts live in refs — a counter re-runs the owed-scroll effect
+  // when the active row or the scroller itself first measures in.
+  const [lyricLayoutTick, bumpLyricLayout] = useState(0);
+  const lyricActiveIndex =
+    lyricsPane.kind === 'lines' ? lyricsPane.activeIndex : null;
+  const lyricScrollKey =
+    lyricActiveIndex === null
+      ? null
+      : `${player.occurrenceId ?? ''}:${lyricActiveIndex}`;
+  // A song swap re-measures every line — the previous song's y offsets
+  // would otherwise satisfy the owed scroll at stale positions.
+  const lyricOccurrenceRef = useRef(player.occurrenceId);
+  if (lyricOccurrenceRef.current !== player.occurrenceId) {
+    lyricOccurrenceRef.current = player.occurrenceId;
+    lyricLayouts.current = [];
+  }
+  const scrollToLyricLine = useCallback(
+    (index: number) => {
+      const line = lyricLayouts.current[index];
+      // A zero scroller height means its own layout has not landed —
+      // scrollTo against uncommitted content clamps and loses, so
+      // the owed key must stay unsettled rather than mark a miss.
+      if (
+        line === undefined ||
+        lyricsScrollH.current <= 0 ||
+        lyricViewMeasuredGeom.current !== viewGeom
+      ) {
+        return false;
+      }
+      lyricsScrollRef.current?.scrollTo({
+        y: Math.max(0, line.y + line.height / 2 - lyricsScrollH.current / 2),
+        animated: !theme.reducedMotion,
+      });
+      return true;
+    },
+    [theme.reducedMotion, viewGeom],
+  );
+  useEffect(() => {
+    if (visible && lyricMeasuredGeom.current !== rowGeom) {
+      // The pane was hidden while row geometry moved — mounted
+      // rows still hold pre-change frames until the next layout
+      // pass refires them, so their stored offsets must not
+      // settle the owed scroll.
+      lyricMeasuredGeom.current = rowGeom;
+      lyricLayouts.current = [];
+    }
+    if (lyricScrollKey === null || !visible) {
+      // Re-entry owes the active line a scroll — the kept-alive
+      // measurements are still valid (mounted rows only refire
+      // onLayout when geometry actually changes), so only the owed
+      // key resets.
+      lyricScrolledKey.current = null;
+      return;
+    }
+    if (
+      lyricScrolledKey.current !== lyricScrollKey &&
+      lyricActiveIndex !== null &&
+      scrollToLyricLine(lyricActiveIndex)
+    ) {
+      lyricScrolledKey.current = lyricScrollKey;
+    }
+  }, [
+    visible,
+    lyricActiveIndex,
+    lyricScrollKey,
+    scrollToLyricLine,
+    lyricLayoutTick,
+    rowGeom,
+  ]);
+
+  // The lyrics-mode header rides the pane chrome — the same element
+  // sits above the lines list or the state block.
+  const lyricsHeaderEl = (
+    <View style={{ marginTop: theme.spacing.md }}>
+      <Text variant="title" color="bright" numberOfLines={1}>
+        {lyricsHeader.title}
+      </Text>
+      <Text
+        variant="metadata"
+        color="secondary"
+        numberOfLines={1}
+        style={{ marginTop: theme.spacing.xxs }}
+      >
+        {lyricsHeader.subtitle}
+      </Text>
+    </View>
+  );
+
+  const lyricLineEls = useMemo(
+    () =>
+      lyricsPane.kind === 'lines'
+        ? lyricsPane.lines.map((line, i) => (
+            // Occurrence-keyed: a song swap remounts every row so
+            // unchanged geometries still emit fresh onLayout —
+            // the owed-scroll retry in onLayout depends on it.
+            <View
+              key={`${player.occurrenceId ?? ''}:${i}`}
+              onLayout={(e) => {
+                lyricLayouts.current[i] = {
+                  y: e.nativeEvent.layout.y,
+                  height: e.nativeEvent.layout.height,
+                };
+                // Layout arriving after the scroll effect ran —
+                // first open mid-song, or a swap clearing the
+                // measurements — bumps the owed-scroll effect
+                // once the active line's own measurement exists.
+                if (i === lyricActiveIndex) {
+                  bumpLyricLayout((tick) => tick + 1);
+                }
+              }}
+            >
+              <Text
+                variant="body"
+                color={line.color}
+                style={[
+                  {
+                    paddingVertical: 9,
+                    paddingHorizontal: theme.spacing.sm,
+                    borderRadius: theme.radius.control,
+                  },
+                  line.active && {
+                    fontFamily: theme.fontFamilies.bold,
+                  },
+                ]}
+              >
+                {line.text}
+              </Text>
+            </View>
+          ))
+        : null,
+    [lyricsPane, player.occurrenceId, lyricActiveIndex, theme],
+  );
+
+  return lyricsPane.kind === 'lines' ? (
+    <>
+      {/* The header chrome carries the sheet's dismiss drag —
+          only the lines list keeps a scroll gesture. */}
+      <GestureDetector gesture={chromePan}>{lyricsHeaderEl}</GestureDetector>
+      <ScrollView
+        ref={lyricsScrollRef}
+        onLayout={(e) => {
+          lyricsScrollH.current = e.nativeEvent.layout.height;
+          lyricViewMeasuredGeom.current = viewGeom;
+          bumpLyricLayout((tick) => tick + 1);
+        }}
+        style={{ flex: 1, marginTop: theme.spacing.sm }}
+        // Lines glide beneath the floating segment; the pad lets
+        // the last line scroll fully clear of it.
+        contentContainerStyle={{ paddingBottom: segmentReserve }}
+      >
+        {lyricLineEls}
+      </ScrollView>
+    </>
+  ) : (
+    // No list to scroll — the whole pane is drag chrome.
+    <GestureDetector gesture={chromePan}>
+      <View style={{ flex: 1 }}>
+        {lyricsHeaderEl}
+        <StateFor view={lyricsPane} />
+      </View>
+    </GestureDetector>
   );
 }

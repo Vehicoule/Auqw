@@ -18,12 +18,19 @@ import { QueueList } from './queue-list.tsx';
 import { QueueScreen } from './queue-screen.tsx';
 import type { QueueScreenProps } from './queue-screen.tsx';
 import { EmptyState, ErrorState, LoadingState } from './states.tsx';
-import { scaledArtworkUrl, t } from '@auqw/ui-shared';
+import {
+  scaledArtworkUrl,
+  t,
+  useLiveLyricsModel,
+  usePositionMs,
+} from '@auqw/ui-shared';
 import type {
   DownloadChip,
   EntityRef,
   LyricsModel,
+  LyricsSource,
   PlayerModel,
+  PositionSource,
   QueueModel,
   RadioModel,
   StageMode,
@@ -175,8 +182,21 @@ export function ModeSegment({
 
 export type NowPlayingScreenProps = StageScreenHandlers & {
   readonly player: PlayerModel;
+  /** The live position channel — this screen subscribes at its own
+      leaf so an engine tick re-renders only it, not the app shell.
+      Omitted (standalone hosts) freezes position at publish time. */
+  readonly session?: PositionSource | undefined;
   readonly mode?: StageMode | undefined;
   readonly queue?: QueueModel | undefined;
+  /** Publish-stable lyrics fetch inputs — the model rebuilds here on
+      the smoothed clock; null renders the empty pane. */
+  readonly lyricsSource?: LyricsSource | null | undefined;
+  /** Whether the lyrics pane is live (stage open + mode + app active). */
+  readonly lyricsLive?: boolean | undefined;
+  /** Seek-generation counter — re-anchors the smoothed clock. */
+  readonly seekGeneration?: number | undefined;
+  /** A frozen lyrics model for standalone hosts — shown verbatim
+      only when `session` is absent. */
   readonly lyrics?: LyricsModel | undefined;
   readonly radio?: RadioModel | undefined;
   /** Provider the radio seed would arm with — sizes the chip's ghost
@@ -286,8 +306,12 @@ function MetaEntityLink({
 
 export function NowPlayingScreen({
   player,
+  session,
   mode,
   queue,
+  lyricsSource,
+  lyricsLive = false,
+  seekGeneration = 0,
   lyrics,
   radio,
   queueReordering = false,
@@ -323,10 +347,21 @@ export function NowPlayingScreen({
     display: m === activeMode ? 'contents' : 'none',
   });
   const meta = stageMetaView(player);
-  const lyricsHeader = lyricsHeaderView(player, lyrics);
+  const liveMs = usePositionMs(session);
+  const positionMs = session === undefined ? player.positionMs : liveMs;
+  const liveLyrics = useLiveLyricsModel(
+    session === undefined ? null : (lyricsSource ?? null),
+    positionMs,
+    player.status === 'playing',
+    lyricsLive && activeMode === 'lyrics',
+    seekGeneration,
+  );
+  // Standalone hosts render the frozen fixture model verbatim.
+  const lyricsModel = session === undefined ? lyrics : liveLyrics;
+  const lyricsHeader = lyricsHeaderView(player, lyricsModel);
   const lyricsPane = useMemo(
-    () => lyricsPaneView(lyrics, onRetryLyrics),
-    [lyrics, onRetryLyrics],
+    () => lyricsPaneView(lyricsModel, onRetryLyrics),
+    [lyricsModel, onRetryLyrics],
   );
   const radioRow = radioRowView(
     radio,
@@ -584,7 +619,7 @@ export function NowPlayingScreen({
               </div>
             </div>
             <WaveformSeek
-              positionMs={player.positionMs}
+              positionMs={positionMs}
               durationMs={player.durationMs}
               onSeek={onSeek}
               trackKey={meta.trackKey}
