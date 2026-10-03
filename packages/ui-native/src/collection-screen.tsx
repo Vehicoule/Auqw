@@ -37,13 +37,15 @@ export function CollectionTile({
         borderColor: view.enabled
           ? theme.colors.hairline
           : theme.colors.fg08,
-        backgroundColor: view.enabled ? theme.colors.raised : 'transparent',
+        backgroundColor: view.enabled
+          ? theme.colors.accentSoft
+          : theme.colors.fg08,
         opacity: view.enabled ? 1 : 0.58,
         overflow: 'hidden',
       }}
     >
-      {/* The tile is a small shell: the icon sits on the flat stage
-          side and the body panel anchors to the tile's right edges
+      {/* The tile is a small shell: the icon sits on the accent stage
+          side and the body card anchors to the tile's right edges
           with only its seam side rounded — the world card's seam. */}
       <View
         style={{
@@ -72,9 +74,7 @@ export function CollectionTile({
           borderBottomLeftRadius: theme.radius.float,
           borderLeftWidth: theme.strokes.hairline,
           borderLeftColor: theme.colors.hairline,
-          backgroundColor: view.enabled
-            ? theme.colors.accentSoft
-            : theme.colors.fg08,
+          backgroundColor: view.enabled ? theme.colors.raised : 'transparent',
         }}
       >
         <View style={{ flex: 1, minWidth: 0 }}>
@@ -96,7 +96,7 @@ export function CollectionTile({
               borderRadius: 14,
               alignItems: 'center',
               justifyContent: 'center',
-              backgroundColor: theme.colors.raised,
+              backgroundColor: theme.colors.accentSoft,
             }}
           >
             <Icon name="play" size={12} color={theme.colors.accent} />

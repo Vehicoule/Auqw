@@ -119,7 +119,7 @@ export function FloatingNavbar({
         borderRadius: theme.radius.float,
         borderWidth: theme.strokes.hairline,
         borderColor: theme.colors.hairline,
-        backgroundColor: theme.colors.fg08,
+        backgroundColor: theme.colors.raised,
         // Separation comes from the shadow, not a tone step.
         elevation: 8,
         shadowColor: theme.colors.scrim,
@@ -149,6 +149,8 @@ export function FloatingNavbar({
                 left: 0,
                 width: slotW,
                 borderRadius: theme.radius.control,
+                borderWidth: theme.strokes.hairline,
+                borderColor: theme.colors.hairline,
                 backgroundColor: theme.colors.accentSoft,
               },
               pillStyle,
@@ -254,6 +256,10 @@ export function IosGlassNavbar({
                   paddingVertical: theme.spacing.sm,
                   minHeight: theme.sizes.touch,
                   borderRadius: theme.radius.control,
+                  borderWidth: theme.strokes.hairline,
+                  borderColor: active
+                    ? theme.colors.hairline
+                    : 'transparent',
                   backgroundColor: active
                     ? theme.colors.accentSoft
                     : 'transparent',
