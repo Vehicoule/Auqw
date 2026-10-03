@@ -2589,7 +2589,12 @@ function Main({
             field={fabFieldView}
             live={query !== ''}
             open={searchFabOpen}
-            onOpenChange={setSearchFabOpen}
+            onOpenChange={(next) => {
+              setSearchFabOpen(next);
+              // The collapsed field drops its draft — reopening used
+              // to append new keystrokes onto the old text.
+              if (!next) setQuery('');
+            }}
             focusSignal={searchFocusTick}
             onNavigateToSearch={
               tab === 'explore' ? undefined : focusSearch
