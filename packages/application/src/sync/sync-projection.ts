@@ -226,8 +226,11 @@ const MATCH_REVIEW_SYNC_FIELDS = [
   'candidates',
 ] as const;
 
+// `theme` is deliberately absent: device-local by decision (a paired
+// device with a skewed clock would otherwise keep overwriting the pick
+// under per-field LWW). It stays valid in SYNC_FIELD_RULES so a legacy
+// peer's theme entries still merge cleanly — they just never project.
 const SETTINGS_SYNC_FIELDS = [
-  'theme',
   'storefront',
   'catalogProvider',
   'playbackProvider',

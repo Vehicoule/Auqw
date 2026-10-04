@@ -548,8 +548,8 @@ function testSettingsWrites(): void {
   const writes = settingsWrites(SETTINGS, next);
   assertDeepEqual(
     writes.map((w) => ('field' in w ? w.field : '?')),
-    ['theme', 'radioProvider', 'qualityKbps'],
-    'only changed whitelisted fields emit',
+    ['radioProvider', 'qualityKbps'],
+    'changed whitelisted fields emit; device-local theme does not',
   );
   assert(writes.every((w) => w.recordId === SETTINGS_RECORD_ID));
 }
@@ -574,7 +574,7 @@ function testEmissionWritesBatch(): void {
     playlists: [{ playlistId: 'pl-1', name: 'New', createdMs: 100, updatedMs: 300 }],
     playlistEntries: [],
     playHistory: [],
-    settings: { ...SETTINGS, theme: 'dark' },
+    settings: { ...SETTINGS, language: 'fr' },
   });
 
   // Recording update: field writes for the changed row.
@@ -624,11 +624,11 @@ function testEmissionWritesBatch(): void {
     ),
     'removed play event tombstones',
   );
-  // Settings: only `theme` changed.
+  // Settings: only `language` changed.
   const settingWrites = writes.filter((w) => w.kind === 'settings');
   assertDeepEqual(
     settingWrites.map((w) => ('field' in w ? w.field : '?')),
-    ['theme'],
+    ['language'],
     'settings diff emits changed fields only',
   );
 }
@@ -1022,7 +1022,7 @@ function testInboundSettings(): void {
   ];
   const projected = projectAppliedEntries(outcomes, projInput());
   const next = projected.batch.settings;
-  assertEqual(next?.theme, 'dark');
+  assertEqual(next?.theme, 'system', 'theme is device-local — never applied');
   assertEqual(next?.qualityKbps, 128);
   assertEqual(next?.storefront, 'US', 'untouched fields preserved');
 }
@@ -2207,13 +2207,12 @@ function testUnsyncedWrites(): void {
       'qualityKbps',
       'radioProvider',
       'storefront',
-      'theme',
     ],
     'missing settings record emits all whitelisted fields',
   );
   const staleSettings = syncedMap(allWrites);
-  staleSettings.get(`settings\u001f${SETTINGS_RECORD_ID}`)!['theme'] =
-    'other';
+  staleSettings.get(`settings\u001f${SETTINGS_RECORD_ID}`)!['storefront'] =
+    'FR';
   assertEqual(
     unsyncedWrites(input, staleSettings, coveredEvidence).length,
     1,

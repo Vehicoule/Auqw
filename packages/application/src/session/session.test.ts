@@ -8008,7 +8008,9 @@ async function applySyncedEntriesSettingsReconcile(): Promise<void> {
   const settings = readyOf(r).settings;
   assertEqual(settings.playbackProvider, 'youtube-music');
   assertEqual(settings.lyricsProvider, null);
-  assertEqual(settings.theme, 'dark');
+  // theme is device-local: the engine still accepts a legacy peer's
+  // entry, but the projection never writes it back.
+  assertEqual(settings.theme, SETTINGS.theme);
 }
 
 // Remote deletes that cascade into downloads/localFiles report
