@@ -144,6 +144,10 @@ export function themeOptions(): readonly ProviderPickerOption[] {
 
 /** The palette one theme-picker card previews. */
 export type ThemeCardView = ProviderPickerOption & {
+  /** False only for a saved-but-unsupported pick — the card stays
+      visible so the picker shows what is stored, but tapping is
+      inert. */
+  readonly enabled?: boolean | undefined;
   readonly palette: {
     readonly canvas: string;
     readonly deep: string;
@@ -157,33 +161,52 @@ export type ThemeCardView = ProviderPickerOption & {
 /** Preview palettes for the theme picker's cards — 'system' previews
     under the live system scheme and 'adaptive' derives from the OS
     source when one's live (a Material You palette preview, not the
-    built-in accent). No source → the OS-scheme base. */
+    built-in accent). No source → the OS-scheme base.
+    `adaptiveSupported` hides the adaptive card where the OS can never
+    supply a palette (iOS, Android <12, web) — there it would silently
+    resolve flag-only, identical to 'system'. When 'adaptive' is the
+    saved pick on such a device the card stays but disabled, so the
+    picker still shows what is stored without offering an ineffective
+    new pick. */
 export function themeCardViews(
   system: 'light' | 'dark',
   adaptiveSource?: ThemeSource | null,
+  adaptiveSupported = true,
+  selected?: string | null,
 ): readonly ThemeCardView[] {
   const adaptive = deriveScheme(adaptiveSource ?? null, system).values;
-  return themeOptions().map((option) => {
-    const base =
-      option.key === 'adaptive'
-        ? adaptive
-        : option.key === 'dark' ||
-            option.key === 'light' ||
-            option.key === 'oled'
-          ? schemes[option.key]
-          : schemes[system];
-    return {
-      ...option,
-      palette: {
-        canvas: base.canvas,
-        deep: base.deep,
-        raised: base.raised,
-        hairline: base.hairline,
-        text: base.textPrimary,
-        accent: base.accent,
-      },
-    };
-  });
+  return themeOptions()
+    .filter(
+      (option) =>
+        adaptiveSupported ||
+        option.key !== 'adaptive' ||
+        selected === 'adaptive',
+    )
+    .map((option) => {
+      const base =
+        option.key === 'adaptive'
+          ? adaptive
+          : option.key === 'dark' ||
+              option.key === 'light' ||
+              option.key === 'oled'
+            ? schemes[option.key]
+            : schemes[system];
+      const adaptiveBlocked = !adaptiveSupported && option.key === 'adaptive';
+      return {
+        ...option,
+        ...(adaptiveBlocked
+          ? { enabled: false, detail: t('settings.value.unsupported') }
+          : {}),
+        palette: {
+          canvas: base.canvas,
+          deep: base.deep,
+          raised: base.raised,
+          hairline: base.hairline,
+          text: base.textPrimary,
+          accent: base.accent,
+        },
+      };
+    });
 }
 
 export type Boot<TController> =

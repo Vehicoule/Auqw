@@ -476,6 +476,7 @@ export function ThemePickerSheet({
               className="uw-tcard"
               aria-pressed={selected}
               aria-label={card.label}
+              disabled={card.enabled === false}
               onClick={bindTo(onPick, card.key)}
             >
               <span

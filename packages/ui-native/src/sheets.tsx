@@ -423,12 +423,14 @@ export function ThemePickerSheet({
         >
           {cards.map((card) => {
             const selected = card.key === selectedKey;
+            const disabled = card.enabled === false;
             return (
               <Pressable
                 key={card.key}
+                disabled={disabled}
                 onPress={bind(onPick, card.key)}
                 accessibilityLabel={card.label}
-                accessibilityState={{ selected }}
+                accessibilityState={{ selected, disabled }}
                 style={{
                   flexBasis: '47%',
                   flexGrow: 1,
@@ -441,6 +443,7 @@ export function ThemePickerSheet({
                     : theme.colors.hairline,
                   padding: theme.spacing.sm,
                   gap: theme.spacing.xs,
+                  opacity: disabled ? 0.45 : 1,
                 }}
               >
                 {/* Mini-window preview in the option's own palette */}

@@ -2029,6 +2029,29 @@ const tap = (s: string) => {
     byKey.get('light')?.palette.accent !== byKey.get('dark')?.palette.accent,
     'each card carries its own scheme accent',
   );
+  // Where the OS can never supply a palette (iOS, Android <12, web) the
+  // adaptive card is a no-op alias of 'system' — the picker drops it.
+  const noPaletteOs = themeCardViews('light', null, false);
+  assert(noPaletteOs.length === 4, 'unsupported OS hides adaptive');
+  assert(
+    !noPaletteOs.some((card) => card.key === 'adaptive'),
+    'adaptive absent without OS palette support',
+  );
+  // Except when 'adaptive' is the saved pick: the card stays so the
+  // picker shows what is stored, disabled against an ineffective
+  // re-pick.
+  const savedAdaptive = themeCardViews('light', null, false, 'adaptive');
+  const stranded = savedAdaptive.find((card) => card.key === 'adaptive');
+  assert(savedAdaptive.length === 5, 'saved adaptive keeps its card');
+  assert(
+    stranded?.enabled === false,
+    'saved-but-unsupported adaptive renders disabled',
+  );
+  assertEqual(
+    stranded?.detail,
+    'unsupported',
+    'the stranded card explains itself',
+  );
 }
 
 {
