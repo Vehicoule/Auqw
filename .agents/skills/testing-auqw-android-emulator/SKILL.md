@@ -1189,4 +1189,3 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
 - **removeViewAt regression check:** on this HEAD, KEYCODE_BACK
   collapsed the settled expanded queue sheet cleanly — the pre-#312
   crash path stays dead post-#311/#356.
-||||||| 29fcc7e8
