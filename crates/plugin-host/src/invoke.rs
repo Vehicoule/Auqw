@@ -1346,6 +1346,10 @@ async fn perform_batch(
             }),
         })
         .collect();
+    // Every completed sibling is charged before a fatal verdict
+    // returns — join_all already ran them all, so an early exit would
+    // understate bytes and drop their traces.
+    let mut fatal: Option<InvokeError> = None;
     for ((i, method, url, out_len), (result, elapsed)) in metas.into_iter().zip(results) {
         match result {
             Ok(resp) => {
@@ -1357,8 +1361,8 @@ async fn perform_batch(
                     bytes: resp.body.len() as u64,
                     elapsed,
                 });
-                if attempt.bytes > ctx.budgets.max_bytes {
-                    return Err(InvokeError::BudgetExceeded {
+                if attempt.bytes > ctx.budgets.max_bytes && fatal.is_none() {
+                    fatal = Some(InvokeError::BudgetExceeded {
                         dimension: BudgetDimension::Bytes,
                     });
                 }
@@ -1381,16 +1385,24 @@ async fn perform_batch(
                     elapsed,
                 });
                 match e.kind {
-                    HttpErrorKind::Cancelled => return Err(InvokeError::Cancelled),
+                    HttpErrorKind::Cancelled => {
+                        if fatal.is_none() {
+                            fatal = Some(InvokeError::Cancelled);
+                        }
+                    }
                     HttpErrorKind::BodyTooLarge => {
-                        return Err(InvokeError::BudgetExceeded {
-                            dimension: BudgetDimension::Bytes,
-                        });
+                        if fatal.is_none() {
+                            fatal = Some(InvokeError::BudgetExceeded {
+                                dimension: BudgetDimension::Bytes,
+                            });
+                        }
                     }
                     _ if attempt.bytes > ctx.budgets.max_bytes => {
-                        return Err(InvokeError::BudgetExceeded {
-                            dimension: BudgetDimension::Bytes,
-                        });
+                        if fatal.is_none() {
+                            fatal = Some(InvokeError::BudgetExceeded {
+                                dimension: BudgetDimension::Bytes,
+                            });
+                        }
                     }
                     kind => {
                         // Client messages are host-trusted but still
@@ -1405,6 +1417,9 @@ async fn perform_batch(
                 }
             }
         }
+    }
+    if let Some(fatal) = fatal {
+        return Err(fatal);
     }
     serde_json::to_vec(&json!({
         "type": "http_batch_response",

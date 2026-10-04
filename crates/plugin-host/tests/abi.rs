@@ -542,6 +542,67 @@ async fn http_batch_respects_call_budget() {
     assert_eq!(attempt.http_calls, 0);
 }
 
+/// Mixed batch outcomes: `*/big` fails body-too-large mid-stream,
+/// everything else answers a 32-byte body.
+struct MixedBatchHttp;
+
+impl HttpClient for MixedBatchHttp {
+    fn send(
+        &self,
+        req: HttpRequest,
+        _timeout: Duration,
+        _cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + '_>> {
+        let big = req.url.ends_with("/big");
+        Box::pin(async move {
+            if big {
+                return Err(HttpError {
+                    kind: HttpErrorKind::BodyTooLarge,
+                    message: "over cap".into(),
+                    bytes_received: 50,
+                });
+            }
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: vec![0u8; 32],
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn http_batch_fatal_still_accounts_siblings() {
+    let wasm = ok(wat::parse_str(batch_wat(
+        r#"[{"method":"GET","url":"https://example.com/big","headers":[],"body":null},{"method":"GET","url":"https://example.com/ok","headers":[],"body":null}]"#,
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &default_budgets(),
+    ));
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&MixedBatchHttp, None),
+    )
+    .await;
+    // The oversized sibling's verdict still fails the invocation —
+    // but the completed call's bytes and trace are charged too.
+    assert!(matches!(
+        err(result),
+        InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::Bytes
+        }
+    ));
+    assert_eq!(attempt.http_calls, 2);
+    assert_eq!(attempt.http_trace.len(), 2);
+    assert_eq!(attempt.bytes, 50 + 32);
+}
+
 // ---------- load-time rejection ----------
 
 #[test]
