@@ -2163,6 +2163,13 @@ export function StageSheet({
           <Animated.View
             collapsable={false}
             animatedProps={rowGateProps}
+            // JS-side fallback gate under the UI-thread animatedProps
+            // one — same dead-zone insurance as the dismiss surface:
+            // a stuck 'auto' on an expanded sheet would leave an
+            // invisible strip eating taps at the leaf's top edge.
+            pointerEvents={
+              Platform.OS === 'web' || !expanded ? 'auto' : 'none'
+            }
             style={[
               {
                 position: 'absolute',
@@ -2227,6 +2234,13 @@ export function StageSheet({
             and fully present at the input gate. */}
         <Animated.View
           animatedProps={contentGateProps}
+          // Same fallback: this surface is full-screen — a flush that
+          // sticks 'auto' on a parked sheet would eat every tap on the
+          // whole stage area. JS `expanded` mirrors the gate's ground
+          // truth a frame behind the UI-thread props.
+          pointerEvents={
+            Platform.OS === 'web' || expanded ? 'auto' : 'none'
+          }
           style={[
             StyleSheet.absoluteFill,
             { overflow: 'hidden' },
