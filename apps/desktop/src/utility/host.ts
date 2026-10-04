@@ -376,6 +376,17 @@ export function createHostRuntime(opts: {
       }>)
     | undefined;
   /**
+   * Boot-time feed deferral: the first load pass kicks the signed
+   * feed fetch without awaiting it and loads the signed cache under
+   * last-known-good rules while the request flies; the retry pass
+   * that the armed `lastLoadIncomplete` gate schedules consumes the
+   * settled promise instead of fetching again. Skipped on an empty
+   * cache — nothing else can boot then, so first-boot keeps the
+   * awaited semantics. Off by default so injected `feedSync` cadence
+   * in tests is unchanged.
+   */
+  deferBootFeed?: boolean | undefined;
+  /**
    * Injectable signed-pair verifier for tests — defaults to the real
    * release-signature check (`parsePluginPair` + the embedded key).
    */
@@ -431,6 +442,38 @@ export function createHostRuntime(opts: {
   // compatible set — the next ready() re-syncs instead of serving the
   // stale memoized result.
   let lastLoadIncomplete = false;
+  // The feed fetch a deferred boot pass kicked — consumed by the
+  // retry pass the armed gate runs once it settles. `deferredFeedKick`
+  // carries the fetch thunk so the request itself stays off the boot
+  // path too (its CPU contends with session restore otherwise).
+  let deferredFeedSync: Promise<{
+    ready: readonly string[];
+    compatible: readonly string[];
+  }> | null = null;
+  let deferredFeedKick: (() => Promise<{
+    ready: readonly string[];
+    compatible: readonly string[];
+  }>) | null = null;
+  // Every scan serializes through one chain — registry side-effects
+  // (loads, revocations) can never interleave between a deferred
+  // background pass and a caller-triggered rescan. `loadSeq` stamps
+  // each pass so a queued-behind one can't overwrite a newer memo.
+  let loadSeq = 0;
+  let loadChain: Promise<unknown> = Promise.resolve();
+  function runLoad(
+    reuseUserScan: boolean,
+    deferFeed: boolean,
+  ): { seq: number; next: Promise<readonly LoadedPlugin[]> } {
+    const seq = ++loadSeq;
+    const next = loadChain.then(() =>
+      loadPluginDir(ensureHost(), reuseUserScan, deferFeed),
+    );
+    loadChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return { seq, next };
+  }
   let lastUserSignature: string | null = null;
   // Provider ids the previous pass loaded from user pairs — the
   // revocation set for the next reload. `userScanCache` carries the
@@ -576,6 +619,7 @@ export function createHostRuntime(opts: {
   async function loadPluginDir(
     h: PluginHostLike,
     reuseUserScan: boolean,
+    deferFeed: boolean,
   ): Promise<readonly LoadedPlugin[]> {
     const dir =
       opts.env.AUQW_PLUGIN_DIR === undefined || opts.env.AUQW_PLUGIN_DIR === ''
@@ -587,6 +631,10 @@ export function createHostRuntime(opts: {
       // `AUQW_PLUGIN_DIR` still wins — dev loops and harnesses point
       // at their own unsigned sets.
       const cacheDir = join(opts.env.AUQW_USER_DATA ?? process.cwd(), 'plugins');
+      const userDir = join(
+        opts.env.AUQW_USER_DATA ?? process.cwd(),
+        'plugins-user',
+      );
       const sync =
         opts.feedSync ??
         ((d: string) =>
@@ -600,10 +648,47 @@ export function createHostRuntime(opts: {
       // an unreachable feed leaves the whole cache usable as
       // last-known-good.
       let synced: { ready: readonly string[]; compatible: readonly string[] } | undefined;
-      try {
-        synced = await sync(cacheDir);
-      } catch (thrown) {
-        feedFailure = thrown;
+      // True while this pass booted off the cache with the feed
+      // still in flight — same semantics as an unreachable feed.
+      let feedPending = false;
+      if (
+        deferFeed &&
+        deferredFeedSync === null &&
+        deferredFeedKick === null &&
+        (fs.list(cacheDir).some((name) => name.endsWith('.json')) ||
+          fs.list(userDir).some((name) => name.endsWith('.pair.json')))
+      ) {
+        // Intent only — the scheduled consumer kicks the request after
+        // boot so its CPU never rides the restore window.
+        deferredFeedKick = () => {
+          deferredFeedSync ??= Promise.resolve().then(() => sync(cacheDir));
+          void deferredFeedSync.catch(() => {});
+          return deferredFeedSync;
+        };
+        feedPending = true;
+      }
+      if (!feedPending) {
+        if (deferredFeedSync === null && deferredFeedKick !== null) {
+          deferredFeedSync = deferredFeedKick();
+        }
+        if (deferredFeedSync !== null) {
+          // The deferred boot fetch — already in flight or settled,
+          // never a second request.
+          const pendingFeed = deferredFeedSync;
+          deferredFeedSync = null;
+          deferredFeedKick = null;
+          try {
+            synced = await pendingFeed;
+          } catch (thrown) {
+            feedFailure = thrown;
+          }
+        } else {
+          try {
+            synced = await sync(cacheDir);
+          } catch (thrown) {
+            feedFailure = thrown;
+          }
+        }
       }
       const parseSignedPair =
         opts.pairVerifier ??
@@ -679,10 +764,6 @@ export function createHostRuntime(opts: {
       // never a silent accept; the pair file itself stays untouched.
       // The scan runs BEFORE the feed-failure gate so an offline user
       // keeps their approved providers when the signed cache is empty.
-      const userDir = join(
-        opts.env.AUQW_USER_DATA ?? process.cwd(),
-        'plugins-user',
-      );
       const consents = fs.exists(join(userDir, 'consents.json'))
         ? consentsFromJson(
             fs.read(join(userDir, 'consents.json')).toString('utf8'),
@@ -817,6 +898,12 @@ export function createHostRuntime(opts: {
         }
       }
       userScanCache = loaded.slice(signedLoaded);
+      if (loaded.length === 0 && feedPending) {
+        // Pairs existed by name but nothing loaded — first-boot
+        // semantics still need providers, so await the in-flight
+        // feed and re-run the pass over the refreshed cache.
+        return loadPluginDir(h, reuseUserScan, false);
+      }
       // A failed feed refresh with an empty cache must not pin an empty
       // provider set: `pluginsReady` resets on rejection, so the next
       // call re-syncs — a cache hit meanwhile stays usable offline.
@@ -909,8 +996,41 @@ export function createHostRuntime(opts: {
       lastLoadIncomplete = false;
       // A signed-feed retry (the only other armer) reuses the cached
       // user scan — unchanged guests are never re-loaded.
-      const pending = loadPluginDir(ensureHost(), !userChanged);
+      const deferFeed = pluginsReady === null && opts.deferBootFeed === true;
+      const { next: pending } = runLoad(!userChanged, deferFeed);
       pluginsReady = pending;
+      if (deferFeed) {
+        // Once boot's pass resolved, kick the fetch off the boot path
+        // and run the consume pass in the background: it re-gates the
+        // loaded set off the settled feed and swaps the memo only when
+        // it lands — callers during the retry keep the boot set
+        // instead of blocking on the network a second time.
+        void (async () => {
+          await pending.catch(() => {});
+          if (deferredFeedKick === null && deferredFeedSync === null) {
+            return;
+          }
+          // The consume pass re-loads signed pairs — keep its CPU (and
+          // the feed request itself) off the session restore that
+          // immediately follows boot's plugins() resolution.
+          await new Promise((resolve) => setTimeout(resolve, 600));
+          deferredFeedSync ??= deferredFeedKick?.() ?? null;
+          await deferredFeedSync?.catch(() => {});
+          const consume = runLoad(true, false);
+          await consume.next.then(
+            (loaded) => {
+              // A caller-triggered pass queued meanwhile reads newer
+              // fs state — its memo must win over this older result
+              // (a mid-flight user-pair removal would otherwise come
+              // back advertised).
+              if (consume.seq === loadSeq) {
+                pluginsReady = Promise.resolve(loaded);
+              }
+            },
+            () => {},
+          );
+        })();
+      }
       // A rejected init stays retriable — the artifact may appear
       // after a build — while in-flight calls still share `pending`.
       void pending.catch(() => {

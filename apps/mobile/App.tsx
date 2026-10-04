@@ -289,9 +289,9 @@ export function App() {
         // persisted peer endpoint must be read before the controller
         // exists, and a corrupt/missing record degrades to the env
         // override, then the bare ladder.
+        const potUrl = await discoveredPotProviderUrl();
         const created = await createSessionController(AuqwExpo, {
-          potProviderUrl:
-            (await discoveredPotProviderUrl()) ?? POT_PROVIDER_URL,
+          potProviderUrl: potUrl ?? POT_PROVIDER_URL,
           // Android plays through the native Media3 seam (background
           // queue projection + lock-screen controls); iOS keeps the
           // provisional expo-audio path until the seam's iOS player
@@ -681,7 +681,14 @@ function Main({
   // Slice-4 sync surface — null on iOS or when bring-up failed. The
   // client's own subscription feeds status; a failed bring-up leaves
   // the settings row disabled with 'unavailable', never a dead link.
-  const syncSurface = controller.sync();
+  // Bring-up is deferred off the ready path: the surface lands a beat
+  // after mount, so consumers dep on this state — onSyncBuilt is the
+  // wake, not a lucky render.
+  const [syncSurface, setSyncSurface] = useState(() => controller.sync());
+  useEffect(
+    () => controller.onSyncBuilt((surface) => setSyncSurface(surface)),
+    [controller],
+  );
   const [syncStatus, setSyncStatus] = useState<SyncClientStatus | null>(
     () => syncSurface?.client.status() ?? null,
   );
@@ -733,9 +740,8 @@ function Main({
     };
     applyStatus(syncSurface.client.status());
     return syncSurface.client.subscribe(applyStatus);
-    // The surface is stable for the controller's life — subscribe once.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controller]);
+    // The surface lands once, post-ready — the dep is the wake.
+  }, [controller, syncSurface]);
 
   // Real waveform peaks for the Stage seek — lazy, cached per
   // recordingId|attemptId (a re-prepared stream never inherits the
@@ -1157,10 +1163,8 @@ function Main({
         available: syncSurface !== null,
         status: syncStatus,
       }),
-    // syncSurface is stable per controller — syncStatus carries the
-    // updates.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [syncStatus, controller, localeTick],
+    // syncSurface lands post-ready — syncStatus carries the updates.
+    [syncStatus, controller, localeTick, syncSurface],
   );
 
   const [showGallery, setShowGallery] = useState(false);
@@ -1198,9 +1202,7 @@ function Main({
           setPairError(fromUnknown(thrown));
         });
     },
-    // syncSurface is stable per controller.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [controller, pairing],
+    [controller, pairing, syncSurface],
   );
   const onPairCode = useCallback(
     (input: { code: string; host: string; port: number | null }) => {
@@ -1269,9 +1271,7 @@ function Main({
       session?.close();
       setNearbyPeers([]);
     };
-    // syncSurface is stable per controller.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [syncOpen, controller]);
+  }, [syncOpen, controller, syncSurface]);
 
   // Share (this device as the pair host): stop whenever the sync
   // screen isn't open — the listener is pairing-only and its minted
@@ -1288,7 +1288,7 @@ function Main({
     setShare(SHARE_CLOSED);
     setAdvertNotice(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [syncOpen]);
+  }, [syncOpen, syncSurface]);
 
   // Mint + apply a fresh offer — gated on a share still owning the
   // host (shareGenRef) and share still active inside the set.
@@ -1343,9 +1343,7 @@ function Main({
         );
       })
       .catch(mintFailed);
-    // syncSurface is stable per controller.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controller]);
+  }, [controller, syncSurface]);
 
   // Offers expire after ~2m — remint while sharing stays on so the
   // displayed code/QR never outlives what the host will accept.
@@ -1473,7 +1471,7 @@ function Main({
       setPairNotice('sync.pairFailed');
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controller, share.active, share.busy]);
+  }, [controller, share.active, share.busy, syncSurface]);
 
   const onPairNearby = useCallback(
     (key: string, code: string) => {
@@ -1501,14 +1499,14 @@ function Main({
       void syncSurface?.client.syncNow(fp, new CancellationSource().signal);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [controller],
+    [controller, syncSurface],
   );
   const onUnpair = useCallback(
     (fp: string) => {
       void syncSurface?.client.unpair(fp, new CancellationSource().signal);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [controller],
+    [controller, syncSurface],
   );
 
   // Clipboard exchange — RN's core Clipboard covers get/setString on
@@ -1554,7 +1552,7 @@ function Main({
       })
       .catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controller]);
+  }, [controller, syncSurface]);
   const onImportDelta = useCallback(() => {
     const engine = syncSurface?.engine;
     if (engine === undefined) {
@@ -1591,7 +1589,7 @@ function Main({
         );
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controller]);
+  }, [controller, syncSurface]);
 
   const onPickImportFile = useCallback(() => {
     beginImportRead();
