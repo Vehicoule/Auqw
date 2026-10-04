@@ -26,5 +26,11 @@ pub use manifest::{ArtifactRef, Manifest};
 pub use redact::{redact_text, redact_url};
 pub use services::{HostClock, HostServices, SystemClock};
 
-/// ABI version implemented by this crate — the only ABI shipped.
-pub const ABI_VERSION: &str = "0.1.0";
+/// ABI version implemented by this crate — the newest ABI shipped.
+pub const ABI_VERSION: &str = "0.1.1";
+
+/// Manifest `abi` pins this host accepts: every version that shares
+/// the 0.1.x protocol line. `0.1.1` is additive (`http_batch`) over
+/// `0.1.0`, so a 0.1.0 artifact always runs on a newer host; a
+/// manifest pinning anything else is rejected, not adapted.
+pub const SUPPORTED_ABIS: &[&str] = &["0.1.0", "0.1.1"];

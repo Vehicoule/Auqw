@@ -2420,6 +2420,60 @@ function Main({
     }
     return map;
   }, [overlayStack, libraryModel]);
+  // A presented SheetScreen can't rise above the floating stage —
+  // while one is up the whole stage (pill and panes) hides instead
+  // of parking mid-sheet and swallowing its rows. Occlusion tracks
+  // the mount flag LIVE (a sheet mounts in the same commit its flag
+  // sets — a lagged start would let the stage paint above it) and
+  // holds past it only on native, where a programmatic close clears
+  // the flag the frame the sheet starts departing — the hold covers
+  // the native dismiss animation so the stage doesn't resurface over
+  // the departing rows. Gesture/back dismissals clear through
+  // `onDismissed`, which fires after the exit animation ends — they
+  // release immediately, no hold. Web sheets are in-tree overlays
+  // that vanish with the flag; no hold there either.
+  const modalSheetUp =
+    rowActions !== null ||
+    pickerFor !== null ||
+    providerPicker !== null ||
+    themePickerOpen ||
+    languagePickerOpen ||
+    storefrontSheetOpen ||
+    qualityPickerOpen ||
+    artworkCachePickerOpen ||
+    authSheetOpen ||
+    authClientSheetOpen;
+  const [sheetOccluded, setSheetOccluded] = useState(modalSheetUp);
+  // Set inside `onDismissed` before the flag clears — tells the
+  // hold that this flag-down edge already ended the native exit
+  // animation.
+  const nativeSheetDone = useRef(false);
+  const onNativeSheetDismissed = useCallback(
+    (close: () => void) => () => {
+      nativeSheetDone.current = true;
+      close();
+    },
+    [],
+  );
+  useEffect(() => {
+    if (modalSheetUp) {
+      // A mark landing while another sheet is mounted belongs to the
+      // DEPARTED one (a swipe-dismissed sheet replaced by a new sheet
+      // in the same commit) — consume it here or it would leak onto
+      // the replacement's later programmatic close and skip its hold.
+      nativeSheetDone.current = false;
+      setSheetOccluded(true);
+      return;
+    }
+    if (nativeSheetDone.current) {
+      nativeSheetDone.current = false;
+      setSheetOccluded(false);
+      return;
+    }
+    const t = setTimeout(() => setSheetOccluded(false), SHEET_DISMISS_MS);
+    return () => clearTimeout(t);
+  }, [modalSheetUp]);
+
   if (galleryActive) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
@@ -2659,60 +2713,6 @@ function Main({
         return null;
     }
   };
-
-  // A presented SheetScreen can't rise above the floating stage —
-  // while one is up the whole stage (pill and panes) hides instead
-  // of parking mid-sheet and swallowing its rows. Occlusion tracks
-  // the mount flag LIVE (a sheet mounts in the same commit its flag
-  // sets — a lagged start would let the stage paint above it) and
-  // holds past it only on native, where a programmatic close clears
-  // the flag the frame the sheet starts departing — the hold covers
-  // the native dismiss animation so the stage doesn't resurface over
-  // the departing rows. Gesture/back dismissals clear through
-  // `onDismissed`, which fires after the exit animation ends — they
-  // release immediately, no hold. Web sheets are in-tree overlays
-  // that vanish with the flag; no hold there either.
-  const modalSheetUp =
-    rowActions !== null ||
-    pickerFor !== null ||
-    providerPicker !== null ||
-    themePickerOpen ||
-    languagePickerOpen ||
-    storefrontSheetOpen ||
-    qualityPickerOpen ||
-    artworkCachePickerOpen ||
-    authSheetOpen ||
-    authClientSheetOpen;
-  const [sheetOccluded, setSheetOccluded] = useState(modalSheetUp);
-  // Set inside `onDismissed` before the flag clears — tells the
-  // hold that this flag-down edge already ended the native exit
-  // animation.
-  const nativeSheetDone = useRef(false);
-  const onNativeSheetDismissed = useCallback(
-    (close: () => void) => () => {
-      nativeSheetDone.current = true;
-      close();
-    },
-    [],
-  );
-  useEffect(() => {
-    if (modalSheetUp) {
-      // A mark landing while another sheet is mounted belongs to the
-      // DEPARTED one (a swipe-dismissed sheet replaced by a new sheet
-      // in the same commit) — consume it here or it would leak onto
-      // the replacement's later programmatic close and skip its hold.
-      nativeSheetDone.current = false;
-      setSheetOccluded(true);
-      return;
-    }
-    if (nativeSheetDone.current) {
-      nativeSheetDone.current = false;
-      setSheetOccluded(false);
-      return;
-    }
-    const t = setTimeout(() => setSheetOccluded(false), SHEET_DISMISS_MS);
-    return () => clearTimeout(t);
-  }, [modalSheetUp]);
 
   const stageSheet = sheetPlayer !== null ? (
         <StageSheet

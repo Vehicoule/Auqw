@@ -331,6 +331,35 @@ fn probe_reply_wat(first: &str, on_error: &str, ok: &str) -> String {
     )
 }
 
+/// Same probe as `probe_reply_wat` but the discriminator is byte 18 —
+/// the first letter of the `host_error` kind under serde_json key
+/// order (`{"error":{"kind":"<kind>"…`). 'u' = `unsupported`.
+fn probe_kind_wat(first: &str, on_unsupported: &str, ok: &str) -> String {
+    format!(
+        "(module\n  (memory (export \"memory\") 1)\n  \
+         (global $n (mut i32) (i32.const 0))\n  \
+         (func (export \"alloc\") (param i32) (result i32) (i32.const 1024))\n  \
+         (func (export \"handle\") (param i32 i32) (result i64)\n    \
+         (global.set $n (i32.add (global.get $n) (i32.const 1)))\n    \
+         (select\n      \
+         (i64.const {})\n      \
+         (select\n        \
+         (i64.const {})\n        \
+         (i64.const {})\n        \
+         (i32.eq (i32.load8_u offset=18 (local.get 0)) (i32.const 117)))\n      \
+         (i32.le_u (global.get $n) (i32.const 1))))\n  \
+         (data (i32.const 16384) \"{}\")\n  \
+         (data (i32.const 49152) \"{}\")\n  \
+         (data (i32.const 57344) \"{}\"))",
+        (16384u64 << 32) | first.len() as u64,
+        (49152u64 << 32) | on_unsupported.len() as u64,
+        (57344u64 << 32) | ok.len() as u64,
+        first.replace('"', "\\\""),
+        on_unsupported.replace('"', "\\\""),
+        ok.replace('"', "\\\""),
+    )
+}
+
 /// Guest that emits `raw` (a literal step message) as its output.
 fn raw_wat(raw: &str) -> String {
     format!(
@@ -361,6 +390,301 @@ fn potter_wat(payload: &str) -> String {
         raw.len(),
         msg,
     )
+}
+
+/// Guest emitting one `http_batch` request carrying `requests_json`
+/// (a JSON array text), then `done` on any non-error reply — the
+/// byte-2 discriminator reads 'e' of `{"error":` for `host_error`;
+/// a served `http_batch_response` sorts `{"id":…}` first.
+fn batch_wat(requests_json: &str) -> String {
+    let first = format!(
+        "{{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_batch\",\
+         \"payload\":{{\"requests\":{requests_json}}}}}"
+    );
+    probe_reply_wat(
+        &first,
+        "{\"type\":\"fail\",\"error\":{\"kind\":\"transient\",\"message\":\"denied\"}}",
+        "{\"type\":\"done\",\"result\":{\"ok\":true}}",
+    )
+}
+
+// ---------- http_batch ----------
+
+#[tokio::test]
+async fn http_batch_fans_out_under_one_step() {
+    let wasm = ok(wat::parse_str(batch_wat(
+        r#"[{"method":"GET","url":"https://example.com/a","headers":[],"body":null},{"method":"GET","url":"https://example.com/b","headers":[],"body":null},{"method":"GET","url":"https://example.com/c","headers":[],"body":null}]"#,
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &default_budgets(),
+    ));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert_eq!(ok(result), serde_json::json!({"ok": true}));
+    assert_eq!(calls.load(Ordering::Relaxed), 3);
+    assert_eq!(attempt.http_calls, 3);
+    assert_eq!(attempt.http_trace.len(), 3);
+}
+
+#[tokio::test]
+async fn http_batch_denied_item_degrades_in_place() {
+    let wasm = ok(wat::parse_str(batch_wat(
+        r#"[{"method":"GET","url":"https://example.com/a","headers":[],"body":null},{"method":"GET","url":"https://other.test/b","headers":[],"body":null}]"#,
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &default_budgets(),
+    ));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    // The denied sibling's error rides inside the reply — the
+    // permitted call still lands and the invocation completes.
+    assert_eq!(ok(result), serde_json::json!({"ok": true}));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(attempt.http_calls, 1);
+    assert_eq!(attempt.http_trace.len(), 1);
+}
+
+#[tokio::test]
+async fn http_batch_over_cap_is_invalid_message() {
+    let items = (0..9)
+        .map(|i| {
+            format!(
+                "{{\"method\":\"GET\",\"url\":\"https://example.com/{i}\",\"headers\":[],\"body\":null}}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let wasm = ok(wat::parse_str(batch_wat(&format!("[{items}]"))));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &default_budgets(),
+    ));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert!(matches!(err(result), InvokeError::InvalidMessage(_)));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn http_batch_empty_is_invalid_message() {
+    let wasm = ok(wat::parse_str(batch_wat("[]")));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &default_budgets(),
+    ));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert!(matches!(err(result), InvokeError::InvalidMessage(_)));
+}
+
+#[tokio::test]
+async fn http_batch_malformed_item_is_invalid_message() {
+    let wasm = ok(wat::parse_str(batch_wat(
+        r#"[{"method":"PUT","url":"https://example.com/a","headers":[],"body":null}]"#,
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &default_budgets(),
+    ));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert!(matches!(err(result), InvokeError::InvalidMessage(_)));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn http_batch_respects_call_budget() {
+    let wasm = ok(wat::parse_str(batch_wat(
+        r#"[{"method":"GET","url":"https://example.com/a","headers":[],"body":null},{"method":"GET","url":"https://example.com/b","headers":[],"body":null},{"method":"GET","url":"https://example.com/c","headers":[],"body":null}]"#,
+    )));
+    let mut budgets = default_budgets();
+    budgets.max_http_calls = 2;
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &budgets,
+    ));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert!(matches!(
+        err(result),
+        InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::HttpCalls
+        }
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(attempt.http_calls, 0);
+}
+
+/// Mixed batch outcomes: `*/big` fails body-too-large mid-stream,
+/// everything else answers a 32-byte body.
+struct MixedBatchHttp;
+
+impl HttpClient for MixedBatchHttp {
+    fn send(
+        &self,
+        req: HttpRequest,
+        _timeout: Duration,
+        _cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + '_>> {
+        let big = req.url.ends_with("/big");
+        Box::pin(async move {
+            if big {
+                return Err(HttpError {
+                    kind: HttpErrorKind::BodyTooLarge,
+                    message: "over cap".into(),
+                    bytes_received: 50,
+                });
+            }
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: vec![0u8; 32],
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn http_batch_fatal_still_accounts_siblings() {
+    let wasm = ok(wat::parse_str(batch_wat(
+        r#"[{"method":"GET","url":"https://example.com/big","headers":[],"body":null},{"method":"GET","url":"https://example.com/ok","headers":[],"body":null}]"#,
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &default_budgets(),
+    ));
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&MixedBatchHttp, None),
+    )
+    .await;
+    // The oversized sibling's verdict still fails the invocation —
+    // but the completed call's bytes and trace are charged too.
+    assert!(matches!(
+        err(result),
+        InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::Bytes
+        }
+    ));
+    assert_eq!(attempt.http_calls, 2);
+    assert_eq!(attempt.http_trace.len(), 2);
+    assert_eq!(attempt.bytes, 50 + 32);
+}
+
+/// A `host_request` kind this host predates is a `host_error`
+/// `unsupported` reply — not an invocation abort — so a guest built
+/// on a newer SDK can observe it and fall back.
+#[tokio::test]
+async fn unknown_kind_answers_unsupported() {
+    let wasm = ok(wat::parse_str(probe_kind_wat(
+        r#"{"type":"host_request","id":1,"kind":"future_kind","payload":{}}"#,
+        r#"{"type":"done","result":{"saw":"unsupported"}}"#,
+        r#"{"type":"done","result":{"saw":"other"}}"#,
+    )));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert_eq!(ok(result), serde_json::json!({"saw": "unsupported"}));
+    assert_eq!(attempt.steps, 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(attempt.http_calls, 0);
+}
+
+/// `unsupported` is for kinds the host doesn't know — a missing or
+/// non-string `kind` is a malformed message and aborts.
+#[tokio::test]
+async fn malformed_kind_still_aborts() {
+    for bad in [
+        r#"{"type":"host_request","id":1,"kind":null,"payload":{}}"#,
+        r#"{"type":"host_request","id":1,"payload":{}}"#,
+        r#"{"type":"host_request","id":1,"kind":7,"payload":{}}"#,
+    ] {
+        let wasm = ok(wat::parse_str(raw_wat(bad)));
+        let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+        let (http, _calls) = CannedHttp::new();
+        let Invocation { result, .. } = invoke(
+            &plugin,
+            "playback.resolve",
+            serde_json::json!({}),
+            &default_budgets(),
+            CancellationToken::new(),
+            svc(&http, None),
+        )
+        .await;
+        assert!(
+            matches!(err(result), InvokeError::InvalidMessage(_)),
+            "malformed kind must abort: {bad}"
+        );
+    }
 }
 
 // ---------- load-time rejection ----------
@@ -417,12 +741,16 @@ fn load_rejects_digest_mismatch() {
 
 // ---------- ABI version isolation ----------
 
-/// The one shipped ABI is `0.1.0`; anything else — legacy tiers or a
-/// version never released — is a manifest rejection, not an implicit
-/// member of the newest capability set.
+/// The host serves every ABI sharing the 0.1.x protocol line;
+/// anything else — legacy tiers or a version never released — is a
+/// manifest rejection, not an implicit member of the newest
+/// capability set.
 #[test]
 fn manifest_rejects_noncanonical_abi() {
     let wasm = ok(wat::parse_str(DONE_WAT));
+    for abi in ["0.1.0", "0.1.1"] {
+        ok(Manifest::from_json(&manifest_text(&wasm, abi, &[])));
+    }
     for abi in ["0.2.0", "0.3.0", "0.9.9"] {
         let e = err(Manifest::from_json(&manifest_text(&wasm, abi, &[])));
         assert!(matches!(e, ManifestError::InvalidField(_)), "{abi}");
@@ -438,7 +766,7 @@ fn manifest_accepts_0_1_full_surface() {
         &wasm,
         "0.1.0",
         &[
-            "catalog.search",
+            "playback.resolve",
             "catalog.search.kinds",
             "catalog.metadata",
             "catalog.artwork",
