@@ -352,9 +352,13 @@ export function App() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         {boot.type === 'ready' ? (
-          <RenderBoundary>
-            <Shell controller={boot.controller} />
-          </RenderBoundary>
+          // The outer ThemeProvider only serves RenderBoundary's
+          // fallback (Shell installs the selected theme inside).
+          <ThemeProvider theme="system">
+            <RenderBoundary>
+              <Shell controller={boot.controller} />
+            </RenderBoundary>
+          </ThemeProvider>
         ) : (
           <ThemeProvider theme="system">
             <BootGate
@@ -372,10 +376,14 @@ export function App() {
 /**
  * A render throw anywhere inside the shell is otherwise an unhandled
  * JS exception — on a release build the process just dies (a publish
- * waking a keep-alive/frozen screen is the usual trigger). Catching it
- * here swaps the shell for a recoverable error: retry remounts the
- * subtree against the untouched session controller, so playback and
- * library state survive.
+ * waking a keep-alive/frozen screen is the usual trigger: 'open
+ * something else' unfreezes a pane that renders on stale props).
+ * Two placements: inside Main's output it catches a screen/sheet
+ * throw while Main — the session ports, auth flow, shared stage
+ * values — stays mounted, so retry remounts only the view tree; the
+ * App-level one is the last resort for throws in the shell hooks or
+ * Main itself, where retry remounts everything except the session
+ * controller (playback + library still survive).
  */
 class RenderBoundary extends Component<
   { readonly children: ReactNode },
@@ -388,16 +396,16 @@ class RenderBoundary extends Component<
   override render(): ReactNode {
     const { error } = this.state;
     if (error !== null) {
+      // Ambient theme: inside Main the selected scheme shows through;
+      // at the App seam only the boot 'system' provider exists.
       return (
-        <ThemeProvider theme="system">
-          <GateFrame>
-            <ErrorState
-              title={t('state.errorTitle')}
-              hint={error.message}
-              onRetry={() => this.setState({ error: null })}
-            />
-          </GateFrame>
-        </ThemeProvider>
+        <GateFrame>
+          <ErrorState
+            title={t('state.errorTitle')}
+            hint={error.message}
+            onRetry={() => this.setState({ error: null })}
+          />
+        </GateFrame>
       );
     }
     return this.props.children;
@@ -2291,6 +2299,7 @@ function Main({
       searchModel,
       query,
       topInset,
+      searchFabOpen,
       submitSearch,
       cancelSearch,
       retrySearch,
@@ -2649,9 +2658,14 @@ function Main({
     );
   }
 
+  // The inner render boundary: a throw in a screen/sheet/overlay
+  // swaps just this view tree for the error surface — Main stays
+  // mounted, so the session ports, the auth flow, and the shared
+  // stage values all survive retry.
   return (
-    <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
-      {/* Immersive player (art-backed sheet in player mode) is dark
+    <RenderBoundary>
+      <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
+        {/* Immersive player (art-backed sheet in player mode) is dark
           under any scheme — system bars must read light over it. */}
       <StatusBar
         style={theme.scheme === 'light' && !immersiveStage ? 'dark' : 'light'}
@@ -3046,6 +3060,7 @@ function Main({
           </SheetScreen>
         )}
       </AppStack>
-    </View>
+      </View>
+    </RenderBoundary>
   );
 }
