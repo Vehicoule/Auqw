@@ -371,6 +371,48 @@ export async function run(): Promise<void> {
     }
   }
 
+  // Version components past the safe-integer range still order
+  // correctly — a `Number` compare would collapse them equal and let
+  // feed order pick the older release.
+  {
+    const V_LO = '0.0.9007199254740992';
+    const V_HI = '0.0.9007199254740993';
+    const WASM_HI = utf8Encode('wasm-hi-bytes');
+    const MANIFEST_HI = utf8Encode('{"id":"alpha","v":3}');
+    const base = 'https://feed.test/releases';
+    const urls = new Map<string, Uint8Array>([
+      [
+        `${base}/feed.json`,
+        utf8Encode(
+          JSON.stringify({
+            keyId: KEY_ID,
+            plugins: [
+              entry('alpha', V_LO, WASM_A, MANIFEST_A),
+              entry('alpha', V_HI, WASM_HI, MANIFEST_HI),
+            ],
+          }),
+        ),
+      ],
+      [`${base}/alpha/${V_LO}/plugin.manifest.json`, MANIFEST_A],
+      [`${base}/alpha/${V_LO}/alpha-${V_LO}.wasm`, WASM_A],
+      [`${base}/alpha/${V_HI}/plugin.manifest.json`, MANIFEST_HI],
+      [`${base}/alpha/${V_HI}/alpha-${V_HI}.wasm`, WASM_HI],
+    ]);
+    const { ports, files } = fakePorts({ fetch: urls });
+    const { ready } = await syncPluginFeed({
+      feedUrl: `${base}/feed.json`,
+      keyId: KEY_ID,
+      publicKey: PUB,
+      dir: '/plug',
+      ports,
+    });
+    assertDeepEqual(ready, ['alpha']);
+    const pair = JSON.parse(
+      utf8Decode(files.get('/plug/alpha.json') ?? new Uint8Array()),
+    ) as Record<string, unknown>;
+    assertEqual(pair['version'], V_HI, 'largest component wins');
+  }
+
   // Feed-level failure throws — the caller keeps the whole cache.
   {
     const { ports } = fakePorts({ fetch: new Map() });
@@ -414,6 +456,19 @@ export async function run(): Promise<void> {
       }),
     );
     assert(multiAbi === 'ok', 'one id across distinct abis parses');
+    const concatCollision = tryParse(
+      JSON.stringify({
+        keyId: KEY_ID,
+        plugins: [
+          { ...entry('ab', '0.2.0', WASM_A, MANIFEST_A), abi: '0.1.1' },
+          { ...entry('ab0', '0.3.0', WASM_B, MANIFEST_B), abi: '.1.1' },
+        ],
+      }),
+    );
+    assert(
+      concatCollision === 'ok',
+      'distinct (id, abi) lines parse — a flat concat would collide them',
+    );
     e = tryParse('{"keyId":"x","plugins":[{"id":"Alpha"}]}');
     assert(e === 'invalid-response');
     e = tryParse('not json');

@@ -73,13 +73,18 @@ export const PLUGIN_ABI = '0.1.1';
  */
 export const PLUGIN_ABIS: ReadonlySet<string> = new Set(['0.1.0', '0.1.1']);
 
-/** Feed versions are `\d+.\d+.\d+` — a plain numeric compare. */
+/**
+ * Feed versions are `\d+.\d+.\d+` — a numeric compare, but components
+ * are unbounded digits so `Number` could collapse distinct large
+ * components; `BigInt` keeps the ordering exact.
+ */
 function cmpVersion(a: string, b: string): number {
-  const as = a.split('.').map(Number);
-  const bs = b.split('.').map(Number);
+  const as = a.split('.').map(BigInt);
+  const bs = b.split('.').map(BigInt);
   for (let i = 0; i < 3; i += 1) {
-    if (as[i] !== bs[i]) {
-      return (as[i] ?? 0) - (bs[i] ?? 0);
+    const d = (as[i] ?? 0n) - (bs[i] ?? 0n);
+    if (d !== 0n) {
+      return d < 0n ? -1 : 1;
     }
   }
   return 0;
@@ -382,8 +387,9 @@ export function parsePluginFeed(
     !plugins.every(isEntry) ||
     // One release per (id, abi) line — the feed may list the same
     // plugin under several abis so older builds keep a servable
-    // entry, but never the same line twice.
-    new Set(plugins.map((p) => `${p.id}${p.abi}`)).size !== plugins.length
+    // entry, but never the same line twice. (Structured, not a
+    // concatenation — `ab`+`0.1.1` and `ab0`+`.1.1` must not collide.)
+    new Set(plugins.map((p) => JSON.stringify([p.id, p.abi]))).size !== plugins.length
   ) {
     throw appError('invalid-response', 'plugin feed failed shape check');
   }
