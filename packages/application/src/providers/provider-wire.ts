@@ -842,12 +842,12 @@ export function createProviderWirePort(
     version,
     permissions,
     search(input, context) {
-      // `kinds`/`continuation` widen the base search payload — a
-      // guest built before the extension rejects the extra keys
-      // outright, so they go only to providers declaring
-      // `catalog.search.kinds`. Everyone else gets the original
-      // exact-key payload: an unscoped first page, not a guest error.
-      const scoped = capabilities.includes('catalog.search.kinds');
+      // `kinds`/`continuation` ride the base payload unconditionally:
+      // every shipped `catalog.search` guest already treats both as
+      // optional keys (absent = unscoped first page), so gating them
+      // on the advisory `catalog.search.kinds` capability would drop
+      // a scope the guest can serve — and a guest's own continuation
+      // token is the only one it ever sees back.
       return call(
         'catalog.search',
         {
@@ -856,11 +856,10 @@ export function createProviderWirePort(
           storefront: input.storefront,
           // Optional fields stay absent when unset — guests enforce
           // exact key sets, and an empty kinds set has no meaning.
-          ...(scoped && input.kinds !== undefined && input.kinds.length > 0
+          ...(input.kinds !== undefined && input.kinds.length > 0
             ? { kinds: [...input.kinds] }
             : {}),
-          ...(scoped &&
-          input.continuation !== undefined &&
+          ...(input.continuation !== undefined &&
           input.continuation.length > 0
             ? { continuation: input.continuation }
             : {}),

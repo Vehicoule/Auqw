@@ -13,7 +13,7 @@ import {
   createPublicKey,
   verify as verifySignature,
 } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import {
   PLUGIN_RELEASE_TRUST,
@@ -148,7 +148,7 @@ type FsLike = {
   list(dir: string): string[];
   mkdir(dir: string): void;
   copy(src: string, dst: string): void;
-  stat(path: string): { mtimeMs: number; size: number } | null;
+  stat(path: string): { mtimeMs: number; size: number; isFile: boolean } | null;
   write(path: string, data: string): void;
 };
 
@@ -163,7 +163,12 @@ const defaultFs: FsLike = {
   },
   stat: (path) => {
     try {
-      return statSync(path);
+      const st = statSync(path);
+      return {
+        mtimeMs: st.mtimeMs,
+        size: st.size,
+        isFile: st.isFile(),
+      };
     } catch {
       return null;
     }
@@ -307,6 +312,81 @@ function userDirSignature(dir: string, fs: FsLike): string {
   }
 }
 
+/**
+ * Hard bound on one feed/artifact GET — the largest per-resource
+ * cap `syncPluginFeed` applies (WASM_MAX_BYTES). A body that
+ * declares or streams past it fails before materializing more
+ * than this, so an endpoint serving a huge or endless body can't
+ * exhaust utility memory around the caller's post-read caps.
+ */
+const FEED_FETCH_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * A stalled or trickling endpoint must degrade to last-known-good,
+ * not wedge the sync — every leg is wrapped in this signal so a
+ * never-completing response settles as a transient failure.
+ */
+const FEED_FETCH_TIMEOUT_MS = 30_000;
+
+/**
+ * GET `url` → body bytes, bounded: `AbortSignal.timeout` caps the
+ * stalled case, a Content-Length pre-check fails a declared-oversize
+ * body before reading, and the streamed read hard-caps the
+ * materialized total. The caller's per-resource caps still decide
+ * what's valid — this only bounds what one fetch may hold.
+ */
+export async function boundedPluginFetch(
+  url: string,
+): Promise<Uint8Array> {
+  // The utility's fetch advertises gzip but does NOT transparently
+  // decode it (unlike undici) — GitHub's edge gzips feed.json, so
+  // ask for identity explicitly.
+  const res = await fetch(url, {
+    headers: { 'accept-encoding': 'identity' },
+    signal: AbortSignal.timeout(FEED_FETCH_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    throw shellError('transient', `plugin feed fetch ${res.status}`);
+  }
+  const declared = Number(res.headers.get('content-length') ?? '');
+  if (declared > FEED_FETCH_MAX_BYTES) {
+    throw shellError('transient', 'plugin feed body over size cap');
+  }
+  const body = res.body;
+  if (body === null) {
+    return new Uint8Array(0);
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      total += value.byteLength;
+      if (total > FEED_FETCH_MAX_BYTES) {
+        await reader.cancel();
+        throw shellError(
+          'transient',
+          'plugin feed body over size cap',
+        );
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
 /** Release feed sync over node builtins — the utility's OTA path. */
 async function defaultFeedSync(
   dir: string,
@@ -327,18 +407,7 @@ async function defaultFeedSync(
     publicKey: pluginPublicKey(),
     dir,
     ports: {
-      fetchBytes: async (url) => {
-        // The utility's fetch advertises gzip but does NOT
-        // transparently decode it (unlike undici) — GitHub's edge
-        // gzips feed.json, so ask for identity explicitly.
-        const res = await fetch(url, {
-          headers: { 'accept-encoding': 'identity' },
-        });
-        if (!res.ok) {
-          throw shellError('transient', `plugin feed fetch ${res.status}`);
-        }
-        return new Uint8Array(await res.arrayBuffer());
-      },
+      fetchBytes: boundedPluginFetch,
       ed25519Verify: (message, signature) =>
         verifySignature(null, message, publicKey, signature),
       list: async (d) => (existsSync(d) ? readdirSync(d) : []),
@@ -589,12 +658,22 @@ export function createHostRuntime(opts: {
     readonly manifest: string;
     readonly candidate: NonNullable<ReturnType<typeof describeCandidate>>;
   } | null {
+    // Bound the file, not just the buffer: a renderer-supplied path
+    // (host:reviewPair/dialog:installProvider carries no dir
+    // restriction) can name a never-ending special file whose
+    // synchronous read never EOFs — refusing on stat keeps the cap
+    // ahead of the materialization it guards.
+    const st = fs.stat(path);
+    if (st === null || !st.isFile || st.size > PAIR_FILE_MAX_BYTES) {
+      return null;
+    }
     let raw: Buffer;
     try {
       raw = fs.read(path);
     } catch {
       return null;
     }
+    // The post-read cap stays — the file can grow past the stat.
     if (raw.byteLength > PAIR_FILE_MAX_BYTES) {
       return null;
     }
@@ -856,8 +935,21 @@ export function createHostRuntime(opts: {
         }
         try {
           // Size-cap the raw pair bytes BEFORE parsing — an oversized
-          // document must not transit the JSON parse at all.
-          const raw = fs.read(join(userDir, name));
+          // document must not transit the JSON parse at all. Bound
+          // the file, not just the buffer: a planted oversized or
+          // non-regular `*.pair.json` must be refused before `read`
+          // materializes it — a cap after readFileSync comes too
+          // late to stop the wedge/OOM.
+          const pairPath = join(userDir, name);
+          const st = fs.stat(pairPath);
+          if (
+            st === null ||
+            !st.isFile ||
+            st.size > PAIR_FILE_MAX_BYTES
+          ) {
+            continue;
+          }
+          const raw = fs.read(pairPath);
           if (raw.byteLength > PAIR_FILE_MAX_BYTES) {
             continue;
           }
@@ -1123,6 +1215,14 @@ export function createHostRuntime(opts: {
       );
       const pairPath = join(userDir, `${id}.pair.json`);
       const consentsPath = join(userDir, 'consents.json');
+      // Belt under the candidateFields charset gate: this untrusted-
+      // input→path boundary asserts its own containment — an id that
+      // reaches the write outside the grammar (a validator
+      // regression, a caller that skipped describeCandidate) must
+      // never place bytes outside plugins-user.
+      if (resolve(dirname(pairPath)) !== resolve(userDir)) {
+        return false;
+      }
       const hadPair = fs.exists(pairPath);
       const oldPair = hadPair ? fs.read(pairPath) : undefined;
       const oldConsents = fs.exists(consentsPath)

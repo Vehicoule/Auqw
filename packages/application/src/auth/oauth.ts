@@ -170,6 +170,16 @@ export function createFetchOAuthHttp(
         // headers; a peer stalling the body would otherwise hang past
         // the timeout with no abort armed.
         const text = await resp.text().catch(() => null);
+        // The abort may have landed mid-body — the swallowed rejection
+        // must not read as a null-body ok, or a deadline lapse would
+        // classify as 'unavailable' where 'timeout' stays retryable
+        // and a dismissal as a server fault where it is user intent.
+        if (abortCause === 'timeout') {
+          return err(appError('timeout', 'oauth: request timed out'));
+        }
+        if (abortCause === 'cancelled') {
+          return err(cancelledError());
+        }
         if (text === null || text.length > OAUTH_BODY_CAP) {
           return ok({ status: resp.status, body: null });
         }

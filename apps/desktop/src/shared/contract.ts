@@ -88,7 +88,11 @@ export type ConfirmInstallProviderArgs = v.Guarded<
 export const isConfirmInstallProviderArgs = v.object({
   id: v.boundedString(128),
   version: v.boundedString(64),
-  permissions: v.array(v.boundedString(128)),
+  // The element cap is as much a bound as the per-string one: main
+  // joins this array verbatim into the native consent dialog's
+  // detail text, so an unbounded count from a crafted pair doc or a
+  // compromised renderer would hang the process building the prompt.
+  permissions: v.array(v.boundedString(128), { max: 256 }),
 });
 
 export type PickFolderArgs = v.Guarded<typeof pickFolderArgs>;
@@ -417,7 +421,10 @@ export const isUserPairReviewPayload = v.object({
   version: v.boundedString(64),
   abi: v.boundedString(32),
   capabilities: v.array(v.boundedString(64)),
-  permissions: v.array(v.boundedString(128)),
+  // Same 256-element cap as the consent dialog args — the review
+  // payload re-serializes across utility→main→IPC and feeds the
+  // verbatim permission join the dialog renders.
+  permissions: v.array(v.boundedString(128), { max: 256 }),
   wasm_sha256: v.boundedString(80),
   manifest_sha256: v.boundedString(80),
 });
@@ -454,7 +461,7 @@ export const isInstallProviderOutcome = v.union(
   v.object({
     outcome: v.literal('approved'),
     id: v.boundedString(128),
-    permissions: v.array(v.boundedString(128)),
+    permissions: v.array(v.boundedString(128), { max: 256 }),
   }),
 );
 

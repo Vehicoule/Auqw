@@ -1,6 +1,8 @@
 import { assert } from '@auqw/application/testing';
 import {
+  isConfirmInstallProviderArgs,
   isHostPluginsResult,
+  isInstallProviderOutcome,
   isJsonValue,
   isStorageBackupArgs,
   isStorageBeginArgs,
@@ -15,6 +17,7 @@ import {
   isTransferFetchBodyResult,
   isTransferFetchIdArgs,
   isTransferFetchResult,
+  isUserPairReviewPayload,
 } from './contract.ts';
 
 export function run(): void {
@@ -475,5 +478,62 @@ export function run(): void {
   assert(
     !isHostPluginsResult({ ...pluginsResult, plugins: 'plugin-ytm' }),
     'non-array plugins rejected',
+  );
+
+  // Consent-review payloads cap the permissions array itself, not
+  // just each string: main joins the list verbatim into a native
+  // dialog, so an unbounded count would hang the process.
+  const confirmArgs = {
+    id: 'foo-music',
+    version: '1.0.0',
+    permissions: ['network:api.foo.example', 'kv'],
+  };
+  assert(
+    isConfirmInstallProviderArgs(confirmArgs),
+    'confirm args pass',
+  );
+  const oversized = Array.from({ length: 257 }, (_, i) => `kv-${i}`);
+  assert(
+    !isConfirmInstallProviderArgs({
+      ...confirmArgs,
+      permissions: oversized,
+    }),
+    'over-256 permissions rejected in confirm args',
+  );
+  const reviewPayload = {
+    id: 'foo-music',
+    version: '1.0.0',
+    abi: '0.1.0',
+    capabilities: ['catalog.search'],
+    permissions: ['network:api.foo.example'],
+    wasm_sha256: 'sha256:aa',
+    manifest_sha256: 'sha256:bb',
+  };
+  assert(
+    isUserPairReviewPayload(reviewPayload),
+    'review payload passes',
+  );
+  assert(
+    !isUserPairReviewPayload({
+      ...reviewPayload,
+      permissions: oversized,
+    }),
+    'over-256 permissions rejected in review payload',
+  );
+  assert(
+    isInstallProviderOutcome({
+      outcome: 'approved',
+      id: 'foo-music',
+      permissions: ['network:api.foo.example'],
+    }),
+    'approved outcome passes',
+  );
+  assert(
+    !isInstallProviderOutcome({
+      outcome: 'approved',
+      id: 'foo-music',
+      permissions: oversized,
+    }),
+    'over-256 permissions rejected in approved outcome',
   );
 }
