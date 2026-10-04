@@ -673,6 +673,10 @@ None — the napi artifact is a local cargo build output.
   (opacity/transform) via repeated `Runtime.evaluate` at ~45ms intervals
   — changing values = animation running; sample in wall time since rAF
   may be throttled.
+- GUI clicks on a floating (un-maximized) Electron window may not land
+  at all — CDP is the reliable drive path then: focus
+  `input[placeholder=search]` + `Input.insertText` types into React
+  inputs without any coordinate mapping.
 
 ## Engine internals + media-session OS surface (MPRIS) probes
 

@@ -995,6 +995,59 @@ export async function run(): Promise<void> {
         'the consent record pins the approved digests',
       );
     }
+
+    // deferBootFeed: a populated cache boots last-known-good with the
+    // feed request staying off the ready path entirely — the consume
+    // pass kicks it post-ready, applies the compatible gate, and swaps
+    // the memo without a second fetch.
+    {
+      let feedCalls = 0;
+      const deferLoads: string[] = [];
+      const deferRuntime = createHostRuntime({
+        env: {
+          AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+          AUQW_USER_DATA: '/ud',
+        },
+        deferBootFeed: true,
+        feedSync: async () => {
+          feedCalls += 1;
+          // foo-music is not compatible this release — the consume
+          // pass must drop it from the memo it swaps in.
+          return { ready: [], compatible: [] };
+        },
+        pairVerifier: () => signedFooPair,
+        require: () =>
+          otaHost(async (w, m) => {
+            deferLoads.push(m);
+            return 'p';
+          }),
+        fs: otaFs(
+          new Map<string, Buffer>([
+            ['/b/auqw_node_bindings.node', Buffer.from('')],
+            [join(cacheDirPath, 'foo-music.json'), Buffer.from('pair-doc')],
+          ]),
+          () => [],
+          () => ['foo-music.json'],
+        ),
+      });
+      const boot = await deferRuntime.pluginsReady();
+      assertEqual(
+        feedCalls,
+        0,
+        'the feed request stays off the ready path',
+      );
+      assertEqual(boot.length, 1, 'the signed cache loads last-known-good');
+      // The consume pass kicks the fetch post-ready (~600ms) and swaps
+      // the memo once the settled feed re-gates the loaded set.
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      assertEqual(feedCalls, 1, 'the deferred fetch runs once');
+      const after = await deferRuntime.status();
+      assertEqual(
+        after.manifests.length,
+        0,
+        'the consume pass applies the compatible gate',
+      );
+    }
   }
 
   // A rejected init is retried on the next call — the artifact may
