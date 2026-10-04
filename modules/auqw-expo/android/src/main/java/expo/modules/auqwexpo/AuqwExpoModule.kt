@@ -70,10 +70,12 @@ private const val EVENT_WAVEFORM_PEAKS_COARSE = "onWaveformPeaksCoarse"
 private const val BIND_TIMEOUT_MS = 5_000L
 private const val REMOTE_PREVIOUS_RESTART_MS = 3_000L
 // A registered prepare gets this long to call back before the move
-// is declared dead — generous for a resolve + head request on a bad
-// link, short enough that a wedged latch frees the queue while the
-// user still expects it to move.
-private const val PREPARE_TIMEOUT_MS = 15_000L
+// is declared dead — the host's own invocation budget is 30 s of
+// deadline, so the watchdog waits it out (plus a scheduling margin)
+// rather than cancelling a prepare that was still legitimately
+// working; past it, the latch frees while the user still expects
+// the queue to move.
+private const val PREPARE_TIMEOUT_MS = 35_000L
 private const val POSITION_TICK_MS = 1_000L
 private const val FIRST_OUTPUT_POLL_INTERVAL_MS = 8L
 private const val FIRST_OUTPUT_POLL_DEADLINE_MS = 5_000L
@@ -1719,6 +1721,18 @@ class AuqwExpoModule : Module() {
     dropArmedMove()
     failEndedAttach(reason, "transient", "queue transition timed out")
     Log.w(TAG, "queue transition expired: prepare outcome never landed")
+    // A natural end may have been swallowed behind this latch while
+    // a remote move prepared — the freed cursor owes it a fresh
+    // drive under the installed projection, the same re-drive
+    // finishTransition runs after a stale outcome.
+    val latest = installedProjection
+    val p = player
+    if (p != null && latest != null &&
+      attachedForOccurrence == latest.currentOccurrenceId &&
+      p.playbackState == Player.STATE_ENDED
+    ) {
+      driveTransition("ended")
+    }
   }
 
   private fun finishTransition(
