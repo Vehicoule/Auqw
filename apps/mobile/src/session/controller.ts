@@ -269,6 +269,10 @@ export async function createSessionController(
   const peaksStore = createPeaksCacheStore(sqliteDriver);
   // Assembled in start() after restore: custody → engine → client.
   let syncSurface: ExpoSyncSurface | null = null;
+  // Bring-up is deferred post-ready — a dispose landing mid-hydrate
+  // must keep the freshly built surface from outliving the
+  // controller (scheduler, client, and host would all stay open).
+  let disposed = false;
   const syncBuiltListeners = new Set<(surface: ExpoSyncSurface) => void>();
   // The spec's trigger layer (on-launch, on-change debounced,
   // reconnect backoff, connectivity edge) — created with the client.
@@ -851,6 +855,23 @@ export async function createSessionController(
             },
           });
           if (built.ok) {
+            if (disposed) {
+              // Teardown raced the hydrate — tear the built surface
+              // down instead of installing it: no listeners, no
+              // flush, no scheduler, no reconcile against a dead
+              // session.
+              try {
+                await built.value.host?.close();
+              } catch {
+                // A wedged host close can't resurrect the controller.
+              }
+              try {
+                await built.value.client.close();
+              } catch {
+                // Same — the surface still dies here.
+              }
+              return;
+            }
             syncSurface = built.value;
             for (const listener of [...syncBuiltListeners]) {
               try {
@@ -1052,6 +1073,10 @@ export async function createSessionController(
       }
     },
     async dispose() {
+      // Bar the deferred sync bring-up BEFORE anything awaits — a
+      // hydrate completing mid-dispose must see the flag on its
+      // first continuation.
+      disposed = true;
       // Session FIRST: its graceful emit drain must run while the
       // sync surface is still live — after close() the emit port
       // would buffer the retained writes into a pre-surface queue

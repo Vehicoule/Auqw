@@ -454,6 +454,26 @@ export function createHostRuntime(opts: {
     ready: readonly string[];
     compatible: readonly string[];
   }>) | null = null;
+  // Every scan serializes through one chain — registry side-effects
+  // (loads, revocations) can never interleave between a deferred
+  // background pass and a caller-triggered rescan. `loadSeq` stamps
+  // each pass so a queued-behind one can't overwrite a newer memo.
+  let loadSeq = 0;
+  let loadChain: Promise<unknown> = Promise.resolve();
+  function runLoad(
+    reuseUserScan: boolean,
+    deferFeed: boolean,
+  ): { seq: number; next: Promise<readonly LoadedPlugin[]> } {
+    const seq = ++loadSeq;
+    const next = loadChain.then(() =>
+      loadPluginDir(ensureHost(), reuseUserScan, deferFeed),
+    );
+    loadChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return { seq, next };
+  }
   let lastUserSignature: string | null = null;
   // Provider ids the previous pass loaded from user pairs — the
   // revocation set for the next reload. `userScanCache` carries the
@@ -977,7 +997,7 @@ export function createHostRuntime(opts: {
       // A signed-feed retry (the only other armer) reuses the cached
       // user scan — unchanged guests are never re-loaded.
       const deferFeed = pluginsReady === null && opts.deferBootFeed === true;
-      const pending = loadPluginDir(ensureHost(), !userChanged, deferFeed);
+      const { next: pending } = runLoad(!userChanged, deferFeed);
       pluginsReady = pending;
       if (deferFeed) {
         // Once boot's pass resolved, kick the fetch off the boot path
@@ -996,9 +1016,16 @@ export function createHostRuntime(opts: {
           await new Promise((resolve) => setTimeout(resolve, 600));
           deferredFeedSync ??= deferredFeedKick?.() ?? null;
           await deferredFeedSync?.catch(() => {});
-          await loadPluginDir(ensureHost(), true, false).then(
+          const consume = runLoad(true, false);
+          await consume.next.then(
             (loaded) => {
-              pluginsReady = Promise.resolve(loaded);
+              // A caller-triggered pass queued meanwhile reads newer
+              // fs state — its memo must win over this older result
+              // (a mid-flight user-pair removal would otherwise come
+              // back advertised).
+              if (consume.seq === loadSeq) {
+                pluginsReady = Promise.resolve(loaded);
+              }
             },
             () => {},
           );
