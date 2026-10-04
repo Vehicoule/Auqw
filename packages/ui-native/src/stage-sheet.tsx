@@ -1507,6 +1507,20 @@ export function StageSheet({
     const on = expandedShared.value || progress.value > 0.5;
     return { pointerEvents: on ? 'auto' : 'none' } as const;
   });
+  // JS mirror of the same truth — on native it's the stuck-flush
+  // fallback under the UI-thread props; on web it IS the gate (RNW
+  // never applies animated pointerEvents). `expanded` alone can't
+  // stand in: a drag past the gate threshold hasn't committed yet,
+  // so its revealed controls would stay dead until release.
+  const [contentOn, setContentOn] = useState(expanded);
+  useAnimatedReaction(
+    () => expandedShared.value || progress.value > 0.5,
+    (on, prev) => {
+      if (on === prev) return;
+      scheduleOnRN(setContentOn, on);
+    },
+    [progress, expandedShared],
+  );
 
   // Tap-to-seek on the waveform: the scrub pan only ever activates on
   // movement, so a plain tap resolves x→ms through the same commit
@@ -2200,6 +2214,13 @@ export function StageSheet({
           <Animated.View
             collapsable={false}
             animatedProps={rowGateProps}
+            // JS-side fallback gate under the UI-thread animatedProps
+            // one — same dead-zone insurance as the dismiss surface:
+            // a stuck 'auto' on an expanded sheet would leave an
+            // invisible strip eating taps at the leaf's top edge.
+            pointerEvents={
+              Platform.OS === 'web' || !expanded ? 'auto' : 'none'
+            }
             style={[
               {
                 position: 'absolute',
@@ -2264,6 +2285,13 @@ export function StageSheet({
             and fully present at the input gate. */}
         <Animated.View
           animatedProps={contentGateProps}
+          // Same fallback: this surface is full-screen — a flush that
+          // sticks 'auto' on a parked sheet would eat every tap on the
+          // whole stage area. `contentOn` is the JS mirror of the
+          // UI-thread gate — and on web it IS the gate: RNW doesn't
+          // apply animated pointerEvents, so this layer was 'auto'
+          // even parked, covering the collapsed row.
+          pointerEvents={contentOn ? 'auto' : 'none'}
           style={[
             StyleSheet.absoluteFill,
             { overflow: 'hidden' },
