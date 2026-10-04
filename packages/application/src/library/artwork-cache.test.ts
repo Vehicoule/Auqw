@@ -184,6 +184,8 @@ class FakeArtworkPaths implements ArtworkPathsPort {
   #failRemove: AppError | null = null;
   #failExists: AppError | null = null;
 
+  #failExistsOnPresent: AppError | null = null;
+
   /** The next remove fails once with the given typed error. */
   failNextRemove(error: AppError): void {
     this.#failRemove = error;
@@ -192,6 +194,13 @@ class FakeArtworkPaths implements ArtworkPathsPort {
   /** The next exists check fails once with the given typed error. */
   failNextExists(error: AppError): void {
     this.#failExists = error;
+  }
+
+  /** The next exists check on a PRESENT file fails once — missing
+   *  paths report missing first, so this lets a reap land before the
+   *  failure does. */
+  failExistsOnPresent(error: AppError): void {
+    this.#failExistsOnPresent = error;
   }
 
   destFor(url: string): string {
@@ -208,7 +217,15 @@ class FakeArtworkPaths implements ArtworkPathsPort {
       this.#failExists = null;
       return Promise.resolve(err(error));
     }
-    return Promise.resolve(ok(!this.missing.has(filePath)));
+    if (this.missing.has(filePath)) {
+      return Promise.resolve(ok(false));
+    }
+    if (this.#failExistsOnPresent !== null) {
+      const error = this.#failExistsOnPresent;
+      this.#failExistsOnPresent = null;
+      return Promise.resolve(err(error));
+    }
+    return Promise.resolve(ok(true));
   }
 
   remove(
@@ -1202,6 +1219,22 @@ async function reapedSiblingYieldsToNextSibling(): Promise<void> {
   assertDeepEqual(await storedUrls(r2.storage), [G_BIG]);
 }
 
+async function statFailureStillCommitsReaps(): Promise<void> {
+  // G_BIG's file is gone; the stat on the NEXT sibling errors — the
+  // earlier reap must still commit or the mirror argues with storage.
+  const r = rig(
+    persisted({
+      artworkCache: [seed(G_BIG, 3 * MB, 10), seed(G_HUGE, 9 * MB, 20)],
+    }),
+  );
+  r.paths.missing.add(destOf(G_BIG));
+  r.paths.failExistsOnPresent(appError('unavailable', 'stat broke'));
+  const res = await r.cache.get(G_SMALL, ctx());
+  assert(!res.ok, 'stat failure must surface');
+  assertEqual(res.error.kind, 'unavailable');
+  assertDeepEqual(await storedUrls(r.storage), [G_HUGE]);
+}
+
 export async function run(): Promise<void> {
   await missAndHit();
   await fetchErrorsPropagate();
@@ -1239,4 +1272,5 @@ export async function run(): Promise<void> {
   await siblingBeatsFailureVerdict();
   await reapedSiblingFallsBackToDownload();
   await reapedSiblingYieldsToNextSibling();
+  await statFailureStillCommitsReaps();
 }

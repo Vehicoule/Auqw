@@ -665,6 +665,15 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
             deps.paths.exists(probing.filePath, context.signal),
           );
           if (!present.ok) {
+            // A stat failure after earlier reaps still persists them —
+            // an in-memory-only delete would leave the mirror arguing
+            // with storage until the next commit or refresh.
+            if (reaped) {
+              const committed = await commitMirror(entries, context);
+              if (!committed.ok) {
+                return committed;
+              }
+            }
             return err(present.error);
           }
           if (present.value) {
