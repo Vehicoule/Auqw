@@ -398,23 +398,26 @@ internal class AuqwWaveformPeaks(
     val lastPtsUs = AtomicLong(-1L)
     val coarseSent = AtomicBoolean(false)
     // `slices` is written on the decode lane and folded on it (coarse)
-    // or after it (final/abort emit) — no lock needed.
-    val buildFlat = {
-      val dur = durationUs.get().takeIf { it > 0 } ?: lastPtsUs.get()
+    // or after it (final/abort emit) — no lock needed. `spanUs` is the
+    // duration the fold claims: the declared duration while it is
+    // still honest, the measured pts when decode has already proven
+    // the tail unmeasured — folding over the full span there would let
+    // fillFlat clone the last bucket across the starved tail.
+    val buildFlat = { spanUs: Long ->
       // Zero slices = zero measured audio — a container that publishes
       // only its duration must not emit a fabricated flat baseline as a
       // finished waveform. Decoded-silent PCM still lands slices, so
       // measured silence keeps its honest zeros.
-      if (dur <= 0 || slices.isEmpty()) {
+      if (spanUs <= 0 || slices.isEmpty()) {
         null
       } else {
-        fillFlat(foldSlices(slices, count, dur), count)
+        fillFlat(foldSlices(slices, count, spanUs), count)
       }
     }
-    val emitCoarse = {
+    val emitCoarse = { spanUs: Long ->
       // Fold first: a null profile (duration never landed, nothing
       // decoded yet) must not burn the one-shot emit flag.
-      val flat = buildFlat()
+      val flat = buildFlat(spanUs)
       if (flat !== null && coarseSent.compareAndSet(false, true)) {
         try {
           onCoarse?.invoke(flat)
@@ -434,7 +437,7 @@ internal class AuqwWaveformPeaks(
         lastPtsUs.get() >=
           minOf(COARSE_LEAD_PTS_US, (dur * COARSE_FRACTION).toLong())
       ) {
-        emitCoarse()
+        emitCoarse(dur)
       }
     }
 
@@ -490,11 +493,12 @@ internal class AuqwWaveformPeaks(
 
     if (!buf.pullComplete()) {
       // A lane abandoned: decode stopped at the dead hole. Emit what
-      // was measured (prefix bars are honest) and surface a typed
+      // was measured (prefix bars are honest — folded over the
+      // measured pts, not the full duration) and surface a typed
       // failure so the tracker's retry heals off committed bytes —
       // hits on the next attempt return instantly. The pull's refusal
       // kind wins over whatever the starved decode surfaced.
-      emitCoarse()
+      emitCoarse(lastPtsUs.get())
       throw CodedException(
         probeRefused.get() ?: "transient",
         "stream pull stopped before end of stream",
@@ -508,17 +512,20 @@ internal class AuqwWaveformPeaks(
       // feed that starved mid-track still arrives here with every
       // byte committed, and fillFlat would clone the last measured
       // bucket across the unmeasured tail as a finished profile the
-      // tracker caches forever. Emit the honest prefix as coarse and
-      // fail typed so the retry re-measures rather than persisting
-      // the fabrication.
-      emitCoarse()
+      // tracker caches forever. Emit the honest prefix as coarse —
+      // folded over lastPtsUs, so the emitted flat spans only what
+      // decode measured — and fail typed so the retry re-measures
+      // rather than persisting the fabrication.
+      emitCoarse(lastPtsUs.get())
       throw CodedException(
         "invalid-response",
         "decode settled short of the stream's duration",
         null
       )
     }
-    val flat = buildFlat()
+    val flat = buildFlat(
+      durationUs.get().takeIf { it > 0 } ?: lastPtsUs.get()
+    )
       ?: throw CodedException("invalid-response", "no decodable audio", null)
     Log.i(
       TAG,

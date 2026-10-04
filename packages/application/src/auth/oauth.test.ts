@@ -311,6 +311,32 @@ function abortingFetch(onCall: (signal: RealAbortSignal) => void): OAuthFetch {
   return fn;
 }
 
+/**
+ * A fetch that resolves on headers, then streams a body that settles
+ * only when the abort lands — the stalled-peer shape the deadline is
+ * armed against (fetch resolves before the body does).
+ */
+function stallingBodyFetch(): OAuthFetch {
+  const fn: OAuthFetch = (_url, init) =>
+    Promise.resolve({
+      status: 200,
+      text: () =>
+        new Promise<string>((_resolve, reject) => {
+          const signal = init.signal;
+          // An already-fired abort poisons the body read at once —
+          // only an un-aborted request waits on the stream.
+          if (signal?.aborted === true) {
+            reject(new Error('aborted'));
+            return;
+          }
+          signal?.addEventListener?.('abort', () =>
+            reject(new Error('aborted')),
+          );
+        }),
+    });
+  return fn;
+}
+
 async function testFetchHttpAbortCause(): Promise<void> {
   // A caller dismissal aborts the fetch — the result is a
   // 'cancelled' error, never 'unavailable' (which the retry ladder
@@ -355,6 +381,28 @@ async function testFetchHttpAbortCause(): Promise<void> {
     assert(!res.ok, 'timed-out request must fail');
     assertEqual(res.error.kind, 'timeout');
     assert(res.error.retryable, 'timeout must stay retryable');
+  }
+  // The deadline lapses mid-BODY — headers already resolved, the
+  // abort rejects the streaming read: still 'timeout', never a
+  // null-body 'unavailable'.
+  {
+    const http = createFetchOAuthHttp(stallingBodyFetch());
+    const res = await http.postForm('https://x/y', {}, { timeoutMs: 5 });
+    assert(!res.ok, 'a body-leg deadline lapse must fail');
+    assertEqual(res.error.kind, 'timeout');
+    assert(res.error.retryable, 'timeout must stay retryable');
+  }
+  // A caller dismissal mid-body is 'cancelled', not a server fault.
+  {
+    const source = new CancellationSource();
+    const http = createFetchOAuthHttp(stallingBodyFetch());
+    const pending = http.postForm('https://x/y', {}, {
+      signal: source.signal,
+    });
+    source.cancel();
+    const res = await pending;
+    assert(!res.ok, 'a body-leg cancellation must fail');
+    assertEqual(res.error.kind, 'cancelled');
   }
   // No deadline, no signal, a raw rejection — the genuine network
   // failure keeps its historical kind.

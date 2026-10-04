@@ -669,9 +669,10 @@ export interface UpdateApplier {
   /** Change feed — fires once per state transition (and per progress
       tick while 'downloading'). */
   subscribe(listener: () => void): () => void;
-  /** Start the pipeline; no-op while a run is live or the SAME
-      version already finished ('ready-to-restart', 'applied') — a
-      different-version begin is the supersede path. */
+  /** Start the pipeline; no-op while a run is live or a same-or-older
+      version already finished ('ready-to-restart', 'applied',
+      'needs-permission') — only a strictly newer begin is the
+      supersede path. */
   begin(target: UpdateApplyTarget): void;
   /** Abort the live run — publishes 'idle' so the affordance returns
       to its install label. */
@@ -970,17 +971,21 @@ export function createUpdateApplier(ports: UpdateApplyPorts): UpdateApplier {
       if (
         running ||
         live() ||
-        // The terminal guards are per-VERSION: a same-version re-tap
-        // stays inert ('ready-to-restart' retries through the restart
-        // affordance, 'applied'/'needs-permission' through reapply),
-        // while a different release's begin is the supersede path —
-        // a newer check owns the pipeline instead of freezing behind
-        // a pending restart or a staged run.
+        // The terminal guards are per-VERSION and directional: a
+        // same-version re-tap stays inert ('ready-to-restart' retries
+        // through the restart affordance, 'applied'/'needs-permission'
+        // through reapply) — and so does an OLDER one. 'available' is
+        // computed against the RUNNING version, so a retracted release
+        // can offer a target older than the stage already parked; only
+        // a strictly newer release takes the supersede path and owns
+        // the pipeline instead of freezing behind a pending restart or
+        // a staged run.
         (state.state === 'ready-to-restart' &&
-          state.version === target.version) ||
-        (state.state === 'applied' && state.version === target.version) ||
+          compareVersions(target.version, state.version) <= 0) ||
+        (state.state === 'applied' &&
+          compareVersions(target.version, state.version) <= 0) ||
         (state.state === 'needs-permission' &&
-          state.version === target.version)
+          compareVersions(target.version, state.version) <= 0)
       ) {
         return;
       }

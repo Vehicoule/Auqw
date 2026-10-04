@@ -144,11 +144,11 @@ async function manifestPermissionsKeepLongEntries(): Promise<void> {
   assertEqual(manifestPermissions({ permissions: 'kv' }).length, 0, 'non-array');
 }
 
-/** Guests built before the scoped-search extension reject widened
- *  payloads on exact keys, so a provider that never declares
- *  `catalog.search.kinds` gets the base payload and answers an
- *  unscoped page rather than failing. */
-async function searchDropsExtensionKeysWithoutDeclaration(): Promise<void> {
+/** Every shipped `catalog.search` guest treats `kinds`/`continuation`
+ *  as optional keys, so the extension fields ride unconditionally —
+ *  a provider that never declares `catalog.search.kinds` still gets
+ *  the scoped payload it can serve. */
+async function searchForwardsExtensionKeysWithoutDeclaration(): Promise<void> {
   const { sent, transport } = spy({ items: [], storefront: null });
   const port = createProviderWirePort(
     'p',
@@ -161,8 +161,8 @@ async function searchDropsExtensionKeysWithoutDeclaration(): Promise<void> {
   const keys = Object.keys(sent[0] ?? {}).sort();
   assertEqual(
     keys.join(','),
-    'limit,query,storefront',
-    'payload carries only the base key set',
+    'continuation,kinds,limit,query,storefront',
+    'extension keys ride the base payload unconditionally',
   );
 }
 
@@ -258,7 +258,7 @@ async function entityArraysRejectOverCap(): Promise<void> {
 export async function run(): Promise<void> {
   await mintHeadersKeepProtoName();
   await manifestPermissionsKeepLongEntries();
-  await searchDropsExtensionKeysWithoutDeclaration();
+  await searchForwardsExtensionKeysWithoutDeclaration();
   await searchForwardsExtensionKeysWhenDeclared();
   await entityArraysRejectOverCap();
 }

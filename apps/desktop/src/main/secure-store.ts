@@ -105,6 +105,23 @@ export function createSecureStore(opts: {
     return next;
   }
 
+  // Best-effort parent-dir fsync after a rename or unlink — the file
+  // operation has already committed; this orders the directory entry
+  // itself so a crash can't resurrect or lose it.
+  async function syncParentDir(): Promise<void> {
+    try {
+      const parent = await open(dir, 'r');
+      try {
+        await parent.sync();
+      } finally {
+        await parent.close();
+      }
+    } catch {
+      // Directory fsync is unsupported on some platforms — the entry
+      // change has landed; only its durability ordering is soft.
+    }
+  }
+
   return {
     async get(key) {
       requireEncryption();
@@ -157,18 +174,7 @@ export function createSecureStore(opts: {
           await unlink(staging).catch(() => undefined);
           throw shellError('io-error', 'secure entry could not be written');
         }
-        // Best-effort dir fsync — the rename is already committed.
-        try {
-          const parent = await open(dir, 'r');
-          try {
-            await parent.sync();
-          } finally {
-            await parent.close();
-          }
-        } catch {
-          // Directory fsync is unsupported on some platforms — the
-          // rename has landed; only the dir entry ordering is soft.
-        }
+        await syncParentDir();
         cache.set(key, Promise.resolve(value));
       });
     },
@@ -183,6 +189,12 @@ export function createSecureStore(opts: {
             throw shellError('io-error', 'secure entry could not be removed');
           }
         }
+        // Same durability chain as set() — without the dir fsync a
+        // crash can resurrect the unlinked credential file, and the
+        // 'deleted' secret silently returns on the next boot. The
+        // ENOENT path fsyncs too: a prior delete's removal may be the
+        // entry still waiting for durability.
+        await syncParentDir();
         cache.set(key, Promise.resolve(null));
       });
     },

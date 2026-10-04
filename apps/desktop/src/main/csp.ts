@@ -41,49 +41,100 @@ const NETWORK_PERMISSION = /^network:((\*\.)?[a-z0-9.-]+)$/;
 
 const HOSTNAME = /^(\*\.)?[a-z0-9.-]+$/;
 
-function manifestNetworkHosts(pluginDir: string): readonly string[] {
-  let entries: string[];
+/**
+ * Pull the manifest object out of one directory entry. The OTA cache
+ * (`plugins/<id>.json`) and the consent-gated user dir
+ * (`plugins-user/<id>.pair.json`) both store self-describing pair
+ * documents whose `manifest` field embeds the manifest as a JSON
+ * string; the `AUQW_PLUGIN_DIR` dev layout keeps flat
+ * `<id>.manifest.json` files where the document IS the manifest.
+ * Everything else that can sit in these dirs — `feed.json`,
+ * `consents.json`, staging residue — yields null and is skipped.
+ */
+function manifestDocFor(
+  name: string,
+  text: string,
+): Record<string, unknown> | null {
+  let doc: unknown;
   try {
-    entries = readdirSync(pluginDir);
+    doc = JSON.parse(text);
   } catch {
-    // Plugin dir absent (first boot before the feed sync lands) —
-    // the artwork allowlist alone still keeps providers' covers live
-    // once the directory appears on the next document serve.
-    return [];
+    return null;
   }
+  if (typeof doc !== 'object' || doc === null || Array.isArray(doc)) {
+    return null;
+  }
+  const embedded = (doc as Record<string, unknown>)['manifest'];
+  if (typeof embedded !== 'string') {
+    return name.endsWith('.manifest.json')
+      ? (doc as Record<string, unknown>)
+      : null;
+  }
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(embedded);
+  } catch {
+    return null;
+  }
+  if (
+    typeof manifest !== 'object' ||
+    manifest === null ||
+    Array.isArray(manifest)
+  ) {
+    return null;
+  }
+  return manifest as Record<string, unknown>;
+}
+
+function manifestNetworkHosts(
+  pluginDirs: readonly string[],
+): readonly string[] {
   const hosts = new Set<string>();
-  for (const name of entries) {
-    if (!name.endsWith('.manifest.json')) {
-      continue;
-    }
-    let raw: unknown;
+  for (const pluginDir of pluginDirs) {
+    let entries: string[];
     try {
-      raw = JSON.parse(readFileSync(join(pluginDir, name), 'utf8'));
+      entries = readdirSync(pluginDir);
     } catch {
+      // Plugin dir absent (first boot before the feed sync lands, or
+      // no user pairs yet) — the artwork allowlist alone still keeps
+      // providers' covers live once the directory appears on the
+      // next document serve.
       continue;
     }
-    if (typeof raw !== 'object' || raw === null) {
-      continue;
-    }
-    const permissions = (raw as Record<string, unknown>)['permissions'];
-    if (!Array.isArray(permissions)) {
-      continue;
-    }
-    for (const permission of permissions) {
-      if (typeof permission !== 'string') {
+    for (const name of entries) {
+      if (!name.endsWith('.json')) {
         continue;
       }
-      const host = NETWORK_PERMISSION.exec(permission)?.[1];
-      if (host === undefined || !HOSTNAME.test(host)) {
+      let text: string;
+      try {
+        text = readFileSync(join(pluginDir, name), 'utf8');
+      } catch {
         continue;
       }
-      if (host.startsWith('*.')) {
-        // CSP `*.h` matches subdomains but not the bare apex —
-        // grant both so `network:*.x` never narrows an apex hit.
-        hosts.add(`https://${host.slice(2)}`);
-        hosts.add(`https://${host}`);
-      } else {
-        hosts.add(`https://${host}`);
+      const manifest = manifestDocFor(name, text);
+      if (manifest === null) {
+        continue;
+      }
+      const permissions = manifest['permissions'];
+      if (!Array.isArray(permissions)) {
+        continue;
+      }
+      for (const permission of permissions) {
+        if (typeof permission !== 'string') {
+          continue;
+        }
+        const host = NETWORK_PERMISSION.exec(permission)?.[1];
+        if (host === undefined || !HOSTNAME.test(host)) {
+          continue;
+        }
+        if (host.startsWith('*.')) {
+          // CSP `*.h` matches subdomains but not the bare apex —
+          // grant both so `network:*.x` never narrows an apex hit.
+          hosts.add(`https://${host.slice(2)}`);
+          hosts.add(`https://${host}`);
+        } else {
+          hosts.add(`https://${host}`);
+        }
       }
     }
   }
@@ -92,16 +143,16 @@ function manifestNetworkHosts(pluginDir: string): readonly string[] {
 
 /**
  * The `img-src` source-expression list (no directive name) for the
- * plugin set installed under `pluginDir`. Sorted for a stable served
- * document.
+ * plugin set installed under `pluginDirs` — the signed OTA cache,
+ * the consent-gated user dir, or the `AUQW_PLUGIN_DIR` dev dir.
  */
-export function imgSrcSources(pluginDir: string): string {
+export function imgSrcSources(pluginDirs: readonly string[]): string {
   const sources = new Set<string>([
     "'self'",
     'data:',
     'blob:',
     ...ARTWORK_HOSTS,
-    ...manifestNetworkHosts(pluginDir),
+    ...manifestNetworkHosts(pluginDirs),
   ]);
   return [...sources].join(' ');
 }
