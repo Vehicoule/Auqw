@@ -204,6 +204,10 @@ step input, a response id that matches no outstanding request — fails
 }
 ```
 
+(The example pins `0.1.0` — this guest emits no `http_batch`, so the
+older pin keeps it loadable by the most hosts. A batching guest's
+manifest would pin `"abi": "0.1.1"` instead.)
+
 `abi` is `0.1.0` or `0.1.1` — any other value is rejected (the host
 [unconditionally
 rejects](../../crates/plugin-host/src/invoke.rs) a manifest pinning anything

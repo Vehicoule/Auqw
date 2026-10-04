@@ -5,12 +5,16 @@ import { utf8Decode, utf8Encode } from '../utf8.ts';
 /**
  * OTA plugin delivery (decision log, Plugin guests): the app embeds
  * only the release-signing public key + feed URL and downloads signed
- * artifacts at runtime — nothing is bundled. `releases/feed.json` on
- * Auqw-plugins main is a plain index ({keyId, plugins[]}); each
- * artifact still carries its own ed25519 signature over the canonical
+ * artifacts at runtime — nothing is bundled. `releases/feed-v2.json`
+ * on Auqw-plugins main is a plain index ({keyId, plugins[]}) listing
+ * the newest release per (plugin, abi) line; each artifact still
+ * carries its own ed25519 signature over the canonical
  * `auqw-release-v1` payload, so the feed needs no signature of its
- * own. The per-plugin `<id>.wasm` + `<id>.manifest.json` pair lands
- * under the app's plugin cache dir; loaders scan it verbatim.
+ * own. (`releases/feed.json` is the legacy single-line index for
+ * released builds that reject duplicate ids — it serves the oldest
+ * abi line only.) The per-plugin `<id>.wasm` + `<id>.manifest.json`
+ * pair lands under the app's plugin cache dir; loaders scan it
+ * verbatim.
  *
  * Failure posture: a fetch or verification failure never destroys the
  * on-disk set — last-known-good stays loadable. A half-written pair
@@ -69,6 +73,18 @@ export const PLUGIN_ABI = '0.1.1';
  */
 export const PLUGIN_ABIS: ReadonlySet<string> = new Set(['0.1.0', '0.1.1']);
 
+/** Feed versions are `\d+.\d+.\d+` — a plain numeric compare. */
+function cmpVersion(a: string, b: string): number {
+  const as = a.split('.').map(Number);
+  const bs = b.split('.').map(Number);
+  for (let i = 0; i < 3; i += 1) {
+    if (as[i] !== bs[i]) {
+      return (as[i] ?? 0) - (bs[i] ?? 0);
+    }
+  }
+  return 0;
+}
+
 /**
  * Trust root, embedded at build time. `publicKey` is the raw 32-byte
  * ed25519 key (SPKI DER is `<12-byte prefix>‖raw` on targets that need
@@ -82,7 +98,7 @@ export const PLUGIN_RELEASE_TRUST = {
   publicKeyHex:
     'a1dd9fc1169be5ac2950bf55e2bcc4589774453ca935fb54f2991e5b3cc43420',
   feedUrl:
-    'https://raw.githubusercontent.com/Vehicoule/Auqw-plugins/main/releases/feed.json',
+    'https://raw.githubusercontent.com/Vehicoule/Auqw-plugins/main/releases/feed-v2.json',
 } as const;
 
 // Bounded reads — feed is ~KBs, manifests ~1KB, wasms today ~200KB.
@@ -364,7 +380,10 @@ export function parsePluginFeed(
     !Array.isArray(plugins) ||
     plugins.length === 0 ||
     !plugins.every(isEntry) ||
-    new Set(plugins.map((p) => p.id)).size !== plugins.length
+    // One release per (id, abi) line — the feed may list the same
+    // plugin under several abis so older builds keep a servable
+    // entry, but never the same line twice.
+    new Set(plugins.map((p) => `${p.id}${p.abi}`)).size !== plugins.length
   ) {
     throw appError('invalid-response', 'plugin feed failed shape check');
   }
@@ -389,7 +408,15 @@ export async function syncPluginFeed(opts: {
   /** Cache dir holding signed `<id>.json` pair documents. */
   readonly dir: string;
   readonly ports: FeedSyncPorts;
-}): Promise<{ readonly ready: readonly string[]; readonly compatible: readonly string[] }> {
+}): Promise<{
+  readonly ready: readonly string[];
+  readonly compatible: readonly string[];
+  /** Ids the feed still names — the authority set for cached-pair
+   * loading and the sweep. A feed-named id keeps its installed pair
+   * even when the offered release's abi is one this build can't
+   * serve. */
+  readonly current: readonly string[];
+}> {
   const { ports, dir } = opts;
   const feedBytes = await ports.fetchBytes(opts.feedUrl);
   if (feedBytes.byteLength > FEED_MAX_BYTES) {
@@ -398,20 +425,32 @@ export async function syncPluginFeed(opts: {
   const feed = parsePluginFeed(utf8Decode(feedBytes), opts.keyId);
   const base = opts.feedUrl.slice(0, opts.feedUrl.lastIndexOf('/') + 1);
   const current = new Set<string>();
-  const compatible: string[] = [];
-  const ready: string[] = [];
+  // The feed may offer several releases of one plugin — one per abi
+  // line still served to older builds. Candidates sort newest-first;
+  // a broken newest release falls back to an older abi line rather
+  // than stranding the plugin.
+  const candidates = new Map<string, PluginFeedEntry[]>();
   for (const entry of feed.plugins) {
-    // The feed still names this id — keep any installed pair alive
-    // even when the offered release's abi is one this build can't
-    // serve (the sweep below only removes what the feed dropped).
     current.add(entry.id);
     if (!PLUGIN_ABIS.has(entry.abi)) {
       continue;
     }
-    compatible.push(entry.id);
+    const list = candidates.get(entry.id);
+    if (list === undefined) {
+      candidates.set(entry.id, [entry]);
+    } else {
+      list.push(entry);
+    }
+  }
+  for (const list of candidates.values()) {
+    list.sort((a, b) => cmpVersion(b.version, a.version));
+  }
+  const compatible = [...candidates.keys()];
+  const ready: string[] = [];
+  for (const [id, releases] of candidates) {
     // Cache hit: the stored pair re-verifies offline (signature +
     // both digests), so cached bytes are never loaded unverified.
-    const cached = await ports.read(`${dir}/${entry.id}.json`);
+    const cached = await ports.read(`${dir}/${id}.json`);
     const pair =
       cached === null
         ? null
@@ -420,54 +459,58 @@ export async function syncPluginFeed(opts: {
             publicKey: opts.publicKey,
             verify: ports.ed25519Verify,
           });
-    if (
-      pair !== null &&
-      pair.id === entry.id &&
-      pair.wasmSha256 === entry.wasm_sha256 &&
-      pair.manifestSha256 === entry.manifest_sha256
-    ) {
-      ready.push(entry.id);
-      continue;
-    }
-    try {
-      const dirUrl = `${base}${entry.id}/${entry.version}/`;
-      const [manifest, wasm] = await Promise.all([
-        ports.fetchBytes(`${dirUrl}plugin.manifest.json`),
-        ports.fetchBytes(`${dirUrl}${entry.id}-${entry.version}.wasm`),
-      ]);
+    for (const entry of releases) {
       if (
-        manifest.byteLength > MANIFEST_MAX_BYTES ||
-        wasm.byteLength > WASM_MAX_BYTES ||
-        sha256Hex(manifest) !== entry.manifest_sha256 ||
-        sha256Hex(wasm) !== entry.wasm_sha256 ||
-        !verifyRelease(entry, manifest, wasm, {
-          keyId: opts.keyId,
-          publicKey: opts.publicKey,
-          verify: ports.ed25519Verify,
-        })
+        pair !== null &&
+        pair.id === id &&
+        pair.wasmSha256 === entry.wasm_sha256 &&
+        pair.manifestSha256 === entry.manifest_sha256
       ) {
-        continue;
+        ready.push(id);
+        break;
       }
-      // One self-describing document — a single atomic write per
-      // plugin, so no torn pair can ever strand a provider.
-      await ports.write(
-        `${dir}/${entry.id}.json`,
-        utf8Encode(
-          JSON.stringify({
-            id: entry.id,
-            version: entry.version,
-            abi: entry.abi,
-            wasm_sha256: entry.wasm_sha256,
-            manifest_sha256: entry.manifest_sha256,
-            signature: entry.signature,
-            manifest: utf8Decode(manifest),
-            wasm: b64Encode(wasm),
-          }),
-        ),
-      );
-      ready.push(entry.id);
-    } catch {
-      // Per-plugin failure keeps last-known-good on disk.
+      try {
+        const dirUrl = `${base}${entry.id}/${entry.version}/`;
+        const [manifest, wasm] = await Promise.all([
+          ports.fetchBytes(`${dirUrl}plugin.manifest.json`),
+          ports.fetchBytes(`${dirUrl}${entry.id}-${entry.version}.wasm`),
+        ]);
+        if (
+          manifest.byteLength > MANIFEST_MAX_BYTES ||
+          wasm.byteLength > WASM_MAX_BYTES ||
+          sha256Hex(manifest) !== entry.manifest_sha256 ||
+          sha256Hex(wasm) !== entry.wasm_sha256 ||
+          !verifyRelease(entry, manifest, wasm, {
+            keyId: opts.keyId,
+            publicKey: opts.publicKey,
+            verify: ports.ed25519Verify,
+          })
+        ) {
+          continue;
+        }
+        // One self-describing document — a single atomic write per
+        // plugin, so no torn pair can ever strand a provider.
+        await ports.write(
+          `${dir}/${id}.json`,
+          utf8Encode(
+            JSON.stringify({
+              id: entry.id,
+              version: entry.version,
+              abi: entry.abi,
+              wasm_sha256: entry.wasm_sha256,
+              manifest_sha256: entry.manifest_sha256,
+              signature: entry.signature,
+              manifest: utf8Decode(manifest),
+              wasm: b64Encode(wasm),
+            }),
+          ),
+        );
+        ready.push(id);
+        break;
+      } catch {
+        // A failed fetch tries the older abi line next — per-plugin
+        // failure keeps last-known-good on disk either way.
+      }
     }
   }
   // Sweep artifact-shaped files the feed does not name (legacy
@@ -493,5 +536,5 @@ export async function syncPluginFeed(opts: {
   if (compatible.length > 0 && ready.length === 0) {
     throw appError('transient', 'no feed plugins became ready');
   }
-  return { ready, compatible };
+  return { ready, compatible, current: [...current].sort() };
 }

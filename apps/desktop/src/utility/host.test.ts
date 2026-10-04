@@ -35,7 +35,7 @@ export async function run(): Promise<void> {
     env: {},
     resourcesPath: '/r',
     repoRoot: '/repo',
-    feedSync: async () => ({ ready: [], compatible: [] }),
+    feedSync: async () => ({ ready: [], compatible: [], current: [] }),
     require: () => {
       throw new Error('unreachable');
     },
@@ -236,7 +236,7 @@ export async function run(): Promise<void> {
         AUQW_NODE_BINDINGS: '/repo/target/debug/libauqw_node_bindings.so',
         AUQW_USER_DATA: '/ud',
       },
-      feedSync: async () => ({ ready: [], compatible: [] }),
+      feedSync: async () => ({ ready: [], compatible: [], current: [] }),
       require: (path) => {
         assertEqual(
           path,
@@ -344,7 +344,7 @@ export async function run(): Promise<void> {
         AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
         AUQW_USER_DATA: '/ud',
       },
-      feedSync: async () => ({ ready: [], compatible: [] }),
+      feedSync: async () => ({ ready: [], compatible: [], current: [] }),
       require: () => userModule,
       fs: userFs,
     });
@@ -502,7 +502,7 @@ export async function run(): Promise<void> {
         AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
         AUQW_USER_DATA: '/ud',
       },
-      feedSync: async () => ({ ready: [], compatible: [] }),
+      feedSync: async () => ({ ready: [], compatible: [], current: [] }),
       require: () => revokeModule,
       fs: revokeFs,
     });
@@ -642,7 +642,7 @@ export async function run(): Promise<void> {
           feedCalls += 1;
           return feedCalls < 3
             ? Promise.reject(new Error('feed down'))
-            : Promise.resolve({ ready: [], compatible: [] });
+            : Promise.resolve({ ready: [], compatible: [], current: [] });
         },
         pairVerifier: () => null,
         require: () => fakeModule,
@@ -687,7 +687,7 @@ export async function run(): Promise<void> {
         },
         feedSync: async () => {
           reserveFeeds += 1;
-          return { ready: ['x'], compatible: ['foo-music', 'x'] };
+          return { ready: ['x'], compatible: ['foo-music', 'x'], current: ['foo-music', 'x'] };
         },
         pairVerifier: () => signedFooPair,
         require: () =>
@@ -742,6 +742,7 @@ export async function run(): Promise<void> {
         feedSync: async () => ({
           ready: ['x'],
           compatible: ['foo-music', 'x'],
+          current: ['foo-music', 'x'],
         }),
         pairVerifier: () => signedFooPair,
         require: () =>
@@ -830,6 +831,7 @@ export async function run(): Promise<void> {
         feedSync: async () => ({
           ready: ['x'],
           compatible: ['foo-music', 'x'],
+          current: ['foo-music', 'x'],
         }),
         pairVerifier: () => signedFooPair,
         require: () =>
@@ -899,7 +901,7 @@ export async function run(): Promise<void> {
           AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
           AUQW_USER_DATA: '/ud',
         },
-        feedSync: async () => ({ ready: ['x'], compatible: ['x'] }),
+        feedSync: async () => ({ ready: ['x'], compatible: ['x'], current: ['x'] }),
         pairVerifier: () => null,
         require: () =>
           otaHost(
@@ -941,7 +943,7 @@ export async function run(): Promise<void> {
           AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
           AUQW_USER_DATA: '/ud',
         },
-        feedSync: async () => ({ ready: [], compatible: [] }),
+        feedSync: async () => ({ ready: [], compatible: [], current: [] }),
         require: () => fakeModule,
         fs: {
           exists: (p) => approveFiles.has(p) || p === userDirPath,
@@ -1013,7 +1015,7 @@ export async function run(): Promise<void> {
           feedCalls += 1;
           // foo-music is not compatible this release — the consume
           // pass must drop it from the memo it swaps in.
-          return { ready: [], compatible: [] };
+          return { ready: [], compatible: [], current: [] };
         },
         pairVerifier: () => signedFooPair,
         require: () =>
@@ -1056,7 +1058,7 @@ export async function run(): Promise<void> {
     let requireCalls = 0;
     const retryRuntime = createHostRuntime({
       env: { AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node' },
-      feedSync: async () => ({ ready: [], compatible: [] }),
+      feedSync: async () => ({ ready: [], compatible: [], current: [] }),
       require: () => {
         requireCalls++;
         if (requireCalls === 1) {

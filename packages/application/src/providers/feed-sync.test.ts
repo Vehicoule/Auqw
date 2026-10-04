@@ -273,7 +273,7 @@ export async function run(): Promise<void> {
       utf8Encode(JSON.stringify(feed)),
     );
     const { ports, fetched } = fakePorts({ files, fetch: urls });
-    const { ready } = await syncPluginFeed({
+    const { ready, compatible, current } = await syncPluginFeed({
       feedUrl: 'https://feed.test/releases/feed.json',
       keyId: KEY_ID,
       publicKey: PUB,
@@ -281,6 +281,9 @@ export async function run(): Promise<void> {
       ports,
     });
     assertDeepEqualSorted(ready, ['alpha']);
+    assertDeepEqualSorted(compatible, ['alpha']);
+    // `current` keeps every id the feed names.
+    assertDeepEqualSorted(current, ['alpha', 'next']);
     assert(
       files.has('/plug/next.json'),
       'unsupported-abi pair survives the sweep',
@@ -289,6 +292,83 @@ export async function run(): Promise<void> {
       !fetched.some((u) => u.includes('/next/')),
       'unsupported abi is never downloaded',
     );
+  }
+
+  // A multi-abi feed lists one release per line: the sync picks the
+  // newest release it can serve, and a broken newest line falls back
+  // to the older one rather than stranding the plugin.
+  {
+    const WASM_NEXT = utf8Encode('wasm-next-bytes');
+    const MANIFEST_NEXT = utf8Encode('{"id":"alpha","v":2}');
+    const multi = {
+      keyId: KEY_ID,
+      plugins: [
+        { ...entry('alpha', '0.2.0', WASM_A, MANIFEST_A), abi: '0.1.0' },
+        { ...entry('alpha', '0.3.0', WASM_NEXT, MANIFEST_NEXT), abi: '0.1.1' },
+      ],
+    };
+    const base = 'https://feed.test/releases';
+    const urls = new Map<string, Uint8Array>([
+      [`${base}/feed.json`, utf8Encode(JSON.stringify(multi))],
+      [`${base}/alpha/0.3.0/plugin.manifest.json`, MANIFEST_NEXT],
+      [`${base}/alpha/0.3.0/alpha-0.3.0.wasm`, WASM_NEXT],
+      [`${base}/alpha/0.2.0/plugin.manifest.json`, MANIFEST_A],
+      [`${base}/alpha/0.2.0/alpha-0.2.0.wasm`, WASM_A],
+    ]);
+    {
+      const { ports, files } = fakePorts({ fetch: urls });
+      const { ready } = await syncPluginFeed({
+        feedUrl: `${base}/feed.json`,
+        keyId: KEY_ID,
+        publicKey: PUB,
+        dir: '/plug',
+        ports,
+      });
+      assertDeepEqual(ready, ['alpha']);
+      const pair = JSON.parse(
+        utf8Decode(files.get('/plug/alpha.json') ?? new Uint8Array()),
+      ) as Record<string, unknown>;
+      assertEqual(pair['version'], '0.3.0', 'newest servable line wins');
+      assertEqual(pair['abi'], '0.1.1');
+    }
+    {
+      // The 0.1.1 artifacts 404 — the older abi line still answers.
+      const flaky = new Map(urls);
+      flaky.delete(`${base}/alpha/0.3.0/alpha-0.3.0.wasm`);
+      const { ports, files } = fakePorts({ fetch: flaky });
+      const { ready } = await syncPluginFeed({
+        feedUrl: `${base}/feed.json`,
+        keyId: KEY_ID,
+        publicKey: PUB,
+        dir: '/plug',
+        ports,
+      });
+      assertDeepEqual(ready, ['alpha'], 'older abi line is the fallback');
+      const pair = JSON.parse(
+        utf8Decode(files.get('/plug/alpha.json') ?? new Uint8Array()),
+      ) as Record<string, unknown>;
+      assertEqual(pair['version'], '0.2.0');
+      assertEqual(pair['abi'], '0.1.0');
+    }
+    {
+      // An installed pair on the older line upgrades to the newest.
+      const files = new Map([
+        ['/plug/alpha.json', utf8Encode(pairDoc('alpha', '0.2.0', WASM_A, MANIFEST_A))],
+      ]);
+      const { ports } = fakePorts({ files, fetch: urls });
+      const { ready } = await syncPluginFeed({
+        feedUrl: `${base}/feed.json`,
+        keyId: KEY_ID,
+        publicKey: PUB,
+        dir: '/plug',
+        ports,
+      });
+      assertDeepEqual(ready, ['alpha']);
+      const pair = JSON.parse(
+        utf8Decode(files.get('/plug/alpha.json') ?? new Uint8Array()),
+      ) as Record<string, unknown>;
+      assertEqual(pair['version'], '0.3.0', 'installed pair upgrades');
+    }
   }
 
   // Feed-level failure throws — the caller keeps the whole cache.
@@ -323,7 +403,17 @@ export async function run(): Promise<void> {
         ],
       }),
     );
-    assert(e === 'invalid-response');
+    assert(e === 'invalid-response', 'duplicate (id, abi) rejected');
+    const multiAbi = tryParse(
+      JSON.stringify({
+        keyId: KEY_ID,
+        plugins: [
+          { ...entry('alpha', '0.2.0', WASM_A, MANIFEST_A), abi: '0.1.0' },
+          { ...entry('alpha', '0.3.0', WASM_B, MANIFEST_B), abi: '0.1.1' },
+        ],
+      }),
+    );
+    assert(multiAbi === 'ok', 'one id across distinct abis parses');
     e = tryParse('{"keyId":"x","plugins":[{"id":"Alpha"}]}');
     assert(e === 'invalid-response');
     e = tryParse('not json');

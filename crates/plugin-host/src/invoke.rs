@@ -845,7 +845,14 @@ async fn host_request_step(
         // A kind this host predates gets a reply, not an abort — a
         // guest built on a newer SDK can see `unsupported` and fall
         // back instead of losing the whole invocation.
-        _ => return host_error(id, "unsupported", "unsupported host_request kind"),
+        Some(_) => return host_error(id, "unsupported", "unsupported host_request kind"),
+        // A missing or non-string `kind` isn't an unknown kind —
+        // it's a malformed request, and malformed messages die.
+        None => {
+            return Err(InvokeError::InvalidMessage(
+                "host_request.kind missing".into(),
+            ))
+        }
     };
     match authorized {
         Authorized::Denied(reply) => Ok(reply),

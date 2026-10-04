@@ -659,6 +659,34 @@ async fn unknown_kind_answers_unsupported() {
     assert_eq!(attempt.http_calls, 0);
 }
 
+/// `unsupported` is for kinds the host doesn't know — a missing or
+/// non-string `kind` is a malformed message and aborts.
+#[tokio::test]
+async fn malformed_kind_still_aborts() {
+    for bad in [
+        r#"{"type":"host_request","id":1,"kind":null,"payload":{}}"#,
+        r#"{"type":"host_request","id":1,"payload":{}}"#,
+        r#"{"type":"host_request","id":1,"kind":7,"payload":{}}"#,
+    ] {
+        let wasm = ok(wat::parse_str(raw_wat(bad)));
+        let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+        let (http, _calls) = CannedHttp::new();
+        let Invocation { result, .. } = invoke(
+            &plugin,
+            "playback.resolve",
+            serde_json::json!({}),
+            &default_budgets(),
+            CancellationToken::new(),
+            svc(&http, None),
+        )
+        .await;
+        assert!(
+            matches!(err(result), InvokeError::InvalidMessage(_)),
+            "malformed kind must abort: {bad}"
+        );
+    }
+}
+
 // ---------- load-time rejection ----------
 
 #[test]

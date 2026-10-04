@@ -311,7 +311,11 @@ function userDirSignature(dir: string, fs: FsLike): string {
 async function defaultFeedSync(
   dir: string,
   feedUrl: string,
-): Promise<{ ready: readonly string[]; compatible: readonly string[] }> {
+): Promise<{
+  ready: readonly string[];
+  compatible: readonly string[];
+  current: readonly string[];
+}> {
   const publicKey = createPublicKey({
     key: Buffer.concat([ED25519_SPKI_DER_PREFIX, pluginPublicKey()]),
     format: 'der',
@@ -373,6 +377,7 @@ export function createHostRuntime(opts: {
     | ((dir: string) => Promise<{
         ready: readonly string[];
         compatible: readonly string[];
+        current: readonly string[];
       }>)
     | undefined;
   /**
@@ -449,10 +454,12 @@ export function createHostRuntime(opts: {
   let deferredFeedSync: Promise<{
     ready: readonly string[];
     compatible: readonly string[];
+    current: readonly string[];
   }> | null = null;
   let deferredFeedKick: (() => Promise<{
     ready: readonly string[];
     compatible: readonly string[];
+    current: readonly string[];
   }>) | null = null;
   // Every scan serializes through one chain — registry side-effects
   // (loads, revocations) can never interleave between a deferred
@@ -647,7 +654,13 @@ export function createHostRuntime(opts: {
       // authority on which plugin ids may load while it is reachable;
       // an unreachable feed leaves the whole cache usable as
       // last-known-good.
-      let synced: { ready: readonly string[]; compatible: readonly string[] } | undefined;
+      let synced:
+        | {
+            ready: readonly string[];
+            compatible: readonly string[];
+            current: readonly string[];
+          }
+        | undefined;
       // True while this pass booted off the cache with the feed
       // still in flight — same semantics as an unreachable feed.
       let feedPending = false;
@@ -711,11 +724,17 @@ export function createHostRuntime(opts: {
             verify,
           });
         });
-      // Feed-claimed identities: every signed pair that passed the
-      // compatible gate reserves its id whether or not the load then
+      // Feed-claimed identities: every signed pair the feed still
+      // names reserves its id whether or not the load then
       // succeeded — a failed `loadPlugin` must not free a signed id
-      // for an unsigned pair to answer under.
+      // for an unsigned pair to answer under. `current` (not
+      // `compatible`) is the gate: a feed entry whose abi this build
+      // can't serve keeps its installed pair loadable.
       const signedIds = new Set<string>();
+      // Signed loads counting toward the retry gate — a preserved
+      // pair for an abi-unservable feed entry must not mask a
+      // compatible provider that failed `loadPlugin`.
+      let compatibleLoaded = 0;
       for (const name of fs.list(cacheDir).sort()) {
         if (!name.endsWith('.json')) {
           continue;
@@ -726,7 +745,7 @@ export function createHostRuntime(opts: {
           );
           if (
             pair === null ||
-            (synced !== undefined && !synced.compatible.includes(pair.id))
+            (synced !== undefined && !synced.current.includes(pair.id))
           ) {
             continue;
           }
@@ -748,6 +767,9 @@ export function createHostRuntime(opts: {
           // guest in the host's id-keyed registry — the stale cache
           // entry can no longer advertise it without reloading the
           // approved user bytes first.
+          if (synced?.compatible.includes(pair.id) === true) {
+            compatibleLoaded += 1;
+          }
           if (lastUserProviderIds.includes(fields.providerId)) {
             displacedUserIds.add(fields.providerId);
           }
@@ -825,7 +847,7 @@ export function createHostRuntime(opts: {
         lastLoadIncomplete =
           synced !== undefined &&
           (synced.ready.length < synced.compatible.length ||
-            signedLoaded < synced.compatible.length);
+            compatibleLoaded < synced.compatible.length);
         return loaded;
       }
       for (const name of fs.list(userDir).sort()) {
@@ -915,14 +937,15 @@ export function createHostRuntime(opts: {
       // The retry gate stays armed while the feed's compatible set is
       // not fully available — either because a listed plugin is below
       // its feed release (stale LKG loads, ready tracks currency) or
-      // because a current pair failed to load into the host (loadPlugin
-      // rejects skip it, so loaded counts only compatible pairs: dropped
-      // ids were filtered above). The next `ready()` re-syncs and the
-      // host's id-keyed insert hot-swaps the pair.
+      // because a current pair failed to load into the host (only
+      // loads of compatible ids count; a preserved abi-unservable
+      // pair never masks a compatible provider's failure). The next
+      // `ready()` re-syncs and the host's id-keyed insert hot-swaps
+      // the pair.
       lastLoadIncomplete =
         synced !== undefined &&
         (synced.ready.length < synced.compatible.length ||
-          signedLoaded < synced.compatible.length);
+          compatibleLoaded < synced.compatible.length);
       return loaded;
     }
     const manifests = fs
