@@ -1272,11 +1272,14 @@ export function StageSheet({
     );
     return {
       opacity: stageContentAlpha(progress.value),
-      // The grow's pivot sits on the sheet's top edge — a center
-      // pivot shrank the full-bleed artwork off the top during the
-      // morph and read as a black gap closing as the sheet rose.
+      // scaleY only, pivot on the sheet's top edge: a uniform scale
+      // shrinks the content's width too, which read as dark side
+      // strips closing over the leaf backing as the sheet rose; a
+      // center pivot did the same at the top. The vertical squish's
+      // exposed edge is the content's bottom — off-screen through the
+      // whole reveal window, invisible.
       transformOrigin: '50% 0%',
-      transform: [{ scale: 0.96 + 0.04 * p }],
+      transform: [{ scaleY: 0.96 + 0.04 * p }],
       borderTopLeftRadius: radius,
       borderTopRightRadius: radius,
     };

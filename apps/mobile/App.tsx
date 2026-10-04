@@ -2209,9 +2209,9 @@ function Main({
       <SearchScreen
         state={searchModel}
         query={query}
-        // The floating loupe occupies a 44px slot under the inset —
-        // reserve it so it never covers the recents/results heading.
-        topInset={topInset + 52}
+        // The screen adds the floating loupe's reserve itself —
+        // pinned rows pad the right edge instead of a dead top band.
+        topInset={topInset}
         onQueryChange={setQuery}
         onSubmit={submitSearch}
         onCancel={cancelSearch}
