@@ -21,6 +21,7 @@ import {
 export type TransferScreenProps = TransferScreenHandlers & {
   readonly model: TransferModel;
   readonly topInset?: number | undefined;
+  readonly bottomClearance?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
 };
 
@@ -35,6 +36,7 @@ export type TransferScreenProps = TransferScreenHandlers & {
 export function TransferScreen({
   model,
   topInset = 0,
+  bottomClearance = 0,
   scrollEnabled = true,
   onBack,
   onExport,
@@ -77,10 +79,7 @@ export function TransferScreen({
         scrollEnabled={scrollEnabled}
         contentContainerStyle={{
           paddingHorizontal: theme.spacing.sm,
-          paddingBottom:
-            theme.spacing.xxl +
-            theme.sizes.miniPlayer +
-            theme.spacing.md,
+          paddingBottom: theme.spacing.xxl + bottomClearance,
           gap: theme.spacing.lg,
         }}
       >

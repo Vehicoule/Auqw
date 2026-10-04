@@ -11,6 +11,7 @@ import { t } from '@auqw/ui-shared';
 export type SyncScreenProps = {
   readonly model: SyncModel;
   readonly topInset?: number | undefined;
+  readonly bottomClearance?: number | undefined;
   readonly onBack?: (() => void) | undefined;
   /**
    * Typed-code pair — `host:port` is the manual endpoint the spec's
@@ -568,6 +569,7 @@ function NearbyRow({
 export function SyncScreen({
   model,
   topInset = 0,
+  bottomClearance = 0,
   onBack,
   onPairCode,
   onPairPayload,
@@ -591,10 +593,7 @@ export function SyncScreen({
       style={{ flex: 1, backgroundColor: theme.colors.canvas }}
       contentContainerStyle={{
         paddingTop: topInset,
-        paddingBottom:
-          theme.spacing.xxl +
-          theme.sizes.miniPlayer +
-          theme.spacing.md,
+        paddingBottom: theme.spacing.xxl + bottomClearance,
       }}
     >
       <View
