@@ -61,6 +61,7 @@ import type {
   SqliteConnection,
   SqliteDriver,
   SqlRow,
+  SqlStatement,
   SqlValue,
 } from './driver.ts';
 import { enqueueDriverTransaction } from './transaction-queue.ts';
@@ -569,8 +570,14 @@ export class SqliteStorage implements StoragePort {
         // post-import state, so a wholesale transaction replay (a
         // dead-handle retry whose COMMIT had already landed) is a
         // no-op instead of incrementing the revision a second time.
-        await conn.execute(
-          `UPDATE queue_state
+        // Writes collect into a plan flushed by one executeAll — on
+        // the desktop driver each conn.execute is its own IPC round
+        // trip (storage:execute) while executeAll ships the plan as
+        // 2048-statement execMany chunks, so an unbuffered import pays
+        // one IPC per row.
+        const writes: SqlStatement[] = [];
+        writes.push({
+          sql: `UPDATE queue_state
            SET revision = revision + 1, current_occurrence_id = NULL,
                position_ms = 0, mode = 'stopped', blocked_error_json = NULL,
                origin_json = NULL
@@ -581,9 +588,8 @@ export class SqliteStorage implements StoragePort {
                   OR blocked_error_json IS NOT NULL
                   OR origin_json IS NOT NULL
                   OR EXISTS (SELECT 1 FROM queue_occurrences))`,
-          undefined,
-          signal,
-        );
+          params: [],
+        });
         for (const statement of [
           'DELETE FROM queue_occurrences',
           'DELETE FROM lyrics_cache',
@@ -602,14 +608,13 @@ export class SqliteStorage implements StoragePort {
           'DELETE FROM recordings',
           'DELETE FROM settings',
         ]) {
-          await conn.execute(statement, undefined, signal);
+          writes.push({ sql: statement, params: [] });
         }
-        await conn.execute(
-          `INSERT OR IGNORE INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
+        writes.push({
+          sql: `INSERT OR IGNORE INTO queue_state (id, revision, current_occurrence_id, position_ms, mode, blocked_error_json)
            VALUES (1, 0, NULL, 0, 'stopped', NULL)`,
-          undefined,
-          signal,
-        );
+          params: [],
+        });
         this.#check(signal);
         const refsByRecording = new Map<string, SourceRef[]>();
         for (const row of doc.sourceRefs) {
@@ -624,10 +629,10 @@ export class SqliteStorage implements StoragePort {
           mappingsByRecording.set(row.recordingId, list);
         }
         for (const recording of doc.recordings) {
-          await conn.execute(
-            `INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json, provenance)
+          writes.push({
+            sql: `INSERT INTO recordings (id, title, artist, album, duration_ms, release_year, artwork_json, explicit, genre, isrc, version_labels_json, provenance)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
+            params: [
               recording.id,
               recording.title,
               recording.artist,
@@ -646,23 +651,21 @@ export class SqliteStorage implements StoragePort {
               // Pre-slice-3 exports carry no provenance — 'provider'.
               recording.provenance ?? 'provider',
             ],
-            signal,
-          );
+          });
           const refs = refsByRecording.get(recording.id) ?? [];
           for (const [ordinal, ref] of refs.entries()) {
-            await conn.execute(
-              `INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
+            writes.push({
+              sql: `INSERT INTO source_refs (recording_id, ordinal, provider, kind, source_id)
                VALUES (?, ?, ?, ?, ?)`,
-              [recording.id, ordinal, ref.provider, ref.kind, ref.id],
-              signal,
-            );
+              params: [recording.id, ordinal, ref.provider, ref.kind, ref.id],
+            });
           }
           const mappings = mappingsByRecording.get(recording.id) ?? [];
           for (const [ordinal, mapping] of mappings.entries()) {
-            await conn.execute(
-              `INSERT INTO mappings (recording_id, ordinal, provider, kind, source_id, status, matched_at_ms, evidence_json)
+            writes.push({
+              sql: `INSERT INTO mappings (recording_id, ordinal, provider, kind, source_id, status, matched_at_ms, evidence_json)
                VALUES (?, ?, ?, 'track', ?, ?, ?, ?)`,
-              [
+              params: [
                 recording.id,
                 ordinal,
                 mapping.ref.provider,
@@ -671,15 +674,14 @@ export class SqliteStorage implements StoragePort {
                 mapping.matchedAtMs,
                 JSON.stringify(mapping.evidence),
               ],
-              signal,
-            );
+            });
           }
         }
         for (const entity of doc.entities) {
-          await conn.execute(
-            `INSERT INTO entities (entity_id, kind, title, artist_name, artwork_json, created_ms)
+          writes.push({
+            sql: `INSERT INTO entities (entity_id, kind, title, artist_name, artwork_json, created_ms)
              VALUES (?, ?, ?, ?, ?, ?)`,
-            [
+            params: [
               entity.entityId,
               entity.kind,
               entity.title,
@@ -689,35 +691,32 @@ export class SqliteStorage implements StoragePort {
                 : JSON.stringify(entity.artwork),
               entity.createdMs,
             ],
-            signal,
-          );
+          });
         }
         for (const ref of doc.entitySourceRefs) {
-          await conn.execute(
-            `INSERT INTO entity_source_refs (entity_id, provider, ref_json)
+          writes.push({
+            sql: `INSERT INTO entity_source_refs (entity_id, provider, ref_json)
              VALUES (?, ?, ?)`,
-            [ref.entityId, ref.provider, JSON.stringify(ref.ref)],
-            signal,
-          );
+            params: [ref.entityId, ref.provider, JSON.stringify(ref.ref)],
+          });
         }
         for (const playlist of doc.playlists) {
-          await conn.execute(
-            `INSERT INTO playlists (playlist_id, name, created_ms, updated_ms)
+          writes.push({
+            sql: `INSERT INTO playlists (playlist_id, name, created_ms, updated_ms)
              VALUES (?, ?, ?, ?)`,
-            [
+            params: [
               playlist.playlistId,
               playlist.name,
               playlist.createdMs,
               playlist.updatedMs,
             ],
-            signal,
-          );
+          });
         }
         for (const entry of doc.playlistEntries) {
-          await conn.execute(
-            `INSERT INTO playlist_entries (entry_id, playlist_id, recording_id, position, selected_ref_json, added_ms)
+          writes.push({
+            sql: `INSERT INTO playlist_entries (entry_id, playlist_id, recording_id, position, selected_ref_json, added_ms)
              VALUES (?, ?, ?, ?, ?, ?)`,
-            [
+            params: [
               entry.entryId,
               entry.playlistId,
               entry.recordingId,
@@ -727,36 +726,33 @@ export class SqliteStorage implements StoragePort {
                 : JSON.stringify(entry.selectedRef),
               entry.addedMs,
             ],
-            signal,
-          );
+          });
         }
         for (const like of doc.likes) {
-          await conn.execute(
-            `INSERT INTO likes (entity_kind, target_id, liked_ms)
+          writes.push({
+            sql: `INSERT INTO likes (entity_kind, target_id, liked_ms)
              VALUES (?, ?, ?)`,
-            [like.entityKind, like.targetId, like.likedAtMs],
-            signal,
-          );
+            params: [like.entityKind, like.targetId, like.likedAtMs],
+          });
         }
         for (const event of doc.playHistory) {
-          await conn.execute(
-            `INSERT INTO play_history (event_id, recording_id, occurrence_id, played_ms, listened_ms)
+          writes.push({
+            sql: `INSERT INTO play_history (event_id, recording_id, occurrence_id, played_ms, listened_ms)
              VALUES (?, ?, ?, ?, ?)`,
-            [
+            params: [
               event.eventId,
               event.recordingId,
               event.occurrenceId,
               event.playedMs,
               event.listenedMs,
             ],
-            signal,
-          );
+          });
         }
         for (const count of doc.playCounts) {
-          await conn.execute(
-            `INSERT INTO play_counts (recording_id, count, last_ms, local_count, logged_remote, logged_ours)
+          writes.push({
+            sql: `INSERT INTO play_counts (recording_id, count, last_ms, local_count, logged_remote, logged_ours)
              VALUES (?, ?, ?, ?, ?, ?)`,
-            [
+            params: [
               count.recordingId,
               count.count,
               count.lastMs,
@@ -764,14 +760,13 @@ export class SqliteStorage implements StoragePort {
               count.loggedRemote ?? null,
               count.loggedOurs ?? null,
             ],
-            signal,
-          );
+          });
         }
         for (const review of doc.matchReviews) {
-          await conn.execute(
-            `INSERT INTO match_reviews (review_id, recording_id, candidates_json, status, resolution_json, created_ms, resolved_ms)
+          writes.push({
+            sql: `INSERT INTO match_reviews (review_id, recording_id, candidates_json, status, resolution_json, created_ms, resolved_ms)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [
+            params: [
               review.reviewId,
               review.recordingId,
               JSON.stringify(review.candidates),
@@ -782,13 +777,12 @@ export class SqliteStorage implements StoragePort {
               review.createdMs,
               review.resolvedMs,
             ],
-            signal,
-          );
+          });
         }
-        await conn.execute(
-          `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered, language)
+        writes.push({
+          sql: `INSERT INTO settings (id, catalog_provider, playback_provider, storefront, quality_kbps, theme, prefetch, lyrics_provider, radio_provider, artwork_cache_bytes, download_metered, language)
            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
+          params: [
             doc.settings.catalogProvider,
             doc.settings.playbackProvider,
             doc.settings.storefront,
@@ -801,8 +795,8 @@ export class SqliteStorage implements StoragePort {
             doc.settings.downloadMetered === true ? 1 : 0,
             doc.settings.language ?? null,
           ],
-          signal,
-        );
+        });
+        await conn.executeAll(writes, signal);
         this.#check(signal);
         return ok(undefined);
       }, signal);
