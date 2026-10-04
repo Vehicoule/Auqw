@@ -331,6 +331,35 @@ fn probe_reply_wat(first: &str, on_error: &str, ok: &str) -> String {
     )
 }
 
+/// Same probe as `probe_reply_wat` but the discriminator is byte 18 —
+/// the first letter of the `host_error` kind under serde_json key
+/// order (`{"error":{"kind":"<kind>"…`). 'u' = `unsupported`.
+fn probe_kind_wat(first: &str, on_unsupported: &str, ok: &str) -> String {
+    format!(
+        "(module\n  (memory (export \"memory\") 1)\n  \
+         (global $n (mut i32) (i32.const 0))\n  \
+         (func (export \"alloc\") (param i32) (result i32) (i32.const 1024))\n  \
+         (func (export \"handle\") (param i32 i32) (result i64)\n    \
+         (global.set $n (i32.add (global.get $n) (i32.const 1)))\n    \
+         (select\n      \
+         (i64.const {})\n      \
+         (select\n        \
+         (i64.const {})\n        \
+         (i64.const {})\n        \
+         (i32.eq (i32.load8_u offset=18 (local.get 0)) (i32.const 117)))\n      \
+         (i32.le_u (global.get $n) (i32.const 1))))\n  \
+         (data (i32.const 16384) \"{}\")\n  \
+         (data (i32.const 49152) \"{}\")\n  \
+         (data (i32.const 57344) \"{}\"))",
+        (16384u64 << 32) | first.len() as u64,
+        (49152u64 << 32) | on_unsupported.len() as u64,
+        (57344u64 << 32) | ok.len() as u64,
+        first.replace('"', "\\\""),
+        on_unsupported.replace('"', "\\\""),
+        ok.replace('"', "\\\""),
+    )
+}
+
 /// Guest that emits `raw` (a literal step message) as its output.
 fn raw_wat(raw: &str) -> String {
     format!(
@@ -603,6 +632,33 @@ async fn http_batch_fatal_still_accounts_siblings() {
     assert_eq!(attempt.bytes, 50 + 32);
 }
 
+/// A `host_request` kind this host predates is a `host_error`
+/// `unsupported` reply — not an invocation abort — so a guest built
+/// on a newer SDK can observe it and fall back.
+#[tokio::test]
+async fn unknown_kind_answers_unsupported() {
+    let wasm = ok(wat::parse_str(probe_kind_wat(
+        r#"{"type":"host_request","id":1,"kind":"future_kind","payload":{}}"#,
+        r#"{"type":"done","result":{"saw":"unsupported"}}"#,
+        r#"{"type":"done","result":{"saw":"other"}}"#,
+    )));
+    let plugin = ok(load(&wasm, manifest_for(&wasm, &[]), &default_budgets()));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert_eq!(ok(result), serde_json::json!({"saw": "unsupported"}));
+    assert_eq!(attempt.steps, 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(attempt.http_calls, 0);
+}
+
 // ---------- load-time rejection ----------
 
 #[test]
@@ -657,12 +713,16 @@ fn load_rejects_digest_mismatch() {
 
 // ---------- ABI version isolation ----------
 
-/// The one shipped ABI is `0.1.0`; anything else — legacy tiers or a
-/// version never released — is a manifest rejection, not an implicit
-/// member of the newest capability set.
+/// The host serves every ABI sharing the 0.1.x protocol line;
+/// anything else — legacy tiers or a version never released — is a
+/// manifest rejection, not an implicit member of the newest
+/// capability set.
 #[test]
 fn manifest_rejects_noncanonical_abi() {
     let wasm = ok(wat::parse_str(DONE_WAT));
+    for abi in ["0.1.0", "0.1.1"] {
+        ok(Manifest::from_json(&manifest_text(&wasm, abi, &[])));
+    }
     for abi in ["0.2.0", "0.3.0", "0.9.9"] {
         let e = err(Manifest::from_json(&manifest_text(&wasm, abi, &[])));
         assert!(matches!(e, ManifestError::InvalidField(_)), "{abi}");

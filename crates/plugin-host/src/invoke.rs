@@ -23,7 +23,7 @@ use crate::kv::{MAX_KV_KEY_BYTES, MAX_KV_NAMESPACE_BYTES, MAX_KV_VALUE_BYTES};
 use crate::manifest::Manifest;
 use crate::redact::{redact_text, redact_url};
 use crate::services::HostServices;
-use crate::ABI_VERSION;
+use crate::{ABI_VERSION, SUPPORTED_ABIS};
 
 /// Largest guest→host step message accepted (1 MiB).
 const MAX_GUEST_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -129,7 +129,7 @@ pub fn load(wasm: &[u8], manifest: Manifest, budgets: &Budgets) -> Result<Loaded
             actual: wasm.len(),
         });
     }
-    if manifest.abi != ABI_VERSION {
+    if !SUPPORTED_ABIS.contains(&manifest.abi.as_str()) {
         return Err(LoadError::AbiMismatch {
             manifest: manifest.abi.clone(),
             host: ABI_VERSION,
@@ -842,11 +842,10 @@ async fn host_request_step(
         Some("http_request") => authorize_http_request(&msg["payload"], id, ctx, &attempt.secrets)?,
         Some("pot_token") => authorize_pot_token(&msg["payload"], id, ctx, &attempt.secrets)?,
         Some("resume") => authorize_resume(&msg["payload"], id, ctx, &attempt.secrets)?,
-        _ => {
-            return Err(InvokeError::InvalidMessage(
-                "unsupported host_request kind".into(),
-            ));
-        }
+        // A kind this host predates gets a reply, not an abort — a
+        // guest built on a newer SDK can see `unsupported` and fall
+        // back instead of losing the whole invocation.
+        _ => return host_error(id, "unsupported", "unsupported host_request kind"),
     };
     match authorized {
         Authorized::Denied(reply) => Ok(reply),

@@ -255,6 +255,42 @@ export async function run(): Promise<void> {
     assert(files.has('/plug/beta.json'), 'lkg survives fetch failure');
   }
 
+  // An abi this build can't serve is skipped for download, but the
+  // installed pair survives the sweep — the feed still names the id.
+  {
+    const files = new Map([
+      ['/plug/alpha.json', utf8Encode(pairDoc('alpha', '0.2.0', WASM_A, MANIFEST_A))],
+      ['/plug/next.json', utf8Encode(pairDoc('next', '0.1.0', WASM_A, MANIFEST_A))],
+    ]);
+    const feed = JSON.parse(FEED_BODY) as {
+      plugins: { id: string; abi: string }[];
+    };
+    feed.plugins = feed.plugins.filter((e) => e.id === 'alpha');
+    feed.plugins.push({ ...entry('next', '0.3.0', WASM_B, MANIFEST_B), abi: '9.9.9' });
+    const urls = feedUrls();
+    urls.set(
+      'https://feed.test/releases/feed.json',
+      utf8Encode(JSON.stringify(feed)),
+    );
+    const { ports, fetched } = fakePorts({ files, fetch: urls });
+    const { ready } = await syncPluginFeed({
+      feedUrl: 'https://feed.test/releases/feed.json',
+      keyId: KEY_ID,
+      publicKey: PUB,
+      dir: '/plug',
+      ports,
+    });
+    assertDeepEqualSorted(ready, ['alpha']);
+    assert(
+      files.has('/plug/next.json'),
+      'unsupported-abi pair survives the sweep',
+    );
+    assert(
+      !fetched.some((u) => u.includes('/next/')),
+      'unsupported abi is never downloaded',
+    );
+  }
+
   // Feed-level failure throws — the caller keeps the whole cache.
   {
     const { ports } = fakePorts({ fetch: new Map() });

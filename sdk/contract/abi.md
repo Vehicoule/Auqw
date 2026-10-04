@@ -1,8 +1,11 @@
 # Plugin ABI v0
 
-Version: `0.1.0` — the one ABI the host loads. The pre-release
-0.2.0/0.3.0 ladder was collapsed into it: every capability, permission, and
-host-request kind below is available under `0.1.0`.
+Version: `0.1.1` — the newest ABI the host loads. The pre-release
+0.2.0/0.3.0 ladder was collapsed into `0.1.0`; `0.1.1` is additive and
+adds only the `http_batch` host request / `http_batch_response` reply.
+The host accepts manifests pinned to `0.1.0` or `0.1.1` — a `0.1.0`
+manifest must never emit `http_batch` (a `0.1.0` host aborts the
+invocation on the unknown kind).
 Defines how the host runs a provider
 plugin guest. Machine-readable message shapes:
 [messages.schema.json](messages.schema.json);
@@ -48,7 +51,7 @@ Rejection rules (v0):
 ## Guest → host step messages (`handle` output)
 
 - `{"type":"host_request","id":<u32>,"kind":"http_request","payload":{"method":"GET|POST","url":"<https url>","headers":[["name","value"],...],"body":"<base64 or null>"}}`
-- `{"type":"host_request","id":<u32>,"kind":"http_batch","payload":{"requests":[<http_request payload>, ... ]}}` — fans 1–8 authorized HTTPS calls out concurrently under one step — the only way a guest fetches in parallel under the one-request-in-flight ABI. Each item passes the identical schema/header/allowlist gates as a standalone `http_request`; a malformed item fails the envelope `invalid-message`, while an unpermitted destination degrades to that item's `permission-denied` without sinking its siblings. Answered `http_batch_response` with per-item results in request order. Budgets mirror the sequential path: one HTTP-call tick per callable item, request bytes charged up front, each call's response cap its even share of the remaining byte budget; a body-too-large/budget/cancel verdict fails the invocation exactly as a sequential call would (completed siblings are still accounted). A host that predates the kind answers `host_error` `unsupported` — guests should fall back to sequential `http_request`s.
+- `{"type":"host_request","id":<u32>,"kind":"http_batch","payload":{"requests":[<http_request payload>, ... ]}}` — fans 1–8 authorized HTTPS calls out concurrently under one step — the only way a guest fetches in parallel under the one-request-in-flight ABI. Each item passes the identical schema/header/allowlist gates as a standalone `http_request`; a malformed item fails the envelope `invalid-message`, while an unpermitted destination degrades to that item's `permission-denied` without sinking its siblings. Answered `http_batch_response` with per-item results in request order. Budgets mirror the sequential path: one HTTP-call tick per callable item, request bytes charged up front, each call's response cap its even share of the remaining byte budget; a body-too-large/budget/cancel verdict fails the invocation exactly as a sequential call would (completed siblings are still accounted). Introduced at ABI `0.1.1` — a `0.1.0` host never sees it (the manifest pin keeps it off old feeds); a ≥`0.1.1` host predating a *future* kind answers `host_error` `unsupported`, so guests should still fall back to sequential `http_request`s on that error.
 - `{"type":"host_request","id":<u32>,"kind":"pot_token","payload":{"content_binding":"<string>"}}` — asks the host to mint a PO token bound to `content_binding` against its configured provider (`POST {provider}/get_pot`, bgutil contract). Requires the `pot-provider` permission. Answered with the provider's `http_response` verbatim, or `host_error` `permission-denied` (permission not declared) / `unsupported` (no provider configured) / `invalid-response` (the provider body exceeds the host's secret-collection caps — refused rather than served only partially masked). The guest never learns the provider URL.
 - `{"type":"host_request","id":<u32>,"kind":"kv_get","payload":{"key":"<string>"}}` — reads this plugin's KV namespace. Requires the `kv` permission. Answered `kv_response` (base64 value, or `null` when absent), or `host_error` `permission-denied`.
 - `{"type":"host_request","id":<u32>,"kind":"kv_set","payload":{"key":"<string>","value":"<base64 or null>"}}` — stages a write into this plugin's KV namespace; `null` deletes. Requires the `kv` permission. Answered `host_ok`, or `host_error` `permission-denied` / `invalid-response` (a size cap would be exceeded; nothing is staged).
@@ -201,9 +204,12 @@ step input, a response id that matches no outstanding request — fails
 }
 ```
 
-`abi` is `0.1.0` — any other value is rejected (the host [unconditionally
+`abi` is `0.1.0` or `0.1.1` — any other value is rejected (the host
+[unconditionally
 rejects](../../crates/plugin-host/src/invoke.rs) a manifest pinning anything
-else). A manifest must declare a non-empty subset of the capabilities
+else). Pin `0.1.1` only when the guest may emit `http_batch`; the pin is
+what keeps an older host's feed from serving the artifact. A manifest
+must declare a non-empty subset of the capabilities
 above (`capabilities: []` is rejected), plus at most the
 `catalog.search.kinds` declaration flag (a manifest value; it names no
 payload of its own and is never an invoke target);

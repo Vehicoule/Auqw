@@ -58,8 +58,16 @@ export type FeedSyncPorts = {
   remove(path: string): Promise<void>;
 };
 
-/** The shipped ABI — manifests pinning anything else never load. */
-export const PLUGIN_ABI = '0.1.0';
+/** The newest ABI this build serves. */
+export const PLUGIN_ABI = '0.1.1';
+
+/**
+ * Manifest `abi` pins this build accepts — every version sharing the
+ * 0.1.x protocol line. A feed entry pinning anything else is skipped
+ * (never downloaded); the installed pair stays on disk so an older
+ * release keeps serving until the app updates.
+ */
+export const PLUGIN_ABIS: ReadonlySet<string> = new Set(['0.1.0', '0.1.1']);
 
 /**
  * Trust root, embedded at build time. `publicKey` is the raw 32-byte
@@ -222,7 +230,7 @@ export function parsePluginPair(
     manifestBytes.byteLength > MANIFEST_MAX_BYTES ||
     sha256Hex(wasmBytes) !== wasmSha ||
     sha256Hex(manifestBytes) !== manifestSha ||
-    abi !== PLUGIN_ABI
+    !PLUGIN_ABIS.has(abi)
   ) {
     return null;
   }
@@ -393,10 +401,13 @@ export async function syncPluginFeed(opts: {
   const compatible: string[] = [];
   const ready: string[] = [];
   for (const entry of feed.plugins) {
-    if (entry.abi !== PLUGIN_ABI) {
+    // The feed still names this id — keep any installed pair alive
+    // even when the offered release's abi is one this build can't
+    // serve (the sweep below only removes what the feed dropped).
+    current.add(entry.id);
+    if (!PLUGIN_ABIS.has(entry.abi)) {
       continue;
     }
-    current.add(entry.id);
     compatible.push(entry.id);
     // Cache hit: the stored pair re-verifies offline (signature +
     // both digests), so cached bytes are never loaded unverified.

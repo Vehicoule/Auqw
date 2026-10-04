@@ -1,4 +1,4 @@
-//! Guest-side SDK over the Auqw plugin step ABI (0.1.0).
+//! Guest-side SDK over the Auqw plugin step ABI (0.1.x).
 //!
 //! A plugin crate writes an ordinary `async` dispatch function and
 //! exports it with [`export_plugin!`]; the shim below inverts the ABI's

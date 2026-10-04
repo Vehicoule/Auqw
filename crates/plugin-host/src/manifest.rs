@@ -12,7 +12,7 @@ pub struct Manifest {
     pub id: String,
     /// Plugin semver version.
     pub version: String,
-    /// ABI version the artifact was built against (`0.1.0`).
+    /// ABI version the artifact was built against (`0.1.0`/`0.1.1`).
     pub abi: String,
     /// Capabilities the plugin declares.
     pub capabilities: Vec<String>,
@@ -94,8 +94,8 @@ impl Manifest {
             "lyrics.synced",
             "radio.seed",
         ];
-        if self.abi != "0.1.0" {
-            return Err(bad("abi must be \"0.1.0\""));
+        if !crate::SUPPORTED_ABIS.contains(&self.abi.as_str()) {
+            return Err(bad("abi outside the versions this host serves"));
         }
         if self
             .capabilities
