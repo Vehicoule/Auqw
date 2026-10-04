@@ -2662,11 +2662,16 @@ function Main({
 
   // A presented SheetScreen can't rise above the floating stage —
   // while one is up the whole stage (pill and panes) hides instead
-  // of parking mid-sheet and swallowing its rows. The hold lags the
-  // mount flag by a dismissal-transition bound: a programmatic close
-  // clears the flag the frame the sheet starts departing, so the
-  // stage stays hidden through the native dismiss animation rather
-  // than resurfacing over its rows mid-slide.
+  // of parking mid-sheet and swallowing its rows. Occlusion tracks
+  // the mount flag LIVE (a sheet mounts in the same commit its flag
+  // sets — a lagged start would let the stage paint above it) and
+  // holds past it only on native, where a programmatic close clears
+  // the flag the frame the sheet starts departing — the hold covers
+  // the native dismiss animation so the stage doesn't resurface over
+  // the departing rows. Gesture/back dismissals clear through
+  // `onDismissed`, which fires after the exit animation ends — they
+  // release immediately, no hold. Web sheets are in-tree overlays
+  // that vanish with the flag; no hold there either.
   const modalSheetUp =
     rowActions !== null ||
     pickerFor !== null ||
@@ -2679,9 +2684,25 @@ function Main({
     authSheetOpen ||
     authClientSheetOpen;
   const [sheetOccluded, setSheetOccluded] = useState(modalSheetUp);
+  // Set inside `onDismissed` before the flag clears — tells the
+  // hold that this flag-down edge already ended the native exit
+  // animation.
+  const nativeSheetDone = useRef(false);
+  const onNativeSheetDismissed = useCallback(
+    (close: () => void) => () => {
+      nativeSheetDone.current = true;
+      close();
+    },
+    [],
+  );
   useEffect(() => {
     if (modalSheetUp) {
       setSheetOccluded(true);
+      return;
+    }
+    if (nativeSheetDone.current) {
+      nativeSheetDone.current = false;
+      setSheetOccluded(false);
       return;
     }
     const t = setTimeout(() => setSheetOccluded(false), SHEET_DISMISS_MS);
@@ -2691,7 +2712,9 @@ function Main({
   const stageSheet = sheetPlayer !== null ? (
         <StageSheet
           player={sheetPlayer}
-          occluded={sheetOccluded}
+          occluded={
+            modalSheetUp || (Platform.OS !== 'web' && sheetOccluded)
+          }
           // No live player = held ended pose — the leaves
           // freeze at the model's retained position rather
           // than resetting on the queue's cleared position.
@@ -2955,7 +2978,7 @@ function Main({
         {rowActions !== null && (
           <SheetScreen
             stackKey="sheet-actions"
-            onDismissed={closeRowActions}
+            onDismissed={onNativeSheetDismissed(closeRowActions)}
           >
             <RowActionsSheet
               title={rowActions.title}
@@ -2969,7 +2992,7 @@ function Main({
         {pickerFor !== null && (
           <SheetScreen
             stackKey="sheet-add-playlist"
-            onDismissed={closePlaylistPicker}
+            onDismissed={onNativeSheetDismissed(closePlaylistPicker)}
           >
             <AddToPlaylistSheet
               playlists={pickerItems}
@@ -2983,7 +3006,7 @@ function Main({
         {providerPicker !== null && (
           <SheetScreen
             stackKey="sheet-provider"
-            onDismissed={closeProviderPicker}
+            onDismissed={onNativeSheetDismissed(closeProviderPicker)}
           >
             <ProviderPickerSheet
               title={providerPicker.title}
@@ -2998,7 +3021,7 @@ function Main({
         {themePickerOpen && (
           <SheetScreen
             stackKey="sheet-theme"
-            onDismissed={closeThemePicker}
+            onDismissed={onNativeSheetDismissed(closeThemePicker)}
           >
             <ThemePickerSheet
               title={t('settings.theme')}
@@ -3013,7 +3036,7 @@ function Main({
         {languagePickerOpen && (
           <SheetScreen
             stackKey="sheet-language"
-            onDismissed={closeLanguagePicker}
+            onDismissed={onNativeSheetDismissed(closeLanguagePicker)}
           >
             <LanguagePickerSheet
               options={languageOptions()}
@@ -3027,7 +3050,7 @@ function Main({
         {storefrontSheetOpen && (
           <SheetScreen
             stackKey="sheet-storefront"
-            onDismissed={closeStorefront}
+            onDismissed={onNativeSheetDismissed(closeStorefront)}
           >
             <ValueFieldSheet
               title={t('settings.storefront')}
@@ -3045,7 +3068,7 @@ function Main({
         {qualityPickerOpen && (
           <SheetScreen
             stackKey="sheet-quality"
-            onDismissed={closeQualityPicker}
+            onDismissed={onNativeSheetDismissed(closeQualityPicker)}
           >
             <ProviderPickerSheet
               title={t('settings.quality')}
@@ -3060,7 +3083,7 @@ function Main({
         {artworkCachePickerOpen && (
           <SheetScreen
             stackKey="sheet-artwork-cache"
-            onDismissed={closeArtworkCache}
+            onDismissed={onNativeSheetDismissed(closeArtworkCache)}
           >
             <ProviderPickerSheet
               title={t('settings.artworkCache')}
@@ -3079,7 +3102,7 @@ function Main({
         {authSheetOpen && (
           <SheetScreen
             stackKey="sheet-auth"
-            onDismissed={closeAuthSheet}
+            onDismissed={onNativeSheetDismissed(closeAuthSheet)}
           >
             <AuthSheet
               model={toAuthSheetModel(
@@ -3097,7 +3120,7 @@ function Main({
         {authClientSheetOpen && (
           <SheetScreen
             stackKey="sheet-auth-client"
-            onDismissed={closeAuthClient}
+            onDismissed={onNativeSheetDismissed(closeAuthClient)}
           >
             <ValueFieldSheet
               title={t('auth.clientId.title')}
