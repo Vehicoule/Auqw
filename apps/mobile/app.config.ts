@@ -45,6 +45,13 @@ const config: ExpoConfig = {
       monochromeImage: './assets/android-icon-monochrome.png',
     },
     predictiveBackGestureEnabled: true,
+    // 'pan' over the resize default: OEM keyboards have left the
+    // window stuck at its post-IME size (and the system-bars bottom
+    // inset leaked at keyboard height), stranding a dead band under
+    // the tab bar and floating the miniplayer mid-screen. Panning
+    // keeps the focused field visible without ever shrinking the
+    // window or the reported insets.
+    softwareKeyboardLayoutMode: 'pan',
   },
   plugins: [
     [

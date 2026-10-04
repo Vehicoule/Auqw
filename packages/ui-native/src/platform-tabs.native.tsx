@@ -97,8 +97,8 @@ export function PlatformTabs({
   const androidDock =
     accessory != null && Platform.OS === 'android' && !tabBarHidden;
 
-  // Android: adjustResize lands the tab bar flush on top of the IME.
-  // Platform convention drops it while the keyboard is open; on iOS the
+  // Android: the IME covers the window under adjustPan. Platform
+  // convention drops the bar while the keyboard is open; on iOS the
   // keyboard is a separate window covering the bar, no hiding needed.
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   useEffect(() => {
