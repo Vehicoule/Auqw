@@ -193,6 +193,7 @@ if (port === null) {
         ? process.resourcesPath
         : undefined,
     repoRoot: process.env.AUQW_REPO_ROOT,
+    deferBootFeed: true,
     authToken: () => authTokenCurrent,
     potProviderUrl: () => {
       const url = pot.loopbackUrl();

@@ -1079,3 +1079,28 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   destructure edit (~20s gap) — before reporting a render crash,
   check whether the cited prop exists at the CURRENT commit; don't
   attribute a live-worktree artifact to committed code.
+
+## Phase-8 notes (boot-time measurement — startup perf hunt)
+
+- **bootMark recipe:** a `[BOOTMARK] <label> <ms>` console.log tracer
+  (`performance.now()` delta from a module-scope t0) rides logcat on
+  Android and ELECTRON_ENABLE_LOGGING stdout on desktop — measure
+  index-eval → feed → plugin loads → sqlite-open → restore →
+  controller-started. Tag every site `// [TEST-ONLY]` and strip
+  before the PR; a utility-process twin (`uMark`, own t0) attributes
+  desktop's `api.host.plugins()` leg (spawn+eval ≈ mark offset).
+- **Cold-start:** `am force-stop` + `logcat -c` + `am start -W -n
+  com.vehicoule.auqw/.MainActivity` — but `TotalTime` is
+  time-to-splash ONLY (~3.8s vs ~6s real boot): the boot gate holds
+  the splash during JS boot, so BOOTMARK deltas are the timeline.
+- **Proven wins (2026-10):** feed-sync off the boot path
+  (last-known-good load + post-ready refresh kick ~1.2s), parallel
+  cached-pair loads, deferred LAN-sync bring-up + `onSyncBuilt`
+  notifier; feed fetch MUST wait for ready — an in-flight fetch
+  costs session restore ~150-200ms on shared CPU.
+- **Trap — the potBound warm:** desktop utility's
+  `potBound.then(pluginsReady)` fires mid-boot; a retry that swaps
+  `pluginsReady` to the in-flight pass re-serializes the renderer
+  behind the network. Serve the resolved memo; swap only on land.
+- **pkill self-match:** `pkill -f "electron ."` matches the calling
+  shell's own cmdline — use `pkill -x electron`.

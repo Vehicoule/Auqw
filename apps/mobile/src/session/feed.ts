@@ -30,7 +30,9 @@ const verifyPairOpts = {
 
 const ports: FeedSyncPorts = {
   fetchBytes: async (url) => {
-    const res = await fetch(url);
+    // Bounded stall: a wedged feed must not hang boot (cached pairs)
+    // or the first-launch populate. Per-fetch, not a total budget.
+    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) {
       throw new Error(`plugin feed fetch ${res.status}`);
     }
@@ -100,14 +102,12 @@ export type LoadedFeedPlugin = {
   readonly pluginId: string;
 };
 
-/** Sync the feed, then load every verified pair on `host`. */
-export async function loadFeedPlugins(
+/** Load every verified pair currently on disk — no network wait. */
+async function loadCachedPairs(
   host: Pick<AuqwExpoHostModuleLike, 'loadPlugin'>,
-): Promise<readonly LoadedFeedPlugin[]> {
-  await syncPluginCache();
-  const loaded: LoadedFeedPlugin[] = [];
+): Promise<LoadedFeedPlugin[]> {
   if (!PLUGIN_DIR.exists) {
-    return loaded;
+    return [];
   }
   let manifests: File[];
   try {
@@ -117,22 +117,50 @@ export async function loadFeedPlugins(
       )
       .sort((a, b) => a.name.localeCompare(b.name));
   } catch {
-    return loaded;
+    return [];
   }
-  for (const pairFile of manifests) {
-    try {
-      const pair = parsePluginPair(pairFile.textSync(), verifyPairOpts);
-      if (pair === null) {
-        continue;
+  // Independent pairs load concurrently — each verifies its own
+  // signature and the host registers under a lock. A concurrent feed
+  // sync can only swap a pair for another verified one (atomic .part
+  // renames), never for unverified bytes.
+  const settled = await Promise.all(
+    manifests.map(async (pairFile) => {
+      try {
+        const pair = parsePluginPair(pairFile.textSync(), verifyPairOpts);
+        if (pair === null) {
+          return null;
+        }
+        const pluginId = await host.loadPlugin(
+          pair.wasmB64,
+          pair.manifestJson,
+        );
+        return {
+          providerId: pair.id,
+          manifestJson: pair.manifestJson,
+          pluginId,
+        };
+      } catch {
+        // A malformed pair is skipped, not fatal — others still load.
+        return null;
       }
-      loaded.push({
-        providerId: pair.id,
-        manifestJson: pair.manifestJson,
-        pluginId: await host.loadPlugin(pair.wasmB64, pair.manifestJson),
-      });
-    } catch {
-      // A malformed pair is skipped, not fatal — other pairs still load.
-    }
+    }),
+  );
+  return settled.filter((p): p is LoadedFeedPlugin => p !== null);
+}
+
+/** Load the verified pairs on disk. The signed feed does NOT gate
+ * this path — callers refresh it post-ready so its fetch + verify
+ * never contend with boot-critical work. Only an empty cache (first
+ * launch, wiped docs, or every pair corrupt) awaits the sync here —
+ * there is nothing else to load. Freshness one boot behind is the
+ * OTA model: updates apply on restart anyway. */
+export async function loadFeedPlugins(
+  host: Pick<AuqwExpoHostModuleLike, 'loadPlugin'>,
+): Promise<readonly LoadedFeedPlugin[]> {
+  let loaded = await loadCachedPairs(host);
+  if (loaded.length === 0) {
+    await syncPluginCache();
+    loaded = await loadCachedPairs(host);
   }
   return loaded;
 }

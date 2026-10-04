@@ -70,7 +70,7 @@ import {
   createLog,
   createRandom,
 } from '@auqw/application';
-import { loadFeedPlugins } from './feed.ts';
+import { loadFeedPlugins, syncPluginCache } from './feed.ts';
 import { createSyncEmit } from './sync-emit.ts';
 
 
@@ -125,6 +125,15 @@ export type SessionController = {
    * honest 'sync unavailable' state, never a dead control.
    */
   readonly sync: () => ExpoSyncSurface | null;
+  /**
+   * Fired once the deferred bring-up lands the surface — subscribers
+   * re-read `sync()` on the wake. Never fires when the seam is absent
+   * or bring-up fails: the getter stays null and the UI's
+   * 'unavailable' read is already correct.
+   */
+  readonly onSyncBuilt: (
+    listener: (surface: ExpoSyncSurface) => void,
+  ) => () => void;
   /**
    * Live PO-token provider update on the running plugin host —
    * resolves read the slot at invocation spawn, so a pairing or
@@ -220,8 +229,8 @@ export async function createSessionController(
   // Two phases, not one interleave: a rejected load must leave zero
   // providers constructed — each adapter registers a native listener at
   // construction and a half-built set has no controller to dispose it.
-  const loaded = await loadFeedPlugins(host);
-  const providers: PluginProvider[] = loaded.map(
+  const feedPlugins = await loadFeedPlugins(host);
+  const providers: PluginProvider[] = feedPlugins.map(
     ({ providerId, manifestJson, pluginId }) => {
       const manifest: unknown = JSON.parse(manifestJson);
       return createPluginProvider(
@@ -260,6 +269,7 @@ export async function createSessionController(
   const peaksStore = createPeaksCacheStore(sqliteDriver);
   // Assembled in start() after restore: custody → engine → client.
   let syncSurface: ExpoSyncSurface | null = null;
+  const syncBuiltListeners = new Set<(surface: ExpoSyncSurface) => void>();
   // The spec's trigger layer (on-launch, on-change debounced,
   // reconnect backoff, connectivity edge) — created with the client.
   let syncScheduler: SyncScheduler | null = null;
@@ -559,6 +569,20 @@ export async function createSessionController(
     searchHistory,
     peaksStore,
     sync: () => syncSurface,
+    onSyncBuilt: (listener) => {
+      // A subscriber arriving after bring-up gets the surface now —
+      // the listener set only fires at the bring-up transition.
+      if (syncSurface !== null) {
+        try {
+          listener(syncSurface);
+        } catch {
+          // A throwing consumer can't take down bring-up.
+        }
+        return () => {};
+      }
+      syncBuiltListeners.add(listener);
+      return () => syncBuiltListeners.delete(listener);
+    },
     // A stale native module predating the pot seam has no such
     // function — the provider keeps its boot value rather than
     // crashing the sync-status effect that calls this.
@@ -797,129 +821,160 @@ export async function createSessionController(
         host.hasSyncSocket?.() === true &&
         !signal.cancelled
       ) {
-        const built = await createExpoSync({
-          host,
-          logStore: syncLogStore,
-          ids,
-          clock,
-          log,
-          // Every inbound merge — syncNow pages and any other
-          // applyDelta path — projects onto the domain here. A
-          // failed projection stays in the session's pending, so
-          // refold with bounded retries rather than wait for an
-          // inbound delta that may never come.
-          onApplied: (applied) => {
-            void refold(
-              applied.outcomes,
-              (entries, s) =>
-                session.applySyncedEntries(
-                  entries,
-                  s,
-                  syncSurface?.engine.deviceId,
-                ),
-              'sync apply',
-            ).catch(() => undefined);
-          },
-        });
-        if (built.ok) {
-          syncSurface = built.value;
-          // Flush buffered pre-surface writes BEFORE the scheduler's
-          // on-launch round — a round that exports first carries a
-          // page missing them, and a flush landing after notifies
-          // nobody, so they'd sit unsynced until the next trigger.
-          // A failed flush re-pends the buffer with no other wake
-          // until the next edit, so retry bounded here; a still-
-          // failing prefix stays buffered for the next emitWrites
-          // (and the boot reconcile's emitUnsynced re-stamps it).
-          const flushed = await retryBounded({
-            // Boot-critical: start() awaits this before the
-            // scheduler's launch round, so a wedged batch must
-            // time out promptly — a late commit still stamps the
-            // log and a failure leaves the prefix re-pended.
-            deadlineMs: clock.nowMs() + 30_000,
-            signal,
+        // Bring-up is background work: custody → engine → client
+        // hydrate off the ready path so secure-store/socket latency
+        // can't gate first paint. Ordering inside the tail is
+        // unchanged — flush before the scheduler's launch round.
+        void (async () => {
+          const built = await createExpoSync({
+            host,
+            logStore: syncLogStore,
+            ids,
             clock,
-            maxAttempts: 4,
-            baseBackoffMs: 400,
-            call: (attemptSignal) => emitWrites([], attemptSignal),
+            log,
+            // Every inbound merge — syncNow pages and any other
+            // applyDelta path — projects onto the domain here. A
+            // failed projection stays in the session's pending, so
+            // refold with bounded retries rather than wait for an
+            // inbound delta that may never come.
+            onApplied: (applied) => {
+              void refold(
+                applied.outcomes,
+                (entries, s) =>
+                  session.applySyncedEntries(
+                    entries,
+                    s,
+                    syncSurface?.engine.deviceId,
+                  ),
+                'sync apply',
+              ).catch(() => undefined);
+            },
           });
-          if (!flushed.ok) {
+          if (built.ok) {
+            syncSurface = built.value;
+            for (const listener of [...syncBuiltListeners]) {
+              try {
+                listener(syncSurface);
+              } catch {
+                // A throwing consumer can't take down bring-up.
+              }
+            }
+            // Flush buffered pre-surface writes BEFORE the scheduler's
+            // on-launch round — a round that exports first carries a
+            // page missing them, and a flush landing after notifies
+            // nobody, so they'd sit unsynced until the next trigger.
+            // A failed flush re-pends the buffer with no other wake
+            // until the next edit, so retry bounded here; a still-
+            // failing prefix stays buffered for the next emitWrites
+            // (and the boot reconcile's emitUnsynced re-stamps it).
+            const flushed = await retryBounded({
+              // Ordered before the scheduler's launch round, so a
+              // wedged batch must time out promptly — a late commit
+              // still stamps the log and a failure leaves the prefix
+              // re-pended.
+              deadlineMs: clock.nowMs() + 30_000,
+              signal,
+              clock,
+              maxAttempts: 4,
+              baseBackoffMs: 400,
+              call: (attemptSignal) => emitWrites([], attemptSignal),
+            });
+            if (!flushed.ok) {
+              void log.write({
+                level: 'warn',
+                message: `sync pre-surface flush failed: ${flushed.error.kind}`,
+                atMs: clock.nowMs(),
+              });
+            }
+            // Trigger layer lives with the client: on-launch round per
+            // peer now, debounced rounds on committed writes,
+            // reconnect backoff on session drops, and rounds on the
+            // connectivity recovery edge (wired into the monitor
+            // below).
+            syncScheduler = createSyncScheduler({
+              client: built.value.client,
+              clock,
+              log,
+              isOnline: () => lastOnline,
+            });
+            syncScheduler.start();
+            // Reconcile from the engine's materialized view ONCE at
+            // bring-up — pending outcomes are in-memory only, so a
+            // kill mid-apply loses them; the durable sync log keeps
+            // the truth and this rebuild restores anything lost
+            // (Review #46). Idempotent — outcomes that already
+            // projected just re-fold to the same rows.
+            const syncDeviceId = syncSurface.engine.deviceId;
+            void (async () => {
+              const materialized = syncSurface.engine.materialize();
+              const ok_ = await refold(
+                materialized,
+                (entries, s) =>
+                  session.applyMaterializedEntries(entries, s, syncDeviceId),
+                'sync reconcile',
+              );
+              if (!ok_) {
+                return;
+              }
+              // The session's emit queue is memory-only — committed
+              // writes a past kill stranded re-emit against the
+              // materialized (kind, recordId)→fields map the same
+              // view just walked: absent records AND stale field
+              // values, upserts only (Review #46). 'sum' fields
+              // additionally need per-device components — a merged
+              // total can't prove our share landed.
+              const synced = new Map<string, Record<string, unknown>>();
+              const components = new Map<
+                string,
+                Readonly<Record<string, Readonly<Record<string, number>>>>
+              >();
+              const winners = new Map<
+                string,
+                Readonly<Record<string, string>>
+              >();
+              for (const rec of materialized) {
+                const key = syncedRecordKey(rec.kind, rec.recordId);
+                synced.set(key, rec.fields);
+                if (rec.sumComponents !== undefined) {
+                  components.set(key, rec.sumComponents);
+                }
+                if (rec.winnerDeviceIds !== undefined) {
+                  winners.set(key, rec.winnerDeviceIds);
+                }
+              }
+              await session
+                .emitUnsynced(synced, {
+                  deviceId: syncSurface.engine.deviceId,
+                  components,
+                  winners,
+                })
+                .catch(() => undefined);
+            })().catch(() => undefined);
+          } else {
             void log.write({
               level: 'warn',
-              message: `sync pre-surface flush failed: ${flushed.error.kind}`,
+              message: `sync bring-up failed: ${built.error.kind} — ${built.error.message}`,
               atMs: clock.nowMs(),
             });
           }
-          // Trigger layer lives with the client: on-launch round per
-          // peer now, debounced rounds on committed writes, reconnect
-          // backoff on session drops, and rounds on the connectivity
-          // recovery edge (wired into the monitor below).
-          syncScheduler = createSyncScheduler({
-            client: built.value.client,
-            clock,
-            log,
-            isOnline: () => lastOnline,
-          });
-          syncScheduler.start();
-          // Reconcile from the engine's materialized view ONCE at
-          // bring-up — pending outcomes are in-memory only, so a kill
-          // mid-apply loses them; the durable sync log keeps the
-          // truth and this rebuild restores anything lost (Review
-          // #46). Idempotent — outcomes that already projected just
-          // re-fold to the same rows.
-          const syncDeviceId = syncSurface.engine.deviceId;
-          void (async () => {
-            const materialized = syncSurface.engine.materialize();
-            const ok_ = await refold(
-              materialized,
-              (entries, s) =>
-                session.applyMaterializedEntries(entries, s, syncDeviceId),
-              'sync reconcile',
-            );
-            if (!ok_) {
-              return;
-            }
-            // The session's emit queue is memory-only — committed
-            // writes a past kill stranded re-emit against the
-            // materialized (kind, recordId)→fields map the same
-            // view just walked: absent records AND stale field
-            // values, upserts only (Review #46). 'sum' fields
-            // additionally need per-device components — a merged
-            // total can't prove our share landed.
-            const synced = new Map<string, Record<string, unknown>>();
-            const components = new Map<
-              string,
-              Readonly<Record<string, Readonly<Record<string, number>>>>
-            >();
-            const winners = new Map<
-              string,
-              Readonly<Record<string, string>>
-            >();
-            for (const rec of materialized) {
-              const key = syncedRecordKey(rec.kind, rec.recordId);
-              synced.set(key, rec.fields);
-              if (rec.sumComponents !== undefined) {
-                components.set(key, rec.sumComponents);
-              }
-              if (rec.winnerDeviceIds !== undefined) {
-                winners.set(key, rec.winnerDeviceIds);
-              }
-            }
-            await session
-              .emitUnsynced(synced, {
-                deviceId: syncSurface.engine.deviceId,
-                components,
-                winners,
-              })
-              .catch(() => undefined);
-          })().catch(() => undefined);
-        } else {
+        })().catch((thrown) => {
+          // A throw mid-tail (scheduler start, flush) degrades to the
+          // same honest 'unavailable' as a failed build — never a
+          // rejected start().
           void log.write({
             level: 'warn',
-            message: `sync bring-up failed: ${built.error.kind} — ${built.error.message}`,
+            message: `sync bring-up threw: ${nativeMessage(thrown)}`,
             atMs: clock.nowMs(),
           });
-        }
+        });
+      }
+      // Plugin-feed refresh rides the NEXT boot's cache: fetch +
+      // verify run post-ready so they can't contend with restore or
+      // first paint. Only worth kicking when the disk already holds
+      // pairs — an empty cache means loadFeedPlugins just ran the
+      // sync itself (or failed on it offline; next launch retries).
+      if (feedPlugins.length > 0) {
+        setTimeout(() => void syncPluginCache(), 1200);
       }
     },
     rehydrateMedia,
@@ -1018,6 +1073,7 @@ export async function createSessionController(
         await syncSurface.client.close();
         syncSurface = null;
       }
+      syncBuiltListeners.clear();
       // Stop while the FGS subscriber is still attached — it emits the
       // zero-active update as stop demotes the last transferring row.
       await downloads.stop(new CancellationSource().signal);
