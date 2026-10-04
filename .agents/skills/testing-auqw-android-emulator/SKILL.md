@@ -1079,3 +1079,88 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   destructure edit (~20s gap) — before reporting a render crash,
   check whether the cited prop exists at the CURRENT commit; don't
   attribute a live-worktree artifact to committed code.
+
+## Phase-8 notes (Android emulator — #368 compiler/fonts/importOwned)
+
+- **Verifying an experiments-flagged transform in the SERVED bundle:**
+  the older served-bundle curl
+  (`.../apps/mobile/index.bundle?platform=android&dev=true`) BYPASSES
+  Expo's `rewriteRequestUrl` middleware — `transform.*` params inferred
+  from `exp.experiments` (e.g. `transform.reactCompiler`,
+  `transform.engine=hermes`) are only injected for the magic virtual
+  entry URL. A real-path fetch can come back UNtransformed even while
+  Metro's banner says the experiment is enabled. Fetch what the app
+  actually requests instead:
+  `curl ".../.expo/.virtual-metro-entry.bundle?platform=android&dev=true&minify=false"`
+- **React Compiler ground truth (babel-plugin-react-compiler 1.x):**
+  compiled modules contain
+  `var _reactCompilerRuntime = require(_dependencyMap[N], "react/compiler-runtime")`
+  and `var $ = (0, _reactCompilerRuntime.c)(N)` memo-cache slots inside
+  each transformed component (dev bundles preserve function names —
+  grep a known component, e.g. `function GateFrame`). `useMemoCache`
+  hits inside `react.js` itself are library internals, NOT evidence;
+  `Symbol.for("react.memo_cache_sentinel")` hits inside react packages
+  likewise. Zero `react/compiler-runtime` in a virtual-entry bundle =
+  the flag did not reach transforms — a real finding. Flag chain for
+  reference: `app.config.ts experiments.reactCompiler` →
+  `rewriteRequestUrl` injects `transform.reactCompiler` into the
+  virtual-entry URL → `customTransformOptions.reactCompiler` → babel
+  `caller.supportsReactCompiler` → babel-preset-expo gates
+  `babel-plugin-react-compiler` (its transitive dep). Metro logs
+  "React Compiler enabled" from the config read alone — the banner
+  does not prove per-request transform coverage.
+- **On-device font proof (vendored/local TTF):**
+  `run-as com.vehicoule.auqw find cache -name "*.ttf"` — expo-asset
+  materializes dev-mode font requires as `cache/ExponentAsset-*.ttf`.
+  Match file SIZES to the vendored TTFs (342408/342892/344072 bytes for
+  Inter_400/500/700) — exact-size equality proves the fetched assets
+  are the vendored cuts, not substitutes. Glyph distinguisher vs the
+  Android fallback (Roboto): Inter's lowercase `g` is DOUBLE-STORY
+  (closed upper bowl + closed lower loop); Roboto/DejaVu `g` is
+  single-story. Find stable UI text with a lowercase g ("morning"
+  greeting, a fixture title), `adb exec-out screencap -p`, crop with
+  PIL at 1080x2400 device res (the displayed view is downscaled —
+  re-crop from the full PNG), compare against a local PIL render of
+  the vendored TTF (`ImageFont.truetype(path, size)` + draw same
+  word). `useFonts` failure modes stay silent in this app (error
+  return is unused) — pixel proof is the only honest check; a missing
+  registration renders Roboto with no logged error.
+- **Cheap importOwned exercise on-device:** `auqw://transfer?import=<path>`
+  + `auqw://transfer?apply-import` is the journey pair — no SAF
+  picker, no pairing. Path must satisfy `appFilePath`
+  (apps/mobile/seam-dev.ts): inside the app's document or cache root;
+  `/data/data/<pkg>/` aliases `/data/user/0/<pkg>/`. Stage with
+  `adb shell "run-as com.vehicoule.auqw sh -c 'cat > cache/f.json'" < f.json`
+  (`files/` does not exist before first launch — use `cache/`).
+  Minimal valid ExportDocument (formatVersion 1, exact top-level key
+  set): `formatVersion:1, exportedAtMs, recordings:[{id,title,artist,
+  album,durationMs,releaseYear,artwork,explicit,genre,isrc,
+  versionLabels}], sourceRefs:[{recordingId,ref:{provider,kind:"track",
+  id}}]` (≥1 per recording), `mappings:[], likes:[], entities:[],
+  entitySourceRefs:[], playlists:[], playlistEntries:[], playHistory:[],
+  playCounts:[], matchReviews:[], settings:{catalogProvider,
+  playbackProvider,storefront,qualityKbps,theme,prefetch}`. Preview
+  shows per-section counts; apply ends with
+  "✓ imported N tracks · M likes · K playlists". Verify at the ledger:
+  `run-as ... sqlite3 files/SQLite/auqw.db 'SELECT count(*) FROM
+  recordings; SELECT count(*) FROM source_refs'` — batching
+  correctness = every row lands atomically. Import semantics: REPLACES
+  library/downloads/queue/history/settings; provenance='provider' rows
+  do NOT appear in the "in your library" search section (that merges
+  `provenance==='local'` rows only — app-shell.ts localResults).
+  Unliked provider rows surface only via likes/playlists/catalog
+  badges — judge materialization at the sqlite ledger + committed
+  banner, not library-section presence.
+- **PLAYING-waveform legs:** uiautomator dumps starve indefinitely —
+  drop to screencap + fixed coords only (segment pill ~y2245,
+  transport ~2074, waveform ~1860). `adb exec-out uiautomator dump`
+  can hang long enough to stall a compound command — keep dumps out
+  of timed legs.
+- **Provider bursts:** Deezer catalog metadata DID flow this session
+  when a burst wasn't rate-limited ("search failed — the provider is
+  rate-limiting" is the honest transient; retry after ~60 s). Live
+  catalog rows make entity-page + real-tracklist-scroll legs possible
+  without stubs.
+- **removeViewAt regression check:** on this HEAD, KEYCODE_BACK
+  collapsed the settled expanded queue sheet cleanly — the pre-#312
+  crash path stays dead post-#311/#356.
