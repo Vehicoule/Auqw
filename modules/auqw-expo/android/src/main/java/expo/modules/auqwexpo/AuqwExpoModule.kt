@@ -69,6 +69,13 @@ private const val EVENT_SYNC_DISCOVERY = "onSyncDiscovery"
 private const val EVENT_WAVEFORM_PEAKS_COARSE = "onWaveformPeaksCoarse"
 private const val BIND_TIMEOUT_MS = 5_000L
 private const val REMOTE_PREVIOUS_RESTART_MS = 3_000L
+// A registered prepare gets this long to call back before the move
+// is declared dead — the host's own invocation budget is 30 s of
+// deadline, so the watchdog waits it out (plus a scheduling margin)
+// rather than cancelling a prepare that was still legitimately
+// working; past it, the latch frees while the user still expects
+// the queue to move.
+private const val PREPARE_TIMEOUT_MS = 35_000L
 private const val POSITION_TICK_MS = 1_000L
 private const val FIRST_OUTPUT_POLL_INTERVAL_MS = 8L
 private const val FIRST_OUTPUT_POLL_DEADLINE_MS = 5_000L
@@ -1661,7 +1668,15 @@ class AuqwExpoModule : Module() {
       }
       return
     }
-    val h = host ?: return
+    val h = host
+    if (h == null) {
+      // No host can mint a handle — the move is impossible. The ended
+      // path must still hear the block as a failure or the app waits
+      // on a transition that can never land; remote presses park
+      // silently, the same rule as every other dead move.
+      failEndedAttach(reason, "unavailable", "playback host offline")
+      return
+    }
     val seq = ++transitionSeq
     val armed = ArmedMove(proj, seq, h)
     transitionInFlight = armed
@@ -1683,6 +1698,40 @@ class AuqwExpoModule : Module() {
       dropArmedMove()
       failEndedAttach(reason, "unavailable", e.message)
       Log.w(TAG, "transition prepare rejected: ${e.message}")
+    }
+    // Watchdog: a prepare that registered but never resolves (guest
+    // hang, background network killed by doze/battery policy) would
+    // hold the latch forever — every later ended/remote press parks
+    // behind a move that isn't coming. Seq-checked on this looper:
+    // a finished or replaced move lets it land harmlessly.
+    Handler(p.applicationLooper).postDelayed(
+      Runnable { expireArmedMove(seq, reason) },
+      PREPARE_TIMEOUT_MS,
+    )
+  }
+
+  /** The armed move outlived its prepare deadline — free the latch so
+   * the cursor can move again, and let the ended path hear the death
+   * as a failure (remote presses stay silent per the parked rule). A
+   * late outcome still lands but seq-fails in finishTransition. */
+  private fun expireArmedMove(seq: Long, reason: String) {
+    if (transitionInFlight?.seq != seq) {
+      return
+    }
+    dropArmedMove()
+    failEndedAttach(reason, "transient", "queue transition timed out")
+    Log.w(TAG, "queue transition expired: prepare outcome never landed")
+    // A natural end may have been swallowed behind this latch while
+    // a remote move prepared — the freed cursor owes it a fresh
+    // drive under the installed projection, the same re-drive
+    // finishTransition runs after a stale outcome.
+    val latest = installedProjection
+    val p = player
+    if (p != null && latest != null &&
+      attachedForOccurrence == latest.currentOccurrenceId &&
+      p.playbackState == Player.STATE_ENDED
+    ) {
+      driveTransition("ended")
     }
   }
 
