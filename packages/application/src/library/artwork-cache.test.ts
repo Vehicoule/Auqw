@@ -184,6 +184,8 @@ class FakeArtworkPaths implements ArtworkPathsPort {
   #failRemove: AppError | null = null;
   #failExists: AppError | null = null;
 
+  #failExistsOnPresent: AppError | null = null;
+
   /** The next remove fails once with the given typed error. */
   failNextRemove(error: AppError): void {
     this.#failRemove = error;
@@ -192,6 +194,13 @@ class FakeArtworkPaths implements ArtworkPathsPort {
   /** The next exists check fails once with the given typed error. */
   failNextExists(error: AppError): void {
     this.#failExists = error;
+  }
+
+  /** The next exists check on a PRESENT file fails once — missing
+   *  paths report missing first, so this lets a reap land before the
+   *  failure does. */
+  failExistsOnPresent(error: AppError): void {
+    this.#failExistsOnPresent = error;
   }
 
   destFor(url: string): string {
@@ -208,7 +217,15 @@ class FakeArtworkPaths implements ArtworkPathsPort {
       this.#failExists = null;
       return Promise.resolve(err(error));
     }
-    return Promise.resolve(ok(!this.missing.has(filePath)));
+    if (this.missing.has(filePath)) {
+      return Promise.resolve(ok(false));
+    }
+    if (this.#failExistsOnPresent !== null) {
+      const error = this.#failExistsOnPresent;
+      this.#failExistsOnPresent = null;
+      return Promise.resolve(err(error));
+    }
+    return Promise.resolve(ok(true));
   }
 
   remove(
@@ -1053,6 +1070,171 @@ async function sweepExistsErrorKeepsRow(): Promise<void> {
   );
 }
 
+// CDN size variants of one asset — the grammar artwork-url.ts owns.
+const G_SMALL =
+  'https://lh3.googleusercontent.com/img/abc=w128-h128-l90-rj';
+const G_BIG =
+  'https://lh3.googleusercontent.com/img/abc=w1024-h1024-l90-rj';
+const G_HUGE =
+  'https://lh3.googleusercontent.com/img/abc=w2048-h2048-l90-rj';
+const G_OTHER =
+  'https://lh3.googleusercontent.com/img/zzz=w1024-h1024-l90-rj';
+const D_SMALL =
+  'https://e-cdns-images.dzcdn.net/images/cover/abc/64x64.jpg';
+const D_BIG =
+  'https://e-cdns-images.dzcdn.net/images/cover/abc/500x500.jpg';
+
+async function siblingServesMiss(): Promise<void> {
+  // The big variant cached (the full player fetched it); the small
+  // variant's get answers with that file — no second download.
+  const r = rig(
+    persisted({ artworkCache: [seed(G_BIG, 3 * MB, 500)] }),
+  );
+  r.fetch.respondBytes(4 * MB);
+  r.clock.advance(500);
+  const res = await r.cache.get(G_SMALL, ctx());
+  assert(res.ok, 'sibling get failed');
+  assertEqual(res.value.hit, true);
+  assertEqual(res.value.filePath, destOf(G_BIG));
+  assertEqual(r.fetch.calls.length, 0, 'sibling hit must not download');
+  // Read-only reuse: no row minted for the requested url — the file
+  // stays owned by the sibling's single entry for bytes and eviction.
+  assertDeepEqual(await storedUrls(r.storage), [G_BIG]);
+  // The SIBLING's access time earned the hit — write-behind flush.
+  r.clock.advance(3_000);
+  await pump();
+  const after = await r.storage.load(ctx());
+  assert(after.ok);
+  assertEqual(after.value.artworkCache[0]?.lastAccessedMs, 1_500);
+  // Deezer-shaped urls key alike across their discrete ladder too.
+  const r2 = rig(
+    persisted({ artworkCache: [seed(D_BIG, 3 * MB, 500)] }),
+  );
+  const res2 = await r2.cache.get(D_SMALL, ctx());
+  assert(res2.ok && res2.value.hit, 'deezer sibling must serve');
+  assertEqual(res2.value.filePath, destOf(D_BIG));
+  assertEqual(r2.fetch.calls.length, 0);
+}
+
+async function smallestAdequateSiblingWins(): Promise<void> {
+  // Both variants cover the request — the 1024 file beats the 2048
+  // (same asset, less decode memory for the row that asked).
+  const r = rig(
+    persisted({
+      artworkCache: [seed(G_HUGE, 9 * MB, 10), seed(G_BIG, 3 * MB, 20)],
+    }),
+  );
+  r.fetch.respondBytes(4 * MB);
+  const res = await r.cache.get(G_SMALL, ctx());
+  assert(res.ok, 'adequate sibling get failed');
+  assertEqual(res.value.filePath, destOf(G_BIG));
+  assertEqual(r.fetch.calls.length, 0);
+}
+
+async function undersizedAndForeignSiblingsDoNotServe(): Promise<void> {
+  // A smaller variant can't cover the request; a different asset key
+  // and a knob-less url never substitute — each is a real download.
+  const r = rig(
+    persisted({
+      artworkCache: [
+        seed(G_SMALL, 1 * MB, 10),
+        seed(G_OTHER, 3 * MB, 20),
+        seed(A, 2 * MB, 30),
+      ],
+    }),
+  );
+  r.fetch.respondBytes(4 * MB);
+  const res = await r.cache.get(G_BIG, ctx());
+  assert(res.ok, 'miss get failed');
+  assertEqual(res.value.hit, false);
+  assertEqual(r.fetch.calls.length, 1, 'real miss downloads');
+}
+
+async function siblingBeatsFailureVerdict(): Promise<void> {
+  // The small variant 404'd, THEN the big one landed: the file beats
+  // the remembered verdict — a dead size knob says nothing about the
+  // asset's other variants.
+  const r = rig(persisted());
+  r.fetch.respond((url) =>
+    url === G_SMALL
+      ? err(appError('not-found', 'variant gone'))
+      : ok({ bytes: 3 * MB }),
+  );
+  const dead = await r.cache.get(G_SMALL, ctx());
+  assert(!dead.ok && dead.error.kind === 'not-found');
+  const big = await r.cache.get(G_BIG, ctx());
+  assert(big.ok, 'big variant download failed');
+  // Still inside the verdict window — the sibling file answers.
+  const res = await r.cache.get(G_SMALL, ctx());
+  assert(res.ok, 'sibling file must beat the stale verdict');
+  assertEqual(res.value.filePath, destOf(G_BIG));
+  assertEqual(r.fetch.calls.length, 2, 'no refetch ran');
+}
+
+async function reapedSiblingFallsBackToDownload(): Promise<void> {
+  // The sibling's row outlived its file — the reap drops the row and
+  // the request downloads like any honest miss.
+  const r = rig(
+    persisted({ artworkCache: [seed(G_BIG, 3 * MB, 10)] }),
+  );
+  r.paths.missing.add(destOf(G_BIG));
+  r.fetch.respondBytes(4 * MB);
+  const res = await r.cache.get(G_SMALL, ctx());
+  assert(res.ok, 'miss get failed');
+  assertEqual(res.value.hit, false);
+  assertEqual(res.value.filePath, destOf(G_SMALL));
+  assertEqual(r.fetch.calls.length, 1);
+  // The dead sibling row was reaped — its file is gone either way.
+  assertDeepEqual(await storedUrls(r.storage), [G_SMALL]);
+}
+
+async function reapedSiblingYieldsToNextSibling(): Promise<void> {
+  // The smallest adequate sibling's file is gone but a larger one's
+  // survives — the reap yields to the next sibling, not a download.
+  const r = rig(
+    persisted({
+      artworkCache: [seed(G_HUGE, 9 * MB, 10), seed(G_BIG, 3 * MB, 20)],
+    }),
+  );
+  r.paths.missing.add(destOf(G_BIG));
+  r.fetch.respondBytes(4 * MB);
+  const res = await r.cache.get(G_SMALL, ctx());
+  assert(res.ok, 'sibling get failed');
+  assertEqual(res.value.hit, true);
+  assertEqual(res.value.filePath, destOf(G_HUGE));
+  assertEqual(r.fetch.calls.length, 0);
+  assertDeepEqual(await storedUrls(r.storage), [G_HUGE]);
+  // Same through the exact row: G_SMALL's own file missing, the
+  // bigger variant still answers.
+  const r2 = rig(
+    persisted({
+      artworkCache: [seed(G_SMALL, 1 * MB, 10), seed(G_BIG, 3 * MB, 20)],
+    }),
+  );
+  r2.paths.missing.add(destOf(G_SMALL));
+  const res2 = await r2.cache.get(G_SMALL, ctx());
+  assert(res2.ok && res2.value.hit, 'exact-reap sibling must serve');
+  assertEqual(res2.value.filePath, destOf(G_BIG));
+  assertEqual(r2.fetch.calls.length, 0);
+  assertDeepEqual(await storedUrls(r2.storage), [G_BIG]);
+}
+
+async function statFailureStillCommitsReaps(): Promise<void> {
+  // G_BIG's file is gone; the stat on the NEXT sibling errors — the
+  // earlier reap must still commit or the mirror argues with storage.
+  const r = rig(
+    persisted({
+      artworkCache: [seed(G_BIG, 3 * MB, 10), seed(G_HUGE, 9 * MB, 20)],
+    }),
+  );
+  r.paths.missing.add(destOf(G_BIG));
+  r.paths.failExistsOnPresent(appError('unavailable', 'stat broke'));
+  const res = await r.cache.get(G_SMALL, ctx());
+  assert(!res.ok, 'stat failure must surface');
+  assertEqual(res.error.kind, 'unavailable');
+  assertDeepEqual(await storedUrls(r.storage), [G_HUGE]);
+}
+
 export async function run(): Promise<void> {
   await missAndHit();
   await fetchErrorsPropagate();
@@ -1084,4 +1266,11 @@ export async function run(): Promise<void> {
   await sweepSeesUnflushedTouches();
   await sweepReapsMissing();
   await sweepExistsErrorKeepsRow();
+  await siblingServesMiss();
+  await smallestAdequateSiblingWins();
+  await undersizedAndForeignSiblingsDoNotServe();
+  await siblingBeatsFailureVerdict();
+  await reapedSiblingFallsBackToDownload();
+  await reapedSiblingYieldsToNextSibling();
+  await statFailureStillCommitsReaps();
 }

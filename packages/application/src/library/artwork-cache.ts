@@ -20,6 +20,7 @@ import type { StoragePort } from '../ports/storage.ts';
 import { retryBounded } from '../retry.ts';
 import { isArtworkCacheEntry } from './library.ts';
 import type { ArtworkCacheEntry } from './library.ts';
+import { artworkAssetKey, artworkUrlSize } from './artwork-url.ts';
 
 /**
  * Network-to-file transfer for one artwork image, supplied by the
@@ -129,6 +130,42 @@ function isArtworkUrl(url: unknown): url is string {
 
 const invalidResponse = (message: string): Result<never> =>
   err(appError('invalid-response', message));
+
+/**
+ * The cached same-asset entry best able to serve `url`: same asset key
+ * and a served size ≥ the request's, smallest adequate winning (a
+ * 2048px file serving a 64px row wastes decode memory when a 128px
+ * twin sits beside it). Only size-addressable shapes qualify — a
+ * knob-less entry is 'unknown', never 'probably big'. Exact misses
+ * only: the caller already tried `entries.get(url)`.
+ */
+function siblingEntry(
+  url: string,
+  entries: ReadonlyMap<string, ArtworkCacheEntry>,
+): ArtworkCacheEntry | undefined {
+  const want = artworkUrlSize(url);
+  if (want === null) {
+    return undefined;
+  }
+  const key = artworkAssetKey(url);
+  let best: ArtworkCacheEntry | undefined;
+  let bestSize = Number.POSITIVE_INFINITY;
+  for (const other of entries.values()) {
+    if (other.url === url) {
+      continue;
+    }
+    const have = artworkUrlSize(other.url);
+    if (have === null || have < want || have >= bestSize) {
+      continue;
+    }
+    if (artworkAssetKey(other.url) !== key) {
+      continue;
+    }
+    best = other;
+    bestSize = have;
+  }
+  return best;
+}
 
 type Section = {
   readonly entries: Map<string, ArtworkCacheEntry>;
@@ -605,21 +642,62 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         if (!section.ok) {
           return section;
         }
-        const entry = section.value.entries.get(url);
+        // Exact key first, then same-asset siblings in ascending
+        // adequacy: entries are keyed by exact url, but CDN size
+        // variants of one asset are interchangeable at the file level —
+        // a small variant's miss (a scaled-url 404 or a stalled fetch)
+        // is served by a cached larger variant instead of a redundant
+        // download. Read-only reuse: no row is minted for the request
+        // url, so byte accounting and eviction keep owning the file
+        // through the sibling's single entry, and the sibling's access
+        // time is what bumps — it earned the hit.
+        const entries = section.value.entries;
+        let candidate =
+          entries.get(url) ?? siblingEntry(url, entries);
+        let reaped = false;
+        let entry: ArtworkCacheEntry | undefined;
+        for (;;) {
+          if (candidate === undefined) {
+            break;
+          }
+          const probing = candidate;
+          const present = await call(() =>
+            deps.paths.exists(probing.filePath, context.signal),
+          );
+          if (!present.ok) {
+            // A stat failure after earlier reaps still persists them —
+            // an in-memory-only delete would leave the mirror arguing
+            // with storage until the next commit or refresh.
+            if (reaped) {
+              const committed = await commitMirror(entries, context);
+              if (!committed.ok) {
+                return committed;
+              }
+            }
+            return err(present.error);
+          }
+          if (present.value) {
+            entry = probing;
+            break;
+          }
+          // The row reaps under the entry's own key — a sibling hit's
+          // request url isn't in the map. The next-smallest adequate
+          // sibling then gets its turn: one reclaimed file shouldn't
+          // cost the whole cached set its answer.
+          entries.delete(probing.url);
+          reaped = true;
+          candidate = siblingEntry(url, entries);
+        }
+        // One commit covers reaps whether they ended in a hit or a
+        // miss — a sibling that answered still drops the dead rows.
+        if (reaped) {
+          const committed = await commitMirror(entries, context);
+          if (!committed.ok) {
+            return committed;
+          }
+        }
         if (entry === undefined) {
           return ok<Probe>(null);
-        }
-        const present = await call(() =>
-          deps.paths.exists(entry.filePath, context.signal),
-        );
-        if (!present.ok) {
-          return err(present.error);
-        }
-        const entries = section.value.entries;
-        if (!present.value) {
-          entries.delete(url);
-          const committed = await commitMirror(entries, context);
-          return committed.ok ? ok<Probe>(null) : committed;
         }
         const now = safeNow();
         if (now === null) {
@@ -638,6 +716,21 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     }
     if (probed.value !== null) {
       return ok({ hit: true, filePath: probed.value });
+    }
+
+    // The remembered failure verdict only suppresses the retry loop
+    // after the probe misses — a file on disk (exact or same-asset
+    // sibling) answers regardless: a 404 on this size variant says
+    // nothing about the file a larger variant already holds.
+    const remembered = failures.get(url);
+    if (remembered !== undefined) {
+      const now = safeNow();
+      if (now !== null && now < remembered.untilMs) {
+        return err(remembered.error);
+      }
+      // Expired — or a broken clock can't vouch for the verdict —
+      // either way the url earns a fresh try.
+      failures.delete(url);
     }
 
     const destPath = deps.paths.destFor(url);
@@ -857,16 +950,6 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
     }
     if (context.signal.cancelled) {
       return Promise.resolve(err(cancelledError()));
-    }
-    const remembered = failures.get(url);
-    if (remembered !== undefined) {
-      const now = safeNow();
-      if (now !== null && now < remembered.untilMs) {
-        return Promise.resolve(err(remembered.error));
-      }
-      // Expired — or a broken clock can't vouch for the verdict —
-      // either way the url earns a fresh try.
-      failures.delete(url);
     }
     // Concurrent gets for the same url coalesce onto one download —
     // except a record whose work is already cancelled but not yet
