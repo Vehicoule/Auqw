@@ -363,6 +363,185 @@ fn potter_wat(payload: &str) -> String {
     )
 }
 
+/// Guest emitting one `http_batch` request carrying `requests_json`
+/// (a JSON array text), then `done` on any non-error reply — the
+/// byte-2 discriminator reads 'e' of `{"error":` for `host_error`;
+/// a served `http_batch_response` sorts `{"id":…}` first.
+fn batch_wat(requests_json: &str) -> String {
+    let first = format!(
+        "{{\"type\":\"host_request\",\"id\":1,\"kind\":\"http_batch\",\
+         \"payload\":{{\"requests\":{requests_json}}}}}"
+    );
+    probe_reply_wat(
+        &first,
+        "{\"type\":\"fail\",\"error\":{\"kind\":\"transient\",\"message\":\"denied\"}}",
+        "{\"type\":\"done\",\"result\":{\"ok\":true}}",
+    )
+}
+
+// ---------- http_batch ----------
+
+#[tokio::test]
+async fn http_batch_fans_out_under_one_step() {
+    let wasm = ok(wat::parse_str(batch_wat(
+        r#"[{"method":"GET","url":"https://example.com/a","headers":[],"body":null},{"method":"GET","url":"https://example.com/b","headers":[],"body":null},{"method":"GET","url":"https://example.com/c","headers":[],"body":null}]"#,
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &default_budgets(),
+    ));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert_eq!(ok(result), serde_json::json!({"ok": true}));
+    assert_eq!(calls.load(Ordering::Relaxed), 3);
+    assert_eq!(attempt.http_calls, 3);
+    assert_eq!(attempt.http_trace.len(), 3);
+}
+
+#[tokio::test]
+async fn http_batch_denied_item_degrades_in_place() {
+    let wasm = ok(wat::parse_str(batch_wat(
+        r#"[{"method":"GET","url":"https://example.com/a","headers":[],"body":null},{"method":"GET","url":"https://other.test/b","headers":[],"body":null}]"#,
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &default_budgets(),
+    ));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    // The denied sibling's error rides inside the reply — the
+    // permitted call still lands and the invocation completes.
+    assert_eq!(ok(result), serde_json::json!({"ok": true}));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(attempt.http_calls, 1);
+    assert_eq!(attempt.http_trace.len(), 1);
+}
+
+#[tokio::test]
+async fn http_batch_over_cap_is_invalid_message() {
+    let items = (0..9)
+        .map(|i| {
+            format!(
+                "{{\"method\":\"GET\",\"url\":\"https://example.com/{i}\",\"headers\":[],\"body\":null}}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let wasm = ok(wat::parse_str(batch_wat(&format!("[{items}]"))));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &default_budgets(),
+    ));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert!(matches!(err(result), InvokeError::InvalidMessage(_)));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn http_batch_empty_is_invalid_message() {
+    let wasm = ok(wat::parse_str(batch_wat("[]")));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &default_budgets(),
+    ));
+    let (http, _calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert!(matches!(err(result), InvokeError::InvalidMessage(_)));
+}
+
+#[tokio::test]
+async fn http_batch_malformed_item_is_invalid_message() {
+    let wasm = ok(wat::parse_str(batch_wat(
+        r#"[{"method":"PUT","url":"https://example.com/a","headers":[],"body":null}]"#,
+    )));
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &default_budgets(),
+    ));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, .. } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert!(matches!(err(result), InvokeError::InvalidMessage(_)));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn http_batch_respects_call_budget() {
+    let wasm = ok(wat::parse_str(batch_wat(
+        r#"[{"method":"GET","url":"https://example.com/a","headers":[],"body":null},{"method":"GET","url":"https://example.com/b","headers":[],"body":null},{"method":"GET","url":"https://example.com/c","headers":[],"body":null}]"#,
+    )));
+    let mut budgets = default_budgets();
+    budgets.max_http_calls = 2;
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &budgets,
+    ));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert!(matches!(
+        err(result),
+        InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::HttpCalls
+        }
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(attempt.http_calls, 0);
+}
+
 // ---------- load-time rejection ----------
 
 #[test]
@@ -438,7 +617,7 @@ fn manifest_accepts_0_1_full_surface() {
         &wasm,
         "0.1.0",
         &[
-            "catalog.search",
+            "playback.resolve",
             "catalog.search.kinds",
             "catalog.metadata",
             "catalog.artwork",

@@ -45,6 +45,12 @@ const LOG_LEVELS: &[&str] = &["debug", "info", "warn", "error"];
 const MAX_COLLECTED_SECRETS: usize = 256;
 const MAX_COLLECTED_SECRET_BYTES: usize = 64 * 1024;
 
+/// Sub-requests one `http_batch` step may carry. The fan-out exists
+/// for search/entity pages (a handful of same-host calls); the cap
+/// keeps a guest from renting the whole step's byte budget in
+/// concurrent bodies it could not stage sequentially anyway.
+const MAX_BATCH_REQUESTS: usize = 8;
+
 /// Header names an `http_request` may not set (matched
 /// ASCII-case-insensitively): `Host` must come from the authorized URL,
 /// never the guest, and the rest are hop-by-hop or body-framing fields
@@ -826,6 +832,10 @@ async fn host_request_step(
         }
         Some("log") => return log_step(&msg["payload"], id, attempt),
         Some("now_ms") => return now_ms_step(&msg["payload"], id, ctx, &attempt.secrets),
+        Some("http_batch") => {
+            let items = authorize_http_batch(&msg["payload"], ctx, &attempt.secrets)?;
+            return perform_batch(items, id, ctx, attempt).await;
+        }
         _ => {}
     }
     let authorized = match msg.get("kind").and_then(Value::as_str) {
@@ -1202,6 +1212,206 @@ async fn perform_call(
             }
         }
     }
+}
+
+/// One authorized member of an `http_batch`: a call to fan out, or
+/// the per-item denial the single-call path would have replied with.
+enum BatchItem {
+    Call(ParsedHttpRequest),
+    Error { kind: String, message: String },
+}
+
+/// Validate an `http_batch` payload: `{"requests": [ <http_request
+/// payload>, … ≤ MAX_BATCH_REQUESTS ]}`. Every item goes through the
+/// same schema and header rules as a standalone `http_request`; a
+/// malformed item invalidates the whole envelope exactly as a bad
+/// standalone payload would, while an unpermitted destination degrades
+/// to that item's `permission-denied` — a denied sibling must not
+/// take down calls the manifest does allow.
+fn authorize_http_batch(
+    payload: &Value,
+    ctx: &StepCtx<'_>,
+    secrets: &[String],
+) -> Result<Vec<BatchItem>, InvokeError> {
+    check_keys(payload, &["requests"], "http_batch.payload", secrets)?;
+    let raw = payload
+        .get("requests")
+        .and_then(Value::as_array)
+        .ok_or_else(|| InvokeError::InvalidMessage("http_batch.requests missing".into()))?;
+    if raw.is_empty() || raw.len() > MAX_BATCH_REQUESTS {
+        return Err(InvokeError::InvalidMessage(format!(
+            "http_batch.requests must carry 1..={MAX_BATCH_REQUESTS} items"
+        )));
+    }
+    let mut items = Vec::with_capacity(raw.len());
+    for item in raw {
+        let req = parse_http_request(item, secrets)?;
+        if ctx.plugin.manifest.allows_destination(&req.url) {
+            items.push(BatchItem::Call(req));
+        } else {
+            items.push(BatchItem::Error {
+                kind: "permission-denied".to_string(),
+                message: "destination not permitted".to_string(),
+            });
+        }
+    }
+    Ok(items)
+}
+
+/// Spend budget on every callable batch member, run them
+/// concurrently, and relay per-item results in request order as
+/// `http_batch_response`. Budget semantics mirror the sequential
+/// path: each callable item costs one `http_calls` tick, the
+/// invocation fails outright on a budget or cancellation verdict an
+/// item produces, and each call's response cap is its even share of
+/// the remaining byte budget — a concurrent fan-out otherwise spends
+/// `remaining` once per in-flight request.
+async fn perform_batch(
+    items: Vec<BatchItem>,
+    id: u32,
+    ctx: &StepCtx<'_>,
+    attempt: &mut Attempt,
+) -> Result<Vec<u8>, InvokeError> {
+    if ctx.cancel.is_cancelled() {
+        return Err(InvokeError::Cancelled);
+    }
+    let calls = items
+        .iter()
+        .filter(|i| matches!(i, BatchItem::Call(_)))
+        .count();
+    if attempt.http_calls.saturating_add(calls as u32) > ctx.budgets.max_http_calls {
+        return Err(InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::HttpCalls,
+        });
+    }
+    let out_bytes = items
+        .iter()
+        .map(|i| match i {
+            BatchItem::Call(req) => req.body.as_ref().map_or(0, Vec::len) as u64,
+            BatchItem::Error { .. } => 0,
+        })
+        .sum::<u64>();
+    if attempt.bytes.saturating_add(out_bytes) > ctx.budgets.max_bytes {
+        return Err(InvokeError::BudgetExceeded {
+            dimension: BudgetDimension::Bytes,
+        });
+    }
+    attempt.http_calls += calls as u32;
+    let remaining = ctx
+        .budgets
+        .max_bytes
+        .saturating_sub(attempt.bytes + out_bytes);
+    let per_call_cap = remaining / calls.max(1) as u64;
+    let timeout = ctx
+        .budgets
+        .http_timeout
+        .min(ctx.budgets.deadline.saturating_sub(ctx.started.elapsed()));
+    let mut metas = Vec::with_capacity(calls);
+    let mut futs = Vec::with_capacity(calls);
+    for (i, item) in items.iter().enumerate() {
+        let BatchItem::Call(req) = item else { continue };
+        let send = ctx.services.http.send(
+            HttpRequest {
+                method: req.method.clone(),
+                url: req.url.clone(),
+                headers: req.headers.clone(),
+                body: req.body.clone(),
+                max_response_bytes: per_call_cap,
+            },
+            timeout,
+            ctx.cancel.clone(),
+        );
+        metas.push((
+            i,
+            req.method.clone(),
+            redact_url(&req.url),
+            req.body.as_ref().map_or(0, Vec::len) as u64,
+        ));
+        futs.push(async move {
+            let t0 = Instant::now();
+            let r = send.await;
+            (r, t0.elapsed())
+        });
+    }
+    let results = tokio::select! {
+        () = ctx.cancel.cancelled() => return Err(InvokeError::Cancelled),
+        r = futures_util::future::join_all(futs) => r,
+    };
+    let mut out_items: Vec<Value> = items
+        .iter()
+        .map(|i| match i {
+            BatchItem::Call(_) => Value::Null,
+            BatchItem::Error { kind, message } => json!({
+                "error": { "kind": kind, "message": message },
+            }),
+        })
+        .collect();
+    for ((i, method, url, out_len), (result, elapsed)) in metas.into_iter().zip(results) {
+        match result {
+            Ok(resp) => {
+                attempt.bytes += out_len + resp.body.len() as u64;
+                attempt.http_trace.push(HttpTraceEntry {
+                    method,
+                    url,
+                    status: Some(resp.status),
+                    bytes: resp.body.len() as u64,
+                    elapsed,
+                });
+                if attempt.bytes > ctx.budgets.max_bytes {
+                    return Err(InvokeError::BudgetExceeded {
+                        dimension: BudgetDimension::Bytes,
+                    });
+                }
+                let headers: Vec<Value> = resp.headers.iter().map(|(k, v)| json!([k, v])).collect();
+                out_items[i] = json!({
+                    "status": resp.status,
+                    "headers": headers,
+                    "body": base64::engine::general_purpose::STANDARD.encode(resp.body),
+                });
+            }
+            Err(e) => {
+                // Bytes pulled before the failure still belong to the
+                // byte budget — a mid-stream error is not a refund.
+                attempt.bytes += out_len + e.bytes_received;
+                attempt.http_trace.push(HttpTraceEntry {
+                    method,
+                    url,
+                    status: None,
+                    bytes: e.bytes_received,
+                    elapsed,
+                });
+                match e.kind {
+                    HttpErrorKind::Cancelled => return Err(InvokeError::Cancelled),
+                    HttpErrorKind::BodyTooLarge => {
+                        return Err(InvokeError::BudgetExceeded {
+                            dimension: BudgetDimension::Bytes,
+                        });
+                    }
+                    _ if attempt.bytes > ctx.budgets.max_bytes => {
+                        return Err(InvokeError::BudgetExceeded {
+                            dimension: BudgetDimension::Bytes,
+                        });
+                    }
+                    kind => {
+                        // Client messages are host-trusted but still
+                        // scrubbed before they cross into the guest.
+                        out_items[i] = json!({
+                            "error": {
+                                "kind": kind.guest_kind().unwrap_or("transient"),
+                                "message": redact_text(&e.message, &attempt.secrets),
+                            },
+                        });
+                    }
+                }
+            }
+        }
+    }
+    serde_json::to_vec(&json!({
+        "type": "http_batch_response",
+        "id": id,
+        "results": out_items,
+    }))
+    .map_err(|e| InvokeError::InvalidMessage(e.to_string()))
 }
 
 /// Validate the `payload` of an `http_request` host request.
