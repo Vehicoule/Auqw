@@ -395,7 +395,9 @@ export function SearchScreen({
       {view.filters !== null && (
         <View
           style={{
-            paddingTop: topInset,
+            // Pinned like the other chrome: drops below the field
+            // while it is open, hugs the inset when it collapses.
+            paddingTop: pinnedTop,
             // The floating loupe overlays this band's right edge —
             // clipping the viewport here keeps chips from sliding
             // under it at any scroll position.
