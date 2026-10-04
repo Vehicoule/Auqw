@@ -1048,3 +1048,34 @@ from uiautomator's shell process, uid 2000 — filter by app pid).
   Retry never recovers, force-stop+relaunch does. Possibly
   emulator-only execAsync-under-load, but flag it if it reproduces
   elsewhere.
+
+## Phase-7 notes (Android emulator — #360 scroll/inset/morph + render boundary)
+
+- **Search chrome choreography (post-#360):** `topInset` is the raw
+  system inset again — no dead band. The loupe sits ~device
+  (985,196); the chips-viewport clip edge is ~x905 (collapsed state).
+  'Did row X drop below the expanded field' = compare its y in
+  collapsed vs expanded state (pinnedTop = inset + 52 when open).
+  Every pinned block must drop (recents heading, resultsHead,
+  skeleton, AND the filter-chips row — a chips row staying at raw
+  inset behind the field is the #360-round-2 regression shape).
+- **Entity-hero scroll check:** hero + pills live in
+  `ListHeaderComponent` now — on scroll-down the art/title/play pills
+  must slide fully off; anything pinned above the list is a
+  regression of the pre-#360 fixed-hero shape.
+- **Mid-flight morph captures:** `input swipe <x> <y1> <x> <y2> <ms>`
+  backgrounded (`&`) + parallel `exec-out screencap` lands mid-drag
+  frames — post-#360 the sheet is scaleY-only, so a correct frame is
+  full-width (side strips = the uniform-scale regression); the
+  exposed edge is the bottom, off-screen through the reveal window.
+- **Frozen-screen re-render crash class:** a render-time throw on a
+  keep-alive/frozen pane waking on a publish = unhandled exception =
+  process death on release (#360 adds RenderBoundary inside Main's
+  output + at the App seam). Logcat signature: `isComponentError` +
+  `componentStack … at Freeze … at RNCTabView` → full restart.
+- **Mid-edit worktree caveat (real trap):** a captured
+  `ReferenceError: Property '<prop>' doesn't exist` can be a
+  TRANSIENT Metro rebundle between a prop-adding edit and the
+  destructure edit (~20s gap) — before reporting a render crash,
+  check whether the cited prop exists at the CURRENT commit; don't
+  attribute a live-worktree artifact to committed code.
