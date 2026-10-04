@@ -60,7 +60,12 @@ branch="$(git rev-parse --abbrev-ref HEAD)"
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || {
     echo "cut-release: HEAD != origin/main — sync first" >&2; exit 1; }
 
-node tooling/stamp-version.mjs --check >/dev/null && echo "==> manifest version-line consistent"
+# A command inside an AND list is exempt from `set -e` — a failing
+# --check would only skip the echo and let tagging proceed, so this
+# gate must exit explicitly like the checks around it.
+node tooling/stamp-version.mjs --check >/dev/null || {
+    echo "cut-release: manifest version-lines inconsistent" >&2; exit 1; }
+echo "==> manifest version-line consistent"
 
 # versionCodeOf is the upgrade order Android enforces. sort -V orders
 # a stable below its own prereleases (0.0.1 < 0.0.1-alpha.23), so it

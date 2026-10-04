@@ -283,8 +283,15 @@ async function main(): Promise<void> {
         rewriteCsp(
           readFileSync(RENDERER, 'utf8'),
           imgSrcSources(
-            process.env['AUQW_PLUGIN_DIR'] ??
-              join(app.getPath('userData'), 'plugins'),
+            process.env['AUQW_PLUGIN_DIR'] === undefined
+              ? [
+                  join(app.getPath('userData'), 'plugins'),
+                  // Consent-approved third-party pairs live beside the
+                  // signed cache — they need the same widening. The dev
+                  // dir replaces the whole plugin set, so it stands alone.
+                  join(app.getPath('userData'), 'plugins-user'),
+                ]
+              : [process.env['AUQW_PLUGIN_DIR']],
           ),
         ),
         { headers: { 'content-type': 'text/html; charset=utf-8' } },

@@ -28,9 +28,17 @@ const verifyPairOpts = {
     ed25519.verify(signature, message, publicKey),
 };
 
+/** Per-request budget — the same AbortSignal.timeout idiom the
+ * desktop utility uses. RN fetch has no default timeout, so an
+ * unbounded fetch lets a stalled feed wedge the sync; a timeout
+ * degrades it to last-known-good instead. */
+const FETCH_TIMEOUT_MS = 10_000;
+
 const ports: FeedSyncPorts = {
   fetchBytes: async (url) => {
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
     if (!res.ok) {
       throw new Error(`plugin feed fetch ${res.status}`);
     }
@@ -100,11 +108,14 @@ export type LoadedFeedPlugin = {
   readonly pluginId: string;
 };
 
-/** Sync the feed, then load every verified pair on `host`. */
+/** Load every verified pair on `host`, refreshing the cache in the
+ * background — the network leg never gates boot, so a stalled feed
+ * degrades to last-known-good; pairs the sync lands are picked up
+ * by the next scan (next boot). */
 export async function loadFeedPlugins(
   host: Pick<AuqwExpoHostModuleLike, 'loadPlugin'>,
 ): Promise<readonly LoadedFeedPlugin[]> {
-  await syncPluginCache();
+  void syncPluginCache();
   const loaded: LoadedFeedPlugin[] = [];
   if (!PLUGIN_DIR.exists) {
     return loaded;
