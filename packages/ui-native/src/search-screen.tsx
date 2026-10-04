@@ -530,7 +530,16 @@ export function SearchScreen({
       )}
       {view.results !== null && (
         <FlatList
-          data={view.results.rows}
+          // The songs band leads with the same first rows — partition
+          // by key so they don't double up under 'all results' (the
+          // full result model is untouched: counts, paging and the
+          // play context all still see every row).
+          data={view.results.rows.filter(
+            (row) =>
+              !(view.topRow?.songs.some(
+                (song) => song.row.key === row.row.key,
+              ) ?? false),
+          )}
           keyExtractor={(row) => row.row.key}
           scrollEnabled={scrollEnabled}
           ListHeaderComponent={
