@@ -1326,21 +1326,31 @@ export function StageSheet({
   // intercepting the same frame the sheet lifts off the pill (or the
   // expanded anchor lands) — a state-mounted surface would leave a
   // JS-hop window where a tap slips through to content underneath.
+  // Two gates, same shared value: the wrapper can only be 'box-none'
+  // or 'none', so it never absorbs a tap itself and a stuck value
+  // fails open to content; the inner wrapper owns the sole hit
+  // target ('auto'/'none'), so the surface's reach ends exactly at
+  // its Pressable — a JS 'none' on that Pressable instead would
+  // reopen the hop the animated gate exists to close (a rising drag
+  // could leak a tap to the page mid-flight).
   // RNW writes those non-style animated props as inert DOM
-  // attributes: the wrapper's pe:none class is baked at mount and
-  // never swaps, and `pointer-events` inherits — RNW Pressable
-  // emits no pe class of its own, so the web gate pairs the
-  // Pressable's mount (`dismissOn`, which also covers the
-  // synchronous expanded flip) with an explicit pointerEvents='auto'
-  // that overrides the inherited dead class. On native 'auto' is
-  // the default and the wrapper's 'none' still gates the subtree.
+  // attributes: the baked mount-time pe:none class never swaps, and
+  // `pointer-events` inherits — RNW Pressable emits no pe class of
+  // its own, so the web gate pairs the Pressable's mount
+  // (`dismissOn`, which also covers the synchronous expanded flip)
+  // with an explicit pointerEvents='auto' that overrides the
+  // inherited dead class.
   const dismissSurfaceProps = useAnimatedProps(() => {
     const on = progress.value > 0.001 || expandedShared.value;
     return {
-      pointerEvents: on ? 'auto' : 'none',
+      pointerEvents: on ? 'box-none' : 'none',
       accessibilityElementsHidden: !on,
       importantForAccessibility: on ? 'auto' : 'no-hide-descendants',
     } as const;
+  });
+  const dismissTapProps = useAnimatedProps(() => {
+    const on = progress.value > 0.001 || expandedShared.value;
+    return { pointerEvents: on ? 'auto' : 'none' } as const;
   });
   const dismissOn = risenOn || expanded;
 
@@ -2029,21 +2039,24 @@ export function StageSheet({
         animatedProps={dismissSurfaceProps}
         style={StyleSheet.absoluteFill}
       >
+        {/* Sole hit target — gated on the UI thread a level up so a
+            rising drag can't leak a tap through to the page. Web
+            mounts it only when `dismissOn` and keeps the Pressable's
+            explicit 'auto' overriding the baked pe:none class. */}
         {(dismissOn || Platform.OS !== 'web') && (
-          <Pressable
-            compact
-            onPress={dismissBackdrop}
-            accessibilityLabel={t('sheets.closeA11y')}
-            // JS-side fallback gate under the UI-thread animatedProps
-            // one: if that prop flush ever sticks 'auto' on a parked
-            // sheet, the invisible full-screen surface would eat every
-            // tap beneath it — this mirrors `dismissOn` a frame later
-            // so taps can reach content again.
-            pointerEvents={
-              Platform.OS === 'web' || dismissOn ? 'auto' : 'none'
-            }
+          <Animated.View
+            collapsable={false}
+            animatedProps={dismissTapProps}
             style={StyleSheet.absoluteFill}
-          />
+          >
+            <Pressable
+              compact
+              onPress={dismissBackdrop}
+              accessibilityLabel={t('sheets.closeA11y')}
+              pointerEvents="auto"
+              style={StyleSheet.absoluteFill}
+            />
+          </Animated.View>
         )}
       </Animated.View>
       <Animated.View
