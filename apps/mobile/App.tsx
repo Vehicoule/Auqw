@@ -2697,6 +2697,11 @@ function Main({
   );
   useEffect(() => {
     if (modalSheetUp) {
+      // A mark landing while another sheet is mounted belongs to the
+      // DEPARTED one (a swipe-dismissed sheet replaced by a new sheet
+      // in the same commit) — consume it here or it would leak onto
+      // the replacement's later programmatic close and skip its hold.
+      nativeSheetDone.current = false;
       setSheetOccluded(true);
       return;
     }
