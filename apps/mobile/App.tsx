@@ -2654,9 +2654,25 @@ function Main({
     }
   };
 
+  // A presented SheetScreen can't rise above the floating stage —
+  // while one is up the whole stage (pill and panes) hides instead
+  // of parking mid-sheet and swallowing its rows.
+  const modalSheetUp =
+    rowActions !== null ||
+    pickerFor !== null ||
+    providerPicker !== null ||
+    themePickerOpen ||
+    languagePickerOpen ||
+    storefrontSheetOpen ||
+    qualityPickerOpen ||
+    artworkCachePickerOpen ||
+    authSheetOpen ||
+    authClientSheetOpen;
+
   const stageSheet = sheetPlayer !== null ? (
         <StageSheet
           player={sheetPlayer}
+          occluded={modalSheetUp}
           // No live player = held ended pose — the leaves
           // freeze at the model's retained position rather
           // than resetting on the queue's cleared position.
@@ -3079,18 +3095,16 @@ function Main({
         )}
       </AppStack>
       {/* The stage sheet IS the miniplayer — mounted outside the
-          ScreenStack so its collapsed pill keeps floating over pushed
-          overlay pages (entity/playlist/...), not just the tab shell.
-          Its absolute-fill surfaces anchor to the screen-filling view;
-          native formSheets still present above it. */}
-      {/* The stage sheet IS the miniplayer — mounted outside the
           ScreenStack on native so its collapsed pill keeps floating
           over pushed overlay pages (entity/playlist/...), not just
           the tab shell. Its absolute-fill surfaces anchor to the
-          screen-filling view; native formSheets still present above
-          it. Web keeps the in-tree mount below: there SheetScreens
-          are in-tree overlays too, and a hoisted layer would cover
-          them — pushed pages covering the pill stays the web
+          screen-filling view. Native formSheets render INSIDE the
+          stack below it, so `occluded` parks the whole stage while
+          one is up — the pill can't float mid-sheet and the
+          expanded pane can't bury a presented sheet. Web keeps the
+          in-tree mount below: there SheetScreens are in-tree
+          overlays too, and a hoisted layer would cover them —
+          pushed pages covering the pill stays the web
           limitation. */}
       {Platform.OS === 'web' ? null : stageSheet}
       </View>

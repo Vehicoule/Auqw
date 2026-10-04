@@ -677,6 +677,12 @@ export type StageSheetProps = {
       contract MiniPlayer documents — null = dead edge). */
   readonly skipNext?: SkipPeek | null | undefined;
   readonly skipPrevious?: SkipPeek | null | undefined;
+  /** A modal sheet is presented over the stage — the host keeps this
+      sheet mounted as floating chrome above pushed pages, but a
+      native formSheet can never rise above it, so while one is up
+      every stage surface (pill and panes alike) hides and drops its
+      touches rather than floating mid-sheet and swallowing taps. */
+  readonly occluded?: boolean | undefined;
   readonly nextEndsQueue?: boolean | undefined;
   /** Live peek resolution forwarded to the embedded MiniPlayer —
       re-evaluated per position tick so the >3s restart boundary
@@ -789,6 +795,7 @@ export function StageSheet({
   collapsedHeight: collapsedHeightProp,
   skipNext,
   skipPrevious,
+  occluded = false,
   nextEndsQueue,
   peeksFor,
   onDismiss,
@@ -2012,7 +2019,18 @@ export function StageSheet({
   );
 
   return (
-    <>
+    // While a modal sheet presents over the stage (`occluded`), every
+    // surface hides and drops its touches — the parked pill floating
+    // mid-sheet would occlude rows and an expanded pane would bury
+    // the presented sheet entirely. `box-none` keeps the pass-
+    // through contract for everything inside when it is up.
+    <View
+      collapsable={false}
+      pointerEvents={occluded ? 'none' : 'box-none'}
+      accessibilityElementsHidden={occluded}
+      importantForAccessibility={occluded ? 'no-hide-descendants' : 'auto'}
+      style={[StyleSheet.absoluteFill, occluded && { opacity: 0 }]}
+    >
       {/* Scrim over whatever the rising sheet hasn't covered yet — same
           role as the CMP deck's scrim: it fades in with progress and is
           tappable to collapse once the sheet is the presented surface. */}
@@ -2255,7 +2273,7 @@ export function StageSheet({
           </View>
         </Animated.View>
       </Animated.View>
-    </>
+    </View>
   );
 }
 
