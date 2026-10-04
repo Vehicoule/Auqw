@@ -2037,6 +2037,21 @@ const tap = (s: string) => {
     !noPaletteOs.some((card) => card.key === 'adaptive'),
     'adaptive absent without OS palette support',
   );
+  // Except when 'adaptive' is the saved pick: the card stays so the
+  // picker shows what is stored, disabled against an ineffective
+  // re-pick.
+  const savedAdaptive = themeCardViews('light', null, false, 'adaptive');
+  const stranded = savedAdaptive.find((card) => card.key === 'adaptive');
+  assert(savedAdaptive.length === 5, 'saved adaptive keeps its card');
+  assert(
+    stranded?.enabled === false,
+    'saved-but-unsupported adaptive renders disabled',
+  );
+  assertEqual(
+    stranded?.detail,
+    'unsupported',
+    'the stranded card explains itself',
+  );
 }
 
 {

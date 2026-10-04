@@ -2952,6 +2952,7 @@ function Main({
                 osScheme,
                 themeSource,
                 Platform.OS === 'android' && Platform.Version >= 31,
+                state.settings.theme,
               )}
               selectedKey={state.settings.theme}
               onPick={onPickTheme}
