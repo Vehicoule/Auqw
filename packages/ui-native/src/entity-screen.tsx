@@ -313,7 +313,10 @@ export function EntityScreen({
             // is short, scrolls the whole block when it overflows.
             flexGrow: 1,
             paddingHorizontal: theme.spacing.sm,
-            paddingBottom: theme.spacing.xxl,
+            paddingBottom:
+              theme.spacing.xxl +
+              theme.sizes.miniPlayer +
+              theme.spacing.md,
           }}
         >
           {header}
@@ -332,7 +335,10 @@ export function EntityScreen({
           contentContainerStyle={{
             paddingHorizontal: theme.spacing.sm,
             paddingTop: theme.spacing.md,
-            paddingBottom: theme.spacing.xxl,
+            paddingBottom:
+              theme.spacing.xxl +
+              theme.sizes.miniPlayer +
+              theme.spacing.md,
           }}
           renderItem={({ item }) => (
             <TrackRow

@@ -591,7 +591,10 @@ export function SyncScreen({
       style={{ flex: 1, backgroundColor: theme.colors.canvas }}
       contentContainerStyle={{
         paddingTop: topInset,
-        paddingBottom: theme.spacing.xxl,
+        paddingBottom:
+          theme.spacing.xxl +
+          theme.sizes.miniPlayer +
+          theme.spacing.md,
       }}
     >
       <View

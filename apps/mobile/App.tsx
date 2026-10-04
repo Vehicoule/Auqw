@@ -2708,124 +2708,6 @@ function Main({
             topInset={topInset}
             width={paneWidth}
           />
-          {sheetPlayer !== null ? (
-            <StageSheet
-              player={sheetPlayer}
-              // No live player = held ended pose — the leaves
-              // freeze at the model's retained position rather
-              // than resetting on the queue's cleared position.
-              session={player === null ? undefined : session}
-              expanded={expanded}
-              onOpenEntity={openEntityFromStage}
-              progress={stageProgress}
-              travel={stageTravel}
-              anchor={stageAnchor}
-              gone={stageGone}
-              collapsedHeight={stageCollapsedHeight}
-              onExpandChange={setStageOpenFor}
-              onDismiss={() => void session.stop()}
-              peeksFor={skipPeeksFor}
-              mode={stageMode}
-              onModeChange={setStageMode}
-              restMode={stageReopenMode}
-              queue={queueModel}
-              queueReordering={reordering}
-              topInset={topInset}
-              bottomInset={insets.bottom}
-              lyricsSource={lyricsSource}
-              lyricsLive={lyricsLive}
-              seekGeneration={seekGeneration}
-              radio={radioModel}
-              onPlayPause={
-                heldOccurrenceId !== null
-                  ? () => {
-                      // Same offline rule as queue rows — an unowned
-                      // remote target must not start a dead attempt.
-                      const held = state.queue.occurrences.find(
-                        (o) => o.occurrenceId === heldOccurrenceId,
-                      );
-                      if (held !== undefined && !canPlay(held.recordingId)) {
-                        return;
-                      }
-                      void Haptics.impactAsync(
-                        Haptics.ImpactFeedbackStyle.Light,
-                      );
-                      void session
-                        .playOccurrence(heldOccurrenceId)
-                        .then((r) => reportPlay('common.play', r));
-                    }
-                  : onPlayPause
-              }
-              onNext={() => advance('next')}
-              onPrevious={() => advance('previous')}
-              onToggleLike={onToggleLike}
-              shuffle={state.type === 'ready' ? state.shuffle : false}
-              onToggleShuffle={() => void session.toggleShuffle()}
-              repeat={state.type === 'ready' ? state.repeat : 'off'}
-              onCycleRepeat={() => void session.cycleRepeat()}
-              download={stageDownload}
-              onDownload={onStageDownload}
-              onAddToPlaylist={onStageAddToPlaylist}
-              onTrackMenu={
-                sheetPlayer.recordingId === null
-                  ? undefined
-                  : () => {
-                      const recordingId = sheetPlayer.recordingId;
-                      if (recordingId !== null) {
-                        setActionsFor({ kind: 'recording', recordingId });
-                      }
-                    }
-              }
-              onRecovery={onAuthRecovery}
-              onSeek={
-                heldOccurrenceId !== null
-                  ? (ms) => {
-                      const held = state.queue.occurrences.find(
-                        (o) => o.occurrenceId === heldOccurrenceId,
-                      );
-                      if (held !== undefined && !canPlay(held.recordingId)) {
-                        return;
-                      }
-                      void session
-                        .playOccurrence(heldOccurrenceId)
-                        .then((r) => {
-                          if (!r.ok) {
-                            reportPlay('common.play', r);
-                            return;
-                          }
-                          // The await can outlive a re-cursor — a
-                          // queue tap during prepare would otherwise
-                          // have this seek land on the new song.
-                          const snap = session.snapshot();
-                          if (
-                            snap.type === 'ready' &&
-                            snap.queue.currentOccurrenceId ===
-                              heldOccurrenceId
-                          ) {
-                            seekToPosition(ms);
-                          }
-                        });
-                    }
-                  : seekToPosition
-              }
-              peaks={peaks}
-              onRetryLyrics={onRetryLyrics}
-              onStartRadio={onStartRadioGated}
-              radioSeedProvider={radioSeedProvider}
-              onStopRadio={onStopRadio}
-              onPressQueueItem={playQueueOccurrence}
-              onQueueRowIntent={(id) =>
-                rowIntent({ kind: 'occurrence', id })
-              }
-              onQueueViewport={onQueueViewport}
-              onRemoveQueueItem={removeQueueOccurrence}
-              onClearUpcoming={clearUpcoming}
-              onOpenQueueContext={openQueueContext}
-              onToggleQueueReorder={toggleReordering}
-              onMoveQueueItem={onMoveQueueItem}
-              onMoveQueueItemTo={onMoveQueueItemTo}
-            />
-          ) : null}
           {online === false && (
             <View
               style={{
@@ -3056,6 +2938,129 @@ function Main({
           </SheetScreen>
         )}
       </AppStack>
+      {/* The stage sheet IS the miniplayer — mounted outside the
+          ScreenStack so its collapsed pill keeps floating over pushed
+          overlay pages (entity/playlist/...), not just the tab shell.
+          Its absolute-fill surfaces anchor to the screen-filling view;
+          native formSheets still present above it. */}
+      {sheetPlayer !== null ? (
+        <StageSheet
+          player={sheetPlayer}
+          // No live player = held ended pose — the leaves
+          // freeze at the model's retained position rather
+          // than resetting on the queue's cleared position.
+          session={player === null ? undefined : session}
+          expanded={expanded}
+          onOpenEntity={openEntityFromStage}
+          progress={stageProgress}
+          travel={stageTravel}
+          anchor={stageAnchor}
+          gone={stageGone}
+          collapsedHeight={stageCollapsedHeight}
+          onExpandChange={setStageOpenFor}
+          onDismiss={() => void session.stop()}
+          peeksFor={skipPeeksFor}
+          mode={stageMode}
+          onModeChange={setStageMode}
+          restMode={stageReopenMode}
+          queue={queueModel}
+          queueReordering={reordering}
+          topInset={topInset}
+          bottomInset={insets.bottom}
+          lyricsSource={lyricsSource}
+          lyricsLive={lyricsLive}
+          seekGeneration={seekGeneration}
+          radio={radioModel}
+          onPlayPause={
+            heldOccurrenceId !== null
+              ? () => {
+                  // Same offline rule as queue rows — an unowned
+                  // remote target must not start a dead attempt.
+                  const held = state.queue.occurrences.find(
+                    (o) => o.occurrenceId === heldOccurrenceId,
+                  );
+                  if (held !== undefined && !canPlay(held.recordingId)) {
+                    return;
+                  }
+                  void Haptics.impactAsync(
+                    Haptics.ImpactFeedbackStyle.Light,
+                  );
+                  void session
+                    .playOccurrence(heldOccurrenceId)
+                    .then((r) => reportPlay('common.play', r));
+                }
+              : onPlayPause
+          }
+          onNext={() => advance('next')}
+          onPrevious={() => advance('previous')}
+          onToggleLike={onToggleLike}
+          shuffle={state.type === 'ready' ? state.shuffle : false}
+          onToggleShuffle={() => void session.toggleShuffle()}
+          repeat={state.type === 'ready' ? state.repeat : 'off'}
+          onCycleRepeat={() => void session.cycleRepeat()}
+          download={stageDownload}
+          onDownload={onStageDownload}
+          onAddToPlaylist={onStageAddToPlaylist}
+          onTrackMenu={
+            sheetPlayer.recordingId === null
+              ? undefined
+              : () => {
+                  const recordingId = sheetPlayer.recordingId;
+                  if (recordingId !== null) {
+                    setActionsFor({ kind: 'recording', recordingId });
+                  }
+                }
+          }
+          onRecovery={onAuthRecovery}
+          onSeek={
+            heldOccurrenceId !== null
+              ? (ms) => {
+                  const held = state.queue.occurrences.find(
+                    (o) => o.occurrenceId === heldOccurrenceId,
+                  );
+                  if (held !== undefined && !canPlay(held.recordingId)) {
+                    return;
+                  }
+                  void session
+                    .playOccurrence(heldOccurrenceId)
+                    .then((r) => {
+                      if (!r.ok) {
+                        reportPlay('common.play', r);
+                        return;
+                      }
+                      // The await can outlive a re-cursor — a
+                      // queue tap during prepare would otherwise
+                      // have this seek land on the new song.
+                      const snap = session.snapshot();
+                      if (
+                        snap.type === 'ready' &&
+                        snap.queue.currentOccurrenceId ===
+                          heldOccurrenceId
+                      ) {
+                        seekToPosition(ms);
+                      }
+                    });
+                }
+              : seekToPosition
+          }
+          peaks={peaks}
+          onRetryLyrics={onRetryLyrics}
+          onStartRadio={onStartRadioGated}
+          radioSeedProvider={radioSeedProvider}
+          onStopRadio={onStopRadio}
+          onPressQueueItem={playQueueOccurrence}
+          onQueueRowIntent={(id) =>
+            rowIntent({ kind: 'occurrence', id })
+          }
+          onQueueViewport={onQueueViewport}
+          onRemoveQueueItem={removeQueueOccurrence}
+          onClearUpcoming={clearUpcoming}
+          onOpenQueueContext={openQueueContext}
+          onToggleQueueReorder={toggleReordering}
+          onMoveQueueItem={onMoveQueueItem}
+          onMoveQueueItemTo={onMoveQueueItemTo}
+        />
+      ) : null}
       </View>
     </RenderBoundary>
   );

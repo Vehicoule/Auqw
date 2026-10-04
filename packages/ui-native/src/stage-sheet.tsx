@@ -2034,7 +2034,14 @@ export function StageSheet({
             compact
             onPress={dismissBackdrop}
             accessibilityLabel={t('sheets.closeA11y')}
-            pointerEvents="auto"
+            // JS-side fallback gate under the UI-thread animatedProps
+            // one: if that prop flush ever sticks 'auto' on a parked
+            // sheet, the invisible full-screen surface would eat every
+            // tap beneath it — this mirrors `dismissOn` a frame later
+            // so taps can reach content again.
+            pointerEvents={
+              Platform.OS === 'web' || dismissOn ? 'auto' : 'none'
+            }
             style={StyleSheet.absoluteFill}
           />
         )}

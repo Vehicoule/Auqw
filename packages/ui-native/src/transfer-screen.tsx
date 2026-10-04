@@ -77,7 +77,10 @@ export function TransferScreen({
         scrollEnabled={scrollEnabled}
         contentContainerStyle={{
           paddingHorizontal: theme.spacing.sm,
-          paddingBottom: theme.spacing.xxl,
+          paddingBottom:
+            theme.spacing.xxl +
+            theme.sizes.miniPlayer +
+            theme.spacing.md,
           gap: theme.spacing.lg,
         }}
       >

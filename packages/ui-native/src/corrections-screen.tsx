@@ -104,7 +104,12 @@ export function CorrectionsScreen({
       ) : (
         <ScrollView
           scrollEnabled={scrollEnabled}
-          contentContainerStyle={{ paddingBottom: theme.spacing.xxl }}
+          contentContainerStyle={{
+            paddingBottom:
+              theme.spacing.xxl +
+              theme.sizes.miniPlayer +
+              theme.spacing.md,
+          }}
         >
           {view.body.rows.map((row) => (
             <ReviewRow key={row.row.reviewId} view={row} />
