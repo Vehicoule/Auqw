@@ -393,7 +393,15 @@ export function SearchScreen({
         </ScrollView>
       )}
       {view.filters !== null && (
-        <View style={{ paddingTop: topInset }}>
+        <View
+          style={{
+            paddingTop: topInset,
+            // The floating loupe overlays this band's right edge —
+            // clipping the viewport here keeps chips from sliding
+            // under it at any scroll position.
+            paddingRight: theme.spacing.screen + SEARCH_FAB_RESERVE,
+          }}
+        >
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -402,10 +410,6 @@ export function SearchScreen({
             contentContainerStyle={{
               gap: theme.spacing.xs,
               paddingHorizontal: theme.spacing.screen,
-              // The floating loupe overlays this band's right edge —
-              // chips keep clear of it instead of sliding under.
-              paddingRight:
-                theme.spacing.screen + SEARCH_FAB_RESERVE,
               paddingBottom: theme.spacing.sm,
             }}
           >
