@@ -291,6 +291,10 @@ struct LiveRequest {
     /// the entry this task inserted, never a next generation that
     /// claimed the id mid-delivery.
     generation: u64,
+    /// The plugin this request drives — `unload_plugin` cancels
+    /// every live request for a provider it removes, or the running
+    /// invocation keeps its cloned host handles past revocation.
+    plugin_id: String,
 }
 
 /// A produced session slot in `prepared_handles`. The slot's commit
@@ -618,11 +622,25 @@ impl PluginHost {
         Ok(id)
     }
 
-    /// Unregister a previously loaded plugin by manifest id.
+    /// Unregister a previously loaded plugin by manifest id, cancelling
+    /// its in-flight invocations first: removing the registry `Arc`
+    /// alone leaves running requests holding cloned http/kv/pot
+    /// handles, so a revoked guest would keep executing against host
+    /// resources until each request settled on its own. The `cancels`
+    /// → `plugins` order matches `start_typed_admitted` (the registry
+    /// lookup nests inside the admission's `cancels` guard), and
+    /// holding the map through the removal makes the unload atomic
+    /// against a same-plugin admission.
     ///
     /// # Errors
     /// [`HostError::UnknownPlugin`] if `provider_id` is not loaded.
     pub fn unload_plugin(&self, provider_id: String) -> Result<(), HostError> {
+        let cancels = lock(&self.cancels)?;
+        for req in cancels.values() {
+            if req.plugin_id == provider_id {
+                req.token.cancel();
+            }
+        }
         lock(&self.plugins)?
             .remove(&provider_id)
             .map(|_| ())
@@ -1062,6 +1080,7 @@ impl PluginHost {
                 is_prepare,
                 settled: false,
                 generation,
+                plugin_id,
             },
         );
         drop(admission);
@@ -1494,6 +1513,86 @@ mod tests {
             Err(e) => panic!("outcome: {e}"),
         };
         assert_eq!(kind, "budget-exceeded");
+    }
+
+    #[test]
+    fn unload_cancels_the_plugins_inflight_requests() {
+        // Removing the registry `Arc` alone leaves a running
+        // invocation holding cloned http/kv/pot handles — a revoked
+        // provider would keep executing until the request settled on
+        // its own. `unload_plugin` cancels every live request for the
+        // removed plugin: the outcome reports `cancelled`, and a
+        // bystander plugin's request is untouched. A deep fuel grant
+        // keeps both spin burns in flight past the unload at any
+        // interpreter speed.
+        let mut cfg = config();
+        cfg.fuel_per_entry = 1_000_000_000;
+        cfg.fuel_total = 1_000_000_000;
+        let host = match PluginHost::new(cfg) {
+            Ok(h) => h,
+            Err(e) => panic!("host: {e}"),
+        };
+        let id = match host.load_plugin(SPIN_WASM.to_vec(), manifest_json("spin", SPIN_WASM, "[]"))
+        {
+            Ok(id) => id,
+            Err(e) => panic!("load: {e}"),
+        };
+        let id_b =
+            match host.load_plugin(SPIN_WASM.to_vec(), manifest_json("spin-b", SPIN_WASM, "[]")) {
+                Ok(id) => id,
+                Err(e) => panic!("load b: {e}"),
+            };
+        let kind_of = |_: String, o: ResolveOutcome| match o {
+            ResolveOutcome::Failed { kind, .. } => kind,
+            ResolveOutcome::Resolved { .. } => "resolved".to_string(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        match host.start_resolve(id.clone(), "x".into(), "victim".into(), move |id, o| {
+            let _ = tx.send(kind_of(id, o));
+            async move {}
+        }) {
+            Ok(()) => {}
+            Err(e) => panic!("start victim: {e}"),
+        }
+        let (tx_b, rx_b) = std::sync::mpsc::channel::<String>();
+        match host.start_resolve(
+            id_b.clone(),
+            "x".into(),
+            "bystander".into(),
+            move |id, o| {
+                let _ = tx_b.send(kind_of(id, o));
+                async move {}
+            },
+        ) {
+            Ok(()) => {}
+            Err(e) => panic!("start bystander: {e}"),
+        }
+        match host.unload_plugin(id.clone()) {
+            Ok(()) => {}
+            Err(e) => panic!("unload: {e}"),
+        }
+        let kind = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(kind) => kind,
+            Err(e) => panic!("victim outcome: {e}"),
+        };
+        assert_eq!(kind, "cancelled");
+        // The removed id is gone from the registry — a new start
+        // fails admission instead of running the revoked guest.
+        match host.start_resolve(id, "x".into(), "again".into(), |_, _| async move {}) {
+            Err(HostError::UnknownPlugin { .. }) => {}
+            other => panic!("expected UnknownPlugin, got {other:?}"),
+        }
+        // The bystander keeps running: its own unload cancels it —
+        // another plugin's unload never reached it.
+        match host.unload_plugin(id_b) {
+            Ok(()) => {}
+            Err(e) => panic!("unload b: {e}"),
+        }
+        let kind = match rx_b.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(kind) => kind,
+            Err(e) => panic!("bystander outcome: {e}"),
+        };
+        assert_eq!(kind, "cancelled");
     }
 
     #[test]
