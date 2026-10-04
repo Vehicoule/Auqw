@@ -373,7 +373,8 @@ export async function run(): Promise<void> {
 
   // Version components past the safe-integer range still order
   // correctly — a `Number` compare would collapse them equal and let
-  // feed order pick the older release.
+  // feed order pick the older release. The (id, abi) uniqueness rule
+  // puts the two candidates on distinct abi lines.
   {
     const V_LO = '0.0.9007199254740992';
     const V_HI = '0.0.9007199254740993';
@@ -387,8 +388,8 @@ export async function run(): Promise<void> {
           JSON.stringify({
             keyId: KEY_ID,
             plugins: [
-              entry('alpha', V_LO, WASM_A, MANIFEST_A),
-              entry('alpha', V_HI, WASM_HI, MANIFEST_HI),
+              { ...entry('alpha', V_LO, WASM_A, MANIFEST_A), abi: '0.1.0' },
+              { ...entry('alpha', V_HI, WASM_HI, MANIFEST_HI), abi: '0.1.1' },
             ],
           }),
         ),
