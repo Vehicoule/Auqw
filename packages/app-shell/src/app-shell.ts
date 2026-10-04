@@ -667,35 +667,49 @@ export function useAppShell<E extends { readonly type: string } = never>(
   // ---- toast bus ---------------------------------------------------
   // reportResult routes its text through the module sink; the pill
   // self-clears.
-  const [toast, setToastText] = useState<string | null>(null);
-  const [toastSeq, setToastSeq] = useState(0);
   // Actions that must start their clock from a toast's committed
   // display — not from the state write (the install reboot waits out
   // the toast's own window, and a delayed commit must not eat it).
-  const postToastAction = useRef<(() => void) | null>(null);
+  // The action rides inside the same commit as its text: a setToast
+  // write supersedes the whole pair atomically, so an action queued
+  // under a toast that never commits (a same-flush write winning
+  // with null or other text) dies with it instead of firing against
+  // a later, unrelated toast.
+  const [
+    { seq: toastSeq, text: toast, action: toastAction },
+    setToastCommit,
+  ] = useState<{
+    seq: number;
+    text: string | null;
+    action: (() => void) | null;
+  }>({ seq: 0, text: null, action: null });
   // Every setToast bumps the sequence — React bails on identical
   // state, and a repeat of the visible text must still commit so a
   // queued post-toast action is never stranded.
-  const setToast = useCallback((text: string | null) => {
-    setToastSeq((n) => n + 1);
-    setToastText(text);
-  }, []);
+  const setToast = useCallback(
+    (text: string | null, action: (() => void) | null = null) => {
+      setToastCommit((prev) => ({ seq: prev.seq + 1, text, action }));
+    },
+    [],
+  );
   useEffect(() => {
     setToastSink(setToast);
     return () => setToastSink(null);
   }, [setToast]);
+  // Each commit's action fires once — a StrictMode-style re-run of
+  // the effect over the same commit must not re-fire it.
+  const firedToastSeq = useRef(0);
   useEffect(() => {
     if (toast === null) {
       return undefined;
     }
     const timer = setTimeout(() => setToast(null), 4_000);
-    const pending = postToastAction.current;
-    if (pending !== null) {
-      postToastAction.current = null;
-      pending();
+    if (toastAction !== null && firedToastSeq.current !== toastSeq) {
+      firedToastSeq.current = toastSeq;
+      toastAction();
     }
     return () => clearTimeout(timer);
-  }, [toast, toastSeq, setToast]);
+  }, [toast, toastSeq, toastAction, setToast]);
 
   // ---- downloads ledger + usage probes -----------------------------
   // Live ledger — chips, the downloads collection, and the stage
@@ -2519,18 +2533,18 @@ export function useAppShell<E extends { readonly type: string } = never>(
                 return;
               }
               if (outcome.outcome === 'approved') {
+                // The session reboots so the new provider's adapters
+                // exist — the action rides with the toast commit, so
+                // the port starts its clock when the confirmation
+                // displays (full window even under a delayed render)
+                // and never fires against an unrelated toast.
                 setToast(
                   t('toast.providerInstalled', {
                     id: outcome.id,
                     count: outcome.permissions.length,
                   }),
+                  ports.afterProviderInstall ?? null,
                 );
-                // The session reboots so the new provider's adapters
-                // exist — the port starts its clock when the toast
-                // commits, so the confirmation gets its full window
-                // even under a delayed render.
-                postToastAction.current =
-                  ports.afterProviderInstall ?? null;
                 return;
               }
               setToast(t('toast.providerInstallFailed'));
