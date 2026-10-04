@@ -28,7 +28,7 @@ export function run(): void {
   try {
     // img-src enumerates the proven artwork CDNs even with no
     // manifests — the bundled providers' covers must never break.
-    const bare = imgSrcSources(dir);
+    const bare = imgSrcSources([dir]);
     const bareSources = new Set(bare.split(' '));
     for (const host of [
       'https://*.dzcdn.net',
@@ -82,7 +82,7 @@ export function run(): void {
     // A malformed manifest is skipped, not fatal.
     writeFileSync(join(dir, 'plugins', 'broken.manifest.json'), '{nope', 'utf8');
     const pluginDir = join(dir, 'plugins');
-    const widened = imgSrcSources(pluginDir);
+    const widened = imgSrcSources([pluginDir]);
     // img-src is a space-separated source list — membership means the
     // whole token, not a substring inside some longer host.
     const widenedSources = new Set(widened.split(' '));
@@ -107,6 +107,100 @@ export function run(): void {
       assert(
         /^('self'|data:|blob:|https:\/\/\S+)$/.test(token),
         `capability name leaked into img-src: ${token}`,
+      );
+    }
+
+    // The OTA cache stores self-describing `<id>.json` pair docs —
+    // the manifest rides embedded as a JSON string next to the wasm
+    // and release signature, and its network: grants must widen
+    // img-src exactly like a flat manifest's.
+    writeFileSync(
+      join(dir, 'plugins', 'spotify.json'),
+      JSON.stringify({
+        id: 'spotify',
+        version: '0.1.0',
+        abi: '0.1.0',
+        wasm_sha256: 'sha256:aa',
+        manifest_sha256: 'sha256:bb',
+        signature: 'c2ln',
+        manifest: JSON.stringify({
+          abi: '0.1.0',
+          capabilities: ['catalog.search'],
+          id: 'spotify',
+          permissions: ['network:api.spotify.com', 'kv'],
+          version: '0.1.0',
+        }),
+        wasm: 'QUJD',
+      }),
+      'utf8',
+    );
+    // feed.json coexists in the same dir — it is not a pair doc, and
+    // even a permissions-shaped top level must not be read as one.
+    writeFileSync(
+      join(dir, 'plugins', 'feed.json'),
+      JSON.stringify({
+        plugins: [{ id: 'spotify' }],
+        permissions: ['network:feed.example'],
+      }),
+      'utf8',
+    );
+    // A pair doc whose embedded manifest is malformed is skipped.
+    writeFileSync(
+      join(dir, 'plugins', 'torn.json'),
+      JSON.stringify({ manifest: '{nope', wasm: 'QUJD' }),
+      'utf8',
+    );
+    const ota = imgSrcSources([pluginDir]);
+    const otaSources = new Set(ota.split(' '));
+    assert(
+      otaSources.has('https://api.spotify.com'),
+      `pair-doc network: grant did not widen img-src: ${ota}`,
+    );
+    assert(
+      !otaSources.has('https://feed.example'),
+      `feed.json leaked into img-src: ${ota}`,
+    );
+
+    // The consent-gated user dir widens the same way: scanning both
+    // dirs unions the declared hosts.
+    mkdirSync(join(dir, 'plugins-user'));
+    writeFileSync(
+      join(dir, 'plugins-user', 'foo-music.pair.json'),
+      JSON.stringify({
+        manifest: JSON.stringify({
+          abi: '0.1.0',
+          capabilities: ['catalog.search'],
+          id: 'foo-music',
+          permissions: ['network:api.foo-music.example'],
+          version: '1.0.0',
+        }),
+        wasm: 'QUJD',
+      }),
+      'utf8',
+    );
+    // consents.json lives beside the pairs — not a pair doc either.
+    writeFileSync(
+      join(dir, 'plugins-user', 'consents.json'),
+      JSON.stringify({ consents: [{ id: 'foo-music' }] }),
+      'utf8',
+    );
+    const userDir = join(dir, 'plugins-user');
+    const both = imgSrcSources([pluginDir, userDir]);
+    const bothSources = new Set(both.split(' '));
+    for (const host of [
+      'https://api.deezer.com',
+      'https://api.spotify.com',
+      'https://api.foo-music.example',
+    ]) {
+      assert(
+        bothSources.has(host),
+        `merged scan dropped ${host}: ${both}`,
+      );
+    }
+    for (const token of bothSources) {
+      assert(
+        /^('self'|data:|blob:|https:\/\/\S+)$/.test(token),
+        `merged scan leaked a non-source token: ${token}`,
       );
     }
 
