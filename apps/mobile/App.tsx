@@ -2437,10 +2437,11 @@ function Main({
   };
 
   // Pushed pages sit under the same collapsed pill strip as the
-  // tabs: bottom clearance is the measured collapsed bound (tab bar +
-  // gap + pill), zeroed while no player is up.
+  // tabs on native: bottom clearance is the measured collapsed bound
+  // (tab bar + gap + pill), zeroed while no player is up. On web the
+  // pushed overlay covers bar and pill alike, so no strip is owed.
   const pushedBottomClearance =
-    sheetPlayer === null
+    sheetPlayer === null || Platform.OS === 'web'
       ? 0
       : tabBarHeight +
         theme.spacing.md +
