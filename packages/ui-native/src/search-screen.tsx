@@ -240,6 +240,12 @@ export type SearchScreenProps = SearchScreenHandlers & {
   /** The system top inset — the screen adds the floating loupe's
    *  reserve itself where content must clear it. */
   readonly topInset?: number | undefined;
+  /**
+   * Whether the floating search field is expanded. Pinned rows drop
+   * below it while open (it spans the width), hug the inset when it
+   * is collapsed back to the loupe.
+   */
+  readonly fabOpen?: boolean | undefined;
   readonly scrollEnabled?: boolean | undefined;
   /** Submitted queries, newest first — rendered on the idle phase. */
   readonly recents?: readonly string[] | undefined;
@@ -255,6 +261,7 @@ export function SearchScreen({
   state,
   query,
   topInset = 0,
+  fabOpen = false,
   scrollEnabled = true,
   onQueryChange,
   onSubmit,
@@ -293,13 +300,14 @@ export function SearchScreen({
     onLoadMore,
   });
   // Chips stay pinned above the list (the explore contract); the
-  // heading rides inside it. Pinned at the raw inset — the band the
-  // loupe floats over is right-padded on the scroller so chips never
-  // slide under it, not reserved top space that sat dead while
-  // content couldn't scroll through it. Pinned blocks that can land
-  // under the loupe carry the full reserve; scrollables carry it
-  // inside their content so it scrolls away.
+  // heading rides inside it. Pinned rows hug the raw inset — the
+  // collapsed loupe only overlays the row's right edge, cleared by
+  // the scroller's right padding; the expanded field spans the full
+  // width, so pinned rows drop the full reserve below it while open.
+  // Scrollables carry the reserve inside their content — it scrolls
+  // away instead of sitting dead above the viewport.
   const fabInset = topInset + SEARCH_FAB_RESERVE;
+  const pinnedTop = fabOpen === true ? fabInset : topInset;
   const resultHeader =
     view.resultsHead === null ? null : (
       <View
@@ -415,7 +423,7 @@ export function SearchScreen({
       {view.results === null && view.resultsHead !== null && (
         <View
           style={{
-            paddingTop: view.filters !== null ? 0 : fabInset,
+            paddingTop: view.filters !== null ? 0 : pinnedTop,
             paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
           }}
         >
@@ -424,7 +432,7 @@ export function SearchScreen({
       )}
       {view.idle !== null &&
         (view.idle.kind === 'recents' ? (
-          <View style={{ paddingTop: fabInset }}>
+          <View style={{ paddingTop: pinnedTop }}>
             <Text
               variant="label"
               color="secondary"

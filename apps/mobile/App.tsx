@@ -2210,8 +2210,10 @@ function Main({
         state={searchModel}
         query={query}
         // The screen adds the floating loupe's reserve itself —
-        // pinned rows pad the right edge instead of a dead top band.
+        // pinned rows pad the right edge instead of a dead top band,
+        // dropping below the field while it is expanded.
         topInset={topInset}
+        fabOpen={searchFabOpen}
         onQueryChange={setQuery}
         onSubmit={submitSearch}
         onCancel={cancelSearch}
