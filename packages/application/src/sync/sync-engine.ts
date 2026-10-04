@@ -77,8 +77,8 @@ import {
  * record kind each — recordings (+ their source-ref and mapping-claim
  * presence records), likes, entities, entity refs, playlists, playlist
  * entries, play events, play counts, match reviews, and a settings
- * subset (theme, storefront, provider selections, quality tier,
- * prefetch — exactly the sync.md list). Anything outside the whitelist
+ * subset (storefront, provider selections, quality tier, prefetch,
+ * language — exactly the sync.md list). Anything outside the whitelist
  * never enters a delta and is rejected on apply, which is how media,
  * session state, diagnostics, and per-device budgets stay out.
  *
@@ -759,9 +759,11 @@ const isOptTrackRef = (value: unknown): boolean =>
 /**
  * The whitelist — the exact set of (kind, field) pairs that may enter
  * a delta, each with its value contract. sync.md's "settings subset"
- * is the settings row literally: theme, storefront, the four provider
- * selections, quality tier, prefetch — nothing else (artwork bytes and
- * metered-download flags are per-device budgets and never sync).
+ * is the settings row literally: storefront, the four provider
+ * selections, quality tier, prefetch, language — nothing else (artwork
+ * bytes and metered-download flags are per-device budgets and never
+ * sync). `theme` keeps its rule below for a legacy peer's deltas;
+ * the projection (SETTINGS_SYNC_FIELDS) treats it as device-local.
  */
 export const SYNC_FIELD_RULES: Readonly<
   Record<SyncRecordKind, Readonly<Record<string, FieldRule>>>
