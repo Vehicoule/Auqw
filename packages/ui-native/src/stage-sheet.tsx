@@ -2237,10 +2237,10 @@ export function StageSheet({
           // Same fallback: this surface is full-screen — a flush that
           // sticks 'auto' on a parked sheet would eat every tap on the
           // whole stage area. JS `expanded` mirrors the gate's ground
-          // truth a frame behind the UI-thread props.
-          pointerEvents={
-            Platform.OS === 'web' || expanded ? 'auto' : 'none'
-          }
+          // truth a frame behind the UI-thread props — and on web it IS
+          // the gate: RNW doesn't apply animated pointerEvents, so this
+          // layer was 'auto' even parked, covering the collapsed row.
+          pointerEvents={expanded ? 'auto' : 'none'}
           style={[
             StyleSheet.absoluteFill,
             { overflow: 'hidden' },
