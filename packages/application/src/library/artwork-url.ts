@@ -128,7 +128,11 @@ export function scaledArtworkUrl(url: string, targetPx: number): string {
  */
 export function artworkAssetKey(url: string): string {
   const googleSize = url.match(GOOGLE_SIZE);
-  if (googleSize !== null && GOOGLE_HOST.test(url)) {
+  if (
+    googleSize !== null &&
+    GOOGLE_HOST.test(url) &&
+    googleSize[1] === googleSize[2]
+  ) {
     return `${url.slice(0, googleSize.index ?? 0)}${googleSize[3] ?? ''}`;
   }
   const googleSquare = url.match(GOOGLE_SQUARE);
@@ -153,7 +157,13 @@ export function artworkAssetKey(url: string): string {
  */
 export function artworkUrlSize(url: string): number | null {
   const googleSize = url.match(GOOGLE_SIZE);
-  if (googleSize !== null && GOOGLE_HOST.test(url)) {
+  if (
+    googleSize !== null &&
+    GOOGLE_HOST.test(url) &&
+    googleSize[1] === googleSize[2]
+  ) {
+    // Square-only, like SIZED_TAIL: `=w1024-h64` is a crop, not a
+    // large square — it must not size up to serve square requests.
     return parseInt(googleSize[1] ?? '0', 10);
   }
   const googleSquare = url.match(GOOGLE_SQUARE);

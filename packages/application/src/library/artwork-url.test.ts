@@ -39,6 +39,11 @@ export function run(): void {
   const rect = 'https://cdn.example/art/600x400.jpg';
   assertEqual(artworkAssetKey(rect), rect);
   assertEqual(artworkUrlSize(rect), null);
+  // Google `=wN-hM` non-square is a crop, not a large square — it
+  // must not size up to serve a square request's sibling match.
+  const crop = 'https://lh3.googleusercontent.com/img/abc=w1024-h64-l90-rj';
+  assertEqual(artworkAssetKey(crop), crop);
+  assertEqual(artworkUrlSize(crop), null);
   // Look-alike hosts don't take the google grammar.
   const evil = 'https://ggpht.com.evil.tld/img=w128-h128';
   assertEqual(artworkAssetKey(evil), evil);

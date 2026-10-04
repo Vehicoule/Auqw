@@ -642,34 +642,53 @@ export function createArtworkCache(deps: ArtworkCacheDeps): ArtworkCache {
         if (!section.ok) {
           return section;
         }
-        // Exact key first, then a same-asset sibling: entries are keyed
-        // by exact url, but CDN size variants of one asset are
-        // interchangeable at the file level — a small variant's miss
-        // (a scaled-url 404 or a stalled fetch) is served by a cached
-        // larger variant instead of a redundant download. Read-only
-        // reuse: no row is minted for the request url, so byte
-        // accounting and eviction keep owning the file through the
-        // sibling's single entry, and the sibling's access time is
-        // what bumps — it earned the hit.
-        const entry =
-          section.value.entries.get(url) ??
-          siblingEntry(url, section.value.entries);
+        // Exact key first, then same-asset siblings in ascending
+        // adequacy: entries are keyed by exact url, but CDN size
+        // variants of one asset are interchangeable at the file level —
+        // a small variant's miss (a scaled-url 404 or a stalled fetch)
+        // is served by a cached larger variant instead of a redundant
+        // download. Read-only reuse: no row is minted for the request
+        // url, so byte accounting and eviction keep owning the file
+        // through the sibling's single entry, and the sibling's access
+        // time is what bumps — it earned the hit.
+        const entries = section.value.entries;
+        let candidate =
+          entries.get(url) ?? siblingEntry(url, entries);
+        let reaped = false;
+        let entry: ArtworkCacheEntry | undefined;
+        for (;;) {
+          if (candidate === undefined) {
+            break;
+          }
+          const probing = candidate;
+          const present = await call(() =>
+            deps.paths.exists(probing.filePath, context.signal),
+          );
+          if (!present.ok) {
+            return err(present.error);
+          }
+          if (present.value) {
+            entry = probing;
+            break;
+          }
+          // The row reaps under the entry's own key — a sibling hit's
+          // request url isn't in the map. The next-smallest adequate
+          // sibling then gets its turn: one reclaimed file shouldn't
+          // cost the whole cached set its answer.
+          entries.delete(probing.url);
+          reaped = true;
+          candidate = siblingEntry(url, entries);
+        }
+        // One commit covers reaps whether they ended in a hit or a
+        // miss — a sibling that answered still drops the dead rows.
+        if (reaped) {
+          const committed = await commitMirror(entries, context);
+          if (!committed.ok) {
+            return committed;
+          }
+        }
         if (entry === undefined) {
           return ok<Probe>(null);
-        }
-        const present = await call(() =>
-          deps.paths.exists(entry.filePath, context.signal),
-        );
-        if (!present.ok) {
-          return err(present.error);
-        }
-        const entries = section.value.entries;
-        if (!present.value) {
-          // The row reaps under the entry's own key — a sibling hit's
-          // request url isn't in the map (that's the miss path).
-          entries.delete(entry.url);
-          const committed = await commitMirror(entries, context);
-          return committed.ok ? ok<Probe>(null) : committed;
         }
         const now = safeNow();
         if (now === null) {

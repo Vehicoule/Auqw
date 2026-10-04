@@ -1171,6 +1171,37 @@ async function reapedSiblingFallsBackToDownload(): Promise<void> {
   assertDeepEqual(await storedUrls(r.storage), [G_SMALL]);
 }
 
+async function reapedSiblingYieldsToNextSibling(): Promise<void> {
+  // The smallest adequate sibling's file is gone but a larger one's
+  // survives — the reap yields to the next sibling, not a download.
+  const r = rig(
+    persisted({
+      artworkCache: [seed(G_HUGE, 9 * MB, 10), seed(G_BIG, 3 * MB, 20)],
+    }),
+  );
+  r.paths.missing.add(destOf(G_BIG));
+  r.fetch.respondBytes(4 * MB);
+  const res = await r.cache.get(G_SMALL, ctx());
+  assert(res.ok, 'sibling get failed');
+  assertEqual(res.value.hit, true);
+  assertEqual(res.value.filePath, destOf(G_HUGE));
+  assertEqual(r.fetch.calls.length, 0);
+  assertDeepEqual(await storedUrls(r.storage), [G_HUGE]);
+  // Same through the exact row: G_SMALL's own file missing, the
+  // bigger variant still answers.
+  const r2 = rig(
+    persisted({
+      artworkCache: [seed(G_SMALL, 1 * MB, 10), seed(G_BIG, 3 * MB, 20)],
+    }),
+  );
+  r2.paths.missing.add(destOf(G_SMALL));
+  const res2 = await r2.cache.get(G_SMALL, ctx());
+  assert(res2.ok && res2.value.hit, 'exact-reap sibling must serve');
+  assertEqual(res2.value.filePath, destOf(G_BIG));
+  assertEqual(r2.fetch.calls.length, 0);
+  assertDeepEqual(await storedUrls(r2.storage), [G_BIG]);
+}
+
 export async function run(): Promise<void> {
   await missAndHit();
   await fetchErrorsPropagate();
@@ -1207,4 +1238,5 @@ export async function run(): Promise<void> {
   await undersizedAndForeignSiblingsDoNotServe();
   await siblingBeatsFailureVerdict();
   await reapedSiblingFallsBackToDownload();
+  await reapedSiblingYieldsToNextSibling();
 }

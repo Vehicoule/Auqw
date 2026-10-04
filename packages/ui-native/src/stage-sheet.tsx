@@ -472,6 +472,31 @@ function PlayerBackdrop({
        */}
       {Platform.OS === 'web' ? (
         <>
+          {/*
+           * Wide fit letterboxes the sharp copy, so the margins need
+           * their own blurred fill — the frost-masked SvgImage below
+           * only reveals below FROST_TOP_FRACTION and can't cover the
+           * upper margins. Drawn FIRST so it sits under the sharp
+           * Image; gated on letterbox so portrait pays nothing.
+           */}
+          {haveArt && letterbox && (
+            <Svg style={StyleSheet.absoluteFill}>
+              <Defs>
+                <Filter id="uwfp-blur-fill">
+                  <FeGaussianBlur stdDeviation={36} />
+                </Filter>
+              </Defs>
+              <SvgImage
+                href={uri}
+                x="0"
+                y="0"
+                width="100%"
+                height="100%"
+                preserveAspectRatio="xMidYMid slice"
+                filter="#uwfp-blur-fill"
+              />
+            </Svg>
+          )}
           {haveArt && (
             <Image
               source={{ uri }}
