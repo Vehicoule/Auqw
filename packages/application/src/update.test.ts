@@ -889,6 +889,37 @@ export async function run(): Promise<void> {
     assertEqual(calls.applies, 1);
   }
 
+  // an OLDER begin on a terminal state stays inert too — 'available'
+  // is computed against the running version, so a retracted release
+  // can offer a target older than the parked stage; a tap must not
+  // downgrade over it
+  {
+    const { calls, ports } = fakePorts();
+    const applier = createUpdateApplier(ports);
+    applier.begin(APK_TARGET);
+    await settle();
+    assertEqual(applier.snapshot().state, 'applied');
+    applier.begin({
+      ...APK_TARGET,
+      version: '0.0.1-alpha.17',
+    });
+    await settle();
+    const snap = applier.snapshot();
+    assertEqual(snap.state, 'applied');
+    assert(snap.state === 'applied');
+    assertEqual(snap.version, '0.0.1-alpha.18');
+    assertEqual(
+      calls.downloads,
+      1,
+      'an older begin must not start a pipeline over the parked stage',
+    );
+    assertDeepEqual(
+      calls.removed,
+      [],
+      'the retained stage is never reclaimed by an older begin',
+    );
+  }
+
   // a permission-gated install is not a failed run: the verified
   // stage stays staged, the state parks as 'needs-permission', and
   // reapply refires the install leg on the retained file — no
