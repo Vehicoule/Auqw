@@ -7,7 +7,11 @@ import {
 import { describeCandidate } from '@auqw/application';
 import { isRecord } from '../shared/check.ts';
 import type { NodeBindingsModule, PluginHostLike } from './host.ts';
-import { bindingsCandidates, createHostRuntime } from './host.ts';
+import {
+  bindingsCandidates,
+  boundedPluginFetch,
+  createHostRuntime,
+} from './host.ts';
 
 export async function run(): Promise<void> {
   // Candidate order: env override, resources, then repo dev outputs.
@@ -335,7 +339,9 @@ export async function run(): Promise<void> {
       copy: () => {},
       stat: (p: string) => {
         const b = userFiles.get(p);
-        return b === undefined ? null : { mtimeMs: 1, size: b.byteLength };
+        return b === undefined
+          ? null
+          : { mtimeMs: 1, size: b.byteLength, isFile: true };
       },
       write: () => {},
     };
@@ -493,7 +499,9 @@ export async function run(): Promise<void> {
       copy: () => {},
       stat: (p: string) => {
         const b = revokeFiles.get(p);
-        return b === undefined ? null : { mtimeMs: 1, size: b.byteLength };
+        return b === undefined
+          ? null
+          : { mtimeMs: 1, size: b.byteLength, isFile: true };
       },
       write: () => {},
     };
@@ -606,7 +614,9 @@ export async function run(): Promise<void> {
       copy: () => {},
       stat: (p: string) => {
         const b = files.get(p);
-        return b === undefined ? null : { mtimeMs: 1, size: b.byteLength };
+        return b === undefined
+          ? null
+          : { mtimeMs: 1, size: b.byteLength, isFile: true };
       },
       write: (p: string, data: string) => {
         writes?.push({ path: p, data });
@@ -949,7 +959,12 @@ export async function run(): Promise<void> {
           list: () => [],
           mkdir: () => {},
           copy: () => {},
-          stat: () => null,
+          stat: (p) => {
+            const b = approveFiles.get(p);
+            return b === undefined
+              ? null
+              : { mtimeMs: 1, size: b.byteLength, isFile: true };
+          },
           write: (p, data) => {
             writes.push({ path: p, data });
           },
@@ -994,6 +1009,340 @@ export async function run(): Promise<void> {
           consentWrite.data.includes('foo-music'),
         'the consent record pins the approved digests',
       );
+    }
+
+    // A pair/consent write during an in-flight load queues exactly
+    // one follow-up instead of launching a second concurrent pass —
+    // passes serialize, and the trailing pass reads the write.
+    {
+      const serFiles = new Map<string, Buffer>([
+        ['/b/auqw_node_bindings.node', Buffer.from('')],
+        [join(userDirPath, 'consents.json'), Buffer.from(consentJson)],
+      ]);
+      let serUserNames: readonly string[] = ['consents.json'];
+      const serLoaded: string[] = [];
+      const feedResolvers: Array<() => void> = [];
+      const serRuntime = createHostRuntime({
+        env: {
+          AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+          AUQW_USER_DATA: '/ud',
+        },
+        feedSync: () =>
+          new Promise((resolveFeed) => {
+            feedResolvers.push(() =>
+              resolveFeed({ ready: [], compatible: [] }),
+            );
+          }),
+        pairVerifier: () => null,
+        require: () =>
+          otaHost(async (w, m) => {
+            serLoaded.push(m);
+            return 'p';
+          }),
+        fs: otaFs(serFiles, () => serUserNames, () => []),
+      });
+      const first = serRuntime.status();
+      // The drain body starts on a microtask — let pass 1 reach its
+      // feed suspension before observing it.
+      await new Promise((r) => setTimeout(r, 0));
+      assertEqual(feedResolvers.length, 1, 'the first pass syncs once');
+      // The approval lands while pass 1 is suspended in the feed —
+      // the re-arm must queue, not interleave a second load.
+      serFiles.set(
+        join(userDirPath, 'foo-music.pair.json'),
+        Buffer.from(pair),
+      );
+      serUserNames = ['consents.json', 'foo-music.pair.json'];
+      const second = serRuntime.status();
+      await Promise.resolve();
+      assertEqual(
+        feedResolvers.length,
+        1,
+        'a mid-flight re-arm queues behind the in-flight pass',
+      );
+      feedResolvers[0]?.();
+      await new Promise((r) => setTimeout(r, 10));
+      assertEqual(
+        feedResolvers.length,
+        2,
+        'the queued follow-up runs its own sync once started',
+      );
+      feedResolvers[1]?.();
+      const out = await second;
+      await first;
+      assert(
+        out.manifests.some((m) => m.providerId === 'foo-music'),
+        'the trailing pass loads the mid-flight pair',
+      );
+    }
+
+    // The pair write asserts its own containment — an id carrying
+    // path segments (reachable if the grammar regresses or a caller
+    // skips describeCandidate) must not place bytes outside
+    // plugins-user.
+    {
+      const traversalManifest = JSON.stringify({
+        id: 'a/b',
+        version: '1.2.3',
+        abi: '0.1.0',
+        capabilities: ['catalog.search'],
+        permissions: ['network:api.foo.com'],
+        artifact: { path: 'foo.wasm', digest: 'sha256:' + 'a'.repeat(64) },
+      });
+      const traversalPair = JSON.stringify({
+        manifest: traversalManifest,
+        wasm: wasm.toString('base64'),
+      });
+      const traversalFiles = new Map<string, Buffer>([
+        ['/b/auqw_node_bindings.node', Buffer.from('')],
+        ['/pick/ab.pair.json', Buffer.from(traversalPair)],
+      ]);
+      const traversalWrites: Array<{ path: string; data: string }> = [];
+      const traversalRuntime = createHostRuntime({
+        env: {
+          AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+          AUQW_USER_DATA: '/ud',
+        },
+        feedSync: async () => ({ ready: [], compatible: [] }),
+        require: () => fakeModule,
+        fs: {
+          exists: (p) => traversalFiles.has(p) || p === userDirPath,
+          read: (p) => traversalFiles.get(p) ?? Buffer.alloc(0),
+          list: () => [],
+          mkdir: () => {},
+          copy: () => {},
+          stat: (p) => {
+            const b = traversalFiles.get(p);
+            return b === undefined
+              ? null
+              : { mtimeMs: 1, size: b.byteLength, isFile: true };
+          },
+          write: (p, data) => {
+            traversalWrites.push({ path: p, data });
+          },
+        },
+      });
+      const traversalReview = traversalRuntime.reviewUserPair(
+        '/pick/ab.pair.json',
+      );
+      assert(
+        traversalReview !== null && traversalReview.id === 'a/b',
+        'the candidate describes the traversal id',
+      );
+      assertEqual(
+        traversalRuntime.approveUserPair(
+          '/pick/ab.pair.json',
+          traversalReview.wasm_sha256,
+          traversalReview.manifest_sha256,
+        ),
+        false,
+        'an id escaping plugins-user is refused at the write',
+      );
+      assertEqual(
+        traversalWrites.length,
+        0,
+        'a refused traversal writes nothing',
+      );
+    }
+
+    // The pair-file cap binds the FILE, not the buffered bytes: an
+    // oversized or non-regular target is refused on stat before
+    // `read` can wedge the utility.
+    {
+      const capReads: string[] = [];
+      const capRuntime = (
+        stat: { mtimeMs: number; size: number; isFile: boolean } | null,
+      ) =>
+        createHostRuntime({
+          env: {
+            AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+            AUQW_USER_DATA: '/ud',
+          },
+          feedSync: async () => ({ ready: [], compatible: [] }),
+          require: () => fakeModule,
+          fs: {
+            exists: () => true,
+            read: (p) => {
+              capReads.push(p);
+              return Buffer.alloc(0);
+            },
+            list: () => [],
+            mkdir: () => {},
+            copy: () => {},
+            stat: () => stat,
+            write: () => {},
+          },
+        });
+      // 27 MiB > PAIR_FILE_MAX_BYTES (26 MiB).
+      const over = capRuntime({
+        mtimeMs: 1,
+        size: 27 * 1024 * 1024,
+        isFile: true,
+      });
+      assertEqual(
+        over.reviewUserPair('/pick/huge.pair.json'),
+        null,
+        'an oversized pair is refused before read',
+      );
+      assertEqual(
+        over.approveUserPair('/pick/huge.pair.json', 'x', 'y'),
+        false,
+        'an oversized pair is refused at approve',
+      );
+      assert(
+        !capReads.includes('/pick/huge.pair.json'),
+        'read never ran on the oversized target',
+      );
+      const dev = capRuntime({ mtimeMs: 1, size: 0, isFile: false });
+      assertEqual(
+        dev.reviewUserPair('/dev/zero'),
+        null,
+        'a non-regular file is refused before read',
+      );
+      assert(
+        !capReads.includes('/dev/zero'),
+        'read never ran on the special file',
+      );
+    }
+
+    // The loader's user scan applies the same stat gate: a planted
+    // oversized pair is skipped before `read`, not after — every
+    // scan would OOM on it otherwise.
+    {
+      const bigPair = join(userDirPath, 'big.pair.json');
+      const scanReads: string[] = [];
+      const scanRuntime = createHostRuntime({
+        env: {
+          AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+          AUQW_USER_DATA: '/ud',
+        },
+        feedSync: async () => ({ ready: [], compatible: [] }),
+        pairVerifier: () => null,
+        require: () => fakeModule,
+        fs: {
+          exists: (p) =>
+            p === '/b/auqw_node_bindings.node' ||
+            p === userDirPath ||
+            p === bigPair,
+          read: (p) => {
+            scanReads.push(p);
+            return Buffer.alloc(0);
+          },
+          list: (d) => (d === userDirPath ? ['big.pair.json'] : []),
+          mkdir: () => {},
+          copy: () => {},
+          stat: (p) =>
+            p === bigPair
+              ? { mtimeMs: 1, size: 27 * 1024 * 1024, isFile: true }
+              : null,
+          write: () => {},
+        },
+      });
+      const scanStatus = await scanRuntime.status();
+      assertEqual(scanStatus.bindings, 'loaded');
+      assert(
+        !scanReads.includes(bigPair),
+        'the oversized pair is skipped before read',
+      );
+    }
+  }
+
+  // The feed leg is bounded: a declared-oversize body fails before a
+  // byte is read, a streamed body over the cap fails mid-read, a
+  // non-2xx is a typed transient, and the whole leg races a hard
+  // timeout — the caller's per-resource caps still decide what an
+  // in-budget body may mean.
+  {
+    const realFetch = globalThis.fetch;
+    const stubFetch = (res: {
+      ok: boolean;
+      status?: number;
+      contentLength?: number | null;
+      chunks?: readonly Uint8Array[];
+      onRead?: () => void;
+    }) => {
+      const chunks = res.chunks ?? [];
+      return (async () => ({
+        ok: res.ok,
+        status: res.status ?? 200,
+        headers: {
+          get: (name: string) =>
+            name === 'content-length' && res.contentLength != null
+              ? String(res.contentLength)
+              : null,
+        },
+        body: {
+          getReader: () => {
+            let i = 0;
+            return {
+              read: async () => {
+                res.onRead?.();
+                return i < chunks.length
+                  ? { done: false, value: chunks[i++] }
+                  : { done: true, value: undefined };
+              },
+              cancel: async () => {},
+              releaseLock: () => {},
+            };
+          },
+        },
+      })) as unknown as typeof fetch;
+    };
+    const transientKind = async (url: string): Promise<string | null> => {
+      try {
+        await boundedPluginFetch(url);
+        return null;
+      } catch (thrown) {
+        return isRecord(thrown) && typeof thrown['kind'] === 'string'
+          ? thrown['kind']
+          : null;
+      }
+    };
+    try {
+      // Declared oversize: refused without consuming the body.
+      let bodyTouched = false;
+      globalThis.fetch = stubFetch({
+        ok: true,
+        contentLength: 32 * 1024 * 1024,
+        onRead: () => {
+          bodyTouched = true;
+        },
+      });
+      assertEqual(
+        await transientKind('https://feed/x'),
+        'transient',
+        'a declared-oversize body is refused',
+      );
+      assert(!bodyTouched, 'the over-cap body was never read');
+      // Streamed oversize under the wire: the cap counts real bytes.
+      globalThis.fetch = stubFetch({
+        ok: true,
+        chunks: [new Uint8Array(17 * 1024 * 1024)],
+      });
+      assertEqual(
+        await transientKind('https://feed/x'),
+        'transient',
+        'a streamed body is refused at the cap',
+      );
+      // In-budget body: the bytes come back.
+      globalThis.fetch = stubFetch({
+        ok: true,
+        chunks: [new Uint8Array([1, 2]), new Uint8Array([3])],
+      });
+      const out = await boundedPluginFetch('https://feed/x');
+      assert(
+        out.length === 3 && out[2] === 3,
+        'an in-budget body returns its bytes',
+      );
+      // A non-2xx is a typed transient, never a raw error.
+      globalThis.fetch = stubFetch({ ok: false, status: 503 });
+      assertEqual(
+        await transientKind('https://feed/x'),
+        'transient',
+        'a failed status is a typed transient',
+      );
+    } finally {
+      globalThis.fetch = realFetch;
     }
   }
 
