@@ -22,7 +22,14 @@
 // Everything behavioral above the platform boundary is shared — a fix
 // in the hook fixes both shells.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Component,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type { ReactNode } from 'react';
 import {
   AppState,
@@ -345,7 +352,9 @@ export function App() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         {boot.type === 'ready' ? (
-          <Shell controller={boot.controller} />
+          <RenderBoundary>
+            <Shell controller={boot.controller} />
+          </RenderBoundary>
         ) : (
           <ThemeProvider theme="system">
             <BootGate
@@ -358,6 +367,41 @@ export function App() {
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
+}
+
+/**
+ * A render throw anywhere inside the shell is otherwise an unhandled
+ * JS exception — on a release build the process just dies (a publish
+ * waking a keep-alive/frozen screen is the usual trigger). Catching it
+ * here swaps the shell for a recoverable error: retry remounts the
+ * subtree against the untouched session controller, so playback and
+ * library state survive.
+ */
+class RenderBoundary extends Component<
+  { readonly children: ReactNode },
+  { readonly error: Error | null }
+> {
+  override state: { error: Error | null } = { error: null };
+  static getDerivedStateFromError(error: Error): { error: Error } {
+    return { error };
+  }
+  override render(): ReactNode {
+    const { error } = this.state;
+    if (error !== null) {
+      return (
+        <ThemeProvider theme="system">
+          <GateFrame>
+            <ErrorState
+              title={t('state.errorTitle')}
+              hint={error.message}
+              onRetry={() => this.setState({ error: null })}
+            />
+          </GateFrame>
+        </ThemeProvider>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function GateFrame({ children }: { readonly children: ReactNode }) {
