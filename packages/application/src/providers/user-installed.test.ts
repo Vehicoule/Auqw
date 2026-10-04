@@ -156,4 +156,36 @@ export async function run(): Promise<void> {
     null,
     'non-string permission entry refuses',
   );
+
+  // The id grammar is the manifest's own set — ids become path
+  // components, so separators, traversal, and case all refuse.
+  for (const id of ['../outside', 'a/b', '..', 'UPPER', 'has space', '-lead', 'under_score']) {
+    assertEqual(
+      candidateFields(manifestJson({ id })),
+      null,
+      `id grammar refuses ${JSON.stringify(id)}`,
+    );
+  }
+  assert(
+    candidateFields(manifestJson({ id: 'foo-music-2' })) !== null,
+    'grammar-legal id still passes',
+  );
+
+  // Field caps track the wire contract — an over-long version or abi
+  // must refuse here, not fail the review payload check downstream.
+  assertEqual(
+    candidateFields(manifestJson({ version: 'v'.repeat(65) })),
+    null,
+    'version over the wire cap refuses',
+  );
+  assertEqual(
+    candidateFields(manifestJson({ abi: 'a'.repeat(33) })),
+    null,
+    'abi over the wire cap refuses',
+  );
+  assertEqual(
+    candidateFields(manifestJson({ version: '' })),
+    null,
+    'empty version refuses',
+  );
 }

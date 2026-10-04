@@ -186,8 +186,17 @@ export function PlatformTabs({
             <StatusBarCover />
             <TabBarHeightProbe
               onHeight={(h) => {
-                setTabBarHeight(h);
-                onTabBarHeight?.(h);
+                // The library keeps reporting a GONE bar's last
+                // bounds — the hidden container is skipped in
+                // layout, so the measured height never drops while
+                // the IME is up. Fold the effective-hidden state in:
+                // this closure is fresh per render, so the probe's
+                // effect refires on the keyboardDidShow/DidHide
+                // flips and the real height restores on its own.
+                const reported =
+                  Platform.OS === 'android' && keyboardOpen ? 0 : h;
+                setTabBarHeight(reported);
+                onTabBarHeight?.(reported);
               }}
             />
           </View>

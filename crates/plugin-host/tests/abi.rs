@@ -1296,6 +1296,38 @@ fn manifest_field_grammar_matches_schema() {
     )));
 }
 
+/// `catalog.search.kinds` marks a `catalog.search` declarer — a
+/// kinds-only manifest validates the enum but registers a provider
+/// that can serve nothing, so the host must reject it like the
+/// schema's if/then clause does.
+#[test]
+fn manifest_kinds_flag_requires_catalog_search() {
+    let wasm = ok(wat::parse_str(DONE_WAT));
+    let digest = format!("sha256:{:x}", sha2::Sha256::digest(&wasm));
+    let manifest_json = |caps: &str| {
+        format!(
+            "{{\"id\":\"p\",\"version\":\"0.1.0\",\"abi\":\"0.1.0\",\
+             \"capabilities\":{caps},\"permissions\":[],\
+             \"artifact\":{{\"path\":\"p.wasm\",\"digest\":\"{digest}\"}}}}"
+        )
+    };
+    for caps in [
+        "[\"catalog.search.kinds\"]",
+        "[\"catalog.search.kinds\",\"catalog.artwork\"]",
+    ] {
+        assert!(
+            matches!(
+                Manifest::from_json(&manifest_json(caps)),
+                Err(ManifestError::InvalidField(_))
+            ),
+            "kinds without catalog.search must be rejected: {caps}"
+        );
+    }
+    ok(Manifest::from_json(&manifest_json(
+        "[\"catalog.search\",\"catalog.search.kinds\"]",
+    )));
+}
+
 // ---------- conformance echo guest ----------
 
 #[tokio::test]

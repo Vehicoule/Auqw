@@ -45,6 +45,12 @@
           "lyrics.synced",
           "radio.seed"
         ]
+      },
+      "if": {
+        "contains": { "const": "catalog.search.kinds" }
+      },
+      "then": {
+        "contains": { "const": "catalog.search" }
       }
     },
     "permissions": {

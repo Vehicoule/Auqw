@@ -14,6 +14,19 @@ import { utf8Decode, utf8Encode } from '../utf8.ts';
 const MANIFEST_MAX_BYTES = 64 * 1024;
 const WASM_MAX_BYTES = 16 * 1024 * 1024;
 
+/** The manifest id grammar — the same set `manifest.rs` and the
+ * feed's `isEntry` enforce. Ids become path components
+ * (`<id>.pair.json` under the install dir), so a charset without
+ * separators is what makes traversal impossible. */
+const MANIFEST_ID = /^[a-z0-9][a-z0-9-]*$/;
+
+/** The wire contract's field caps (`isUserPairReviewPayload`) — a
+ * candidate that exceeds them would describe fine here and then be
+ * rejected by the review payload's own check, so the bounds land at
+ * the candidate grammar instead. */
+const VERSION_MAX_CHARS = 64;
+const ABI_MAX_CHARS = 32;
+
 /** The persisted per-plugin consent record. */
 export type ProviderConsent = {
   readonly id: string;
@@ -70,10 +83,14 @@ export function candidateFields(
   const permissions = d['permissions'];
   if (
     typeof id !== 'string' ||
-    id.length === 0 ||
     id.length > 128 ||
+    !MANIFEST_ID.test(id) ||
     typeof version !== 'string' ||
+    version.length === 0 ||
+    version.length > VERSION_MAX_CHARS ||
     typeof abi !== 'string' ||
+    abi.length === 0 ||
+    abi.length > ABI_MAX_CHARS ||
     !Array.isArray(permissions) ||
     !permissions.every(
       (p): p is string =>

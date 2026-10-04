@@ -104,6 +104,18 @@ impl Manifest {
         {
             return Err(bad("capabilities outside the set this ABI serves"));
         }
+        // `catalog.search.kinds` marks a `catalog.search` declarer
+        // (abi.md: the flag names no payload and is never an invoke
+        // target) — a kinds-only manifest would register as a
+        // provider that can serve nothing.
+        if self
+            .capabilities
+            .iter()
+            .any(|c| c == "catalog.search.kinds")
+            && !self.capabilities.iter().any(|c| c == "catalog.search")
+        {
+            return Err(bad("catalog.search.kinds requires catalog.search"));
+        }
         for p in &self.permissions {
             if p == "pot-provider" || p == "kv" {
                 continue;

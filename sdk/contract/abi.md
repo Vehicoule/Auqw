@@ -204,7 +204,9 @@ rejects](../../crates/plugin-host/src/invoke.rs) a manifest pinning anything
 else). A manifest must declare a non-empty subset of the capabilities
 above (`capabilities: []` is rejected), plus at most the
 `catalog.search.kinds` declaration flag (a manifest value; it names no
-payload of its own and is never an invoke target);
+payload of its own and is never an invoke target) — and the flag may
+ride only alongside `catalog.search`, so a kinds-only manifest is
+rejected rather than registering a provider that can serve nothing;
 `host_request` kinds are gated by permission, not by capability set.
 
 Permission grammar: `network:<host>` exact match; `network:*.<domain>`
