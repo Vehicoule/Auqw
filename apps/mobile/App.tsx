@@ -173,6 +173,12 @@ setLocale(resolveLocale(undefined, systemLocaleTag()));
 // machine) > none — unset peers resolve on the anonymous ladder.
 const POT_PROVIDER_URL = process.env.EXPO_PUBLIC_POT_PROVIDER_URL || undefined;
 
+/** Upper bound on a native formSheet's dismiss animation — the
+ * stage's occlusion hold-out while a departing sheet slides away
+ * (its mount flag clears at the start of the transition, not the
+ * end). */
+const SHEET_DISMISS_MS = 400;
+
 /**
  * expo-navigation-bar's <NavigationBar> component calls the native
  * setHidden/setStyle through an unawaited stack helper — a call
@@ -2656,7 +2662,11 @@ function Main({
 
   // A presented SheetScreen can't rise above the floating stage —
   // while one is up the whole stage (pill and panes) hides instead
-  // of parking mid-sheet and swallowing its rows.
+  // of parking mid-sheet and swallowing its rows. The hold lags the
+  // mount flag by a dismissal-transition bound: a programmatic close
+  // clears the flag the frame the sheet starts departing, so the
+  // stage stays hidden through the native dismiss animation rather
+  // than resurfacing over its rows mid-slide.
   const modalSheetUp =
     rowActions !== null ||
     pickerFor !== null ||
@@ -2668,11 +2678,20 @@ function Main({
     artworkCachePickerOpen ||
     authSheetOpen ||
     authClientSheetOpen;
+  const [sheetOccluded, setSheetOccluded] = useState(modalSheetUp);
+  useEffect(() => {
+    if (modalSheetUp) {
+      setSheetOccluded(true);
+      return;
+    }
+    const t = setTimeout(() => setSheetOccluded(false), SHEET_DISMISS_MS);
+    return () => clearTimeout(t);
+  }, [modalSheetUp]);
 
   const stageSheet = sheetPlayer !== null ? (
         <StageSheet
           player={sheetPlayer}
-          occluded={modalSheetUp}
+          occluded={sheetOccluded}
           // No live player = held ended pose — the leaves
           // freeze at the model's retained position rather
           // than resetting on the queue's cleared position.
