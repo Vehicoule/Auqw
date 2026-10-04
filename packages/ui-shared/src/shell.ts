@@ -72,6 +72,16 @@ export const DIAGNOSTICS_LIMIT = 20;
 /** Search rails group by entity kind in this order — artist, album,
     playlist matches how discovery reads. */
 const SEARCH_ENTITY_ORDER = ['artist', 'album', 'playlist'] as const;
+/** Rail titles read plural like the filter chips — `entity.kind.*`
+    is the singular noun reserved for kind badges and meta labels. */
+const SEARCH_RAIL_TITLE: Record<
+  (typeof SEARCH_ENTITY_ORDER)[number],
+  MessageId
+> = {
+  artist: 'search.filters.artists',
+  album: 'search.filters.albums',
+  playlist: 'search.filters.playlists',
+};
 
 const NAV_KEYS = ['home', 'explore', 'library', 'settings'] as const;
 
@@ -292,7 +302,7 @@ export function toSearchModel(
       // wholly on its one rail.
       const rails = SEARCH_ENTITY_ORDER.map((kind) => ({
         key: kind,
-        title: t(`entity.kind.${kind}`),
+        title: t(SEARCH_RAIL_TITLE[kind]),
         cards: entityCards.filter((card) => card.kind === kind),
       })).filter((rail) => rail.cards.length > 0);
       // The hero is the provider's declared top hit; an undeclared

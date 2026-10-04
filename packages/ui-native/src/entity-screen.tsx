@@ -126,6 +126,8 @@ export function EntityScreen({
   // Handlers bound into retained rows/cards go through ref-trampolines:
   // a stale wrapper then still calls the latest prop (e.g. a press
   // handler re-keyed on connectivity), never its own era's closure.
+  const { width: windowWidth } = useWindowDimensions();
+  const heroSize = Math.min(280, Math.round(windowWidth * 0.6));
   const pressItem = useLatestCallback(onPressItem);
   const rowIntent = useLatestCallback(onRowIntent);
   const rowContext = useLatestCallback(onContext);
@@ -161,15 +163,14 @@ export function EntityScreen({
         style={{
           flex: 1,
           backgroundColor: theme.colors.canvas,
-          paddingTop: topInset + theme.spacing.sm,
+          paddingTop: topInset + theme.sizes.touch,
         }}
       >
         <View
           style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            paddingHorizontal: theme.spacing.lg,
-            marginBottom: theme.spacing.sm,
+            position: 'absolute',
+            top: topInset + theme.spacing.sm,
+            left: theme.spacing.lg - theme.spacing.xs,
           }}
         >
           <BackButton
@@ -195,6 +196,10 @@ export function EntityScreen({
           alignItems: 'center',
           paddingHorizontal: theme.spacing.xl,
           overflow: 'hidden',
+          // The wash bleeds edge-to-edge: the band above the artwork
+          // that used to read as a bare safe-zone is tinted by the
+          // backdrop, with the back button floating over it.
+          paddingTop: topInset + theme.spacing.sm + theme.sizes.touch,
         }}
       >
         {/* Pure decoration — absent entirely when the page has no
@@ -206,12 +211,13 @@ export function EntityScreen({
             playlist covers stay square. */}
         <Artwork
           url={model.artworkUrl}
-          size={160}
-          cornerRadius={model.kind === 'artist' ? 80 : undefined}
+          size={heroSize}
+          cornerRadius={
+            model.kind === 'artist' ? heroSize / 2 : undefined
+          }
         />
         <Text
           variant="metadata"
-          color="secondary"
           uppercase
           style={{ marginTop: theme.spacing.md }}
         >
@@ -291,22 +297,8 @@ export function EntityScreen({
       style={{
         flex: 1,
         backgroundColor: theme.colors.canvas,
-        paddingTop: topInset + theme.spacing.sm,
       }}
     >
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          paddingHorizontal: theme.spacing.lg,
-        }}
-      >
-        <BackButton
-          onPress={onBack}
-          accessibilityLabel={view.backA11yLabel}
-        />
-      </View>
-
       {view.body.kind === 'empty' ? (
         <ScrollView
           scrollEnabled={scrollEnabled}
@@ -387,6 +379,22 @@ export function EntityScreen({
           }
         />
       )}
+
+      {/* Floating back — paints over the hero wash, stays pinned as
+          the hero scrolls away. Its padding xs bleeds the touch
+          target toward the screen edge like the old in-flow row. */}
+      <View
+        style={{
+          position: 'absolute',
+          top: topInset + theme.spacing.sm,
+          left: theme.spacing.lg - theme.spacing.xs,
+        }}
+      >
+        <BackButton
+          onPress={onBack}
+          accessibilityLabel={view.backA11yLabel}
+        />
+      </View>
     </View>
   );
 }

@@ -329,12 +329,39 @@ export function SearchScreen({
         </Text>
       </View>
     );
-  // Hero + entity rails ride the results scroller; when a page is
-  // entities-only (no track rows) the rails get their own scroller.
+  // Hero + songs band + entity rails ride the results scroller; when
+  // a page is entities-only (no track rows) the rails get their own
+  // scroller. The band leads like the web layout — songs were the
+  // buried result type under a full-width hero and three rails.
   const discovery =
     view.topRow === null && view.rails.length === 0 ? null : (
       <>
         {view.topRow !== null && <SearchHero hero={view.topRow.hero} />}
+        {view.topRow !== null && view.topRow.songs.length > 0 && (
+          <>
+            <Text
+              variant="heading"
+              color="bright"
+              style={{
+                paddingHorizontal: theme.spacing.sm,
+                marginTop: theme.spacing.md,
+                marginBottom: theme.spacing.xs,
+              }}
+            >
+              {view.topRow.songsTitle}
+            </Text>
+            {view.topRow.songs.map((row) => (
+              <TrackRow
+                key={row.row.key}
+                row={row.row}
+                onPress={row.onPress}
+                onIntent={row.onIntent}
+                onToggleLike={row.onToggleLike}
+                onContext={row.onContext}
+              />
+            ))}
+          </>
+        )}
         {view.rails.map((rail) => (
           <EntityRail key={rail.key} rail={rail} />
         ))}
@@ -503,7 +530,16 @@ export function SearchScreen({
       )}
       {view.results !== null && (
         <FlatList
-          data={view.results.rows}
+          // The songs band leads with the same first rows — partition
+          // by key so they don't double up under 'all results' (the
+          // full result model is untouched: counts, paging and the
+          // play context all still see every row).
+          data={view.results.rows.filter(
+            (row) =>
+              !(view.topRow?.songs.some(
+                (song) => song.row.key === row.row.key,
+              ) ?? false),
+          )}
           keyExtractor={(row) => row.row.key}
           scrollEnabled={scrollEnabled}
           ListHeaderComponent={
