@@ -29,12 +29,17 @@ const MANIFEST_A = utf8Encode('{"id":"alpha"}');
 const WASM_B = utf8Encode('wasm-b-bytes');
 const MANIFEST_B = utf8Encode('{"id":"beta"}');
 
+/** Fake signature with the real 64-byte length — the pair grammar
+ * bounds signatures before the verifier sees them. */
+const SIG64 = b64Encode(new Uint8Array(64).fill(9));
+const SIG_SHORT = 'c2ln';
+
 function entry(
   id: string,
   version: string,
   wasm: Uint8Array,
   manifest: Uint8Array,
-  signature = 'c2ln',
+  signature = SIG64,
 ): PluginFeedEntry {
   return {
     id,
@@ -51,7 +56,7 @@ function pairDoc(
   version: string,
   wasm: Uint8Array,
   manifest: Uint8Array,
-  signature = 'c2ln',
+  signature = SIG64,
 ): string {
   return JSON.stringify({
     id,
@@ -235,6 +240,102 @@ export async function run(): Promise<void> {
     assert(files.has('/plug/keep.txt'), 'non-artifact files survive');
   }
 
+  // A feed entry at an ABI this build can't run still claims its id:
+  // the verified cached pair survives the sweep (last-known-good)
+  // and the id lands in `compatible` for the signed-id gate — only
+  // the fetch/load is abi-gated.
+  {
+    const bumped = JSON.stringify({
+      keyId: KEY_ID,
+      plugins: [
+        { ...entry('alpha', '9.9.9', WASM_A, MANIFEST_A), abi: '9.9.9' },
+        entry('beta', '1.0.0', WASM_B, MANIFEST_B),
+      ],
+    });
+    const urls = feedUrls();
+    urls.set('https://feed.test/releases/feed.json', utf8Encode(bumped));
+    const files = new Map([
+      ['/plug/alpha.json', utf8Encode(pairDoc('alpha', '0.2.0', WASM_A, MANIFEST_A))],
+      ['/plug/beta.json', utf8Encode(pairDoc('beta', '1.0.0', WASM_B, MANIFEST_B))],
+    ]);
+    const { ports, fetched } = fakePorts({ files, fetch: urls });
+    const { ready, compatible } = await syncPluginFeed({
+      feedUrl: 'https://feed.test/releases/feed.json',
+      keyId: KEY_ID,
+      publicKey: PUB,
+      dir: '/plug',
+      ports,
+    });
+    assert(
+      files.has('/plug/alpha.json'),
+      'abi-skipped id keeps its cached pair',
+    );
+    assert(compatible.includes('alpha'), 'abi-skipped id still claimed');
+    assertDeepEqualSorted(ready, ['beta']);
+    assert(
+      !fetched.some((u) => u.includes('/alpha/')),
+      'abi-gated entry never fetches artifacts',
+    );
+  }
+
+  // A cached pair whose signature decodes to the wrong length — or a
+  // read that throws — degrades to a re-download instead of aborting
+  // the whole sync.
+  {
+    const files = new Map([
+      ['/plug/alpha.json', utf8Encode(pairDoc('alpha', '0.2.0', WASM_A, MANIFEST_A, SIG_SHORT))],
+      ['/plug/beta.json', utf8Encode(pairDoc('beta', '1.0.0', WASM_B, MANIFEST_B))],
+    ]);
+    const { ports, fetched } = fakePorts({ files, fetch: feedUrls() });
+    const { ready } = await syncPluginFeed({
+      feedUrl: 'https://feed.test/releases/feed.json',
+      keyId: KEY_ID,
+      publicKey: PUB,
+      dir: '/plug',
+      ports,
+    });
+    assertDeepEqualSorted(ready, ['alpha', 'beta']);
+    assert(
+      fetched.some((u) => u.endsWith('alpha-0.2.0.wasm')),
+      'bad cache entry re-downloads',
+    );
+    const rewritten = JSON.parse(
+      utf8Decode(files.get('/plug/alpha.json') ?? new Uint8Array()),
+    ) as Record<string, unknown>;
+    assertEqual(
+      rewritten['signature'],
+      SIG64,
+      're-downloaded pair carries the feed signature',
+    );
+  }
+  {
+    const files = new Map([
+      ['/plug/beta.json', utf8Encode(pairDoc('beta', '1.0.0', WASM_B, MANIFEST_B))],
+    ]);
+    const { ports, fetched } = fakePorts({ files, fetch: feedUrls() });
+    const throwing: FeedSyncPorts = {
+      ...ports,
+      read: async (path) => {
+        if (path.endsWith('alpha.json')) {
+          throw appError('transient', 'cache read EISDIR');
+        }
+        return files.get(path) ?? null;
+      },
+    };
+    const { ready } = await syncPluginFeed({
+      feedUrl: 'https://feed.test/releases/feed.json',
+      keyId: KEY_ID,
+      publicKey: PUB,
+      dir: '/plug',
+      ports: throwing,
+    });
+    assertDeepEqualSorted(ready, ['alpha', 'beta']);
+    assert(
+      fetched.some((u) => u.endsWith('alpha-0.2.0.wasm')),
+      'a throwing read degrades to re-download, not a sync abort',
+    );
+  }
+
   // A fetch failure for one plugin keeps its last-known-good pair.
   {
     const files = new Map([
@@ -327,6 +428,37 @@ export async function run(): Promise<void> {
     wrongAbi['abi'] = '0.2.0';
     assertEqual(parsePluginPair(JSON.stringify(wrongAbi), verify), null);
     assertEqual(parsePluginPair('not json', verify), null);
+    // A signature that decodes to anything but 64 bytes refuses
+    // before the verifier — noble's abytes() throws on wrong-length
+    // input outside its own try, so the pair must not reach it.
+    const shortSig = pairDoc('alpha', '0.2.0', WASM_A, MANIFEST_A, SIG_SHORT);
+    let threw = false;
+    try {
+      assertEqual(
+        parsePluginPair(shortSig, {
+          ...verify,
+          verify: () => {
+            throw new Error('noble-style throw');
+          },
+        }),
+        null,
+        'short signature refuses without reaching verify',
+      );
+    } catch {
+      threw = true;
+    }
+    assert(!threw, 'wrong-length signature must not throw');
+    // A verifier that throws anyway degrades to null per the contract.
+    assertEqual(
+      parsePluginPair(good, {
+        ...verify,
+        verify: () => {
+          throw new Error('verifier threw');
+        },
+      }),
+      null,
+      'throwing verifier degrades to null',
+    );
   }
 }
 

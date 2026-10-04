@@ -143,6 +143,7 @@ function verifyRelease(
   const signature = base64Bytes(entry.signature);
   return (
     signature !== null &&
+    signature.byteLength === 64 &&
     opts.verify(
       releasePayload(
         entry.id,
@@ -218,6 +219,10 @@ export function parsePluginPair(
   if (
     wasmBytes === null ||
     sigBytes === null ||
+    // ed25519 signatures are exactly 64 bytes — a wrong-length
+    // decode throws inside some verifiers (noble's abytes) instead
+    // of returning false, so the length is checked up front.
+    sigBytes.byteLength !== 64 ||
     wasmBytes.byteLength > WASM_MAX_BYTES ||
     manifestBytes.byteLength > MANIFEST_MAX_BYTES ||
     sha256Hex(wasmBytes) !== wasmSha ||
@@ -226,13 +231,18 @@ export function parsePluginPair(
   ) {
     return null;
   }
-  if (
-    !opts.verify(
+  let verified = false;
+  try {
+    verified = opts.verify(
       releasePayload(id, version, abi, wasmSha, manifestSha, opts.keyId),
       sigBytes,
       opts.publicKey,
-    )
-  ) {
+    );
+  } catch {
+    // A throwing verifier means "anything fails" → null, per the
+    // contract — never propagate across the platform seam.
+  }
+  if (!verified) {
     return null;
   }
   return {
@@ -393,22 +403,34 @@ export async function syncPluginFeed(opts: {
   const compatible: string[] = [];
   const ready: string[] = [];
   for (const entry of feed.plugins) {
+    // The id claim is abi-independent: the feed owns every id it
+    // lists, whether or not this build can run the entry. Recording
+    // it before the abi gate keeps a last-known-good cached pair
+    // from the sweep and keeps the id feed-owned for the signed-id
+    // gate — only fetch/load check the abi.
+    current.add(entry.id);
+    compatible.push(entry.id);
     if (entry.abi !== PLUGIN_ABI) {
       continue;
     }
-    current.add(entry.id);
-    compatible.push(entry.id);
     // Cache hit: the stored pair re-verifies offline (signature +
-    // both digests), so cached bytes are never loaded unverified.
-    const cached = await ports.read(`${dir}/${entry.id}.json`);
-    const pair =
-      cached === null
-        ? null
-        : parsePluginPair(utf8Decode(cached), {
-            keyId: opts.keyId,
-            publicKey: opts.publicKey,
-            verify: ports.ed25519Verify,
-          });
+    // both digests), so cached bytes are never loaded unverified. A
+    // read that fails degrades to a re-download — a corrupt or
+    // unreadable entry must never abort the whole sync.
+    let pair: VerifiedPluginPair | null = null;
+    try {
+      const cached = await ports.read(`${dir}/${entry.id}.json`);
+      pair =
+        cached === null
+          ? null
+          : parsePluginPair(utf8Decode(cached), {
+              keyId: opts.keyId,
+              publicKey: opts.publicKey,
+              verify: ports.ed25519Verify,
+            });
+    } catch {
+      pair = null;
+    }
     if (
       pair !== null &&
       pair.id === entry.id &&
