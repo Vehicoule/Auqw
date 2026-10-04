@@ -416,6 +416,11 @@ const NIGHT = schemes.dark.deep;
 // Mask ramps ride luminance — a bright token, alpha carried by
 // stopOpacity.
 const MASK_LIGHT = schemes.dark.textBright;
+// Viewport aspect past which cover-cropping stops reading as a
+// backdrop and starts reading as a mid-strip of the cover (landscape,
+// foldables, split-screen). Past it the sharp copy letterboxes; the
+// blurred copy still fills the margin, which is what it is for.
+const MEET_FIT_ASPECT = 1.3;
 
 function PlayerBackdrop({
   artworkUrl,
@@ -428,7 +433,12 @@ function PlayerBackdrop({
   // sharp copy does anyway (offline a remote refetch is just absent).
   // Screen-width pixels are plenty for the sharp layer — the provider's
   // multi-MP file only costs radio + decode.
-  const { width: windowWidth } = useWindowDimensions();
+  const { width: windowWidth, height: windowHeight } =
+    useWindowDimensions();
+  // Album art is square almost always; on a wide enough viewport cover
+  // would slice it to the middle band, so the sharp copy fits whole.
+  const letterbox = windowWidth / Math.max(windowHeight, 1) >=
+    MEET_FIT_ASPECT;
   const { uri, pending, markSourceError } = useResolvedArtworkUri(
     artworkUrl,
     Math.ceil(windowWidth * PixelRatio.get()),
@@ -466,7 +476,7 @@ function PlayerBackdrop({
             <Image
               source={{ uri }}
               style={StyleSheet.absoluteFill}
-              resizeMode="cover"
+              resizeMode={letterbox ? 'contain' : 'cover'}
               onError={markSourceError}
               accessibilityIgnoresInvertColors
             />
@@ -573,7 +583,9 @@ function PlayerBackdrop({
                   y="0"
                   width="100%"
                   height="100%"
-                  preserveAspectRatio="xMidYMid slice"
+                  preserveAspectRatio={
+                    letterbox ? 'xMidYMid meet' : 'xMidYMid slice'
+                  }
                 />
               </G>
             )}

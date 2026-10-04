@@ -25,6 +25,7 @@ export * from './ports/log.ts';
 export * from './runtime-impls.ts';
 export * from './library/export-import.ts';
 export * from './library/artwork-cache.ts';
+export * from './library/artwork-url.ts';
 export * from './library/likes.ts';
 export * from './library/library.ts';
 export * from './library/corrections.ts';
