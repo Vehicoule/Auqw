@@ -23,6 +23,7 @@ export type PlaylistScreenProps = {
    */
   readonly model: PlaylistModel | null;
   readonly topInset?: number | undefined;
+  readonly bottomClearance?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
   readonly onBack?: (() => void) | undefined;
   /**
@@ -62,6 +63,7 @@ function HeaderButton({
 export function PlaylistScreen({
   model,
   topInset = 0,
+  bottomClearance = 0,
   scrollEnabled = true,
   onBack,
   onDownloadAll,
@@ -236,7 +238,7 @@ export function PlaylistScreen({
           scrollEnabled={scrollEnabled}
           contentContainerStyle={{
             paddingHorizontal: theme.spacing.sm,
-            paddingBottom: theme.spacing.xxl,
+            paddingBottom: theme.spacing.xxl + bottomClearance,
           }}
           renderItem={({ item, index }) => (
             <TrackRow

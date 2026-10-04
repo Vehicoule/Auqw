@@ -677,6 +677,12 @@ export type StageSheetProps = {
       contract MiniPlayer documents — null = dead edge). */
   readonly skipNext?: SkipPeek | null | undefined;
   readonly skipPrevious?: SkipPeek | null | undefined;
+  /** A modal sheet is presented over the stage — the host keeps this
+      sheet mounted as floating chrome above pushed pages, but a
+      native formSheet can never rise above it, so while one is up
+      every stage surface (pill and panes alike) hides and drops its
+      touches rather than floating mid-sheet and swallowing taps. */
+  readonly occluded?: boolean | undefined;
   readonly nextEndsQueue?: boolean | undefined;
   /** Live peek resolution forwarded to the embedded MiniPlayer —
       re-evaluated per position tick so the >3s restart boundary
@@ -789,6 +795,7 @@ export function StageSheet({
   collapsedHeight: collapsedHeightProp,
   skipNext,
   skipPrevious,
+  occluded = false,
   nextEndsQueue,
   peeksFor,
   onDismiss,
@@ -1326,21 +1333,34 @@ export function StageSheet({
   // intercepting the same frame the sheet lifts off the pill (or the
   // expanded anchor lands) — a state-mounted surface would leave a
   // JS-hop window where a tap slips through to content underneath.
+  // Two gates, same shared value: the wrapper can only be 'box-none'
+  // or 'none', so it never absorbs a tap itself and a stuck value
+  // fails open to content; the inner wrapper owns the sole hit
+  // target ('auto'/'none') on the UI thread — a JS 'none' on the
+  // Pressable instead would reopen the hop (a rising drag could
+  // leak a tap to the page mid-flight), while no JS gate at all
+  // leaves a stuck 'auto' absorbing every tap on a parked sheet.
+  // The inner wrapper also remounts on each `dismissOn` settle
+  // (keyed below): mount-time props don't ride the update channel,
+  // so a stalled flush can't leave the parked gate hot.
   // RNW writes those non-style animated props as inert DOM
-  // attributes: the wrapper's pe:none class is baked at mount and
-  // never swaps, and `pointer-events` inherits — RNW Pressable
-  // emits no pe class of its own, so the web gate pairs the
-  // Pressable's mount (`dismissOn`, which also covers the
-  // synchronous expanded flip) with an explicit pointerEvents='auto'
-  // that overrides the inherited dead class. On native 'auto' is
-  // the default and the wrapper's 'none' still gates the subtree.
+  // attributes: the baked mount-time pe:none class never swaps, and
+  // `pointer-events` inherits — RNW Pressable emits no pe class of
+  // its own, so the web gate pairs the Pressable's mount
+  // (`dismissOn`, which also covers the synchronous expanded flip)
+  // with an explicit pointerEvents='auto' that overrides the
+  // inherited dead class.
   const dismissSurfaceProps = useAnimatedProps(() => {
     const on = progress.value > 0.001 || expandedShared.value;
     return {
-      pointerEvents: on ? 'auto' : 'none',
+      pointerEvents: on ? 'box-none' : 'none',
       accessibilityElementsHidden: !on,
       importantForAccessibility: on ? 'auto' : 'no-hide-descendants',
     } as const;
+  });
+  const dismissTapProps = useAnimatedProps(() => {
+    const on = progress.value > 0.001 || expandedShared.value;
+    return { pointerEvents: on ? 'auto' : 'none' } as const;
   });
   const dismissOn = risenOn || expanded;
 
@@ -1999,7 +2019,18 @@ export function StageSheet({
   );
 
   return (
-    <>
+    // While a modal sheet presents over the stage (`occluded`), every
+    // surface hides and drops its touches — the parked pill floating
+    // mid-sheet would occlude rows and an expanded pane would bury
+    // the presented sheet entirely. `box-none` keeps the pass-
+    // through contract for everything inside when it is up.
+    <View
+      collapsable={false}
+      pointerEvents={occluded ? 'none' : 'box-none'}
+      accessibilityElementsHidden={occluded}
+      importantForAccessibility={occluded ? 'no-hide-descendants' : 'auto'}
+      style={[StyleSheet.absoluteFill, occluded && { opacity: 0 }]}
+    >
       {/* Scrim over whatever the rising sheet hasn't covered yet — same
           role as the CMP deck's scrim: it fades in with progress and is
           tappable to collapse once the sheet is the presented surface. */}
@@ -2029,14 +2060,28 @@ export function StageSheet({
         animatedProps={dismissSurfaceProps}
         style={StyleSheet.absoluteFill}
       >
+        {/* Sole hit target — the inner wrapper gates on the UI
+            thread so a rising drag can't leak a tap to the page,
+            and remounts on every `dismissOn` settle so the parked
+            'none' always lands even if prop updates stall (mount-
+            time props bypass the update channel). Web mounts it
+            only when `dismissOn` and keeps the Pressable's
+            explicit 'auto' overriding the baked pe:none class. */}
         {(dismissOn || Platform.OS !== 'web') && (
-          <Pressable
-            compact
-            onPress={dismissBackdrop}
-            accessibilityLabel={t('sheets.closeA11y')}
-            pointerEvents="auto"
+          <Animated.View
+            key={dismissOn ? 'risen' : 'parked'}
+            collapsable={false}
+            animatedProps={dismissTapProps}
             style={StyleSheet.absoluteFill}
-          />
+          >
+            <Pressable
+              compact
+              onPress={dismissBackdrop}
+              accessibilityLabel={t('sheets.closeA11y')}
+              pointerEvents="auto"
+              style={StyleSheet.absoluteFill}
+            />
+          </Animated.View>
         )}
       </Animated.View>
       <Animated.View
@@ -2228,7 +2273,7 @@ export function StageSheet({
           </View>
         </Animated.View>
       </Animated.View>
-    </>
+    </View>
   );
 }
 

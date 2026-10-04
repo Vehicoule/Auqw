@@ -91,6 +91,7 @@ export function CollectionTile({
 export type CollectionScreenProps = {
   readonly model: CollectionModel;
   readonly topInset?: number | undefined;
+  readonly bottomClearance?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
   readonly onBack?: (() => void) | undefined;
   readonly onPressItem?: ((row: CollectionRowModel) => void) | undefined;
@@ -112,6 +113,7 @@ const EMPTY_HINTS: Readonly<
 export function CollectionScreen({
   model,
   topInset = 0,
+  bottomClearance = 0,
   scrollEnabled = true,
   onBack,
   onPressItem,
@@ -149,7 +151,7 @@ export function CollectionScreen({
           scrollEnabled={scrollEnabled}
           contentContainerStyle={{
             paddingHorizontal: theme.spacing.sm,
-            paddingBottom: theme.spacing.xxl,
+            paddingBottom: theme.spacing.xxl + bottomClearance,
           }}
           renderItem={({ item }) => (
             <TrackRow

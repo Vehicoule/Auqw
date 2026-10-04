@@ -35,6 +35,7 @@ import {
 export type EntityScreenProps = EntityScreenHandlers & {
   readonly model: EntityScreenModel;
   readonly topInset?: number | undefined;
+  readonly bottomClearance?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
 };
 
@@ -107,6 +108,7 @@ function HeaderPill({ view }: { readonly view: EntityPillView }) {
 export function EntityScreen({
   model,
   topInset = 0,
+  bottomClearance = 0,
   scrollEnabled = true,
   onBack,
   onPlayAll,
@@ -313,7 +315,7 @@ export function EntityScreen({
             // is short, scrolls the whole block when it overflows.
             flexGrow: 1,
             paddingHorizontal: theme.spacing.sm,
-            paddingBottom: theme.spacing.xxl,
+            paddingBottom: theme.spacing.xxl + bottomClearance,
           }}
         >
           {header}
@@ -332,7 +334,7 @@ export function EntityScreen({
           contentContainerStyle={{
             paddingHorizontal: theme.spacing.sm,
             paddingTop: theme.spacing.md,
-            paddingBottom: theme.spacing.xxl,
+            paddingBottom: theme.spacing.xxl + bottomClearance,
           }}
           renderItem={({ item }) => (
             <TrackRow

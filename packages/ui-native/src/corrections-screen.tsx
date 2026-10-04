@@ -19,6 +19,7 @@ import {
 export type CorrectionsScreenProps = CorrectionsScreenHandlers & {
   readonly model: CorrectionsModel;
   readonly topInset?: number | undefined;
+  readonly bottomClearance?: number | undefined;
   readonly scrollEnabled?: boolean | undefined;
 };
 
@@ -32,6 +33,7 @@ export type CorrectionsScreenProps = CorrectionsScreenHandlers & {
 export function CorrectionsScreen({
   model,
   topInset = 0,
+  bottomClearance = 0,
   scrollEnabled = true,
   onBack,
   onFilter,
@@ -104,7 +106,9 @@ export function CorrectionsScreen({
       ) : (
         <ScrollView
           scrollEnabled={scrollEnabled}
-          contentContainerStyle={{ paddingBottom: theme.spacing.xxl }}
+          contentContainerStyle={{
+            paddingBottom: theme.spacing.xxl + bottomClearance,
+          }}
         >
           {view.body.rows.map((row) => (
             <ReviewRow key={row.row.reviewId} view={row} />

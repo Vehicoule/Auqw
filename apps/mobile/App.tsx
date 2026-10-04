@@ -173,6 +173,12 @@ setLocale(resolveLocale(undefined, systemLocaleTag()));
 // machine) > none — unset peers resolve on the anonymous ladder.
 const POT_PROVIDER_URL = process.env.EXPO_PUBLIC_POT_PROVIDER_URL || undefined;
 
+/** Upper bound on a native formSheet's dismiss animation — the
+ * stage's occlusion hold-out while a departing sheet slides away
+ * (its mount flag clears at the start of the transition, not the
+ * end). */
+const SHEET_DISMISS_MS = 400;
+
 /**
  * expo-navigation-bar's <NavigationBar> component calls the native
  * setHidden/setStyle through an unawaited stack helper — a call
@@ -2436,6 +2442,18 @@ function Main({
     }
   };
 
+  // Pushed pages sit under the same collapsed pill strip as the
+  // tabs on native: bottom clearance is the measured collapsed bound
+  // (tab bar + gap + pill), zeroed while no player is up. On web the
+  // pushed overlay covers bar and pill alike, so no strip is owed.
+  const pushedBottomClearance =
+    sheetPlayer === null || Platform.OS === 'web'
+      ? 0
+      : tabBarHeight +
+        theme.spacing.md +
+        theme.sizes.miniPlayer +
+        theme.spacing.xs;
+
   const renderOverlayEntry = (entry: OverlayEntry<Overlay>) => {
     const current = entry.overlay;
     switch (current.type) {
@@ -2443,6 +2461,7 @@ function Main({
         const model = collectionModels.get(current.key) ?? null;
         return model === null ? null : (
           <CollectionScreen
+            bottomClearance={pushedBottomClearance}
             model={model}
             topInset={topInset}
             onBack={closeOverlay}
@@ -2463,6 +2482,7 @@ function Main({
         const playlistModel = playlistModelFor(current.playlistId);
         return (
           <PlaylistScreen
+            bottomClearance={pushedBottomClearance}
             model={playlistModel}
             topInset={topInset}
             onBack={closeOverlay}
@@ -2508,6 +2528,7 @@ function Main({
         );
         return (
           <EntityScreen
+            bottomClearance={pushedBottomClearance}
             model={entityModelFor(fetch)}
             topInset={topInset}
             onBack={closeOverlay}
@@ -2542,6 +2563,7 @@ function Main({
       case 'corrections':
         return (
           <CorrectionsScreen
+            bottomClearance={pushedBottomClearance}
             model={correctionsModel}
             topInset={topInset}
             onBack={closeOverlay}
@@ -2561,6 +2583,7 @@ function Main({
       case 'transfer':
         return (
           <TransferScreen
+            bottomClearance={pushedBottomClearance}
             model={transfer}
             topInset={topInset}
             onBack={closeOverlay}
@@ -2575,6 +2598,7 @@ function Main({
         const hasDiscovery = syncSurface?.discovery != null;
         return (
           <SyncScreen
+            bottomClearance={pushedBottomClearance}
             model={syncModel}
             topInset={topInset}
             onBack={closeOverlay}
@@ -2635,6 +2659,182 @@ function Main({
         return null;
     }
   };
+
+  // A presented SheetScreen can't rise above the floating stage —
+  // while one is up the whole stage (pill and panes) hides instead
+  // of parking mid-sheet and swallowing its rows. Occlusion tracks
+  // the mount flag LIVE (a sheet mounts in the same commit its flag
+  // sets — a lagged start would let the stage paint above it) and
+  // holds past it only on native, where a programmatic close clears
+  // the flag the frame the sheet starts departing — the hold covers
+  // the native dismiss animation so the stage doesn't resurface over
+  // the departing rows. Gesture/back dismissals clear through
+  // `onDismissed`, which fires after the exit animation ends — they
+  // release immediately, no hold. Web sheets are in-tree overlays
+  // that vanish with the flag; no hold there either.
+  const modalSheetUp =
+    rowActions !== null ||
+    pickerFor !== null ||
+    providerPicker !== null ||
+    themePickerOpen ||
+    languagePickerOpen ||
+    storefrontSheetOpen ||
+    qualityPickerOpen ||
+    artworkCachePickerOpen ||
+    authSheetOpen ||
+    authClientSheetOpen;
+  const [sheetOccluded, setSheetOccluded] = useState(modalSheetUp);
+  // Set inside `onDismissed` before the flag clears — tells the
+  // hold that this flag-down edge already ended the native exit
+  // animation.
+  const nativeSheetDone = useRef(false);
+  const onNativeSheetDismissed = useCallback(
+    (close: () => void) => () => {
+      nativeSheetDone.current = true;
+      close();
+    },
+    [],
+  );
+  useEffect(() => {
+    if (modalSheetUp) {
+      // A mark landing while another sheet is mounted belongs to the
+      // DEPARTED one (a swipe-dismissed sheet replaced by a new sheet
+      // in the same commit) — consume it here or it would leak onto
+      // the replacement's later programmatic close and skip its hold.
+      nativeSheetDone.current = false;
+      setSheetOccluded(true);
+      return;
+    }
+    if (nativeSheetDone.current) {
+      nativeSheetDone.current = false;
+      setSheetOccluded(false);
+      return;
+    }
+    const t = setTimeout(() => setSheetOccluded(false), SHEET_DISMISS_MS);
+    return () => clearTimeout(t);
+  }, [modalSheetUp]);
+
+  const stageSheet = sheetPlayer !== null ? (
+        <StageSheet
+          player={sheetPlayer}
+          occluded={
+            modalSheetUp || (Platform.OS !== 'web' && sheetOccluded)
+          }
+          // No live player = held ended pose — the leaves
+          // freeze at the model's retained position rather
+          // than resetting on the queue's cleared position.
+          session={player === null ? undefined : session}
+          expanded={expanded}
+          onOpenEntity={openEntityFromStage}
+          progress={stageProgress}
+          travel={stageTravel}
+          anchor={stageAnchor}
+          gone={stageGone}
+          collapsedHeight={stageCollapsedHeight}
+          onExpandChange={setStageOpenFor}
+          onDismiss={() => void session.stop()}
+          peeksFor={skipPeeksFor}
+          mode={stageMode}
+          onModeChange={setStageMode}
+          restMode={stageReopenMode}
+          queue={queueModel}
+          queueReordering={reordering}
+          topInset={topInset}
+          bottomInset={insets.bottom}
+          lyricsSource={lyricsSource}
+          lyricsLive={lyricsLive}
+          seekGeneration={seekGeneration}
+          radio={radioModel}
+          onPlayPause={
+            heldOccurrenceId !== null
+              ? () => {
+                  // Same offline rule as queue rows — an unowned
+                  // remote target must not start a dead attempt.
+                  const held = state.queue.occurrences.find(
+                    (o) => o.occurrenceId === heldOccurrenceId,
+                  );
+                  if (held !== undefined && !canPlay(held.recordingId)) {
+                    return;
+                  }
+                  void Haptics.impactAsync(
+                    Haptics.ImpactFeedbackStyle.Light,
+                  );
+                  void session
+                    .playOccurrence(heldOccurrenceId)
+                    .then((r) => reportPlay('common.play', r));
+                }
+              : onPlayPause
+          }
+          onNext={() => advance('next')}
+          onPrevious={() => advance('previous')}
+          onToggleLike={onToggleLike}
+          shuffle={state.type === 'ready' ? state.shuffle : false}
+          onToggleShuffle={() => void session.toggleShuffle()}
+          repeat={state.type === 'ready' ? state.repeat : 'off'}
+          onCycleRepeat={() => void session.cycleRepeat()}
+          download={stageDownload}
+          onDownload={onStageDownload}
+          onAddToPlaylist={onStageAddToPlaylist}
+          onTrackMenu={
+            sheetPlayer.recordingId === null
+              ? undefined
+              : () => {
+                  const recordingId = sheetPlayer.recordingId;
+                  if (recordingId !== null) {
+                    setActionsFor({ kind: 'recording', recordingId });
+                  }
+                }
+          }
+          onRecovery={onAuthRecovery}
+          onSeek={
+            heldOccurrenceId !== null
+              ? (ms) => {
+                  const held = state.queue.occurrences.find(
+                    (o) => o.occurrenceId === heldOccurrenceId,
+                  );
+                  if (held !== undefined && !canPlay(held.recordingId)) {
+                    return;
+                  }
+                  void session
+                    .playOccurrence(heldOccurrenceId)
+                    .then((r) => {
+                      if (!r.ok) {
+                        reportPlay('common.play', r);
+                        return;
+                      }
+                      // The await can outlive a re-cursor — a
+                      // queue tap during prepare would otherwise
+                      // have this seek land on the new song.
+                      const snap = session.snapshot();
+                      if (
+                        snap.type === 'ready' &&
+                        snap.queue.currentOccurrenceId ===
+                          heldOccurrenceId
+                      ) {
+                        seekToPosition(ms);
+                      }
+                    });
+                }
+              : seekToPosition
+          }
+          peaks={peaks}
+          onRetryLyrics={onRetryLyrics}
+          onStartRadio={onStartRadioGated}
+          radioSeedProvider={radioSeedProvider}
+          onStopRadio={onStopRadio}
+          onPressQueueItem={playQueueOccurrence}
+          onQueueRowIntent={(id) =>
+            rowIntent({ kind: 'occurrence', id })
+          }
+          onQueueViewport={onQueueViewport}
+          onRemoveQueueItem={removeQueueOccurrence}
+          onClearUpcoming={clearUpcoming}
+          onOpenQueueContext={openQueueContext}
+          onToggleQueueReorder={toggleReordering}
+          onMoveQueueItem={onMoveQueueItem}
+          onMoveQueueItemTo={onMoveQueueItemTo}
+        />
+  ) : null;
 
   // Gate frame: the ready UI must not render before the persisted
   // language has been applied — only gate copy (whose system-language
@@ -2708,124 +2908,9 @@ function Main({
             topInset={topInset}
             width={paneWidth}
           />
-          {sheetPlayer !== null ? (
-            <StageSheet
-              player={sheetPlayer}
-              // No live player = held ended pose — the leaves
-              // freeze at the model's retained position rather
-              // than resetting on the queue's cleared position.
-              session={player === null ? undefined : session}
-              expanded={expanded}
-              onOpenEntity={openEntityFromStage}
-              progress={stageProgress}
-              travel={stageTravel}
-              anchor={stageAnchor}
-              gone={stageGone}
-              collapsedHeight={stageCollapsedHeight}
-              onExpandChange={setStageOpenFor}
-              onDismiss={() => void session.stop()}
-              peeksFor={skipPeeksFor}
-              mode={stageMode}
-              onModeChange={setStageMode}
-              restMode={stageReopenMode}
-              queue={queueModel}
-              queueReordering={reordering}
-              topInset={topInset}
-              bottomInset={insets.bottom}
-              lyricsSource={lyricsSource}
-              lyricsLive={lyricsLive}
-              seekGeneration={seekGeneration}
-              radio={radioModel}
-              onPlayPause={
-                heldOccurrenceId !== null
-                  ? () => {
-                      // Same offline rule as queue rows — an unowned
-                      // remote target must not start a dead attempt.
-                      const held = state.queue.occurrences.find(
-                        (o) => o.occurrenceId === heldOccurrenceId,
-                      );
-                      if (held !== undefined && !canPlay(held.recordingId)) {
-                        return;
-                      }
-                      void Haptics.impactAsync(
-                        Haptics.ImpactFeedbackStyle.Light,
-                      );
-                      void session
-                        .playOccurrence(heldOccurrenceId)
-                        .then((r) => reportPlay('common.play', r));
-                    }
-                  : onPlayPause
-              }
-              onNext={() => advance('next')}
-              onPrevious={() => advance('previous')}
-              onToggleLike={onToggleLike}
-              shuffle={state.type === 'ready' ? state.shuffle : false}
-              onToggleShuffle={() => void session.toggleShuffle()}
-              repeat={state.type === 'ready' ? state.repeat : 'off'}
-              onCycleRepeat={() => void session.cycleRepeat()}
-              download={stageDownload}
-              onDownload={onStageDownload}
-              onAddToPlaylist={onStageAddToPlaylist}
-              onTrackMenu={
-                sheetPlayer.recordingId === null
-                  ? undefined
-                  : () => {
-                      const recordingId = sheetPlayer.recordingId;
-                      if (recordingId !== null) {
-                        setActionsFor({ kind: 'recording', recordingId });
-                      }
-                    }
-              }
-              onRecovery={onAuthRecovery}
-              onSeek={
-                heldOccurrenceId !== null
-                  ? (ms) => {
-                      const held = state.queue.occurrences.find(
-                        (o) => o.occurrenceId === heldOccurrenceId,
-                      );
-                      if (held !== undefined && !canPlay(held.recordingId)) {
-                        return;
-                      }
-                      void session
-                        .playOccurrence(heldOccurrenceId)
-                        .then((r) => {
-                          if (!r.ok) {
-                            reportPlay('common.play', r);
-                            return;
-                          }
-                          // The await can outlive a re-cursor — a
-                          // queue tap during prepare would otherwise
-                          // have this seek land on the new song.
-                          const snap = session.snapshot();
-                          if (
-                            snap.type === 'ready' &&
-                            snap.queue.currentOccurrenceId ===
-                              heldOccurrenceId
-                          ) {
-                            seekToPosition(ms);
-                          }
-                        });
-                    }
-                  : seekToPosition
-              }
-              peaks={peaks}
-              onRetryLyrics={onRetryLyrics}
-              onStartRadio={onStartRadioGated}
-              radioSeedProvider={radioSeedProvider}
-              onStopRadio={onStopRadio}
-              onPressQueueItem={playQueueOccurrence}
-              onQueueRowIntent={(id) =>
-                rowIntent({ kind: 'occurrence', id })
-              }
-              onQueueViewport={onQueueViewport}
-              onRemoveQueueItem={removeQueueOccurrence}
-              onClearUpcoming={clearUpcoming}
-              onOpenQueueContext={openQueueContext}
-              onToggleQueueReorder={toggleReordering}
-              onMoveQueueItem={onMoveQueueItem}
-              onMoveQueueItemTo={onMoveQueueItemTo}
-            />
-          ) : null}
+          {/* Web-only mount (the in-tree sibling choice above): the
+              pill stays under pushed pages there, unchanged. */}
+          {Platform.OS === 'web' ? stageSheet : null}
           {online === false && (
             <View
               style={{
@@ -2898,7 +2983,7 @@ function Main({
         {rowActions !== null && (
           <SheetScreen
             stackKey="sheet-actions"
-            onDismissed={closeRowActions}
+            onDismissed={onNativeSheetDismissed(closeRowActions)}
           >
             <RowActionsSheet
               title={rowActions.title}
@@ -2912,7 +2997,7 @@ function Main({
         {pickerFor !== null && (
           <SheetScreen
             stackKey="sheet-add-playlist"
-            onDismissed={closePlaylistPicker}
+            onDismissed={onNativeSheetDismissed(closePlaylistPicker)}
           >
             <AddToPlaylistSheet
               playlists={pickerItems}
@@ -2926,7 +3011,7 @@ function Main({
         {providerPicker !== null && (
           <SheetScreen
             stackKey="sheet-provider"
-            onDismissed={closeProviderPicker}
+            onDismissed={onNativeSheetDismissed(closeProviderPicker)}
           >
             <ProviderPickerSheet
               title={providerPicker.title}
@@ -2941,7 +3026,7 @@ function Main({
         {themePickerOpen && (
           <SheetScreen
             stackKey="sheet-theme"
-            onDismissed={closeThemePicker}
+            onDismissed={onNativeSheetDismissed(closeThemePicker)}
           >
             <ThemePickerSheet
               title={t('settings.theme')}
@@ -2956,7 +3041,7 @@ function Main({
         {languagePickerOpen && (
           <SheetScreen
             stackKey="sheet-language"
-            onDismissed={closeLanguagePicker}
+            onDismissed={onNativeSheetDismissed(closeLanguagePicker)}
           >
             <LanguagePickerSheet
               options={languageOptions()}
@@ -2970,7 +3055,7 @@ function Main({
         {storefrontSheetOpen && (
           <SheetScreen
             stackKey="sheet-storefront"
-            onDismissed={closeStorefront}
+            onDismissed={onNativeSheetDismissed(closeStorefront)}
           >
             <ValueFieldSheet
               title={t('settings.storefront')}
@@ -2988,7 +3073,7 @@ function Main({
         {qualityPickerOpen && (
           <SheetScreen
             stackKey="sheet-quality"
-            onDismissed={closeQualityPicker}
+            onDismissed={onNativeSheetDismissed(closeQualityPicker)}
           >
             <ProviderPickerSheet
               title={t('settings.quality')}
@@ -3003,7 +3088,7 @@ function Main({
         {artworkCachePickerOpen && (
           <SheetScreen
             stackKey="sheet-artwork-cache"
-            onDismissed={closeArtworkCache}
+            onDismissed={onNativeSheetDismissed(closeArtworkCache)}
           >
             <ProviderPickerSheet
               title={t('settings.artworkCache')}
@@ -3022,7 +3107,7 @@ function Main({
         {authSheetOpen && (
           <SheetScreen
             stackKey="sheet-auth"
-            onDismissed={closeAuthSheet}
+            onDismissed={onNativeSheetDismissed(closeAuthSheet)}
           >
             <AuthSheet
               model={toAuthSheetModel(
@@ -3040,7 +3125,7 @@ function Main({
         {authClientSheetOpen && (
           <SheetScreen
             stackKey="sheet-auth-client"
-            onDismissed={closeAuthClient}
+            onDismissed={onNativeSheetDismissed(closeAuthClient)}
           >
             <ValueFieldSheet
               title={t('auth.clientId.title')}
@@ -3056,6 +3141,19 @@ function Main({
           </SheetScreen>
         )}
       </AppStack>
+      {/* The stage sheet IS the miniplayer — mounted outside the
+          ScreenStack on native so its collapsed pill keeps floating
+          over pushed overlay pages (entity/playlist/...), not just
+          the tab shell. Its absolute-fill surfaces anchor to the
+          screen-filling view. Native formSheets render INSIDE the
+          stack below it, so `occluded` parks the whole stage while
+          one is up — the pill can't float mid-sheet and the
+          expanded pane can't bury a presented sheet. Web keeps the
+          in-tree mount below: there SheetScreens are in-tree
+          overlays too, and a hoisted layer would cover them —
+          pushed pages covering the pill stays the web
+          limitation. */}
+      {Platform.OS === 'web' ? null : stageSheet}
       </View>
     </RenderBoundary>
   );
