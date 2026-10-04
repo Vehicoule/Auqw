@@ -56,12 +56,7 @@ import { StatusBar } from 'expo-status-bar';
 import * as Haptics from 'expo-haptics';
 import { requireOptionalNativeModule } from 'expo';
 import { Directory, File, Paths } from 'expo-file-system';
-import {
-  useFonts,
-  Inter_400Regular,
-  Inter_500Medium,
-  Inter_700Bold,
-} from '@expo-google-fonts/inter';
+import { useFonts } from 'expo-font';
 import * as AuqwExpo from 'auqw-expo';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import {
@@ -268,10 +263,13 @@ function exportDestinationLabel(uri: string): string {
 }
 
 export function App() {
+  // Local copies of the three Inter cuts the token sheet names —
+  // @expo-google-fonts/inter top-level requires all 18 TTFs, which
+  // Metro then bundles as ~6 MB of dead assets for the 3 we use.
   const [fontsLoaded] = useFonts({
-    Inter_400Regular,
-    Inter_500Medium,
-    Inter_700Bold,
+    Inter_400Regular: require('./assets/fonts/Inter_400Regular.ttf'),
+    Inter_500Medium: require('./assets/fonts/Inter_500Medium.ttf'),
+    Inter_700Bold: require('./assets/fonts/Inter_700Bold.ttf'),
   });
   const [attempt, setAttempt] = useState(0);
   const [boot, setBoot] = useState<Boot<SessionController>>({
