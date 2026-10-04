@@ -11,6 +11,13 @@ const config: ExpoConfig = {
   // (adb am start / simctl openurl); auqw://seam-* links are the
   // Slice 1.5 seam harness — no other deep links exist yet.
   scheme: 'auqw',
+  experiments: {
+    // babel-preset-expo wires this to babel-plugin-react-compiler
+    // (already its transitive dep) — auto-memoization over the
+    // leaf-subscribed render surface. Revert candidate if jank or a
+    // compile regression shows in journey timings.
+    reactCompiler: true,
+  },
   ios: {
     bundleIdentifier: 'com.vehicoule.auqw',
     // expo-audio's background-audio knob is disabled below — it would
