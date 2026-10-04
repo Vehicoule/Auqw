@@ -14,6 +14,12 @@ import { useTheme } from './theme.tsx';
 
 const FAB = 44;
 
+/** Content clearance under the collapsed loupe (44px + its margins).
+ *  Scrollables carry it inside their content so it scrolls away with
+ *  the rows; pinned rows pad the right edge so nothing slides under
+ *  the floating field. */
+export const SEARCH_FAB_RESERVE = FAB + 8;
+
 /**
  * The one search field, floating: a solid loupe pinned top-right over
  * every tab that springs open into the field (the loupe icon travels

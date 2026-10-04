@@ -2,6 +2,7 @@ import {
   FlatList,
   Image,
   PixelRatio,
+  ScrollView,
   StyleSheet,
   View,
   useWindowDimensions,
@@ -182,28 +183,11 @@ export function EntityScreen({
       </View>
     );
   }
-  return (
-    <View
-      style={{
-        flex: 1,
-        backgroundColor: theme.colors.canvas,
-        paddingTop: topInset + theme.spacing.sm,
-      }}
-    >
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          paddingHorizontal: theme.spacing.lg,
-        }}
-      >
-        <BackButton
-          onPress={onBack}
-          accessibilityLabel={view.backA11yLabel}
-        />
-      </View>
-
-      {/* Hero: centered artwork + title block, then the action pills. */}
+  // The whole hero — artwork, title block, pills, honesty flags —
+  // rides the tracklist's header so a scroll carries it away instead
+  // of pinning most of the screen.
+  const header = (
+    <>
       <View
         style={{
           alignItems: 'center',
@@ -213,7 +197,9 @@ export function EntityScreen({
       >
         {/* Pure decoration — absent entirely when the page has no
             cover. */}
-        {model.artworkUrl !== null && <HeroBackdrop url={model.artworkUrl} />}
+        {model.artworkUrl !== null && (
+          <HeroBackdrop url={model.artworkUrl} />
+        )}
         {/* Artist pages conventionally round the portrait; album and
             playlist covers stay square. */}
         <Artwork
@@ -295,18 +281,54 @@ export function EntityScreen({
           </Text>
         </View>
       )}
+    </>
+  );
+
+  return (
+    <View
+      style={{
+        flex: 1,
+        backgroundColor: theme.colors.canvas,
+        paddingTop: topInset + theme.spacing.sm,
+      }}
+    >
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          paddingHorizontal: theme.spacing.lg,
+        }}
+      >
+        <BackButton
+          onPress={onBack}
+          accessibilityLabel={view.backA11yLabel}
+        />
+      </View>
 
       {view.body.kind === 'empty' ? (
-        <EmptyState
-          title={view.body.title}
-          hint={view.body.hint}
-          icon={view.body.icon}
-        />
+        <ScrollView
+          scrollEnabled={scrollEnabled}
+          contentContainerStyle={{
+            // flexGrow keeps the empty state centered when the hero
+            // is short, scrolls the whole block when it overflows.
+            flexGrow: 1,
+            paddingHorizontal: theme.spacing.sm,
+            paddingBottom: theme.spacing.xxl,
+          }}
+        >
+          {header}
+          <EmptyState
+            title={view.body.title}
+            hint={view.body.hint}
+            icon={view.body.icon}
+          />
+        </ScrollView>
       ) : (
         <FlatList
           data={bodyRows}
           keyExtractor={(item) => item.row.key}
           scrollEnabled={scrollEnabled}
+          ListHeaderComponent={header}
           contentContainerStyle={{
             paddingHorizontal: theme.spacing.sm,
             paddingTop: theme.spacing.md,

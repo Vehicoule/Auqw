@@ -12,6 +12,7 @@ import {
 import type { IconName } from './primitives.tsx';
 import { TrackRow } from './track-row.tsx';
 import { EntityRail } from './entity-rail.tsx';
+import { SEARCH_FAB_RESERVE } from './search-fab.tsx';
 import { EmptyState, StateFor } from './states.tsx';
 import type { SearchStateModel } from '@auqw/ui-shared';
 import {
@@ -236,7 +237,15 @@ export type SearchScreenProps = SearchScreenHandlers & {
    * fixtures still render filled.
    */
   readonly query?: string | undefined;
+  /** The system top inset — the screen adds the floating loupe's
+   *  reserve itself where content must clear it. */
   readonly topInset?: number | undefined;
+  /**
+   * Whether the floating search field is expanded. Pinned rows drop
+   * below it while open (it spans the width), hug the inset when it
+   * is collapsed back to the loupe.
+   */
+  readonly fabOpen?: boolean | undefined;
   readonly scrollEnabled?: boolean | undefined;
   /** Submitted queries, newest first — rendered on the idle phase. */
   readonly recents?: readonly string[] | undefined;
@@ -252,6 +261,7 @@ export function SearchScreen({
   state,
   query,
   topInset = 0,
+  fabOpen = false,
   scrollEnabled = true,
   onQueryChange,
   onSubmit,
@@ -290,9 +300,14 @@ export function SearchScreen({
     onLoadMore,
   });
   // Chips stay pinned above the list (the explore contract); the
-  // heading rides inside it. The pinned row carries the inset on its
-  // wrapper — padding inside the horizontal scroller was what clipped
-  // the chips under the floating field on device.
+  // heading rides inside it. Pinned rows hug the raw inset — the
+  // collapsed loupe only overlays the row's right edge, cleared by
+  // the scroller's right padding; the expanded field spans the full
+  // width, so pinned rows drop the full reserve below it while open.
+  // Scrollables carry the reserve inside their content — it scrolls
+  // away instead of sitting dead above the viewport.
+  const fabInset = topInset + SEARCH_FAB_RESERVE;
+  const pinnedTop = fabOpen === true ? fabInset : topInset;
   const resultHeader =
     view.resultsHead === null ? null : (
       <View
@@ -343,7 +358,7 @@ export function SearchScreen({
           scrollEnabled={scrollEnabled}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{
-            paddingTop: topInset,
+            paddingTop: fabInset,
             // Clears the floating miniplayer's strip.
             paddingBottom:
               theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
@@ -378,7 +393,17 @@ export function SearchScreen({
         </ScrollView>
       )}
       {view.filters !== null && (
-        <View style={{ paddingTop: topInset }}>
+        <View
+          style={{
+            // Pinned like the other chrome: drops below the field
+            // while it is open, hugs the inset when it collapses.
+            paddingTop: pinnedTop,
+            // The floating loupe overlays this band's right edge —
+            // clipping the viewport here keeps chips from sliding
+            // under it at any scroll position.
+            paddingRight: theme.spacing.screen + SEARCH_FAB_RESERVE,
+          }}
+        >
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -404,7 +429,7 @@ export function SearchScreen({
       {view.results === null && view.resultsHead !== null && (
         <View
           style={{
-            paddingTop: view.filters !== null ? 0 : topInset,
+            paddingTop: view.filters !== null ? 0 : pinnedTop,
             paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
           }}
         >
@@ -413,7 +438,7 @@ export function SearchScreen({
       )}
       {view.idle !== null &&
         (view.idle.kind === 'recents' ? (
-          <View style={{ paddingTop: topInset }}>
+          <View style={{ paddingTop: pinnedTop }}>
             <Text
               variant="label"
               color="secondary"
@@ -451,7 +476,7 @@ export function SearchScreen({
                 ? `${view.status.title} · ${view.status.hint}`
                 : view.status.title
             }
-            style={{ paddingTop: topInset }}
+            style={{ paddingTop: fabInset }}
           />
         ) : (
           <StateFor view={view.status} />
@@ -464,7 +489,7 @@ export function SearchScreen({
             paddingTop:
               view.resultsHead !== null || view.filters !== null
                 ? 0
-                : topInset,
+                : fabInset,
             paddingBottom:
               theme.spacing.xxl + theme.sizes.miniPlayer + theme.spacing.md,
           }}
@@ -486,7 +511,7 @@ export function SearchScreen({
           }
           contentContainerStyle={{
             // The pinned chips row owns the inset when present.
-            paddingTop: view.filters !== null ? 0 : topInset,
+            paddingTop: view.filters !== null ? 0 : fabInset,
             paddingHorizontal: theme.spacing.screen - theme.spacing.sm,
             // Clears the floating miniplayer's strip.
             paddingBottom:

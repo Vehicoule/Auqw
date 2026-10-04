@@ -22,7 +22,14 @@
 // Everything behavioral above the platform boundary is shared — a fix
 // in the hook fixes both shells.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Component,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type { ReactNode } from 'react';
 import {
   AppState,
@@ -345,7 +352,13 @@ export function App() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         {boot.type === 'ready' ? (
-          <Shell controller={boot.controller} />
+          // The outer ThemeProvider only serves RenderBoundary's
+          // fallback (Shell installs the selected theme inside).
+          <ThemeProvider theme="system">
+            <RenderBoundary>
+              <Shell controller={boot.controller} />
+            </RenderBoundary>
+          </ThemeProvider>
         ) : (
           <ThemeProvider theme="system">
             <BootGate
@@ -358,6 +371,45 @@ export function App() {
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
+}
+
+/**
+ * A render throw anywhere inside the shell is otherwise an unhandled
+ * JS exception — on a release build the process just dies (a publish
+ * waking a keep-alive/frozen screen is the usual trigger: 'open
+ * something else' unfreezes a pane that renders on stale props).
+ * Two placements: inside Main's output it catches a screen/sheet
+ * throw while Main — the session ports, auth flow, shared stage
+ * values — stays mounted, so retry remounts only the view tree; the
+ * App-level one is the last resort for throws in the shell hooks or
+ * Main itself, where retry remounts everything except the session
+ * controller (playback + library still survive).
+ */
+class RenderBoundary extends Component<
+  { readonly children: ReactNode },
+  { readonly error: Error | null }
+> {
+  override state: { error: Error | null } = { error: null };
+  static getDerivedStateFromError(error: Error): { error: Error } {
+    return { error };
+  }
+  override render(): ReactNode {
+    const { error } = this.state;
+    if (error !== null) {
+      // Ambient theme: inside Main the selected scheme shows through;
+      // at the App seam only the boot 'system' provider exists.
+      return (
+        <GateFrame>
+          <ErrorState
+            title={t('state.errorTitle')}
+            hint={error.message}
+            onRetry={() => this.setState({ error: null })}
+          />
+        </GateFrame>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function GateFrame({ children }: { readonly children: ReactNode }) {
@@ -2209,9 +2261,11 @@ function Main({
       <SearchScreen
         state={searchModel}
         query={query}
-        // The floating loupe occupies a 44px slot under the inset —
-        // reserve it so it never covers the recents/results heading.
-        topInset={topInset + 52}
+        // The screen adds the floating loupe's reserve itself —
+        // pinned rows pad the right edge instead of a dead top band,
+        // dropping below the field while it is expanded.
+        topInset={topInset}
+        fabOpen={searchFabOpen}
         onQueryChange={setQuery}
         onSubmit={submitSearch}
         onCancel={cancelSearch}
@@ -2245,6 +2299,7 @@ function Main({
       searchModel,
       query,
       topInset,
+      searchFabOpen,
       submitSearch,
       cancelSearch,
       retrySearch,
@@ -2603,9 +2658,14 @@ function Main({
     );
   }
 
+  // The inner render boundary: a throw in a screen/sheet/overlay
+  // swaps just this view tree for the error surface — Main stays
+  // mounted, so the session ports, the auth flow, and the shared
+  // stage values all survive retry.
   return (
-    <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
-      {/* Immersive player (art-backed sheet in player mode) is dark
+    <RenderBoundary>
+      <View style={{ flex: 1, backgroundColor: theme.colors.canvas }}>
+        {/* Immersive player (art-backed sheet in player mode) is dark
           under any scheme — system bars must read light over it. */}
       <StatusBar
         style={theme.scheme === 'light' && !immersiveStage ? 'dark' : 'light'}
@@ -3000,6 +3060,7 @@ function Main({
           </SheetScreen>
         )}
       </AppStack>
-    </View>
+      </View>
+    </RenderBoundary>
   );
 }
