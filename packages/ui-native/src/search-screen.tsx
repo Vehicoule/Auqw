@@ -476,7 +476,10 @@ export function SearchScreen({
                 ? `${view.status.title} · ${view.status.hint}`
                 : view.status.title
             }
-            style={{ paddingTop: fabInset }}
+            // Pinned like the other chrome — hugging the raw inset
+            // when the field is collapsed keeps the rows out of the
+            // dead band the scrollables reserve for the loupe.
+            style={{ paddingTop: pinnedTop }}
           />
         ) : (
           <StateFor view={view.status} />
