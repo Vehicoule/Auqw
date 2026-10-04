@@ -1329,10 +1329,13 @@ export function StageSheet({
   // Two gates, same shared value: the wrapper can only be 'box-none'
   // or 'none', so it never absorbs a tap itself and a stuck value
   // fails open to content; the inner wrapper owns the sole hit
-  // target ('auto'/'none'), so the surface's reach ends exactly at
-  // its Pressable — a JS 'none' on that Pressable instead would
-  // reopen the hop the animated gate exists to close (a rising drag
-  // could leak a tap to the page mid-flight).
+  // target ('auto'/'none') on the UI thread — a JS 'none' on the
+  // Pressable instead would reopen the hop (a rising drag could
+  // leak a tap to the page mid-flight), while no JS gate at all
+  // leaves a stuck 'auto' absorbing every tap on a parked sheet.
+  // The inner wrapper also remounts on each `dismissOn` settle
+  // (keyed below): mount-time props don't ride the update channel,
+  // so a stalled flush can't leave the parked gate hot.
   // RNW writes those non-style animated props as inert DOM
   // attributes: the baked mount-time pe:none class never swaps, and
   // `pointer-events` inherits — RNW Pressable emits no pe class of
@@ -2039,12 +2042,16 @@ export function StageSheet({
         animatedProps={dismissSurfaceProps}
         style={StyleSheet.absoluteFill}
       >
-        {/* Sole hit target — gated on the UI thread a level up so a
-            rising drag can't leak a tap through to the page. Web
-            mounts it only when `dismissOn` and keeps the Pressable's
+        {/* Sole hit target — the inner wrapper gates on the UI
+            thread so a rising drag can't leak a tap to the page,
+            and remounts on every `dismissOn` settle so the parked
+            'none' always lands even if prop updates stall (mount-
+            time props bypass the update channel). Web mounts it
+            only when `dismissOn` and keeps the Pressable's
             explicit 'auto' overriding the baked pe:none class. */}
         {(dismissOn || Platform.OS !== 'web') && (
           <Animated.View
+            key={dismissOn ? 'risen' : 'parked'}
             collapsable={false}
             animatedProps={dismissTapProps}
             style={StyleSheet.absoluteFill}
