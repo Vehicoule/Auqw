@@ -74,6 +74,118 @@
         }
       }
     },
+    "httpRequestPayload": {
+      "type": "object",
+      "required": [
+        "method",
+        "url",
+        "headers",
+        "body"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "GET",
+            "POST"
+          ]
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^https://"
+        },
+        "headers": {
+          "$ref": "#/$defs/headerList"
+        },
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "contentEncoding": "base64"
+        }
+      }
+    },
+    "httpBatchResult": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "status",
+            "headers",
+            "body"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "headers": {
+              "$ref": "#/$defs/headerList"
+            },
+            "body": {
+              "type": "string",
+              "contentEncoding": "base64"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "error"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "type": "object",
+              "required": [
+                "kind",
+                "message"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "$ref": "#/$defs/errorKind"
+                },
+                "message": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "httpBatchResponse": {
+      "type": "object",
+      "required": [
+        "type",
+        "id",
+        "results"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "http_batch_response"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/httpBatchResult"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        }
+      }
+    },
     "httpResponse": {
       "type": "object",
       "required": [
@@ -166,35 +278,45 @@
               "const": "http_request"
             },
             "payload": {
+              "$ref": "#/$defs/httpRequestPayload"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "id",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "host_request"
+            },
+            "id": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "kind": {
+              "const": "http_batch"
+            },
+            "payload": {
               "type": "object",
               "required": [
-                "method",
-                "url",
-                "headers",
-                "body"
+                "requests"
               ],
               "additionalProperties": false,
               "properties": {
-                "method": {
-                  "type": "string",
-                  "enum": [
-                    "GET",
-                    "POST"
-                  ]
-                },
-                "url": {
-                  "type": "string",
-                  "pattern": "^https://"
-                },
-                "headers": {
-                  "$ref": "#/$defs/headerList"
-                },
-                "body": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "contentEncoding": "base64"
+                "requests": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/httpRequestPayload"
+                  },
+                  "minItems": 1,
+                  "maxItems": 8
                 }
               }
             }
@@ -557,6 +679,9 @@
     },
     {
       "$ref": "#/$defs/httpResponse"
+    },
+    {
+      "$ref": "#/$defs/httpBatchResponse"
     },
     {
       "$ref": "#/$defs/hostError"

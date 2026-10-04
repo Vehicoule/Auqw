@@ -63,11 +63,14 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 ### Provider artifacts
 
 Provider plugins are not bundled: the app fetches signed releases
-over-the-air from `releases/feed.json` on the `auqw-plugins` repo
-(first open and periodic check), verifies each artifact's ed25519
-signature + digests against the embedded release key, and caches the
-verified `<id>.wasm` + `<id>.manifest.json` pairs under its plugin
-dir. The decision row lives in `docs/decisions.md` (Plugin guests).
+over-the-air from the `auqw-plugins` repo (first open and periodic
+check), verifies each artifact's ed25519 signature + digests against
+the embedded release key, and caches the verified `<id>.wasm` +
+`<id>.manifest.json` pairs under its plugin dir. Two indexes live
+there: this build reads `releases/feed-v2.json` (one line per
+(plugin, abi)); `releases/feed.json` is the legacy single-line index
+released builds consume. The decision row lives in
+`docs/decisions.md` (Plugin guests).
 
 ### Layout
 
