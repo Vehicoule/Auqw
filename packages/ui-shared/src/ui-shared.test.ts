@@ -2029,6 +2029,14 @@ const tap = (s: string) => {
     byKey.get('light')?.palette.accent !== byKey.get('dark')?.palette.accent,
     'each card carries its own scheme accent',
   );
+  // Where the OS can never supply a palette (iOS, Android <12, web) the
+  // adaptive card is a no-op alias of 'system' — the picker drops it.
+  const noPaletteOs = themeCardViews('light', null, false);
+  assert(noPaletteOs.length === 4, 'unsupported OS hides adaptive');
+  assert(
+    !noPaletteOs.some((card) => card.key === 'adaptive'),
+    'adaptive absent without OS palette support',
+  );
 }
 
 {

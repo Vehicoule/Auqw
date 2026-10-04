@@ -2653,18 +2653,30 @@ export class Session {
     if (!ready.ok) {
       return ready;
     }
+    const r = ready.value;
     if (
       !isSettings(settings) ||
-      !this.#providers.has(settings.catalogProvider) ||
-      !this.#providers.has(settings.playbackProvider) ||
-      (settings.lyricsProvider != null &&
+      // Provider ids are only policed on CHANGE: a committed id can
+      // legitimately name a provider this device never loaded (synced
+      // settings, a removed or failed plugin, a boot before plugin
+      // ready), and rejecting every write then deadlocks fields that
+      // have nothing to do with providers — theme included. A write
+      // that keeps the committed (possibly stale) id makes nothing
+      // worse; one that POINTS a slot at an unloaded id is still
+      // rejected.
+      (settings.catalogProvider !== r.settings.catalogProvider &&
+        !this.#providers.has(settings.catalogProvider)) ||
+      (settings.playbackProvider !== r.settings.playbackProvider &&
+        !this.#providers.has(settings.playbackProvider)) ||
+      (settings.lyricsProvider !== r.settings.lyricsProvider &&
+        settings.lyricsProvider != null &&
         !this.#providers.has(settings.lyricsProvider)) ||
-      (settings.radioProvider != null &&
+      (settings.radioProvider !== r.settings.radioProvider &&
+        settings.radioProvider != null &&
         !this.#providers.has(settings.radioProvider))
     ) {
       return err(appError('invalid-response', 'invalid settings'));
     }
-    const r = ready.value;
     const persisted = await this.#persist({ settings });
     if (!persisted.ok) {
       return err(persisted.error);

@@ -2945,7 +2945,14 @@ function Main({
           >
             <ThemePickerSheet
               title={t('settings.theme')}
-              cards={themeCardViews(osScheme, themeSource)}
+              // 'adaptive' only exists where the OS can hand back a
+              // palette — Android 12+ Monet stops; iOS/web/old-Android
+              // would silently resolve it identical to 'system'.
+              cards={themeCardViews(
+                osScheme,
+                themeSource,
+                Platform.OS === 'android' && Platform.Version >= 31,
+              )}
               selectedKey={state.settings.theme}
               onPick={onPickTheme}
               onDismiss={closeThemePicker}

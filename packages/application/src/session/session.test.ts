@@ -1749,6 +1749,26 @@ async function settingsFlow(): Promise<void> {
     'invalid settings never commit',
   );
   assertEqual(readyOf(r).settings.playbackProvider, 'youtube-music');
+  // A provider id committed elsewhere (another device, a plugin since
+  // removed) is not this device's to police: it blocks only a NEW pick
+  // of an unloaded id — never a write that leaves it untouched.
+  const stale = rig(
+    persisted({
+      settings: { ...SETTINGS, playbackProvider: 'ghost-device' },
+    }),
+  );
+  await restoreOk(stale);
+  const side = await stale.session.updateSettings({
+    ...readyOf(stale).settings,
+    theme: 'dark',
+  });
+  assert(side.ok, 'stale provider id must not block unrelated writes');
+  assertEqual(readyOf(stale).settings.theme, 'dark');
+  const stillBad = await stale.session.updateSettings({
+    ...readyOf(stale).settings,
+    radioProvider: 'also-ghost',
+  });
+  assert(!stillBad.ok && stillBad.error.kind === 'invalid-response');
   // Provider change while paused never starts playback.
   const spotify = new FakeProvider('spotify');
   const r2 = rig(
