@@ -38,8 +38,12 @@ const DEEZER_HOST =
  * googleusercontent/ggpht hosts — the same test the bare-append branch
  * applies. A look-alike tail on another host (a signed query value, a
  * tracking token) is opaque data, not a size knob — rewriting it
- * corrupts the URL. */
-const GOOGLE_HOST = /\.googleusercontent\.com\/|ggpht\.com\//;
+ * corrupts the URL. The match is anchored at the host like
+ * DEEZER_HOST: a host merely ending in `ggpht.com` (`notggpht.com`)
+ * or a needle in another host's path or query must not take the
+ * grammar. */
+const GOOGLE_HOST =
+  /^https:\/\/(?:[a-z0-9-]{1,63}\.){0,4}(?:ggpht\.com|googleusercontent\.com)(?::\d{1,5})?\//i;
 
 const GOOGLE_SIZE = /=w(\d{1,8})-h(\d{1,8})(-\S{1,127})?$/;
 const GOOGLE_SQUARE = /=s(\d{1,8})(-\S{1,127})?$/;

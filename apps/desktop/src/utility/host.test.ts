@@ -1005,6 +1005,7 @@ export async function run(): Promise<void> {
     {
       let feedCalls = 0;
       const deferLoads: string[] = [];
+      const deferUnloaded: string[] = [];
       const deferRuntime = createHostRuntime({
         env: {
           AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
@@ -1019,10 +1020,15 @@ export async function run(): Promise<void> {
         },
         pairVerifier: () => signedFooPair,
         require: () =>
-          otaHost(async (w, m) => {
-            deferLoads.push(m);
-            return 'p';
-          }),
+          otaHost(
+            async (w, m) => {
+              deferLoads.push(m);
+              return 'p';
+            },
+            async (providerId) => {
+              deferUnloaded.push(providerId);
+            },
+          ),
         fs: otaFs(
           new Map<string, Buffer>([
             ['/b/auqw_node_bindings.node', Buffer.from('')],
@@ -1048,6 +1054,203 @@ export async function run(): Promise<void> {
         after.manifests.length,
         0,
         'the consume pass applies the compatible gate',
+      );
+      assert(
+        deferUnloaded.includes('foo-music'),
+        'the consume pass unloads the guest the feed dropped',
+      );
+    }
+
+    // A signed id the settled feed drops is revoked at runtime too —
+    // the advertisement gate alone would leave the guest registered
+    // and invocable for the rest of the process.
+    {
+      const dropUnloaded: string[] = [];
+      const dropFiles = new Map<string, Buffer>([
+        ['/b/auqw_node_bindings.node', Buffer.from('')],
+        [join(cacheDirPath, 'foo-music.json'), Buffer.from('pair-doc')],
+      ]);
+      let dropCalls = 0;
+      const dropRuntime = createHostRuntime({
+        env: {
+          AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+          AUQW_USER_DATA: '/ud',
+        },
+        feedSync: () => {
+          dropCalls += 1;
+          return dropCalls === 1
+            ? Promise.resolve({
+                ready: ['x'],
+                compatible: ['foo-music', 'x'],
+                current: ['foo-music', 'x'],
+              })
+            : Promise.resolve({
+                ready: ['x'],
+                compatible: ['x'],
+                current: ['x'],
+              });
+        },
+        pairVerifier: () => signedFooPair,
+        require: () =>
+          otaHost(
+            async () => 'p',
+            async (providerId) => {
+              dropUnloaded.push(providerId);
+            },
+          ),
+        fs: otaFs(dropFiles, () => [], () => ['foo-music.json']),
+      });
+      const named = await dropRuntime.status();
+      assertEqual(
+        named.manifests.length,
+        1,
+        'the signed pair loads while the feed names it',
+      );
+      // ready(1) < compatible(2) keeps the retry gate armed — the
+      // next status re-syncs and settles without foo-music.
+      const dropped = await dropRuntime.status();
+      assertEqual(
+        dropped.manifests.length,
+        0,
+        'a dropped pair leaves the advertised set',
+      );
+      assert(
+        dropUnloaded.includes('foo-music'),
+        'a dropped signed id is unloaded from the registry',
+      );
+    }
+
+    // An unreachable feed revokes nothing: last-known-good keeps the
+    // signed guest registered AND advertised.
+    {
+      const lkgUnloaded: string[] = [];
+      const lkgFiles = new Map<string, Buffer>([
+        ['/b/auqw_node_bindings.node', Buffer.from('')],
+        [join(cacheDirPath, 'foo-music.json'), Buffer.from('pair-doc')],
+      ]);
+      let lkgCalls = 0;
+      const lkgRuntime = createHostRuntime({
+        env: {
+          AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+          AUQW_USER_DATA: '/ud',
+        },
+        feedSync: () => {
+          lkgCalls += 1;
+          return lkgCalls === 1
+            ? Promise.resolve({
+                ready: ['x'],
+                compatible: ['foo-music', 'x'],
+                current: ['foo-music', 'x'],
+              })
+            : Promise.reject(new Error('feed down'));
+        },
+        pairVerifier: () => signedFooPair,
+        require: () =>
+          otaHost(
+            async () => 'p',
+            async (providerId) => {
+              lkgUnloaded.push(providerId);
+            },
+          ),
+        fs: otaFs(lkgFiles, () => [], () => ['foo-music.json']),
+      });
+      await lkgRuntime.status();
+      const offline = await lkgRuntime.status();
+      assertEqual(
+        offline.manifests.length,
+        1,
+        'last-known-good keeps the guest advertised',
+      );
+      assertEqual(
+        offline.manifests[0]?.providerId,
+        'foo-music',
+        'the cached signed pair still serves',
+      );
+      assertEqual(
+        lkgUnloaded.length,
+        0,
+        'an unreachable feed unloads nothing',
+      );
+    }
+
+    // deferBootFeed: a caller pass that consumes the deferred fetch
+    // leaves its settled result for the scheduled consume pass — the
+    // consume applies it instead of fetching a second time.
+    {
+      let sharedCalls = 0;
+      const sharedUnloaded: string[] = [];
+      const sharedFiles = new Map<string, Buffer>([
+        ['/b/auqw_node_bindings.node', Buffer.from('')],
+        [join(cacheDirPath, 'foo-music.json'), Buffer.from('pair-doc')],
+      ]);
+      let sharedUserNames: readonly string[] = [];
+      const sharedRuntime = createHostRuntime({
+        env: {
+          AUQW_NODE_BINDINGS: '/b/auqw_node_bindings.node',
+          AUQW_USER_DATA: '/ud',
+        },
+        deferBootFeed: true,
+        feedSync: () => {
+          sharedCalls += 1;
+          // The settled feed drops foo-music — the racing caller
+          // pass and the consume pass apply the same gate.
+          return Promise.resolve({
+            ready: [],
+            compatible: [],
+            current: [],
+          });
+        },
+        pairVerifier: () => signedFooPair,
+        require: () =>
+          otaHost(
+            async () => 'p',
+            async (providerId) => {
+              sharedUnloaded.push(providerId);
+            },
+          ),
+        fs: otaFs(
+          sharedFiles,
+          () => sharedUserNames,
+          () => ['foo-music.json'],
+        ),
+      });
+      const sharedBoot = await sharedRuntime.pluginsReady();
+      assertEqual(
+        sharedBoot.length,
+        1,
+        'the signed cache boots last-known-good',
+      );
+      assertEqual(sharedCalls, 0, 'the feed request stays off the ready path');
+      // A user-dir write during the post-boot sleep flips the
+      // directory signature — the caller pass consumes the deferred
+      // fetch first.
+      sharedFiles.set(
+        join(userDirPath, 'new.pair.json'),
+        Buffer.from('{}'),
+      );
+      sharedUserNames = ['new.pair.json'];
+      const mid = await sharedRuntime.status();
+      assertEqual(
+        sharedCalls,
+        1,
+        'the caller pass consumes the deferred fetch',
+      );
+      assertEqual(
+        mid.manifests.length,
+        0,
+        'the caller pass applies the settled gate',
+      );
+      // The scheduled consume pass reuses that settled feed — no
+      // second fetch, and the dropped id is unloaded.
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      assertEqual(
+        sharedCalls,
+        1,
+        'the consume pass reuses the settled feed',
+      );
+      assert(
+        sharedUnloaded.includes('foo-music'),
+        'the dropped guest is unloaded from the registry',
       );
     }
   }

@@ -461,6 +461,16 @@ export function createHostRuntime(opts: {
     compatible: readonly string[];
     current: readonly string[];
   }>) | null = null;
+  // The settled result when a caller pass consumes the deferred fetch
+  // before the scheduled consume pass — that pass applies it instead
+  // of fetching a second time.
+  let deferredFeedSettled:
+    | {
+        ready: readonly string[];
+        compatible: readonly string[];
+        current: readonly string[];
+      }
+    | undefined;
   // Every scan serializes through one chain — registry side-effects
   // (loads, revocations) can never interleave between a deferred
   // background pass and a caller-triggered rescan. `loadSeq` stamps
@@ -470,10 +480,16 @@ export function createHostRuntime(opts: {
   function runLoad(
     reuseUserScan: boolean,
     deferFeed: boolean,
+    consumeDeferredFeed = false,
   ): { seq: number; next: Promise<readonly LoadedPlugin[]> } {
     const seq = ++loadSeq;
     const next = loadChain.then(() =>
-      loadPluginDir(ensureHost(), reuseUserScan, deferFeed),
+      loadPluginDir(
+        ensureHost(),
+        reuseUserScan,
+        deferFeed,
+        consumeDeferredFeed,
+      ),
     );
     loadChain = next.then(
       () => undefined,
@@ -494,6 +510,13 @@ export function createHostRuntime(opts: {
   // drops the pass into a real rescan so approved bytes reload before
   // status advertises the entry again.
   const displacedUserIds = new Set<string>();
+  // Signed provider ids the host registry still holds — the
+  // revocation set a settled feed applies. A failed re-load keeps
+  // the old registration, so only a landed unload may drop an id.
+  const registeredSignedIds = new Set<string>();
+  // Signed ids a settled feed revoked but whose unload has not
+  // landed — every later pass retries them, reachable feed or not.
+  const owedSignedUnloads = new Set<string>();
 
   function loadBindings(): PluginHostLike {
     const candidates = bindingsCandidates(
@@ -627,6 +650,7 @@ export function createHostRuntime(opts: {
     h: PluginHostLike,
     reuseUserScan: boolean,
     deferFeed: boolean,
+    consumeDeferredFeed = false,
   ): Promise<readonly LoadedPlugin[]> {
     const dir =
       opts.env.AUQW_PLUGIN_DIR === undefined || opts.env.AUQW_PLUGIN_DIR === ''
@@ -692,15 +716,31 @@ export function createHostRuntime(opts: {
           deferredFeedKick = null;
           try {
             synced = await pendingFeed;
+            // A caller pass that raced the deferred fetch leaves the
+            // settled result for the scheduled consume pass — that
+            // pass applies it instead of fetching a second time.
+            if (!consumeDeferredFeed) {
+              deferredFeedSettled = synced;
+            }
           } catch (thrown) {
             feedFailure = thrown;
           }
+        } else if (
+          consumeDeferredFeed &&
+          deferredFeedSettled !== undefined
+        ) {
+          // A caller pass already consumed the deferred fetch and
+          // left the settled feed — apply it rather than re-fetching.
+          synced = deferredFeedSettled;
         } else {
           try {
             synced = await sync(cacheDir);
           } catch (thrown) {
             feedFailure = thrown;
           }
+        }
+        if (consumeDeferredFeed) {
+          deferredFeedSettled = undefined;
         }
       }
       const parseSignedPair =
@@ -836,7 +876,14 @@ export function createHostRuntime(opts: {
         // A revoked guest stays owed until the unload lands — retry
         // it on the reuse path too, or a long reuse streak would
         // leave the revoked provider registered and callable.
-        await unloadRevoked(h, userProviderIds, signedProviderIds);
+        await unloadRevoked(
+          h,
+          userProviderIds,
+          signedProviderIds,
+          synced === undefined
+            ? null
+            : new Set([...synced.current, ...signedIds]),
+        );
         // Same empty-result gate as the full path: a failed feed with
         // no providers at all must reject — a cached empty scan
         // swallowing the failure would memoize an empty success and
@@ -909,7 +956,14 @@ export function createHostRuntime(opts: {
       // host's registry keeps the id registered otherwise. Guests the
       // previous pass loaded as user pairs but this pass no longer
       // carries are unloaded; a signed feed id never lands here.
-      await unloadRevoked(h, userProviderIds, signedProviderIds);
+      await unloadRevoked(
+        h,
+        userProviderIds,
+        signedProviderIds,
+        synced === undefined
+          ? null
+          : new Set([...synced.current, ...signedIds]),
+      );
       // Origins re-derive with the scan — except ids a signed guest
       // still shadows: those marks carry over so a later pass reloads
       // the pair when the feed claim lifts. An unclaimed mark reloaded
@@ -978,18 +1032,28 @@ export function createHostRuntime(opts: {
   }
 
   /**
-   * Revoke user guests the current pass no longer carries — a failed
+   * Revoke guests the current pass no longer carries — a failed
    * unload stays owed to the next scan instead of being dropped, so
    * the revoked provider can't keep answering under its old id.
+   * Signed ids revoke only off a settled feed (`claimedSignedIds` —
+   * the feed's `current` names plus the verified pairs' ids): the
+   * feed is the authority on which signed ids may stay registered
+   * while it is reachable, so an unreachable or in-flight feed
+   * leaves every last-known-good guest alone — but
+   * an unload already owed retries on every pass, reachable or not.
+   * The registry is one id-keyed slot per provider: an id a user
+   * pair just loaded belongs to that guest now and is never a
+   * signed revocation target.
    */
   async function unloadRevoked(
     h: PluginHostLike,
     keptUserIds: readonly string[],
-    signedIds: readonly string[],
+    loadedSignedIds: readonly string[],
+    claimedSignedIds: ReadonlySet<string> | null,
   ): Promise<void> {
     const stillOwed: string[] = [];
     for (const gone of lastUserProviderIds.filter(
-      (id) => !keptUserIds.includes(id) && !signedIds.includes(id),
+      (id) => !keptUserIds.includes(id) && !loadedSignedIds.includes(id),
     )) {
       try {
         await h.unloadPlugin(gone);
@@ -998,6 +1062,37 @@ export function createHostRuntime(opts: {
       }
     }
     lastUserProviderIds = [...keptUserIds, ...stillOwed];
+    for (const id of loadedSignedIds) {
+      registeredSignedIds.add(id);
+    }
+    // A user pair that just registered owns the slot now — signed
+    // bookkeeping for its id is stale whatever the feed says.
+    for (const id of keptUserIds) {
+      registeredSignedIds.delete(id);
+      owedSignedUnloads.delete(id);
+    }
+    if (claimedSignedIds !== null) {
+      for (const id of registeredSignedIds) {
+        if (!claimedSignedIds.has(id)) {
+          owedSignedUnloads.add(id);
+        }
+      }
+    }
+    for (const gone of [...owedSignedUnloads]) {
+      if (claimedSignedIds?.has(gone) === true) {
+        // The feed re-claimed the id — the owed revocation is
+        // rescinded; the id stays signed-registered.
+        owedSignedUnloads.delete(gone);
+        continue;
+      }
+      try {
+        await h.unloadPlugin(gone);
+        registeredSignedIds.delete(gone);
+        owedSignedUnloads.delete(gone);
+      } catch {
+        // Still registered — the unload stays owed.
+      }
+    }
   }
 
   async function ready(): Promise<readonly LoadedPlugin[]> {
@@ -1031,6 +1126,7 @@ export function createHostRuntime(opts: {
         void (async () => {
           await pending.catch(() => {});
           if (deferredFeedKick === null && deferredFeedSync === null) {
+            deferredFeedSettled = undefined;
             return;
           }
           // The consume pass re-loads signed pairs — keep its CPU (and
@@ -1039,7 +1135,10 @@ export function createHostRuntime(opts: {
           await new Promise((resolve) => setTimeout(resolve, 600));
           deferredFeedSync ??= deferredFeedKick?.() ?? null;
           await deferredFeedSync?.catch(() => {});
-          const consume = runLoad(true, false);
+          // The consume flag lets the pass reuse the settled result a
+          // racing caller pass left in `deferredFeedSettled` instead of
+          // fetching the feed a second time.
+          const consume = runLoad(true, false, true);
           await consume.next.then(
             (loaded) => {
               // A caller-triggered pass queued meanwhile reads newer

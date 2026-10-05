@@ -5,9 +5,15 @@ import {
   parsePluginPair,
   pluginPublicKey,
   syncPluginFeed,
+  utf8Encode,
 } from '@auqw/application';
 import type { FeedSyncPorts } from '@auqw/application';
 import type { AuqwExpoHostModuleLike } from '../adapters/auqw-expo-surface.ts';
+import {
+  FEED_CURRENT_FILE,
+  parseFeedCurrent,
+  serializeFeedCurrent,
+} from './feed-current.ts';
 
 /**
  * OTA plugin delivery (decision log, Plugin guests): nothing is
@@ -78,21 +84,42 @@ function feedUrl(): string {
   return process.env.EXPO_PUBLIC_PLUGIN_FEED ?? PLUGIN_RELEASE_TRUST.feedUrl;
 }
 
+export type PluginCacheSync = {
+  readonly ready: readonly string[];
+  readonly compatible: readonly string[];
+  /** Ids the feed still names — the revocation authority set. */
+  readonly current: readonly string[];
+};
+
 /** Refresh the on-disk plugin set from the signed feed. Failures are
- * non-fatal — last-known-good stays loadable. */
-export async function syncPluginCache(): Promise<readonly string[]> {
+ * non-fatal — last-known-good stays loadable — and surface as `null`
+ * so a caller never gates or revokes on a feed that didn't answer. */
+export async function syncPluginCache(): Promise<PluginCacheSync | null> {
   try {
-    return (
-      await syncPluginFeed({
-        feedUrl: feedUrl(),
-        keyId: PLUGIN_RELEASE_TRUST.keyId,
-        publicKey,
-        dir: PLUGIN_DIR.uri.replace(/\/+$/, ''),
-        ports,
-      })
-    ).ready;
+    const dir = PLUGIN_DIR.uri.replace(/\/+$/, '');
+    const synced = await syncPluginFeed({
+      feedUrl: feedUrl(),
+      keyId: PLUGIN_RELEASE_TRUST.keyId,
+      publicKey,
+      dir,
+      ports,
+    });
+    // Persist the settled authority set — the next boot's cached
+    // load gates on it, so an id the feed dropped can't ride the
+    // disk while this surface has no unload seam. The sweep exempts
+    // this sidecar's name; a failed write just leaves the gate
+    // fail-open one more boot.
+    try {
+      await ports.write(
+        `${dir}/${FEED_CURRENT_FILE}`,
+        utf8Encode(serializeFeedCurrent(synced.current)),
+      );
+    } catch {
+      // Best-effort — the sync itself already succeeded.
+    }
+    return synced;
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -113,11 +140,29 @@ async function loadCachedPairs(
   try {
     manifests = PLUGIN_DIR.list()
       .filter(
-        (e): e is File => e instanceof File && e.name.endsWith('.json'),
+        (e): e is File =>
+          e instanceof File &&
+          e.name.endsWith('.json') &&
+          e.name !== FEED_CURRENT_FILE,
       )
       .sort((a, b) => a.name.localeCompare(b.name));
   } catch {
     return [];
+  }
+  // The feed's refresh rides post-ready, so the revocation gate a
+  // network-free boot can apply is the last synced `current` set: a
+  // pair whose id is absent was already dropped, and a guest this
+  // surface registers cannot be unloaded — it must never load at
+  // all. A missing or malformed sidecar fails open: a feed that may
+  // be unreachable never gates last-known-good.
+  let gated: ReadonlySet<string> | null = null;
+  try {
+    const sidecar = new File(PLUGIN_DIR, FEED_CURRENT_FILE);
+    if (sidecar.exists) {
+      gated = parseFeedCurrent(sidecar.textSync());
+    }
+  } catch {
+    gated = null;
   }
   // Independent pairs load concurrently — each verifies its own
   // signature and the host registers under a lock. A concurrent feed
@@ -128,6 +173,17 @@ async function loadCachedPairs(
       try {
         const pair = parsePluginPair(pairFile.textSync(), verifyPairOpts);
         if (pair === null) {
+          return null;
+        }
+        if (gated !== null && !gated.has(pair.id)) {
+          // Already dropped at the last known sync — sweep it the
+          // way the feed sync would rather than load a revoked
+          // guest for the whole session.
+          try {
+            pairFile.delete();
+          } catch {
+            // A failed delete retries through the feed sweep.
+          }
           return null;
         }
         const pluginId = await host.loadPlugin(
@@ -148,12 +204,13 @@ async function loadCachedPairs(
   return settled.filter((p): p is LoadedFeedPlugin => p !== null);
 }
 
-/** Load the verified pairs on disk. The signed feed does NOT gate
- * this path — callers refresh it post-ready so its fetch + verify
- * never contend with boot-critical work. Only an empty cache (first
- * launch, wiped docs, or every pair corrupt) awaits the sync here —
- * there is nothing else to load. Freshness one boot behind is the
- * OTA model: updates apply on restart anyway. */
+/** Load the verified pairs on disk. No network wait — but not
+ * gate-free: the last synced `current` set still bars ids the feed
+ * already dropped (freshness one boot behind IS the OTA model — a
+ * boot-time revocation that only lands one sync late is the price of
+ * keeping fetch + verify off the restore path). Only an empty cache
+ * (first launch, wiped docs, or every pair corrupt) awaits the live
+ * sync here — there is nothing else to load. */
 export async function loadFeedPlugins(
   host: Pick<AuqwExpoHostModuleLike, 'loadPlugin'>,
 ): Promise<readonly LoadedFeedPlugin[]> {

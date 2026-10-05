@@ -417,7 +417,7 @@ async fn http_batch_fans_out_under_one_step() {
     )));
     let plugin = ok(load(
         &wasm,
-        manifest_for(&wasm, &["network:example.com"]),
+        manifest_for_abi(&wasm, "0.1.1", &["network:example.com"]),
         &default_budgets(),
     ));
     let (http, calls) = CannedHttp::new();
@@ -443,7 +443,7 @@ async fn http_batch_denied_item_degrades_in_place() {
     )));
     let plugin = ok(load(
         &wasm,
-        manifest_for(&wasm, &["network:example.com"]),
+        manifest_for_abi(&wasm, "0.1.1", &["network:example.com"]),
         &default_budgets(),
     ));
     let (http, calls) = CannedHttp::new();
@@ -477,7 +477,7 @@ async fn http_batch_over_cap_is_invalid_message() {
     let wasm = ok(wat::parse_str(batch_wat(&format!("[{items}]"))));
     let plugin = ok(load(
         &wasm,
-        manifest_for(&wasm, &["network:example.com"]),
+        manifest_for_abi(&wasm, "0.1.1", &["network:example.com"]),
         &default_budgets(),
     ));
     let (http, calls) = CannedHttp::new();
@@ -499,7 +499,7 @@ async fn http_batch_empty_is_invalid_message() {
     let wasm = ok(wat::parse_str(batch_wat("[]")));
     let plugin = ok(load(
         &wasm,
-        manifest_for(&wasm, &["network:example.com"]),
+        manifest_for_abi(&wasm, "0.1.1", &["network:example.com"]),
         &default_budgets(),
     ));
     let (http, _calls) = CannedHttp::new();
@@ -522,7 +522,7 @@ async fn http_batch_malformed_item_is_invalid_message() {
     )));
     let plugin = ok(load(
         &wasm,
-        manifest_for(&wasm, &["network:example.com"]),
+        manifest_for_abi(&wasm, "0.1.1", &["network:example.com"]),
         &default_budgets(),
     ));
     let (http, calls) = CannedHttp::new();
@@ -548,7 +548,7 @@ async fn http_batch_respects_call_budget() {
     budgets.max_http_calls = 2;
     let plugin = ok(load(
         &wasm,
-        manifest_for(&wasm, &["network:example.com"]),
+        manifest_for_abi(&wasm, "0.1.1", &["network:example.com"]),
         &budgets,
     ));
     let (http, calls) = CannedHttp::new();
@@ -607,7 +607,7 @@ async fn http_batch_fatal_still_accounts_siblings() {
     )));
     let plugin = ok(load(
         &wasm,
-        manifest_for(&wasm, &["network:example.com"]),
+        manifest_for_abi(&wasm, "0.1.1", &["network:example.com"]),
         &default_budgets(),
     ));
     let Invocation { result, attempt } = invoke(
@@ -630,6 +630,112 @@ async fn http_batch_fatal_still_accounts_siblings() {
     assert_eq!(attempt.http_calls, 2);
     assert_eq!(attempt.http_trace.len(), 2);
     assert_eq!(attempt.bytes, 50 + 32);
+}
+
+/// A manifest pinned `0.1.0` must never emit `http_batch` (abi.md):
+/// the host answers the same `unsupported` a kind it predates gets —
+/// spending no HTTP budget — instead of silently serving a call a
+/// real 0.1.0 host would have aborted.
+#[tokio::test]
+async fn http_batch_under_0_1_0_pin_answers_unsupported() {
+    let wasm = ok(wat::parse_str(probe_kind_wat(
+        r#"{"type":"host_request","id":1,"kind":"http_batch","payload":{"requests":[{"method":"GET","url":"https://example.com/a","headers":[],"body":null}]}}"#,
+        r#"{"type":"done","result":{"saw":"unsupported"}}"#,
+        r#"{"type":"done","result":{"saw":"other"}}"#,
+    )));
+    // `manifest_for` pins 0.1.0 — the mis-pin the gate exists for.
+    let plugin = ok(load(
+        &wasm,
+        manifest_for(&wasm, &["network:example.com"]),
+        &default_budgets(),
+    ));
+    let (http, calls) = CannedHttp::new();
+    let Invocation { result, attempt } = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &default_budgets(),
+        CancellationToken::new(),
+        svc(&http, None),
+    )
+    .await;
+    assert_eq!(ok(result), serde_json::json!({"saw": "unsupported"}));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(attempt.http_calls, 0);
+    assert_eq!(attempt.http_trace.len(), 0);
+}
+
+/// `/fast` answers at once with a 32-byte body; `/slow` never
+/// resolves — a batch where a cancel races one settled sibling and
+/// one in-flight leg.
+struct StaggeredHttp;
+
+impl HttpClient for StaggeredHttp {
+    fn send(
+        &self,
+        req: HttpRequest,
+        _timeout: Duration,
+        _cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + '_>> {
+        let fast = req.url.ends_with("/fast");
+        Box::pin(async move {
+            if !fast {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: vec![0u8; 32],
+            })
+        })
+    }
+}
+
+/// A cancel mid-batch still accounts every leg: the settled sibling
+/// keeps its byte charge and real trace, and the dropped leg gets the
+/// same status-less entry the sequential cancel arm writes — a
+/// counted call never goes untraced.
+#[tokio::test]
+async fn http_batch_cancel_still_accounts_legs() {
+    let wasm = ok(wat::parse_str(batch_wat(
+        r#"[{"method":"GET","url":"https://example.com/fast","headers":[],"body":null},{"method":"GET","url":"https://example.com/slow","headers":[],"body":null}]"#,
+    )));
+    let budgets = default_budgets();
+    let plugin = ok(load(
+        &wasm,
+        manifest_for_abi(&wasm, "0.1.1", &["network:example.com"]),
+        &budgets,
+    ));
+    let cancel = CancellationToken::new();
+    let fut = invoke(
+        &plugin,
+        "playback.resolve",
+        serde_json::json!({}),
+        &budgets,
+        cancel.clone(),
+        svc(&StaggeredHttp, None),
+    );
+    tokio::pin!(fut);
+    // Park the invocation inside the fan-out — `/slow` never answers
+    // on its own.
+    tokio::select! {
+        _ = &mut fut => panic!("invoke returned before cancel"),
+        () = tokio::time::sleep(Duration::from_millis(50)) => {}
+    }
+    cancel.cancel();
+    let Invocation { result, attempt } = fut.await;
+    assert!(matches!(err(result), InvokeError::Cancelled));
+    assert_eq!(attempt.http_calls, 2);
+    assert_eq!(attempt.http_trace.len(), 2);
+    assert!(attempt
+        .http_trace
+        .iter()
+        .any(|t| { t.url.ends_with("/fast") && t.status == Some(200) && t.bytes == 32 }));
+    assert!(attempt
+        .http_trace
+        .iter()
+        .any(|t| t.url.ends_with("/slow") && t.status.is_none() && t.bytes == 0));
+    assert_eq!(attempt.bytes, 32);
 }
 
 /// A `host_request` kind this host predates is a `host_error`

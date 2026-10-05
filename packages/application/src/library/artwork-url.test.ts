@@ -48,6 +48,19 @@ export function run(): void {
   const evil = 'https://ggpht.com.evil.tld/img=w128-h128';
   assertEqual(artworkAssetKey(evil), evil);
   assertEqual(artworkUrlSize(evil), null);
+  // A host merely ending in `ggpht.com` isn't the CDN — the `=sN`
+  // tail is opaque, so two sizes stay two assets.
+  const not = (n: number) => `https://notggpht.com/img/a=s${n}`;
+  assertEqual(artworkAssetKey(not(2048)), not(2048));
+  assert(artworkAssetKey(not(2048)) !== artworkAssetKey(not(128)));
+  assertEqual(artworkUrlSize(not(2048)), null);
+  // The needle inside another host's path or query is opaque too.
+  const inPath = 'https://cdn.example/ggpht.com/a=w128-h128';
+  assertEqual(artworkAssetKey(inPath), inPath);
+  assertEqual(artworkUrlSize(inPath), null);
+  const inQuery = 'https://cdn.example/img?u=ggpht.com/a=s64';
+  assertEqual(artworkAssetKey(inQuery), inQuery);
+  assertEqual(artworkUrlSize(inQuery), null);
   // Plain urls have no knob anywhere.
   assertEqual(artworkAssetKey('https://art.example/a.jpg'), 'https://art.example/a.jpg');
   assertEqual(artworkUrlSize('https://art.example/a.jpg'), null);
