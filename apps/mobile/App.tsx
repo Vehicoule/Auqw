@@ -2432,47 +2432,66 @@ function Main({
   // `onDismissed`, which fires after the exit animation ends — they
   // release immediately, no hold. Web sheets are in-tree overlays
   // that vanish with the flag; no hold there either.
-  const modalSheetUp =
-    rowActions !== null ||
-    pickerFor !== null ||
-    providerPicker !== null ||
-    themePickerOpen ||
-    languagePickerOpen ||
-    storefrontSheetOpen ||
-    qualityPickerOpen ||
-    artworkCachePickerOpen ||
-    authSheetOpen ||
-    authClientSheetOpen;
+  const sheetKeysUp = [
+    rowActions !== null && 'sheet-actions',
+    pickerFor !== null && 'sheet-add-playlist',
+    providerPicker !== null && 'sheet-provider',
+    themePickerOpen && 'sheet-theme',
+    languagePickerOpen && 'sheet-language',
+    storefrontSheetOpen && 'sheet-storefront',
+    qualityPickerOpen && 'sheet-quality',
+    artworkCachePickerOpen && 'sheet-artwork-cache',
+    authSheetOpen && 'sheet-auth',
+    authClientSheetOpen && 'sheet-auth-client',
+  ].filter((key): key is string => typeof key === 'string');
+  const modalSheetUp = sheetKeysUp.length > 0;
   const [sheetOccluded, setSheetOccluded] = useState(modalSheetUp);
-  // Set inside `onDismissed` before the flag clears — tells the
-  // hold that this flag-down edge already ended the native exit
-  // animation.
-  const nativeSheetDone = useRef(false);
+  // Set inside `onDismissed` before the flag clears — stamps WHICH
+  // sheet's native exit animation already ended, so a flag-down edge
+  // can tell gesture/back dismissals (release now) from programmatic
+  // closes (hold for the animation).
+  const nativeSheetsDone = useRef(new Set<string>());
   const onNativeSheetDismissed = useCallback(
-    (close: () => void) => () => {
-      nativeSheetDone.current = true;
+    (stackKey: string, close: () => void) => () => {
+      nativeSheetsDone.current.add(stackKey);
       close();
     },
     [],
   );
+  // The effect keys on the mounted set's signature, not modalSheetUp:
+  // a close→replace in one commit leaves modalSheetUp true while the
+  // mounted set changes, and the departed sheet's deferred onDismissed
+  // (~300ms, at the end of its programmatic exit) then lands while its
+  // replacement is mounted. Tracked keys tell the flag-down edge which
+  // sheets actually left on it.
+  const sheetKeysSig = sheetKeysUp.join(' ');
+  const mountedSheetKeys = useRef(sheetKeysUp);
   useEffect(() => {
-    if (modalSheetUp) {
-      // A mark landing while another sheet is mounted belongs to the
-      // DEPARTED one (a swipe-dismissed sheet replaced by a new sheet
-      // in the same commit) — consume it here or it would leak onto
-      // the replacement's later programmatic close and skip its hold.
-      nativeSheetDone.current = false;
+    const done = nativeSheetsDone.current;
+    const now = sheetKeysSig === '' ? [] : sheetKeysSig.split(' ');
+    if (now.length > 0) {
+      // A mounted sheet can't own a done-mark — drop marks left by a
+      // previous instance of the same stackKey (flag down, deferred
+      // onDismissed, flag back up before the mark was consumed).
+      for (const key of now) done.delete(key);
+      mountedSheetKeys.current = now;
       setSheetOccluded(true);
       return;
     }
-    if (nativeSheetDone.current) {
-      nativeSheetDone.current = false;
+    const departed = mountedSheetKeys.current;
+    mountedSheetKeys.current = now;
+    // Skip the hold only when every sheet that just left already
+    // ended its exit animation. A mark stamped for a sheet that left
+    // EARLIER — the close→replace leak — isn't in this edge's
+    // departed set, so it can't release the replacement's hold.
+    if (departed.every((key) => done.has(key))) {
+      for (const key of departed) done.delete(key);
       setSheetOccluded(false);
       return;
     }
     const t = setTimeout(() => setSheetOccluded(false), SHEET_DISMISS_MS);
     return () => clearTimeout(t);
-  }, [modalSheetUp]);
+  }, [sheetKeysSig]);
 
   if (galleryActive) {
     return (
@@ -2983,7 +3002,10 @@ function Main({
         {rowActions !== null && (
           <SheetScreen
             stackKey="sheet-actions"
-            onDismissed={onNativeSheetDismissed(closeRowActions)}
+            onDismissed={onNativeSheetDismissed(
+              'sheet-actions',
+              closeRowActions,
+            )}
           >
             <RowActionsSheet
               title={rowActions.title}
@@ -2997,7 +3019,10 @@ function Main({
         {pickerFor !== null && (
           <SheetScreen
             stackKey="sheet-add-playlist"
-            onDismissed={onNativeSheetDismissed(closePlaylistPicker)}
+            onDismissed={onNativeSheetDismissed(
+              'sheet-add-playlist',
+              closePlaylistPicker,
+            )}
           >
             <AddToPlaylistSheet
               playlists={pickerItems}
@@ -3011,7 +3036,10 @@ function Main({
         {providerPicker !== null && (
           <SheetScreen
             stackKey="sheet-provider"
-            onDismissed={onNativeSheetDismissed(closeProviderPicker)}
+            onDismissed={onNativeSheetDismissed(
+              'sheet-provider',
+              closeProviderPicker,
+            )}
           >
             <ProviderPickerSheet
               title={providerPicker.title}
@@ -3026,7 +3054,10 @@ function Main({
         {themePickerOpen && (
           <SheetScreen
             stackKey="sheet-theme"
-            onDismissed={onNativeSheetDismissed(closeThemePicker)}
+            onDismissed={onNativeSheetDismissed(
+              'sheet-theme',
+              closeThemePicker,
+            )}
           >
             <ThemePickerSheet
               title={t('settings.theme')}
@@ -3049,7 +3080,10 @@ function Main({
         {languagePickerOpen && (
           <SheetScreen
             stackKey="sheet-language"
-            onDismissed={onNativeSheetDismissed(closeLanguagePicker)}
+            onDismissed={onNativeSheetDismissed(
+              'sheet-language',
+              closeLanguagePicker,
+            )}
           >
             <LanguagePickerSheet
               options={languageOptions()}
@@ -3063,7 +3097,10 @@ function Main({
         {storefrontSheetOpen && (
           <SheetScreen
             stackKey="sheet-storefront"
-            onDismissed={onNativeSheetDismissed(closeStorefront)}
+            onDismissed={onNativeSheetDismissed(
+              'sheet-storefront',
+              closeStorefront,
+            )}
           >
             <ValueFieldSheet
               title={t('settings.storefront')}
@@ -3081,7 +3118,10 @@ function Main({
         {qualityPickerOpen && (
           <SheetScreen
             stackKey="sheet-quality"
-            onDismissed={onNativeSheetDismissed(closeQualityPicker)}
+            onDismissed={onNativeSheetDismissed(
+              'sheet-quality',
+              closeQualityPicker,
+            )}
           >
             <ProviderPickerSheet
               title={t('settings.quality')}
@@ -3096,7 +3136,10 @@ function Main({
         {artworkCachePickerOpen && (
           <SheetScreen
             stackKey="sheet-artwork-cache"
-            onDismissed={onNativeSheetDismissed(closeArtworkCache)}
+            onDismissed={onNativeSheetDismissed(
+              'sheet-artwork-cache',
+              closeArtworkCache,
+            )}
           >
             <ProviderPickerSheet
               title={t('settings.artworkCache')}
@@ -3115,7 +3158,7 @@ function Main({
         {authSheetOpen && (
           <SheetScreen
             stackKey="sheet-auth"
-            onDismissed={onNativeSheetDismissed(closeAuthSheet)}
+            onDismissed={onNativeSheetDismissed('sheet-auth', closeAuthSheet)}
           >
             <AuthSheet
               model={toAuthSheetModel(
@@ -3133,7 +3176,10 @@ function Main({
         {authClientSheetOpen && (
           <SheetScreen
             stackKey="sheet-auth-client"
-            onDismissed={onNativeSheetDismissed(closeAuthClient)}
+            onDismissed={onNativeSheetDismissed(
+              'sheet-auth-client',
+              closeAuthClient,
+            )}
           >
             <ValueFieldSheet
               title={t('auth.clientId.title')}
