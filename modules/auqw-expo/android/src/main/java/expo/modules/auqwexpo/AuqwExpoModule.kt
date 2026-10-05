@@ -1724,10 +1724,13 @@ class AuqwExpoModule : Module() {
     // A natural end may have been swallowed behind this latch while
     // a remote move prepared — the freed cursor owes it a fresh
     // drive under the installed projection, the same re-drive
-    // finishTransition runs after a stale outcome.
+    // finishTransition runs after a stale outcome. An ended move's
+    // own expiry earns no re-drive: its timeout already surfaced as a
+    // failure the app retries on its own budget — re-arming the
+    // identical move on a dead host would loop unbounded.
     val latest = installedProjection
     val p = player
-    if (p != null && latest != null &&
+    if (reason != "ended" && p != null && latest != null &&
       attachedForOccurrence == latest.currentOccurrenceId &&
       p.playbackState == Player.STATE_ENDED
     ) {
