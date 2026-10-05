@@ -1964,6 +1964,18 @@ const tap = (s: string) => {
     tracked,
     'non-google =sN tail passes through untouched',
   );
+  // The host test is anchored: a look-alike suffix (`notggpht.com`)
+  // and a `ggpht.com/` needle in the path take no google grammar.
+  assertEqual(
+    scaledArtworkUrl('https://notggpht.com/img/a', 40),
+    'https://notggpht.com/img/a',
+    'look-alike ggpht host gets no appended size suffix',
+  );
+  assertEqual(
+    scaledArtworkUrl('https://cdn.example/ggpht.com/a=w128-h128', 40),
+    'https://cdn.example/ggpht.com/a=w128-h128',
+    'ggpht needle in another host\'s path is not a size knob',
+  );
   assertEqual(
     scaledArtworkUrl(
       'https://is1-ssl.mzstatic.com/image/thumb/x/3000x3000bb.jpg',
