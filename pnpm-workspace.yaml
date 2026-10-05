@@ -26,6 +26,8 @@ minimumReleaseAgeExclude:
   - expo@57.0.24
   - is-core-module@2.17.0
   - node-releases@2.0.56
+  # GHSA-ch52-4w7c-c8xp fix, released inside the release-age window.
+  - http-cache-semantics@4.3.0
 allowBuilds:
   electron-winstaller: true
   esbuild: true
@@ -34,6 +36,9 @@ allowBuilds:
 # collapses one whole ~6 MB metro tree per install. (The 0.87.1 tree
 # is @react-native/metro-config's and can't merge into 0.84.)
 overrides:
+  # GHSA-ch52-4w7c-c8xp (high): remap the vulnerable <=4.2.0 range to the
+  # fixed release; electron-builder pulls it via @electron/get>got>cacheable-request.
+  http-cache-semantics@<=4.2.0: '>=4.3.0'
   metro@0.84.5: 0.84.6
   metro-babel-transformer@0.84.5: 0.84.6
   metro-cache@0.84.5: 0.84.6
