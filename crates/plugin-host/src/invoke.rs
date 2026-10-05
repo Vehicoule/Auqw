@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
+use futures_util::{stream::FuturesUnordered, FutureExt, StreamExt};
 use serde_json::{json, Value};
 use sha2::Digest;
 use tokio_util::sync::CancellationToken;
@@ -833,6 +834,15 @@ async fn host_request_step(
         Some("log") => return log_step(&msg["payload"], id, attempt),
         Some("now_ms") => return now_ms_step(&msg["payload"], id, ctx, &attempt.secrets),
         Some("http_batch") => {
+            // `http_batch` joined at 0.1.1 — a manifest pinned to
+            // 0.1.0 must never emit it (abi.md). Answer the same
+            // `unsupported` a kind this host predates gets, so a
+            // mis-pinned artifact sees the fallback signal instead of
+            // silently working here while aborting every call on a
+            // real 0.1.0 host.
+            if ctx.plugin.manifest.abi == "0.1.0" {
+                return host_error(id, "unsupported", "unsupported host_request kind");
+            }
             let items = authorize_http_batch(&msg["payload"], ctx, &attempt.secrets)?;
             return perform_batch(items, id, ctx, attempt).await;
         }
@@ -1313,7 +1323,7 @@ async fn perform_batch(
         .http_timeout
         .min(ctx.budgets.deadline.saturating_sub(ctx.started.elapsed()));
     let mut metas = Vec::with_capacity(calls);
-    let mut futs = Vec::with_capacity(calls);
+    let mut futs = FuturesUnordered::new();
     for (i, item) in items.iter().enumerate() {
         let BatchItem::Call(req) = item else { continue };
         let send = ctx.services.http.send(
@@ -1327,6 +1337,9 @@ async fn perform_batch(
             timeout,
             ctx.cancel.clone(),
         );
+        // The leg's `metas` slot travels with the future — the set
+        // answers in completion order, not push order.
+        let leg = metas.len();
         metas.push((
             i,
             req.method.clone(),
@@ -1336,13 +1349,31 @@ async fn perform_batch(
         futs.push(async move {
             let t0 = Instant::now();
             let r = send.await;
-            (r, t0.elapsed())
+            (leg, r, t0.elapsed())
         });
     }
-    let results = tokio::select! {
-        () = ctx.cancel.cancelled() => return Err(InvokeError::Cancelled),
-        r = futures_util::future::join_all(futs) => r,
+    // One slot per callable leg: a leg still in flight when the
+    // cancel lands keeps a `None` so the accounting loop can write
+    // its trace — `http_calls` already counted the attempt.
+    let mut results: Vec<_> = std::iter::repeat_with(|| None).take(calls).collect();
+    let t0 = Instant::now();
+    let cancelled = tokio::select! {
+        () = ctx.cancel.cancelled() => true,
+        () = async {
+            while let Some((leg, r, elapsed)) = futs.next().await {
+                results[leg] = Some((r, elapsed));
+            }
+        } => false,
     };
+    if cancelled {
+        // Legs that settled before the drop were still spent —
+        // harvest them so they keep the byte charges and traces the
+        // fatal-verdict path guarantees. Sends still in flight abort
+        // as `futs` drops, per the HttpClient contract.
+        while let Some((leg, r, elapsed)) = futs.next().now_or_never().flatten() {
+            results[leg] = Some((r, elapsed));
+        }
+    }
     let mut out_items: Vec<Value> = items
         .iter()
         .map(|i| match i {
@@ -1352,13 +1383,13 @@ async fn perform_batch(
             }),
         })
         .collect();
-    // Every completed sibling is charged before a fatal verdict
-    // returns — join_all already ran them all, so an early exit would
-    // understate bytes and drop their traces.
-    let mut fatal: Option<InvokeError> = None;
-    for ((i, method, url, out_len), (result, elapsed)) in metas.into_iter().zip(results) {
+    // Every settled leg is charged before a fatal verdict returns —
+    // an early exit would understate bytes and drop their traces. A
+    // caller cancel outranks any verdict a settled leg produced.
+    let mut fatal = cancelled.then_some(InvokeError::Cancelled);
+    for ((i, method, url, out_len), result) in metas.into_iter().zip(results) {
         match result {
-            Ok(resp) => {
+            Some((Ok(resp), elapsed)) => {
                 attempt.bytes += out_len + resp.body.len() as u64;
                 attempt.http_trace.push(HttpTraceEntry {
                     method,
@@ -1379,7 +1410,7 @@ async fn perform_batch(
                     "body": base64::engine::general_purpose::STANDARD.encode(resp.body),
                 });
             }
-            Err(e) => {
+            Some((Err(e), elapsed)) => {
                 // Bytes pulled before the failure still belong to the
                 // byte budget — a mid-stream error is not a refund.
                 attempt.bytes += out_len + e.bytes_received;
@@ -1421,6 +1452,19 @@ async fn perform_batch(
                         });
                     }
                 }
+            }
+            None => {
+                // The cancel dropped this leg before it answered —
+                // `http_calls` counted the attempt, so the trace must
+                // record it too (the same status-less entry the
+                // sequential path's cancel arm writes).
+                attempt.http_trace.push(HttpTraceEntry {
+                    method,
+                    url,
+                    status: None,
+                    bytes: 0,
+                    elapsed: t0.elapsed(),
+                });
             }
         }
     }
