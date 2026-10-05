@@ -277,6 +277,10 @@ export async function createSessionController(
   // The spec's trigger layer (on-launch, on-change debounced,
   // reconnect backoff, connectivity edge) — created with the client.
   let syncScheduler: SyncScheduler | null = null;
+  // The post-ready feed refresh — held so dispose() can disarm it:
+  // its fetch + cache writes must not outlive the controller and
+  // race the next one's own sync on the shared plugin dir.
+  let feedSyncTimer: ReturnType<typeof setTimeout> | null = null;
   // Pre-surface emission buffer: domain edits made before the engine
   // exists (or while its bring-up is still in flight) queue here and
   // flush through one localChangeBatch once the surface lands — a
@@ -907,6 +911,25 @@ export async function createSessionController(
                 atMs: clock.nowMs(),
               });
             }
+            // A dispose() landing mid-flush ran `syncScheduler?.stop()`
+            // against a still-null field and closed this surface — a
+            // scheduler started now would fire rounds and reconnect
+            // backoff on the dead client with nothing left to stop it,
+            // and the reconcile below would fold into a dead session.
+            // Tear down exactly like the post-build race and return.
+            if (disposed) {
+              try {
+                await built.value.host?.close();
+              } catch {
+                // A wedged host close can't resurrect the controller.
+              }
+              try {
+                await built.value.client.close();
+              } catch {
+                // Same — the surface still dies here.
+              }
+              return;
+            }
             // Trigger layer lives with the client: on-launch round per
             // peer now, debounced rounds on committed writes,
             // reconnect backoff on session drops, and rounds on the
@@ -934,7 +957,9 @@ export async function createSessionController(
                   session.applyMaterializedEntries(entries, s, syncDeviceId),
                 'sync reconcile',
               );
-              if (!ok_) {
+              // A dispose() landing mid-refold already closed the
+              // surface — don't write its state into a dead session.
+              if (!ok_ || disposed) {
                 return;
               }
               // The session's emit queue is memory-only — committed
@@ -965,7 +990,7 @@ export async function createSessionController(
               }
               await session
                 .emitUnsynced(synced, {
-                  deviceId: syncSurface.engine.deviceId,
+                  deviceId: syncDeviceId,
                   components,
                   winners,
                 })
@@ -994,8 +1019,49 @@ export async function createSessionController(
       // first paint. Only worth kicking when the disk already holds
       // pairs — an empty cache means loadFeedPlugins just ran the
       // sync itself (or failed on it offline; next launch retries).
-      if (feedPlugins.length > 0) {
-        setTimeout(() => void syncPluginCache(), 1200);
+      // The handle is held so dispose() can disarm it, and arming is
+      // itself gated — a start() still unwinding after dispose must
+      // not schedule work on the shared cache.
+      if (feedPlugins.length > 0 && !disposed) {
+        feedSyncTimer = setTimeout(() => {
+          feedSyncTimer = null;
+          void (async () => {
+            const synced = await syncPluginCache();
+            // A feed that didn't answer revokes nothing — the cache
+            // stays last-known-good until a sync does.
+            if (disposed || synced === null) {
+              return;
+            }
+            const kept = providers.filter((p) =>
+              synced.current.includes(p.id),
+            );
+            if (kept.length === providers.length) {
+              return;
+            }
+            // A drop this sync first discovered already registered
+            // its guest at boot — the expo host has no unload seam,
+            // so revoke at the adapter: every call resolves typed
+            // 'unavailable' from here on, and slots that named the
+            // dropped provider repick onto the surviving set.
+            for (const provider of providers) {
+              if (!synced.current.includes(provider.id)) {
+                provider.dispose();
+              }
+            }
+            void log.write({
+              level: 'warn',
+              message: `plugin feed revoked ${providers.length - kept.length} provider(s) live`,
+              atMs: clock.nowMs(),
+            });
+            const snap = session.snapshot();
+            if (snap.type === 'ready') {
+              const repaired = repairedSettings(snap.settings, kept);
+              if (repaired !== null) {
+                await session.updateSettings(repaired);
+              }
+            }
+          })().catch(() => undefined);
+        }, 1200);
       }
     },
     rehydrateMedia,
@@ -1077,6 +1143,14 @@ export async function createSessionController(
       // hydrate completing mid-dispose must see the flag on its
       // first continuation.
       disposed = true;
+      // Disarm a pending feed refresh before anything awaits — its
+      // fetch + cache writes must not run on a dead controller, and
+      // the plugin cache is shared so the next controller's own
+      // deferred sync supersedes this one anyway.
+      if (feedSyncTimer !== null) {
+        clearTimeout(feedSyncTimer);
+        feedSyncTimer = null;
+      }
       // Session FIRST: its graceful emit drain must run while the
       // sync surface is still live — after close() the emit port
       // would buffer the retained writes into a pre-surface queue

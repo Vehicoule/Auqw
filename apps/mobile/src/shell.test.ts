@@ -11,6 +11,7 @@ import { run as runNobleResponder } from './adapters/noble-sync-responder.test.t
 import { run as runPotProvider } from './adapters/pot-provider.test.ts';
 import { run as runSqliteDriver } from './adapters/expo-sqlite-driver.test.ts';
 import { runSyncEmit } from './session/sync-emit.test.ts';
+import { runFeedCurrent } from './session/feed-current.test.ts';
 import { devRoute } from './dev-routes.ts';
 
 assertEqual(devRoute('auqw://gallery'), 'gallery');
@@ -52,4 +53,5 @@ await runNobleResponder();
 runPotProvider();
 await runSqliteDriver();
 await runSyncEmit();
+await runFeedCurrent();
 console.log('mobile shell tests passed');
