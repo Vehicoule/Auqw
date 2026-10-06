@@ -24,8 +24,10 @@ minimumReleaseAgeExclude:
   - expo-constants@57.0.19
   - expo@57.0.23
   - expo@57.0.24
+  - http-cache-semantics@4.3.0
   - is-core-module@2.17.0
   - node-releases@2.0.56
+  - source-map-js@1.2.2
 allowBuilds:
   electron-winstaller: true
   esbuild: true
@@ -48,3 +50,9 @@ overrides:
   metro-symbolicate@0.84.5: 0.84.6
   metro-transform-plugins@0.84.5: 0.84.6
   metro-transform-worker@0.84.5: 0.84.6
+  # Security: GHSA-ch52-4w7c-c8xp (high) — cached-response disclosure via
+  # max-stale handling; GHSA-68fv-2mgg-jv7q (high) — event-loop DoS via
+  # source-map section offsets. Both land through dev tooling
+  # (electron-builder / jsdom / postcss), not shipped code.
+  http-cache-semantics@<4.3.0: 4.3.0
+  source-map-js@<1.2.2: 1.2.2
