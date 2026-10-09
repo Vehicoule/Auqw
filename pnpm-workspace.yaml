@@ -24,6 +24,7 @@ minimumReleaseAgeExclude:
   - expo-constants@57.0.19
   - expo@57.0.23
   - expo@57.0.24
+  - http-cache-semantics@4.3.0
   - is-core-module@2.17.0
   - node-releases@2.0.56
 allowBuilds:
@@ -48,3 +49,13 @@ overrides:
   metro-symbolicate@0.84.5: 0.84.6
   metro-transform-plugins@0.84.5: 0.84.6
   metro-transform-worker@0.84.5: 0.84.6
+  # Security patches (advisory scan 2026-10-09):
+  # GHSA-pqg4-j6r4-53mv (critical): quote() command injection via line
+  # terminator after `{ comment` — react-devtools-core allows ^1.6.1.
+  shell-quote@1.10.0: 1.11.0
+  # GHSA-ch52-4w7c-c8xp (high): max-stale discloses cross-user cached
+  # responses — cacheable-request allows ^4.0.0.
+  http-cache-semantics@4.2.0: 4.3.0
+  # GHSA-68fv-2mgg-jv7q (high): indexed source-map section offsets DoS
+  # the event loop — css-tree allows ^1.0.1.
+  source-map-js@1.2.1: 1.2.2
