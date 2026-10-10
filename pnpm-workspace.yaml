@@ -24,6 +24,7 @@ minimumReleaseAgeExclude:
   - expo-constants@57.0.19
   - expo@57.0.23
   - expo@57.0.24
+  - http-cache-semantics@4.3.0
   - is-core-module@2.17.0
   - node-releases@2.0.56
 allowBuilds:
@@ -48,3 +49,7 @@ overrides:
   metro-symbolicate@0.84.5: 0.84.6
   metro-transform-plugins@0.84.5: 0.84.6
   metro-transform-worker@0.84.5: 0.84.6
+  # Security pins for transitive deps with advisories (see GHSA ids):
+  'shell-quote@<1.11.0': 1.12.0 # GHSA-pqg4-j6r4-53mv
+  'http-cache-semantics@<4.3.0': 4.3.0 # GHSA-ch52-4w7c-c8xp
+  'source-map-js@<1.2.2': 1.2.2 # GHSA-68fv-2mgg-jv7q
