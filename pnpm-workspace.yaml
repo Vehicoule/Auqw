@@ -24,6 +24,7 @@ minimumReleaseAgeExclude:
   - expo-constants@57.0.19
   - expo@57.0.23
   - expo@57.0.24
+  - http-cache-semantics@4.3.0
   - is-core-module@2.17.0
   - node-releases@2.0.56
 allowBuilds:
@@ -34,6 +35,10 @@ allowBuilds:
 # collapses one whole ~6 MB metro tree per install. (The 0.87.1 tree
 # is @react-native/metro-config's and can't merge into 0.84.)
 overrides:
+  # GHSA-ch52-4w7c-c8xp: 4.2.0 discloses cross-user cached responses via
+  # max-stale. Transitive through electron-builder → @electron/get → got →
+  # cacheable-request; 4.3.0 is inside its ^4.2.0 range.
+  http-cache-semantics: '>=4.3.0'
   metro@0.84.5: 0.84.6
   metro-babel-transformer@0.84.5: 0.84.6
   metro-cache@0.84.5: 0.84.6
