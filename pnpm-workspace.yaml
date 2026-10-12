@@ -48,3 +48,9 @@ overrides:
   metro-symbolicate@0.84.5: 0.84.6
   metro-transform-plugins@0.84.5: 0.84.6
   metro-transform-worker@0.84.5: 0.84.6
+  # Security: GHSA-pqg4-j6r4-53mv (CVE-2026-102422, critical) — react-devtools-core's shell-quote@1.10.0; command injection via line terminator after a { comment } token.
+  shell-quote: 1.11.0
+  # Security: GHSA-ch52-4w7c-c8xp (CVE-2026-93748, high) — @electron/get>got>cacheable-request's http-cache-semantics@4.2.0; max-stale cross-user cache disclosure.
+  http-cache-semantics: 4.3.0
+  # Security: GHSA-68fv-2mgg-jv7q (CVE-2026-93749, high) — postcss/css-tree's source-map-js@1.2.1; event-loop DoS via indexed source-map section offsets.
+  source-map-js: 1.2.2
