@@ -34,6 +34,13 @@ allowBuilds:
 # collapses one whole ~6 MB metro tree per install. (The 0.87.1 tree
 # is @react-native/metro-config's and can't merge into 0.84.)
 overrides:
+  # Security fixes (transitive deps; single resolved version each):
+  #   shell-quote 1.10.0 → 1.11.0 (GHSA-pqg4-j6r4-53mv, critical)
+  #   http-cache-semantics 4.2.0 → 4.3.0 (GHSA-ch52-4w7c-c8xp, high)
+  #   source-map-js 1.2.1 → 1.2.2 (GHSA-68fv-2mgg-jv7q, high)
+  shell-quote: 1.11.0
+  http-cache-semantics: 4.3.0
+  source-map-js: 1.2.2
   metro@0.84.5: 0.84.6
   metro-babel-transformer@0.84.5: 0.84.6
   metro-cache@0.84.5: 0.84.6
